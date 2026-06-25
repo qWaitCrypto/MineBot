@@ -67,8 +67,11 @@ class ProgressTests(unittest.TestCase):
             progress.note_step(("action", i), success=False, fingerprint=fp)
 
         self.assertEqual(progress.failure_steps, FAILURE_STORM_LIMIT)
-        with self.assertRaises(ProgressAbort):
+        with self.assertRaises(ProgressAbort) as cm:
             progress.require_can_continue("test goal")
+        self.assertIsNotNone(cm.exception.facts)
+        self.assertEqual(cm.exception.facts.goal, "test goal")
+        self.assertEqual(cm.exception.facts.failure_steps, FAILURE_STORM_LIMIT)
 
 
     def test_neutral_preempted_does_not_increment_failure_storm(self):

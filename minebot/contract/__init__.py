@@ -13,6 +13,7 @@ from .progress import (
     LocalProgressController,
     ProgressAbort,
     ProgressController,
+    ProgressFacts,
     STAGNATION_LIMIT,
     STALL_LIMIT,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "Position",
     "ProgressAbort",
     "ProgressController",
+    "ProgressFacts",
     "LocalProgressController",
     "FAILURE_STORM_LIMIT",
     "Region",

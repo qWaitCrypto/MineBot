@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .messages import BodyState
@@ -11,8 +12,24 @@ STALL_LIMIT = 8
 FAILURE_STORM_LIMIT = 5
 
 
+@dataclass(frozen=True)
+class ProgressFacts:
+    goal: str
+    last_action: tuple[Any, ...] | None
+    stagnant_steps: int
+    stalled_steps: int
+    failure_steps: int
+    last_fingerprint: str
+    current_fingerprint: str
+    recent_events: list[str] = field(default_factory=list)
+
+
 class ProgressAbort(Exception):
     """Raised when a progress authority decides a loop must yield."""
+
+    def __init__(self, message: str = "", *, facts: ProgressFacts | None = None) -> None:
+        super().__init__(message)
+        self.facts = facts
 
 
 class ProgressController(Protocol):
@@ -27,6 +44,7 @@ class ProgressController(Protocol):
         *,
         neutral: bool = False,
     ) -> None: ...
+    def facts(self, goal_text: str) -> ProgressFacts: ...
     def require_can_continue(self, goal_text: str) -> None: ...
 
 
@@ -42,6 +60,7 @@ class LocalProgressController:
         self.last_action: tuple[Any, ...] | None = None
         self.last_fingerprint = ""
         self.current_fingerprint = ""
+        self.recent_events: list[str] = []
 
     def next_generation(self) -> int:
         self._generation += 1
@@ -83,14 +102,28 @@ class LocalProgressController:
         self.last_action = action_key
         self.last_fingerprint = fingerprint
 
+    def facts(self, goal_text: str) -> ProgressFacts:
+        return ProgressFacts(
+            goal=goal_text,
+            last_action=self.last_action,
+            stagnant_steps=self.stagnant_steps,
+            stalled_steps=self.stalled_steps,
+            failure_steps=self.failure_steps,
+            last_fingerprint=self.last_fingerprint,
+            current_fingerprint=self.current_fingerprint,
+            recent_events=list(self.recent_events),
+        )
+
     def require_can_continue(self, goal_text: str) -> None:
         if (
             self.stagnant_steps >= STAGNATION_LIMIT
             or self.stalled_steps >= STALL_LIMIT
             or self.failure_steps >= FAILURE_STORM_LIMIT
         ):
+            facts = self.facts(goal_text)
             raise ProgressAbort(
                 "progress authority yielded: "
-                f"goal={goal_text!r} stagnant={self.stagnant_steps} "
-                f"stalled={self.stalled_steps} failures={self.failure_steps}"
+                f"goal={facts.goal!r} stagnant={facts.stagnant_steps} "
+                f"stalled={facts.stalled_steps} failures={facts.failure_steps}",
+                facts=facts,
             )

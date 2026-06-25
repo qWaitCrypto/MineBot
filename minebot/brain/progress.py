@@ -5,19 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from minebot.contract import BodyState, FAILURE_STORM_LIMIT, ProgressAbort, STAGNATION_LIMIT, STALL_LIMIT
-
-
-@dataclass(frozen=True)
-class ProgressFacts:
-    goal: str
-    last_action: tuple[Any, ...] | None
-    stagnant_steps: int
-    stalled_steps: int
-    failure_steps: int
-    last_fingerprint: str
-    current_fingerprint: str
-    recent_events: list[str]
+from minebot.contract import (
+    BodyState,
+    FAILURE_STORM_LIMIT,
+    ProgressAbort,
+    ProgressFacts,
+    STAGNATION_LIMIT,
+    STALL_LIMIT,
+)
 
 
 @dataclass
@@ -92,7 +87,8 @@ class ProgressAuthority:
             raise ProgressAbort(
                 "progress authority yielded: "
                 f"goal={facts.goal!r} stagnant={facts.stagnant_steps} "
-                f"stalled={facts.stalled_steps} failures={facts.failure_steps}"
+                f"stalled={facts.stalled_steps} failures={facts.failure_steps}",
+                facts=facts,
             )
 
     def facts(self, goal_text: str) -> ProgressFacts:
