@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from minebot.app.runner import AgentRuntime  # noqa: E402
+from minebot.app.runner import AgentRuntime, RuntimeRunContext  # noqa: E402
 from minebot.brain.context import AgentContext  # noqa: E402
 from minebot.brain.lifecycle import LifecycleController, LifecycleState  # noqa: E402
 from minebot.brain.modes import ModeRuntime  # noqa: E402
@@ -132,6 +132,56 @@ async def call_sdk_tool(agent, context, target, timeout_s):
     )
 
 
+async def run_projection_refusal(body: ScarpetBody) -> dict[str, object]:
+    target = (4, 59, -2)
+    runtime = make_runtime(body, lambda *args, **kwargs: None)
+    runtime.set_tool_facts("move_to", {"precondition_missing": True})
+    profile = runtime.mode_runtime.profile_for(LifecycleState.ACTIVE)
+    context = RuntimeRunContext(
+        agent_context=runtime.agent_context,
+        weld_context=runtime.weld_context,
+        profile=profile,
+        tool_facts=runtime.tool_facts,
+        trace=runtime.trace,
+    )
+    tool = next(tool for tool in runtime.agent.tools if tool.name == "move_to")
+
+    class Wrapper:
+        def __init__(self, context):
+            self.context = context
+
+    wrapper = Wrapper(context)
+    before = body.get_state()
+    if tool.is_enabled(wrapper, runtime.agent):
+        raise AssertionError("move_to should be disabled by missing precondition")
+    after_disabled = body.get_state()
+    if distance(before.pos, after_disabled.pos) > 0.25:
+        raise AssertionError(f"disabled tool moved the body: before={before.pos} after={after_disabled.pos}")
+
+    runtime.set_tool_facts("move_to", {})
+    context.tool_facts = runtime.tool_facts
+    if not tool.is_enabled(wrapper, runtime.agent):
+        raise AssertionError("move_to should be enabled after precondition clears")
+    result = await call_sdk_tool(runtime.agent, context, target, 12.0)
+    final = body.get_state()
+    dist = distance(final.pos, target)
+    if not result.get("success") or dist > 1.0:
+        raise AssertionError(f"enabled move_to did not complete: result={result} final={final.pos} dist={dist:.3f}")
+    trace = runtime.trace.snapshot()
+    if not any(event.get("event") == "tool_enabled" and event.get("enabled") is False for event in trace):
+        raise AssertionError(f"trace missing disabled projection event: {trace}")
+    if not any(event.get("event") == "tool_enabled" and event.get("enabled") is True for event in trace):
+        raise AssertionError(f"trace missing enabled projection event: {trace}")
+    if not any(event.get("event") == "tool_result" and event.get("reason") == "arrived" for event in trace):
+        raise AssertionError(f"trace missing tool result event: {trace}")
+    return {
+        "disabled_static": after_disabled.pos,
+        "enabled_final": final.pos,
+        "enabled_dist": round(dist, 3),
+        "trace_events": [event.get("event") for event in trace],
+    }
+
+
 async def run_happy(body: ScarpetBody) -> dict[str, object]:
     target = (8, 59, 0)
 
@@ -205,6 +255,12 @@ def main() -> None:
         command(rcon, f"gamemode survival {BOT}")
         command(rcon, f"effect clear {BOT}")
         command(rcon, "script in minebot run minebot_reset()")
+        projection = asyncio.run(run_projection_refusal(body))
+
+        command(rcon, "script in minebot run minebot_reset()")
+        command(rcon, "fill -4 59 -4 20 66 8 air")
+        command(rcon, "fill -4 58 -4 20 58 8 stone")
+        command(rcon, f"tp {BOT} 0 59 0 -90 0")
         happy = asyncio.run(run_happy(body))
 
         command(rcon, "script in minebot run minebot_reset()")
@@ -214,7 +270,7 @@ def main() -> None:
         command(rcon, f"tp {BOT} 0 59 5 -90 0")
         failed = asyncio.run(run_yield(body))
 
-        print({"happy": happy, "yield": failed})
+        print({"projection": projection, "happy": happy, "yield": failed})
 
 
 if __name__ == "__main__":

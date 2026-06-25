@@ -2,13 +2,13 @@ import asyncio
 import json
 import unittest
 
-from minebot.app.runner import AgentRuntime, RuntimeRunContext, sdk_tool_for
+from minebot.app.runner import AgentRuntime, RuntimeRunContext, RuntimeTrace, sdk_tool_for, tool_is_enabled
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleState
 from minebot.brain.modes import ModeRuntime
 from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext
-from minebot.contract import BodyState, PerceptionResult, Result, ToolResult
+from minebot.contract import BodyState, LegalityDecision, PerceptionResult, Result, ToolResult
 
 
 def body_state(x=0.0):
@@ -114,6 +114,31 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertIsNone(sdk_tool._failure_error_function)
         self.assertFalse(sdk_tool._use_default_failure_error_function)
 
+    def test_tool_projection_uses_governance_and_preconditions_not_mode_hiding(self):
+        body = FakeBody()
+        sidecar = make_tool(body).sidecar
+        normal = ModeRuntime().profile_for(LifecycleState.ACTIVE)
+        modes = ModeRuntime()
+        survival = modes.reduce([], LifecycleState.ACTIVE).profile
+
+        self.assertTrue(tool_is_enabled(sidecar, normal, {}))
+        self.assertTrue(tool_is_enabled(sidecar, survival, {}))
+        self.assertFalse(tool_is_enabled(sidecar, normal, {"precondition_missing": True}))
+        self.assertFalse(
+            tool_is_enabled(
+                sidecar,
+                normal,
+                {"governance": LegalityDecision(False, "protected_region", protected=True)},
+            )
+        )
+        self.assertTrue(
+            tool_is_enabled(
+                sidecar,
+                normal,
+                {"governance": LegalityDecision(True, "allowed_natural")},
+            )
+        )
+
     def test_run_turn_enters_active_once_and_preserves_active_on_second_turn(self):
         body = FakeBody()
         registry = ToolRegistry()
@@ -146,6 +171,48 @@ class AgentRunnerSpineTests(unittest.TestCase):
         )
         self.assertEqual(len(calls), 2)
         self.assertIn("PROFILE:", calls[0][0])
+
+    def test_tool_facts_and_trace_are_projected_into_sdk_tool(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        registry.register(make_tool(body))
+        trace = RuntimeTrace()
+        runtime = AgentRuntime(
+            body=body,
+            registry=registry,
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=lambda *args, **kwargs: None,
+            tool_facts={"move_step": {"precondition_missing": True}},
+            trace=trace,
+        )
+        sdk_tool = next(tool for tool in runtime.agent.tools if tool.name == "move_step")
+        context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            tool_facts=runtime.tool_facts,
+            trace=trace,
+        )
+
+        class Wrapper:
+            def __init__(self, context):
+                self.context = context
+
+        wrapper = Wrapper(context)
+        self.assertFalse(sdk_tool.is_enabled(wrapper, runtime.agent))
+        runtime.set_tool_facts("move_step", {})
+        context.tool_facts = runtime.tool_facts
+        self.assertTrue(sdk_tool.is_enabled(wrapper, runtime.agent))
+        out = asyncio.run(sdk_tool.on_invoke_tool(wrapper, json.dumps({"dx": 1})))
+
+        self.assertTrue(out["success"])
+        events = trace.snapshot()
+        self.assertTrue(any(event["event"] == "tool_enabled" and event["enabled"] is False for event in events))
+        self.assertTrue(any(event["event"] == "tool_invoke" and event["tool"] == "move_step" for event in events))
+        self.assertTrue(any(event["event"] == "tool_result" and event["reason"] == "completed" for event in events))
 
     def test_progress_abort_from_runner_becomes_lifecycle_yield(self):
         body = FakeBody()

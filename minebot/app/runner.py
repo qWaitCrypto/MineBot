@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from agents import Agent, RunConfig, RunContextWrapper, Runner
+from agents import Agent, RunConfig, RunContextWrapper, Runner, RunHooks
 from agents.tool import FunctionTool
 
 from minebot.app.model_provider import ModelProviderRegistry
@@ -32,7 +32,11 @@ class RuntimeRunContext:
     agent_context: AgentContext
     weld_context: WeldContext
     profile: RuntimeProfile
-    enabled_facts: dict[str, object] = field(default_factory=dict)
+    tool_facts: dict[str, dict[str, object]] = field(default_factory=dict)
+    trace: "RuntimeTrace | None" = None
+
+    def facts_for_tool(self, tool_name: str) -> dict[str, object]:
+        return dict(self.tool_facts.get(tool_name, {}))
 
 
 @dataclass(frozen=True)
@@ -45,24 +49,99 @@ class AgentTurnOutcome:
     message: str | None = None
 
 
+@dataclass
+class RuntimeTrace:
+    """In-memory trace sink for Phase-1 turn/tool observability."""
+
+    events: list[dict[str, object]] = field(default_factory=list)
+
+    def emit(self, event: str, **fields: object) -> None:
+        self.events.append({"event": event, **fields})
+
+    def snapshot(self) -> list[dict[str, object]]:
+        return [dict(event) for event in self.events]
+
+
+class RuntimeHooks(RunHooks[RuntimeRunContext]):
+    """SDK hook bridge into RuntimeTrace."""
+
+    def on_agent_start(self, context: Any, agent: Any) -> None:
+        trace = _trace_from_context(context)
+        if trace is not None:
+            trace.emit("agent_start", agent=getattr(agent, "name", None))
+
+    def on_agent_end(self, context: Any, agent: Any, output: Any) -> None:
+        trace = _trace_from_context(context)
+        if trace is not None:
+            trace.emit("agent_end", agent=getattr(agent, "name", None), output_type=type(output).__name__)
+
+    def on_llm_start(self, context: Any, agent: Any, system_prompt: str | None, input_items: list[Any]) -> None:
+        trace = _trace_from_context(context)
+        if trace is not None:
+            trace.emit(
+                "llm_start",
+                agent=getattr(agent, "name", None),
+                input_count=len(input_items),
+                has_system_prompt=system_prompt is not None,
+            )
+
+    def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
+        trace = _trace_from_context(context)
+        if trace is not None:
+            trace.emit("llm_end", agent=getattr(agent, "name", None), response_type=type(response).__name__)
+
+    def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
+        trace = _trace_from_context(context)
+        if trace is not None:
+            trace.emit("tool_start", agent=getattr(agent, "name", None), tool=getattr(tool, "name", None))
+
+    def on_tool_end(self, context: Any, agent: Any, tool: Any, result: object) -> None:
+        trace = _trace_from_context(context)
+        if trace is not None:
+            reason = result.get("reason") if isinstance(result, dict) else None
+            trace.emit(
+                "tool_end",
+                agent=getattr(agent, "name", None),
+                tool=getattr(tool, "name", None),
+                reason=reason,
+                result_type=type(result).__name__,
+            )
+
+
 def tool_is_enabled(
     sidecar: Any,
     profile: RuntimeProfile,
     facts: dict[str, object] | None = None,
 ) -> bool:
-    """Q1 default shared-pool predicate.
+    """Shared-pool tool projection predicate.
 
     State foregrounds capabilities through context and ordering; it does not
-    hide tools. Q2 will feed governance facts here.
+    hide tools. Only governance/refusal facts and hard preconditions disable a
+    tool.
     """
     facts = facts or {}
-    if facts.get("disabled") is True:
+    if facts.get("disabled") is True or facts.get("precondition_missing") is True:
+        return False
+    decision = facts.get("governance")
+    if hasattr(decision, "allowed"):
+        return bool(decision.allowed)
+    if isinstance(decision, dict) and decision.get("allowed") is False:
         return False
     return True
 
 
 def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
     async def on_invoke_tool(ctx: RunContextWrapper[RuntimeRunContext], input_json: str) -> JsonObject:
+        trace = ctx.context.trace
+        if trace is not None:
+            trace.emit(
+                "tool_invoke",
+                tool=tool.name,
+                mutating=tool.sidecar.mutating,
+                permission=tool.sidecar.permission,
+                situational=ctx.context.profile.situational,
+                lifecycle=ctx.context.profile.lifecycle,
+            )
         try:
             params = json.loads(input_json) if input_json else {}
         except json.JSONDecodeError as exc:
@@ -81,10 +160,22 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 "nextSuggestion": None,
                 "metrics": {"expected": "object"},
             }
-        return execute_tool(tool, params, ctx.context.weld_context)
+        result = execute_tool(tool, params, ctx.context.weld_context)
+        if trace is not None:
+            trace.emit("tool_result", tool=tool.name, reason=str(result.get("reason")), success=bool(result.get("success")))
+        return result
 
     def is_enabled(ctx: RunContextWrapper[RuntimeRunContext], agent: Any) -> bool:
-        return tool_is_enabled(tool.sidecar, ctx.context.profile, ctx.context.enabled_facts)
+        enabled = tool_is_enabled(tool.sidecar, ctx.context.profile, ctx.context.facts_for_tool(tool.name))
+        if ctx.context.trace is not None:
+            ctx.context.trace.emit(
+                "tool_enabled",
+                tool=tool.name,
+                enabled=enabled,
+                situational=ctx.context.profile.situational,
+                lifecycle=ctx.context.profile.lifecycle,
+            )
+        return enabled
 
     return FunctionTool(
         name=tool.name,
@@ -115,6 +206,8 @@ class AgentRuntime:
         runner_run: RunnerCallable | None = None,
         agent_name: str = "MineBot",
         max_turns: int = 10,
+        tool_facts: dict[str, dict[str, object]] | None = None,
+        trace: RuntimeTrace | None = None,
     ) -> None:
         self.body = body
         self.registry = registry
@@ -125,6 +218,9 @@ class AgentRuntime:
         self.model_provider = model_provider
         self.runner_run: RunnerCallable = runner_run or Runner.run
         self.max_turns = max_turns
+        self.tool_facts: dict[str, dict[str, object]] = tool_facts or {}
+        self.trace = trace or RuntimeTrace()
+        self.hooks = RuntimeHooks()
         self.weld_context = WeldContext(
             body=body,
             authority=authority,
@@ -137,6 +233,9 @@ class AgentRuntime:
             model="primary",
         )
         self.last_tool_results: list[dict[str, Any]] = []
+
+    def set_tool_facts(self, tool_name: str, facts: dict[str, object]) -> None:
+        self.tool_facts[tool_name] = dict(facts)
 
     async def run_turn(self, extra_signals: list[AgentSignal] | None = None) -> AgentTurnOutcome:
         self._ensure_active()
@@ -161,8 +260,18 @@ class AgentRuntime:
         self.agent_context.observe_state(state)
         self.agent_context.observe_profile(profile)
         self.weld_context.goal_text = self.agent_context.goal_text
+        self.trace.emit(
+            "turn_profile",
+            relationship=profile.relationship,
+            situational=profile.situational,
+            lifecycle=profile.lifecycle,
+            tool_focus=list(profile.tool_focus),
+            model_route=profile.model_route,
+            policy_tags=list(profile.policy_tags),
+        )
 
         if not self.lifecycle.is_active:
+            self.trace.emit("turn_stopped", lifecycle=self.lifecycle.state.value, reason=reduction.reason)
             return AgentTurnOutcome(
                 status="stopped",
                 lifecycle=self.lifecycle.state,
@@ -174,6 +283,8 @@ class AgentRuntime:
             agent_context=self.agent_context,
             weld_context=self.weld_context,
             profile=profile,
+            tool_facts={name: dict(facts) for name, facts in self.tool_facts.items()},
+            trace=self.trace,
         )
         run_config = self._run_config(profile)
         turn_agent = self._agent_for_profile(profile)
@@ -185,6 +296,7 @@ class AgentRuntime:
                 context=run_context,
                 max_turns=self.max_turns,
                 run_config=run_config,
+                hooks=self.hooks,
             )
         except ProgressAbort as exc:
             facts = exc.facts or self.authority.facts(self.agent_context.goal_text)
@@ -196,6 +308,14 @@ class AgentRuntime:
             self._apply_lifecycle_request(yielded.requested_lifecycle)
             yielded_profile = self.mode_runtime.profile_for(self.lifecycle.state)
             self.agent_context.observe_profile(yielded_profile)
+            self.trace.emit(
+                "progress_yielded",
+                stagnant_steps=facts.stagnant_steps,
+                stalled_steps=facts.stalled_steps,
+                failure_steps=facts.failure_steps,
+                lifecycle=self.lifecycle.state.value,
+                situational=yielded_profile.situational,
+            )
             return AgentTurnOutcome(
                 status="yielded",
                 lifecycle=self.lifecycle.state,
@@ -204,6 +324,7 @@ class AgentRuntime:
                 message=_yield_message(facts, self.agent_context.goal_text),
             )
 
+        self.trace.emit("turn_completed", lifecycle=self.lifecycle.state.value, situational=profile.situational)
         return AgentTurnOutcome(
             status="completed_turn",
             lifecycle=self.lifecycle.state,
@@ -277,10 +398,17 @@ def _yield_message(facts: ProgressFacts, goal_text: str) -> str:
     )
 
 
+def _trace_from_context(context: Any) -> RuntimeTrace | None:
+    runtime_context = getattr(context, "context", None)
+    return getattr(runtime_context, "trace", None)
+
+
 __all__ = [
     "AgentRuntime",
     "AgentTurnOutcome",
+    "RuntimeHooks",
     "RuntimeRunContext",
+    "RuntimeTrace",
     "sdk_tool_for",
     "tool_is_enabled",
 ]
