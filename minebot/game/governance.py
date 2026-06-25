@@ -66,6 +66,10 @@ NATURAL_BREAKABLE = frozenset(
 
 COLLECT_TARGETS = frozenset(
     {
+        "dirt",
+        "grass_block",
+        "gravel",
+        "sand",
         "oak_log",
         "spruce_log",
         "birch_log",

@@ -45,6 +45,13 @@ class GovernanceTests(unittest.TestCase):
         self.assertEqual(decision.reason, "allowed_natural")
         self.assertEqual(decision.natural_region, "test_mine")
 
+    def test_collect_context_allows_phase1_surface_resources_inside_natural_region(self):
+        for block_type in ("dirt", "sand", "gravel"):
+            with self.subTest(block_type=block_type):
+                decision = self.policy.can_break((0, 64, 0), block_type, BreakContext.COLLECT)
+                self.assertTrue(decision.allowed)
+                self.assertEqual(decision.reason, "allowed_natural")
+
     def test_collect_context_rejects_non_target_trash(self):
         decision = self.policy.can_break((0, 64, 0), "stone", BreakContext.COLLECT)
 
