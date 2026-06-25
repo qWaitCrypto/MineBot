@@ -1,0 +1,18 @@
+pluginManagement {
+    repositories {
+        maven { url = "https://maven.fabricmc.net/" }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_PROJECT)
+    repositories {
+        maven { url = "https://maven.fabricmc.net/" }
+        mavenCentral()
+        maven { url = "https://maven.terraformersmc.com/releases/" }
+    }
+}
+
+rootProject.name = "minebot-body"

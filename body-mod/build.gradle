@@ -1,0 +1,48 @@
+buildscript {
+    repositories {
+        maven { url = "https://maven.fabricmc.net/" }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    dependencies {
+        classpath "net.fabricmc:fabric-loom:1.17.12"
+    }
+}
+
+plugins {
+    id "maven-publish"
+}
+
+apply plugin: "fabric-loom"
+
+version = "0.1.0"
+group = "dev.minebot"
+
+base {
+    archivesName = "minebot-body"
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+    withSourcesJar()
+}
+
+loom {
+    splitEnvironmentSourceSets()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:26.1.2"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:0.19.3"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:0.152.1+26.1.2"
+    implementation "org.java-websocket:Java-WebSocket:1.6.0"
+    include "org.java-websocket:Java-WebSocket:1.6.0"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = "UTF-8"
+    options.release = 25
+}

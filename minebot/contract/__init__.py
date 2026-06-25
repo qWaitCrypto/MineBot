@@ -1,0 +1,45 @@
+"""Neutral Body/Agent contract types.
+
+This package is intentionally type/data only.  Agent-side code and Body-side
+transport/transactions can import these names without crossing the
+`brain/ -> game/` boundary.
+"""
+
+from .governance import BotPlacement, BreakContext, InteractionContext, LegalityDecision, PlaceContext, Position, Region
+from .messages import Action, BodyState, Event, InventorySlot, JsonObject, PerceptionResult, Result, ToolResult
+from .body_iface import Body
+from .progress import (
+    FAILURE_STORM_LIMIT,
+    LocalProgressController,
+    ProgressAbort,
+    ProgressController,
+    STAGNATION_LIMIT,
+    STALL_LIMIT,
+)
+from .results import terminal_event_to_tool_result
+
+__all__ = [
+    "Action",
+    "Body",
+    "BodyState",
+    "BotPlacement",
+    "BreakContext",
+    "InteractionContext",
+    "Event",
+    "InventorySlot",
+    "JsonObject",
+    "LegalityDecision",
+    "PerceptionResult",
+    "PlaceContext",
+    "Position",
+    "ProgressAbort",
+    "ProgressController",
+    "LocalProgressController",
+    "FAILURE_STORM_LIMIT",
+    "Region",
+    "Result",
+    "ToolResult",
+    "STAGNATION_LIMIT",
+    "STALL_LIMIT",
+    "terminal_event_to_tool_result",
+]

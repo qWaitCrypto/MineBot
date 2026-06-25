@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "minebot-body",
+  "version": "${version}",
+  "name": "MineBot Body POC",
+  "description": "Server-side Fabric Body layer proof of concept for MineBot.",
+  "authors": ["MineBot"],
+  "environment": "server",
+  "entrypoints": {
+    "server": [
+      "dev.minebot.body.MineBotBodyMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "26.1.2",
+    "fabric-api": "*"
+  }
+}

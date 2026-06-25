@@ -1,3 +1,19 @@
+# HarnessKit / agent docs (local knowledge, not committed)
+.gitignore
+AGENTS.md
+ARCHITECTURE.md
+CLAUDE.md
+docs/
+.harnesskit/
+.agents/
+.codex/
+
+# Local Gradle state
+body-mod/.gradle/
+
+# Local Minecraft test-server runtime/cache state
+test-server/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
