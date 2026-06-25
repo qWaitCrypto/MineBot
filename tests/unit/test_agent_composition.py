@@ -41,19 +41,31 @@ class FakeBody:
     bot_name = "Bot"
 
     def __init__(self):
-        self.inventory_count = 0
+        self.inventory_counts = {"dirt": 0}
         self.state_reads = 0
         self.inventory_reads = 0
 
+    @property
+    def inventory_count(self):
+        return self.inventory_counts.get("dirt", 0)
+
+    @inventory_count.setter
+    def inventory_count(self, value):
+        self.inventory_counts["dirt"] = value
+
     def get_state(self):
         self.state_reads += 1
-        return state(f"inv-{self.inventory_count}-{self.state_reads}")
+        return state(f"inv-{self.inventory_counts}-{self.state_reads}")
 
     def perceive(self, scope, params):
         if scope != "inventory":
             raise AssertionError(f"unexpected scope {scope}")
         self.inventory_reads += 1
-        slots = [slot(0, "minecraft:dirt", self.inventory_count)] if self.inventory_count else []
+        slots = [
+            slot(index, f"minecraft:{item}", count)
+            for index, (item, count) in enumerate(sorted(self.inventory_counts.items()))
+            if count
+        ]
         return PerceptionResult("Bot", "inventory", "perception", True, True, {"slots": slots})
 
 
@@ -85,7 +97,8 @@ def search_tool(targets):
         if not targets:
             return ToolResult(False, "search_block_not_found", True, metrics={"block_types": params.get("block_types")})
         target = targets[0]
-        return ToolResult(True, "block_in_range", False, metrics={"target": {"pos": target, "type": "dirt"}})
+        block_type = params.get("block_types", ["dirt"])[0]
+        return ToolResult(True, "block_in_range", False, metrics={"target": {"pos": target, "type": block_type}})
 
     return RegisteredTool(
         "search_for_block",
@@ -103,7 +116,9 @@ def mine_tool(body, *, fail_reason=None):
         calls.append(dict(params))
         if fail_reason is not None:
             return ToolResult(False, fail_reason, True, metrics={"target": params.get("pos")})
-        body.inventory_count += 1
+        expected = params.get("expected_drops") or ["dirt"]
+        item = str(expected[0]).removeprefix("minecraft:")
+        body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
         return ToolResult(True, "collected", False, metrics={"target": params.get("pos"), "collected_total": 1})
 
     return RegisteredTool(
@@ -198,6 +213,29 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.reason, "protected_or_illegal_target")
         self.assertTrue(result.can_retry)
         self.assertEqual(result.metrics["skipped"][0]["reason"], "break_denied:protected_region")
+
+    def test_collect_resource_maps_resource_to_blocks_and_inventory_item(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, search_calls = search_tool([[1, 59, 0]])
+        registry.register(search)
+        miner, mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx = composition_context(body, registry)
+        register_collect_resource_tool(registry, ctx)
+
+        result = execute_tool(
+            registry.get("collect_resource"),
+            {"item": "iron", "count": 1, "constraints": {"max_candidates": 1}},
+            ctx.weld_context,
+        )
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual(search_calls[0]["block_types"], ["iron_ore", "deepslate_iron_ore"])
+        self.assertEqual(mine_calls[0]["expected_drops"], ["raw_iron"])
+        self.assertEqual(result["metrics"]["requested_item"], "iron")
+        self.assertEqual(result["metrics"]["item"], "raw_iron")
 
 
 if __name__ == "__main__":

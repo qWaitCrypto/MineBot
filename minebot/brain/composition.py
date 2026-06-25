@@ -30,6 +30,14 @@ class CompositionContext:
     budget: CompositionBudget
 
 
+@dataclass(frozen=True)
+class ResourcePlan:
+    requested_item: str
+    inventory_item: str
+    block_types: tuple[str, ...]
+    expected_drops: tuple[str, ...]
+
+
 def register_inventory_tools(registry: ToolRegistry, body: Body) -> None:
     registry.register(
         RegisteredTool(
@@ -104,8 +112,9 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     radius = int(constraints.get("radius") or 16)
     allow_dry = bool(constraints.get("allow_dry", False))
     started = time.monotonic()
+    plan = _resource_plan(item)
 
-    before_result = _read_count(context, item)
+    before_result = _read_count(context, plan.inventory_item)
     if not before_result.success:
         return before_result
     before_count = int((before_result.metrics or {}).get("count") or 0)
@@ -115,7 +124,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             True,
             "already_satisfied",
             False,
-            item,
+            plan,
             count,
             before_count,
             current_count,
@@ -135,7 +144,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 False,
                 "partial_budget_exhausted",
                 True,
-                item,
+                plan,
                 count,
                 before_count,
                 current_count,
@@ -148,7 +157,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
 
         search = execute_tool(
             context.registry.get("search_for_block"),
-            {"block_types": [item], "search_radius": radius, "find_limit": max(32, budget.max_candidates * 4)},
+            {"block_types": list(plan.block_types), "search_radius": radius, "find_limit": max(32, budget.max_candidates * 4)},
             context.weld_context,
         )
         target = _target_from_search(search)
@@ -159,7 +168,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 False,
                 "target_not_found" if reason == "search_block_not_found" else f"search_failed:{reason}",
                 True,
-                item,
+                plan,
                 count,
                 before_count,
                 current_count,
@@ -173,13 +182,13 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         mutating_calls += 1
         mined = execute_tool(
             context.registry.get("mine_block_collect"),
-            {"pos": target, "expected_drops": [item], "dry": allow_dry},
+            {"pos": target, "expected_drops": list(plan.expected_drops), "dry": allow_dry},
             context.weld_context,
         )
         attempt = {"target": target, "search": search, "mine": mined}
         attempts.append(attempt)
 
-        after_result = _read_count(context, item)
+        after_result = _read_count(context, plan.inventory_item)
         if not after_result.success:
             return after_result
         current_count = int((after_result.metrics or {}).get("count") or 0)
@@ -188,7 +197,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 True,
                 "collected",
                 False,
-                item,
+                plan,
                 count,
                 before_count,
                 current_count,
@@ -206,7 +215,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                     False,
                     "protected_or_illegal_target",
                     True,
-                    item,
+                    plan,
                     count,
                     before_count,
                     current_count,
@@ -221,7 +230,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         False,
         "partial_budget_exhausted",
         True,
-        item,
+        plan,
         count,
         before_count,
         current_count,
@@ -257,6 +266,36 @@ def _read_count(context: CompositionContext, item: str) -> ToolResult:
         False,
         metrics={"item": item, "count": int((counts or {}).get(item, 0)), "counts": counts or {}},
     )
+
+
+def _resource_plan(item: str) -> ResourcePlan:
+    item = _normalize_item(item)
+    aliases: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+        "log": (
+            "oak_log",
+            ("oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log"),
+            ("oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log"),
+        ),
+        "logs": (
+            "oak_log",
+            ("oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log"),
+            ("oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log"),
+        ),
+        "coal": ("coal", ("coal_ore", "deepslate_coal_ore"), ("coal",)),
+        "iron": ("raw_iron", ("iron_ore", "deepslate_iron_ore"), ("raw_iron",)),
+        "raw_iron": ("raw_iron", ("iron_ore", "deepslate_iron_ore"), ("raw_iron",)),
+        "diamond": ("diamond", ("diamond_ore", "deepslate_diamond_ore"), ("diamond",)),
+    }
+    mapped = aliases.get(item)
+    if mapped is not None:
+        inventory_item, block_types, expected_drops = mapped
+        return ResourcePlan(
+            requested_item=item,
+            inventory_item=inventory_item,
+            block_types=block_types,
+            expected_drops=expected_drops,
+        )
+    return ResourcePlan(requested_item=item, inventory_item=item, block_types=(item,), expected_drops=(item,))
 
 
 def _read_inventory_counts(body: Body, *, page_size: int = 12) -> ToolResult:
@@ -306,7 +345,7 @@ def _collect_result(
     success: bool,
     reason: str,
     can_retry: bool,
-    item: str,
+    plan: ResourcePlan,
     target_count: int,
     before_count: int,
     after_count: int,
@@ -318,7 +357,10 @@ def _collect_result(
     budget: CompositionBudget | None = None,
 ) -> ToolResult:
     metrics: dict[str, object] = {
-        "item": item,
+        "item": plan.inventory_item,
+        "requested_item": plan.requested_item,
+        "block_types": list(plan.block_types),
+        "expected_drops": list(plan.expected_drops),
         "target_count": target_count,
         "before_count": before_count,
         "after_count": after_count,
@@ -347,6 +389,7 @@ def _normalize_item(item: str) -> str:
 __all__ = [
     "CompositionBudget",
     "CompositionContext",
+    "ResourcePlan",
     "collect_resource",
     "register_collect_resource_tool",
     "register_inventory_tools",

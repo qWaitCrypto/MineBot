@@ -62,7 +62,7 @@ def setup_world(rcon: RconClient) -> None:
         command(rcon, cmd)
 
 
-def reset_subject(rcon: RconClient, *, item: str = "dirt") -> None:
+def reset_subject(rcon: RconClient, *, item: str = "dirt", blocks: list[tuple[int, int, int, str]] | None = None) -> None:
     for cmd in [
         "script in minebot run minebot_reset()",
         "kill @e[type=!player]",
@@ -74,8 +74,10 @@ def reset_subject(rcon: RconClient, *, item: str = "dirt") -> None:
         f"effect clear {BOT}",
     ]:
         command(rcon, cmd)
-    for x in range(3, 9):
-        command(rcon, f"setblock {x} 70 0 {item}", delay=0.0)
+    if blocks is None:
+        blocks = [(x, 70, 0, item) for x in range(3, 9)]
+    for x, y, z, block_type in blocks:
+        command(rcon, f"setblock {x} {y} {z} {block_type}", delay=0.0)
 
 
 def flat_world() -> GridWorld:
@@ -188,28 +190,86 @@ def make_runtime(body: ScarpetBody) -> tuple[AgentRuntime, ToolRegistry, Composi
     return runtime, registry, ctx
 
 
-def run_happy(rcon: RconClient, body: ScarpetBody, *, item: str) -> dict[str, object]:
-    reset_subject(rcon, item=item)
+def run_happy(
+    rcon: RconClient,
+    body: ScarpetBody,
+    *,
+    item: str,
+    blocks: list[tuple[int, int, int, str]] | None = None,
+    count: int = 3,
+    tool: str | None = None,
+) -> dict[str, object]:
+    reset_subject(rcon, item=item, blocks=blocks)
+    if tool is not None:
+        command(rcon, f"item replace entity {BOT} weapon.mainhand with {tool}")
+        command(rcon, "script in minebot run minebot_reset()")
     registry, ctx = make_registry(body)
     result = execute_tool(
         registry.get("collect_resource"),
-        {"item": item, "count": 3, "constraints": {"radius": 12, "max_candidates": 6}},
+        {"item": item, "count": count, "constraints": {"radius": 12, "max_candidates": 6}},
         ctx.weld_context,
     )
     if not result.get("success") or result.get("reason") != "collected":
         raise AssertionError(f"collect {item} happy failed: {result}")
     metrics = result["metrics"]
-    if metrics["after_count"] < 3 or metrics["candidates_tried"] < 3:
+    if metrics["after_count"] < count or metrics["candidates_tried"] < count:
         raise AssertionError(f"collect {item} did not prove inventory/candidate truth: {result}")
     if ctx.weld_context.authority.last_action is None or ctx.weld_context.authority.last_action[0] != "mine_block_collect":
         raise AssertionError(f"collect {item} did not route leaf mutation through progress weld: {result}")
     return {
         "item": item,
+        "inventory_item": metrics["item"],
+        "block_types": metrics["block_types"],
+        "expected_drops": metrics["expected_drops"],
         "reason": result["reason"],
         "after_count": metrics["after_count"],
         "candidates_tried": metrics["candidates_tried"],
         "last_action": ctx.weld_context.authority.last_action,
     }
+
+
+def run_resource_ladder(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+    ladder = {
+        "logs": run_happy(
+            rcon,
+            body,
+            item="logs",
+            blocks=[(3, 70, 1, "oak_log"), (4, 70, 1, "oak_log"), (5, 70, 1, "oak_log")],
+            count=2,
+        ),
+        "coal": run_happy(
+            rcon,
+            body,
+            item="coal",
+            blocks=[(3, 70, 2, "coal_ore"), (4, 70, 2, "coal_ore"), (5, 70, 2, "coal_ore")],
+            count=2,
+            tool="iron_pickaxe",
+        ),
+        "iron": run_happy(
+            rcon,
+            body,
+            item="iron",
+            blocks=[(3, 70, 3, "iron_ore"), (4, 70, 3, "iron_ore"), (5, 70, 3, "iron_ore")],
+            count=2,
+            tool="iron_pickaxe",
+        ),
+        "diamond": run_happy(
+            rcon,
+            body,
+            item="diamond",
+            blocks=[(3, 70, 4, "diamond_ore"), (4, 70, 4, "diamond_ore"), (5, 70, 4, "diamond_ore")],
+            count=2,
+            tool="diamond_pickaxe",
+        ),
+    }
+    missing_rare = run_not_found(rcon, body, item="diamond", target_absent_block="diamond_ore")
+    protected_log = run_illegal(
+        rcon,
+        body,
+        item="logs",
+        blocks=[(3, 70, 0, "oak_log"), (4, 70, 0, "oak_log")],
+    )
+    return {"happy": ladder, "missing_rare": missing_rare, "protected_log": protected_log}
 
 
 def inventory_count(body: ScarpetBody, item: str) -> int:
@@ -263,29 +323,49 @@ def run_interrupt_resume(rcon: RconClient, body: ScarpetBody) -> dict[str, objec
     }
 
 
-def run_not_found(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+def run_not_found(
+    rcon: RconClient,
+    body: ScarpetBody,
+    *,
+    item: str = "gravel",
+    target_absent_block: str = "gravel",
+) -> dict[str, object]:
     reset_subject(rcon, item="dirt")
+    if item != target_absent_block:
+        command(rcon, f"clear {BOT} {item}")
     command(rcon, "fill -10 70 -10 16 78 10 air")
     command(rcon, "fill -10 69 -10 16 69 10 stone")
     registry, ctx = make_registry(body)
     result = execute_tool(
         registry.get("collect_resource"),
-        {"item": "gravel", "count": 1, "constraints": {"radius": 6, "max_candidates": 2}},
+        {"item": item, "count": 1, "constraints": {"radius": 6, "max_candidates": 2}},
         ctx.weld_context,
     )
     if result.get("success") or result.get("reason") != "target_not_found" or not result.get("canRetry"):
         raise AssertionError(f"not-found inverse returned wrong truth: {result}")
     if result["metrics"]["after_count"] != 0:
         raise AssertionError(f"not-found inverse invented inventory progress: {result}")
-    return {"reason": result["reason"], "can_retry": result["canRetry"], "after_count": result["metrics"]["after_count"]}
+    return {
+        "item": item,
+        "reason": result["reason"],
+        "can_retry": result["canRetry"],
+        "after_count": result["metrics"]["after_count"],
+        "block_types": result["metrics"].get("block_types"),
+    }
 
 
-def run_illegal(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
-    reset_subject(rcon, item="dirt")
+def run_illegal(
+    rcon: RconClient,
+    body: ScarpetBody,
+    *,
+    item: str = "dirt",
+    blocks: list[tuple[int, int, int, str]] | None = None,
+) -> dict[str, object]:
+    reset_subject(rcon, item=item, blocks=blocks)
     registry, ctx = make_registry(body, protected=True)
     result = execute_tool(
         registry.get("collect_resource"),
-        {"item": "dirt", "count": 1, "constraints": {"radius": 12, "max_candidates": 2}},
+        {"item": item, "count": 1, "constraints": {"radius": 12, "max_candidates": 2}},
         ctx.weld_context,
     )
     if result.get("success") or result.get("reason") != "protected_or_illegal_target" or not result.get("canRetry"):
@@ -293,6 +373,7 @@ def run_illegal(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     if result["metrics"]["after_count"] != 0:
         raise AssertionError(f"illegal inverse counted protected mutation: {result}")
     return {
+        "item": item,
         "reason": result["reason"],
         "skipped": result["metrics"]["skipped"],
         "last_failure": result["metrics"].get("last_failure"),
@@ -318,9 +399,20 @@ def main() -> None:
         sand = run_happy(rcon, body, item="sand")
         gravel = run_happy(rcon, body, item="gravel")
         resumed = run_interrupt_resume(rcon, body)
+        ladder = run_resource_ladder(rcon, body)
         missing = run_not_found(rcon, body)
         illegal = run_illegal(rcon, body)
-        print({"dirt": dirt, "sand": sand, "gravel": gravel, "resumed": resumed, "missing": missing, "illegal": illegal})
+        print(
+            {
+                "dirt": dirt,
+                "sand": sand,
+                "gravel": gravel,
+                "resumed": resumed,
+                "ladder": ladder,
+                "missing": missing,
+                "illegal": illegal,
+            }
+        )
 
 
 if __name__ == "__main__":
