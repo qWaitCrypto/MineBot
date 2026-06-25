@@ -350,6 +350,7 @@ class AgentRuntime:
         if self.lifecycle.state is LifecycleState.IDLE:
             self.lifecycle.start()
         elif self.lifecycle.state is LifecycleState.RESUMING:
+            self._inject_resume_context()
             self.lifecycle.reenter_active()
 
     def _apply_lifecycle_request(self, target: LifecycleState | None) -> None:
@@ -385,6 +386,25 @@ class AgentRuntime:
         return RunConfig(
             model_provider=self.model_provider,
             model_settings=self.model_provider.model_settings_for(profile.model_route),
+        )
+
+    def _inject_resume_context(self) -> None:
+        slot = self.mode_runtime.consume_suspend_slot()
+        if slot is None:
+            self.trace.emit("resume_without_suspend", lifecycle=self.lifecycle.state.value)
+            return
+        facts = {
+            "goal": slot.goal_text,
+            "composition_id": slot.composition_id,
+            "reason": slot.reason,
+            "last_progress": dict(slot.last_progress),
+        }
+        self.agent_context.observe_resume(facts)
+        self.trace.emit(
+            "resume_context",
+            goal=slot.goal_text,
+            reason=slot.reason,
+            composition_id=slot.composition_id,
         )
 
 

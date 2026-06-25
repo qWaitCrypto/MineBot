@@ -62,6 +62,10 @@ class ModeRuntimeTests(unittest.TestCase):
         self.assertEqual(reduction.profile.situational, "mobility")
         self.assertIsNotNone(modes.suspend_slot)
         self.assertEqual(modes.suspend_slot.goal_text, "collect 64 dirt")
+        consumed = modes.consume_suspend_slot()
+        self.assertIsNotNone(consumed)
+        self.assertEqual(consumed.goal_text, "collect 64 dirt")
+        self.assertIsNone(modes.suspend_slot)
 
     def test_survival_reflex_changes_situational_without_lifecycle_request(self):
         modes = ModeRuntime()

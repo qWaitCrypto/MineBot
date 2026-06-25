@@ -41,6 +41,7 @@ class AgentContext:
     _turn: int = 0
     _last_state: BodyState | None = field(default=None, repr=False)
     _last_profile: RuntimeProfile | None = field(default=None, repr=False)
+    _resume_facts: dict[str, object] | None = field(default=None, repr=False)
 
     # -- goal ownership -------------------------------------------------------
 
@@ -57,6 +58,10 @@ class AgentContext:
     def observe_profile(self, profile: RuntimeProfile) -> None:
         """Record the current stance profile for per-turn context framing."""
         self._last_profile = profile
+
+    def observe_resume(self, facts: dict[str, object]) -> None:
+        """Inject one resume frame after a situational interruption."""
+        self._resume_facts = dict(facts)
 
     # -- per-turn assembly ----------------------------------------------------
 
@@ -82,6 +87,9 @@ class AgentContext:
             parts.append(self._state_line(self._last_state))
         if self._last_profile is not None:
             parts.append(self._profile_line(self._last_profile))
+        if self._resume_facts is not None:
+            parts.append(self._resume_line(self._resume_facts))
+            self._resume_facts = None
         return "\n".join(parts)
 
     @staticmethod
@@ -101,6 +109,13 @@ class AgentContext:
             f"lifecycle={profile.lifecycle} focus={focus} model={profile.model_route} "
             f"effort={profile.effort} policy={tags} frame={profile.context_frame}"
         )
+
+    @staticmethod
+    def _resume_line(facts: dict[str, object]) -> str:
+        reason = facts.get("reason") or "resume"
+        goal = facts.get("goal") or ""
+        progress = facts.get("last_progress") or {}
+        return f"RESUME: reason={reason} goal={goal} last_progress={progress}"
 
 
 __all__ = ["AgentContext", "DEFAULT_GOAL_REINJECT_EVERY"]

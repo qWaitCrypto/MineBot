@@ -5,7 +5,7 @@ import unittest
 from minebot.app.runner import AgentRuntime, RuntimeRunContext, RuntimeTrace, sdk_tool_for, tool_is_enabled
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleState
-from minebot.brain.modes import ModeRuntime
+from minebot.brain.modes import AgentSignal, ModeRuntime
 from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext
 from minebot.contract import BodyState, LegalityDecision, PerceptionResult, Result, ToolResult
@@ -245,6 +245,47 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(outcome.profile.lifecycle, "yielded")
         self.assertIs(outcome.yielded_facts, facts)
         self.assertIn("How should I continue?", outcome.message)
+
+    def test_recovery_resume_consumes_suspend_slot_and_injects_resume_context_once(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        calls = []
+
+        async def fake_runner(agent, input_text, *, context=None, **kwargs):
+            calls.append(input_text)
+            return {"ok": True}
+
+        modes = ModeRuntime()
+        lifecycle = LifecycleController()
+        runtime = AgentRuntime(
+            body=body,
+            registry=registry,
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect 64 dirt"),
+            lifecycle=lifecycle,
+            mode_runtime=modes,
+            authority=ProgressAuthority(),
+            runner_run=fake_runner,
+        )
+
+        first = asyncio.run(runtime.run_turn(extra_signals=[AgentSignal.death_detected("death", composition_id="c1")]))
+        self.assertEqual(first.status, "stopped")
+        self.assertEqual(runtime.lifecycle.state, LifecycleState.RECOVERING)
+        self.assertIsNotNone(modes.suspend_slot)
+
+        second = asyncio.run(runtime.run_turn(extra_signals=[AgentSignal.recovery_completed("respawned")]))
+        self.assertEqual(second.status, "stopped")
+        self.assertEqual(runtime.lifecycle.state, LifecycleState.RESUMING)
+
+        third = asyncio.run(runtime.run_turn())
+        fourth = asyncio.run(runtime.run_turn())
+
+        self.assertEqual(third.status, "completed_turn")
+        self.assertEqual(fourth.status, "completed_turn")
+        self.assertEqual(runtime.lifecycle.state, LifecycleState.ACTIVE)
+        self.assertIn("RESUME: reason=death", calls[0])
+        self.assertNotIn("RESUME: reason=death", calls[1])
+        self.assertIsNone(modes.suspend_slot)
+        self.assertTrue(any(event["event"] == "resume_context" for event in runtime.trace.snapshot()))
 
 
 if __name__ == "__main__":

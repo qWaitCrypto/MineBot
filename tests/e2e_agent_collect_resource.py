@@ -17,8 +17,10 @@ from minebot.brain.composition import (  # noqa: E402
     register_collect_resource_tool,
     register_inventory_tools,
 )
-from minebot.brain.lifecycle import LifecycleState  # noqa: E402
-from minebot.brain.modes import ModeRuntime  # noqa: E402
+from minebot.app.runner import AgentRuntime, sdk_tool_for  # noqa: E402
+from minebot.brain.context import AgentContext  # noqa: E402
+from minebot.brain.lifecycle import LifecycleController, LifecycleState  # noqa: E402
+from minebot.brain.modes import AgentSignal, ModeRuntime  # noqa: E402
 from minebot.brain.progress import ProgressAuthority  # noqa: E402
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool  # noqa: E402
 from minebot.contract import BreakContext, ToolResult  # noqa: E402
@@ -80,7 +82,13 @@ def flat_world() -> GridWorld:
     return GridWorld({(x, 70, z): GridCell() for x in range(-10, 17) for z in range(-10, 11)})
 
 
-def make_registry(body: ScarpetBody, *, protected: bool = False) -> tuple[ToolRegistry, CompositionContext]:
+def make_registry(
+    body: ScarpetBody,
+    *,
+    protected: bool = False,
+    weld_context: WeldContext | None = None,
+    mode_runtime: ModeRuntime | None = None,
+) -> tuple[ToolRegistry, CompositionContext]:
     policy = GovernancePolicy(
         natural_regions=[REGION],
         protected_regions=[Region("protected-target", (3, 70, 0), (8, 70, 0))] if protected else [],
@@ -126,14 +134,58 @@ def make_registry(body: ScarpetBody, *, protected: bool = False) -> tuple[ToolRe
             ),
         )
     )
+    weld_context = weld_context or WeldContext(body=body, authority=ProgressAuthority(), goal_text="collect_resource dirt 3")
+    mode_runtime = mode_runtime or ModeRuntime()
     context = CompositionContext(
         registry=registry,
-        weld_context=WeldContext(body=body, authority=ProgressAuthority(), goal_text="collect_resource dirt 3"),
-        runtime_profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+        weld_context=weld_context,
+        runtime_profile=mode_runtime.profile_for(LifecycleState.ACTIVE),
         budget=CompositionBudget(max_candidates=6, max_mutating_calls=6, max_wall_s=45.0),
     )
     register_collect_resource_tool(registry, context)
     return registry, context
+
+
+def make_runtime(body: ScarpetBody) -> tuple[AgentRuntime, ToolRegistry, CompositionContext]:
+    async def runner(agent, input_text, *, context=None, **kwargs):
+        tool = next(tool for tool in agent.tools if tool.name == "collect_resource")
+
+        class Wrapper:
+            def __init__(self, context):
+                self.context = context
+
+        import json
+
+        return await tool.on_invoke_tool(
+            Wrapper(context),
+            json.dumps({"item": "dirt", "count": 3, "constraints": {"radius": 12, "max_candidates": 6}}),
+        )
+
+    mode_runtime = ModeRuntime()
+    lifecycle = LifecycleController()
+    authority = ProgressAuthority()
+    placeholder_registry = ToolRegistry()
+    runtime = AgentRuntime(
+        body=body,
+        registry=placeholder_registry,
+        agent_context=AgentContext(
+            system_prompt="You are MineBot. Continue collection from fresh facts after interruptions.",
+            goal_text="collect_resource dirt 3",
+        ),
+        lifecycle=lifecycle,
+        mode_runtime=mode_runtime,
+        authority=authority,
+        runner_run=runner,
+        max_turns=2,
+    )
+    registry, ctx = make_registry(
+        body,
+        weld_context=runtime.weld_context,
+        mode_runtime=mode_runtime,
+    )
+    runtime.registry = registry
+    runtime.agent = runtime.agent.clone(tools=[sdk_tool_for(registry.get(name)) for name in registry.names()])
+    return runtime, registry, ctx
 
 
 def run_happy(rcon: RconClient, body: ScarpetBody, *, item: str) -> dict[str, object]:
@@ -157,6 +209,57 @@ def run_happy(rcon: RconClient, body: ScarpetBody, *, item: str) -> dict[str, ob
         "after_count": metrics["after_count"],
         "candidates_tried": metrics["candidates_tried"],
         "last_action": ctx.weld_context.authority.last_action,
+    }
+
+
+def inventory_count(body: ScarpetBody, item: str) -> int:
+    wanted = item.removeprefix("minecraft:")
+    count = 0
+    for slot in body.get_inventory():
+        if slot.item is not None and slot.item.removeprefix("minecraft:") == wanted:
+            count += slot.count
+    return count
+
+
+def run_interrupt_resume(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+    reset_subject(rcon, item="dirt")
+    registry, ctx = make_registry(body)
+    partial = execute_tool(
+        registry.get("collect_resource"),
+        {"item": "dirt", "count": 3, "constraints": {"radius": 12, "max_candidates": 1, "max_mutating_calls": 1}},
+        ctx.weld_context,
+    )
+    if partial.get("success") or partial.get("reason") != "partial_budget_exhausted":
+        raise AssertionError(f"expected bounded partial before interruption: {partial}")
+    if partial["metrics"]["after_count"] != 1:
+        raise AssertionError(f"partial collection did not leave one authoritative dirt: {partial}")
+
+    runtime, _runtime_registry, _runtime_ctx = make_runtime(body)
+
+    async def run_sequence():
+        first = await runtime.run_turn(extra_signals=[AgentSignal.death_detected("death", composition_id="collect_resource")])
+        second = await runtime.run_turn(extra_signals=[AgentSignal.recovery_completed("respawned")])
+        third = await runtime.run_turn()
+        return first, second, third
+
+    import asyncio
+
+    first, second, third = asyncio.run(run_sequence())
+    final_count = inventory_count(body, "dirt")
+    trace = runtime.trace.snapshot()
+    if first.lifecycle is not LifecycleState.RECOVERING or second.lifecycle is not LifecycleState.RESUMING:
+        raise AssertionError(f"death/recovery lifecycle did not suspend/resume: first={first} second={second}")
+    if third.status != "completed_turn" or runtime.lifecycle.state is not LifecycleState.ACTIVE:
+        raise AssertionError(f"resume did not re-enter active runtime: third={third} state={runtime.lifecycle.state}")
+    if final_count < 3:
+        raise AssertionError(f"resume did not continue from fresh inventory count: final_count={final_count}")
+    if not any(event.get("event") == "resume_context" and event.get("reason") == "death" for event in trace):
+        raise AssertionError(f"resume trace missing death suspend facts: {trace}")
+    return {
+        "partial_after_count": partial["metrics"]["after_count"],
+        "final_count": final_count,
+        "lifecycle_history": [state.value for state in runtime.lifecycle.history],
+        "resume_events": [event for event in trace if event.get("event") == "resume_context"],
     }
 
 
@@ -214,9 +317,10 @@ def main() -> None:
         dirt = run_happy(rcon, body, item="dirt")
         sand = run_happy(rcon, body, item="sand")
         gravel = run_happy(rcon, body, item="gravel")
+        resumed = run_interrupt_resume(rcon, body)
         missing = run_not_found(rcon, body)
         illegal = run_illegal(rcon, body)
-        print({"dirt": dirt, "sand": sand, "gravel": gravel, "missing": missing, "illegal": illegal})
+        print({"dirt": dirt, "sand": sand, "gravel": gravel, "resumed": resumed, "missing": missing, "illegal": illegal})
 
 
 if __name__ == "__main__":

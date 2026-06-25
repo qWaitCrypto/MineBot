@@ -202,6 +202,11 @@ class ModeRuntime:
             policy_tags=tags,
         )
 
+    def consume_suspend_slot(self) -> SuspendSlot | None:
+        slot = self.suspend_slot
+        self.suspend_slot = None
+        return slot
+
     def _write_suspend(
         self,
         goal_text: str | None,
