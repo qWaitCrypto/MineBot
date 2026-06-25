@@ -119,69 +119,64 @@ class ModeRuntime:
         *,
         goal_text: str | None = None,
     ) -> ModeReduction:
-        requested: LifecycleState | None = None
-        reason: str | None = None
+        requested_candidates: list[tuple[LifecycleState, str, dict[str, Any]]] = []
+        situational_candidates: list[tuple[SituationalState, str]] = []
 
         for signal in signals:
             if signal.kind == "goal_started":
-                self.situational = "normal"
-                reason = str(signal.facts.get("goal") or "goal_started")
+                situational_candidates.append(("normal", str(signal.facts.get("goal") or "goal_started")))
                 continue
 
             if signal.kind == "progress_abort":
                 progress = signal.facts.get("progress")
-                self.situational = _situational_from_progress(progress)
-                requested = LifecycleState.YIELDED
-                reason = "progress_abort"
-                self._write_suspend(goal_text, reason, signal.facts)
+                situational_candidates.append((_situational_from_progress(progress), "progress_abort"))
+                requested_candidates.append((LifecycleState.YIELDED, "progress_abort", signal.facts))
                 continue
 
             if signal.kind in {"body_reflex_started", "survival_metric_red"}:
-                self.situational = "survival"
-                reason = str(signal.facts.get("reason") or signal.kind)
-                self._write_suspend(goal_text, reason, signal.facts)
+                situational_candidates.append(("survival", str(signal.facts.get("reason") or signal.kind)))
                 continue
 
             if signal.kind == "body_reflex_completed":
-                self.situational = "normal"
-                reason = str(signal.facts.get("reason") or "body_reflex_completed")
+                situational_candidates.append(("normal", str(signal.facts.get("reason") or "body_reflex_completed")))
                 continue
 
             if signal.kind == "mobility_blocked":
-                self.situational = "mobility"
-                reason = str(signal.facts.get("reason") or "mobility_blocked")
-                self._write_suspend(goal_text, reason, signal.facts)
+                situational_candidates.append(("mobility", str(signal.facts.get("reason") or "mobility_blocked")))
                 continue
 
             if signal.kind == "death_detected":
-                self.situational = "death"
-                requested = LifecycleState.RECOVERING
                 reason = str(signal.facts.get("reason") or "death_detected")
-                self._write_suspend(goal_text, reason, signal.facts)
+                situational_candidates.append(("death", reason))
+                requested_candidates.append((LifecycleState.RECOVERING, reason, signal.facts))
                 continue
 
             if signal.kind == "recovery_completed":
-                self.situational = "normal"
-                if lifecycle_state is LifecycleState.RECOVERING:
-                    requested = LifecycleState.RESUMING
                 reason = str(signal.facts.get("reason") or "recovery_completed")
+                situational_candidates.append(("normal", reason))
+                if lifecycle_state is LifecycleState.RECOVERING:
+                    requested_candidates.append((LifecycleState.RESUMING, reason, signal.facts))
                 continue
 
             if signal.kind == "user_interrupt":
-                requested = LifecycleState.YIELDED
                 reason = str(signal.facts.get("reason") or "user_interrupt")
-                self._write_suspend(goal_text, reason, signal.facts)
+                requested_candidates.append((LifecycleState.YIELDED, reason, signal.facts))
                 continue
 
             if signal.kind == "tool_results":
                 result_reason = _first_blocking_tool_reason(signal.facts.get("results"))
                 if result_reason:
-                    self.situational = "mobility"
-                    reason = result_reason
-                    self._write_suspend(goal_text, reason, signal.facts)
+                    situational_candidates.append(("mobility", result_reason))
+
+        situational, situational_reason = _highest_situational(situational_candidates, self.situational)
+        requested, requested_reason, suspend_facts = _highest_lifecycle_request(requested_candidates)
+        self.situational = situational
+        reason = requested_reason or situational_reason
 
         if reason is not None:
             self.last_reason = reason
+        if requested in {LifecycleState.YIELDED, LifecycleState.RECOVERING} and suspend_facts is not None:
+            self._write_suspend(goal_text, reason or requested.value, suspend_facts)
         return ModeReduction(
             profile=self.profile_for(lifecycle_state),
             requested_lifecycle=requested,
@@ -258,6 +253,39 @@ def _situational_from_progress(progress: Any) -> SituationalState:
         if "navigate" in str(action) or "move" in str(action):
             return "mobility"
     return "normal"
+
+
+_SITUATIONAL_SEVERITY: dict[SituationalState, int] = {
+    "normal": 0,
+    "mobility": 1,
+    "survival": 2,
+    "death": 3,
+}
+
+_LIFECYCLE_REQUEST_PRIORITY: dict[LifecycleState, int] = {
+    LifecycleState.RESUMING: 0,
+    LifecycleState.INTERRUPTED: 1,
+    LifecycleState.YIELDED: 2,
+    LifecycleState.RECOVERING: 3,
+}
+
+
+def _highest_situational(
+    candidates: list[tuple[SituationalState, str]],
+    current: SituationalState,
+) -> tuple[SituationalState, str | None]:
+    if not candidates:
+        return current, None
+    return max(candidates, key=lambda item: _SITUATIONAL_SEVERITY[item[0]])
+
+
+def _highest_lifecycle_request(
+    candidates: list[tuple[LifecycleState, str, dict[str, Any]]],
+) -> tuple[LifecycleState | None, str | None, dict[str, Any] | None]:
+    if not candidates:
+        return None, None, None
+    state, reason, facts = max(candidates, key=lambda item: _LIFECYCLE_REQUEST_PRIORITY.get(item[0], -1))
+    return state, reason, facts
 
 
 def _profile_axes(

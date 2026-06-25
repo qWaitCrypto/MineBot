@@ -87,6 +87,24 @@ class ModeRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(recovered.profile.situational, "normal")
 
+    def test_survival_and_mobility_do_not_write_suspend_slot_without_lifecycle_stop(self):
+        modes = ModeRuntime()
+
+        survival = modes.reduce(
+            [AgentSignal.body_reflex_started("lava")],
+            LifecycleState.ACTIVE,
+            goal_text="collect 64 dirt",
+        )
+        mobility = modes.reduce(
+            [AgentSignal.mobility_blocked("navigation_blocked")],
+            LifecycleState.ACTIVE,
+            goal_text="collect 64 dirt",
+        )
+
+        self.assertIsNone(survival.requested_lifecycle)
+        self.assertIsNone(mobility.requested_lifecycle)
+        self.assertIsNone(modes.suspend_slot)
+
     def test_death_requests_recovery_then_recovery_completed_requests_resume(self):
         modes = ModeRuntime()
 
@@ -105,6 +123,41 @@ class ModeRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(recovered.profile.situational, "normal")
         self.assertEqual(recovered.requested_lifecycle, LifecycleState.RESUMING)
+
+    def test_death_priority_beats_same_turn_mobility_and_stale_tool_results(self):
+        modes = ModeRuntime()
+
+        reduction = modes.reduce(
+            [
+                AgentSignal.death_detected("death", composition_id="collect_resource"),
+                AgentSignal.mobility_blocked("navigation_blocked"),
+                AgentSignal.tool_results([{"reason": "navigation_blocked:no_path"}]),
+            ],
+            LifecycleState.ACTIVE,
+            goal_text="collect 64 dirt",
+        )
+
+        self.assertEqual(reduction.profile.situational, "death")
+        self.assertEqual(reduction.requested_lifecycle, LifecycleState.RECOVERING)
+        self.assertEqual(reduction.reason, "death")
+        self.assertIsNotNone(modes.suspend_slot)
+        self.assertEqual(modes.suspend_slot.reason, "death")
+
+    def test_death_recovery_priority_beats_same_turn_user_interrupt(self):
+        modes = ModeRuntime()
+
+        reduction = modes.reduce(
+            [
+                AgentSignal.death_detected("death", composition_id="collect_resource"),
+                AgentSignal.user_interrupt("stop"),
+            ],
+            LifecycleState.ACTIVE,
+            goal_text="collect 64 dirt",
+        )
+
+        self.assertEqual(reduction.profile.situational, "death")
+        self.assertEqual(reduction.requested_lifecycle, LifecycleState.RECOVERING)
+        self.assertEqual(reduction.reason, "death")
 
     def test_signalize_body_state_and_events(self):
         self.assertEqual(signalize_body_state(state(health=4.0))[0].kind, "survival_metric_red")
