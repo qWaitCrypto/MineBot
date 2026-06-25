@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from minebot.brain.modes import RuntimeProfile
 from minebot.contract import BodyState
 
 # Re-inject the goal every N model turns so it never scrolls out of the window.
@@ -39,6 +40,7 @@ class AgentContext:
     goal_reinject_every: int = DEFAULT_GOAL_REINJECT_EVERY
     _turn: int = 0
     _last_state: BodyState | None = field(default=None, repr=False)
+    _last_profile: RuntimeProfile | None = field(default=None, repr=False)
 
     # -- goal ownership -------------------------------------------------------
 
@@ -51,6 +53,10 @@ class AgentContext:
     def observe_state(self, state: BodyState) -> None:
         """Record the latest authoritative Body state for per-turn injection."""
         self._last_state = state
+
+    def observe_profile(self, profile: RuntimeProfile) -> None:
+        """Record the current stance profile for per-turn context framing."""
+        self._last_profile = profile
 
     # -- per-turn assembly ----------------------------------------------------
 
@@ -74,6 +80,8 @@ class AgentContext:
             parts.append(f"GOAL: {self.goal_text}")
         if self._last_state is not None:
             parts.append(self._state_line(self._last_state))
+        if self._last_profile is not None:
+            parts.append(self._profile_line(self._last_profile))
         return "\n".join(parts)
 
     @staticmethod
@@ -82,6 +90,16 @@ class AgentContext:
         return (
             f"STATE: pos=({pos}) health={state.health:.1f} food={state.food} "
             f"dim={state.dimension or 'overworld'}"
+        )
+
+    @staticmethod
+    def _profile_line(profile: RuntimeProfile) -> str:
+        focus = ",".join(profile.tool_focus)
+        tags = ",".join(profile.policy_tags)
+        return (
+            f"PROFILE: relationship={profile.relationship} situational={profile.situational} "
+            f"lifecycle={profile.lifecycle} focus={focus} model={profile.model_route} "
+            f"effort={profile.effort} policy={tags} frame={profile.context_frame}"
         )
 
 

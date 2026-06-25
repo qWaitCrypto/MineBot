@@ -19,6 +19,7 @@ from minebot.brain.lifecycle import (  # noqa: E402
     LifecycleError,
     LifecycleState,
 )
+from minebot.brain.modes import RuntimeProfile  # noqa: E402
 from minebot.contract import BodyState  # noqa: E402
 
 _failures: list[str] = []
@@ -74,6 +75,27 @@ def test_state_injection_every_turn() -> None:
     ctx.observe_state(make_state(x=99.0))
     ctx.begin_turn()
     check("state refreshes each turn", "99.0" in ctx.turn_preamble())
+
+
+def test_profile_injection() -> None:
+    ctx = AgentContext(system_prompt="sys", goal_text="g")
+    ctx.observe_profile(
+        RuntimeProfile(
+            relationship="autonomous.user_request",
+            situational="mobility",
+            lifecycle="active",
+            goal_lock="mutable",
+            context_frame="Mobility frame",
+            tool_focus=("navigation", "perception"),
+            model_route="primary",
+            effort="standard",
+            policy_tags=("mobility",),
+        )
+    )
+    ctx.begin_turn()
+    pre = ctx.turn_preamble()
+    check("profile injected", "PROFILE:" in pre and "situational=mobility" in pre)
+    check("tool focus injected", "focus=navigation,perception" in pre)
 
 
 def test_no_state_no_crash() -> None:
@@ -165,6 +187,7 @@ def main() -> int:
         test_goal_single_ownership,
         test_set_goal_resets_cadence,
         test_state_injection_every_turn,
+        test_profile_injection,
         test_no_state_no_crash,
         test_single_active_entry,
         test_no_backdoor_into_active,

@@ -1,0 +1,328 @@
+"""Phase-1 relationship/situational runtime.
+
+Framework-agnostic stance reducer for Agent Phase 1. It owns the relationship
+and situational axes and emits a per-turn RuntimeProfile for context, policy,
+and runner binding. Tools report facts; they do not mutate this state directly.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from minebot.brain.lifecycle import LifecycleState
+from minebot.contract import BodyState, Event, ProgressFacts
+
+RelationshipState = Literal["autonomous.user_request"]
+SituationalState = Literal["normal", "survival", "mobility", "death"]
+SignalKind = Literal[
+    "goal_started",
+    "progress_abort",
+    "body_reflex_started",
+    "body_reflex_completed",
+    "survival_metric_red",
+    "mobility_blocked",
+    "death_detected",
+    "recovery_completed",
+    "tool_results",
+    "user_interrupt",
+]
+
+
+@dataclass
+class SuspendSlot:
+    goal_text: str
+    composition_id: str | None
+    last_progress: dict[str, object]
+    reason: str
+
+
+@dataclass(frozen=True)
+class RuntimeProfile:
+    relationship: RelationshipState
+    situational: SituationalState
+    lifecycle: str
+    goal_lock: Literal["mutable"]
+    context_frame: str
+    tool_focus: tuple[str, ...]
+    model_route: Literal["primary", "fast"]
+    effort: Literal["minimal", "standard", "deep"]
+    policy_tags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ModeReduction:
+    profile: RuntimeProfile
+    requested_lifecycle: LifecycleState | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentSignal:
+    kind: SignalKind
+    facts: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def goal_started(cls, goal_text: str) -> "AgentSignal":
+        return cls("goal_started", {"goal": goal_text})
+
+    @classmethod
+    def progress_abort(cls, facts: ProgressFacts) -> "AgentSignal":
+        return cls("progress_abort", {"progress": facts})
+
+    @classmethod
+    def body_reflex_started(cls, reason: str, **facts: Any) -> "AgentSignal":
+        return cls("body_reflex_started", {"reason": reason, **facts})
+
+    @classmethod
+    def body_reflex_completed(cls, reason: str = "recovered", **facts: Any) -> "AgentSignal":
+        return cls("body_reflex_completed", {"reason": reason, **facts})
+
+    @classmethod
+    def survival_metric_red(cls, reason: str, **facts: Any) -> "AgentSignal":
+        return cls("survival_metric_red", {"reason": reason, **facts})
+
+    @classmethod
+    def mobility_blocked(cls, reason: str, **facts: Any) -> "AgentSignal":
+        return cls("mobility_blocked", {"reason": reason, **facts})
+
+    @classmethod
+    def death_detected(cls, reason: str = "death_detected", **facts: Any) -> "AgentSignal":
+        return cls("death_detected", {"reason": reason, **facts})
+
+    @classmethod
+    def recovery_completed(cls, reason: str = "recovered", **facts: Any) -> "AgentSignal":
+        return cls("recovery_completed", {"reason": reason, **facts})
+
+    @classmethod
+    def tool_results(cls, results: list[dict[str, Any]]) -> "AgentSignal":
+        return cls("tool_results", {"results": results})
+
+    @classmethod
+    def user_interrupt(cls, reason: str = "user_interrupt", **facts: Any) -> "AgentSignal":
+        return cls("user_interrupt", {"reason": reason, **facts})
+
+
+class ModeRuntime:
+    """Reduce turn-boundary signals into the current runtime profile."""
+
+    def __init__(self, *, relationship: RelationshipState = "autonomous.user_request") -> None:
+        self.relationship: RelationshipState = relationship
+        self.situational: SituationalState = "normal"
+        self.suspend_slot: SuspendSlot | None = None
+        self.last_reason: str | None = None
+
+    def reduce(
+        self,
+        signals: list[AgentSignal] | tuple[AgentSignal, ...],
+        lifecycle_state: LifecycleState,
+        *,
+        goal_text: str | None = None,
+    ) -> ModeReduction:
+        requested: LifecycleState | None = None
+        reason: str | None = None
+
+        for signal in signals:
+            if signal.kind == "goal_started":
+                self.situational = "normal"
+                reason = str(signal.facts.get("goal") or "goal_started")
+                continue
+
+            if signal.kind == "progress_abort":
+                progress = signal.facts.get("progress")
+                self.situational = _situational_from_progress(progress)
+                requested = LifecycleState.YIELDED
+                reason = "progress_abort"
+                self._write_suspend(goal_text, reason, signal.facts)
+                continue
+
+            if signal.kind in {"body_reflex_started", "survival_metric_red"}:
+                self.situational = "survival"
+                reason = str(signal.facts.get("reason") or signal.kind)
+                self._write_suspend(goal_text, reason, signal.facts)
+                continue
+
+            if signal.kind == "body_reflex_completed":
+                self.situational = "normal"
+                reason = str(signal.facts.get("reason") or "body_reflex_completed")
+                continue
+
+            if signal.kind == "mobility_blocked":
+                self.situational = "mobility"
+                reason = str(signal.facts.get("reason") or "mobility_blocked")
+                self._write_suspend(goal_text, reason, signal.facts)
+                continue
+
+            if signal.kind == "death_detected":
+                self.situational = "death"
+                requested = LifecycleState.RECOVERING
+                reason = str(signal.facts.get("reason") or "death_detected")
+                self._write_suspend(goal_text, reason, signal.facts)
+                continue
+
+            if signal.kind == "recovery_completed":
+                self.situational = "normal"
+                if lifecycle_state is LifecycleState.RECOVERING:
+                    requested = LifecycleState.RESUMING
+                reason = str(signal.facts.get("reason") or "recovery_completed")
+                continue
+
+            if signal.kind == "user_interrupt":
+                requested = LifecycleState.YIELDED
+                reason = str(signal.facts.get("reason") or "user_interrupt")
+                self._write_suspend(goal_text, reason, signal.facts)
+                continue
+
+            if signal.kind == "tool_results":
+                result_reason = _first_blocking_tool_reason(signal.facts.get("results"))
+                if result_reason:
+                    self.situational = "mobility"
+                    reason = result_reason
+                    self._write_suspend(goal_text, reason, signal.facts)
+
+        if reason is not None:
+            self.last_reason = reason
+        return ModeReduction(
+            profile=self.profile_for(lifecycle_state),
+            requested_lifecycle=requested,
+            reason=reason,
+        )
+
+    def profile_for(self, lifecycle_state: LifecycleState) -> RuntimeProfile:
+        focus, route, effort, tags = _profile_axes(self.situational)
+        return RuntimeProfile(
+            relationship=self.relationship,
+            situational=self.situational,
+            lifecycle=lifecycle_state.value,
+            goal_lock="mutable",
+            context_frame=_context_frame(self.situational),
+            tool_focus=focus,
+            model_route=route,
+            effort=effort,
+            policy_tags=tags,
+        )
+
+    def _write_suspend(
+        self,
+        goal_text: str | None,
+        reason: str,
+        facts: dict[str, Any],
+    ) -> None:
+        if goal_text is None:
+            return
+        self.suspend_slot = SuspendSlot(
+            goal_text=goal_text,
+            composition_id=_maybe_str(facts.get("composition_id")),
+            last_progress=_jsonish(facts),
+            reason=reason,
+        )
+
+
+def signalize_body_state(state: BodyState) -> list[AgentSignal]:
+    signals: list[AgentSignal] = []
+    if state.missing or state.health <= 0:
+        signals.append(AgentSignal.death_detected(health=state.health, missing=state.missing))
+    elif state.health <= 6:
+        signals.append(AgentSignal.survival_metric_red("low_health", health=state.health))
+    elif state.food <= 6:
+        signals.append(AgentSignal.survival_metric_red("low_food", food=state.food))
+    elif state.oxygen is not None and state.oxygen <= 80:
+        signals.append(AgentSignal.survival_metric_red("low_oxygen", oxygen=state.oxygen))
+    return signals
+
+
+def signalize_events(events: list[Event] | tuple[Event, ...]) -> list[AgentSignal]:
+    signals: list[AgentSignal] = []
+    for event in events:
+        name = event.name
+        data = dict(event.data)
+        if name in {"reflexTriggered", "reflexStarted", "ownerPreempted"}:
+            signals.append(AgentSignal.body_reflex_started(str(data.get("kind") or name), event=name))
+        elif name in {"reflexCompleted", "recoveryCompleted"}:
+            signals.append(AgentSignal.body_reflex_completed(str(data.get("kind") or name), event=name))
+        elif name in {"deathDetected", "botDied", "respawned"}:
+            signals.append(AgentSignal.death_detected(str(data.get("reason") or name), event=name))
+        elif name in {"stuck", "navigationBlocked", "lostPosition"}:
+            signals.append(AgentSignal.mobility_blocked(str(data.get("reason") or name), event=name))
+    return signals
+
+
+def _situational_from_progress(progress: Any) -> SituationalState:
+    if isinstance(progress, ProgressFacts):
+        action = progress.last_action[0] if progress.last_action else ""
+        if "navigate" in str(action) or "move" in str(action):
+            return "mobility"
+    return "normal"
+
+
+def _profile_axes(
+    situational: SituationalState,
+) -> tuple[tuple[str, ...], Literal["primary", "fast"], Literal["minimal", "standard", "deep"], tuple[str, ...]]:
+    if situational == "survival":
+        return ("survival", "recovery", "navigation"), "fast", "standard", ("survival",)
+    if situational == "mobility":
+        return ("navigation", "perception", "recovery"), "primary", "standard", ("mobility",)
+    if situational == "death":
+        return ("recovery", "inventory", "navigation"), "primary", "standard", ("death",)
+    return ("resource", "navigation", "perception"), "primary", "standard", ("normal",)
+
+
+def _context_frame(situational: SituationalState) -> str:
+    if situational == "survival":
+        return "Survival issue resolved or active; reason from current body facts before continuing."
+    if situational == "mobility":
+        return "Mobility/reachability issue; use fresh position, route, and candidate facts."
+    if situational == "death":
+        return "Death/recovery context; recount inventory and resume at the resource goal level."
+    return "Normal autonomous resource collection."
+
+
+def _first_blocking_tool_reason(results: Any) -> str | None:
+    if not isinstance(results, list):
+        return None
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        reason = str(result.get("reason") or "")
+        if reason.startswith(("navigation_", "mobility_", "stuck", "lost_position")):
+            return reason
+    return None
+
+
+def _maybe_str(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def _jsonish(value: Any) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key, item in value.items():
+        if isinstance(item, ProgressFacts):
+            out[key] = {
+                "goal": item.goal,
+                "last_action": list(item.last_action) if item.last_action else None,
+                "stagnant_steps": item.stagnant_steps,
+                "stalled_steps": item.stalled_steps,
+                "failure_steps": item.failure_steps,
+                "last_fingerprint": item.last_fingerprint,
+                "current_fingerprint": item.current_fingerprint,
+                "recent_events": list(item.recent_events),
+            }
+        elif isinstance(item, (str, int, float, bool)) or item is None:
+            out[key] = item
+        else:
+            out[key] = str(item)
+    return out
+
+
+__all__ = [
+    "AgentSignal",
+    "ModeReduction",
+    "ModeRuntime",
+    "RelationshipState",
+    "RuntimeProfile",
+    "SignalKind",
+    "SituationalState",
+    "SuspendSlot",
+    "signalize_body_state",
+    "signalize_events",
+]
