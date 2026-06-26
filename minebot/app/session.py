@@ -16,6 +16,8 @@ from minebot.app.wiring import AgentRuntimeParts
 from minebot.brain.lifecycle import LifecycleError, LifecycleState
 from minebot.brain.modes import AgentSignal
 
+DEFAULT_RUNAWAY_STEP_LIMIT = 100_000
+
 
 class SessionCommandKind(Enum):
     START = "start"
@@ -75,7 +77,6 @@ class AgentSession:
     parts_factory: PartsFactory
     parts: AgentRuntimeParts | None = None
     pending: deque[SessionCommand] = field(default_factory=deque)
-    max_auto_turns_per_step: int = 1
 
     def submit(self, command: SessionCommand) -> None:
         self.pending.append(command)
@@ -95,7 +96,7 @@ class AgentSession:
         return self.parts.context.goal_text
 
     async def step(self) -> SessionStep:
-        """Drain queued user commands, then advance active work by bounded turns."""
+        """Drain queued user commands, then advance active work by one SDK run."""
         signals: list[AgentSignal] = []
         suppress_run = False
         while self.pending:
@@ -114,39 +115,44 @@ class AgentSession:
         if self.parts.lifecycle.state not in runnable_states:
             return SessionStep("waiting", self.parts.lifecycle.state)
 
-        outcome = None
-        for index in range(max(1, self.max_auto_turns_per_step)):
-            extra = signals if index == 0 else None
-            try:
-                outcome = await self.parts.runtime.run_turn(extra_signals=extra)
-            except Exception as exc:
-                self._trace(
-                    "session_step_failed",
-                    error_type=type(exc).__name__,
-                    lifecycle=self.parts.lifecycle.state.value,
-                )
-                self._stand_down()
-                return SessionStep("failed", self.parts.lifecycle.state, f"runtime_error:{type(exc).__name__}")
-            if outcome.lifecycle is not LifecycleState.ACTIVE or outcome.status == "yielded":
-                break
-        if outcome is None:
-            return SessionStep("waiting", self.parts.lifecycle.state)
+        try:
+            outcome = await self.parts.runtime.run_turn(extra_signals=signals)
+        except Exception as exc:
+            self._trace(
+                "session_step_failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                cause_type=type(exc.__cause__).__name__ if exc.__cause__ is not None else None,
+                cause_message=str(exc.__cause__) if exc.__cause__ is not None else None,
+                lifecycle=self.parts.lifecycle.state.value,
+            )
+            self._stand_down()
+            return SessionStep("failed", self.parts.lifecycle.state, f"runtime_error:{type(exc).__name__}")
         return SessionStep(outcome.status, outcome.lifecycle, outcome.message)
 
-    async def run_until_waiting(self, *, max_steps: int = 100, should_stop: ShouldStop | None = None) -> SessionStep:
-        """Run bounded session steps until no automatic ACTIVE work remains."""
+    async def run_until_waiting(
+        self,
+        *,
+        max_steps: int | None = None,
+        should_stop: ShouldStop | None = None,
+    ) -> SessionStep:
+        """Run active work until lifecycle/yield/terminal truth stops it.
+
+        ``max_steps`` is a runaway guard only. It is not a continuation or stop
+        mechanism for normal autonomous work.
+        """
         last = await self.step()
         if should_stop is not None and should_stop(last):
             return last
-        for _ in range(max(0, max_steps - 1)):
+        remaining = None if max_steps is None else max(0, max_steps - 1)
+        while remaining is None or remaining > 0:
             if last.lifecycle is not LifecycleState.ACTIVE:
                 return last
-            if self.pending:
-                last = await self.step()
-            else:
-                last = await self.step()
+            last = await self.step()
             if should_stop is not None and should_stop(last):
                 return last
+            if remaining is not None:
+                remaining -= 1
         return last
 
     def complete_current_goal(self, reason: str = "goal_completed") -> SessionStep:

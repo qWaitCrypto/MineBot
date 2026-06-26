@@ -36,6 +36,25 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.api_key_env, "OPENAI_API_KEY")
         self.assertEqual(cfg.base_url, "https://maas-openapi.example/api/v1")
 
+    def test_provider_trace_configs_are_public_and_sanitized(self):
+        provider = provider_registry_from_env(
+            {
+                "MINEBOT_LLM_MODEL": "glm-5.2",
+                "MINEBOT_LLM_API_KEY_ENV": "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_AUTH_TOKEN": "secret-token-value",
+                "MINEBOT_LLM_BASE_URL": "https://maas-openapi.wanjiedata.com/api/v1/chat/completions",
+            }
+        )
+
+        rows = provider.trace_configs()
+
+        self.assertEqual(rows[0]["name"], "primary")
+        self.assertEqual(rows[0]["kind"], "openai_chat")
+        self.assertEqual(rows[0]["model"], "glm-5.2")
+        self.assertEqual(rows[0]["base_url_host"], "https://maas-openapi.wanjiedata.com")
+        self.assertEqual(rows[0]["api_key_env"], "ANTHROPIC_AUTH_TOKEN")
+        self.assertNotIn("secret-token-value", repr(rows))
+
     def test_provider_config_error_names_missing_env_without_value(self):
         with self.assertRaises(AppConfigError) as ctx:
             provider_registry_from_env({"OPENAI_MODEL": "glm-5.2"})

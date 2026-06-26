@@ -110,9 +110,21 @@ def tool_manifest(registry: ToolRegistry) -> list[dict[str, object]]:
 def inventory_count(body: Body, item: str) -> int:
     wanted = item.removeprefix("minecraft:")
     total = 0
-    for slot in body.get_inventory():
-        if slot.item is not None and slot.item.removeprefix("minecraft:") == wanted:
-            total += slot.count
+    start: int | None = 0
+    while start is not None:
+        perception = body.perceive("inventory", {"start": start, "limit": 12})
+        if not perception.ok:
+            raise ValueError(f"inventory perception failed: {perception.error}")
+        for payload in perception.data.get("slots") or []:
+            slot = payload if hasattr(payload, "get") else None
+            if not isinstance(slot, dict):
+                continue
+            slot_item = slot.get("item")
+            slot_count = slot.get("count")
+            if slot_item is not None and str(slot_item).removeprefix("minecraft:") == wanted:
+                total += int(slot_count or 0)
+        next_start = perception.data.get("nextStart")
+        start = int(next_start) if next_start is not None else None
     return total
 
 

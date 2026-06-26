@@ -325,6 +325,21 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["requested_item"], "iron")
         self.assertEqual(result["metrics"]["item"], "raw_iron")
 
+    def test_collect_resource_caps_search_limit_for_rcon_payload_safety(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, search_calls = search_tool([[1, 59, 0]])
+        registry.register(search)
+        miner, _mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx = composition_context(body, registry, max_candidates=96)
+
+        result = collect_resource({"item": "logs", "count": 1}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(search_calls[0]["find_limit"], 32)
+
     def test_collect_resource_counts_equivalent_log_inventory_items(self):
         body = FakeBody()
         body.inventory_counts = {"spruce_log": 32, "birch_log": 32}

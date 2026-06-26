@@ -2,7 +2,8 @@ import asyncio
 import json
 import unittest
 
-from agents.exceptions import UserError
+from agents.exceptions import MaxTurnsExceeded, UserError
+from agents.items import MessageOutputItem, ToolCallItem, ToolCallOutputItem
 
 from minebot.app.config import agent_language_from_env
 from minebot.app.console import parse_collect_goal
@@ -10,6 +11,7 @@ from minebot.app.runner import (
     AgentRuntime,
     RuntimeRunContext,
     RuntimeTrace,
+    extract_model_response_observations,
     extract_run_observations,
     sdk_tool_for,
     tool_is_enabled,
@@ -85,6 +87,10 @@ class FakeBody:
         return Result(None, self.bot_name, "result", True, True, True)
 
 
+class WeakAgent:
+    pass
+
+
 def make_tool(body: FakeBody, *, mutating=True):
     def callable_(params):
         body.x += float(params.get("dx", 1.0))
@@ -156,7 +162,48 @@ class AgentRunnerSpineTests(unittest.TestCase):
             any(
                 event["event"] == "model_tool_call"
                 and event["tool"] == "collect_resource"
-                and event["arguments_summary"] == '{"resource":"dirt"}'
+                and event["arguments_summary"] == '{"resource": "dirt"}'
+                for event in events
+            )
+        )
+        self.assertTrue(any(event["event"] == "model_tool_output" for event in events))
+
+    def test_extract_run_observations_prefers_typed_new_items(self):
+        class RawFunctionCall:
+            def __init__(self, name, arguments):
+                self.name = name
+                self.arguments = arguments
+                self.call_id = "call-1"
+                self.id = "call-1"
+
+        class FakeMessage:
+            def __init__(self, text):
+                self.content = [type("Txt", (), {"text": text})()]
+
+        class FakeRunResult:
+            final_output = "Collected one log."
+
+            def __init__(self):
+                agent = WeakAgent()
+                self.new_items = [
+                    MessageOutputItem(agent=agent, raw_item=FakeMessage("I will try the nearest tree.")),  # type: ignore[arg-type]
+                    ToolCallItem(agent=agent, raw_item=RawFunctionCall("collect_resource", '{"resource":"logs","count":64}')),  # type: ignore[arg-type]
+                    ToolCallOutputItem(
+                        agent=agent,  # type: ignore[arg-type]
+                        raw_item={"type": "function_call_output", "call_id": "call-1", "output": '{"success":true}'},
+                        output={"success": True, "reason": "progress"},
+                    ),
+                ]
+
+        events = extract_run_observations(FakeRunResult())
+
+        self.assertIn({"event": "assistant_message", "content": "I will try the nearest tree."}, events)
+        self.assertIn({"event": "assistant_final_output", "content": "Collected one log."}, events)
+        self.assertTrue(
+            any(
+                event["event"] == "model_tool_call"
+                and event["tool"] == "collect_resource"
+                and '"count": 64' in (event["arguments_summary"] or "")
                 for event in events
             )
         )
@@ -200,6 +247,33 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(outcome.status, "completed_turn")
         self.assertTrue(any(event["event"] == "model_tool_call" for event in runtime.trace.snapshot()))
         self.assertTrue(any(event["event"] == "assistant_no_content_tool_only" for event in runtime.trace.snapshot()))
+
+    def test_extract_model_response_observations_reads_model_output_directly(self):
+        class FakeFunctionCall:
+            type = "function_call"
+            name = "collect_resource"
+            arguments = '{"item":"oak_log","count":16}'
+
+        class FakeMessage:
+            type = "message"
+
+            def __init__(self, text):
+                self.content = [type("Txt", (), {"text": text})()]
+
+        class FakeModelResponse:
+            output = [FakeMessage("I will collect nearby logs first."), FakeFunctionCall()]
+
+        events = extract_model_response_observations(FakeModelResponse())
+
+        self.assertIn({"event": "assistant_message", "content": "I will collect nearby logs first."}, events)
+        self.assertTrue(
+            any(
+                event["event"] == "model_tool_call"
+                and event["tool"] == "collect_resource"
+                and '"oak_log"' in (event["arguments_summary"] or "")
+                for event in events
+            )
+        )
 
     def test_visible_assistant_output_is_recorded_into_agent_context(self):
         class SpeechRunResult:
@@ -294,7 +368,6 @@ class AgentRunnerSpineTests(unittest.TestCase):
             mode_runtime=ModeRuntime(),
             authority=ProgressAuthority(),
             runner_run=fake_runner,
-            max_turns=3,
         )
 
         first = asyncio.run(runtime.run_turn())
@@ -309,6 +382,34 @@ class AgentRunnerSpineTests(unittest.TestCase):
         )
         self.assertEqual(len(calls), 2)
         self.assertIn("PROFILE:", calls[0][0])
+        self.assertIsNone(calls[0][2])
+
+    def test_sdk_max_turns_exceeded_yields_instead_of_failing(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+
+        async def quota_runner(*args, **kwargs):
+            raise MaxTurnsExceeded("runaway guard hit")
+
+        runtime = AgentRuntime(
+            body=body,
+            registry=registry,
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=quota_runner,
+            max_turns=999,
+        )
+
+        outcome = asyncio.run(runtime.run_turn())
+
+        self.assertEqual(outcome.status, "yielded")
+        self.assertEqual(outcome.lifecycle, LifecycleState.YIELDED)
+        self.assertIn("GOAL: collect", outcome.message)
+        events = runtime.trace.snapshot()
+        self.assertTrue(any(event["event"] == "runaway_ceiling_hit" for event in events))
+        self.assertTrue(any(event["event"] == "runaway_ceiling_yielded" for event in events))
 
     def test_tool_facts_and_trace_are_projected_into_sdk_tool(self):
         body = FakeBody()
@@ -358,6 +459,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
                 and event["permission"] == "move"
                 and event["body_scope"] == ["navigation"]
                 and event["terminal_truth"] == ["position"]
+                and event["arguments_summary"] == '{"dx": 1}'
                 for event in events
             )
         )

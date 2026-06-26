@@ -20,7 +20,7 @@ from minebot.app.config import AppConfigError, agent_language_from_env, provider
 from minebot.app.observability import JsonlObservationSink
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime, inventory_count
 from minebot.app.runner import RuntimeTrace
-from minebot.app.session import AgentSession, SessionCommand, SessionStep
+from minebot.app.session import DEFAULT_RUNAWAY_STEP_LIMIT, AgentSession, SessionCommand, SessionStep
 from minebot.brain.lifecycle import LifecycleState
 from minebot.brain.composition import resource_plan_for
 from minebot.contract import Body, Region
@@ -114,7 +114,7 @@ def _region_from_env(env: Mapping[str, str]) -> Region:
     return Region("real-server-natural", (-256, -64, -256), (256, 320, 256))
 
 
-async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps: int) -> int:
+async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps: int | None) -> int:
     provider = provider_registry_from_env()
     rcon = RconClient(config.rcon)
     try:
@@ -134,6 +134,12 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
 
         def make_parts(goal_text: str):
             trace = RuntimeTrace(session_id=config.bot_name, sink=sink)
+            trace.emit(
+                "provider_manifest",
+                default_route=provider.default,
+                language=config.language,
+                providers=provider.trace_configs(),
+            )
             parts = build_phase1_agent_runtime(
                 body=body,
                 goal_text=goal_text,
@@ -150,13 +156,13 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
         try:
             final = await session.run_until_waiting(
                 max_steps=max_steps,
-                should_stop=lambda step: evaluate_terminal_truth(body, goal, step).satisfied,
+                should_stop=lambda step: safe_evaluate_terminal_truth(body, goal, step, session=session).satisfied,
             )
             terminal_goal = _session_goal(session, goal)
-            truth = evaluate_terminal_truth(body, terminal_goal, final)
+            truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
             if truth.satisfied:
                 final = session.complete_current_goal("terminal_truth_satisfied")
-                truth = evaluate_terminal_truth(body, terminal_goal, final)
+                truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
             if session.parts is not None:
                 session.parts.runtime.trace.emit(
                     "session_terminal",
@@ -176,7 +182,7 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
             await provider.aclose()
 
 
-async def run_real_server_interactive(config: RealServerConfig, goal: str, *, max_steps: int) -> int:
+async def run_real_server_interactive(config: RealServerConfig, goal: str, *, max_steps: int | None) -> int:
     """Run one persistent real-server session with stdin as the user channel."""
     provider = provider_registry_from_env()
     rcon = RconClient(config.rcon)
@@ -197,6 +203,12 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
 
         def make_parts(goal_text: str):
             trace = RuntimeTrace(session_id=config.bot_name, sink=sink)
+            trace.emit(
+                "provider_manifest",
+                default_route=provider.default,
+                language=config.language,
+                providers=provider.trace_configs(),
+            )
             parts = build_phase1_agent_runtime(
                 body=body,
                 goal_text=goal_text,
@@ -250,17 +262,22 @@ async def _run_interactive_loop(
     *,
     fallback_goal: str,
     body: Body,
-    max_steps: int,
+    max_steps: int | None,
     chat_source: object | None = None,
 ) -> SessionStep:
     last = None
-    for _ in range(max(1, max_steps)):
+    remaining = max_steps
+    while remaining is None or remaining > 0:
         _poll_chat_commands(session, chat_source)
         last = await session.step()
         if evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last).satisfied:
             return last
         if last.lifecycle.value == "idle" and not session.pending:
             return last
+        if last.lifecycle is not LifecycleState.ACTIVE and not session.pending:
+            return last
+        if remaining is not None:
+            remaining -= 1
         await asyncio.sleep(0)
     assert last is not None
     return last
@@ -363,6 +380,35 @@ def evaluate_terminal_truth(body: Body, goal: str, final: SessionStep) -> Termin
     )
 
 
+def safe_evaluate_terminal_truth(
+    body: Body,
+    goal: str,
+    final: SessionStep,
+    *,
+    session: AgentSession | None = None,
+) -> TerminalTruth:
+    try:
+        return evaluate_terminal_truth(body, goal, final)
+    except Exception as exc:
+        parts = getattr(session, "parts", None) if session is not None else None
+        if parts is not None:
+            parts.runtime.trace.emit(
+                "terminal_truth_failed",
+                goal=goal,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+        return TerminalTruth(
+            goal=goal,
+            target=parse_collect_target(goal),
+            inventory_count=None,
+            satisfied=False,
+            status=final.status,
+            lifecycle=final.lifecycle.value,
+            exit_code=8,
+        )
+
+
 def _exit_code_for(final: SessionStep, *, satisfied: bool, has_target: bool) -> int:
     if satisfied:
         return 0
@@ -396,7 +442,12 @@ def _collect_target(item: str, count: int) -> CollectTarget:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run MineBot Agent against an explicitly configured real Minecraft server.")
     parser.add_argument("goal", help="Natural-language user goal, e.g. 'collect 64 logs'.")
-    parser.add_argument("--max-steps", type=int, default=16)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=DEFAULT_RUNAWAY_STEP_LIMIT,
+        help="Runaway guard for session steps; normal stopping is lifecycle/progress/terminal truth.",
+    )
     parser.add_argument(
         "--interactive",
         action="store_true",

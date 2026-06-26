@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from typing import Any
+from urllib.parse import urlparse
 
 from agents import (
     Model,
@@ -123,6 +124,40 @@ class ModelProviderRegistry(ModelProvider):
 
     def logical_names(self) -> list[str]:
         return list(self._configs)
+
+    def trace_configs(self) -> list[dict[str, object]]:
+        """Public, sanitized provider metadata for session observability.
+
+        This intentionally records credential env-var names, never credential
+        values. The base URL is reduced to scheme+host so logs can identify the
+        backend family without persisting path/query details.
+        """
+        rows: list[dict[str, object]] = []
+        for name in self.logical_names():
+            cfg = self._require(name)
+            parsed = urlparse(cfg.base_url) if cfg.base_url else None
+            base_url_host = None
+            if parsed is not None and parsed.netloc:
+                base_url_host = f"{parsed.scheme}://{parsed.netloc}"
+            rows.append(
+                {
+                    "name": cfg.name,
+                    "kind": cfg.kind,
+                    "model": cfg.model,
+                    "api_shape": cfg.api_shape,
+                    "base_url_host": base_url_host,
+                    "api_key_env": cfg.api_key_env,
+                    "capabilities": {
+                        "json_schema": cfg.capabilities.json_schema,
+                        "multimodal": cfg.capabilities.multimodal,
+                        "hosted_tools": cfg.capabilities.hosted_tools,
+                        "prompt_caching": cfg.capabilities.prompt_caching,
+                    },
+                    "include_usage": cfg.include_usage,
+                    "tracing": cfg.tracing,
+                }
+            )
+        return rows
 
     @property
     def default(self) -> str:

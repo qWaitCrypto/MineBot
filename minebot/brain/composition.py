@@ -161,9 +161,10 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 budget=budget,
             )
 
+        find_limit = min(32, max(8, budget.max_candidates))
         search = execute_tool(
             context.registry.get("search_for_block"),
-            {"block_types": list(plan.block_types), "search_radius": radius, "find_limit": max(32, budget.max_candidates * 4)},
+            {"block_types": list(plan.block_types), "search_radius": radius, "find_limit": find_limit},
             context.weld_context,
         )
         targets = _targets_from_search(search)

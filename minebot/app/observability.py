@@ -51,6 +51,8 @@ def sanitize_observation(value: Any) -> Any:
 
 def _secret_key(key: str) -> bool:
     normalized = key.lower()
+    if normalized.endswith("_env") or normalized.endswith("_env_name"):
+        return False
     return any(marker in normalized for marker in ("api_key", "password", "secret", "token", "auth"))
 
 

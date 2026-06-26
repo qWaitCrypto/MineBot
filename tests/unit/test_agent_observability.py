@@ -6,6 +6,7 @@ from pathlib import Path
 
 from minebot.app.observability import JsonlObservationSink, sanitize_observation
 from minebot.app.runner import AgentRuntime, RuntimeTrace
+from minebot.app.real_server_session import TerminalTruth, safe_evaluate_terminal_truth
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController
 from minebot.brain.modes import ModeRuntime
@@ -79,6 +80,53 @@ class AgentObservabilityTests(unittest.TestCase):
         self.assertEqual(safe["password"], "<redacted>")
         self.assertEqual(safe["metrics"][0]["token"], "<redacted>")
         self.assertEqual(safe["metrics"][0]["count"], 3)
+
+    def test_safe_terminal_truth_failure_is_logged_and_degrades_to_unsatisfied(self):
+        class BrokenBody(FakeBody):
+            def perceive(self, scope, params):
+                if scope == "inventory":
+                    raise RuntimeError("inventory truncated")
+                return super().perceive(scope, params)
+
+            def get_inventory(self):  # pragma: no cover - terminal truth must not call this path
+                raise RuntimeError("inventory truncated")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "runtime.jsonl"
+            trace = RuntimeTrace(session_id="terminal-test", sink=JsonlObservationSink(path))
+            body = BrokenBody()
+
+            async def fake_runner(*args, **kwargs):
+                return {"ok": True}
+
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=AgentContext(system_prompt="sys", goal_text="collect 64 logs"),
+                lifecycle=LifecycleController(),
+                mode_runtime=ModeRuntime(),
+                authority=ProgressAuthority(),
+                runner_run=fake_runner,
+                trace=trace,
+            )
+            asyncio.run(runtime.run_turn())
+
+            class Parts:
+                def __init__(self, runtime):
+                    self.runtime = runtime
+
+            class Session:
+                def __init__(self, runtime):
+                    self.parts = Parts(runtime)
+
+            final = type("Final", (), {"status": "completed_turn", "lifecycle": type("L", (), {"value": "active"})()})()
+            truth = safe_evaluate_terminal_truth(body, "collect 64 logs", final, session=Session(runtime))
+            trace.close()
+
+            self.assertIsInstance(truth, TerminalTruth)
+            self.assertFalse(truth.satisfied)
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(any(row["event"] == "terminal_truth_failed" for row in rows))
 
 
 if __name__ == "__main__":

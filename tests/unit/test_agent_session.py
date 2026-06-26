@@ -1,6 +1,8 @@
 import asyncio
 import unittest
 
+from agents.exceptions import MaxTurnsExceeded
+
 from minebot.app.runner import AgentRuntime
 from minebot.app.session import AgentSession, SessionCommand
 from minebot.app.wiring import AgentRuntimeParts
@@ -203,6 +205,50 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(failed.lifecycle, LifecycleState.IDLE)
         self.assertEqual(failed.message, "runtime_error:RuntimeError")
         self.assertTrue(any(event["event"] == "session_step_failed" for event in session.parts.runtime.trace.snapshot()))
+
+    def test_sdk_runaway_guard_yields_session_instead_of_failing(self):
+        bodies: list[FakeBody] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = FakeBody()
+            bodies.append(body)
+
+            async def quota_runner(*args, **kwargs):
+                raise MaxTurnsExceeded("runaway guard hit")
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=quota_runner,
+                max_turns=999,
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("collect 64 logs"))
+
+        yielded = asyncio.run(session.step())
+
+        self.assertEqual(yielded.status, "yielded")
+        self.assertEqual(yielded.lifecycle, LifecycleState.YIELDED)
+        events = session.parts.runtime.trace.snapshot()
+        self.assertFalse(any(event["event"] == "session_step_failed" for event in events))
+        self.assertTrue(any(event["event"] == "runaway_ceiling_yielded" for event in events))
 
 
 if __name__ == "__main__":

@@ -10,7 +10,8 @@ from enum import Enum
 from typing import Any
 
 from agents import Agent, RunConfig, RunContextWrapper, Runner, RunHooks
-from agents.exceptions import UserError
+from agents.exceptions import MaxTurnsExceeded, UserError
+from agents.items import ItemHelpers, MessageOutputItem, ToolCallItem, ToolCallOutputItem
 from agents.tool import FunctionTool
 
 from minebot.app.model_provider import ModelProviderRegistry
@@ -112,6 +113,8 @@ class RuntimeHooks(RunHooks[RuntimeRunContext]):
         trace = _trace_from_context(context)
         if trace is not None:
             trace.emit("llm_end", agent=getattr(agent, "name", None), response_type=type(response).__name__)
+            for event in extract_model_response_observations(response):
+                trace.emit(**event)
 
     async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
         trace = _trace_from_context(context)
@@ -156,6 +159,7 @@ def tool_is_enabled(
 def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
     async def on_invoke_tool(ctx: RunContextWrapper[RuntimeRunContext], input_json: str) -> JsonObject:
         trace = ctx.context.trace
+        arguments_summary = _tool_arguments_summary_from_json(input_json)
         if trace is not None:
             trace.emit(
                 "tool_invoke",
@@ -168,6 +172,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 terminal_truth=list(tool.sidecar.terminal_truth),
                 situational=ctx.context.profile.situational,
                 lifecycle=ctx.context.profile.lifecycle,
+                arguments_summary=arguments_summary,
             )
         try:
             params = json.loads(input_json) if input_json else {}
@@ -236,7 +241,7 @@ class AgentRuntime:
         model_provider: ModelProviderRegistry | None = None,
         runner_run: RunnerCallable | None = None,
         agent_name: str = "MineBot",
-        max_turns: int = 10,
+        max_turns: int | None = None,
         tool_facts: dict[str, dict[str, object]] | None = None,
         trace: RuntimeTrace | None = None,
     ) -> None:
@@ -352,6 +357,8 @@ class AgentRuntime:
             )
         except ProgressAbort as exc:
             return self._yield_from_progress_abort(exc)
+        except MaxTurnsExceeded as exc:
+            return self._yield_from_runaway_ceiling(exc)
         except UserError as exc:
             progress_abort = _find_progress_abort(exc)
             if progress_abort is None:
@@ -459,6 +466,33 @@ class AgentRuntime:
 
     def _yield_from_progress_abort(self, exc: ProgressAbort) -> AgentTurnOutcome:
         facts = exc.facts or self.authority.facts(self.agent_context.goal_text)
+        return self._yield_with_facts(
+            facts,
+            trace_event="progress_yielded",
+            message=_yield_message(facts, self.agent_context.goal_text),
+        )
+
+    def _yield_from_runaway_ceiling(self, exc: MaxTurnsExceeded) -> AgentTurnOutcome:
+        facts = self.authority.facts(self.agent_context.goal_text)
+        self.trace.emit(
+            "runaway_ceiling_hit",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            sdk_max_turns=self.max_turns,
+        )
+        return self._yield_with_facts(
+            facts,
+            trace_event="runaway_ceiling_yielded",
+            message=_runaway_yield_message(facts, self.agent_context.goal_text, self.max_turns),
+        )
+
+    def _yield_with_facts(
+        self,
+        facts: ProgressFacts,
+        *,
+        trace_event: str,
+        message: str,
+    ) -> AgentTurnOutcome:
         yielded = self.mode_runtime.reduce(
             [AgentSignal.progress_abort(facts)],
             self.lifecycle.state,
@@ -468,7 +502,7 @@ class AgentRuntime:
         yielded_profile = self.mode_runtime.profile_for(self.lifecycle.state)
         self.agent_context.observe_profile(yielded_profile)
         self.trace.emit(
-            "progress_yielded",
+            trace_event,
             stagnant_steps=facts.stagnant_steps,
             stalled_steps=facts.stalled_steps,
             failure_steps=facts.failure_steps,
@@ -480,13 +514,24 @@ class AgentRuntime:
             lifecycle=self.lifecycle.state,
             profile=yielded_profile,
             yielded_facts=facts,
-            message=_yield_message(facts, self.agent_context.goal_text),
+            message=message,
         )
 
 
 def _yield_message(facts: ProgressFacts, goal_text: str) -> str:
     return (
         "Progress authority yielded.\n"
+        f"GOAL: {goal_text}\n"
+        f"stagnant={facts.stagnant_steps} stalled={facts.stalled_steps} "
+        f"failures={facts.failure_steps}\n"
+        "How should I continue?"
+    )
+
+
+def _runaway_yield_message(facts: ProgressFacts, goal_text: str, max_turns: int | None) -> str:
+    ceiling = "the SDK runaway ceiling" if max_turns is None else f"the SDK runaway ceiling ({max_turns})"
+    return (
+        f"Autonomous run yielded after hitting {ceiling}.\n"
         f"GOAL: {goal_text}\n"
         f"stagnant={facts.stagnant_steps} stalled={facts.stalled_steps} "
         f"failures={facts.failure_steps}\n"
@@ -519,6 +564,20 @@ def extract_run_observations(result: Any) -> list[dict[str, object]]:
     providers, and observation failure must never downgrade task execution.
     """
     events: list[dict[str, object]] = []
+    new_items = getattr(result, "new_items", None)
+    if isinstance(new_items, list) and new_items:
+        extracted = _extract_observations_from_new_items(new_items)
+        if extracted:
+            events.extend(extracted)
+            final_output = getattr(result, "final_output", None)
+            if final_output not in {None, ""}:
+                final_text = _shorten(_public_text(final_output), limit=2000)
+                if not any(
+                    event.get("event") == "assistant_final_output" and event.get("content") == final_text
+                    for event in events
+                ):
+                    events.append({"event": "assistant_final_output", "content": final_text})
+            return events
     to_input_list = getattr(result, "to_input_list", None)
     if not callable(to_input_list):
         final_output = getattr(result, "final_output", None)
@@ -562,6 +621,43 @@ def extract_run_observations(result: Any) -> list[dict[str, object]]:
     return events
 
 
+def extract_model_response_observations(response: Any) -> list[dict[str, object]]:
+    output = getattr(response, "output", None)
+    if not isinstance(output, list):
+        return []
+    events: list[dict[str, object]] = []
+    assistant_texts: set[str] = set()
+    for item in output:
+        item_type = _public_text(getattr(item, "type", None) or "")
+        if item_type == "message":
+            content = _text_from_raw_message(item)
+            if content:
+                shortened = _shorten(content, limit=2000)
+                if shortened not in assistant_texts:
+                    assistant_texts.add(shortened)
+                    events.append({"event": "assistant_message", "content": shortened})
+            continue
+        if item_type in {"function_call", "tool_call"}:
+            name = getattr(item, "name", None) or getattr(item, "tool_name", None) or item_type
+            arguments = getattr(item, "arguments", None)
+            events.append(
+                {
+                    "event": "model_tool_call",
+                    "tool": _public_text(name),
+                    "arguments_summary": _summarize_tool_arguments(arguments),
+                }
+            )
+            continue
+        if item_type in {"function_call_output", "tool_output"}:
+            output_value = getattr(item, "output", None)
+            events.append({"event": "model_tool_output", "summary": _shorten(_public_text(output_value), limit=500)})
+    if any(event["event"] == "model_tool_call" for event in events) and not any(
+        event["event"] == "assistant_message" and event.get("content") for event in events
+    ):
+        events.append({"event": "assistant_no_content_tool_only"})
+    return events
+
+
 def _text_from_item(item: dict[str, object]) -> str:
     content = item.get("content")
     if isinstance(content, str):
@@ -597,7 +693,91 @@ def _tool_arguments_summary(item: dict[str, object]) -> str | None:
         raw = function.get("arguments")
     if raw is None:
         return None
-    return _shorten(_public_text(raw), limit=500)
+    return _summarize_tool_arguments(raw)
+
+
+def _tool_arguments_summary_from_json(input_json: str) -> str | None:
+    if not input_json:
+        return None
+    try:
+        parsed = json.loads(input_json)
+    except json.JSONDecodeError:
+        return _shorten(input_json, limit=500)
+    return _summarize_tool_arguments(parsed)
+
+
+def _extract_observations_from_new_items(new_items: list[Any]) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    assistant_texts: set[str] = set()
+    for item in new_items:
+        if isinstance(item, MessageOutputItem):
+            content = ItemHelpers.text_message_output(item) or _text_from_raw_message(getattr(item, "raw_item", None))
+            if content:
+                shortened = _shorten(content, limit=2000)
+                if shortened not in assistant_texts:
+                    assistant_texts.add(shortened)
+                    events.append({"event": "assistant_message", "content": shortened})
+            continue
+        if isinstance(item, ToolCallItem):
+            tool_name = item.tool_name or item.type
+            raw = item.raw_item
+            arguments = getattr(raw, "arguments", None) if not isinstance(raw, dict) else raw.get("arguments")
+            events.append(
+                {
+                    "event": "model_tool_call",
+                    "tool": _public_text(tool_name),
+                    "arguments_summary": _summarize_tool_arguments(arguments),
+                }
+            )
+            continue
+        if isinstance(item, ToolCallOutputItem):
+            events.append(
+                {
+                    "event": "model_tool_output",
+                    "summary": _shorten(_public_text(item.output), limit=500),
+                }
+            )
+    return events
+
+
+def _text_from_raw_message(raw_item: object) -> str:
+    content = getattr(raw_item, "content", None)
+    if content is None and isinstance(raw_item, dict):
+        content = raw_item.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+            continue
+        text = None
+        if isinstance(part, dict):
+            text = part.get("text") or part.get("content")
+        else:
+            text = getattr(part, "text", None) or getattr(part, "content", None)
+        if text is not None:
+            parts.append(_public_text(text))
+    return "\n".join(part for part in parts if part)
+
+
+def _summarize_tool_arguments(raw: object) -> str | None:
+    if raw is None:
+        return None
+    try:
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                return _shorten(raw, limit=500)
+            return _shorten(json.dumps(sanitize_observation(parsed), ensure_ascii=True, sort_keys=True), limit=500)
+        if isinstance(raw, (dict, list, tuple)):
+            return _shorten(json.dumps(sanitize_observation(raw), ensure_ascii=True, sort_keys=True), limit=500)
+        return _shorten(_public_text(sanitize_observation(raw)), limit=500)
+    except Exception:
+        return _shorten(_public_text(raw), limit=500)
 
 
 def _public_text(value: object) -> str:

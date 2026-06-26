@@ -14,9 +14,8 @@ import sys
 import time
 
 from openai import APIStatusError
-from agents.exceptions import MaxTurnsExceeded
-
 from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
+from minebot.app.session import DEFAULT_RUNAWAY_STEP_LIMIT
 from minebot.app.resource_runtime import ResourceRuntimeConfig, build_resource_agent_runtime, inventory_count
 from minebot.brain.lifecycle import LifecycleState
 from minebot.game import RconClient, Region, ScarpetBody
@@ -76,7 +75,7 @@ def seed_resource_scene(rcon: RconClient) -> None:
         command(rcon, f"setblock {3 + offset} 70 0 dirt", delay=0.0)
 
 
-async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int, sdk_max_turns: int, language: str) -> None:
+async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int, sdk_max_turns: int | None, language: str) -> None:
     provider = provider_registry_from_env()
     collect_target = parse_collect_goal(goal_text)
     parts = build_resource_agent_runtime(
@@ -108,11 +107,7 @@ async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int, sdk_max
             if _goal_completed(body, trace, collect_target):
                 print("completed: authoritative inventory satisfies goal")
                 return
-        print(f"stopped after max_turns={max_turns}; goal may still be in progress")
-    except MaxTurnsExceeded:
-        trace = parts.runtime.trace.snapshot()
-        _print_new_observations(trace, printed_events)
-        print(f"stopped: model/tool loop exceeded sdk_max_turns={sdk_max_turns}")
+        print(f"stopped after runaway guard max_turns={max_turns}; goal may still be in progress")
     finally:
         await provider.aclose()
 
@@ -174,8 +169,18 @@ def parse_collect_goal(goal_text: str) -> tuple[str, int] | None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run an interactive MineBot agent against the local test server.")
     parser.add_argument("--bot", default="MineBotLocal")
-    parser.add_argument("--max-turns", type=int, default=6)
-    parser.add_argument("--sdk-max-turns", type=int, default=40)
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=DEFAULT_RUNAWAY_STEP_LIMIT,
+        help="Console runaway guard; normal stopping is lifecycle/progress/terminal truth.",
+    )
+    parser.add_argument(
+        "--sdk-max-turns",
+        type=int,
+        default=None,
+        help="Optional SDK runaway guard; omit for progress-authority stopping.",
+    )
     parser.add_argument(
         "--language",
         default=None,

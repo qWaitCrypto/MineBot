@@ -53,6 +53,45 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(cfg.log_path, Path("logs/custom.jsonl"))
         self.assertEqual(cfg.language, "Chinese")
 
+    def test_provider_manifest_is_written_to_real_server_log(self):
+        from minebot.app.model_provider import ModelProviderRegistry
+        from minebot.brain.provider import ProviderConfig
+        from minebot.app.observability import JsonlObservationSink
+        from minebot.app.runner import RuntimeTrace
+        import json
+        import tempfile
+
+        provider = ModelProviderRegistry(
+            [
+                ProviderConfig(
+                    name="primary",
+                    kind="openai_chat",
+                    model="glm-5.2",
+                    base_url="https://maas-openapi.wanjiedata.com/api/v1/chat/completions",
+                    api_key_env="ANTHROPIC_AUTH_TOKEN",
+                )
+            ],
+            env={"ANTHROPIC_AUTH_TOKEN": "secret"},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl"
+            trace = RuntimeTrace(session_id="Bot", sink=JsonlObservationSink(path))
+            trace.emit(
+                "provider_manifest",
+                default_route=provider.default,
+                language="Chinese",
+                providers=provider.trace_configs(),
+            )
+            trace.close()
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(rows[0]["event"], "provider_manifest")
+        self.assertEqual(rows[0]["default_route"], "primary")
+        self.assertEqual(rows[0]["language"], "Chinese")
+        self.assertEqual(rows[0]["providers"][0]["base_url_host"], "https://maas-openapi.wanjiedata.com")
+        self.assertEqual(rows[0]["providers"][0]["api_key_env"], "ANTHROPIC_AUTH_TOKEN")
+
     def test_main_exits_before_connecting_when_real_env_missing(self):
         clean_env = {
             key: value
@@ -263,19 +302,26 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 class InventoryBody:
     def __init__(self, counts):
         self.counts = counts
+        self.inventory_reads = []
 
     def get_inventory(self):
+        raise AssertionError("terminal truth must use paged perception, not default get_inventory")
+
+    def perceive(self, scope, params):
+        if scope != "inventory":
+            return PerceptionResult("Bot", scope, "perception", False, False, {}, error="unsupported")
+        self.inventory_reads.append(dict(params))
         slots = []
         for index, (item, count) in enumerate(self.counts.items()):
-            slots.append(
-                InventorySlot(
-                    slot=index,
-                    item=f"minecraft:{item}",
-                    count=count,
-                    empty=False,
-                )
-            )
-        return slots
+            slots.append({"slot": index, "item": f"minecraft:{item}", "count": count, "empty": False})
+        start = int(params.get("start") or 0)
+        limit = int(params.get("limit") or 12)
+        page = slots[start : start + limit]
+        next_start = start + limit if start + limit < len(slots) else None
+        data = {"slots": page}
+        if next_start is not None:
+            data["nextStart"] = next_start
+        return PerceptionResult("Bot", scope, "perception", True, next_start is None, data)
 
 
 class HarnessBody:
