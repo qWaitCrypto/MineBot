@@ -20,3 +20,13 @@ python3 tests/e2e_agent_real_model_collect.py
 ```
 
 Without the key/model env vars, the test exits with SKIP 77.
+
+For the actual playable loop, use the console entrypoint:
+
+```bash
+python3 -m minebot.app.console
+```
+
+Then type a natural-language goal, for example `collect 3 dirt`. MineBot injects
+that as the active goal, lets the real model choose tools, switches runtime
+profile through the state machine, and drives the local server body.
