@@ -9,6 +9,7 @@ from minebot.app.runner import AgentRuntime
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController
 from minebot.brain.modes import ModeRuntime
+from minebot.brain.persona import MINEBOT_SYSTEM_PROMPT
 from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import ToolRegistry
 from minebot.contract import Body
@@ -28,7 +29,7 @@ def build_agent_runtime(
     *,
     body: Body,
     registry: ToolRegistry,
-    system_prompt: str,
+    system_prompt: str = MINEBOT_SYSTEM_PROMPT,
     goal_text: str,
     model_provider: ModelProviderRegistry | None = None,
     agent_name: str = "MineBot",
