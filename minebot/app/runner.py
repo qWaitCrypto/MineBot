@@ -65,17 +65,17 @@ class RuntimeTrace:
 class RuntimeHooks(RunHooks[RuntimeRunContext]):
     """SDK hook bridge into RuntimeTrace."""
 
-    def on_agent_start(self, context: Any, agent: Any) -> None:
+    async def on_agent_start(self, context: Any, agent: Any) -> None:
         trace = _trace_from_context(context)
         if trace is not None:
             trace.emit("agent_start", agent=getattr(agent, "name", None))
 
-    def on_agent_end(self, context: Any, agent: Any, output: Any) -> None:
+    async def on_agent_end(self, context: Any, agent: Any, output: Any) -> None:
         trace = _trace_from_context(context)
         if trace is not None:
             trace.emit("agent_end", agent=getattr(agent, "name", None), output_type=type(output).__name__)
 
-    def on_llm_start(self, context: Any, agent: Any, system_prompt: str | None, input_items: list[Any]) -> None:
+    async def on_llm_start(self, context: Any, agent: Any, system_prompt: str | None, input_items: list[Any]) -> None:
         trace = _trace_from_context(context)
         if trace is not None:
             trace.emit(
@@ -85,17 +85,17 @@ class RuntimeHooks(RunHooks[RuntimeRunContext]):
                 has_system_prompt=system_prompt is not None,
             )
 
-    def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
+    async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
         trace = _trace_from_context(context)
         if trace is not None:
             trace.emit("llm_end", agent=getattr(agent, "name", None), response_type=type(response).__name__)
 
-    def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
+    async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
         trace = _trace_from_context(context)
         if trace is not None:
             trace.emit("tool_start", agent=getattr(agent, "name", None), tool=getattr(tool, "name", None))
 
-    def on_tool_end(self, context: Any, agent: Any, tool: Any, result: object) -> None:
+    async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: object) -> None:
         trace = _trace_from_context(context)
         if trace is not None:
             reason = result.get("reason") if isinstance(result, dict) else None

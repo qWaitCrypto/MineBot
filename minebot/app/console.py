@@ -12,6 +12,8 @@ import asyncio
 import sys
 import time
 
+from openai import APIStatusError
+
 from minebot.app.config import AppConfigError, provider_registry_from_env
 from minebot.app.resource_runtime import ResourceRuntimeConfig, build_resource_agent_runtime
 from minebot.brain.lifecycle import LifecycleState
@@ -135,7 +137,11 @@ def main(argv: list[str] | None = None) -> int:
         prepare_local_server(rcon, args.bot)
         body = ScarpetBody(args.bot, rcon)
         if args.once:
-            asyncio.run(run_goal(body, args.once, max_turns=args.max_turns))
+            try:
+                asyncio.run(run_goal(body, args.once, max_turns=args.max_turns))
+            except APIStatusError as exc:
+                print(f"Model provider error: {type(exc).__name__} status={exc.status_code}", file=sys.stderr)
+                return 4
             return 0
 
         print("MineBot console ready. Type a goal, or /quit.")
@@ -149,7 +155,10 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             if goal in {"/quit", "/exit"}:
                 return 0
-            asyncio.run(run_goal(body, goal, max_turns=args.max_turns))
+            try:
+                asyncio.run(run_goal(body, goal, max_turns=args.max_turns))
+            except APIStatusError as exc:
+                print(f"Model provider error: {type(exc).__name__} status={exc.status_code}", file=sys.stderr)
 
 
 if __name__ == "__main__":
