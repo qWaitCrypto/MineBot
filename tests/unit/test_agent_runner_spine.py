@@ -2,7 +2,17 @@ import asyncio
 import json
 import unittest
 
-from minebot.app.runner import AgentRuntime, RuntimeRunContext, RuntimeTrace, sdk_tool_for, tool_is_enabled
+from agents.exceptions import UserError
+
+from minebot.app.console import parse_collect_goal
+from minebot.app.runner import (
+    AgentRuntime,
+    RuntimeRunContext,
+    RuntimeTrace,
+    extract_run_observations,
+    sdk_tool_for,
+    tool_is_enabled,
+)
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleState
 from minebot.brain.modes import AgentSignal, ModeRuntime
@@ -89,6 +99,75 @@ def make_tool(body: FakeBody, *, mutating=True):
 
 
 class AgentRunnerSpineTests(unittest.TestCase):
+    def test_parse_collect_goal_extracts_common_terminal_goal_shapes(self):
+        self.assertEqual(parse_collect_goal("collect 3 dirt"), ("dirt", 3))
+        self.assertEqual(parse_collect_goal("gather minecraft:oak_log 12"), ("oak_log", 12))
+        self.assertIsNone(parse_collect_goal("come here"))
+
+    def test_extract_run_observations_captures_speech_and_tool_items(self):
+        class FakeRunResult:
+            final_output = "Done."
+
+            def to_input_list(self):
+                return [
+                    {"role": "assistant", "content": [{"type": "output_text", "text": "I will gather dirt."}]},
+                    {"type": "function_call", "name": "collect_resource", "arguments": '{"resource":"dirt"}'},
+                    {"type": "function_call_output", "output": '{"success":true,"reason":"completed"}'},
+                ]
+
+        events = extract_run_observations(FakeRunResult())
+
+        self.assertIn({"event": "assistant_final_output", "content": "Done."}, events)
+        self.assertIn({"event": "assistant_message", "content": "I will gather dirt."}, events)
+        self.assertTrue(
+            any(
+                event["event"] == "model_tool_call"
+                and event["tool"] == "collect_resource"
+                and event["arguments_summary"] == '{"resource":"dirt"}'
+                for event in events
+            )
+        )
+        self.assertTrue(any(event["event"] == "model_tool_output" for event in events))
+
+    def test_extract_run_observations_failure_is_non_fatal(self):
+        class BrokenRunResult:
+            final_output = None
+
+            def to_input_list(self):
+                raise RuntimeError("sdk drift")
+
+        events = extract_run_observations(BrokenRunResult())
+
+        self.assertEqual(events, [{"event": "run_observation_failed", "error_type": "RuntimeError"}])
+
+    def test_tool_only_run_is_marked_as_observation_gap(self):
+        body = FakeBody()
+
+        class ToolOnlyRunResult:
+            final_output = None
+
+            def to_input_list(self):
+                return [{"type": "function_call", "name": "collect_resource", "arguments": "{}"}]
+
+        async def fake_runner(*args, **kwargs):
+            return ToolOnlyRunResult()
+
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=fake_runner,
+        )
+
+        outcome = asyncio.run(runtime.run_turn())
+
+        self.assertEqual(outcome.status, "completed_turn")
+        self.assertTrue(any(event["event"] == "model_tool_call" for event in runtime.trace.snapshot()))
+        self.assertTrue(any(event["event"] == "assistant_no_content_tool_only" for event in runtime.trace.snapshot()))
+
     def test_sdk_tool_invokes_registered_tool_through_weld(self):
         body = FakeBody()
         tool = make_tool(body)
@@ -245,6 +324,39 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(outcome.profile.lifecycle, "yielded")
         self.assertIs(outcome.yielded_facts, facts)
         self.assertIn("How should I continue?", outcome.message)
+
+    def test_progress_abort_wrapped_by_sdk_user_error_becomes_lifecycle_yield(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        authority = ProgressAuthority()
+        fp = authority.fingerprint(body.get_state())
+        for i in range(5):
+            authority.note_step(("action", i), success=False, fingerprint=fp)
+        facts = authority.facts("collect")
+
+        async def fake_runner(*args, **kwargs):
+            from minebot.contract import ProgressAbort
+
+            try:
+                raise ProgressAbort("yield", facts=facts)
+            except ProgressAbort as exc:
+                raise UserError("Error running tool mine_block_collect: progress authority yielded") from exc
+
+        runtime = AgentRuntime(
+            body=body,
+            registry=registry,
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=authority,
+            runner_run=fake_runner,
+        )
+
+        outcome = asyncio.run(runtime.run_turn())
+
+        self.assertEqual(outcome.status, "yielded")
+        self.assertEqual(outcome.lifecycle, LifecycleState.YIELDED)
+        self.assertIs(outcome.yielded_facts, facts)
 
     def test_recovery_resume_consumes_suspend_slot_and_injects_resume_context_once(self):
         body = FakeBody()

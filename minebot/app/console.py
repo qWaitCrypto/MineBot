@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 import time
 
 from openai import APIStatusError
+from agents.exceptions import MaxTurnsExceeded
 
 from minebot.app.config import AppConfigError, provider_registry_from_env
-from minebot.app.resource_runtime import ResourceRuntimeConfig, build_resource_agent_runtime
+from minebot.app.resource_runtime import ResourceRuntimeConfig, build_resource_agent_runtime, inventory_count
 from minebot.brain.lifecycle import LifecycleState
 from minebot.game import RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
@@ -32,7 +34,7 @@ def command(rcon: RconClient, command_text: str, delay: float = 0.05) -> str:
     return out
 
 
-def prepare_local_server(rcon: RconClient, bot_name: str) -> None:
+def prepare_local_server(rcon: RconClient, bot_name: str, *, seed_demo_resources: bool) -> None:
     for cmd in [
         "script unload minebot",
         "script load minebot global",
@@ -44,6 +46,7 @@ def prepare_local_server(rcon: RconClient, bot_name: str) -> None:
         "time set day",
         "weather clear",
         "difficulty normal",
+        "kill @e[type=!player]",
     ]:
         command(rcon, cmd)
     body = ScarpetBody(bot_name, rcon)
@@ -54,13 +57,28 @@ def prepare_local_server(rcon: RconClient, bot_name: str) -> None:
         f"tp {bot_name} 0 70 0 -90 0",
         f"gamemode survival {bot_name}",
         f"effect clear {bot_name}",
+        f"clear {bot_name}",
         "script in minebot run minebot_reset()",
     ]:
         command(rcon, cmd)
+    if seed_demo_resources:
+        seed_resource_scene(rcon)
 
 
-async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int) -> None:
+def seed_resource_scene(rcon: RconClient) -> None:
+    """Create a small reproducible natural-resource patch for local console e2e."""
+    for cmd in [
+        "fill -10 70 -10 16 78 10 air",
+        "fill -10 69 -10 16 69 10 stone",
+    ]:
+        command(rcon, cmd)
+    for offset in range(4):
+        command(rcon, f"setblock {3 + offset} 70 0 dirt", delay=0.0)
+
+
+async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int, sdk_max_turns: int) -> None:
     provider = provider_registry_from_env()
+    collect_target = parse_collect_goal(goal_text)
     parts = build_resource_agent_runtime(
         body=body,
         goal_text=goal_text,
@@ -68,7 +86,9 @@ async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int) -> None
         config=ResourceRuntimeConfig(natural_region=DEFAULT_REGION),
         agent_name="MineBotConsole",
     )
+    parts.runtime.max_turns = sdk_max_turns
     try:
+        printed_events = 0
         for index in range(max_turns):
             outcome = await parts.runtime.run_turn()
             profile = outcome.profile
@@ -76,28 +96,45 @@ async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int) -> None
                 f"[turn {index + 1}] status={outcome.status} "
                 f"lifecycle={outcome.lifecycle.value} situational={profile.situational}"
             )
-            _print_recent_tool_results(parts.runtime.trace.snapshot())
+            trace = parts.runtime.trace.snapshot()
+            printed_events = _print_new_observations(trace, printed_events)
             if outcome.status == "yielded":
                 print(outcome.message or "yielded")
                 return
             if outcome.lifecycle is not LifecycleState.ACTIVE:
                 print(f"stopped: lifecycle={outcome.lifecycle.value} message={outcome.message}")
                 return
-            if _last_collect_succeeded(parts.runtime.trace.snapshot()):
-                print("completed: collect_resource reported success")
+            if _goal_completed(body, trace, collect_target):
+                print("completed: authoritative inventory satisfies goal")
                 return
         print(f"stopped after max_turns={max_turns}; goal may still be in progress")
+    except MaxTurnsExceeded:
+        trace = parts.runtime.trace.snapshot()
+        _print_new_observations(trace, printed_events)
+        print(f"stopped: model/tool loop exceeded sdk_max_turns={sdk_max_turns}")
     finally:
         await provider.aclose()
 
 
-def _print_recent_tool_results(trace: list[dict[str, object]]) -> None:
-    for event in trace[-12:]:
-        if event.get("event") == "tool_result":
+def _print_new_observations(trace: list[dict[str, object]], start_index: int) -> int:
+    for event in trace[start_index:]:
+        kind = event.get("event")
+        if kind in {"assistant_message", "assistant_final_output"}:
+            content = str(event.get("content") or "").strip()
+            if content:
+                print(f"MineBot: {content}")
+        elif kind == "assistant_no_content_tool_only":
+            print("MineBot: (tool calls only; no visible assistant message)")
+        elif kind == "model_tool_call":
+            args = event.get("arguments_summary")
+            suffix = f" args={args}" if args else ""
+            print(f"  call={event.get('tool')}{suffix}")
+        elif kind == "tool_result":
             print(
                 f"  tool={event.get('tool')} success={event.get('success')} "
                 f"reason={event.get('reason')}"
             )
+    return len(trace)
 
 
 def _last_collect_succeeded(trace: list[dict[str, object]]) -> bool:
@@ -109,10 +146,40 @@ def _last_collect_succeeded(trace: list[dict[str, object]]) -> bool:
     )
 
 
+def _goal_completed(
+    body: ScarpetBody,
+    trace: list[dict[str, object]],
+    collect_target: tuple[str, int] | None,
+) -> bool:
+    if _last_collect_succeeded(trace):
+        return True
+    if collect_target is None:
+        return False
+    item, count = collect_target
+    return inventory_count(body, item) >= count
+
+
+def parse_collect_goal(goal_text: str) -> tuple[str, int] | None:
+    text = goal_text.strip().lower().replace("minecraft:", "")
+    match = re.search(r"\b(?:collect|get|gather|mine)\s+(\d+)\s+([a-z_]+)\b", text)
+    if match:
+        return match.group(2), int(match.group(1))
+    match = re.search(r"\b(?:collect|get|gather|mine)\s+([a-z_]+)\s+(\d+)\b", text)
+    if match:
+        return match.group(1), int(match.group(2))
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run an interactive MineBot agent against the local test server.")
     parser.add_argument("--bot", default="MineBotLocal")
     parser.add_argument("--max-turns", type=int, default=6)
+    parser.add_argument("--sdk-max-turns", type=int, default=40)
+    parser.add_argument(
+        "--no-demo-resources",
+        action="store_true",
+        help="Do not seed the small local dirt patch used by collect-resource console tests.",
+    )
     parser.add_argument("--once", help="Run one natural-language goal and exit.")
     args = parser.parse_args(argv)
 
@@ -134,11 +201,11 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     with rcon:
-        prepare_local_server(rcon, args.bot)
+        prepare_local_server(rcon, args.bot, seed_demo_resources=not args.no_demo_resources)
         body = ScarpetBody(args.bot, rcon)
         if args.once:
             try:
-                asyncio.run(run_goal(body, args.once, max_turns=args.max_turns))
+                asyncio.run(run_goal(body, args.once, max_turns=args.max_turns, sdk_max_turns=args.sdk_max_turns))
             except APIStatusError as exc:
                 print(f"Model provider error: {type(exc).__name__} status={exc.status_code}", file=sys.stderr)
                 return 4
@@ -156,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
             if goal in {"/quit", "/exit"}:
                 return 0
             try:
-                asyncio.run(run_goal(body, goal, max_turns=args.max_turns))
+                asyncio.run(run_goal(body, goal, max_turns=args.max_turns, sdk_max_turns=args.sdk_max_turns))
             except APIStatusError as exc:
                 print(f"Model provider error: {type(exc).__name__} status={exc.status_code}", file=sys.stderr)
 

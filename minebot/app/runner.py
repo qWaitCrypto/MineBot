@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from agents import Agent, RunConfig, RunContextWrapper, Runner, RunHooks
+from agents.exceptions import UserError
 from agents.tool import FunctionTool
 
 from minebot.app.model_provider import ModelProviderRegistry
@@ -299,32 +301,15 @@ class AgentRuntime:
                 hooks=self.hooks,
             )
         except ProgressAbort as exc:
-            facts = exc.facts or self.authority.facts(self.agent_context.goal_text)
-            yielded = self.mode_runtime.reduce(
-                [AgentSignal.progress_abort(facts)],
-                self.lifecycle.state,
-                goal_text=self.agent_context.goal_text,
-            )
-            self._apply_lifecycle_request(yielded.requested_lifecycle)
-            yielded_profile = self.mode_runtime.profile_for(self.lifecycle.state)
-            self.agent_context.observe_profile(yielded_profile)
-            self.trace.emit(
-                "progress_yielded",
-                stagnant_steps=facts.stagnant_steps,
-                stalled_steps=facts.stalled_steps,
-                failure_steps=facts.failure_steps,
-                lifecycle=self.lifecycle.state.value,
-                situational=yielded_profile.situational,
-            )
-            return AgentTurnOutcome(
-                status="yielded",
-                lifecycle=self.lifecycle.state,
-                profile=yielded_profile,
-                yielded_facts=facts,
-                message=_yield_message(facts, self.agent_context.goal_text),
-            )
+            return self._yield_from_progress_abort(exc)
+        except UserError as exc:
+            progress_abort = _find_progress_abort(exc)
+            if progress_abort is None:
+                raise
+            return self._yield_from_progress_abort(progress_abort)
 
         self.trace.emit("turn_completed", lifecycle=self.lifecycle.state.value, situational=profile.situational)
+        self._record_run_result(result)
         return AgentTurnOutcome(
             status="completed_turn",
             lifecycle=self.lifecycle.state,
@@ -407,6 +392,44 @@ class AgentRuntime:
             composition_id=slot.composition_id,
         )
 
+    def _record_run_result(self, result: Any) -> None:
+        extracted = extract_run_observations(result)
+        for event in extracted:
+            self.trace.emit(**event)
+        has_content = any(
+            event.get("event") in {"assistant_message", "assistant_final_output"} and event.get("content")
+            for event in extracted
+        )
+        has_tool_call = any(event.get("event") == "model_tool_call" for event in extracted)
+        if has_tool_call and not has_content:
+            self.trace.emit("assistant_no_content_tool_only")
+
+    def _yield_from_progress_abort(self, exc: ProgressAbort) -> AgentTurnOutcome:
+        facts = exc.facts or self.authority.facts(self.agent_context.goal_text)
+        yielded = self.mode_runtime.reduce(
+            [AgentSignal.progress_abort(facts)],
+            self.lifecycle.state,
+            goal_text=self.agent_context.goal_text,
+        )
+        self._apply_lifecycle_request(yielded.requested_lifecycle)
+        yielded_profile = self.mode_runtime.profile_for(self.lifecycle.state)
+        self.agent_context.observe_profile(yielded_profile)
+        self.trace.emit(
+            "progress_yielded",
+            stagnant_steps=facts.stagnant_steps,
+            stalled_steps=facts.stalled_steps,
+            failure_steps=facts.failure_steps,
+            lifecycle=self.lifecycle.state.value,
+            situational=yielded_profile.situational,
+        )
+        return AgentTurnOutcome(
+            status="yielded",
+            lifecycle=self.lifecycle.state,
+            profile=yielded_profile,
+            yielded_facts=facts,
+            message=_yield_message(facts, self.agent_context.goal_text),
+        )
+
 
 def _yield_message(facts: ProgressFacts, goal_text: str) -> str:
     return (
@@ -423,12 +446,131 @@ def _trace_from_context(context: Any) -> RuntimeTrace | None:
     return getattr(runtime_context, "trace", None)
 
 
+def _find_progress_abort(exc: BaseException) -> ProgressAbort | None:
+    seen: set[int] = set()
+    cursor: BaseException | None = exc
+    while cursor is not None and id(cursor) not in seen:
+        seen.add(id(cursor))
+        if isinstance(cursor, ProgressAbort):
+            return cursor
+        cause = cursor.__cause__
+        context = cursor.__context__
+        cursor = cause if cause is not None else context
+    return None
+
+
+def extract_run_observations(result: Any) -> list[dict[str, object]]:
+    """Extract model-visible observations from an SDK run result.
+
+    This is intentionally best-effort: SDK item shapes vary across versions and
+    providers, and observation failure must never downgrade task execution.
+    """
+    events: list[dict[str, object]] = []
+    to_input_list = getattr(result, "to_input_list", None)
+    if not callable(to_input_list):
+        final_output = getattr(result, "final_output", None)
+        if final_output not in {None, ""}:
+            events.append({"event": "assistant_final_output", "content": _shorten(_public_text(final_output), limit=2000)})
+        return events
+    try:
+        items = to_input_list()
+    except Exception as exc:  # pragma: no cover - defensive SDK compatibility guard
+        events.append({"event": "run_observation_failed", "error_type": type(exc).__name__})
+        return events
+    if not isinstance(items, list):
+        return events
+    assistant_texts: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_type = _public_text(item.get("type") or "")
+        role = item.get("role")
+        if role == "assistant" or item_type in {"message", "output_text"}:
+            content = _text_from_item(item)
+            if content:
+                shortened = _shorten(content, limit=2000)
+                assistant_texts.add(shortened)
+                events.append({"event": "assistant_message", "content": shortened})
+        if item_type in {"function_call_output", "tool_output"}:
+            events.append({"event": "model_tool_output", "summary": _shorten(_public_text(item.get("output") or ""))})
+        elif item_type in {"function_call", "tool_call"}:
+            events.append(
+                {
+                    "event": "model_tool_call",
+                    "tool": _tool_name_from_item(item, fallback=item_type),
+                    "arguments_summary": _tool_arguments_summary(item),
+                }
+            )
+    final_output = getattr(result, "final_output", None)
+    if final_output not in {None, ""}:
+        final_text = _shorten(_public_text(final_output), limit=2000)
+        if final_text not in assistant_texts:
+            events.append({"event": "assistant_final_output", "content": final_text})
+    return events
+
+
+def _text_from_item(item: dict[str, object]) -> str:
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text") or part.get("content")
+                if text is not None:
+                    parts.append(_public_text(text))
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(part for part in parts if part)
+    text = item.get("text")
+    return _public_text(text) if text is not None else ""
+
+
+def _tool_name_from_item(item: dict[str, object], *, fallback: str) -> str:
+    direct = item.get("name")
+    if direct:
+        return _public_text(direct)
+    function = item.get("function")
+    if isinstance(function, dict) and function.get("name"):
+        return _public_text(function["name"])
+    return fallback
+
+
+def _tool_arguments_summary(item: dict[str, object]) -> str | None:
+    raw = item.get("arguments")
+    function = item.get("function")
+    if raw is None and isinstance(function, dict):
+        raw = function.get("arguments")
+    if raw is None:
+        return None
+    return _shorten(_public_text(raw), limit=500)
+
+
+def _public_text(value: object) -> str:
+    if isinstance(value, Enum):
+        return value.value if isinstance(value.value, str) else str(value.value)
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=True, sort_keys=True)
+        except TypeError:
+            return str(value)
+    return str(value)
+
+
+def _shorten(text: str, *, limit: int = 500) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
 __all__ = [
     "AgentRuntime",
     "AgentTurnOutcome",
     "RuntimeHooks",
     "RuntimeRunContext",
     "RuntimeTrace",
+    "extract_run_observations",
     "sdk_tool_for",
     "tool_is_enabled",
 ]
