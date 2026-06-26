@@ -1,0 +1,435 @@
+"""Agent session entrypoint for an existing real Minecraft server.
+
+Unlike the local console, this module must not prepare, reset, teleport, clear,
+seed resources, or change gamerules. It only connects to an explicitly
+configured real-server RCON endpoint and drives the Agent session.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import re
+import sys
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
+from minebot.app.observability import JsonlObservationSink
+from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime, inventory_count
+from minebot.app.runner import RuntimeTrace
+from minebot.app.session import AgentSession, SessionCommand, SessionStep
+from minebot.brain.lifecycle import LifecycleState
+from minebot.brain.composition import resource_plan_for
+from minebot.contract import Body, Region
+from minebot.game import RconClient, ScarpetBody
+from minebot.game.errors import RconError
+from minebot.game.rcon import RconConfig
+
+
+@dataclass(frozen=True)
+class RealServerConfig:
+    rcon: RconConfig
+    bot_name: str
+    natural_region: Region
+    log_path: Path
+    language: str
+
+
+class RealServerConfigError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class CollectTarget:
+    item: str
+    count: int
+    inventory_items: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TerminalTruth:
+    goal: str
+    target: CollectTarget | None
+    inventory_count: int | None
+    satisfied: bool
+    status: str
+    lifecycle: str
+    exit_code: int
+
+    def to_trace(self) -> dict[str, object]:
+        target_payload: dict[str, object] | None = None
+        if self.target is not None:
+            target_payload = {
+                "item": self.target.item,
+                "count": self.target.count,
+                "inventory_items": list(self.target.inventory_items),
+            }
+        return {
+            "goal": self.goal,
+            "target": target_payload,
+            "inventory_count": self.inventory_count,
+            "satisfied": self.satisfied,
+            "status": self.status,
+            "lifecycle": self.lifecycle,
+            "exit_code": self.exit_code,
+        }
+
+
+def env_required(env: Mapping[str, str], name: str) -> str:
+    value = env.get(name)
+    if not value:
+        raise RealServerConfigError(f"missing required env var {name}")
+    return value
+
+
+def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealServerConfig:
+    env = os.environ if env is None else env
+    host = env_required(env, "MINEBOT_REAL_RCON_HOST")
+    port = int(env_required(env, "MINEBOT_REAL_RCON_PORT"))
+    password = env_required(env, "MINEBOT_REAL_RCON_PASSWORD")
+    bot_name = env_required(env, "MINEBOT_REAL_BOT")
+    timeout_s = float(env.get("MINEBOT_REAL_RCON_TIMEOUT", "20"))
+    natural_region = _region_from_env(env)
+    log_path = Path(env.get("MINEBOT_AGENT_LOG_PATH") or "logs/agent-session.jsonl")
+    language = agent_language_from_env(env)
+    return RealServerConfig(
+        rcon=RconConfig(host=host, port=port, password=password, timeout_s=timeout_s),
+        bot_name=bot_name,
+        natural_region=natural_region,
+        log_path=log_path,
+        language=language,
+    )
+
+
+def _region_from_env(env: Mapping[str, str]) -> Region:
+    raw = env.get("MINEBOT_REAL_NATURAL_REGION")
+    if raw:
+        parts = [int(part.strip()) for part in raw.split(",")]
+        if len(parts) != 6:
+            raise RealServerConfigError("MINEBOT_REAL_NATURAL_REGION must be six comma-separated ints")
+        return Region("real-server-natural", tuple(parts[:3]), tuple(parts[3:]))
+    return Region("real-server-natural", (-256, -64, -256), (256, 320, 256))
+
+
+async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps: int) -> int:
+    provider = provider_registry_from_env()
+    rcon = RconClient(config.rcon)
+    try:
+        rcon.connect()
+    except (OSError, PermissionError, RconError) as exc:
+        print(
+            f"Real-server RCON unavailable at {config.rcon.host}:{config.rcon.port}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        await provider.aclose()
+        return 3
+
+    with rcon:
+        body = ScarpetBody(config.bot_name, rcon)
+        sink = JsonlObservationSink(config.log_path)
+
+        def make_parts(goal_text: str):
+            trace = RuntimeTrace(session_id=config.bot_name, sink=sink)
+            parts = build_phase1_agent_runtime(
+                body=body,
+                goal_text=goal_text,
+                model_provider=provider,
+                config=Phase1RuntimeConfig(natural_region=config.natural_region),
+                agent_name="MineBotRealServer",
+                language=config.language,
+                trace=trace,
+            )
+            return parts
+
+        session = AgentSession(make_parts)
+        session.submit(SessionCommand.start(goal))
+        try:
+            final = await session.run_until_waiting(
+                max_steps=max_steps,
+                should_stop=lambda step: evaluate_terminal_truth(body, goal, step).satisfied,
+            )
+            terminal_goal = _session_goal(session, goal)
+            truth = evaluate_terminal_truth(body, terminal_goal, final)
+            if truth.satisfied:
+                final = session.complete_current_goal("terminal_truth_satisfied")
+                truth = evaluate_terminal_truth(body, terminal_goal, final)
+            if session.parts is not None:
+                session.parts.runtime.trace.emit(
+                    "session_terminal",
+                    status=final.status,
+                    lifecycle=final.lifecycle.value,
+                    message=final.message,
+                    terminal_truth=truth.to_trace(),
+                )
+                session.parts.runtime.trace.close()
+            print(f"log={config.log_path}")
+            print(
+                f"status={final.status} lifecycle={final.lifecycle.value} "
+                f"satisfied={truth.satisfied} inventory_count={truth.inventory_count}"
+            )
+            return truth.exit_code
+        finally:
+            await provider.aclose()
+
+
+async def run_real_server_interactive(config: RealServerConfig, goal: str, *, max_steps: int) -> int:
+    """Run one persistent real-server session with stdin as the user channel."""
+    provider = provider_registry_from_env()
+    rcon = RconClient(config.rcon)
+    try:
+        rcon.connect()
+    except (OSError, PermissionError, RconError) as exc:
+        print(
+            f"Real-server RCON unavailable at {config.rcon.host}:{config.rcon.port}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        await provider.aclose()
+        return 3
+
+    with rcon:
+        body = ScarpetBody(config.bot_name, rcon)
+        sink = JsonlObservationSink(config.log_path)
+
+        def make_parts(goal_text: str):
+            trace = RuntimeTrace(session_id=config.bot_name, sink=sink)
+            parts = build_phase1_agent_runtime(
+                body=body,
+                goal_text=goal_text,
+                model_provider=provider,
+                config=Phase1RuntimeConfig(natural_region=config.natural_region),
+                agent_name="MineBotRealServer",
+                language=config.language,
+                trace=trace,
+            )
+            return parts
+
+        session = AgentSession(make_parts)
+        session.submit(SessionCommand.start(goal))
+        reader = asyncio.create_task(_stdin_command_reader(session))
+        try:
+            final = await _run_interactive_loop(
+                session,
+                fallback_goal=goal,
+                body=body,
+                chat_source=body,
+                max_steps=max_steps,
+            )
+            terminal_goal = _session_goal(session, goal)
+            truth = evaluate_terminal_truth(body, terminal_goal, final)
+            if truth.satisfied:
+                final = session.complete_current_goal("terminal_truth_satisfied")
+                truth = evaluate_terminal_truth(body, terminal_goal, final)
+            if session.parts is not None:
+                session.parts.runtime.trace.emit(
+                    "session_terminal",
+                    mode="interactive",
+                    status=final.status,
+                    lifecycle=final.lifecycle.value,
+                    message=final.message,
+                    terminal_truth=truth.to_trace(),
+                )
+                session.parts.runtime.trace.close()
+            print(f"log={config.log_path}")
+            print(
+                f"status={final.status} lifecycle={final.lifecycle.value} "
+                f"satisfied={truth.satisfied} inventory_count={truth.inventory_count}"
+            )
+            return truth.exit_code
+        finally:
+            reader.cancel()
+            await provider.aclose()
+
+
+async def _run_interactive_loop(
+    session: AgentSession,
+    *,
+    fallback_goal: str,
+    body: Body,
+    max_steps: int,
+    chat_source: object | None = None,
+) -> SessionStep:
+    last = None
+    for _ in range(max(1, max_steps)):
+        _poll_chat_commands(session, chat_source)
+        last = await session.step()
+        if evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last).satisfied:
+            return last
+        if last.lifecycle.value == "idle" and not session.pending:
+            return last
+        await asyncio.sleep(0)
+    assert last is not None
+    return last
+
+
+def _poll_chat_commands(session: AgentSession, chat_source: object | None) -> int:
+    if chat_source is None:
+        return 0
+    poll = getattr(chat_source, "poll_chat_events", None)
+    if not callable(poll):
+        return 0
+    try:
+        events = poll()
+    except Exception as exc:
+        parts = getattr(session, "parts", None)
+        if parts is not None:
+            parts.runtime.trace.emit("chat_poll_failed", error_type=type(exc).__name__)
+        return 0
+    count = 0
+    for event in events:
+        if getattr(event, "name", None) != "agentChat":
+            continue
+        data = getattr(event, "data", {}) or {}
+        message = str(data.get("message") or "").strip()
+        if not message:
+            continue
+        command = parse_session_command(message)
+        if command is None:
+            continue
+        parts = getattr(session, "parts", None)
+        if parts is not None:
+            parts.runtime.trace.emit(
+                "chat_message",
+                sender=str(data.get("sender") or ""),
+                command=command.kind.value,
+                content=command.text,
+                reason=command.reason,
+            )
+        session.submit(command)
+        count += 1
+    return count
+
+
+def _session_goal(session: AgentSession, fallback: str) -> str:
+    return session.current_goal or fallback
+
+
+async def _stdin_command_reader(session: AgentSession) -> None:
+    while True:
+        line = await asyncio.to_thread(sys.stdin.readline)
+        if line == "":
+            return
+        command = parse_session_command(line)
+        if command is not None:
+            session.submit(command)
+
+
+def parse_session_command(line: str) -> SessionCommand | None:
+    text = line.strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"/pause", "pause"} or lowered.startswith("/pause "):
+        return SessionCommand.pause(_command_tail(text, "/pause") or "user_pause")
+    if lowered in {"/continue", "continue"} or lowered.startswith("/continue "):
+        return SessionCommand.continue_(_command_tail(text, "/continue"))
+    if lowered in {"/cancel", "cancel", "/stop", "stop"} or lowered.startswith(("/cancel ", "/stop ")):
+        tail = _command_tail(text, "/cancel") if lowered.startswith("/cancel") else _command_tail(text, "/stop")
+        return SessionCommand.cancel(tail or "user_cancel")
+    if lowered.startswith("/goal ") or lowered.startswith("/replace "):
+        tail = _command_tail(text, "/goal") if lowered.startswith("/goal ") else _command_tail(text, "/replace")
+        return SessionCommand.replace_goal(tail)
+    return SessionCommand.message(text)
+
+
+def _command_tail(text: str, command: str) -> str:
+    if text.lower().startswith(command):
+        return text[len(command) :].strip()
+    return ""
+
+
+def evaluate_terminal_truth(body: Body, goal: str, final: SessionStep) -> TerminalTruth:
+    target = parse_collect_target(goal)
+    count: int | None = None
+    satisfied = False
+    if target is not None:
+        count = sum(inventory_count(body, item) for item in target.inventory_items)
+        satisfied = count >= target.count
+    elif final.status == "completed_turn" and final.lifecycle is LifecycleState.ACTIVE:
+        satisfied = False
+    exit_code = _exit_code_for(final, satisfied=satisfied, has_target=target is not None)
+    return TerminalTruth(
+        goal=goal,
+        target=target,
+        inventory_count=count,
+        satisfied=satisfied,
+        status=final.status,
+        lifecycle=final.lifecycle.value,
+        exit_code=exit_code,
+    )
+
+
+def _exit_code_for(final: SessionStep, *, satisfied: bool, has_target: bool) -> int:
+    if satisfied:
+        return 0
+    if final.status == "failed":
+        return 8
+    if final.status == "yielded":
+        return 5
+    if final.lifecycle in {LifecycleState.YIELDED, LifecycleState.INTERRUPTED, LifecycleState.RECOVERING}:
+        return 5
+    if has_target:
+        return 6
+    return 7
+
+
+def parse_collect_target(goal: str) -> CollectTarget | None:
+    text = goal.strip().lower().replace("minecraft:", "")
+    match = re.search(r"\b(?:collect|get|gather|mine)\s+(\d+)\s+([a-z_]+)\b", text)
+    if match:
+        return _collect_target(match.group(2), int(match.group(1)))
+    match = re.search(r"\b(?:collect|get|gather|mine)\s+([a-z_]+)\s+(\d+)\b", text)
+    if match:
+        return _collect_target(match.group(1), int(match.group(2)))
+    return None
+
+
+def _collect_target(item: str, count: int) -> CollectTarget:
+    plan = resource_plan_for(item)
+    return CollectTarget(item=plan.requested_item, count=count, inventory_items=plan.inventory_items)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run MineBot Agent against an explicitly configured real Minecraft server.")
+    parser.add_argument("goal", help="Natural-language user goal, e.g. 'collect 64 logs'.")
+    parser.add_argument("--max-steps", type=int, default=16)
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Keep the same real-server Agent session alive and read user messages from stdin.",
+    )
+    args = parser.parse_args(argv)
+    try:
+        config = real_server_config_from_env()
+    except (RealServerConfigError, AppConfigError, ValueError) as exc:
+        print(f"Real-server agent config error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        if args.interactive:
+            return asyncio.run(run_real_server_interactive(config, args.goal, max_steps=args.max_steps))
+        return asyncio.run(run_real_server_goal(config, args.goal, max_steps=args.max_steps))
+    except AppConfigError as exc:
+        print(f"Provider not configured: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = [
+    "RealServerConfig",
+    "RealServerConfigError",
+    "env_required",
+    "evaluate_terminal_truth",
+    "main",
+    "parse_collect_target",
+    "parse_session_command",
+    "real_server_config_from_env",
+    "run_real_server_goal",
+    "run_real_server_interactive",
+]

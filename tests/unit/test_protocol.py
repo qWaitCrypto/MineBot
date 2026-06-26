@@ -5,6 +5,7 @@ from minebot.game.errors import EnvelopeError, IncompletePayloadError, Truncated
 from minebot.contract import Action
 from minebot.game.protocol import (
     build_action_call,
+    build_chat_drain_call,
     build_perceive_call,
     parse_events,
     parse_perception,
@@ -31,6 +32,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("'Bot1'", command)
         self.assertIn("'blockAt'", command)
         self.assertIn('"x":1', command)
+
+    def test_build_chat_drain_call_uses_separate_queue(self):
+        command = build_chat_drain_call("Bot1")
+
+        self.assertTrue(command.startswith("script in minebot run minebot_drain_chat("))
+        self.assertIn("'Bot1'", command)
 
 
     def test_parse_result_requires_complete_envelope(self):

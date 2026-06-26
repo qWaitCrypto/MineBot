@@ -49,6 +49,7 @@ class FakeBody:
     def __init__(self):
         self.x = 0.0
         self.events = []
+        self.interrupt_reasons = []
 
     def spawn(self, *args, **kwargs):
         return Result(None, self.bot_name, "result", True, True, True)
@@ -80,6 +81,7 @@ class FakeBody:
         raise NotImplementedError
 
     def interrupt(self, reason=None):
+        self.interrupt_reasons.append(reason)
         return Result(None, self.bot_name, "result", True, True, True)
 
 
@@ -97,7 +99,14 @@ def make_tool(body: FakeBody, *, mutating=True):
             "additionalProperties": False,
         },
         callable=callable_,
-        sidecar=ToolSidecar(progress_key="move_step", mutating=mutating, timeout_s=2.0),
+        sidecar=ToolSidecar(
+            progress_key="move_step",
+            mutating=mutating,
+            permission="move",
+            body_scope=("navigation",),
+            terminal_truth=("position",),
+            timeout_s=2.0,
+        ),
     )
 
 
@@ -191,6 +200,32 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(outcome.status, "completed_turn")
         self.assertTrue(any(event["event"] == "model_tool_call" for event in runtime.trace.snapshot()))
         self.assertTrue(any(event["event"] == "assistant_no_content_tool_only" for event in runtime.trace.snapshot()))
+
+    def test_visible_assistant_output_is_recorded_into_agent_context(self):
+        class SpeechRunResult:
+            final_output = "I found the first tree."
+
+            def to_input_list(self):
+                return [{"role": "assistant", "content": "I am starting with nearby logs."}]
+
+        async def fake_runner(*args, **kwargs):
+            return SpeechRunResult()
+
+        context = AgentContext(system_prompt="sys", goal_text="collect 64 logs")
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=context,
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=fake_runner,
+        )
+
+        asyncio.run(runtime.run_turn())
+
+        self.assertIn(("assistant", "I am starting with nearby logs."), context.session_messages())
+        self.assertIn(("assistant", "I found the first tree."), context.session_messages())
 
     def test_sdk_tool_invokes_registered_tool_through_weld(self):
         body = FakeBody()
@@ -314,7 +349,18 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertTrue(out["success"])
         events = trace.snapshot()
         self.assertTrue(any(event["event"] == "tool_enabled" and event["enabled"] is False for event in events))
-        self.assertTrue(any(event["event"] == "tool_invoke" and event["tool"] == "move_step" for event in events))
+        self.assertTrue(
+            any(
+                event["event"] == "tool_invoke"
+                and event["tool"] == "move_step"
+                and event["source"] == "unknown"
+                and event["tool_type"] == "general"
+                and event["permission"] == "move"
+                and event["body_scope"] == ["navigation"]
+                and event["terminal_truth"] == ["position"]
+                for event in events
+            )
+        )
         self.assertTrue(any(event["event"] == "tool_result" and event["reason"] == "completed" for event in events))
 
     def test_progress_abort_from_runner_becomes_lifecycle_yield(self):

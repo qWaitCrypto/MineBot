@@ -6,6 +6,7 @@ from minebot.brain.composition import (
     collect_resource,
     register_collect_resource_tool,
     register_inventory_tools,
+    resource_plan_for,
 )
 from minebot.brain.modes import ModeRuntime
 from minebot.brain.progress import ProgressAuthority
@@ -109,6 +110,28 @@ def search_tool(targets):
     ), calls
 
 
+def candidate_search_tool(targets):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        candidates = [
+            {"pos": list(target), "type": params.get("block_types", ["dirt"])[0], "distance": index}
+            for index, target in enumerate(targets)
+        ]
+        if not candidates:
+            return ToolResult(False, "search_block_not_found", True, metrics={"candidates": []})
+        return ToolResult(True, "block_in_range", False, metrics={"target": candidates[0], "candidates": candidates})
+
+    return RegisteredTool(
+        "search_for_block",
+        "search",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("search_for_block", mutating=False, permission="read_world"),
+    ), calls
+
+
 def mine_tool(body, *, fail_reason=None):
     calls = []
 
@@ -116,6 +139,27 @@ def mine_tool(body, *, fail_reason=None):
         calls.append(dict(params))
         if fail_reason is not None:
             return ToolResult(False, fail_reason, True, metrics={"target": params.get("pos")})
+        expected = params.get("expected_drops") or ["dirt"]
+        item = str(expected[0]).removeprefix("minecraft:")
+        body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+        return ToolResult(True, "collected", False, metrics={"target": params.get("pos"), "collected_total": 1})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def mine_tool_fail_once(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        if len(calls) == 1:
+            return ToolResult(False, "mine_failed:no_inventory_delta", True, metrics={"target": params.get("pos")})
         expected = params.get("expected_drops") or ["dirt"]
         item = str(expected[0]).removeprefix("minecraft:")
         body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
@@ -156,7 +200,7 @@ class AgentCompositionTests(unittest.TestCase):
         body = FakeBody()
         registry = ToolRegistry()
         register_inventory_tools(registry, body)
-        search, _search_calls = search_tool([[1, 59, 0]])
+        search, _search_calls = candidate_search_tool([[1, 59, 0], [2, 59, 0]])
         registry.register(search)
         miner, mine_calls = mine_tool(body)
         registry.register(miner)
@@ -173,11 +217,55 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result["reason"], "collected")
         self.assertEqual(result["metrics"]["after_count"], 2)
         self.assertEqual(result["metrics"]["candidates_tried"], 2)
+        self.assertEqual([call["pos"] for call in mine_calls], [[1, 59, 0], [2, 59, 0]])
         self.assertEqual(len(mine_calls), 2)
         self.assertIsNotNone(ctx.weld_context.authority.last_action)
         self.assertEqual(ctx.weld_context.authority.last_action[0], "mine_block_collect")
         self.assertFalse(registry.get("collect_resource").sidecar.mutating)
         self.assertIsNone(ctx.weld_context.writer.holder)
+
+    def test_collect_resource_outer_tool_does_not_own_writer_or_progress_key(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = search_tool([[1, 59, 0]])
+        registry.register(search)
+        miner, _mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx = composition_context(body, registry)
+        register_collect_resource_tool(registry, ctx)
+
+        result = execute_tool(
+            registry.get("collect_resource"),
+            {"item": "dirt", "count": 1},
+            ctx.weld_context,
+        )
+
+        self.assertTrue(result["success"], result)
+        self.assertFalse(registry.get("collect_resource").sidecar.mutating)
+        self.assertEqual(ctx.weld_context.authority.last_action[0], "mine_block_collect")
+        self.assertNotEqual(ctx.weld_context.authority.last_action[0], "collect_resource")
+        self.assertIsNone(ctx.weld_context.writer.holder)
+
+    def test_mutating_leaf_owner_busy_is_honest_retryable_failure(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        miner, _mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx = composition_context(body, registry)
+        self.assertTrue(ctx.weld_context.writer.try_acquire("other_mutation"))
+
+        result = execute_tool(
+            registry.get("mine_block_collect"),
+            {"pos": [1, 59, 0], "expected_drops": ["dirt"]},
+            ctx.weld_context,
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["reason"], "owner_busy")
+        self.assertTrue(result["canRetry"])
+        self.assertEqual(result["metrics"]["holder"], "other_mutation")
+        ctx.weld_context.writer.release("other_mutation")
 
     def test_collect_resource_returns_not_found_as_honest_retryable_failure(self):
         body = FakeBody()
@@ -236,6 +324,42 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(mine_calls[0]["expected_drops"], ["raw_iron"])
         self.assertEqual(result["metrics"]["requested_item"], "iron")
         self.assertEqual(result["metrics"]["item"], "raw_iron")
+
+    def test_collect_resource_counts_equivalent_log_inventory_items(self):
+        body = FakeBody()
+        body.inventory_counts = {"spruce_log": 32, "birch_log": 32}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = search_tool([[1, 59, 0]])
+        registry.register(search)
+        miner, mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx = composition_context(body, registry)
+
+        result = collect_resource({"item": "logs", "count": 64}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "already_satisfied")
+        self.assertEqual(result.metrics["after_count"], 64)
+        self.assertEqual(mine_calls, [])
+        self.assertIn("spruce_log", resource_plan_for("logs").inventory_items)
+        self.assertIn("birch_log", resource_plan_for("logs").inventory_items)
+
+    def test_collect_resource_tries_next_candidate_after_failed_target(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[1, 59, 0], [2, 59, 0]])
+        registry.register(search)
+        miner, mine_calls = mine_tool_fail_once(body)
+        registry.register(miner)
+        ctx = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 1}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual([call["pos"] for call in mine_calls], [[1, 59, 0], [2, 59, 0]])
+        self.assertEqual(result.metrics["candidates_tried"], 2)
 
 
 if __name__ == "__main__":

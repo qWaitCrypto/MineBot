@@ -233,6 +233,40 @@ class BodyClientTests(unittest.TestCase):
         self.assertEqual(snapshot["events"][0]["name"], "desync")
         self.assertEqual(snapshot["events"][1]["name"], "moveDone")
 
+    def test_poll_chat_events_uses_separate_chat_drain(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "events",
+                        "bot": "Bot1",
+                        "ok": True,
+                        "complete": True,
+                        "next": None,
+                        "events": [
+                            {
+                                "type": "event",
+                                "seq": 1,
+                                "tick": 30,
+                                "bot": "Bot1",
+                                "name": "agentChat",
+                                "data": {"sender": "Steve", "message": "collect 64 logs"},
+                            }
+                        ],
+                        "error": None,
+                    }
+                )
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        events = body.poll_chat_events()
+
+        self.assertEqual([event.name for event in events], ["agentChat"])
+        self.assertEqual(events[0].data["sender"], "Steve")
+        self.assertEqual(events[0].data["message"], "collect 64 logs")
+        self.assertIn("minebot_drain_chat", transport.commands[0])
+
 
     def test_await_action_terminal_processes_batches_until_matching_move_done(self):
         transport = FakeTransport(

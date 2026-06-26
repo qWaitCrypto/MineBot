@@ -62,6 +62,8 @@ class ToolSidecar:
 
     progress_key: str
     mutating: bool
+    source: str = "unknown"
+    tool_type: str = "general"
     permission: str = "none"
     body_scope: tuple[str, ...] = ()
     terminal_truth: tuple[str, ...] = ()

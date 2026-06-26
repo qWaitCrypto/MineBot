@@ -31,6 +31,10 @@ def build_drain_call(bot: str, app: str = SCARPET_APP) -> str:
     return _script_call(app, "minebot_drain_events", bot)
 
 
+def build_chat_drain_call(bot: str, app: str = SCARPET_APP) -> str:
+    return _script_call(app, "minebot_drain_chat", bot)
+
+
 def build_spawn_call(
     bot: str,
     pos: tuple[int, int, int] | None = None,

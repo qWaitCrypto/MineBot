@@ -14,6 +14,7 @@ from minebot.brain.provider import ProviderConfig
 
 
 DEFAULT_API_KEY_ENV = "MINEBOT_LLM_API_KEY"
+DEFAULT_OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
 DEFAULT_AGENT_LANGUAGE = "English"
 
 
@@ -23,11 +24,13 @@ class AppConfigError(RuntimeError):
 
 def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelProviderRegistry:
     env = os.environ if env is None else env
-    model = env.get("MINEBOT_LLM_MODEL")
+    model = env.get("MINEBOT_LLM_MODEL") or env.get("OPENAI_MODEL")
     if not model:
-        raise AppConfigError("MINEBOT_LLM_MODEL is unset")
+        raise AppConfigError("MINEBOT_LLM_MODEL or OPENAI_MODEL is unset")
 
-    api_key_env = env.get("MINEBOT_LLM_API_KEY_ENV", DEFAULT_API_KEY_ENV)
+    api_key_env = env.get("MINEBOT_LLM_API_KEY_ENV")
+    if not api_key_env:
+        api_key_env = DEFAULT_API_KEY_ENV if env.get(DEFAULT_API_KEY_ENV) else DEFAULT_OPENAI_API_KEY_ENV
     if not env.get(api_key_env):
         raise AppConfigError(f"{api_key_env} is unset or empty")
 
@@ -35,8 +38,8 @@ def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelPro
     if kind not in {"openai_chat", "openai_responses", "litellm"}:
         raise AppConfigError("MINEBOT_LLM_KIND must be openai_chat, openai_responses, or litellm")
 
-    base_url = env.get("MINEBOT_LLM_BASE_URL") or None
-    fast_model = env.get("MINEBOT_LLM_FAST_MODEL", model)
+    base_url = env.get("MINEBOT_LLM_BASE_URL") or env.get("OPENAI_BASE_URL") or None
+    fast_model = env.get("MINEBOT_LLM_FAST_MODEL") or env.get("OPENAI_FAST_MODEL") or model
     settings = _settings_from_env(env)
     configs = [
         ProviderConfig(
@@ -84,6 +87,7 @@ __all__ = [
     "AppConfigError",
     "DEFAULT_AGENT_LANGUAGE",
     "DEFAULT_API_KEY_ENV",
+    "DEFAULT_OPENAI_API_KEY_ENV",
     "agent_language_from_env",
     "provider_registry_from_env",
 ]

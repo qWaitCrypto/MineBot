@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from minebot.app.model_provider import ModelProviderRegistry
-from minebot.app.runner import AgentRuntime
+from minebot.app.runner import AgentRuntime, RuntimeTrace
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController
 from minebot.brain.modes import ModeRuntime
@@ -34,8 +34,13 @@ def build_agent_runtime(
     goal_text: str,
     model_provider: ModelProviderRegistry | None = None,
     agent_name: str = "MineBot",
+    trace: RuntimeTrace | None = None,
 ) -> AgentRuntimeParts:
-    context = AgentContext(system_prompt=prompt_with_language(system_prompt, language=language), goal_text=goal_text)
+    context = AgentContext(
+        system_prompt=prompt_with_language(system_prompt, language=language),
+        goal_text=goal_text,
+        language=language,
+    )
     lifecycle = LifecycleController()
     modes = ModeRuntime()
     authority = ProgressAuthority()
@@ -48,6 +53,7 @@ def build_agent_runtime(
         authority=authority,
         model_provider=model_provider,
         agent_name=agent_name,
+        trace=trace,
     )
     return AgentRuntimeParts(
         runtime=runtime,

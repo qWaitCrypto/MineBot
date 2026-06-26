@@ -8,6 +8,7 @@ from typing import Any
 from minebot.contract import Action, BodyState, Event, InventorySlot, PerceptionResult, Result
 from minebot.game.protocol import (
     build_action_call,
+    build_chat_drain_call,
     build_despawn_call,
     build_drain_call,
     build_interrupt_call,
@@ -570,6 +571,16 @@ class ScarpetBody:
             self.last_seq = max(self.last_seq, event.seq)
         self.event_log.extend(normalized)
         return normalized
+
+    def poll_chat_events(self) -> list[Event]:
+        """Drain app-level public chat directed at this bot.
+
+        Chat is intentionally separate from Body action events so it cannot
+        satisfy `await_action_terminal(...)` by accident.
+        """
+        events = parse_events(self._timed_request(build_chat_drain_call(self.bot_name, self.app), kind="chat_drain"))
+        self.event_log.extend(events)
+        return events
 
     def await_action_terminal(
         self,

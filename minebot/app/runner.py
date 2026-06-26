@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -13,6 +14,7 @@ from agents.exceptions import UserError
 from agents.tool import FunctionTool
 
 from minebot.app.model_provider import ModelProviderRegistry
+from minebot.app.observability import ObservationSink, sanitize_observation
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleError, LifecycleState
 from minebot.brain.modes import (
@@ -55,13 +57,32 @@ class AgentTurnOutcome:
 class RuntimeTrace:
     """In-memory trace sink for Phase-1 turn/tool observability."""
 
+    session_id: str = "default"
+    sink: ObservationSink | None = None
     events: list[dict[str, object]] = field(default_factory=list)
+    _seq: int = 0
 
     def emit(self, event: str, **fields: object) -> None:
-        self.events.append({"event": event, **fields})
+        self._seq += 1
+        record = sanitize_observation(
+            {
+                "seq": self._seq,
+                "ts": time.time(),
+                "session_id": self.session_id,
+                "event": event,
+                **fields,
+            }
+        )
+        self.events.append(record)
+        if self.sink is not None:
+            self.sink.write(record)
 
     def snapshot(self) -> list[dict[str, object]]:
         return [dict(event) for event in self.events]
+
+    def close(self) -> None:
+        if self.sink is not None:
+            self.sink.close()
 
 
 class RuntimeHooks(RunHooks[RuntimeRunContext]):
@@ -139,8 +160,12 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             trace.emit(
                 "tool_invoke",
                 tool=tool.name,
+                source=tool.sidecar.source,
+                tool_type=tool.sidecar.tool_type,
                 mutating=tool.sidecar.mutating,
                 permission=tool.sidecar.permission,
+                body_scope=list(tool.sidecar.body_scope),
+                terminal_truth=list(tool.sidecar.terminal_truth),
                 situational=ctx.context.profile.situational,
                 lifecycle=ctx.context.profile.lifecycle,
             )
@@ -174,6 +199,10 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 "tool_enabled",
                 tool=tool.name,
                 enabled=enabled,
+                source=tool.sidecar.source,
+                tool_type=tool.sidecar.tool_type,
+                permission=tool.sidecar.permission,
+                body_scope=list(tool.sidecar.body_scope),
                 situational=ctx.context.profile.situational,
                 lifecycle=ctx.context.profile.lifecycle,
             )
@@ -241,9 +270,28 @@ class AgentRuntime:
 
     async def run_turn(self, extra_signals: list[AgentSignal] | None = None) -> AgentTurnOutcome:
         self._ensure_active()
+        self.agent_context.begin_turn()
 
         state = self.body.get_state()
         events = self.body.poll_events()
+        self.trace.emit(
+            "body_state",
+            bot=state.bot,
+            pos=list(state.pos),
+            health=state.health,
+            food=state.food,
+            oxygen=state.oxygen,
+            inventory_hash=state.inventory_hash,
+            dimension=state.dimension,
+            complete=state.complete,
+            missing=state.missing,
+        )
+        self.trace.emit(
+            "body_events",
+            count=len(events),
+            names=[event.name for event in events],
+            seqs=[event.seq for event in events],
+        )
         signals = [
             *signalize_body_state(state),
             *signalize_events(events),
@@ -269,7 +317,9 @@ class AgentRuntime:
             lifecycle=profile.lifecycle,
             tool_focus=list(profile.tool_focus),
             model_route=profile.model_route,
+            effort=profile.effort,
             policy_tags=list(profile.policy_tags),
+            context_frame=profile.context_frame,
         )
 
         if not self.lifecycle.is_active:
@@ -323,7 +373,6 @@ class AgentRuntime:
         agent: Agent[RuntimeRunContext],
     ) -> str:
         context = ctx.context.agent_context
-        context.begin_turn()
         preamble = context.turn_preamble()
         if preamble:
             return f"{context.system_prompt}\n\n{preamble}"
@@ -396,6 +445,10 @@ class AgentRuntime:
         extracted = extract_run_observations(result)
         for event in extracted:
             self.trace.emit(**event)
+            if event.get("event") in {"assistant_message", "assistant_final_output"}:
+                content = event.get("content")
+                if isinstance(content, str) and content.strip():
+                    self.agent_context.observe_assistant_message(content)
         has_content = any(
             event.get("event") in {"assistant_message", "assistant_final_output"} and event.get("content")
             for event in extracted

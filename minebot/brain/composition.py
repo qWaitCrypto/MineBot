@@ -34,6 +34,7 @@ class CompositionContext:
 class ResourcePlan:
     requested_item: str
     inventory_item: str
+    inventory_items: tuple[str, ...]
     block_types: tuple[str, ...]
     expected_drops: tuple[str, ...]
 
@@ -52,6 +53,8 @@ def register_inventory_tools(registry: ToolRegistry, body: Body) -> None:
             sidecar=ToolSidecar(
                 progress_key="read_inventory",
                 mutating=False,
+                source="body.perception",
+                tool_type="state",
                 permission="read_state",
                 body_scope=("inventory",),
                 terminal_truth=("inventory",),
@@ -89,6 +92,8 @@ def register_collect_resource_tool(registry: ToolRegistry, context: CompositionC
             sidecar=ToolSidecar(
                 progress_key="collect_resource",
                 mutating=False,
+                source="agent.composition",
+                tool_type="resource",
                 permission="compose_collect",
                 body_scope=("composition",),
                 terminal_truth=("inventory", "ToolResult"),
@@ -109,12 +114,12 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     constraints = params.get("constraints")
     constraints = constraints if isinstance(constraints, dict) else {}
     budget = _budget_from_constraints(context.budget, constraints)
-    radius = int(constraints.get("radius") or 16)
     allow_dry = bool(constraints.get("allow_dry", False))
     started = time.monotonic()
     plan = _resource_plan(item)
+    radius = int(constraints.get("radius") or _default_search_radius(plan))
 
-    before_result = _read_count(context, plan.inventory_item)
+    before_result = _read_count(context, plan.inventory_items)
     if not before_result.success:
         return before_result
     before_count = int((before_result.metrics or {}).get("count") or 0)
@@ -135,6 +140,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
 
     attempts: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
+    tried_positions: set[tuple[int, int, int]] = set()
     mutating_calls = 0
     last_failure: dict[str, object] | None = None
 
@@ -160,13 +166,14 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             {"block_types": list(plan.block_types), "search_radius": radius, "find_limit": max(32, budget.max_candidates * 4)},
             context.weld_context,
         )
-        target = _target_from_search(search)
+        targets = _targets_from_search(search)
+        target = _first_untried_target(targets, tried_positions)
         if not search.get("success") or target is None:
             reason = str(search.get("reason") or "search_failed")
             last_failure = {"phase": "search", "reason": reason, "result": search}
             return _collect_result(
                 False,
-                "target_not_found" if reason == "search_block_not_found" else f"search_failed:{reason}",
+                _search_failure_reason(reason, bool(targets)),
                 True,
                 plan,
                 count,
@@ -180,6 +187,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             )
 
         mutating_calls += 1
+        tried_positions.add(tuple(target))
         mined = execute_tool(
             context.registry.get("mine_block_collect"),
             {"pos": target, "expected_drops": list(plan.expected_drops), "dry": allow_dry},
@@ -188,7 +196,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         attempt = {"target": target, "search": search, "mine": mined}
         attempts.append(attempt)
 
-        after_result = _read_count(context, plan.inventory_item)
+        after_result = _read_count(context, plan.inventory_items)
         if not after_result.success:
             return after_result
         current_count = int((after_result.metrics or {}).get("count") or 0)
@@ -250,21 +258,28 @@ def _budget_from_constraints(default: CompositionBudget, constraints: dict[str, 
     )
 
 
-def _read_count(context: CompositionContext, item: str) -> ToolResult:
+def _read_count(context: CompositionContext, items: tuple[str, ...]) -> ToolResult:
     payload = execute_tool(context.registry.get("read_inventory"), {}, context.weld_context)
     if not payload.get("success"):
         return ToolResult(
             False,
             f"inventory_read_failed:{payload.get('reason')}",
             True,
-            metrics={"item": item, "inventory_result": payload},
+            metrics={"items": list(items), "inventory_result": payload},
         )
     counts = payload.get("metrics", {}).get("counts") if isinstance(payload.get("metrics"), dict) else {}
+    safe_counts = counts or {}
+    total = sum(int(safe_counts.get(item, 0)) for item in items)
     return ToolResult(
         True,
         "inventory_counted",
         False,
-        metrics={"item": item, "count": int((counts or {}).get(item, 0)), "counts": counts or {}},
+        metrics={
+            "item": items[0] if len(items) == 1 else "equivalent_items",
+            "items": list(items),
+            "count": total,
+            "counts": safe_counts,
+        },
     )
 
 
@@ -292,10 +307,21 @@ def _resource_plan(item: str) -> ResourcePlan:
         return ResourcePlan(
             requested_item=item,
             inventory_item=inventory_item,
+            inventory_items=tuple(_normalize_item(drop) for drop in expected_drops),
             block_types=block_types,
             expected_drops=expected_drops,
         )
-    return ResourcePlan(requested_item=item, inventory_item=item, block_types=(item,), expected_drops=(item,))
+    return ResourcePlan(requested_item=item, inventory_item=item, inventory_items=(item,), block_types=(item,), expected_drops=(item,))
+
+
+def resource_plan_for(item: str) -> ResourcePlan:
+    return _resource_plan(item)
+
+
+def _default_search_radius(plan: ResourcePlan) -> int:
+    if plan.requested_item in {"log", "logs"}:
+        return 96
+    return 16
 
 
 def _read_inventory_counts(body: Body, *, page_size: int = 12) -> ToolResult:
@@ -328,17 +354,43 @@ def _read_inventory_counts(body: Body, *, page_size: int = 12) -> ToolResult:
     return ToolResult(True, "inventory_counted", False, metrics={"counts": counts})
 
 
-def _target_from_search(payload: JsonObject) -> list[int] | None:
+def _targets_from_search(payload: JsonObject) -> list[list[int]]:
     metrics = payload.get("metrics")
     if not isinstance(metrics, dict):
-        return None
+        return []
+    targets: list[list[int]] = []
+    candidates = metrics.get("candidates")
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            pos = candidate.get("pos") if isinstance(candidate, dict) else None
+            parsed = _parse_pos(pos)
+            if parsed is not None:
+                targets.append(parsed)
     target = metrics.get("target")
-    if not isinstance(target, dict):
+    pos = target.get("pos") if isinstance(target, dict) else None
+    parsed = _parse_pos(pos)
+    if parsed is not None and parsed not in targets:
+        targets.insert(0, parsed)
+    return targets
+
+
+def _parse_pos(value: object) -> list[int] | None:
+    if not isinstance(value, list) or len(value) != 3:
         return None
-    pos = target.get("pos")
-    if not isinstance(pos, list) or len(pos) != 3:
-        return None
-    return [int(pos[0]), int(pos[1]), int(pos[2])]
+    return [int(value[0]), int(value[1]), int(value[2])]
+
+
+def _first_untried_target(targets: list[list[int]], tried_positions: set[tuple[int, int, int]]) -> list[int] | None:
+    for target in targets:
+        if tuple(target) not in tried_positions:
+            return target
+    return None
+
+
+def _search_failure_reason(reason: str, had_candidates: bool) -> str:
+    if had_candidates:
+        return "candidate_targets_exhausted"
+    return "target_not_found" if reason == "search_block_not_found" else f"search_failed:{reason}"
 
 
 def _collect_result(
@@ -393,4 +445,5 @@ __all__ = [
     "collect_resource",
     "register_collect_resource_tool",
     "register_inventory_tools",
+    "resource_plan_for",
 ]

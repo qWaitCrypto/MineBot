@@ -21,6 +21,8 @@ global_water_reflex_damage_budget = null;
 global_water_reflex_health_baselines = {};
 global_respawn_notices = {};
 global_missing_notices = {};
+global_agent_chat_events = [];
+global_agent_chat_seq = 0;
 
 json_bool(v) -> if(v, 'true', 'false');
 
@@ -139,6 +141,9 @@ event_data_json(kind, data) -> (
   );
   if(kind == 'bodyMissing',
     out = str('{"lastPos":%s}', json_pos(data:0))
+  );
+  if(kind == 'agentChat',
+    out = str('{"sender":%s,"message":%s}', json_string(data:0), json_string(data:1))
   );
   if(kind == 'moveStarted',
     out = str('{"action_id":"%s","start_pos":%s,"target":%s,"waypoints":%s,"guard":%s,"movement_cancel":%s}', data:0, json_pos(data:1), json_pos(data:2), json_waypoints(data:3), data:4, data:5)
@@ -426,7 +431,7 @@ perceive_find_blocks(name, params) -> (
     wanted = if(params:'type' == null, '', params:'type');
     radius = floor(number(params:'radius'));
     if(radius < 0, radius = 0);
-    if(radius > 16, radius = 16);
+    if(radius > 128, radius = 128);
     limit = 32;
     if(params:'limit' != null, limit = floor(number(params:'limit')));
     if(limit < 1, limit = 1);
@@ -764,6 +769,12 @@ emit_watched(kind, data) -> (
     emit(kind, names:_, data)
   );
   true
+);
+
+emit_agent_chat(name, sender, message) -> (
+  global_agent_chat_seq += 1;
+  global_agent_chat_events += l(l(global_agent_chat_seq, global_tick, 'agentChat', name, l(sender, message)));
+  global_agent_chat_seq
 );
 
 watch_bot(name) -> (
@@ -3026,6 +3037,17 @@ __on_player_connects(player) -> (
   )
 );
 
+__on_player_message(player, message) -> (
+  sender = query(player, 'name');
+  names = keys(global_watched);
+  loop(length(names),
+    if(sender != names:_,
+      emit_agent_chat(names:_, sender, message)
+    )
+  );
+  true
+);
+
 minebot_reset() -> (
   global_events = [];
   global_seq = 0;
@@ -3050,6 +3072,8 @@ minebot_reset() -> (
   global_water_reflex_health_baselines = {};
   global_respawn_notices = {};
   global_missing_notices = {};
+  global_agent_chat_events = [];
+  global_agent_chat_seq = 0;
   result_json(null, 'server', true, true, '{}', null)
 );
 
@@ -3129,6 +3153,12 @@ minebot_perceive(name, scope, payload) -> (
 minebot_drain_events(name) -> (
   ev = global_events;
   global_events = [];
+  events_json(name, ev)
+);
+
+minebot_drain_chat(name) -> (
+  ev = global_agent_chat_events;
+  global_agent_chat_events = [];
   events_json(name, ev)
 );
 

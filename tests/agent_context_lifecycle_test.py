@@ -47,11 +47,11 @@ def test_goal_single_ownership() -> None:
     ctx.begin_turn()
     check("goal injected on turn 1", "GOAL: mine 10 iron" in ctx.turn_preamble())
     ctx.begin_turn()
-    check("goal NOT injected on turn 2 (within cadence)", "GOAL:" not in ctx.turn_preamble())
+    check("goal still visible on turn 2", "GOAL: mine 10 iron" in ctx.turn_preamble())
     ctx.begin_turn()
-    check("turn 3 still within window", "GOAL:" not in ctx.turn_preamble())
+    check("goal still visible on turn 3", "GOAL: mine 10 iron" in ctx.turn_preamble())
     ctx.begin_turn()
-    check("goal re-injected on turn 4 (cadence=3)", "GOAL: mine 10 iron" in ctx.turn_preamble())
+    check("goal still visible on turn 4", "GOAL: mine 10 iron" in ctx.turn_preamble())
 
 
 def test_set_goal_resets_cadence() -> None:

@@ -38,10 +38,13 @@ class AgentContext:
     system_prompt: str
     goal_text: str
     goal_reinject_every: int = DEFAULT_GOAL_REINJECT_EVERY
+    language: str = "English"
+    max_session_messages: int = 8
     _turn: int = 0
     _last_state: BodyState | None = field(default=None, repr=False)
     _last_profile: RuntimeProfile | None = field(default=None, repr=False)
     _resume_facts: dict[str, object] | None = field(default=None, repr=False)
+    _session_messages: list[tuple[str, str]] = field(default_factory=list, repr=False)
 
     # -- goal ownership -------------------------------------------------------
 
@@ -50,6 +53,14 @@ class AgentContext:
         guaranteed to appear on the very next turn."""
         self.goal_text = goal_text
         self._turn = 0
+
+    def observe_user_message(self, text: str) -> None:
+        """Record user-visible session text for the context window."""
+        self._append_session_message("user", text)
+
+    def observe_assistant_message(self, text: str) -> None:
+        """Record assistant-visible speech for the context window."""
+        self._append_session_message("assistant", text)
 
     def observe_state(self, state: BodyState) -> None:
         """Record the latest authoritative Body state for per-turn injection."""
@@ -63,6 +74,9 @@ class AgentContext:
         """Inject one resume frame after a situational interruption."""
         self._resume_facts = dict(facts)
 
+    def session_messages(self) -> list[tuple[str, str]]:
+        return list(self._session_messages)
+
     # -- per-turn assembly ----------------------------------------------------
 
     def begin_turn(self) -> int:
@@ -73,16 +87,19 @@ class AgentContext:
         """True on the first turn and every Nth turn thereafter."""
         return self._turn <= 1 or (self._turn - 1) % self.goal_reinject_every == 0
 
-    def turn_preamble(self) -> str:
-        """The text prepended to a model turn: goal (on cadence) + live state.
+    def turn_preamble(self, *, include_goal: bool = True) -> str:
+        """The text prepended to a model turn: current goal + live session facts.
 
-        The goal line is the single source of goal truth; no other component
-        emits it. State is injected every turn so the model always reasons over
-        current Body facts, not a stale snapshot.
+        The goal line is always available in Phase 1. Cadence remains available
+        as metadata for future compression policy, but SDK dynamic-instructions
+        callback cadence must never hide the goal from the model.
         """
         parts: list[str] = []
-        if self.should_reinject_goal():
+        if include_goal:
             parts.append(f"GOAL: {self.goal_text}")
+        parts.append(f"SESSION: turn={self._turn} language={self.language}")
+        if self._session_messages:
+            parts.append(self._session_window_line())
         if self._last_state is not None:
             parts.append(self._state_line(self._last_state))
         if self._last_profile is not None:
@@ -116,6 +133,18 @@ class AgentContext:
         goal = facts.get("goal") or ""
         progress = facts.get("last_progress") or {}
         return f"RESUME: reason={reason} goal={goal} last_progress={progress}"
+
+    def _append_session_message(self, role: str, text: str) -> None:
+        clean = " ".join(text.strip().split())
+        if not clean:
+            return
+        self._session_messages.append((role, clean))
+        if len(self._session_messages) > self.max_session_messages:
+            del self._session_messages[: len(self._session_messages) - self.max_session_messages]
+
+    def _session_window_line(self) -> str:
+        chunks = [f"{role}: {text}" for role, text in self._session_messages]
+        return "SESSION_MESSAGES: " + " | ".join(chunks)
 
 
 __all__ = ["AgentContext", "DEFAULT_GOAL_REINJECT_EVERY"]

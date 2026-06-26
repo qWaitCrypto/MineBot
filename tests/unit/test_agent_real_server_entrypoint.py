@@ -1,0 +1,382 @@
+import asyncio
+import os
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry, tool_manifest
+from minebot.app.real_server_session import (
+    RealServerConfigError,
+    _poll_chat_commands,
+    _run_interactive_loop,
+    evaluate_terminal_truth,
+    main,
+    parse_collect_target,
+    parse_session_command,
+    real_server_config_from_env,
+)
+from minebot.app.resource_runtime import ResourceRuntimeConfig
+from minebot.app.session import SessionCommandKind
+from minebot.app.session import SessionStep
+from minebot.brain.lifecycle import LifecycleState
+from minebot.contract import BodyState, InventorySlot, PerceptionResult, Region, Result
+from minebot.contract import Event
+
+
+class AgentRealServerEntrypointTests(unittest.TestCase):
+    def test_config_requires_explicit_real_server_env(self):
+        with self.assertRaises(RealServerConfigError) as ctx:
+            real_server_config_from_env({})
+
+        self.assertIn("MINEBOT_REAL_RCON_HOST", str(ctx.exception))
+
+    def test_config_parses_region_and_log_path_without_exposing_secret(self):
+        cfg = real_server_config_from_env(
+            {
+                "MINEBOT_REAL_RCON_HOST": "example.invalid",
+                "MINEBOT_REAL_RCON_PORT": "25576",
+                "MINEBOT_REAL_RCON_PASSWORD": "secret",
+                "MINEBOT_REAL_BOT": "MineBot",
+                "MINEBOT_REAL_RCON_TIMEOUT": "7",
+                "MINEBOT_REAL_NATURAL_REGION": "-1,2,-3,4,5,6",
+                "MINEBOT_AGENT_LOG_PATH": "logs/custom.jsonl",
+                "MINEBOT_AGENT_LANGUAGE": "Chinese",
+            }
+        )
+
+        self.assertEqual(cfg.rcon.host, "example.invalid")
+        self.assertEqual(cfg.rcon.port, 25576)
+        self.assertEqual(cfg.rcon.timeout_s, 7)
+        self.assertEqual(cfg.bot_name, "MineBot")
+        self.assertEqual(cfg.natural_region.min_pos, (-1, 2, -3))
+        self.assertEqual(cfg.natural_region.max_pos, (4, 5, 6))
+        self.assertEqual(cfg.log_path, Path("logs/custom.jsonl"))
+        self.assertEqual(cfg.language, "Chinese")
+
+    def test_main_exits_before_connecting_when_real_env_missing(self):
+        clean_env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("MINEBOT_REAL_")
+        }
+        with patch.dict(os.environ, clean_env, clear=True):
+            code = main(["collect 64 logs", "--max-steps", "1"])
+
+        self.assertEqual(code, 2)
+
+    def test_interactive_flag_still_requires_explicit_real_env_before_connecting(self):
+        clean_env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("MINEBOT_REAL_")
+        }
+        with patch.dict(os.environ, clean_env, clear=True):
+            code = main(["collect 64 logs", "--interactive", "--max-steps", "1"])
+
+        self.assertEqual(code, 2)
+
+    def test_parse_interactive_session_commands(self):
+        cases = [
+            ("/pause wait there", SessionCommandKind.PAUSE, "", "wait there"),
+            ("/continue now go left", SessionCommandKind.CONTINUE, "now go left", "user_continue"),
+            ("/goal collect 64 sand", SessionCommandKind.REPLACE_GOAL, "collect 64 sand", "goal_replaced"),
+            ("/cancel done", SessionCommandKind.CANCEL, "", "done"),
+            ("你现在先看一下背包", SessionCommandKind.MESSAGE, "你现在先看一下背包", "user_message"),
+        ]
+
+        for raw, kind, text, reason in cases:
+            with self.subTest(raw=raw):
+                command = parse_session_command(raw)
+                self.assertIsNotNone(command)
+                self.assertEqual(command.kind, kind)
+                self.assertEqual(command.text, text)
+                self.assertEqual(command.reason, reason)
+
+        self.assertIsNone(parse_session_command("   "))
+
+    def test_parse_collect_target_uses_shared_resource_equivalence(self):
+        target = parse_collect_target("collect 64 logs")
+
+        self.assertIsNotNone(target)
+        self.assertEqual(target.count, 64)
+        self.assertIn("spruce_log", target.inventory_items)
+        self.assertIn("birch_log", target.inventory_items)
+
+    def test_terminal_truth_succeeds_only_on_authoritative_inventory(self):
+        body = InventoryBody({"spruce_log": 32, "birch_log": 32})
+        final = SessionStep("completed_turn", LifecycleState.ACTIVE)
+
+        truth = evaluate_terminal_truth(body, "collect 64 logs", final)
+
+        self.assertTrue(truth.satisfied)
+        self.assertEqual(truth.inventory_count, 64)
+        self.assertEqual(truth.exit_code, 0)
+
+    def test_terminal_truth_stays_successful_after_completion_stand_down(self):
+        body = InventoryBody({"spruce_log": 32, "birch_log": 32})
+        final = SessionStep("completed", LifecycleState.IDLE, "terminal_truth_satisfied")
+
+        truth = evaluate_terminal_truth(body, "collect 64 logs", final)
+
+        self.assertTrue(truth.satisfied)
+        self.assertEqual(truth.lifecycle, "idle")
+        self.assertEqual(truth.exit_code, 0)
+
+    def test_terminal_truth_fails_when_session_runs_but_inventory_short(self):
+        body = InventoryBody({"oak_log": 12})
+        final = SessionStep("completed_turn", LifecycleState.ACTIVE)
+
+        truth = evaluate_terminal_truth(body, "collect 64 logs", final)
+
+        self.assertFalse(truth.satisfied)
+        self.assertEqual(truth.inventory_count, 12)
+        self.assertEqual(truth.exit_code, 6)
+
+    def test_terminal_truth_keeps_yield_nonzero(self):
+        body = InventoryBody({"oak_log": 12})
+        final = SessionStep("yielded", LifecycleState.YIELDED, "How should I continue?")
+
+        truth = evaluate_terminal_truth(body, "collect 64 logs", final)
+
+        self.assertFalse(truth.satisfied)
+        self.assertEqual(truth.exit_code, 5)
+
+    def test_terminal_truth_keeps_runtime_failure_nonzero(self):
+        body = InventoryBody({"oak_log": 12})
+        final = SessionStep("failed", LifecycleState.IDLE, "runtime_error:RuntimeError")
+
+        truth = evaluate_terminal_truth(body, "collect 64 logs", final)
+
+        self.assertFalse(truth.satisfied)
+        self.assertEqual(truth.exit_code, 8)
+
+    def test_default_resource_runtime_budget_can_attempt_sixty_four_collection(self):
+        cfg = ResourceRuntimeConfig(natural_region=Region("test", (0, 0, 0), (1, 1, 1)))
+
+        self.assertGreaterEqual(cfg.budget.max_candidates, 64)
+        self.assertGreaterEqual(cfg.budget.max_mutating_calls, 64)
+
+    def test_phase1_registry_exposes_formal_manifest_not_resource_only_subset(self):
+        body = HarnessBody()
+        registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=Region("test", (0, 0, 0), (16, 128, 16))))
+
+        self.assertIn("read_state", registry.names())
+        self.assertIn("read_inventory", registry.names())
+        self.assertIn("move_to", registry.names())
+        self.assertIn("search_for_block", registry.names())
+        self.assertIn("mine_block_collect", registry.names())
+
+        manifest = tool_manifest(registry)
+        by_name = {row["name"]: row for row in manifest}
+        self.assertEqual(by_name["move_to"]["source"], "body.navigation")
+        self.assertEqual(by_name["move_to"]["tool_type"], "navigation")
+        self.assertEqual(by_name["read_state"]["source"], "body.perception")
+        self.assertEqual(by_name["search_for_block"]["tool_type"], "perception")
+        self.assertEqual(by_name["mine_block_collect"]["tool_type"], "work")
+
+    def test_interactive_loop_terminal_truth_uses_replaced_current_goal(self):
+        session = ReplacedGoalSession(
+            steps=[
+                SessionStep("completed_turn", LifecycleState.ACTIVE),
+                SessionStep("completed_turn", LifecycleState.ACTIVE),
+            ],
+            goals=["collect 64 logs", "collect 64 sand"],
+        )
+        body = InventoryBody({"sand": 64})
+
+        final = asyncio.run(
+            _run_interactive_loop(
+                session,
+                fallback_goal="collect 64 logs",
+                body=body,
+                max_steps=5,
+            )
+        )
+
+        self.assertEqual(final.status, "completed_turn")
+        self.assertEqual(session.step_count, 2)
+
+    def test_chat_events_submit_existing_session_commands(self):
+        session = RecordingSession()
+        chat = ChatSource(
+            [
+                Event(
+                    seq=1,
+                    tick=10,
+                    bot="Bot1",
+                    name="agentChat",
+                    data={"sender": "Steve", "message": "/pause wait"},
+                ),
+                Event(
+                    seq=2,
+                    tick=11,
+                    bot="Bot1",
+                    name="agentChat",
+                    data={"sender": "Alex", "message": "继续收集木头"},
+                ),
+            ]
+        )
+
+        count = _poll_chat_commands(session, chat)
+
+        self.assertEqual(count, 2)
+        self.assertEqual([command.kind for command in session.submitted], [SessionCommandKind.PAUSE, SessionCommandKind.MESSAGE])
+        self.assertEqual(session.submitted[0].reason, "wait")
+        self.assertEqual(session.submitted[1].text, "继续收集木头")
+        self.assertTrue(any(event["event"] == "chat_message" for event in session.parts.runtime.trace.snapshot()))
+
+    def test_interactive_loop_polls_chat_before_each_session_step(self):
+        session = ReplacedGoalSession(
+            steps=[
+                SessionStep("completed_turn", LifecycleState.ACTIVE),
+                SessionStep("completed_turn", LifecycleState.ACTIVE),
+            ],
+            goals=["collect 64 logs", "collect 64 sand"],
+        )
+        chat = ChatSource(
+            [
+                Event(
+                    seq=1,
+                    tick=10,
+                    bot="Bot1",
+                    name="agentChat",
+                    data={"sender": "Steve", "message": "/goal collect 64 sand"},
+                )
+            ]
+        )
+        body = InventoryBody({"sand": 64})
+
+        final = asyncio.run(
+            _run_interactive_loop(
+                session,
+                fallback_goal="collect 64 logs",
+                body=body,
+                chat_source=chat,
+                max_steps=5,
+            )
+        )
+
+        self.assertEqual(final.status, "completed_turn")
+        self.assertEqual([command.kind for command in session.submitted], [SessionCommandKind.REPLACE_GOAL])
+
+
+class InventoryBody:
+    def __init__(self, counts):
+        self.counts = counts
+
+    def get_inventory(self):
+        slots = []
+        for index, (item, count) in enumerate(self.counts.items()):
+            slots.append(
+                InventorySlot(
+                    slot=index,
+                    item=f"minecraft:{item}",
+                    count=count,
+                    empty=False,
+                )
+            )
+        return slots
+
+
+class HarnessBody:
+    bot_name = "Bot"
+
+    def spawn(self, *args, **kwargs):
+        return Result(None, self.bot_name, "result", True, True, True)
+
+    def despawn(self):
+        return Result(None, self.bot_name, "result", True, True, True)
+
+    def get_state(self):
+        return BodyState(
+            bot=self.bot_name,
+            pos=(0.5, 64.0, 0.5),
+            yaw=None,
+            pitch=None,
+            health=20.0,
+            food=20,
+            oxygen=300,
+            inventory_raw="[]",
+            inventory_hash="0",
+            effects=None,
+            time=1000,
+            weather=None,
+            dimension="overworld",
+            complete=True,
+        )
+
+    def perceive(self, scope, params):
+        return PerceptionResult(self.bot_name, scope, "perception", True, True, {"slots": []})
+
+    def execute(self, action):
+        return Result(action.id, self.bot_name, "result", True, True, False)
+
+    def await_action_terminal(self, action_id, timeout_s=15.0):
+        return Event(seq=1, tick=1, bot=self.bot_name, name="moveDone", data={"actionId": action_id})
+
+    def poll_events(self):
+        return []
+
+    def ignite_block(self, pos, *, item=None, allow_server_substitute=False, timeout_s=8.0):
+        return Event(seq=1, tick=1, bot=self.bot_name, name="igniteDone", data={})
+
+    def sow_crop(self, pos, *, crop_block, seed_item=None, allow_server_substitute=False, timeout_s=8.0):
+        return Event(seq=1, tick=1, bot=self.bot_name, name="sowDone", data={})
+
+    def interrupt(self, reason=None):
+        return Result(None, self.bot_name, "result", True, True, True)
+
+    def get_inventory(self):
+        return []
+
+
+class ReplacedGoalSession:
+    pending = []
+
+    def __init__(self, *, steps, goals):
+        self.steps = list(steps)
+        self.goals = list(goals)
+        self.step_count = 0
+        self.current_goal = self.goals[0] if self.goals else None
+        self.submitted = []
+
+    async def step(self):
+        index = min(self.step_count, len(self.steps) - 1)
+        self.current_goal = self.goals[min(self.step_count, len(self.goals) - 1)]
+        self.step_count += 1
+        return self.steps[index]
+
+    def submit(self, command):
+        self.submitted.append(command)
+
+
+class RecordingSession:
+    pending = []
+
+    def __init__(self):
+        self.submitted = []
+        self.parts = TraceParts()
+
+    def submit(self, command):
+        self.submitted.append(command)
+
+
+class TraceParts:
+    def __init__(self):
+        from minebot.app.runner import RuntimeTrace
+
+        self.runtime = type("Runtime", (), {"trace": RuntimeTrace()})()
+
+
+class ChatSource:
+    def __init__(self, events):
+        self.events = list(events)
+
+    def poll_chat_events(self):
+        events = self.events
+        self.events = []
+        return events
+
+
+if __name__ == "__main__":
+    unittest.main()
