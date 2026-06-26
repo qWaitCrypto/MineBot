@@ -107,4 +107,15 @@ learned; do not disappear into silent tool calls unless speed or safety demands
 it. Have fun out there. Don't die for it.
 """
 
-__all__ = ["MINEBOT_SYSTEM_PROMPT"]
+
+def prompt_with_language(base_prompt: str = MINEBOT_SYSTEM_PROMPT, *, language: str = "English") -> str:
+    language = language.strip() or "English"
+    return (
+        f"{base_prompt}\n\n"
+        "# Speaking language\n\n"
+        f"Use {language} for visible companion speech, self-talk, and user-facing summaries. "
+        "Keep tool arguments and exact Minecraft item/block identifiers in their canonical English IDs."
+    )
+
+
+__all__ = ["MINEBOT_SYSTEM_PROMPT", "prompt_with_language"]

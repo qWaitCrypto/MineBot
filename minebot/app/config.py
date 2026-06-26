@@ -14,6 +14,7 @@ from minebot.brain.provider import ProviderConfig
 
 
 DEFAULT_API_KEY_ENV = "MINEBOT_LLM_API_KEY"
+DEFAULT_AGENT_LANGUAGE = "English"
 
 
 class AppConfigError(RuntimeError):
@@ -58,6 +59,16 @@ def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelPro
     return ModelProviderRegistry(configs, default="primary")
 
 
+def agent_language_from_env(
+    env: Mapping[str, str] | None = None,
+    *,
+    default: str = DEFAULT_AGENT_LANGUAGE,
+) -> str:
+    env = os.environ if env is None else env
+    language = env.get("MINEBOT_AGENT_LANGUAGE") or default
+    return language.strip() or default
+
+
 def _settings_from_env(env: Mapping[str, str]) -> dict[str, object]:
     settings: dict[str, object] = {}
     if env.get("MINEBOT_LLM_TEMPERATURE"):
@@ -69,4 +80,10 @@ def _settings_from_env(env: Mapping[str, str]) -> dict[str, object]:
     return settings
 
 
-__all__ = ["AppConfigError", "DEFAULT_API_KEY_ENV", "provider_registry_from_env"]
+__all__ = [
+    "AppConfigError",
+    "DEFAULT_AGENT_LANGUAGE",
+    "DEFAULT_API_KEY_ENV",
+    "agent_language_from_env",
+    "provider_registry_from_env",
+]

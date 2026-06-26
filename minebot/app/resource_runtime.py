@@ -38,6 +38,7 @@ def build_resource_agent_runtime(
     model_provider: ModelProviderRegistry | None,
     config: ResourceRuntimeConfig,
     agent_name: str = "MineBot",
+    language: str = "English",
 ) -> AgentRuntimeParts:
     registry = build_resource_registry(body, config)
     parts = build_agent_runtime(
@@ -46,6 +47,7 @@ def build_resource_agent_runtime(
         goal_text=goal_text,
         model_provider=model_provider,
         agent_name=agent_name,
+        language=language,
     )
     context = CompositionContext(
         registry=registry,

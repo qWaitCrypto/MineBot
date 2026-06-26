@@ -4,6 +4,7 @@ import unittest
 
 from agents.exceptions import UserError
 
+from minebot.app.config import agent_language_from_env
 from minebot.app.console import parse_collect_goal
 from minebot.app.runner import (
     AgentRuntime,
@@ -13,11 +14,13 @@ from minebot.app.runner import (
     sdk_tool_for,
     tool_is_enabled,
 )
+from minebot.app.wiring import build_agent_runtime
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleState
 from minebot.brain.modes import AgentSignal, ModeRuntime
 from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext
+from minebot.brain.persona import prompt_with_language
 from minebot.contract import BodyState, LegalityDecision, PerceptionResult, Result, ToolResult
 
 
@@ -99,6 +102,27 @@ def make_tool(body: FakeBody, *, mutating=True):
 
 
 class AgentRunnerSpineTests(unittest.TestCase):
+    def test_prompt_language_template_keeps_ids_canonical(self):
+        prompt = prompt_with_language("base", language="Chinese")
+
+        self.assertIn("Use Chinese", prompt)
+        self.assertIn("canonical English IDs", prompt)
+
+    def test_agent_language_from_env_defaults_and_overrides(self):
+        self.assertEqual(agent_language_from_env({}, default="English"), "English")
+        self.assertEqual(agent_language_from_env({"MINEBOT_AGENT_LANGUAGE": "Chinese"}, default="English"), "Chinese")
+
+    def test_build_agent_runtime_injects_language_prompt(self):
+        parts = build_agent_runtime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            system_prompt="base",
+            language="Chinese",
+            goal_text="collect",
+        )
+
+        self.assertIn("Use Chinese", parts.context.system_prompt)
+
     def test_parse_collect_goal_extracts_common_terminal_goal_shapes(self):
         self.assertEqual(parse_collect_goal("collect 3 dirt"), ("dirt", 3))
         self.assertEqual(parse_collect_goal("gather minecraft:oak_log 12"), ("oak_log", 12))

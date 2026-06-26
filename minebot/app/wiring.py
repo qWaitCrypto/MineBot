@@ -9,7 +9,7 @@ from minebot.app.runner import AgentRuntime
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController
 from minebot.brain.modes import ModeRuntime
-from minebot.brain.persona import MINEBOT_SYSTEM_PROMPT
+from minebot.brain.persona import MINEBOT_SYSTEM_PROMPT, prompt_with_language
 from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import ToolRegistry
 from minebot.contract import Body
@@ -30,11 +30,12 @@ def build_agent_runtime(
     body: Body,
     registry: ToolRegistry,
     system_prompt: str = MINEBOT_SYSTEM_PROMPT,
+    language: str = "English",
     goal_text: str,
     model_provider: ModelProviderRegistry | None = None,
     agent_name: str = "MineBot",
 ) -> AgentRuntimeParts:
-    context = AgentContext(system_prompt=system_prompt, goal_text=goal_text)
+    context = AgentContext(system_prompt=prompt_with_language(system_prompt, language=language), goal_text=goal_text)
     lifecycle = LifecycleController()
     modes = ModeRuntime()
     authority = ProgressAuthority()

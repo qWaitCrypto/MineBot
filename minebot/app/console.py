@@ -16,7 +16,7 @@ import time
 from openai import APIStatusError
 from agents.exceptions import MaxTurnsExceeded
 
-from minebot.app.config import AppConfigError, provider_registry_from_env
+from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
 from minebot.app.resource_runtime import ResourceRuntimeConfig, build_resource_agent_runtime, inventory_count
 from minebot.brain.lifecycle import LifecycleState
 from minebot.game import RconClient, Region, ScarpetBody
@@ -76,7 +76,7 @@ def seed_resource_scene(rcon: RconClient) -> None:
         command(rcon, f"setblock {3 + offset} 70 0 dirt", delay=0.0)
 
 
-async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int, sdk_max_turns: int) -> None:
+async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int, sdk_max_turns: int, language: str) -> None:
     provider = provider_registry_from_env()
     collect_target = parse_collect_goal(goal_text)
     parts = build_resource_agent_runtime(
@@ -85,6 +85,7 @@ async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int, sdk_max
         model_provider=provider,
         config=ResourceRuntimeConfig(natural_region=DEFAULT_REGION),
         agent_name="MineBotConsole",
+        language=language,
     )
     parts.runtime.max_turns = sdk_max_turns
     try:
@@ -176,12 +177,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-turns", type=int, default=6)
     parser.add_argument("--sdk-max-turns", type=int, default=40)
     parser.add_argument(
+        "--language",
+        default=None,
+        help="Visible speech language for MineBot. Defaults to MINEBOT_AGENT_LANGUAGE or Chinese in local console.",
+    )
+    parser.add_argument(
         "--no-demo-resources",
         action="store_true",
         help="Do not seed the small local dirt patch used by collect-resource console tests.",
     )
     parser.add_argument("--once", help="Run one natural-language goal and exit.")
     args = parser.parse_args(argv)
+    language = args.language or agent_language_from_env(default="Chinese")
 
     try:
         provider = provider_registry_from_env()
@@ -205,7 +212,15 @@ def main(argv: list[str] | None = None) -> int:
         body = ScarpetBody(args.bot, rcon)
         if args.once:
             try:
-                asyncio.run(run_goal(body, args.once, max_turns=args.max_turns, sdk_max_turns=args.sdk_max_turns))
+                asyncio.run(
+                    run_goal(
+                        body,
+                        args.once,
+                        max_turns=args.max_turns,
+                        sdk_max_turns=args.sdk_max_turns,
+                        language=language,
+                    )
+                )
             except APIStatusError as exc:
                 print(f"Model provider error: {type(exc).__name__} status={exc.status_code}", file=sys.stderr)
                 return 4
@@ -223,7 +238,15 @@ def main(argv: list[str] | None = None) -> int:
             if goal in {"/quit", "/exit"}:
                 return 0
             try:
-                asyncio.run(run_goal(body, goal, max_turns=args.max_turns, sdk_max_turns=args.sdk_max_turns))
+                asyncio.run(
+                    run_goal(
+                        body,
+                        goal,
+                        max_turns=args.max_turns,
+                        sdk_max_turns=args.sdk_max_turns,
+                        language=language,
+                    )
+                )
             except APIStatusError as exc:
                 print(f"Model provider error: {type(exc).__name__} status={exc.status_code}", file=sys.stderr)
 
