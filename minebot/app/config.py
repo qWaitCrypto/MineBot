@@ -31,8 +31,8 @@ def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelPro
         raise AppConfigError(f"{api_key_env} is unset or empty")
 
     kind = env.get("MINEBOT_LLM_KIND", "openai_chat")
-    if kind not in {"openai_chat", "openai_responses"}:
-        raise AppConfigError("MINEBOT_LLM_KIND must be openai_chat or openai_responses")
+    if kind not in {"openai_chat", "openai_responses", "litellm"}:
+        raise AppConfigError("MINEBOT_LLM_KIND must be openai_chat, openai_responses, or litellm")
 
     base_url = env.get("MINEBOT_LLM_BASE_URL") or None
     fast_model = env.get("MINEBOT_LLM_FAST_MODEL", model)
