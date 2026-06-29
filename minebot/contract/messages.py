@@ -149,6 +149,46 @@ class ToolResult:
         }
 
 
+# ---------------------------------------------------------------------------
+# Candidate-skip vocabulary (agent-loop.md §6: neutral sentinel).
+#
+# A "candidate skip" is a result that means "THIS specific target/candidate is
+# unsuitable — pick another", NOT "the task is failing". For progress accounting
+# it is NEUTRAL: the weld must not feed it to the failure-storm sensor, and a
+# composition orchestrator should skip the candidate and keep going. These are
+# deliberately NARROW — genuine failures (incomplete perception, transport error,
+# owner_busy, invalid input, "nothing found at all") are intentionally absent and
+# stay counted. `search_block_not_found` is excluded on purpose: it means there
+# are no candidates, which the orchestrator returns (not skips).
+CANDIDATE_SKIP_REASONS: frozenset[str] = frozenset(
+    {
+        "mine_approach_out_of_range",
+        "collect_no_inventory_delta",
+        "stand_point_unreachable",
+        "search_block_no_stand_point",
+        "search_block_out_of_range",
+        "search_block_target_lost",
+    }
+)
+
+CANDIDATE_SKIP_PREFIXES: tuple[str, ...] = (
+    "break_denied:",
+    "navigation_blocked:",
+    "navigation_replan_required:",
+    "search_block_navigation_failed:",
+    "mine_approach_failed:",
+)
+
+
+def is_candidate_skip(reason: str | None) -> bool:
+    """True if ``reason`` marks an unsuitable candidate (neutral), not a failure."""
+    if not reason:
+        return False
+    if reason in CANDIDATE_SKIP_REASONS:
+        return True
+    return reason.startswith(CANDIDATE_SKIP_PREFIXES)
+
+
 def stable_hash(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
 

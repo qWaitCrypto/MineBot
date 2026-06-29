@@ -3,6 +3,7 @@ global_seq = 0;
 global_tick = 0;
 global_moves = {};
 global_move_cancels = {};
+global_navigations = {};
 global_mines = {};
 global_places = {};
 global_uses = {};
@@ -19,10 +20,12 @@ global_reflex_scan = true;
 global_water_reflex_air_threshold = 80;
 global_water_reflex_damage_budget = null;
 global_water_reflex_health_baselines = {};
+global_response_char_budget = 2000;
 global_respawn_notices = {};
 global_missing_notices = {};
 global_agent_chat_events = [];
 global_agent_chat_seq = 0;
+global_action_results = {};
 
 json_bool(v) -> if(v, 'true', 'false');
 
@@ -152,6 +155,14 @@ event_data_json(kind, data) -> (
     out = str('{"action_id":"%s","arrived":%s,"final_pos":%s,"target":%s,"dist_to_target":%.3f,"stopped_reason":"%s","ticks":%d,"min_dist":%.3f,"stuck_ticks":%d,"deviation":%.3f,"waypoint_index":%d,"waypoint_count":%d,"guard":%s,"movement_cancel":%s}',
       data:0, json_bool(data:1), json_pos(data:2), json_pos(data:3), data:4, data:5, data:6, data:7, data:8, data:9, data:10, data:11, data:12, data:13)
   );
+  if(kind == 'navigateDone',
+    out = str('{"action_id":"%s","arrived":%s,"final_pos":%s,"goal":%s,"goal_dist":%.3f,"reason":"%s","expanded":%d,"waypoints":%d,"segments":%d,"nav_reason":"%s"}',
+      data:0, json_bool(data:1), json_pos(data:2), json_pos(data:3), data:4, data:5, data:6, data:7, data:8, data:9)
+  );
+  if(kind == 'mobilityBlocked',
+    out = str('{"reason":"%s","pos":%s,"goal":%s,"expanded":%d}',
+      data:0, json_pos(data:1), json_pos(data:2), data:3)
+  );
   if(kind == 'moveCancelDelayed',
     out = str('{"action_id":"%s","stopped_reason":"%s","movement_cancel":%s,"requested_tick":%d}',
       data:0, data:1, data:2, data:3)
@@ -258,6 +269,20 @@ events_json(name, evs) -> (
     e = evs:_;
     if(length(e) == 1, e = e:0);
     if(e:3 == name,
+      if(first, first = false, out += ',');
+      out += event_json(e)
+    )
+  );
+  str('{"type":"events","bot":"%s","ok":true,"complete":true,"next":null,"events":[%s],"error":null}', name, out)
+);
+
+events_since_json(name, evs, since_seq) -> (
+  out = '';
+  first = true;
+  loop(length(evs),
+    e = evs:_;
+    if(length(e) == 1, e = e:0);
+    if(e:3 == name && e:0 > since_seq,
       if(first, first = false, out += ',');
       out += event_json(e)
     )
@@ -405,7 +430,7 @@ perceive_nearby_blocks(name, params) -> (
             z = cz + oz;
             bs = '' + block(x, y, z);
             if(block_kind(bs) != 'CLEAR',
-              if(count >= limit,
+              if(count >= limit || length(out) >= global_response_char_budget,
                 overflow = true
               ,
                 if(first, first = false, out += ',');
@@ -439,36 +464,50 @@ perceive_find_blocks(name, params) -> (
     cx = floor(p:0);
     cy = floor(p:1);
     cz = floor(p:2);
-    out = '';
+    found = l();
     count = 0;
     overflow = false;
-    first = true;
     loop(radius * 2 + 1,
       ox = _ - radius;
       loop(radius * 2 + 1,
         oy = _ - radius;
         loop(radius * 2 + 1,
           oz = _ - radius;
-          if(!overflow,
-            x = cx + ox;
-            y = cy + oy;
-            z = cz + oz;
-            bs = '' + block(x, y, z);
-            if(block_type_matches(bs, wanted),
-              if(count >= limit,
-                overflow = true
-              ,
-                dx = x + 0.5 - p:0;
-                dy = y + 0.5 - p:1;
-                dz = z + 0.5 - p:2;
-                dist2 = dx*dx + dy*dy + dz*dz;
-                if(first, first = false, out += ',');
-                out += str('{"x":%d,"y":%d,"z":%d,"type":"%s","state":"%s","dist2":%.3f}', x, y, z, bs, block_kind(bs), dist2);
-                count += 1
-              )
+          x = cx + ox;
+          y = cy + oy;
+          z = cz + oz;
+          bs = '' + block(x, y, z);
+          if(block_type_matches(bs, wanted),
+            dx = x + 0.5 - p:0;
+            dy = y + 0.5 - p:1;
+            dz = z + 0.5 - p:2;
+            dist2 = dx*dx + dy*dy + dz*dz;
+            entry = l(dist2, x, y, z, bs, block_kind(bs));
+            insert_at = count;
+            loop(count,
+              cur = found:_;
+              if(insert_at == count && dist2 < cur:0, insert_at = _)
+            );
+            put(found:insert_at, entry, 'insert');
+            count += 1;
+            if(count > limit,
+              overflow = true;
+              delete(found:limit);
+              count = limit
             )
           )
         )
+      )
+    );
+    out = '';
+    first = true;
+    loop(count,
+      entry = found:_;
+      if(length(out) >= global_response_char_budget,
+        overflow = true
+      ,
+        if(first, first = false, out += ',');
+        out += str('{"x":%d,"y":%d,"z":%d,"type":"%s","state":"%s","dist2":%.3f}', entry:1, entry:2, entry:3, entry:4, entry:5, entry:0)
       )
     );
     data = str('{"center":%s,"type":"%s","radius":%d,"limit":%d,"count":%d,"blocks":[%s]}', json_pos(p), wanted, radius, limit, count, out);
@@ -476,7 +515,6 @@ perceive_find_blocks(name, params) -> (
     perception_json(name, 'findBlocks', true, !overflow, data, uncertainty, if(overflow, 'limit', null), null)
   )
 );
-
 entity_kind(e) -> (
   kind = query(e, 'type');
   if(kind == null, 'unknown', kind)
@@ -526,7 +564,7 @@ perceive_nearby_entities(name, params) -> (
     loop(length(found),
       e = found:_;
       if(e != player(name),
-        if(count >= limit,
+        if(count >= limit || length(out) >= global_response_char_budget,
           overflow = true
         ,
           if(first, first = false, out += ',');
@@ -760,6 +798,7 @@ perceive_recipe_data(name, params) -> (
 emit(kind, name, data) -> (
   global_seq += 1;
   global_events += l(l(global_seq, global_tick, kind, name, data));
+  trim_events();
   global_seq
 );
 
@@ -774,7 +813,42 @@ emit_watched(kind, data) -> (
 emit_agent_chat(name, sender, message) -> (
   global_agent_chat_seq += 1;
   global_agent_chat_events += l(l(global_agent_chat_seq, global_tick, 'agentChat', name, l(sender, message)));
+  trim_chat_events();
   global_agent_chat_seq
+);
+
+trim_events() -> (
+  loop(64,
+    if(length(global_events) > 512,
+      delete(global_events:0)
+    )
+  );
+  true
+);
+
+trim_chat_events() -> (
+  loop(32,
+    if(length(global_agent_chat_events) > 256,
+      delete(global_agent_chat_events:0)
+    )
+  );
+  true
+);
+
+remember_action_result(name, action_id, result) -> (
+  global_action_results:(name + ':' + action_id) = result;
+  keys_list = keys(global_action_results);
+  loop(64,
+    if(length(keys_list) > 512,
+      delete(global_action_results:(keys_list:0));
+      delete(keys_list:0)
+    )
+  );
+  result
+);
+
+remembered_action_result(name, action_id) -> (
+  global_action_results:(name + ':' + action_id)
 );
 
 watch_bot(name) -> (
@@ -830,6 +904,9 @@ finish_move(name, reason, arrived) -> (
     global_moves:name = null;
     global_move_cancels:name = null;
     release_owner(name, 'moveTo');
+    if(global_navigations:name != null,
+      finish_navigate(name, l(m:0, arrived, p, target, dist, reason))
+    );
     true
   )
 );
@@ -3048,12 +3125,337 @@ __on_player_message(player, message) -> (
   true
 );
 
+probe_node_key(x, y, z) -> str('%d_%d_%d', x, y, z);
+
+probe_walkability(x, y, z) -> (
+  feet = '' + block(x, y, z);
+  head = '' + block(x, y + 1, z);
+  feet_kind = block_kind(feet);
+  head_kind = block_kind(head);
+  floor_bs = '' + block(x, y - 1, z);
+  floor_kind = block_kind(floor_bs);
+  if(feet_kind == 'SOLID' || head_kind == 'SOLID',
+    'SOLID'
+  ,
+    if(feet_kind == 'LIQUID' || head_kind == 'LIQUID',
+      'LIQUID'
+    ,
+      if(floor_kind == 'CLEAR' || floor_kind == 'LIQUID',
+        'NO_FLOOR'
+      ,
+        'WALK'
+      )
+    )
+  )
+);
+
+probe_heuristic(x, y, z, gx, gy, gz) -> (
+  abs(x - gx) + abs(y - gy) + abs(z - gz)
+);
+
+probe_open_insert(open_set, f, g, x, y, z) -> (
+  entry = l(f, g, x, y, z);
+  count = length(open_set);
+  insert_at = count;
+  loop(count,
+    if(insert_at == count && f < open_set:_:0, insert_at = _)
+  );
+  put(open_set:insert_at, entry, 'insert');
+  open_set
+);
+
+minebot_pathfind_probe(name, payload) -> (
+  params = if(length(payload) == 0, {}, decode_json(payload));
+  start = params:'start';
+  goal = params:'goal';
+  grid_radius = floor(number(params:'grid_radius'));
+  if(grid_radius < 1, grid_radius = 8);
+  if(grid_radius > 64, grid_radius = 64);
+  max_expand = 5000;
+  if(params:'max_expand' != null, max_expand = floor(number(params:'max_expand')));
+  sx = floor(number(start:0));
+  sy = floor(number(start:1));
+  sz = floor(number(start:2));
+  gx = floor(number(goal:0));
+  gy = floor(number(goal:1));
+  gz = floor(number(goal:2));
+  y_below = 3;
+  y_above = 3;
+  g_costs = {};
+  came_from = {};
+  start_key = probe_node_key(sx, sy, sz);
+  g_costs:(start_key) = 0;
+  h0 = probe_heuristic(sx, sy, sz, gx, gy, gz);
+  open_set = l(l(h0, 0, sx, sy, sz));
+  closed = {};
+  expanded = 0;
+  found = false;
+  found_key = null;
+  neighbors_dx = l(-1, 1, 0, 0, 0, 0);
+  neighbors_dy = l(0, 0, -1, 1, 0, 0);
+  neighbors_dz = l(0, 0, 0, 0, -1, 1);
+  loop(max_expand,
+    if(length(open_set) == 0 || found,
+      null
+    ,
+      best = open_set:0;
+      delete(open_set:0);
+      cx = best:2;
+      cy = best:3;
+      cz = best:4;
+      cur_g = best:1;
+      cur_key = probe_node_key(cx, cy, cz);
+      if(closed:(cur_key) != null,
+        null
+      ,
+        closed:(cur_key) = true;
+        expanded += 1;
+        if(cx == gx && cy == gy && cz == gz,
+          found = true;
+          found_key = cur_key
+        ,
+          loop(6,
+            ni = _;
+            nx = cx + neighbors_dx:ni;
+            ny = cy + neighbors_dy:ni;
+            nz = cz + neighbors_dz:ni;
+            nkey = probe_node_key(nx, ny, nz);
+            if(closed:(nkey) != null,
+              null
+            ,
+              if(abs(nx - sx) > grid_radius || abs(nz - sz) > grid_radius || ny < sy - y_below || ny > sy + y_above,
+                null
+              ,
+                w = probe_walkability(nx, ny, nz);
+                if(w == 'SOLID',
+                  null
+                ,
+                  step_cost = if(w == 'LIQUID', 3.0, if(w == 'NO_FLOOR', 2.0, 1.0));
+                  new_g = cur_g + step_cost;
+                  old_g = g_costs:(nkey);
+                  if(old_g == null || new_g < old_g,
+                    g_costs:(nkey) = new_g;
+                    came_from:(nkey) = cur_key;
+                    h = probe_heuristic(nx, ny, nz, gx, gy, gz);
+                    open_set = probe_open_insert(open_set, new_g + h, new_g, nx, ny, nz)
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  );
+  path_length = 0;
+  if(found,
+    trace_key = found_key;
+    loop(max_expand,
+      if(trace_key == null || trace_key == start_key,
+        null
+      ,
+        path_length += 1;
+        trace_key = came_from:(trace_key)
+      )
+    )
+  );
+  reason = if(found, 'path_found', if(length(open_set) == 0, 'no_path', 'budget_exceeded'));
+  str('{"ok":%s,"reason":"%s","nodes_expanded":%d,"path_length":%d,"grid_radius":%d,"start":[%d,%d,%d],"goal":[%d,%d,%d]}',
+    json_bool(found), reason, expanded, path_length, grid_radius, sx, sy, sz, gx, gy, gz)
+);
+
+navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above) -> (
+  g_costs = {};
+  came_from = {};
+  start_key = probe_node_key(sx, sy, sz);
+  g_costs:(start_key) = 0;
+  h0 = probe_heuristic(sx, sy, sz, gx, gy, gz);
+  open_set = l(l(h0, 0, sx, sy, sz));
+  closed = {};
+  expanded = 0;
+  found = false;
+  found_key = null;
+  best_key = start_key;
+  best_h = h0;
+  best_g = 0;
+  neighbors_dx = l(-1, 1, 0, 0, 0, 0);
+  neighbors_dy = l(0, 0, -1, 1, 0, 0);
+  neighbors_dz = l(0, 0, 0, 0, -1, 1);
+  loop(max_expand,
+    if(length(open_set) == 0 || found,
+      null
+    ,
+      best_entry = open_set:0;
+      delete(open_set:0);
+      cx = best_entry:2;
+      cy = best_entry:3;
+      cz = best_entry:4;
+      cur_g = best_entry:1;
+      cur_key = probe_node_key(cx, cy, cz);
+      if(closed:(cur_key) != null,
+        null
+      ,
+        closed:(cur_key) = true;
+        expanded += 1;
+        cur_h = probe_heuristic(cx, cy, cz, gx, gy, gz);
+        if(cur_h < best_h || (cur_h == best_h && cur_g < best_g),
+          best_h = cur_h;
+          best_g = cur_g;
+          best_key = cur_key
+        );
+        if(cx == gx && cy == gy && cz == gz,
+          found = true;
+          found_key = cur_key
+        ,
+          loop(6,
+            ni = _;
+            nx = cx + neighbors_dx:ni;
+            ny = cy + neighbors_dy:ni;
+            nz = cz + neighbors_dz:ni;
+            nkey = probe_node_key(nx, ny, nz);
+            if(closed:(nkey) != null,
+              null
+            ,
+              if(abs(nx - sx) > grid_radius || abs(nz - sz) > grid_radius || ny < sy - y_below || ny > sy + y_above,
+                null
+              ,
+                w = probe_walkability(nx, ny, nz);
+                if(w == 'SOLID',
+                  null
+                ,
+                  step_cost = if(w == 'LIQUID', 3.0, if(w == 'NO_FLOOR', 2.0, 1.0));
+                  new_g = cur_g + step_cost;
+                  old_g = g_costs:(nkey);
+                  if(old_g == null || new_g < old_g,
+                    g_costs:(nkey) = new_g;
+                    came_from:(nkey) = cur_key;
+                    h = probe_heuristic(nx, ny, nz, gx, gy, gz);
+                    open_set = probe_open_insert(open_set, new_g + h, new_g, nx, ny, nz)
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  );
+  end_key = if(found, found_key, best_key);
+  if(end_key == start_key,
+    l('result', if(found, 'arrived', if(length(open_set) == 0, 'no_path', 'budget_exceeded')), expanded, l())
+  ,
+    path = l();
+    trace_key = end_key;
+    loop(max_expand,
+      if(trace_key == null || trace_key == start_key,
+        null
+      ,
+        parts = split('_', trace_key);
+        path += l(number(parts:0), number(parts:1), number(parts:2));
+        trace_key = came_from:(trace_key)
+      )
+    );
+    reversed_path = l();
+    loop(length(path),
+      reversed_path += path:(length(path) - 1 - _)
+    );
+    status = if(found, 'arrived', 'partial');
+    l('result', status, expanded, reversed_path)
+  )
+);
+
+start_navigate_to(name, action_id, gx, gy, gz, params) -> (
+  watch_bot(name);
+  p = bot_pos(name);
+  if(p == null,
+    emit('navigateDone', name, l(action_id, false, l(0, 0, 0), l(gx, gy, gz), 9999.0, 'missing_body', 0, 0, 0, 'missing_body'));
+    true
+  ,
+    (
+      sx = floor(p:0);
+      sy = floor(p:1);
+      sz = floor(p:2);
+      grid_radius = floor(param_number(params, 'grid_radius', 32));
+      if(grid_radius < 1, grid_radius = 1);
+      if(grid_radius > 64, grid_radius = 64);
+      max_expand = floor(param_number(params, 'max_expand', 200));
+      if(max_expand < 10, max_expand = 10);
+      if(max_expand > 5000, max_expand = 5000);
+      y_below = floor(param_number(params, 'y_below', 8));
+      y_above = floor(param_number(params, 'y_above', 8));
+      arrival_radius = param_number(params, 'arrival_radius', 0.75);
+      timeout_ticks = floor(param_number(params, 'timeout_ticks', 400));
+      no_progress_ticks = floor(param_number(params, 'no_progress_ticks', 60));
+      plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above);
+      plan_status = plan_result:1;
+      plan_expanded = plan_result:2;
+      plan_path = plan_result:3;
+      if(plan_status == 'no_path' || plan_status == 'budget_exceeded' || length(plan_path) == 0,
+        emit('navigateDone', name, l(action_id, false, p, l(gx, gy, gz), dist_to_target(p, gx, gy, gz), plan_status, plan_expanded, 0, 0, plan_status));
+        if(plan_status == 'no_path',
+          emit('mobilityBlocked', name, l('no_path', p, l(gx, gy, gz), plan_expanded))
+        );
+        true
+      ,
+        waypoints = l();
+        loop(length(plan_path),
+          wp = plan_path:_;
+          waypoints += l(wp:0 + 0.5, wp:1, wp:2 + 0.5)
+        );
+        global_navigations:name = l(action_id, gx, gy, gz, plan_status, plan_expanded, length(waypoints), arrival_radius);
+        last_wp = waypoints:(length(waypoints) - 1);
+        move_ok = start_move_to(name, action_id, last_wp:0, last_wp:1, last_wp:2,
+          {'waypoints' -> waypoints, 'arrival_radius' -> arrival_radius,
+           'timeout_ticks' -> timeout_ticks, 'no_progress_ticks' -> no_progress_ticks,
+           'max_deviation' -> 8.0});
+        if(!move_ok,
+          emit('navigateDone', name, l(action_id, false, p, l(gx, gy, gz), dist_to_target(p, gx, gy, gz), 'move_start_failed', plan_expanded, length(waypoints), 0, 'move_start_failed'));
+          global_navigations:name = null;
+          true
+        ,
+          true
+        )
+      )
+    )
+  )
+);
+
+finish_navigate(name, move_event_data) -> (
+  nav = global_navigations:name;
+  if(nav == null,
+    null
+  ,
+    action_id = nav:0;
+    gx = nav:1;
+    gy = nav:2;
+    gz = nav:3;
+    plan_status = nav:4;
+    plan_expanded = nav:5;
+    plan_waypoints = nav:6;
+    p = bot_pos(name);
+    goal_dist = if(p != null, dist_to_target(p, gx, gy, gz), 9999.0);
+    move_arrived = move_event_data:1;
+    move_reason = move_event_data:5;
+    nav_arrived = move_arrived && plan_status == 'arrived';
+    nav_reason = if(nav_arrived, 'arrived',
+      if(plan_status == 'partial' && move_arrived, 'partial',
+        if(move_reason == 'stuck', 'stuck',
+          if(move_reason == 'timeout', 'timeout',
+            if(move_reason == 'deviated', 'deviated', move_reason)))));
+    emit('navigateDone', name, l(action_id, nav_arrived, p, l(gx, gy, gz), goal_dist, nav_reason, plan_expanded, plan_waypoints, 0, nav_reason));
+    if(!nav_arrived && (nav_reason == 'stuck' || nav_reason == 'no_path'),
+      emit('mobilityBlocked', name, l(nav_reason, p, l(gx, gy, gz), plan_expanded))
+    );
+    global_navigations:name = null
+  )
+);
+
 minebot_reset() -> (
   global_events = [];
-  global_seq = 0;
   global_tick = 0;
   global_moves = {};
   global_move_cancels = {};
+  global_navigations = {};
   global_mines = {};
   global_places = {};
   global_uses = {};
@@ -3073,7 +3475,7 @@ minebot_reset() -> (
   global_respawn_notices = {};
   global_missing_notices = {};
   global_agent_chat_events = [];
-  global_agent_chat_seq = 0;
+  global_action_results = {};
   result_json(null, 'server', true, true, '{}', null)
 );
 
@@ -3151,19 +3553,26 @@ minebot_perceive(name, scope, payload) -> (
 );
 
 minebot_drain_events(name) -> (
-  ev = global_events;
-  global_events = [];
-  events_json(name, ev)
+  events_json(name, global_events)
+);
+
+minebot_events_since(name, since_seq) -> (
+  events_since_json(name, global_events, number(since_seq))
 );
 
 minebot_drain_chat(name) -> (
-  ev = global_agent_chat_events;
-  global_agent_chat_events = [];
-  events_json(name, ev)
+  events_json(name, global_agent_chat_events)
+);
+
+minebot_chat_since(name, since_seq) -> (
+  events_since_json(name, global_agent_chat_events, number(since_seq))
 );
 
 minebot_interrupt(name, payload) -> (
   stop_body(name);
+  if(global_navigations:name != null,
+    global_navigations:name = null
+  );
   if(global_moves:name != null,
     request_move_cancel(name, 'interrupted')
   );
@@ -3202,91 +3611,101 @@ minebot_action(name, payload) -> (
     action_id = action:'id';
     action_name = action:'name';
     params = action:'params';
-    out = result_json(action_id, name, false, false, '{}', 'unknown action');
-    if(action_name == 'moveTo',
-      target = params:'target';
-      ok = start_move_to(name, action_id, number(target:0), number(target:1), number(target:2), params);
-      out = result_json(action_id, name, true, ok, '{"action":"moveTo"}', null)
+    remembered = remembered_action_result(name, action_id);
+    if(remembered != null,
+      remembered
+    ,
+      out = result_json(action_id, name, false, false, '{}', 'unknown action');
+      if(action_name == 'moveTo',
+        target = params:'target';
+        ok = start_move_to(name, action_id, number(target:0), number(target:1), number(target:2), params);
+        out = result_json(action_id, name, true, ok, '{"action":"moveTo"}', null)
+      );
+      if(action_name == 'navigateTo',
+        target = params:'target';
+        ok = start_navigate_to(name, action_id, number(target:0), number(target:1), number(target:2), params);
+        out = result_json(action_id, name, true, ok, '{"action":"navigateTo"}', null)
+      );
+      if(action_name == 'lookAt',
+        target = params:'target';
+        ok = run_look_at(name, action_id, number(target:0), number(target:1), number(target:2));
+        out = result_json(action_id, name, true, ok, '{"action":"lookAt"}', null)
+      );
+      if(action_name == 'jump',
+        ok = run_jump_once(name, action_id);
+        out = result_json(action_id, name, true, ok, '{"action":"jump"}', null)
+      );
+      if(action_name == 'selectSlot',
+        slot = number(params:'slot');
+        ok = run_select_slot(name, action_id, slot);
+        out = result_json(action_id, name, true, ok, '{"action":"selectSlot"}', null)
+      );
+      if(action_name == 'selectItem',
+        item = params:'item';
+        ok = run_select_item(name, action_id, item);
+        out = result_json(action_id, name, true, ok, '{"action":"selectItem"}', null)
+      );
+      if(action_name == 'stop',
+        ok = run_stop_action(name, action_id);
+        out = result_json(action_id, name, true, ok, '{"action":"stop"}', null)
+      );
+      if(action_name == 'useItem',
+        ok = start_use_item(name, action_id, params);
+        out = result_json(action_id, name, true, ok, '{"action":"useItem"}', null)
+      );
+      if(action_name == 'rangedAttack',
+        ok = start_ranged_attack(name, action_id, params);
+        out = result_json(action_id, name, true, ok, '{"action":"rangedAttack"}', null)
+      );
+      if(action_name == 'attackEntity',
+        ok = start_attack_entity(name, action_id, params);
+        out = result_json(action_id, name, true, ok, '{"action":"attackEntity"}', null)
+      );
+      if(action_name == 'dropItem',
+        ok = start_drop_item(name, action_id, params);
+        out = result_json(action_id, name, true, ok, '{"action":"dropItem"}', null)
+      );
+      if(action_name == 'handoffItem',
+        ok = run_handoff_item(name, action_id, params);
+        out = result_json(action_id, name, true, ok, '{"action":"handoffItem"}', null)
+      );
+      if(action_name == 'moveItem',
+        ok = run_move_item(name, action_id, params);
+        out = result_json(action_id, name, true, ok, '{"action":"moveItem"}', null)
+      );
+      if(action_name == 'craftItem',
+        ok = run_craft_item(name, action_id, params);
+        out = result_json(action_id, name, true, ok, '{"action":"craftItem"}', null)
+      );
+      if(action_name == 'furnaceTransfer',
+        ok = run_furnace_transfer(name, action_id, params);
+        out = result_json(action_id, name, true, ok, '{"action":"furnaceTransfer"}', null)
+      );
+      if(action_name == 'containerTransfer',
+        ok = run_container_transfer(name, action_id, params);
+        out = result_json(action_id, name, true, ok, '{"action":"containerTransfer"}', null)
+      );
+      if(action_name == 'mineBlock',
+        target = params:'target';
+        ok = start_mine_block(name, action_id, floor(number(target:0)), floor(number(target:1)), floor(number(target:2)), params);
+        out = result_json(action_id, name, true, ok, '{"action":"mineBlock"}', null)
+      );
+      if(action_name == 'placeBlock',
+        target = params:'target';
+        ok = start_place_block(name, action_id, floor(number(target:0)), floor(number(target:1)), floor(number(target:2)), params);
+        out = result_json(action_id, name, true, ok, '{"action":"placeBlock"}', null)
+      );
+      if(action_name == 'igniteBlock',
+        target = params:'target';
+        ok = start_ignite_block(name, action_id, floor(number(target:0)), floor(number(target:1)), floor(number(target:2)), params);
+        out = result_json(action_id, name, true, ok, '{"action":"igniteBlock"}', null)
+      );
+      if(action_name == 'sowCrop',
+        target = params:'target';
+        ok = start_sow_crop(name, action_id, floor(number(target:0)), floor(number(target:1)), floor(number(target:2)), params);
+        out = result_json(action_id, name, true, ok, '{"action":"sowCrop"}', null)
+      );
+      remember_action_result(name, action_id, out)
     );
-    if(action_name == 'lookAt',
-      target = params:'target';
-      ok = run_look_at(name, action_id, number(target:0), number(target:1), number(target:2));
-      out = result_json(action_id, name, true, ok, '{"action":"lookAt"}', null)
-    );
-    if(action_name == 'jump',
-      ok = run_jump_once(name, action_id);
-      out = result_json(action_id, name, true, ok, '{"action":"jump"}', null)
-    );
-    if(action_name == 'selectSlot',
-      slot = number(params:'slot');
-      ok = run_select_slot(name, action_id, slot);
-      out = result_json(action_id, name, true, ok, '{"action":"selectSlot"}', null)
-    );
-    if(action_name == 'selectItem',
-      item = params:'item';
-      ok = run_select_item(name, action_id, item);
-      out = result_json(action_id, name, true, ok, '{"action":"selectItem"}', null)
-    );
-    if(action_name == 'stop',
-      ok = run_stop_action(name, action_id);
-      out = result_json(action_id, name, true, ok, '{"action":"stop"}', null)
-    );
-    if(action_name == 'useItem',
-      ok = start_use_item(name, action_id, params);
-      out = result_json(action_id, name, true, ok, '{"action":"useItem"}', null)
-    );
-    if(action_name == 'rangedAttack',
-      ok = start_ranged_attack(name, action_id, params);
-      out = result_json(action_id, name, true, ok, '{"action":"rangedAttack"}', null)
-    );
-    if(action_name == 'attackEntity',
-      ok = start_attack_entity(name, action_id, params);
-      out = result_json(action_id, name, true, ok, '{"action":"attackEntity"}', null)
-    );
-    if(action_name == 'dropItem',
-      ok = start_drop_item(name, action_id, params);
-      out = result_json(action_id, name, true, ok, '{"action":"dropItem"}', null)
-    );
-    if(action_name == 'handoffItem',
-      ok = run_handoff_item(name, action_id, params);
-      out = result_json(action_id, name, true, ok, '{"action":"handoffItem"}', null)
-    );
-    if(action_name == 'moveItem',
-      ok = run_move_item(name, action_id, params);
-      out = result_json(action_id, name, true, ok, '{"action":"moveItem"}', null)
-    );
-    if(action_name == 'craftItem',
-      ok = run_craft_item(name, action_id, params);
-      out = result_json(action_id, name, true, ok, '{"action":"craftItem"}', null)
-    );
-    if(action_name == 'furnaceTransfer',
-      ok = run_furnace_transfer(name, action_id, params);
-      out = result_json(action_id, name, true, ok, '{"action":"furnaceTransfer"}', null)
-    );
-    if(action_name == 'containerTransfer',
-      ok = run_container_transfer(name, action_id, params);
-      out = result_json(action_id, name, true, ok, '{"action":"containerTransfer"}', null)
-    );
-    if(action_name == 'mineBlock',
-      target = params:'target';
-      ok = start_mine_block(name, action_id, floor(number(target:0)), floor(number(target:1)), floor(number(target:2)), params);
-      out = result_json(action_id, name, true, ok, '{"action":"mineBlock"}', null)
-    );
-    if(action_name == 'placeBlock',
-      target = params:'target';
-      ok = start_place_block(name, action_id, floor(number(target:0)), floor(number(target:1)), floor(number(target:2)), params);
-      out = result_json(action_id, name, true, ok, '{"action":"placeBlock"}', null)
-    );
-    if(action_name == 'igniteBlock',
-      target = params:'target';
-      ok = start_ignite_block(name, action_id, floor(number(target:0)), floor(number(target:1)), floor(number(target:2)), params);
-      out = result_json(action_id, name, true, ok, '{"action":"igniteBlock"}', null)
-    );
-    if(action_name == 'sowCrop',
-      target = params:'target';
-      ok = start_sow_crop(name, action_id, floor(number(target:0)), floor(number(target:1)), floor(number(target:2)), params);
-      out = result_json(action_id, name, true, ok, '{"action":"sowCrop"}', null)
-    );
-    out
   )
 );

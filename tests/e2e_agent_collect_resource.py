@@ -368,10 +368,15 @@ def run_illegal(
         {"item": item, "count": 1, "constraints": {"radius": 12, "max_candidates": 2}},
         ctx.weld_context,
     )
-    if result.get("success") or result.get("reason") != "protected_or_illegal_target" or not result.get("canRetry"):
+    # A protected candidate is now a skip; with no legal candidate the collect
+    # honestly exhausts. The red-line guarantees are unchanged: no success, no
+    # mutation counted, and the break_denied surfaced in skipped (no greenwashing).
+    if result.get("success") or result.get("reason") != "candidate_targets_exhausted" or not result.get("canRetry"):
         raise AssertionError(f"illegal inverse returned wrong truth: {result}")
     if result["metrics"]["after_count"] != 0:
         raise AssertionError(f"illegal inverse counted protected mutation: {result}")
+    if not any(str(entry.get("reason", "")).startswith("break_denied") for entry in result["metrics"]["skipped"]):
+        raise AssertionError(f"illegal inverse must surface break_denied in skipped: {result}")
     return {
         "item": item,
         "reason": result["reason"],

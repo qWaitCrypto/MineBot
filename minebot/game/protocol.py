@@ -27,12 +27,16 @@ def build_perceive_call(bot: str, scope: str, params: dict[str, Any], app: str =
     return _script_call(app, "minebot_perceive", bot, scope, params)
 
 
-def build_drain_call(bot: str, app: str = SCARPET_APP) -> str:
-    return _script_call(app, "minebot_drain_events", bot)
+def build_drain_call(bot: str, app: str = SCARPET_APP, *, since_seq: int | None = None) -> str:
+    if since_seq is None:
+        return _script_call(app, "minebot_drain_events", bot)
+    return _script_call(app, "minebot_events_since", bot, since_seq)
 
 
-def build_chat_drain_call(bot: str, app: str = SCARPET_APP) -> str:
-    return _script_call(app, "minebot_drain_chat", bot)
+def build_chat_drain_call(bot: str, app: str = SCARPET_APP, *, since_seq: int | None = None) -> str:
+    if since_seq is None:
+        return _script_call(app, "minebot_drain_chat", bot)
+    return _script_call(app, "minebot_chat_since", bot, since_seq)
 
 
 def build_spawn_call(

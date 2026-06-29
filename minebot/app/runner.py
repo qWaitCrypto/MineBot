@@ -28,6 +28,7 @@ from minebot.brain.modes import (
 from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, WeldContext, execute_tool
 from minebot.contract import Body, JsonObject, ProgressAbort, ProgressFacts
+from minebot.game.errors import BodyProtocolError
 
 RunnerCallable = Callable[..., Awaitable[Any]]
 
@@ -192,7 +193,20 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 "nextSuggestion": None,
                 "metrics": {"expected": "object"},
             }
-        result = execute_tool(tool, params, ctx.context.weld_context)
+        try:
+            result = execute_tool(tool, params, ctx.context.weld_context)
+        except ProgressAbort:
+            raise
+        except Exception as exc:
+            result = _tool_exception_payload(exc)
+            if trace is not None:
+                trace.emit(
+                    "tool_exception",
+                    tool=tool.name,
+                    error_type=type(exc).__name__,
+                    reason=result["reason"],
+                    message=str(exc),
+                )
         if trace is not None:
             trace.emit("tool_result", tool=tool.name, reason=str(result.get("reason")), success=bool(result.get("success")))
         return result
@@ -224,6 +238,20 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
         _failure_error_function=None,
         _use_default_failure_error_function=False,
     )
+
+
+def _tool_exception_payload(exc: Exception) -> JsonObject:
+    reason = "transport_error" if isinstance(exc, (BodyProtocolError, OSError, TimeoutError)) else "tool_runtime_error"
+    return {
+        "success": False,
+        "reason": reason,
+        "canRetry": True,
+        "nextSuggestion": "retry after refreshing state; choose a different action if the same failure repeats",
+        "metrics": {
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+        },
+    }
 
 
 class AgentRuntime:

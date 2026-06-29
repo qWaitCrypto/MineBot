@@ -10,12 +10,41 @@ class GovernanceTests(unittest.TestCase):
             protected_regions=[Region("base", (20, 0, 20), (30, 100, 30))],
         )
 
-    def test_unknown_provenance_blocks_even_natural_looking_stone(self):
-        decision = self.policy.can_break((100, 64, 100), "minecraft:stone", BreakContext.TRAVEL)
+    def test_natural_type_breakable_outside_declared_region(self):
+        # Provenance is by block TYPE for resource/explicit breaks: a known-natural
+        # block is breakable even with no natural_region containing it.
+        decision = self.policy.can_break((100, 64, 100), "minecraft:stone", BreakContext.DIRECT)
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed_natural")
+        self.assertIsNone(decision.natural_region)
+
+    def test_travel_break_stays_conservative_outside_region(self):
+        # Pathing does NOT tunnel through undeclared terrain even for a natural
+        # type: TRAVEL remains region-gated so navigation behavior is unchanged.
+        decision = self.policy.can_break((100, 64, 100), "stone", BreakContext.TRAVEL)
 
         self.assertFalse(decision.allowed)
         self.assertTrue(decision.protected)
         self.assertEqual(decision.reason, "unknown_provenance")
+
+    def test_collect_dirt_allowed_outside_declared_region(self):
+        # The executability unblock: collect a COLLECT_TARGET with no declared
+        # region (the real-server case) must be allowed.
+        decision = self.policy.can_break((100, 64, 100), "dirt", BreakContext.COLLECT)
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed_natural")
+        self.assertIsNone(decision.natural_region)
+
+    def test_unknown_type_still_denied_outside_region(self):
+        # A type we do not recognize as natural stays protected (red-line safe
+        # default for unknown/player blocks), now by type rather than region.
+        decision = self.policy.can_break((100, 64, 100), "cobblestone_wall", BreakContext.COLLECT)
+
+        self.assertFalse(decision.allowed)
+        self.assertTrue(decision.protected)
+        self.assertEqual(decision.reason, "not_natural_breakable")
 
     def test_protected_region_wins_over_natural_classification(self):
         decision = self.policy.can_break((25, 64, 25), "stone", BreakContext.COLLECT)
@@ -57,6 +86,51 @@ class GovernanceTests(unittest.TestCase):
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "collect_target_required")
+
+    def test_collect_approach_allows_encasing_stone_outside_declared_region(self):
+        # The dig-through root cause fix: to reach a BURIED collect target the
+        # navigator must clear the natural blocks ON THE WAY (e.g. encasing
+        # stone). Plain COLLECT refuses stone (collect_target_required); COLLECT
+        # _APPROACH permits any natural block as pathing — like TRAVEL's
+        # allowed_natural, but TYPE-gated so it does not require a declared
+        # region (TRAVEL refuses undeclared terrain). This is the only context
+        # that lets collect dig over to a buried target in the real
+        # default-spawn (undeclared) world.
+        decision = self.policy.can_break((100, 64, 100), "stone", BreakContext.COLLECT_APPROACH)
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed_natural")
+        self.assertIsNone(decision.natural_region)
+
+    def test_collect_approach_allows_target_type_too(self):
+        decision = self.policy.can_break((100, 64, 100), "diamond_ore", BreakContext.COLLECT_APPROACH)
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed_natural")
+
+    def test_collect_approach_still_refuses_player_functional_blocks(self):
+        # Red line unchanged: player functional blocks stay protected even under
+        # the dig-through pathing context.
+        for block_type in ("chest", "oak_door", "crafting_table"):
+            with self.subTest(block_type=block_type):
+                decision = self.policy.can_break((100, 64, 100), block_type, BreakContext.COLLECT_APPROACH)
+                self.assertFalse(decision.allowed)
+                self.assertTrue(decision.protected)
+                self.assertEqual(decision.reason, "protected_type")
+
+    def test_collect_approach_still_refuses_protected_region(self):
+        decision = self.policy.can_break((25, 64, 25), "stone", BreakContext.COLLECT_APPROACH)
+
+        self.assertFalse(decision.allowed)
+        self.assertTrue(decision.protected)
+        self.assertEqual(decision.reason, "protected_region")
+
+    def test_collect_approach_still_refuses_non_natural_types(self):
+        decision = self.policy.can_break((100, 64, 100), "cobblestone_wall", BreakContext.COLLECT_APPROACH)
+
+        self.assertFalse(decision.allowed)
+        self.assertTrue(decision.protected)
+        self.assertEqual(decision.reason, "not_natural_breakable")
 
     def test_recovery_context_is_bounded_and_does_not_break_resource_targets(self):
         decision = self.policy.can_break((0, 64, 0), "iron_ore", BreakContext.RECOVERY)

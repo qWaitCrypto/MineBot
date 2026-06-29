@@ -313,11 +313,12 @@ def _context_frame(situational: SituationalState) -> str:
 def _first_blocking_tool_reason(results: Any) -> str | None:
     if not isinstance(results, list):
         return None
+    exact_blocking_reasons = {"no_path", "budget_exceeded", "move_start_failed"}
     for result in results:
         if not isinstance(result, dict):
             continue
         reason = str(result.get("reason") or "")
-        if reason.startswith(("navigation_", "mobility_", "stuck", "lost_position")):
+        if reason in exact_blocking_reasons or reason.startswith(("navigation_", "mobility_", "stuck", "lost_position")):
             return reason
     return None
 

@@ -24,6 +24,7 @@ from minebot.game.transport import BodyTransport
 
 DEFAULT_TERMINAL_EVENTS = {
     "moveDone",
+    "navigateDone",
     "lookDone",
     "jumpDone",
     "selectSlotDone",
@@ -56,6 +57,7 @@ class ScarpetBody:
         self.transport = transport
         self.app = app
         self.last_seq = 0
+        self.last_chat_seq = 0
         self.event_log: list[Event] = []
         self.request_history: list[dict[str, object]] = []
         self.completed_action_traces: list[dict[str, object]] = []
@@ -134,23 +136,28 @@ class ScarpetBody:
     def transport_latency_snapshot(self, *, max_requests: int = 64) -> dict[str, object]:
         requests = self.request_history[-max_requests:] if max_requests > 0 else self.request_history
         latencies = [float(entry["elapsed_ms"]) for entry in requests]
+        extra = _transport_snapshot(self.transport)
         if not latencies:
-            return {
+            base = {
                 "count": 0,
                 "last_request_ms": None,
                 "mean_request_ms": None,
                 "p95_request_ms": None,
                 "max_request_ms": None,
             }
+            base.update(extra)
+            return base
         ordered = sorted(latencies)
         p95_index = max(0, min(len(ordered) - 1, int((len(ordered) - 1) * 0.95)))
-        return {
+        base = {
             "count": len(latencies),
             "last_request_ms": latencies[-1],
             "mean_request_ms": round(sum(latencies) / len(latencies), 3),
             "p95_request_ms": ordered[p95_index],
             "max_request_ms": max(latencies),
         }
+        base.update(extra)
+        return base
 
     def observability_snapshot(
         self,
@@ -554,9 +561,16 @@ class ScarpetBody:
         return self._dispatch_action_and_await(action, timeout_s=timeout_s, action_name="furnaceTransfer")
 
     def poll_events(self) -> list[Event]:
-        events = parse_events(self._timed_request(build_drain_call(self.bot_name, self.app), kind="event_drain"))
+        events = parse_events(
+            self._timed_request(
+                build_drain_call(self.bot_name, self.app, since_seq=self.last_seq),
+                kind="event_drain",
+            )
+        )
         normalized: list[Event] = []
         for event in events:
+            if event.seq <= self.last_seq:
+                continue
             if event.seq != self.last_seq + 1:
                 normalized.append(
                     Event(
@@ -578,9 +592,17 @@ class ScarpetBody:
         Chat is intentionally separate from Body action events so it cannot
         satisfy `await_action_terminal(...)` by accident.
         """
-        events = parse_events(self._timed_request(build_chat_drain_call(self.bot_name, self.app), kind="chat_drain"))
-        self.event_log.extend(events)
-        return events
+        events = parse_events(
+            self._timed_request(
+                build_chat_drain_call(self.bot_name, self.app, since_seq=self.last_chat_seq),
+                kind="chat_drain",
+            )
+        )
+        fresh = [event for event in events if event.seq > self.last_chat_seq]
+        for event in fresh:
+            self.last_chat_seq = max(self.last_chat_seq, event.seq)
+        self.event_log.extend(fresh)
+        return fresh
 
     def await_action_terminal(
         self,
@@ -614,3 +636,13 @@ class ScarpetBody:
         return parse_result(
             self._timed_request(build_interrupt_call(self.bot_name, reason, self.app), kind="interrupt")
         )
+
+
+def _transport_snapshot(transport: BodyTransport) -> dict[str, object]:
+    snapshot = getattr(transport, "stats_snapshot", None)
+    if not callable(snapshot):
+        return {}
+    value = snapshot()
+    if isinstance(value, dict):
+        return {"transport_stats": dict(value)}
+    return {}

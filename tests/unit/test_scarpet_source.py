@@ -5,9 +5,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MINEBOT_SC = ROOT / "test-server" / "world" / "scripts" / "minebot.sc"
+ASSET_MINEBOT_SC = ROOT / "assets" / "carpet" / "scripts" / "minebot.sc"
 
 
 class ScarpetSourceTests(unittest.TestCase):
+    def test_test_server_and_deployable_minebot_scripts_stay_in_sync(self):
+        self.assertEqual(MINEBOT_SC.read_text(), ASSET_MINEBOT_SC.read_text())
+
     def test_minebot_action_uses_decode_json_not_regex_payload_parser(self):
         source = MINEBOT_SC.read_text()
         match = re.search(r"minebot_action\(name, payload\) -> \((.*?)\n\);", source, re.S)
@@ -117,6 +121,19 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("'missing_body'", source)
         self.assertIn("release_owner(name, 'moveTo')", source)
 
+    def test_list_perceptions_have_char_budget_guard_against_rcon_truncation(self):
+        # RCON silently truncates at 4096 chars and a truncated list response can
+        # desync the stream. The three list-style perceptions must cap their `out`
+        # string at a char budget (well under 4096) and fall to the existing
+        # `limit_exceeded` overflow path. Pinned in source; the actual <4096
+        # behavior is validated live by the collect-64 rerun.
+        source = MINEBOT_SC.read_text()
+
+        self.assertIn("global_response_char_budget = 2000;", source)
+        # Referenced once in each of nearbyBlocks / findBlocks / nearbyEntities.
+        self.assertEqual(source.count("global_response_char_budget"), 4)  # 1 decl + 3 uses
+        self.assertIn("length(out) >= global_response_char_budget", source)
+
     def test_find_blocks_scope_is_bounded_and_type_matched(self):
         source = MINEBOT_SC.read_text()
 
@@ -125,10 +142,45 @@ class ScarpetSourceTests(unittest.TestCase):
             "wanted = if(params:'type' == null",
             "if(radius > 16, radius = 16)",
             "if(limit > 128, limit = 128)",
+            "found = l();",
+            "entry = l(dist2, x, y, z, bs, block_kind(bs));",
+            "put(found:insert_at, entry, 'insert');",
+            "delete(found:limit);",
             '"dist2":%.3f',
             '"blocks":[%s]',
         ):
             self.assertIn(expected, source)
+
+    def test_navigate_to_immediate_terminals_are_accepted_for_event_truth(self):
+        source = MINEBOT_SC.read_text()
+        match = re.search(r"start_navigate_to\(name, action_id, gx, gy, gz, params\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(match, "start_navigate_to function not found")
+        body = match.group(1)
+
+        self.assertIsNotNone(
+            re.search(
+                r"if\(p == null,\s*"
+                r"emit\('navigateDone'.*?'missing_body'.*?\);\s*true",
+                body,
+                re.S,
+            )
+        )
+        self.assertIsNotNone(
+            re.search(
+                r"emit\('navigateDone'.*?plan_status.*?\);\s*"
+                r"if\(plan_status == 'no_path'.*?\);\s*true",
+                body,
+                re.S,
+            )
+        )
+        self.assertIsNotNone(
+            re.search(
+                r"emit\('navigateDone'.*?'move_start_failed'.*?\);\s*"
+                r"global_navigations:name = null;\s*true",
+                body,
+                re.S,
+            )
+        )
 
     def test_nearby_entities_scope_is_bounded_and_reports_pos_health(self):
         source = MINEBOT_SC.read_text()
@@ -166,6 +218,17 @@ class ScarpetSourceTests(unittest.TestCase):
             "stack_json(data:1)",
         ):
             self.assertIn(expected, source)
+
+    def test_reset_does_not_rewind_event_cursors(self):
+        source = MINEBOT_SC.read_text()
+        match = re.search(r"minebot_reset\(\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(match, "minebot_reset function not found")
+        body = match.group(1)
+
+        self.assertIn("global_events = [];", body)
+        self.assertIn("global_agent_chat_events = [];", body)
+        self.assertNotIn("global_seq = 0;", body)
+        self.assertNotIn("global_agent_chat_seq = 0;", body)
 
     def test_death_and_respawn_events_are_emitted_in_production_app(self):
         source = MINEBOT_SC.read_text()

@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from minebot.brain.progress import ProgressAuthority
-from minebot.contract import Body, JsonObject, ProgressAbort, ToolResult
+from minebot.contract import Body, JsonObject, ProgressAbort, ToolResult, is_candidate_skip
 
 # A tool's callable: takes validated input params, returns a ToolResult whose
 # success reflects *verified Body terminal truth* (the transaction awaits its own
@@ -211,7 +211,10 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
 
         post_fingerprint = ctx.authority.fingerprint(ctx.body.get_state())  # step 5: post fp
         action_key = _action_key(sidecar.progress_key, tool_input)
-        neutral = result.reason == "preempted"
+        # A candidate-skip ("this target is unsuitable, pick another") is neutral:
+        # not progress, not failure (agent-loop.md §6). Without this, a composition
+        # probing a messy candidate field trips the failure storm on healthy work.
+        neutral = result.reason == "preempted" or is_candidate_skip(result.reason)
         ctx.authority.note_step(                          # step 6: feed sensors
             action_key, success=result.success, fingerprint=post_fingerprint, neutral=neutral
         )

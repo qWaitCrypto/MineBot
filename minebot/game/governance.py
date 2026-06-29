@@ -1,9 +1,17 @@
 """Break/place legality for the Body layer.
 
-This module is the shared governance path required by the canonical docs.  It
-is intentionally conservative: unknown provenance is protected until a natural
-work region, bot placement ledger entry, or explicit future override says
-otherwise.
+This module is the shared governance path required by the canonical docs. The
+red line is "never break player-made blocks" (CLAUDE.md: natural blocks/ores/
+logs are fine). Break provenance is therefore established by block TYPE: only
+``NATURAL_BREAKABLE`` types are breakable, and the red line is held by
+``STRONGLY_PROTECTED_TYPES`` + ``protected_regions`` + the bot placement ledger.
+A declared ``natural_region`` is no longer required to break a known-natural
+block — it only annotates the decision. (Placement and interaction remain
+region-gated; only ``can_break`` uses type-based provenance.)
+
+Residual, accepted tradeoff: a player structure built from raw natural types
+(dirt/stone/log) outside any ``protected_region`` is breakable. Mitigate with a
+``protected_region`` overlay and the bot ledger on shared servers.
 """
 
 from __future__ import annotations
@@ -230,7 +238,10 @@ class GovernancePolicy:
             return self._can_break_bot_owned(bot_entry, block_type, context)
 
         natural_region = self._region_containing(self.natural_regions, pos)
+        region_name = natural_region.name if natural_region is not None else None
         if context == BreakContext.FARM and block_type in FARM_TARGETS:
+            # Crops are player-planted by default; harvesting still requires a
+            # declared natural region (unchanged, conservative).
             if natural_region is None:
                 return LegalityDecision(allowed=False, reason="unknown_provenance", protected=True)
             return LegalityDecision(allowed=True, reason="allowed_natural_farm", natural_region=natural_region.name)
@@ -238,30 +249,41 @@ class GovernancePolicy:
         if block_type in STRONGLY_PROTECTED_TYPES:
             return LegalityDecision(allowed=False, reason="protected_type", protected=True)
 
-        if natural_region is None:
+        if natural_region is None and context == BreakContext.TRAVEL:
+            # Conservative pathing: the navigator does not tunnel through
+            # undeclared terrain. Resource/explicit breaks (COLLECT /
+            # COLLECT_APPROACH / DIRECT / BOT_CLEANUP) establish provenance by
+            # block TYPE below, so a declared region is not required to mine a
+            # known-natural target or to clear a path to one.
             return LegalityDecision(allowed=False, reason="unknown_provenance", protected=True)
 
+        # Provenance is established by block TYPE membership in NATURAL_BREAKABLE,
+        # not by a declared natural_region. The red line ("never break player-made
+        # blocks") is held by STRONGLY_PROTECTED_TYPES + protected_regions + the
+        # bot ledger; unknown/unrecognized types stay protected by failing the
+        # NATURAL_BREAKABLE gate below. A declared natural_region is no longer
+        # required to break a known-natural block — it only annotates the decision.
         if block_type not in NATURAL_BREAKABLE:
             return LegalityDecision(
                 allowed=False,
                 reason="not_natural_breakable",
                 protected=True,
-                natural_region=natural_region.name,
+                natural_region=region_name,
             )
 
         if context == BreakContext.PATH:
-            return LegalityDecision(allowed=False, reason="path_no_terrain_break", natural_region=natural_region.name)
+            return LegalityDecision(allowed=False, reason="path_no_terrain_break", natural_region=region_name)
 
         if context == BreakContext.RECOVERY and block_type in COLLECT_TARGETS:
-            return LegalityDecision(allowed=False, reason="recovery_no_resource_break", natural_region=natural_region.name)
+            return LegalityDecision(allowed=False, reason="recovery_no_resource_break", natural_region=region_name)
 
         if context == BreakContext.COLLECT and block_type not in COLLECT_TARGETS:
-            return LegalityDecision(allowed=False, reason="collect_target_required", natural_region=natural_region.name)
+            return LegalityDecision(allowed=False, reason="collect_target_required", natural_region=region_name)
 
         if context == BreakContext.BOT_CLEANUP:
-            return LegalityDecision(allowed=False, reason="not_bot_owned", protected=True, natural_region=natural_region.name)
+            return LegalityDecision(allowed=False, reason="not_bot_owned", protected=True, natural_region=region_name)
 
-        return LegalityDecision(allowed=True, reason="allowed_natural", natural_region=natural_region.name)
+        return LegalityDecision(allowed=True, reason="allowed_natural", natural_region=region_name)
 
     def can_place(self, pos: Position, block_type: str, context: PlaceContext | str, bot: str) -> LegalityDecision:
         context = PlaceContext(context)

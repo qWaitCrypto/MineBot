@@ -9,7 +9,7 @@ from minebot.brain.composition import (
     resource_plan_for,
 )
 from minebot.brain.modes import ModeRuntime
-from minebot.brain.progress import ProgressAuthority
+from minebot.brain.progress import FAILURE_STORM_LIMIT, ProgressAbort, ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
 from minebot.brain.lifecycle import LifecycleState
 from minebot.contract import BodyState, PerceptionResult, ToolResult
@@ -132,6 +132,33 @@ def candidate_search_tool(targets):
     ), calls
 
 
+def skip_failing_search_tool(targets, *, reason="search_block_navigation_failed:search_block_no_stand_point"):
+    """Search that fails on its own nearest pick (a candidate-skip reason) but
+    still returns the full, real candidate list — mirrors the live behavior where
+    the nearest block was underground with no stand point."""
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        candidates = [
+            {"pos": list(target), "type": params.get("block_types", ["dirt"])[0], "distance": index}
+            for index, target in enumerate(targets)
+        ]
+        if not candidates:
+            return ToolResult(False, "search_block_not_found", True, metrics={"candidates": []})
+        # success=False (its internal approach to candidates[0] failed) but the
+        # candidate list is intact and trustworthy.
+        return ToolResult(False, reason, True, metrics={"target": candidates[0], "candidates": candidates})
+
+    return RegisteredTool(
+        "search_for_block",
+        "search",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("search_for_block", mutating=False, permission="read_world"),
+    ), calls
+
+
 def mine_tool(body, *, fail_reason=None):
     calls = []
 
@@ -175,12 +202,14 @@ def mine_tool_fail_once(body):
 
 
 def composition_context(body, registry, *, max_candidates=4):
+    trace_events = []
     return CompositionContext(
         registry=registry,
         weld_context=WeldContext(body=body, authority=ProgressAuthority(), goal_text="collect 2 dirt"),
         runtime_profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
         budget=CompositionBudget(max_candidates=max_candidates, max_mutating_calls=max_candidates, max_wall_s=10),
-    )
+        trace=lambda event, payload: trace_events.append({"event": event, **payload}),
+    ), trace_events
 
 
 class AgentCompositionTests(unittest.TestCase):
@@ -188,7 +217,7 @@ class AgentCompositionTests(unittest.TestCase):
         body = PagedInventoryBody()
         registry = ToolRegistry()
         register_inventory_tools(registry, body)
-        ctx = composition_context(body, registry)
+        ctx, _trace_events = composition_context(body, registry)
 
         result = execute_tool(registry.get("read_inventory"), {}, ctx.weld_context)
 
@@ -204,7 +233,7 @@ class AgentCompositionTests(unittest.TestCase):
         registry.register(search)
         miner, mine_calls = mine_tool(body)
         registry.register(miner)
-        ctx = composition_context(body, registry)
+        ctx, _trace_events = composition_context(body, registry)
         register_collect_resource_tool(registry, ctx)
 
         result = execute_tool(
@@ -232,7 +261,7 @@ class AgentCompositionTests(unittest.TestCase):
         registry.register(search)
         miner, _mine_calls = mine_tool(body)
         registry.register(miner)
-        ctx = composition_context(body, registry)
+        ctx, _trace_events = composition_context(body, registry)
         register_collect_resource_tool(registry, ctx)
 
         result = execute_tool(
@@ -252,7 +281,7 @@ class AgentCompositionTests(unittest.TestCase):
         registry = ToolRegistry()
         miner, _mine_calls = mine_tool(body)
         registry.register(miner)
-        ctx = composition_context(body, registry)
+        ctx, _trace_events = composition_context(body, registry)
         self.assertTrue(ctx.weld_context.writer.try_acquire("other_mutation"))
 
         result = execute_tool(
@@ -275,7 +304,7 @@ class AgentCompositionTests(unittest.TestCase):
         registry.register(search)
         miner, _mine_calls = mine_tool(body)
         registry.register(miner)
-        ctx = composition_context(body, registry)
+        ctx, _trace_events = composition_context(body, registry)
 
         result = collect_resource({"item": "dirt", "count": 1}, ctx)
 
@@ -293,14 +322,49 @@ class AgentCompositionTests(unittest.TestCase):
         registry.register(search)
         miner, _mine_calls = mine_tool(body, fail_reason="break_denied:protected_region")
         registry.register(miner)
-        ctx = composition_context(body, registry)
+        ctx, _trace_events = composition_context(body, registry)
 
         result = collect_resource({"item": "dirt", "count": 1}, ctx)
 
+        # A break_denied candidate is now a skip (try another), not an immediate
+        # task failure. With only the one illegal candidate, the collect honestly
+        # exhausts and still surfaces the break_denied in skipped/last_failure — no
+        # greenwashing into success.
         self.assertFalse(result.success)
-        self.assertEqual(result.reason, "protected_or_illegal_target")
+        self.assertEqual(result.reason, "candidate_targets_exhausted")
         self.assertTrue(result.can_retry)
         self.assertEqual(result.metrics["skipped"][0]["reason"], "break_denied:protected_region")
+        self.assertTrue(result.metrics["skipped"][0]["skip"])
+
+    def test_weld_treats_candidate_skip_as_neutral_not_failure(self):
+        # A mutating tool returning a candidate-skip reason must NOT accrue the
+        # failure-storm counter, even repeated past the limit.
+        body = FakeBody()
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 1 dirt")
+        miner, _ = mine_tool(body, fail_reason="break_denied:protected_region")
+
+        for _ in range(FAILURE_STORM_LIMIT + 2):
+            payload = execute_tool(miner, {"pos": [1, 59, 0]}, weld)
+            self.assertFalse(payload["success"])
+
+        self.assertEqual(authority.failure_steps, 0)
+        authority.require_can_continue("collect 1 dirt")  # does not raise
+
+    def test_weld_counts_genuine_failure_toward_storm(self):
+        # A non-skip failure (a real error) is still counted and still trips the
+        # storm via the weld itself — the skip set must not swallow genuine failures.
+        body = FakeBody()
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="g")
+        miner, _ = mine_tool(body, fail_reason="mine_failed:real_error")
+
+        for _ in range(FAILURE_STORM_LIMIT - 1):
+            execute_tool(miner, {"pos": [1, 59, 0]}, weld)
+        self.assertEqual(authority.failure_steps, FAILURE_STORM_LIMIT - 1)
+
+        with self.assertRaises(ProgressAbort):
+            execute_tool(miner, {"pos": [1, 59, 0]}, weld)
 
     def test_collect_resource_maps_resource_to_blocks_and_inventory_item(self):
         body = FakeBody()
@@ -310,7 +374,7 @@ class AgentCompositionTests(unittest.TestCase):
         registry.register(search)
         miner, mine_calls = mine_tool(body)
         registry.register(miner)
-        ctx = composition_context(body, registry)
+        ctx, _trace_events = composition_context(body, registry)
         register_collect_resource_tool(registry, ctx)
 
         result = execute_tool(
@@ -325,6 +389,15 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["requested_item"], "iron")
         self.assertEqual(result["metrics"]["item"], "raw_iron")
 
+    def test_collect_resource_maps_dirt_to_dirt_dropping_surface_blocks(self):
+        plan = resource_plan_for("dirt")
+
+        self.assertEqual(plan.inventory_items, ("dirt",))
+        self.assertEqual(plan.expected_drops, ("dirt",))
+        self.assertIn("dirt", plan.block_types)
+        self.assertIn("grass_block", plan.block_types)
+        self.assertIn("coarse_dirt", plan.block_types)
+
     def test_collect_resource_caps_search_limit_for_rcon_payload_safety(self):
         body = FakeBody()
         registry = ToolRegistry()
@@ -333,12 +406,12 @@ class AgentCompositionTests(unittest.TestCase):
         registry.register(search)
         miner, _mine_calls = mine_tool(body)
         registry.register(miner)
-        ctx = composition_context(body, registry, max_candidates=96)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=96)
 
         result = collect_resource({"item": "logs", "count": 1}, ctx)
 
         self.assertTrue(result.success, result)
-        self.assertEqual(search_calls[0]["find_limit"], 32)
+        self.assertEqual(search_calls[0]["find_limit"], 12)
 
     def test_collect_resource_counts_equivalent_log_inventory_items(self):
         body = FakeBody()
@@ -349,7 +422,7 @@ class AgentCompositionTests(unittest.TestCase):
         registry.register(search)
         miner, mine_calls = mine_tool(body)
         registry.register(miner)
-        ctx = composition_context(body, registry)
+        ctx, _trace_events = composition_context(body, registry)
 
         result = collect_resource({"item": "logs", "count": 64}, ctx)
 
@@ -368,13 +441,95 @@ class AgentCompositionTests(unittest.TestCase):
         registry.register(search)
         miner, mine_calls = mine_tool_fail_once(body)
         registry.register(miner)
-        ctx = composition_context(body, registry, max_candidates=3)
+        ctx, trace_events = composition_context(body, registry, max_candidates=3)
 
         result = collect_resource({"item": "dirt", "count": 1}, ctx)
 
         self.assertTrue(result.success, result)
         self.assertEqual([call["pos"] for call in mine_calls], [[1, 59, 0], [2, 59, 0]])
         self.assertEqual(result.metrics["candidates_tried"], 2)
+        self.assertTrue(any(event["event"] == "composition_search" for event in trace_events))
+        self.assertTrue(any(event["event"] == "composition_mine_attempt" for event in trace_events))
+
+    def test_collect_resource_prefers_verified_search_target_over_raw_candidates(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+
+        def callable_(params):
+            return ToolResult(
+                True,
+                "block_in_range",
+                False,
+                metrics={
+                    "target": {"pos": [5, 70, 0], "type": "dirt"},
+                    "candidates": [
+                        {"pos": [3, 59, 0], "type": "dirt", "distance": 1},
+                        {"pos": [5, 70, 0], "type": "dirt", "distance": 2},
+                    ],
+                },
+            )
+
+        registry.register(
+            RegisteredTool(
+                "search_for_block",
+                "search",
+                {"type": "object"},
+                callable_,
+                ToolSidecar("search_for_block", mutating=False, permission="read_world"),
+            )
+        )
+        miner, mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 1}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual([call["pos"] for call in mine_calls], [[5, 70, 0]])
+
+    def test_collect_resource_tries_candidates_when_search_skip_fails_on_top_pick(self):
+        # The live bug: search navigated to its own nearest candidate (underground,
+        # no stand point) and returned success=False with a candidate-skip reason,
+        # which made collect_resource abort -- even though the candidate list still
+        # held a reachable block. The orchestrator must fall through and try the
+        # next untried candidate via mine's own approach, not abort.
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = skip_failing_search_tool([[1, 59, 0], [2, 70, 0]])
+        registry.register(search)
+        miner, mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx, trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 1}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "collected")
+        # Both candidates were tried (mine approaches each), not aborted on the first.
+        self.assertEqual([call["pos"] for call in mine_calls][0], [1, 59, 0])
+        self.assertTrue(any(event["event"] == "composition_search_skip" for event in trace_events))
+        # The search-skip is recorded as a neutral skip, not a task failure.
+        self.assertTrue(any(entry.get("phase") == "search" and entry.get("skip") for entry in result.metrics["skipped"]))
+
+    def test_collect_resource_aborts_when_search_fails_for_non_skip_reason(self):
+        # A non-skip search failure (perception_failed: the candidate list itself is
+        # untrustworthy) must still abort honestly -- do NOT swallow real failures.
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = skip_failing_search_tool([[1, 59, 0], [2, 70, 0]], reason="perception_failed")
+        registry.register(search)
+        miner, mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 1}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(mine_calls, [])  # never mined on an untrustworthy candidate list
+        self.assertEqual(result.metrics["after_count"], 0)
 
 
 if __name__ == "__main__":

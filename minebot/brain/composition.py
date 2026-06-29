@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from minebot.brain.modes import RuntimeProfile
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
-from minebot.contract import Body, InventorySlot, JsonObject, ToolResult
+from minebot.contract import Body, InventorySlot, JsonObject, ToolResult, is_candidate_skip
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,7 @@ class CompositionContext:
     weld_context: WeldContext
     runtime_profile: RuntimeProfile
     budget: CompositionBudget
+    trace: Callable[[str, dict[str, object]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,8 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     tried_positions: set[tuple[int, int, int]] = set()
     mutating_calls = 0
     last_failure: dict[str, object] | None = None
+    targets: list[list[int]] = []
+    all_skips = True
 
     while len(attempts) < budget.max_candidates and mutating_calls < budget.max_mutating_calls:
         if time.monotonic() - started > budget.max_wall_s:
@@ -161,20 +164,41 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 budget=budget,
             )
 
-        find_limit = min(32, max(8, budget.max_candidates))
+        find_limit = min(12, max(6, min(budget.max_candidates, radius // 2 if radius > 1 else 1)))
         search = execute_tool(
             context.registry.get("search_for_block"),
             {"block_types": list(plan.block_types), "search_radius": radius, "find_limit": find_limit},
             context.weld_context,
         )
+        _emit_trace(
+            context,
+            "composition_search",
+            {
+                "item": plan.requested_item,
+                "radius": radius,
+                "find_limit": find_limit,
+                "success": bool(search.get("success")),
+                "reason": str(search.get("reason") or ""),
+            },
+        )
         targets = _targets_from_search(search)
         target = _first_untried_target(targets, tried_positions)
-        if not search.get("success") or target is None:
-            reason = str(search.get("reason") or "search_failed")
-            last_failure = {"phase": "search", "reason": reason, "result": search}
+        search_ok = bool(search.get("success"))
+        search_reason = str(search.get("reason") or "search_failed")
+        # A search that navigated to its own nearest pick and could not stand there
+        # (no_stand_point / out_of_range / target_lost / navigation_blocked) is a
+        # CANDIDATE skip, not a search failure: the candidate list it returned is
+        # still real (Scarpet sorts by dist2), so fall through and try the next
+        # untried candidate via mine's own approach. Only abort when there is no
+        # untried candidate left, or the search failed for a non-skip reason
+        # (perception_failed, owner_busy, transport) that means the candidate list
+        # itself is untrustworthy.
+        search_is_candidate_skip = is_candidate_skip(search_reason)
+        if target is None or (not search_ok and not search_is_candidate_skip):
+            last_failure = {"phase": "search", "reason": search_reason, "result": search}
             return _collect_result(
                 False,
-                _search_failure_reason(reason, bool(targets)),
+                _search_failure_reason(search_reason, bool(targets)),
                 True,
                 plan,
                 count,
@@ -186,6 +210,15 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 last_failure=last_failure,
                 budget=budget,
             )
+        if not search_ok:
+            # Candidate-skip search outcome: record it, keep the candidate list, and
+            # try the next untried target instead of treating it as a task failure.
+            skipped.append({"pos": list(target), "reason": search_reason, "skip": True, "phase": "search"})
+            _emit_trace(
+                context,
+                "composition_search_skip",
+                {"item": plan.requested_item, "reason": search_reason, "next_target": list(target)},
+            )
 
         mutating_calls += 1
         tried_positions.add(tuple(target))
@@ -193,6 +226,16 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             context.registry.get("mine_block_collect"),
             {"pos": target, "expected_drops": list(plan.expected_drops), "dry": allow_dry},
             context.weld_context,
+        )
+        _emit_trace(
+            context,
+            "composition_mine_attempt",
+            {
+                "item": plan.requested_item,
+                "target": list(target),
+                "success": bool(mined.get("success")),
+                "reason": str(mined.get("reason") or ""),
+            },
         )
         attempt = {"target": target, "search": search, "mine": mined}
         attempts.append(attempt)
@@ -217,27 +260,28 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             )
 
         if not mined.get("success"):
-            skipped.append({"pos": target, "reason": str(mined.get("reason") or "mine_failed")})
+            reason = str(mined.get("reason") or "mine_failed")
+            skip = is_candidate_skip(reason)
+            skipped.append({"pos": target, "reason": reason, "skip": skip})
             last_failure = {"phase": "mine", "target": target, "reason": mined.get("reason"), "result": mined}
-            if str(mined.get("reason") or "").startswith("break_denied"):
-                return _collect_result(
-                    False,
-                    "protected_or_illegal_target",
-                    True,
-                    plan,
-                    count,
-                    before_count,
-                    current_count,
-                    attempts,
-                    skipped,
-                    "reselect_candidates",
-                    last_failure=last_failure,
-                    budget=budget,
-                )
+            if not skip:
+                all_skips = False
+            # A candidate-skip (unreachable / protected / no observed pickup) is not
+            # a task failure: exclude this target and try the next one. The shared
+            # progress authority still trips the failure storm on genuine repeated
+            # failures (those are NOT neutral in the weld), and budget/tried_positions
+            # bound the loop, so we deliberately do not stop here on a bad candidate.
+        else:
+            all_skips = False
 
+    candidate_budget_hit = len(attempts) >= budget.max_candidates
+    if attempts and candidate_budget_hit and all_skips:
+        reason = "candidate_targets_exhausted"
+    else:
+        reason = "partial_budget_exhausted"
     return _collect_result(
         False,
-        "partial_budget_exhausted",
+        reason,
         True,
         plan,
         count,
@@ -301,6 +345,7 @@ def _resource_plan(item: str) -> ResourcePlan:
         "iron": ("raw_iron", ("iron_ore", "deepslate_iron_ore"), ("raw_iron",)),
         "raw_iron": ("raw_iron", ("iron_ore", "deepslate_iron_ore"), ("raw_iron",)),
         "diamond": ("diamond", ("diamond_ore", "deepslate_diamond_ore"), ("diamond",)),
+        "dirt": ("dirt", ("dirt", "grass_block", "coarse_dirt", "rooted_dirt"), ("dirt",)),
     }
     mapped = aliases.get(item)
     if mapped is not None:
@@ -360,18 +405,18 @@ def _targets_from_search(payload: JsonObject) -> list[list[int]]:
     if not isinstance(metrics, dict):
         return []
     targets: list[list[int]] = []
+    target = metrics.get("target")
+    pos = target.get("pos") if isinstance(target, dict) else None
+    parsed = _parse_pos(pos)
+    if parsed is not None:
+        targets.append(parsed)
     candidates = metrics.get("candidates")
     if isinstance(candidates, list):
         for candidate in candidates:
             pos = candidate.get("pos") if isinstance(candidate, dict) else None
             parsed = _parse_pos(pos)
-            if parsed is not None:
+            if parsed is not None and parsed not in targets:
                 targets.append(parsed)
-    target = metrics.get("target")
-    pos = target.get("pos") if isinstance(target, dict) else None
-    parsed = _parse_pos(pos)
-    if parsed is not None and parsed not in targets:
-        targets.insert(0, parsed)
     return targets
 
 
@@ -437,6 +482,11 @@ def _collect_result(
 
 def _normalize_item(item: str) -> str:
     return item.removeprefix("minecraft:")
+
+
+def _emit_trace(context: CompositionContext, event: str, payload: dict[str, object]) -> None:
+    if context.trace is not None:
+        context.trace(event, payload)
 
 
 __all__ = [

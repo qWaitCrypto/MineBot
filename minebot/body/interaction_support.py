@@ -123,10 +123,16 @@ def find_nearby_block_targets(
                 "limit": limit,
             },
         )
-        failed = perception_failure(found)
-        if failed is not None:
-            return failed
-        for item in found.data.get("blocks") or []:
+        if not found.ok:
+            failed = perception_failure(found)
+            if failed is not None:
+                return failed
+        blocks = found.data.get("blocks") or []
+        if not found.complete and not blocks:
+            failed = perception_failure(found)
+            if failed is not None:
+                return failed
+        for item in blocks:
             block_type = normalize_block_type(str(item.get("type") or ""))
             if not block_type_matches_wanted(block_type, set(wanted)):
                 continue
@@ -153,6 +159,39 @@ def find_nearby_block_targets(
     return sorted(candidates, key=lambda candidate: (candidate.distance, candidate.pos))
 
 
+def find_blocks_metadata(
+    body: Body,
+    *,
+    block_types: tuple[str, ...],
+    radius: int,
+    limit: int,
+) -> dict[str, object]:
+    wanted = sorted({normalize_block_type(block_type) for block_type in block_types})
+    truncated = False
+    uncertainty: list[object] = []
+    errors: list[str] = []
+    for wanted_type in wanted:
+        found = body.perceive(
+            "findBlocks",
+            {
+                "type": wanted_type,
+                "radius": radius,
+                "limit": limit,
+            },
+        )
+        if not found.ok:
+            errors.append(str(found.error or "perception_failed"))
+            continue
+        if not found.complete:
+            truncated = True
+            uncertainty.extend(list(found.uncertainty or ()))
+    return {
+        "truncated": truncated,
+        "uncertainty": uncertainty,
+        "errors": errors,
+    }
+
+
 def find_block_target(
     body: Body,
     *,
@@ -169,48 +208,10 @@ def find_block_target(
             metrics={"search_radius": radius},
         )
 
-    wanted = sorted({normalize_block_type(block_type) for block_type in block_types})
-    state = body.get_state()
-    candidates: list[NearbyBlockTarget] = []
-    seen: set[Position] = set()
-    wanted_set = set(wanted)
-    for wanted_type in wanted:
-        found = body.perceive(
-            "findBlocks",
-            {
-                "type": wanted_type,
-                "radius": radius,
-                "limit": limit,
-            },
-        )
-        failed = perception_failure(found)
-        if failed is not None:
-            return failed
-        for item in found.data.get("blocks") or []:
-            block_type = normalize_block_type(str(item.get("type") or ""))
-            if not block_type_matches_wanted(block_type, wanted_set):
-                continue
-            pos = (int(item["x"]), int(item["y"]), int(item["z"]))
-            if pos in seen:
-                continue
-            seen.add(pos)
-            candidates.append(
-                NearbyBlockTarget(
-                    pos=pos,
-                    block_type=block_type,
-                    distance=dist(state.pos, (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5)),
-                )
-            )
-
-    if not candidates:
-        return ToolResult(
-            success=False,
-            reason=not_found_reason,
-            can_retry=True,
-            next_suggestion="move closer to the target area or expand the block search radius before retrying",
-            metrics={"search_radius": radius, "block_types": wanted, "limit": limit},
-        )
-    return sorted(candidates, key=lambda candidate: (candidate.distance, candidate.pos))[0]
+    targets = find_nearby_block_targets(body, block_types, radius, not_found_reason=not_found_reason, limit=limit)
+    if isinstance(targets, ToolResult):
+        return targets
+    return targets[0]
 
 
 def find_named_entity_target(

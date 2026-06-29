@@ -143,6 +143,19 @@ class ModeRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(modes.suspend_slot)
         self.assertEqual(modes.suspend_slot.reason, "death")
 
+    def test_direct_no_path_tool_result_enters_mobility_profile(self):
+        modes = ModeRuntime()
+
+        reduction = modes.reduce(
+            [AgentSignal.tool_results([{"tool": "move_to", "reason": "no_path"}])],
+            LifecycleState.ACTIVE,
+            goal_text="collect 64 logs",
+        )
+
+        self.assertEqual(reduction.profile.situational, "mobility")
+        self.assertEqual(reduction.reason, "no_path")
+        self.assertIn("navigation", reduction.profile.tool_focus)
+
     def test_death_recovery_priority_beats_same_turn_user_interrupt(self):
         modes = ModeRuntime()
 

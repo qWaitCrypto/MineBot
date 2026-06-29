@@ -13,6 +13,15 @@ class BreakContext(StrEnum):
     PATH = "path"
     TRAVEL = "travel"
     COLLECT = "collect"
+    # COLLECT_APPROACH: "dig over to a collect target". Unlike COLLECT (which
+    # only permits breaking the target TYPE), this permits breaking the natural
+    # blocks ON THE WAY to a target so the navigator can clear a path to a buried
+    # block — like TRAVEL's allowed_natural, but TYPE-gated without requiring a
+    # declared region (TRAVEL refuses undeclared terrain). The red line is
+    # unchanged: player functional blocks (STRONGLY_PROTECTED_TYPES),
+    # protected_regions, and the bot ledger still deny. Bounded by the
+    # navigator's max_break_steps so it cannot tunnel indefinitely.
+    COLLECT_APPROACH = "collect_approach"
     FARM = "farm"
     RECOVERY = "recovery"
     DIRECT = "direct"

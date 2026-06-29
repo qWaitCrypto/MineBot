@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from time import monotonic
 
 from minebot.contract import Body, PerceptionResult, Position
-from minebot.game.navigation import GridCell
+from minebot.game.navigation import GridCell, GridWorld
 
 
 @dataclass(frozen=True)
@@ -101,6 +101,65 @@ def read_block_cells_tiled(
         "elapsed_ms": round((monotonic() - started) * 1000.0, 3),
     }
     return BlockCellRead(cells=read_cells, diagnostics=diagnostics)
+
+
+def refresh_grid_world_around(
+    body: Body,
+    world: GridWorld,
+    center: Position,
+    *,
+    h_radius: int = 4,
+    y_below: int = 3,
+    y_above: int = 3,
+    max_tiles: int = 32,
+    failure_label: str = "nav_refresh",
+) -> dict[str, object]:
+    """Read the bot's local terrain and fold it into the planner's GridWorld.
+
+    This is the seam Baritone calls a per-segment local re-read: before each
+    navigation segment, the live world around ``center`` (the bot's block feet)
+    is read authoritatively and merged into ``world.cells`` so the planner never
+    searches over a stale or placeholder grid. Cells accumulate (we never clear
+    previously-read terrain), so revisited windows are cheap.
+
+    Honesty: the underlying ``read_block_cells_tiled`` raises on any incomplete
+    perception, so a failed refresh propagates as an exception rather than
+    seeding the planner with invented cells. The caller converts that into an
+    honest navigation terminal, never a silent guess.
+    """
+
+    if h_radius < 0:
+        raise ValueError("h_radius must be >= 0")
+    if y_below < 0:
+        raise ValueError("y_below must be >= 0")
+    if y_above < 0:
+        raise ValueError("y_above must be >= 0")
+
+    cx, cy, cz = int(center[0]), int(center[1]), int(center[2])
+    positions: list[Position] = []
+    for x in range(cx - h_radius, cx + h_radius + 1):
+        for y in range(cy - y_below, cy + y_above + 1):
+            for z in range(cz - h_radius, cz + h_radius + 1):
+                positions.append((x, y, z))
+
+    read = read_block_cells_tiled(
+        body,
+        tuple(positions),
+        max_tiles=max_tiles,
+        failure_label=failure_label,
+    )
+    world.cells.update(read.cells)
+    diagnostics = dict(read.diagnostics)
+    diagnostics.update(
+        {
+            "center": [cx, cy, cz],
+            "h_radius": h_radius,
+            "y_below": y_below,
+            "y_above": y_above,
+            "world_cells": len(world.cells),
+        }
+    )
+    return diagnostics
 
 
 def block_read_tiles(

@@ -8,6 +8,7 @@ import time
 from typing import Callable, Protocol
 
 from minebot.body.interaction_support import (
+    find_blocks_metadata,
     find_nearby_block_targets,
     find_block_target,
     interaction_stand_points,
@@ -88,7 +89,15 @@ class BlockWork:
         "deepslate_redstone_ore": ("redstone",),
         "nether_quartz_ore": ("quartz",),
         "nether_gold_ore": ("gold_nugget",),
+        "grass_block": ("dirt",),
+        "coarse_dirt": ("dirt",),
+        "rooted_dirt": ("dirt",),
     }
+    # Bounded migration seam for COLLECT_APPROACH terrain clearing. The current
+    # implementation clears the selected stand point before server-side
+    # navigation; a future terrain-aware navigator can consume the same budget
+    # when BREAK/DOWNWARD steps move fully into Scarpet.
+    DIG_THROUGH_MAX_BREAK_STEPS = 8
 
     def __init__(
         self,
@@ -198,8 +207,23 @@ class BlockWork:
         terminal = self.body.await_action_terminal(action.id, timeout_s=_server_terminal_timeout(timeout_s))
         result = terminal_event_to_tool_result(terminal)
         if not result.success:
+            # The lightweight bare moveTo could not reach a stand point next to the
+            # target (stuck / timeout / deviated) — typically because the target is
+            # buried and there is no pre-existing air pocket beside it. Escalate to
+            # collect-approach clearance: clear the selected stand point under
+            # COLLECT_APPROACH governance, then let the navigator move there.
+            # Only if that fails is it an honest candidate-skip.
+            dig = self._dig_through_approach(pos, stand_block, move_target, timeout_s=timeout_s)
+            if dig is not None:
+                return dig
             return _with_metric(
-                result,
+                ToolResult(
+                    success=False,
+                    reason=f"mine_approach_failed:{result.reason}",
+                    can_retry=True,
+                    next_suggestion="choose another nearby target; this one has no reachable stand point",
+                    metrics=dict(result.metrics or {}),
+                ),
                 "mine_approach",
                 {"target": list(pos), "move_target": list(move_target), "stand_block": list(stand_block)},
             ), None
@@ -218,6 +242,11 @@ class BlockWork:
             "move_result": result.to_payload(),
         }
         if reach > 2.25:
+            # Arrived near the guessed stand cell but still out of mining reach —
+            # try collect-approach clearance before giving up on the target.
+            dig = self._dig_through_approach(pos, stand_block, move_target, timeout_s=timeout_s)
+            if dig is not None:
+                return dig
             return ToolResult(
                 success=False,
                 reason="mine_approach_out_of_range",
@@ -226,6 +255,184 @@ class BlockWork:
                 metrics=metrics,
             ), None
         return None, metrics
+
+    def _dig_through_approach(
+        self,
+        pos: Position,
+        stand_block: Position,
+        move_target: tuple[float, float, float],
+        *,
+        timeout_s: float,
+    ) -> tuple[ToolResult | None, dict[str, object] | None] | None:
+        """Escalate a failed lightweight approach to collect-approach clearance.
+
+        Returns:
+          - ``(None, metrics)`` when the navigator reached mining range (caller
+            proceeds to mine);
+          - ``(None, dig_metrics)`` when a navigator is wired and the dig-through
+            RAN but did not bring the target into reach — the metrics carry the
+            A* failure reason (``dig_through_result``) so the caller can surface
+            *why* it failed, then fall back to its own honest candidate-skip;
+          - ``None`` when no navigator is wired at all (caller skips directly).
+
+        The server-side navigator currently walks/swims through passable cells
+        only. Before delegating to it, this path clears the chosen stand point's
+        feet/head cells under ``BreakContext.COLLECT_APPROACH`` so buried natural
+        candidates can become reachable without letting the navigation controller
+        break arbitrary terrain. The break budget is still passed through as the
+        migration seam for a future Scarpet-side terrain-aware navigator.
+        Governance refuses player/protected blocks before every mutation.
+        """
+
+        if self.navigator is None:
+            return None
+        # Bounded break budget so one buried target cannot consume the session.
+        # The config carries only max_break_steps; the navigator's per-segment
+        # world_refresh (wired at construction) still applies because navigate_to
+        # falls back to the instance's world_refresh when cfg.world_refresh is
+        # None.
+        from minebot.body.navigation import NavigationRunConfig  # local import: navigation.py imports BlockWork at module top
+        from dataclasses import replace
+
+        dig_config = NavigationRunConfig(max_break_steps=self.DIG_THROUGH_MAX_BREAK_STEPS)
+        if timeout_s is not None:
+            dig_config = replace(dig_config, segment_timeout_s=timeout_s)
+        clearance_result = self._clear_collect_approach_stand(
+            stand_block,
+            target=pos,
+            timeout_s=timeout_s,
+        )
+        if clearance_result is not None and not clearance_result.success:
+            return ToolResult(
+                success=False,
+                reason=f"mine_approach_failed:dig_through:{clearance_result.reason}",
+                can_retry=clearance_result.can_retry,
+                next_suggestion=clearance_result.next_suggestion,
+                metrics={
+                    "target": list(pos),
+                    "move_target": list(move_target),
+                    "stand_block": list(stand_block),
+                    "dig_through": True,
+                    "dig_through_context": BreakContext.COLLECT_APPROACH.value,
+                    "clearance": clearance_result.to_payload(),
+                },
+            ), None
+        nav = self.navigator.navigate_to(
+            stand_block,
+            break_context=BreakContext.COLLECT_APPROACH,
+            config=dig_config,
+        )
+        after = self.body.get_state()
+        reach = _mining_reach_distance(after.pos, pos)
+        metrics = {
+            "target": list(pos),
+            "move_target": list(move_target),
+            "stand_block": list(stand_block),
+            "state_after": list(_state_block_pos(after.pos)),
+            "reach_distance": reach,
+            "dig_through": True,
+            "dig_through_context": BreakContext.COLLECT_APPROACH.value,
+            "dig_through_max_break_steps": self.DIG_THROUGH_MAX_BREAK_STEPS,
+            "dig_through_result": nav.to_payload(),
+        }
+        if clearance_result is not None:
+            metrics["clearance"] = clearance_result.to_payload()
+        if nav.success and reach <= 2.25:
+            return None, metrics
+        # Dig-through ran but still could not bring the target into reach. Return
+        # an honest candidate-skip that CARRIES the A* failure diagnostics
+        # (dig_through_result) — previously this returned bare None and the
+        # reason was lost, leaving the orchestrator blind to *why* the
+        # approach failed. The caller folds these metrics into its skip.
+        return ToolResult(
+            success=False,
+            reason=f"mine_approach_failed:dig_through:{nav.reason}",
+            can_retry=True,
+            next_suggestion="choose another nearby target; dig-through could not reach this one",
+            metrics=metrics,
+        ), None
+
+    def _clear_collect_approach_stand(
+        self,
+        stand_block: Position,
+        *,
+        target: Position,
+        timeout_s: float,
+    ) -> ToolResult | None:
+        """Clear natural blocks occupying the chosen mining stand.
+
+        Server-side `navigateTo` currently handles WALK/SWIM/NO_FLOOR, but it
+        deliberately does not break blocks. Keep the collect-approach break
+        authority here, where governance can check each block before mutation.
+        This is a narrow fallback for buried targets: clear the feet/head cells
+        of the selected stand point, then let the normal navigator move there.
+        """
+
+        cleared: list[dict[str, object]] = []
+        for candidate in (stand_block, (stand_block[0], stand_block[1] + 1, stand_block[2])):
+            block = self.body.perceive("blockAt", _block_params(candidate))
+            failed = _perception_failure(block)
+            if failed is not None:
+                return _with_metric(
+                    failed,
+                    "collect_approach_clearance",
+                    {"stand_block": list(stand_block), "target": list(target), "cleared": cleared},
+                )
+            block_type = _normalize_item(str(block.data.get("type") or "unknown"))
+            if _is_clear_perception(block):
+                continue
+            decision = self.governance.can_break(candidate, block_type, BreakContext.COLLECT_APPROACH)
+            if not decision.allowed:
+                return _with_metric(
+                    _denied_result("break_denied", candidate, block_type, decision),
+                    "collect_approach_clearance",
+                    {"stand_block": list(stand_block), "target": list(target), "cleared": cleared},
+                )
+            action = Action.create(
+                "mineBlock",
+                {
+                    "target": list(candidate),
+                    "block_type": block_type,
+                    "context": BreakContext.COLLECT_APPROACH.value,
+                    "timeout_ticks": _seconds_to_ticks(timeout_s),
+                    "legality": _decision_payload(decision),
+                },
+            )
+            accepted = self.body.execute(action)
+            rejected = _acceptance_failure(accepted, "mineBlock", candidate)
+            if rejected is not None:
+                mined = rejected
+            else:
+                terminal = self.body.await_action_terminal(action.id, timeout_s=_server_terminal_timeout(timeout_s))
+                terminal_result = terminal_event_to_tool_result(terminal)
+                mined = ToolResult(
+                    success=terminal_result.success,
+                    reason=terminal_result.reason,
+                    can_retry=terminal_result.can_retry,
+                    metrics={
+                        **dict(terminal_result.metrics or {}),
+                        "target": list(candidate),
+                        "block_type": block_type,
+                        "legality": _decision_payload(decision),
+                    },
+                )
+            cleared.append({"pos": list(candidate), "block_type": block_type, "result": mined.to_payload()})
+            if not mined.success:
+                return _with_metric(
+                    mined,
+                    "collect_approach_clearance",
+                    {"stand_block": list(stand_block), "target": list(target), "cleared": cleared},
+                )
+        if not cleared:
+            return None
+        return ToolResult(
+            success=True,
+            reason="collect_approach_cleared",
+            can_retry=False,
+            metrics={"stand_block": list(stand_block), "target": list(target), "cleared": cleared},
+        )
+
+
 
     def mine_block_dry(
         self,
@@ -423,7 +630,7 @@ class BlockWork:
         expected_drops: tuple[str, ...] | list[str] | None = None,
         drop_map: dict[str, tuple[str, ...]] | None = None,
         settle_s: float = 0.2,
-        pickup_timeout_s: float = 0.6,
+        pickup_timeout_s: float = 1.5,
         timeout_s: float = 30.0,
     ) -> ToolResult:
         """Mine one target and verify collection by inventory delta.
@@ -512,48 +719,100 @@ class BlockWork:
         expected: tuple[str, ...],
         pickup_timeout_s: float,
     ) -> dict[str, object]:
-        after = _inventory_counts_from_body(self.body)
-        if isinstance(after, ToolResult):
-            return {"failed": after, "assist": {"waited": False, "moved": False}}
-        deltas = {item: after.get(item, 0) - before.get(item, 0) for item in expected}
-        collected_total = sum(max(0, delta) for delta in deltas.values())
+        # Two real defects vs vanilla pickup mechanics shaped this method:
+        #   1. A broken block's dropped item has a ~10-tick (0.5s) pickup delay
+        #      during which NO entity (including the bot) may collect it. The
+        #      wait window must outlast that delay, not race it.
+        #   2. Vanilla auto-pickup range is only ~1 block, but the bot mines
+        #      from up to its reach (~1.5 blocks). The drop rests in the now-air
+        #      cell at `pos` (on top of pos.y-1); to collect, the bot must stand
+        #      AT `pos` so the item sits in its feet-level pickup box. (The old
+        #      walk target `pos.y-1` is the SOLID floor under the drop — the
+        #      planner can never stand inside it, so the assist walk never fired.)
+        # Hence: wait, then walk onto `pos`, then wait again. Inventory delta is
+        # the single source of truth; the itemPickup event is telemetry only.
         assist: dict[str, object] = {"waited": False, "moved": False}
+
+        def read() -> tuple[dict[str, int] | ToolResult, dict[str, int] | None, int]:
+            counts = _inventory_counts_from_body(self.body)
+            if isinstance(counts, ToolResult):
+                return counts, None, 0
+            d = {item: counts.get(item, 0) - before.get(item, 0) for item in expected}
+            return counts, d, sum(max(0, v) for v in d.values())
+
+        def poll(window_s: float) -> tuple[dict[str, int] | ToolResult, dict[str, int] | None, int]:
+            counts, d, total = read()
+            if isinstance(counts, ToolResult) or total > 0 or window_s <= 0:
+                return counts, d, total
+            assist["waited"] = True
+            deadline = time.monotonic() + window_s
+            while time.monotonic() < deadline:
+                for event in self.body.poll_events():
+                    if event.name == "itemPickup" and event.data.get("player") == self.body.bot_name:
+                        if _normalize_item(str(event.data.get("item") or "unknown")) in expected:
+                            assist["saw_pickup_event"] = True
+                self._pause(0.10)
+                counts, d, total = read()
+                if isinstance(counts, ToolResult) or total > 0:
+                    return counts, d, total
+            return counts, d, total
+
+        after, deltas, collected_total = poll(pickup_timeout_s)
+        if isinstance(after, ToolResult):
+            return {"failed": after, "assist": assist}
         if collected_total > 0:
             return {"after": after, "deltas": deltas, "collected_total": collected_total, "assist": assist}
 
-        if pickup_timeout_s > 0:
-            assist["waited"] = True
-            deadline = time.monotonic() + pickup_timeout_s
-            while time.monotonic() < deadline:
-                saw_pickup = False
-                for event in self.body.poll_events():
-                    if event.name == "itemPickup" and event.data.get("player") == self.body.bot_name:
-                        picked = _normalize_item(str(event.data.get("item") or "unknown"))
-                        if picked in expected:
-                            saw_pickup = True
-                self._pause(0.10)
-                after = _inventory_counts_from_body(self.body)
-                if isinstance(after, ToolResult):
-                    return {"failed": after, "assist": assist}
-                deltas = {item: after.get(item, 0) - before.get(item, 0) for item in expected}
-                collected_total = sum(max(0, delta) for delta in deltas.values())
-                if collected_total > 0 or saw_pickup:
-                    return {"after": after, "deltas": deltas, "collected_total": collected_total, "assist": assist}
-
+        # pickup-B: walk to the actual drop ENTITY, not the guessed mined cell.
+        # A log mined at trunk height drops an item that FALLS to the ground — it
+        # is not at `pos` (the §8 walk-to-pos only works when the drop stays put,
+        # e.g. surface dirt). Scarpet nearbyEntities gives each item entity's
+        # exact pos; walk to it (TRAVEL — pure reposition, never dig the floor).
+        # Try the nearest few drop entities in turn and only report no delta
+        # after all are exhausted — do not abandon on the first unreachable one
+        # (Mindcraft's pickupNearbyItems gives up if it can't reach the first
+        # item; we keep trying). If no drop entity is visible yet, fall back to
+        # the mined cell.
         if self.navigator is not None:
             assist["moved"] = True
-            move_target = (pos[0], pos[1] - 1, pos[2])
-            nav = self.navigator.navigate_to(move_target, break_context=BreakContext.TRAVEL)
-            assist["move_result"] = nav.to_payload()
-            if nav.success:
-                self._pause(0.20)
-                after = _inventory_counts_from_body(self.body)
+            drop_positions = self._nearby_drop_positions(radius=8, limit=16)
+            assist["drop_targets_seen"] = len(drop_positions)
+            walk_targets = drop_positions or [pos]
+            assist["move_attempts"] = []
+            for target_pos in walk_targets[:4]:
+                nav = self.navigator.navigate_to(target_pos, break_context=BreakContext.TRAVEL)
+                assist["move_result"] = nav.to_payload()
+                assist["move_attempts"].append({"target": list(target_pos), "result": nav.to_payload()})
+                if not nav.success:
+                    continue
+                after, deltas, collected_total = poll(pickup_timeout_s)
                 if isinstance(after, ToolResult):
                     return {"failed": after, "assist": assist}
-                deltas = {item: after.get(item, 0) - before.get(item, 0) for item in expected}
-                collected_total = sum(max(0, delta) for delta in deltas.values())
+                if collected_total > 0:
+                    return {"after": after, "deltas": deltas, "collected_total": collected_total, "assist": assist}
 
         return {"after": after, "deltas": deltas, "collected_total": collected_total, "assist": assist}
+
+    def _nearby_drop_positions(self, *, radius: int, limit: int) -> list[Position]:
+        """Nearest-first positions of dropped-item entities near the bot.
+
+        Powers the pickup assist: a mined block's drop may land away from the
+        mined cell (logs fall), so we walk to where the item entity actually is.
+        Returns [] on any perception error so the caller falls back to the mined
+        cell — a pickup-assist read must never abort the collect.
+        """
+        nearby = self.body.perceive("nearbyEntities", {"radius": radius, "limit": limit})
+        if not nearby.ok:
+            return []
+        positions: list[Position] = []
+        for entity in nearby.data.get("entities") or []:
+            if str(entity.get("type") or "") not in ("item", "minecraft:item"):
+                continue
+            pos_raw = entity.get("pos") or []
+            if len(pos_raw) != 3:
+                continue
+            positions.append((float(pos_raw[0]), float(pos_raw[1]), float(pos_raw[2])))
+        return positions
 
     def dig_down_one(
         self,
@@ -1576,6 +1835,12 @@ class BlockWork:
         )
         if isinstance(targets, ToolResult):
             return targets
+        search_meta = find_blocks_metadata(
+            self.body,
+            block_types=block_types,
+            radius=search_radius,
+            limit=find_limit,
+        )
         target = targets[0]
 
         target_center = (target.pos[0] + 0.5, target.pos[1] + 0.5, target.pos[2] + 0.5)
@@ -1595,7 +1860,11 @@ class BlockWork:
                 {"pos": list(candidate.pos), "type": candidate.block_type, "distance": candidate.distance}
                 for candidate in targets
             ],
+            "truncated": bool(search_meta.get("truncated")),
+            "uncertainty": list(search_meta.get("uncertainty") or []),
         }
+        if search_meta.get("errors"):
+            context["perception_errors"] = list(search_meta.get("errors") or [])
 
         if initial_distance <= interaction_radius:
             return ToolResult(
@@ -1706,12 +1975,16 @@ class BlockWork:
                 can_retry=True,
                 metrics={**context, "initial_distance": initial_distance, "attempts": attempts},
             )
+        # Preserve the search context (notably the dist2-sorted `candidates` list)
+        # in the failure metrics. The approach to the nearest pick may have failed,
+        # but the candidate list is still real and lets the orchestrator try the
+        # next reachable target instead of aborting the whole collection.
         return ToolResult(
             success=False,
             reason=f"search_block_navigation_failed:{last_failure.reason}",
             can_retry=last_failure.can_retry,
             next_suggestion=last_failure.next_suggestion,
-            metrics=dict(last_failure.metrics or {}),
+            metrics={**context, "initial_distance": initial_distance, "attempts": attempts, **dict(last_failure.metrics or {})},
         )
 
     def _find_surface_in_column(

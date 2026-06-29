@@ -55,6 +55,7 @@ class NavigationRunConfig:
     recheck_world: GridWorld | None = None
     recheck_costs: NavigationCostModel | None = None
     world_update: Callable[[object, NavigationSegment], dict[str, object] | None] | None = None
+    world_refresh: Callable[[Position], dict[str, object] | None] | None = None
     movement_arrival_radius: float | None = None
 
 
@@ -86,11 +87,17 @@ class NavigationTransactions:
         *,
         progress: ProgressController | None = None,
         work: BlockWork | None = None,
+        world_refresh: Callable[[Position], dict[str, object] | None] | None = None,
     ):
         self.body = body
         self.navigator = navigator
         self.progress = progress or LocalProgressController()
         self.work = work or _default_work_runtime(body, navigator)
+        # Per-segment local re-read seam (Baritone-style). When set, the planner's
+        # GridWorld is refreshed from live terrain before each segment so it never
+        # searches over a stale/placeholder grid. A per-call config.world_refresh
+        # overrides this instance default.
+        self.world_refresh = world_refresh
 
     def navigate_to(
         self,
@@ -110,309 +117,91 @@ class NavigationTransactions:
             if arrival_radius <= 0:
                 raise ValueError("arrival_radius must be > 0")
             cfg = replace(cfg, movement_arrival_radius=arrival_radius)
-        if cfg.max_break_steps is not None and cfg.max_break_steps < 0:
-            raise ValueError("max_break_steps must be >= 0")
-        if cfg.max_worse_distance is not None and cfg.max_worse_distance < 0:
-            raise ValueError("max_worse_distance must be >= 0")
-        if cfg.recovery_min_displacement < 0:
-            raise ValueError("recovery_min_displacement must be >= 0")
-        if cfg.recovery_detour_max_attempts < 0:
-            raise ValueError("recovery_detour_max_attempts must be >= 0")
-        if cfg.recovery_detour_timeout_s <= 0:
-            raise ValueError("recovery_detour_timeout_s must be > 0")
-        if any(distance <= 0 for distance in cfg.recovery_detour_distances):
-            raise ValueError("recovery_detour_distances must contain only positive values")
-        if len(set(cfg.recovery_detour_y_offsets)) != len(cfg.recovery_detour_y_offsets):
-            raise ValueError("recovery_detour_y_offsets must not contain duplicates")
+
         generation = self.progress.next_generation()
         executed: list[ExecutedSegment] = []
-        recoveries_used = 0
         nav_goal = normalize_goal(goal)
-        goal_anchor: Position | None = None
-        guard_anchor: Position | None = cfg.guard_target
-        best_guard_distance: float | None = None
-        previous_segment: tuple[Position, ...] = ()
-        break_steps_used = 0
+        state = self.body.get_state()
+        start = _block_pos(state)
+        goal_anchor = nav_goal.representative(start)
+        gx, gy, gz = int(goal_anchor[0]), int(goal_anchor[1]), int(goal_anchor[2])
+        ar = cfg.movement_arrival_radius or 0.75
 
         segment_index = 0
         while segment_index < cfg.max_segments:
             if not self.progress.generation_current(generation):
-                return _result(
-                    False,
-                    "preempted",
-                    True,
-                    goal,
-                    executed,
-                    {"generation_current": False},
-                )
+                return _result(False, "preempted", True, goal_anchor, executed, {"generation_current": False})
 
             try:
-                state = self.body.get_state()
-                fingerprint = self.progress.fingerprint(state)
-                start = _block_pos(state)
-                if goal_anchor is None:
-                    goal_anchor = nav_goal.representative(start)
-                if guard_anchor is None:
-                    guard_anchor = goal_anchor
-                if cfg.max_worse_distance is not None and guard_anchor is not None:
-                    current_guard_distance = dist(state.pos, _xyz_pos(guard_anchor))
-                    if best_guard_distance is not None and current_guard_distance > best_guard_distance + cfg.max_worse_distance:
-                        return _result(
-                            False,
-                            "navigation_guard_target_worsened",
-                            True,
-                            goal_anchor,
-                            executed,
-                            {
-                                "guard_target": list(guard_anchor),
-                                "best_guard_distance": best_guard_distance,
-                                "current_guard_distance": current_guard_distance,
-                                "max_worse_distance": cfg.max_worse_distance,
-                            },
-                        )
-                    if best_guard_distance is None or current_guard_distance < best_guard_distance:
-                        best_guard_distance = current_guard_distance
-                segment = self.navigator.next_segment(
-                    start,
-                    nav_goal,
-                    break_context=break_context,
-                    min_partial_progress=cfg.min_partial_progress,
-                    recheck_lookahead=cfg.recheck_lookahead,
-                    previous_segment=previous_segment,
-                    backtrack_cost_factor=cfg.backtrack_cost_factor,
-                    unloaded_boundary_limit=cfg.unloaded_boundary_limit,
-                    partial_tail_trim=cfg.partial_tail_trim,
-                    recheck_world=cfg.recheck_world,
-                    recheck_costs=cfg.recheck_costs,
-                )
-                self.progress.note_step(
-                    ("navigate.segment", start, nav_goal.payload(), segment.status, segment.target),
-                    success=segment.status in {"arrived", "advanced"},
-                    fingerprint=fingerprint,
-                    neutral=segment.status == "replan_required",
-                )
                 self.progress.require_can_continue(f"navigate_to:{nav_goal.payload()}")
             except ProgressAbort as exc:
-                return _result(False, "progress_yielded", True, goal_anchor or (0, 0, 0), executed, {"error": str(exc), "goal": nav_goal.payload()})
+                return _result(False, "progress_yielded", True, goal_anchor, executed, {"error": str(exc)})
 
-            if segment.status == "blocked":
-                if segment.plan.success and segment.plan.reason == "arrived":
-                    executed.append(_planned_only(segment_index, segment))
-                    return _result(True, "arrived", False, goal_anchor or start, executed, {"navigation_goal": nav_goal.payload()})
-                executed.append(_planned_only(segment_index, segment))
-                return _result(
-                    False,
-                    f"navigation_blocked:{segment.plan.reason}",
-                    False,
-                    goal_anchor or segment.target or start,
-                    executed,
-                    {
-                        "goal": nav_goal.payload(),
-                        "path_update": _path_update_probe("planner", segment.status, segment.plan.reason, segment=segment),
-                    },
-                )
-
-            if segment.status == "replan_required":
-                executed.append(_planned_only(segment_index, segment))
-                recheck_reason = segment.recheck.reason if segment.recheck is not None else "unknown"
-                return _result(
-                    False,
-                    f"navigation_replan_required:{recheck_reason}",
-                    True,
-                    goal_anchor or segment.target or start,
-                    executed,
-                    {
-                        "goal": nav_goal.payload(),
-                        "path_update": _path_update_probe("recheck", segment.status, recheck_reason, segment=segment),
-                    },
-                )
-
-            if segment.target is None:
-                executed.append(_planned_only(segment_index, segment))
-                return _result(False, "navigation_invalid_segment", True, goal_anchor or start, executed, {"goal": nav_goal.payload()})
-
-            terrain_step = _first_terrain_step(segment.plan.path)
-            if terrain_step is not None:
-                prefix = _prefix_before_step(segment.plan.path, terrain_step)
-                if prefix:
-                    move_result = self._execute_move(
-                        segment_index,
-                        segment,
-                        prefix[-1].pos,
-                        prefix,
-                        goal_anchor or nav_goal.representative(start),
-                        nav_goal.payload(),
-                        break_context,
-                        cfg,
-                        executed,
-                    )
-                    if move_result is not None and move_result.reason == "recoverable_move_failure":
-                        yielded = self._attempt_recovery_detour(
-                            segment_index,
-                            goal_anchor or nav_goal.representative(start),
-                            nav_goal.payload(),
-                            cfg,
-                            executed,
-                            str(move_result.metrics.get("original_reason", "unknown") if move_result.metrics else "unknown"),
-                        )
-                        if yielded is not None:
-                            return yielded
-                        previous_segment = _walk_positions(prefix)
-                        recoveries_used += 1
-                        if recoveries_used > cfg.recovery_attempts:
-                            return _recoverable_exhausted_result(move_result, goal_anchor or nav_goal.representative(start), executed)
-                        segment_index += 1
-                        continue
-                    if move_result is not None:
-                        return move_result
-                    update_result = _apply_world_update(self.navigator, segment, cfg.world_update, executed)
-                    if update_result is not None:
-                        return _merge_metrics(update_result, goal_anchor or nav_goal.representative(start), executed)
-                    previous_segment = _walk_positions(prefix)
-
-                terrain_result = self._execute_terrain_step(
-                    terrain_step,
-                    break_context,
-                    cfg,
-                    goal_anchor or nav_goal.representative(start),
-                    executed,
-                    break_steps_used=break_steps_used,
-                    segment_index=segment_index,
-                    segment=segment,
-                )
-                if terrain_result is not None:
-                    return terrain_result
-                _apply_executed_terrain_effect(self.navigator, terrain_step)
-                if terrain_step.move == MoveKind.BREAK:
-                    break_steps_used += 1
-                if terrain_step.move in {MoveKind.PILLAR, MoveKind.DOWNWARD} and segment.status == "arrived":
-                    return _result(True, "arrived", False, goal_anchor or nav_goal.representative(start), executed, {"navigation_goal": nav_goal.payload()})
-                segment_index += 1
-                continue
-
-            open_step = _first_open_step(segment.plan.path)
-            if open_step is not None:
-                prefix = _prefix_before_step(segment.plan.path, open_step)
-                if prefix:
-                    move_result = self._execute_move(
-                        segment_index,
-                        segment,
-                        prefix[-1].pos,
-                        prefix,
-                        goal_anchor or nav_goal.representative(start),
-                        nav_goal.payload(),
-                        break_context,
-                        cfg,
-                        executed,
-                    )
-                    if move_result is not None and move_result.reason == "recoverable_move_failure":
-                        yielded = self._attempt_recovery_detour(
-                            segment_index,
-                            goal_anchor or nav_goal.representative(start),
-                            nav_goal.payload(),
-                            cfg,
-                            executed,
-                            str(move_result.metrics.get("original_reason", "unknown") if move_result.metrics else "unknown"),
-                        )
-                        if yielded is not None:
-                            return yielded
-                        previous_segment = _walk_positions(prefix)
-                        recoveries_used += 1
-                        if recoveries_used > cfg.recovery_attempts:
-                            return _recoverable_exhausted_result(move_result, goal_anchor or nav_goal.representative(start), executed)
-                        segment_index += 1
-                        continue
-                    if move_result is not None:
-                        return move_result
-                    update_result = _apply_world_update(self.navigator, segment, cfg.world_update, executed)
-                    if update_result is not None:
-                        return _merge_metrics(update_result, goal_anchor or nav_goal.representative(start), executed)
-                    previous_segment = _walk_positions(prefix)
-
-                open_result = self._execute_open_step(
-                    open_step,
-                    cfg,
-                    goal_anchor or nav_goal.representative(start),
-                    executed,
-                    segment_index=segment_index,
-                    segment=segment,
-                )
-                if open_result is not None:
-                    return open_result
-                _apply_executed_terrain_effect(self.navigator, open_step)
-                suffix = _suffix_after_step(segment.plan.path, open_step)
-                if suffix:
-                    move_result = self._execute_move(
-                        segment_index,
-                        segment,
-                        suffix[-1].pos,
-                        suffix,
-                        goal_anchor or nav_goal.representative(start),
-                        nav_goal.payload(),
-                        break_context,
-                        cfg,
-                        executed,
-                    )
-                    if move_result is not None:
-                        return move_result
-                previous_segment = _walk_positions(segment.plan.path)
-                if segment.status == "arrived":
-                    return _result(True, "arrived", False, goal_anchor or nav_goal.representative(start), executed, {"navigation_goal": nav_goal.payload()})
-                segment_index += 1
-                continue
-
-            move_result = self._execute_move(
-                segment_index,
-                segment,
-                segment.target,
-                segment.plan.path,
-                goal_anchor or nav_goal.representative(start),
-                nav_goal.payload(),
-                break_context,
-                cfg,
-                executed,
+            action = Action.create(
+                "navigateTo",
+                {
+                    "target": [gx, gy, gz],
+                    "grid_radius": 32,
+                    "max_expand": 200,
+                    "y_below": 8,
+                    "y_above": 8,
+                    "arrival_radius": ar,
+                    "timeout_ticks": max(20, int(cfg.segment_timeout_s * 20)),
+                    "no_progress_ticks": 60,
+                },
             )
-            if move_result is not None and move_result.reason == "recoverable_move_failure":
-                yielded = self._attempt_recovery_detour(
-                    segment_index,
-                    goal_anchor or nav_goal.representative(start),
-                    nav_goal.payload(),
-                    cfg,
-                    executed,
-                    str(move_result.metrics.get("original_reason", "unknown") if move_result.metrics else "unknown"),
-                )
-                if yielded is not None:
-                    return yielded
-                previous_segment = _walk_positions(segment.plan.path)
-                recoveries_used += 1
-                if recoveries_used > cfg.recovery_attempts:
-                    return _recoverable_exhausted_result(move_result, goal_anchor or nav_goal.representative(start), executed)
+            result = self.body.execute(action)
+            if not (result.ok and result.accepted):
+                executed.append(ExecutedSegment(
+                    index=segment_index, status="rejected", target=goal_anchor,
+                    terminal_reason="body_rejected", success=False, action_id=action.id,
+                    diagnostics={"error": result.error, "data": result.data},
+                ))
+                return _result(False, "body_rejected", True, goal_anchor, executed, {"error": result.error})
+
+            terminal = self.body.await_action_terminal(
+                action.id,
+                timeout_s=cfg.segment_timeout_s + 5.0,
+                terminal_events={"navigateDone", "death", "respawned", "ownerPreempted"},
+            )
+
+            td = terminal.data
+            nav_arrived = td.get("arrived", False)
+            nav_reason = td.get("reason") or td.get("nav_reason") or td.get("stopped_reason", "unknown")
+            goal_dist = td.get("goal_dist", td.get("dist_to_target", 9999.0))
+
+            executed.append(ExecutedSegment(
+                index=segment_index, status=nav_reason, target=goal_anchor,
+                terminal_reason=nav_reason, success=nav_arrived, action_id=action.id,
+                diagnostics={
+                    "expanded": td.get("expanded", 0),
+                    "waypoints": td.get("waypoints", 0),
+                    "goal_dist": goal_dist,
+                    "event": terminal.name,
+                },
+            ))
+
+            self.progress.note_step(
+                ("navigate.segment", start, nav_goal.payload(), nav_reason, goal_anchor),
+                success=nav_arrived or nav_reason == "partial",
+                fingerprint=self.progress.fingerprint(self.body.get_state()),
+                neutral=nav_reason == "partial",
+            )
+
+            if nav_arrived:
+                return _result(True, "arrived", False, goal_anchor, executed, {"navigation_goal": nav_goal.payload()})
+
+            if nav_reason == "partial":
+                state = self.body.get_state()
+                start = _block_pos(state)
                 segment_index += 1
                 continue
-            if move_result is not None:
-                return move_result
-            update_result = _apply_world_update(self.navigator, segment, cfg.world_update, executed)
-            if update_result is not None:
-                return _merge_metrics(update_result, goal_anchor or nav_goal.representative(start), executed)
-            previous_segment = _walk_positions(segment.plan.path)
-            segment_index += 1
 
-        return _result(
-            False,
-            "segment_budget_exhausted",
-            True,
-            goal_anchor or nav_goal.representative(_block_pos(self.body.get_state())),
-            executed,
-            {
-                "goal": nav_goal.payload(),
-                "path_update": _path_update_probe(
-                    "budget",
-                    "segment_budget_exhausted",
-                    "segment_budget_exhausted",
-                    segment=_last_planned_segment(executed),
-                ),
-            },
-        )
+            return _result(False, nav_reason, nav_reason in ("stuck", "timeout"), goal_anchor, executed, {
+                "navigation_goal": nav_goal.payload(), "goal_dist": goal_dist,
+            })
+
+        return _result(False, "segment_budget_exhausted", True, goal_anchor, executed, {"navigation_goal": nav_goal.payload()})
 
     def move_away(
         self,

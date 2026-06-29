@@ -33,6 +33,8 @@ class FakeBody:
         blocks: dict[tuple[int, int, int], tuple[str, str]] | None = None,
         inventory_pages: list[PerceptionResult] | None = None,
         find_blocks: list[dict[str, object]] | None = None,
+        find_blocks_complete: bool = True,
+        find_blocks_uncertainty: list[dict[str, object]] | None = None,
     ):
         self.perception = perception or PerceptionResult(
             bot="Bot1",
@@ -54,6 +56,8 @@ class FakeBody:
         self.blocks = blocks
         self.inventory_pages = list(inventory_pages or [])
         self.find_blocks = list(find_blocks or [])
+        self.find_blocks_complete = find_blocks_complete
+        self.find_blocks_uncertainty = list(find_blocks_uncertainty or [])
         self.state_pos = (
             float(self.perception.data.get("x", 0)),
             float(self.perception.data.get("y", 64)),
@@ -79,8 +83,9 @@ class FakeBody:
                 scope="findBlocks",
                 type="perception",
                 ok=True,
-                complete=True,
+                complete=self.find_blocks_complete,
                 data={"blocks": list(self.find_blocks)},
+                uncertainty=self.find_blocks_uncertainty,
             )
         if self.blocks is not None and scope == "blockAt":
             pos = (int(params["x"]), int(params["y"]), int(params["z"]))
@@ -366,6 +371,33 @@ class BlockWorkTests(unittest.TestCase):
         self.assertLessEqual(result.metrics["final_distance"], 4.5)
         self.assertEqual(navigator.calls[0][1]["break_context"], BreakContext.TRAVEL)
 
+    def test_search_for_block_accepts_truncated_find_blocks_when_candidates_exist(self):
+        blocks = {
+            (4, 64, 0): ("minecraft:oak_log", "SOLID"),
+            (5, 64, 0): ("minecraft:air", "CLEAR"),
+            (5, 65, 0): ("minecraft:air", "CLEAR"),
+            (5, 63, 0): ("minecraft:stone", "SOLID"),
+        }
+        body = FakeBody(
+            blocks=blocks,
+            find_blocks=[{"x": 4, "y": 64, "z": 0, "type": "minecraft:oak_log"}],
+            find_blocks_complete=False,
+            find_blocks_uncertainty=[{"reason": "limit_exceeded"}],
+        )
+        navigator = FakeNavigator()
+        navigator.body = body
+        work = BlockWork(
+            body,
+            GovernancePolicy(natural_regions=[Region("search", (-20, 0, -20), (20, 100, 20))]),
+            navigator=navigator,
+        )
+
+        result = work.search_for_block(block_types=("oak_log",), search_radius=12)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertTrue(result.metrics["truncated"])
+        self.assertEqual(result.metrics["uncertainty"], [{"reason": "limit_exceeded"}])
+
     def test_search_for_block_tries_next_candidate_after_navigation_failure(self):
         blocks = {
             (4, 64, 0): ("minecraft:oak_log", "SOLID"),
@@ -546,6 +578,112 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual([action.name for action in body.actions[:2]], ["moveTo", "mineBlock"])
         self.assertEqual(body.actions[0].params["target"], [0.5, 65.0, 2.5])
         self.assertEqual(settled, [0.3])
+
+    def test_mine_block_collect_classifies_unreachable_approach_as_candidate_skip(self):
+        # The live failure: collect walked underground candidates, but the approach
+        # moveTo to a stand point next to each returned `stuck`. That must surface as
+        # a candidate-skip (mine_approach_failed:stuck), NOT a generic failure, so the
+        # shared progress authority does not trip the failure storm on a collection
+        # that is healthily trying the next candidate.
+        from minebot.contract import is_candidate_skip
+
+        class StuckApproachBody(FakeBody):
+            def execute(self, action: Action) -> Result:
+                result = super().execute(action)
+                if action.name == "moveTo":
+                    # The bot cannot reach the stand point: report stuck, no displacement.
+                    self.terminal = Event(
+                        seq=self.terminal.seq,
+                        tick=self.terminal.tick,
+                        bot=self.terminal.bot,
+                        name="moveDone",
+                        data={
+                            "action_id": action.id,
+                            "arrived": False,
+                            "final_pos": list(self.state_pos),
+                            "target": list(action.params["target"]),
+                            "stopped_reason": "stuck",
+                        },
+                    )
+                return result
+
+        body = StuckApproachBody(blocks={(0, 64, 5): ("dirt", "SOLID")})
+        body.state_pos = (0.5, 65.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy)
+
+        result = runtime.mine_block_collect((0, 64, 5), context=BreakContext.COLLECT, timeout_s=1.0)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "mine_approach_failed:stuck")
+        self.assertTrue(is_candidate_skip(result.reason))
+        # Never issued a mineBlock on an unreachable target.
+        self.assertNotIn("mineBlock", [action.name for action in body.actions])
+
+    def test_mine_block_collect_escalates_to_dig_through_navigator_when_bare_move_fails(self):
+        # When the lightweight bare moveTo cannot reach a stand point next to a
+        # buried target, the approach must clear the chosen natural stand cell
+        # under COLLECT_APPROACH, then delegate movement to the navigator under
+        # the same context with a bounded break budget, then mine instead of
+        # skipping the target.
+        class StuckThenNavBody(FakeBody):
+            def execute(self, action: Action) -> Result:
+                result = super().execute(action)
+                if action.name == "moveTo":
+                    # The bare moveTo to the stand cell fails (no air pocket).
+                    self.terminal = Event(
+                        seq=self.terminal.seq,
+                        tick=self.terminal.tick,
+                        bot=self.terminal.bot,
+                        name="moveDone",
+                        data={
+                            "action_id": action.id,
+                            "arrived": False,
+                            "final_pos": list(self.state_pos),
+                            "target": list(action.params["target"]),
+                            "stopped_reason": "stuck",
+                        },
+                    )
+                return result
+
+        body = StuckThenNavBody(
+            blocks={
+                (0, 64, 5): ("dirt", "SOLID"),
+                (0, 65, 4): ("stone", "SOLID"),
+            },
+            inventory_pages=[
+                inventory_page([slot(9, "minecraft:dirt", 0)]),
+                inventory_page([slot(9, "minecraft:dirt", 1)]),
+            ],
+        )
+        body.state_pos = (0.5, 65.0, 0.5)
+        navigator = FakeNavigator(result=True, reason="arrived")
+        navigator.body = body
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.mine_block_collect((0, 64, 5), context=BreakContext.COLLECT, timeout_s=1.0)
+
+        # The dig-through navigator was invoked under COLLECT_APPROACH context...
+        self.assertTrue(navigator.calls, "dig-through navigator was not called")
+        nav_kwargs = navigator.calls[-1][1]
+        self.assertEqual(nav_kwargs["break_context"], BreakContext.COLLECT_APPROACH)
+        # ...with a bounded break budget so one target can't dig a runaway tunnel.
+        nav_config = nav_kwargs["config"]
+        self.assertEqual(nav_config.max_break_steps, BlockWork.DIG_THROUGH_MAX_BREAK_STEPS)
+        self.assertEqual(body.blocks[(0, 65, 4)], ("air", "CLEAR"))
+        mine_actions = [action for action in body.actions if action.name == "mineBlock"]
+        self.assertTrue(any(action.params["target"] == [0, 65, 4] for action in mine_actions))
+        self.assertTrue(
+            any(action.params.get("context") == BreakContext.COLLECT_APPROACH.value for action in mine_actions),
+            "stand clearance must use COLLECT_APPROACH, not plain COLLECT",
+        )
+        mine_result = result.metrics["mine_result"]["metrics"]["mine_approach"]
+        self.assertEqual(mine_result["clearance"]["reason"], "collect_approach_cleared")
+        # ...the bot reached mining range and the block was mined and collected.
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "collected")
+        self.assertIn("mineBlock", [action.name for action in body.actions])
 
     def test_mine_block_approach_uses_feet_level_stand_for_headroom_target(self):
         class ApproachingBody(FakeBody):
@@ -830,9 +968,9 @@ class BlockWorkTests(unittest.TestCase):
             ],
         )
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
-        runtime = BlockWork(body, policy)
+        runtime = BlockWork(body, policy, settle=lambda _s: None)
 
-        result = runtime.mine_block_collect((0, 64, 0), timeout_s=1.0)
+        result = runtime.mine_block_collect((0, 64, 0), pickup_timeout_s=0.05, timeout_s=1.0)
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "collect_no_inventory_delta")
@@ -840,6 +978,126 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual([action.name for action in body.actions], ["mineBlock"])
         self.assertEqual(result.metrics["expected_drops"], ["diamond"])
         self.assertEqual(result.metrics["deltas"], {"diamond": 0})
+        # No navigator wired in, so the assist walk must not have fired.
+        self.assertEqual(result.metrics["pickup_assist"], {"waited": True, "moved": False})
+
+    def test_mine_block_collect_walks_onto_drop_cell_when_pickup_lags(self):
+        # The pickup root cause: after mining, the drop often isn't collected
+        # yet (vanilla ~0.5s pickup delay + the bot may mine from just outside
+        # the ~1-block auto-pickup range). The fix walks onto `pos` — the air
+        # cell the drop rests in — then waits again. This test pins that the
+        # walk target is `pos` (NOT `pos-1`, which is the SOLID floor and can
+        # never be stood in), uses TRAVEL (pure reposition, no digging), and
+        # that a delta appearing only AFTER the walk still counts as collected.
+        class LagThenCollectNavigator:
+            def __init__(self, body: FakeBody) -> None:
+                self.body = body
+                self.calls: list[tuple] = []
+
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                # Walking onto the drop brings it into the pickup box; the next
+                # inventory read reflects the pickup.
+                self.body.inventory_pages.append(
+                    inventory_page([slot(9, "minecraft:dirt", 1)])
+                )
+                return ToolResult(success=True, reason="arrived", can_retry=False, metrics={"goal": list(goal)})
+
+        body = FakeBody(
+            blocks={(0, 64, 5): ("dirt", "SOLID")},
+            inventory_pages=[
+                inventory_page([slot(9, "minecraft:dirt", 0)]),  # before
+                inventory_page([slot(9, "minecraft:dirt", 0)]),  # first poll: still lagging
+            ],
+        )
+        body.state_pos = (0.5, 65.0, 0.5)
+        navigator = LagThenCollectNavigator(body)
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, navigator=navigator, settle=lambda _s: None)
+
+        result = runtime.mine_block_collect((0, 64, 5), pickup_timeout_s=0.05, timeout_s=1.0)
+
+        # The drop appeared only after the walk, and was collected.
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "collected")
+        self.assertEqual(result.metrics["deltas"], {"dirt": 1})
+        # Walked onto `pos` (the drop's air cell), not pos-1 (the solid floor).
+        self.assertTrue(navigator.calls, "pickup-assist walk did not fire")
+        goal, nav_kwargs = navigator.calls[0]
+        self.assertEqual(tuple(goal), (0, 64, 5))
+        self.assertEqual(nav_kwargs["break_context"], BreakContext.TRAVEL)
+        assist = result.metrics["pickup_assist"]
+        self.assertTrue(assist["moved"])
+        self.assertTrue(assist["waited"])
+
+    def test_mine_block_collect_walks_to_drop_entity_position_not_mined_cell(self):
+        # pickup-B: a log mined at trunk height drops an item that FALLS away
+        # from the mined cell `pos`. The assist must read nearbyEntities and walk
+        # to the drop ENTITY's actual position, not `pos`. This is the case the
+        # §8 walk-to-pos could not cover (it only works when the drop stays put).
+        # Beats Mindcraft's pickupNearbyItems, which gives up if the first item
+        # is unreachable; here we walk to the real drop and collect it.
+        class DropEntityBody(FakeBody):
+            def __init__(self, *a, item_pos, **kw):
+                super().__init__(*a, **kw)
+                self._item_pos = item_pos
+
+            def perceive(self, scope, params):
+                if scope == "nearbyEntities":
+                    return PerceptionResult(
+                        bot="Bot1",
+                        scope="nearbyEntities",
+                        type="perception",
+                        ok=True,
+                        complete=True,
+                        data={"entities": [
+                            {"id": "e1", "type": "item", "name": "Dirt",
+                             "pos": list(self._item_pos), "health": None, "dist2": 1.0}
+                        ]},
+                    )
+                return super().perceive(scope, params)
+
+        class RecordingNavigator:
+            def __init__(self, body):
+                self.body = body
+                self.calls = []
+
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                # Arriving at the drop entity puts it in the pickup box.
+                self.body.inventory_pages.append(
+                    inventory_page([slot(9, "minecraft:dirt", 1)])
+                )
+                return ToolResult(success=True, reason="arrived", can_retry=False, metrics={"goal": list(goal)})
+
+        # Mined cell at (0,64,5); the drop fell to (2,64,5) — a different cell.
+        body = DropEntityBody(
+            blocks={(0, 64, 5): ("dirt", "SOLID")},
+            item_pos=(2.0, 64.0, 5.0),
+            inventory_pages=[
+                inventory_page([slot(9, "minecraft:dirt", 0)]),  # before
+                inventory_page([slot(9, "minecraft:dirt", 0)]),  # first poll: lagging
+            ],
+        )
+        body.state_pos = (0.5, 65.0, 0.5)
+        navigator = RecordingNavigator(body)
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, navigator=navigator, settle=lambda _s: None)
+
+        result = runtime.mine_block_collect((0, 64, 5), pickup_timeout_s=0.05, timeout_s=1.0)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "collected")
+        self.assertEqual(result.metrics["deltas"], {"dirt": 1})
+        # Walked to the drop ENTITY's position, not the mined cell.
+        self.assertTrue(navigator.calls, "pickup-assist walk did not fire")
+        goal, nav_kwargs = navigator.calls[0]
+        self.assertEqual(tuple(goal), (2, 64, 5))
+        self.assertNotEqual(tuple(goal), (0, 64, 5))
+        self.assertEqual(nav_kwargs["break_context"], BreakContext.TRAVEL)
+        assist = result.metrics["pickup_assist"]
+        self.assertEqual(assist["drop_targets_seen"], 1)
+        self.assertTrue(assist["moved"])
 
     def test_mine_block_collect_uses_ore_drop_mapping_for_raw_resource(self):
         blocks = {
@@ -946,7 +1204,10 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.metrics["fall_clearance"], 3)
         self.assertEqual(result.metrics["max_clear_fall"], 2)
 
-    def test_dig_down_one_refuses_unknown_provenance_before_mutation(self):
+    def test_dig_down_one_refuses_protected_region_before_mutation(self):
+        # Under type-based provenance a natural stone floor is now diggable, so
+        # the red-line refusal-before-mutation property is pinned via an explicit
+        # protected_region instead of unknown provenance.
         blocks = {
             (50, 64, 50): ("air", "CLEAR"),
             (50, 65, 50): ("air", "CLEAR"),
@@ -954,12 +1215,15 @@ class BlockWorkTests(unittest.TestCase):
             (50, 62, 50): ("stone", "SOLID"),
         }
         body = FakeBody(blocks=blocks)
-        runtime = BlockWork(body, GovernancePolicy())
+        runtime = BlockWork(
+            body,
+            GovernancePolicy(protected_regions=[Region("base", (40, 0, 40), (60, 100, 60))]),
+        )
 
         result = runtime.dig_down_one(current_pos=(50, 64, 50), timeout_s=1.0)
 
         self.assertFalse(result.success)
-        self.assertEqual(result.reason, "dig_down_denied:unknown_provenance")
+        self.assertEqual(result.reason, "dig_down_denied:protected_region")
         self.assertEqual(body.actions, [])
         self.assertEqual(result.metrics["legality"]["protected"], True)
 

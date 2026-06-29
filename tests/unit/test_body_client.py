@@ -232,6 +232,34 @@ class BodyClientTests(unittest.TestCase):
         self.assertEqual(snapshot["transport"]["count"], 1)
         self.assertEqual(snapshot["events"][0]["name"], "desync")
         self.assertEqual(snapshot["events"][1]["name"], "moveDone")
+        self.assertIn("minebot_events_since", transport.commands[0])
+        self.assertIn("'0'", transport.commands[0])
+
+    def test_poll_events_uses_retained_event_cursor(self):
+        retained = envelope(
+            {
+                "type": "events",
+                "bot": "Bot1",
+                "ok": True,
+                "complete": True,
+                "next": None,
+                "events": [
+                    {"type": "event", "seq": 1, "tick": 10, "bot": "Bot1", "name": "moveStarted", "data": {}},
+                    {"type": "event", "seq": 2, "tick": 20, "bot": "Bot1", "name": "moveDone", "data": {}},
+                ],
+                "error": None,
+            }
+        )
+        transport = FakeTransport([retained, envelope({**json.loads(retained), "events": []})])
+        body = ScarpetBody("Bot1", transport)
+
+        first = body.poll_events()
+        second = body.poll_events()
+
+        self.assertEqual([event.seq for event in first], [1, 2])
+        self.assertEqual(second, [])
+        self.assertIn("'0'", transport.commands[0])
+        self.assertIn("'2'", transport.commands[1])
 
     def test_poll_chat_events_uses_separate_chat_drain(self):
         transport = FakeTransport(
@@ -265,7 +293,40 @@ class BodyClientTests(unittest.TestCase):
         self.assertEqual([event.name for event in events], ["agentChat"])
         self.assertEqual(events[0].data["sender"], "Steve")
         self.assertEqual(events[0].data["message"], "collect 64 logs")
-        self.assertIn("minebot_drain_chat", transport.commands[0])
+        self.assertIn("minebot_chat_since", transport.commands[0])
+        self.assertIn("'0'", transport.commands[0])
+
+    def test_poll_chat_events_uses_retained_chat_cursor(self):
+        retained = envelope(
+            {
+                "type": "events",
+                "bot": "Bot1",
+                "ok": True,
+                "complete": True,
+                "next": None,
+                "events": [
+                    {
+                        "type": "event",
+                        "seq": 4,
+                        "tick": 40,
+                        "bot": "Bot1",
+                        "name": "agentChat",
+                        "data": {"sender": "Steve", "message": "hello"},
+                    }
+                ],
+                "error": None,
+            }
+        )
+        transport = FakeTransport([retained, envelope({**json.loads(retained), "events": []})])
+        body = ScarpetBody("Bot1", transport)
+
+        first = body.poll_chat_events()
+        second = body.poll_chat_events()
+
+        self.assertEqual([event.seq for event in first], [4])
+        self.assertEqual(second, [])
+        self.assertIn("'0'", transport.commands[0])
+        self.assertIn("'4'", transport.commands[1])
 
 
     def test_await_action_terminal_processes_batches_until_matching_move_done(self):

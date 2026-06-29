@@ -24,6 +24,7 @@ from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext
 from minebot.brain.persona import prompt_with_language
 from minebot.contract import BodyState, LegalityDecision, PerceptionResult, Result, ToolResult
+from minebot.game.errors import RconError
 
 
 def body_state(x=0.0):
@@ -325,6 +326,42 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertIsNone(runtime_context.weld_context.writer.holder)
         self.assertIsNone(sdk_tool._failure_error_function)
         self.assertFalse(sdk_tool._use_default_failure_error_function)
+
+    def test_sdk_tool_converts_transport_exception_to_tool_result(self):
+        def callable_(_params):
+            raise RconError("RCON socket closed")
+
+        tool = RegisteredTool(
+            name="read_state",
+            description="Read state",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(
+                progress_key="read_state",
+                mutating=False,
+                permission="read_state",
+                body_scope=("state",),
+                terminal_truth=(),
+            ),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        trace = RuntimeTrace()
+        runtime_context = RuntimeRunContext(
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            weld_context=WeldContext(body=FakeBody(), authority=ProgressAuthority(), goal_text="collect"),
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+
+        self.assertFalse(out["success"])
+        self.assertEqual(out["reason"], "transport_error")
+        self.assertTrue(out["canRetry"])
+        self.assertTrue(any(event["event"] == "tool_exception" and event["tool"] == "read_state" for event in trace.snapshot()))
 
     def test_tool_projection_uses_governance_and_preconditions_not_mode_hiding(self):
         body = FakeBody()

@@ -14,6 +14,7 @@ from minebot.app.runner import RuntimeTrace
 from minebot.app.runner import sdk_tool_for
 from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
 from minebot.body import BlockWork, NavigationRunConfig, NavigationTransactions
+from minebot.body.world_read import refresh_grid_world_around
 from minebot.brain.composition import (
     CompositionBudget,
     CompositionContext,
@@ -22,7 +23,7 @@ from minebot.brain.composition import (
 )
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
 from minebot.contract import Body, BreakContext, Position, Region, ToolResult
-from minebot.game import GovernancePolicy, GridCell, GridWorld, NavigationCostModel, ScarpetBody
+from minebot.game import GovernancePolicy, GridWorld, NavigationCostModel, ScarpetBody
 from minebot.game.navigation import GoalNear, SegmentedNavigator
 
 
@@ -67,6 +68,7 @@ def build_phase1_agent_runtime(
         weld_context=parts.runtime.weld_context,
         runtime_profile=parts.modes.profile_for(parts.lifecycle.state),
         budget=config.budget,
+        trace=lambda event, payload: parts.runtime.trace.emit(event, **payload),
     )
     register_collect_resource_tool(registry, context)
     parts.runtime.registry = registry
@@ -77,7 +79,15 @@ def build_phase1_agent_runtime(
 
 def build_phase1_registry(body: ScarpetBody, config: Phase1RuntimeConfig) -> ToolRegistry:
     policy = GovernancePolicy(natural_regions=[config.natural_region])
-    navigator = NavigationTransactions(body, SegmentedNavigator(_flat_world(config.natural_region), NavigationCostModel(policy)))
+    # The planner searches over this GridWorld. It starts EMPTY and is filled
+    # from live terrain by a per-segment local re-read (Baritone-style), so the
+    # bot navigates the real world instead of a flat placeholder grid.
+    world = GridWorld({})
+    navigator = NavigationTransactions(
+        body,
+        SegmentedNavigator(world, NavigationCostModel(policy)),
+        world_refresh=lambda center: refresh_grid_world_around(body, world, center),
+    )
     work = BlockWork(body, policy, navigator=navigator)
     registry = ToolRegistry()
     registry.register(_read_state_tool(body))
@@ -128,14 +138,6 @@ def inventory_count(body: Body, item: str) -> int:
     return total
 
 
-def _flat_world(region: Region) -> GridWorld:
-    cells: dict[tuple[int, int, int], GridCell] = {}
-    for x in range(region.min_pos[0], region.max_pos[0] + 1):
-        for z in range(region.min_pos[2], region.max_pos[2] + 1):
-            cells[(x, 70, z)] = GridCell()
-    return GridWorld(cells)
-
-
 def _read_state_tool(body: Body) -> RegisteredTool:
     return RegisteredTool(
         "read_state",
@@ -181,7 +183,7 @@ def _move_to_tool(navigator: NavigationTransactions) -> RegisteredTool:
             tool_type="navigation",
             permission="move",
             body_scope=("navigation",),
-            terminal_truth=("moveDone", "position"),
+            terminal_truth=("navigateDone", "position"),
             timeout_s=120.0,
         ),
     )
@@ -204,7 +206,7 @@ def _search_tool(work: BlockWork) -> RegisteredTool:
         lambda params: work.search_for_block(
             block_types=tuple(str(item) for item in params.get("block_types", [])),
             search_radius=int(params.get("search_radius") or 16),
-            find_limit=int(params.get("find_limit") or 8),
+            find_limit=int(params.get("find_limit") or 6),
             timeout_s=12.0,
         ),
         ToolSidecar(
