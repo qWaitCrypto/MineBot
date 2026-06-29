@@ -3,6 +3,7 @@ import unittest
 from minebot.body import ContainerTransactions
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
 from minebot.game.governance import GovernancePolicy, Region
+from tests.unit._body_batch_helper import batch_block_cells_from_blockat
 
 
 class FakeContainerBody:
@@ -22,6 +23,8 @@ class FakeContainerBody:
             return self.container_pages.pop(0)
         if scope == "inventory":
             return self.inventory_pages.pop(0)
+        if scope == "blockCells":
+            return batch_block_cells_from_blockat(self, params)
         if scope == "blockAt":
             pos = (int(params["x"]), int(params["y"]), int(params["z"]))
             block_type, state = self.block_states[pos]
@@ -148,6 +151,8 @@ class FakeNearestContainerBody(FakeContainerBody):
                 next=None,
                 error=None,
             )
+        if scope == "blockCells":
+            return batch_block_cells_from_blockat(self, params)
         if scope == "blockAt":
             pos = (int(params["x"]), int(params["y"]), int(params["z"]))
             block_type, state = self.block_states[pos]

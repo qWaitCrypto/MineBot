@@ -349,6 +349,55 @@ perceive_block_at(name, params) -> (
   perception_json(name, 'blockAt', true, true, block_fact_json(x, y, z), '[]', null, null)
 );
 
+perceive_block_cells(name, params) -> (
+  cells = params:'cells';
+  if(cells == null || length(cells) == 0,
+    perception_json(name, 'blockCells', true, true, '{"count":0,"total":0,"next":null,"cells":[]}', '[]', null, null)
+  ,
+    total = length(cells);
+    start = 0;
+    if(params:'start' != null, start = floor(number(params:'start')));
+    if(start < 0, start = 0);
+    if(start > total, start = total);
+    limit = 64;
+    if(params:'limit' != null, limit = floor(number(params:'limit')));
+    if(limit < 1, limit = 1);
+    if(limit > 256, limit = 256);
+    out = '';
+    count = 0;
+    first = true;
+    idx = start;
+    overflow = false;
+    loop(total - start,
+      if(overflow,
+        null
+      ,
+        cell = cells:(start + _);
+        x = floor(number(cell:0));
+        y = floor(number(cell:1));
+        z = floor(number(cell:2));
+        fact = block_fact_json(x, y, z);
+        if(count >= limit || length(out) + length(fact) >= global_response_char_budget,
+          overflow = true
+        ,
+          if(first, first = false, out += ',');
+          out += fact;
+          count += 1;
+          idx += 1
+        )
+      )
+    );
+    next_value = if(idx >= total, 'null', str('%d', idx));
+    data = str('{"count":%d,"total":%d,"next":%s,"cells":[%s]}', count, total, next_value, out);
+    uncertainty = if(overflow, '[{"reason":"limit_exceeded"}]', '[]');
+    if(overflow && count == 0,
+      perception_json(name, 'blockCells', false, true, data, '[{"reason":"single_cell_exceeds_budget"}]', null, 'single_cell_exceeds_budget')
+    ,
+      perception_json(name, 'blockCells', true, !overflow, data, uncertainty, null, null)
+    )
+  )
+);
+
 perceive_debug_blocks(name, params) -> (
   p = bot_pos(name);
   if(p == null,
@@ -3520,6 +3569,9 @@ minebot_perceive(name, scope, payload) -> (
   if(scope == 'blockAt',
     perceive_block_at(name, params)
   ,
+    if(scope == 'blockCells',
+      perceive_block_cells(name, params)
+    ,
     if(scope == 'nearbyBlocks',
       perceive_nearby_blocks(name, params)
     ,
@@ -3548,6 +3600,7 @@ minebot_perceive(name, scope, payload) -> (
           )
         )
       )
+    )
     )
   )
 );

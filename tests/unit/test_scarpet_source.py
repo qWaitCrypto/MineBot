@@ -130,8 +130,9 @@ class ScarpetSourceTests(unittest.TestCase):
         source = MINEBOT_SC.read_text()
 
         self.assertIn("global_response_char_budget = 2000;", source)
-        # Referenced once in each of nearbyBlocks / findBlocks / nearbyEntities.
-        self.assertEqual(source.count("global_response_char_budget"), 4)  # 1 decl + 3 uses
+        # Referenced once in each of nearbyBlocks / findBlocks / nearbyEntities /
+        # blockCells (the batch block-read primitive paginates the same way).
+        self.assertEqual(source.count("global_response_char_budget"), 5)  # 1 decl + 4 uses
         self.assertIn("length(out) >= global_response_char_budget", source)
 
     def test_find_blocks_scope_is_bounded_and_type_matched(self):

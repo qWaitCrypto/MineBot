@@ -3,6 +3,7 @@ import unittest
 from minebot.body import BlockWork, FurnaceTransactions
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
 from minebot.game.governance import GovernancePolicy, Region
+from tests.unit._body_batch_helper import batch_block_cells_from_blockat
 
 
 class FakeFurnaceBody:
@@ -78,6 +79,8 @@ class FakeFurnaceBody:
                 start=start,
                 limit=limit,
             )
+        if scope == "blockCells":
+            return batch_block_cells_from_blockat(self, params)
         if scope == "blockAt":
             pos = (int(params["x"]), int(params["y"]), int(params["z"]))
             block_type, state = self.block_states[pos]
@@ -486,6 +489,8 @@ class FurnaceRuntimeTests(unittest.TestCase):
         body.get_state = lambda: state_at((0, 64, 0))
 
         def perceive(scope, params):
+            if scope == "blockCells":
+                return batch_block_cells_from_blockat(body, params)
             if scope == "findBlocks":
                 return PerceptionResult(
                     bot="Bot1",
@@ -545,6 +550,8 @@ class FurnaceRuntimeTests(unittest.TestCase):
         body.get_state = lambda: state_at((0, 64, 0))
 
         def perceive(scope, params):
+            if scope == "blockCells":
+                return batch_block_cells_from_blockat(body, params)
             if scope == "findBlocks":
                 return PerceptionResult(
                     bot="Bot1",

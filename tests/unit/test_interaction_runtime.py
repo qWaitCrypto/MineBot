@@ -8,6 +8,7 @@ from minebot.body.interaction_support import ensure_interaction_range
 from minebot.body.use import UseTransactions
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
 from minebot.game.governance import GovernancePolicy, Region
+from tests.unit._body_batch_helper import batch_block_cells_from_blockat
 
 
 def state_at(pos, *, sleeping=None, time=0):
@@ -130,6 +131,8 @@ class FakeInteractionBody:
                 next=None,
                 error=None,
             )
+        if scope == "blockCells":
+            return batch_block_cells_from_blockat(self, params)
         if scope == "blockAt":
             pos = (int(params["x"]), int(params["y"]), int(params["z"]))
             default_block = ("minecraft:stone", "SOLID") if pos[1] == 63 else ("minecraft:air", "CLEAR")

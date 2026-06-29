@@ -87,6 +87,36 @@ class FakeBody:
                 data={"blocks": list(self.find_blocks)},
                 uncertainty=self.find_blocks_uncertainty,
             )
+        if self.blocks is not None and scope == "blockCells":
+            cells = params.get("cells") or []
+            start = int(params.get("start") or 0)
+            limit = int(params.get("limit") or 64)
+            page = cells[start : start + limit]
+            facts = []
+            for c in page:
+                pos = (int(c[0]), int(c[1]), int(c[2]))
+                block_type, state = self.blocks.get(pos, ("air", "CLEAR"))
+                facts.append(
+                    {
+                        "x": pos[0],
+                        "y": pos[1],
+                        "z": pos[2],
+                        "type": block_type,
+                        "state": state,
+                        "properties": {},
+                    }
+                )
+            next_idx = start + len(page)
+            nxt = None if next_idx >= len(cells) else next_idx
+            return PerceptionResult(
+                bot="Bot1",
+                scope="blockCells",
+                type="perception",
+                ok=True,
+                complete=nxt is None,
+                data={"count": len(page), "total": len(cells), "next": nxt, "cells": facts},
+                uncertainty=[] if nxt is None else [{"reason": "limit_exceeded"}],
+            )
         if self.blocks is not None and scope == "blockAt":
             pos = (int(params["x"]), int(params["y"]), int(params["z"]))
             block_type, state = self.blocks.get(pos, ("air", "CLEAR"))

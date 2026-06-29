@@ -10,6 +10,7 @@ from typing import Protocol
 
 from minebot.contract import Action, Body, PerceptionResult, Position, ToolResult
 from minebot.contract import terminal_event_to_tool_result
+from minebot.body.world_read import read_block_facts
 
 
 INTERACTION_RANGE = 4.5
@@ -673,26 +674,37 @@ def _interaction_stand_points_at_y(
     include_target: bool,
 ) -> list[Position] | ToolResult:
     state = body.get_state()
-    candidates: list[tuple[float, Position]] = []
-    seen: set[Position] = set()
     offsets = STAND_OFFSETS + ((0, 0, 0),) if include_target else STAND_OFFSETS
+    feet_positions: list[Position] = []
+    seen: set[Position] = set()
     for dx, dy, dz in offsets:
         pos = (target[0] + dx, stand_y + dy, target[2] + dz)
         if pos in seen:
             continue
         seen.add(pos)
-        stand = body.perceive("blockAt", {"x": pos[0], "y": pos[1], "z": pos[2]})
-        failed = perception_failure(stand)
-        if failed is not None:
-            return failed
-        head = body.perceive("blockAt", {"x": pos[0], "y": pos[1] + 1, "z": pos[2]})
-        failed = perception_failure(head)
-        if failed is not None:
-            return failed
-        below = body.perceive("blockAt", {"x": pos[0], "y": pos[1] - 1, "z": pos[2]})
-        failed = perception_failure(below)
-        if failed is not None:
-            return failed
+        feet_positions.append(pos)
+    wanted: list[Position] = []
+    for pos in feet_positions:
+        wanted.append(pos)
+        wanted.append((pos[0], pos[1] + 1, pos[2]))
+        wanted.append((pos[0], pos[1] - 1, pos[2]))
+    try:
+        facts = read_block_facts(body, tuple(wanted), failure_label="interaction_stand")
+    except ValueError as exc:
+        return ToolResult(
+            success=False,
+            reason="perception_failed",
+            can_retry=True,
+            next_suggestion="refresh world and inventory facts before attempting the interaction",
+            metrics={"scope": "blockCells", "ok": False, "complete": False, "error": str(exc), "uncertainty": None},
+        )
+    candidates: list[tuple[float, Position]] = []
+    for pos in feet_positions:
+        stand = facts.get(pos)
+        head = facts.get((pos[0], pos[1] + 1, pos[2]))
+        below = facts.get((pos[0], pos[1] - 1, pos[2]))
+        if stand is None or head is None or below is None:
+            continue
         if not _interaction_feet_clear(stand):
             continue
         if not _interaction_head_clear(head, head_pos=(pos[0], pos[1] + 1, pos[2]), target=target):

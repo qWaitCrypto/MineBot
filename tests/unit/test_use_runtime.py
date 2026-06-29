@@ -2,6 +2,7 @@ import unittest
 
 from minebot.body import UseTransactions
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
+from tests.unit._body_batch_helper import batch_block_cells_from_blockat
 
 
 def state_at(*, food: int, pos=(0, 64, 0), effects=None):
@@ -171,6 +172,8 @@ class FakeUseBody:
 
     def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
         self.perception_calls.append((scope, params))
+        if scope == "blockCells":
+            return batch_block_cells_from_blockat(self, params)
         if scope == "blockAt":
             if not self.block_perceptions:
                 raise AssertionError("unexpected blockAt without prepared perception")

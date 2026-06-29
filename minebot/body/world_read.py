@@ -15,6 +15,89 @@ class BlockCellRead:
     diagnostics: dict[str, object]
 
 
+def read_block_facts(
+    body: Body,
+    positions: tuple[Position, ...],
+    *,
+    page_size: int = 64,
+    failure_label: str = "read",
+) -> dict[Position, PerceptionResult]:
+    """Read authoritative ``blockAt`` facts for many positions in one pass.
+
+    Replaces the per-cell ``body.perceive("blockAt", ...)`` loop: one
+    ``blockCells`` perception (paginated by the server on its response-char
+    budget) returns the type/state/properties of every requested cell. Each
+    result is wrapped as a ``blockAt``-shaped ``PerceptionResult`` so existing
+    stand-point predicates consume it unchanged.
+
+    Honesty: raises ``ValueError`` on any incomplete perception (matching
+    ``read_block_cells_tiled``) rather than seeding callers with invented cells.
+    """
+
+    if page_size < 1:
+        raise ValueError("page_size must be >= 1")
+
+    cells = [[int(p[0]), int(p[1]), int(p[2])] for p in positions]
+    requested = {(int(p[0]), int(p[1]), int(p[2])) for p in positions}
+    bot_name = getattr(body, "bot_name", "")
+    facts: dict[Position, PerceptionResult] = {}
+    start = 0
+    while start is not None:
+        perception = body.perceive(
+            "blockCells",
+            {"cells": cells, "start": start, "limit": page_size},
+        )
+        if not perception.ok:
+            raise ValueError(
+                f"blockCells {failure_label} failed at start={start}: "
+                f"ok={getattr(perception, 'ok', None)} "
+                f"complete={getattr(perception, 'complete', None)} "
+                f"error={getattr(perception, 'error', None)}"
+            )
+        page_cells = perception.data.get("cells") or []
+        if not isinstance(page_cells, list):
+            raise ValueError(f"blockCells {failure_label} returned malformed cells at start={start}")
+        for cell in perception.data.get("cells") or []:
+            pos = (int(cell["x"]), int(cell["y"]), int(cell["z"]))
+            if pos not in requested:
+                raise ValueError(f"blockCells {failure_label} returned unexpected cell {list(pos)} at start={start}")
+            facts[pos] = PerceptionResult(
+                bot=bot_name,
+                scope="blockAt",
+                type="perception",
+                ok=True,
+                complete=True,
+                data=dict(cell),
+                uncertainty=[],
+                next=None,
+                error=None,
+            )
+        nxt = perception.data.get("next")
+        if nxt is None:
+            if not perception.complete:
+                raise ValueError(f"blockCells {failure_label} incomplete without next at start={start}")
+            start = None
+        else:
+            next_start = int(nxt)
+            if next_start <= start:
+                raise ValueError(
+                    f"blockCells {failure_label} did not advance next cursor: start={start} next={next_start}"
+                )
+            if next_start > len(cells):
+                raise ValueError(
+                    f"blockCells {failure_label} next cursor exceeds request length: next={next_start} total={len(cells)}"
+                )
+            start = next_start
+    missing = requested.difference(facts)
+    if missing:
+        sample = sorted(missing)[:5]
+        raise ValueError(
+            f"blockCells {failure_label} returned {len(facts)}/{len(requested)} requested cells; "
+            f"missing={ [list(pos) for pos in sample] }"
+        )
+    return facts
+
+
 def read_block_cells_tiled(
     body: Body,
     positions: tuple[Position, ...],

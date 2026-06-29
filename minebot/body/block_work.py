@@ -14,6 +14,7 @@ from minebot.body.interaction_support import (
     interaction_stand_points,
     merge_context,
 )
+from minebot.body.world_read import read_block_facts
 from minebot.contract import (
     Action,
     Body,
@@ -3153,20 +3154,29 @@ def _mining_approach_stand_candidates(pos: Position) -> tuple[Position, ...]:
 
 
 def _best_mining_stand_candidate(body: Body, pos: Position, current: tuple[float, float, float]) -> Position | ToolResult:
+    approach = _mining_approach_stand_candidates(pos)
+    wanted: list[Position] = []
+    for candidate in approach:
+        wanted.append(candidate)
+        wanted.append((candidate[0], candidate[1] - 1, candidate[2]))
+        wanted.append((candidate[0], candidate[1] + 1, candidate[2]))
+    try:
+        facts = read_block_facts(body, tuple(wanted), failure_label="mining_stand")
+    except ValueError as exc:
+        return ToolResult(
+            success=False,
+            reason="perception_failed",
+            can_retry=True,
+            next_suggestion="re-perceive the target block before mutating the world",
+            metrics={"scope": "blockCells", "ok": False, "complete": False, "error": str(exc), "uncertainty": None},
+        )
     standable: list[Position] = []
-    for candidate in _mining_approach_stand_candidates(pos):
-        stand = body.perceive("blockAt", _block_params(candidate))
-        failed = _perception_failure(stand)
-        if failed is not None:
-            return failed
-        below = body.perceive("blockAt", _block_params((candidate[0], candidate[1] - 1, candidate[2])))
-        failed = _perception_failure(below)
-        if failed is not None:
-            return failed
-        head = body.perceive("blockAt", _block_params((candidate[0], candidate[1] + 1, candidate[2])))
-        failed = _perception_failure(head)
-        if failed is not None:
-            return failed
+    for candidate in approach:
+        stand = facts.get(candidate)
+        head = facts.get((candidate[0], candidate[1] + 1, candidate[2]))
+        below = facts.get((candidate[0], candidate[1] - 1, candidate[2]))
+        if stand is None or head is None or below is None:
+            continue
         if _is_clear_perception(stand) and _is_solid_support_perception(below) and _is_clear_perception(head):
             standable.append(candidate)
     candidates = standable or list(_mining_stand_candidates((pos[0], pos[1] + 1, pos[2])))
