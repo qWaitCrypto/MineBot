@@ -287,10 +287,9 @@ class BlockWork:
         if self.navigator is None:
             return None
         # Bounded break budget so one buried target cannot consume the session.
-        # The config carries only max_break_steps; the navigator's per-segment
-        # world_refresh (wired at construction) still applies because navigate_to
-        # falls back to the instance's world_refresh when cfg.world_refresh is
-        # None.
+        # Current navigate_to delegates primary pathfinding to Scarpet. The break
+        # budget remains the migration seam for a future terrain-aware Body
+        # navigator, but this Python path clears only the selected stand cell.
         from minebot.body.navigation import NavigationRunConfig  # local import: navigation.py imports BlockWork at module top
         from dataclasses import replace
 

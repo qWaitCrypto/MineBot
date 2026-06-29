@@ -55,7 +55,6 @@ class NavigationRunConfig:
     recheck_world: GridWorld | None = None
     recheck_costs: NavigationCostModel | None = None
     world_update: Callable[[object, NavigationSegment], dict[str, object] | None] | None = None
-    world_refresh: Callable[[Position], dict[str, object] | None] | None = None
     movement_arrival_radius: float | None = None
 
 
@@ -71,13 +70,13 @@ class ExecutedSegment:
 
 
 class NavigationTransactions:
-    """Executes one navigation objective through Body move segments.
+    """Executes navigation objectives through the Body navigation controller.
 
-    The planner decides the next safe segment. Scarpet/Carpet still owns the
-    physical move controller. This runtime is the Body transaction glue:
-    it rejects stale/unsafe segments, sends one `moveTo` per accepted segment,
-    routes terminal truth through `ToolResult`, and lets the single progress
-    authority stop hidden retry loops.
+    The production ``navigate_to`` path delegates primary pathfinding and
+    movement to Scarpet ``navigateTo`` so terrain reads stay server-side.
+    Python remains the Body transaction glue: it starts the action, waits for
+    terminal truth, records progress, and preserves migration seams for legacy
+    terrain-aware helpers that are not on the Phase 1 hot path.
     """
 
     def __init__(
@@ -87,17 +86,11 @@ class NavigationTransactions:
         *,
         progress: ProgressController | None = None,
         work: BlockWork | None = None,
-        world_refresh: Callable[[Position], dict[str, object] | None] | None = None,
     ):
         self.body = body
         self.navigator = navigator
         self.progress = progress or LocalProgressController()
         self.work = work or _default_work_runtime(body, navigator)
-        # Per-segment local re-read seam (Baritone-style). When set, the planner's
-        # GridWorld is refreshed from live terrain before each segment so it never
-        # searches over a stale/placeholder grid. A per-call config.world_refresh
-        # overrides this instance default.
-        self.world_refresh = world_refresh
 
     def navigate_to(
         self,
@@ -288,25 +281,6 @@ class NavigationTransactions:
                 if check_index + 1 < maintenance_checks and maintenance_interval_s > 0:
                     sleep(maintenance_interval_s)
                 continue
-
-            if _world_has_no_avoid_candidate(self.navigator, danger_xyz, required_distance):
-                return ToolResult(
-                    success=False,
-                    reason="move_away_no_candidate",
-                    can_retry=True,
-                    next_suggestion="expand the move-away radius or fall back to a broader navigation/reflex escape path",
-                    metrics={
-                        "danger": list(danger_xyz),
-                        "origin": list(current),
-                        "initial_distance": initial_distance,
-                        "desired_distance": desired_distance,
-                        "hazard_radius": hazard_radius,
-                        "required_distance": required_distance,
-                        "maintenance_checks": maintenance_checks,
-                        "candidate_radii_legacy": legacy_candidates,
-                        "attempts": attempts,
-                    },
-                )
 
             witness_candidates = _move_away_candidates(
                 current,
@@ -1638,21 +1612,6 @@ def _xyz_pos(pos: Position | tuple[float, float, float]) -> tuple[float, float, 
 
 def _danger_block_pos(pos: tuple[float, float, float]) -> Position:
     return (int(floor(pos[0])), int(floor(pos[1])), int(floor(pos[2])))
-
-
-def _world_has_no_avoid_candidate(
-    navigator: object,
-    danger: tuple[float, float, float],
-    required_distance: float,
-) -> bool:
-    cells = getattr(navigator, "world", None)
-    if cells is None or getattr(cells, "cells", None) is None:
-        return False
-    for pos in cells.cells.keys():
-        center = (pos[0] + 0.5, float(pos[1]), pos[2] + 0.5)
-        if dist(center, danger) >= required_distance:
-            return False
-    return True
 
 
 def _move_away_candidates(

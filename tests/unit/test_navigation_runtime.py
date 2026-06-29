@@ -319,22 +319,17 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(result.reason, "move_away_failed:no_path")
         self.assertTrue(result.can_retry)
 
-    def test_move_away_reports_no_candidate_from_local_world_for_avoid_goal(self):
-        cells = {
-            (0, 64, 0): GridCell(),
-            (1, 64, 0): GridCell(),
-            (0, 64, 1): GridCell(),
-            (1, 64, 1): GridCell(),
-        }
-        nav = _navigator(cells)
-        body = FakeBody([state_at((0, 64, 0))])
+    def test_move_away_uses_candidate_selection_instead_of_local_world_cells(self):
+        nav = FakeNavigator([_segment("arrived", (4, 64, 4), success=True, reason="arrived")])
+        body = FakeBody([state_at((0, 64, 0)), state_at((0, 64, 0)), state_at((4, 64, 4))])
         runtime = NavigationTransactions(body, nav)
 
         result = runtime.move_away((0.0, 64.0, 0.0), min_distance=4.0, candidate_radii=(4,), max_candidates=4)
 
-        self.assertFalse(result.success)
-        self.assertEqual(result.reason, "move_away_no_candidate")
-        self.assertEqual(body.actions, [])
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "moved_away")
+        self.assertEqual(result.metrics["chosen_goal"], [4, 64, 4])
+        self.assertEqual(body.actions[0].name, "navigateTo")
 
     def test_move_away_rechecks_moving_hazard_and_can_escape_again(self):
         nav = FakeNavigator(

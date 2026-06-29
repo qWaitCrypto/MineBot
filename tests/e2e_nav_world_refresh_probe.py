@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live nav probe: prove the GridWorld real-terrain refresh fixes move_to.
+"""Live nav probe: prove server-side navigation succeeds on real terrain.
 
 Drives move_to against the REAL generated terrain near spawn through the same
 build_phase1_registry path the real agent uses, in the directions that
@@ -73,7 +73,7 @@ def main() -> None:
 
         # Targets that previously yielded on the flat placeholder world:
         # a -z move, a +z move, and a short diagonal — all near spawn so the
-        # only question is "does the planner see real terrain", not "is it far".
+        # only question is "does the server-side planner see real terrain".
         targets = [
             (sx, sy, sz - 3),
             (sx, sy, sz + 3),
@@ -88,42 +88,40 @@ def main() -> None:
                 weld,
             )
             dt = time.monotonic() - t
-            refreshed = _refresh_cells(payload)
+            segment_facts = _segment_fact_count(payload)
             results.append(
                 {
                     "target": [tx, ty, tz],
                     "success": payload.get("success"),
                     "reason": payload.get("reason"),
                     "elapsed_s": round(dt, 2),
-                    "refreshed_cells": refreshed,
+                    "segment_facts": segment_facts,
                 }
             )
             print(results[-1])
 
         moved = sum(1 for r in results if r["success"])
-        any_refresh = any((r["refreshed_cells"] or 0) > 0 for r in results)
-        print({"moved": moved, "of": len(results), "any_world_refresh": any_refresh})
-        if not any_refresh:
-            raise AssertionError("no world refresh diagnostics observed -- planner still on placeholder grid")
+        any_segment_facts = any((r["segment_facts"] or 0) > 0 for r in results)
+        print({"moved": moved, "of": len(results), "any_segment_facts": any_segment_facts})
+        if not any_segment_facts:
+            raise AssertionError("no navigation diagnostics observed -- server-side planner did not report segment facts")
         if moved == 0:
             raise AssertionError(f"every move yielded -- nav still broken on real terrain: {results}")
 
 
-def _refresh_cells(payload: dict) -> int | None:
+def _segment_fact_count(payload: dict) -> int | None:
     metrics = payload.get("metrics") if isinstance(payload, dict) else None
     if not isinstance(metrics, dict):
         return None
     executed = metrics.get("segments")
     if not isinstance(executed, list):
         return None
-    total = 0
-    seen = False
+    count = 0
     for seg in executed:
         diag = seg.get("diagnostics") if isinstance(seg, dict) else None
-        if isinstance(diag, dict) and "refreshed_cells" in diag:
-            seen = True
-            total += int(diag.get("refreshed_cells") or 0)
-    return total if seen else None
+        if isinstance(diag, dict) and {"expanded", "waypoints", "event"} & set(diag):
+            count += 1
+    return count if executed else None
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ from minebot.app.runner import RuntimeTrace
 from minebot.app.runner import sdk_tool_for
 from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
 from minebot.body import BlockWork, NavigationRunConfig, NavigationTransactions
-from minebot.body.world_read import refresh_grid_world_around
 from minebot.brain.composition import (
     CompositionBudget,
     CompositionContext,
@@ -79,14 +78,13 @@ def build_phase1_agent_runtime(
 
 def build_phase1_registry(body: ScarpetBody, config: Phase1RuntimeConfig) -> ToolRegistry:
     policy = GovernancePolicy(natural_regions=[config.natural_region])
-    # The planner searches over this GridWorld. It starts EMPTY and is filled
-    # from live terrain by a per-segment local re-read (Baritone-style), so the
-    # bot navigates the real world instead of a flat placeholder grid.
+    # SegmentedNavigator still carries governance policy for fallback/legacy
+    # transaction seams, but production move_to delegates primary pathfinding to
+    # Scarpet navigateTo instead of populating a Python-local terrain grid.
     world = GridWorld({})
     navigator = NavigationTransactions(
         body,
         SegmentedNavigator(world, NavigationCostModel(policy)),
-        world_refresh=lambda center: refresh_grid_world_around(body, world, center),
     )
     work = BlockWork(body, policy, navigator=navigator)
     registry = ToolRegistry()
