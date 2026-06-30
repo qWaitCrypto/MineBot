@@ -9,7 +9,7 @@ from typing import Callable
 
 from minebot.body.block_work import BlockWork
 from minebot.body.interaction import _openable_look_target
-from minebot.body.world_read import read_block_cells_tiled
+from minebot.body.world_read import read_block_cells_tiled, refresh_grid_world_around
 from minebot.contract import (
     Action,
     Body,
@@ -30,6 +30,12 @@ from minebot.game.navigation import GoalLike, normalize_goal
 
 
 WAYPOINT_MOVES = frozenset({MoveKind.WALK, MoveKind.DIAGONAL, MoveKind.ASCEND, MoveKind.DESCEND, MoveKind.SWIM, MoveKind.FALL})
+TERRAIN_ACTION_MOVES = frozenset({MoveKind.BREAK, MoveKind.PLACE, MoveKind.PILLAR, MoveKind.DOWNWARD})
+SCARPET_FALLBACK_REASONS = frozenset({"no_path", "stuck", "timeout", "deviated", "segment_budget_exhausted"})
+TERRAIN_FALLBACK_H_RADIUS = 5
+TERRAIN_FALLBACK_Y_BELOW = 3
+TERRAIN_FALLBACK_Y_ABOVE = 8
+TERRAIN_FALLBACK_MAX_TILES = 64
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,7 @@ class NavigationRunConfig:
     recheck_costs: NavigationCostModel | None = None
     world_update: Callable[[object, NavigationSegment], dict[str, object] | None] | None = None
     movement_arrival_radius: float | None = None
+    allow_local_terrain_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,6 +98,30 @@ class NavigationTransactions:
         self.navigator = navigator
         self.progress = progress or LocalProgressController()
         self.work = work or _default_work_runtime(body, navigator)
+
+    @classmethod
+    def server_side(
+        cls,
+        body: Body,
+        governance,
+        *,
+        progress: ProgressController | None = None,
+        work: BlockWork | None = None,
+    ) -> "NavigationTransactions":
+        """Build the production server-side navigation transaction runtime.
+
+        Primary pathfinding is owned by Scarpet `navigateTo`; the small
+        `SegmentedNavigator` object is retained only as a compatibility carrier
+        for governance-aware helper code such as `move_away` and Body
+        transactions that still accept a navigator-shaped dependency.
+        """
+
+        return cls(
+            body,
+            SegmentedNavigator(GridWorld({}), NavigationCostModel(governance)),
+            progress=progress,
+            work=work,
+        )
 
     def navigate_to(
         self,
@@ -190,11 +221,389 @@ class NavigationTransactions:
                 segment_index += 1
                 continue
 
+            if _scarpet_failure_can_fallback(nav_reason, break_context, cfg):
+                fallback = self._run_local_terrain_fallback(
+                    start=self.body.get_state(),
+                    nav_goal=nav_goal,
+                    goal=goal_anchor,
+                    goal_payload=nav_goal.payload(),
+                    break_context=break_context,
+                    cfg=cfg,
+                    executed=executed,
+                    first_segment_index=segment_index + 1,
+                    original_reason=nav_reason,
+                )
+                if fallback is not None:
+                    return fallback
+
             return _result(False, nav_reason, nav_reason in ("stuck", "timeout"), goal_anchor, executed, {
                 "navigation_goal": nav_goal.payload(), "goal_dist": goal_dist,
             })
 
         return _result(False, "segment_budget_exhausted", True, goal_anchor, executed, {"navigation_goal": nav_goal.payload()})
+
+    def _run_local_terrain_fallback(
+        self,
+        *,
+        start: BodyState,
+        nav_goal,
+        goal: Position,
+        goal_payload: dict[str, object],
+        break_context: BreakContext | str,
+        cfg: NavigationRunConfig,
+        executed: list[ExecutedSegment],
+        first_segment_index: int,
+        original_reason: str,
+    ) -> ToolResult | None:
+        world = getattr(self.navigator, "world", None)
+        if not isinstance(world, GridWorld):
+            return None
+
+        origin = _block_pos(start)
+        try:
+            refresh = refresh_grid_world_around(
+                self.body,
+                world,
+                origin,
+                h_radius=TERRAIN_FALLBACK_H_RADIUS,
+                y_below=TERRAIN_FALLBACK_Y_BELOW,
+                y_above=TERRAIN_FALLBACK_Y_ABOVE,
+                max_tiles=TERRAIN_FALLBACK_MAX_TILES,
+                failure_label="navigation_fallback",
+            )
+        except Exception as exc:
+            return _result(
+                False,
+                "terrain_fallback_world_read_failed",
+                True,
+                goal,
+                executed,
+                {
+                    "navigation_goal": goal_payload,
+                    "original_reason": original_reason,
+                    "error": str(exc),
+                },
+            )
+
+        if executed:
+            executed[-1].diagnostics["terrain_fallback"] = {
+                "trigger": original_reason,
+                "world_refresh": refresh,
+            }
+
+        break_steps_used = 0
+        previous_segment: tuple[Position, ...] = ()
+        for offset in range(max(0, cfg.max_segments - first_segment_index)):
+            segment_index = first_segment_index + offset
+            current = _block_pos(self.body.get_state())
+            if nav_goal.is_satisfied(current):
+                return _with_fallback_origin(
+                    _result(
+                        True,
+                        "arrived",
+                        False,
+                        goal,
+                        executed,
+                        {"navigation_goal": goal_payload, "original_reason": original_reason},
+                    ),
+                    original_reason,
+                )
+            try:
+                self.progress.require_can_continue(f"navigate_terrain_fallback:{goal_payload}")
+            except ProgressAbort as exc:
+                return _with_fallback_origin(
+                    _result(
+                        False,
+                        "progress_yielded",
+                        True,
+                        goal,
+                        executed,
+                        {"error": str(exc), "navigation_goal": goal_payload, "original_reason": original_reason},
+                    ),
+                    original_reason,
+                )
+
+            try:
+                refresh = refresh_grid_world_around(
+                    self.body,
+                    world,
+                    current,
+                    h_radius=TERRAIN_FALLBACK_H_RADIUS,
+                    y_below=TERRAIN_FALLBACK_Y_BELOW,
+                    y_above=TERRAIN_FALLBACK_Y_ABOVE,
+                    max_tiles=TERRAIN_FALLBACK_MAX_TILES,
+                    failure_label="navigation_fallback",
+                )
+            except Exception as exc:
+                return _with_fallback_origin(
+                    _result(
+                        False,
+                        "terrain_fallback_world_read_failed",
+                        True,
+                        goal,
+                        executed,
+                        {
+                            "navigation_goal": goal_payload,
+                            "original_reason": original_reason,
+                            "error": str(exc),
+                        },
+                    ),
+                    original_reason,
+                )
+
+            segment = self.navigator.next_segment(
+                current,
+                goal,
+                break_context=break_context,
+                min_partial_progress=max(1, cfg.min_partial_progress),
+                recheck_lookahead=cfg.recheck_lookahead,
+                recheck_world=cfg.recheck_world,
+                recheck_costs=cfg.recheck_costs,
+                previous_segment=previous_segment,
+                backtrack_cost_factor=cfg.backtrack_cost_factor,
+                unloaded_boundary_limit=cfg.unloaded_boundary_limit,
+                partial_tail_trim=cfg.partial_tail_trim,
+            )
+            if segment.target is None:
+                executed.append(
+                    ExecutedSegment(
+                        index=segment_index,
+                        status=f"terrain_fallback_{segment.status}",
+                        target=None,
+                        terminal_reason=segment.plan.reason,
+                        success=False,
+                        diagnostics={
+                            "original_reason": original_reason,
+                            "world_refresh": refresh,
+                            "segment": _segment_payload(segment),
+                            "planned_segment": segment,
+                        },
+                    )
+                )
+                return _with_fallback_origin(
+                    _result(
+                        False,
+                        f"terrain_fallback:{segment.plan.reason}",
+                        True,
+                        goal,
+                        executed,
+                        {"navigation_goal": goal_payload, "original_reason": original_reason},
+                    ),
+                    original_reason,
+                )
+
+            if segment.status == "replan_required":
+                executed.append(
+                    ExecutedSegment(
+                        index=segment_index,
+                        status="terrain_fallback_replan_required",
+                        target=segment.target,
+                        terminal_reason=segment.recheck.reason if segment.recheck is not None else segment.plan.reason,
+                        success=False,
+                        diagnostics={
+                            "original_reason": original_reason,
+                            "world_refresh": refresh,
+                            "segment": _segment_payload(segment),
+                            "planned_segment": segment,
+                        },
+                    )
+                )
+                return _with_fallback_origin(
+                    _result(
+                        False,
+                        "terrain_fallback:replan_required",
+                        True,
+                        goal,
+                        executed,
+                        {"navigation_goal": goal_payload, "original_reason": original_reason},
+                    ),
+                    original_reason,
+                )
+
+            segment_path = segment.plan.path
+            action_step = _first_action_step(segment_path)
+            if action_step is not None:
+                prefix = _prefix_before_step(segment_path, action_step)
+                if prefix:
+                    prefix_segment = _segment_for_path_prefix(segment, prefix)
+                    moved = self._execute_move(
+                        segment_index,
+                        prefix_segment,
+                        prefix_segment.target,
+                        prefix,
+                        goal,
+                        goal_payload,
+                        break_context,
+                        cfg,
+                        executed,
+                    )
+                    if moved is not None:
+                        if moved.success:
+                            return _with_fallback_origin(moved, original_reason)
+                        if moved.reason == "recoverable_move_failure":
+                            retry = self._attempt_recovery_detour(
+                                segment_index,
+                                goal,
+                                goal_payload,
+                                cfg,
+                                executed,
+                                str((moved.metrics or {}).get("original_reason") or moved.reason),
+                            )
+                            if retry is not None:
+                                return _with_fallback_origin(retry, original_reason)
+                            previous_segment = _walk_positions(prefix)
+                            continue
+                        return _with_fallback_origin(moved, original_reason)
+                    previous_segment = _walk_positions(prefix)
+                    continue
+
+                if action_step.move == MoveKind.OPEN:
+                    opened_result = self._execute_open_step(
+                        action_step,
+                        cfg,
+                        goal,
+                        executed,
+                        segment_index=segment_index,
+                        segment=segment,
+                    )
+                    if opened_result is not None:
+                        return _with_fallback_origin(opened_result, original_reason)
+                    _apply_executed_terrain_effect(self.navigator, action_step)
+                    previous_segment = _walk_positions(prefix)
+                    continue
+
+                terrain_result = self._execute_terrain_step(
+                    action_step,
+                    break_context,
+                    cfg,
+                    goal,
+                    executed,
+                    break_steps_used=break_steps_used,
+                    segment_index=segment_index,
+                    segment=segment,
+                )
+                if terrain_result is not None:
+                    return _with_fallback_origin(terrain_result, original_reason)
+                if action_step.move in {MoveKind.BREAK, MoveKind.DOWNWARD}:
+                    break_steps_used += 1
+                _apply_executed_terrain_effect(self.navigator, action_step)
+                previous_segment = _walk_positions(prefix)
+                continue
+
+            moved = self._execute_move(
+                segment_index,
+                segment,
+                segment.target,
+                segment_path,
+                goal,
+                goal_payload,
+                break_context,
+                cfg,
+                executed,
+            )
+            if moved is not None:
+                if moved.success:
+                    return _with_fallback_origin(moved, original_reason)
+                if moved.reason == "recoverable_move_failure":
+                    retry = self._attempt_recovery_detour(
+                        segment_index,
+                        goal,
+                        goal_payload,
+                        cfg,
+                        executed,
+                        str((moved.metrics or {}).get("original_reason") or moved.reason),
+                    )
+                    if retry is not None:
+                        return _with_fallback_origin(retry, original_reason)
+                    previous_segment = _walk_positions(segment_path)
+                    continue
+                return _with_fallback_origin(moved, original_reason)
+            previous_segment = _walk_positions(segment_path)
+
+        return _with_fallback_origin(
+            _result(
+                False,
+                "terrain_fallback_segment_budget_exhausted",
+                True,
+                goal,
+                executed,
+                {"navigation_goal": goal_payload, "original_reason": original_reason},
+            ),
+            original_reason,
+        )
+
+    def follow_entity(
+        self,
+        target_spec: str,
+        *,
+        keep_distance: float = 3.0,
+        timeout_s: float = 30.0,
+        config: NavigationRunConfig | None = None,
+    ) -> ToolResult:
+        """Follow a moving entity (player or named mob) by name.
+
+        The Body owns the physical pursuit: Scarpet ``followEntity`` re-plans a
+        server-side path to the target's live position on a cadence (move done
+        or target drifted beyond ``replan_distance``) and ``run_move_tick``
+        walks it with jump/obstacle handling. The brain emits one intent
+        ("follow X") and waits for ``followDone``. This is ``navigate_to`` with
+        a moving goal — the same body-owns-execution, brain-stays-thin shape.
+        """
+        cfg = config or NavigationRunConfig()
+        if not target_spec:
+            raise ValueError("target_spec must be a non-empty name/uuid")
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be > 0")
+        if keep_distance < 0:
+            raise ValueError("keep_distance must be >= 0")
+
+        generation = self.progress.next_generation()
+        if not self.progress.generation_current(generation):
+            return _result(False, "preempted", True, _block_pos(self.body.get_state()), [], {"generation_current": False})
+        try:
+            self.progress.require_can_continue(f"follow_entity:{target_spec}")
+        except ProgressAbort as exc:
+            return _result(False, "progress_yielded", True, _block_pos(self.body.get_state()), [], {"error": str(exc), "target_spec": target_spec})
+
+        action = Action.create(
+            "followEntity",
+            {
+                "target_spec": target_spec,
+                "keep_radius": keep_distance,
+                "replan_distance": 2.0,
+                "acquire_radius": 32,
+                "grid_radius": 32,
+                "max_expand": 200,
+                "timeout_ticks": max(20, int(timeout_s * 20)),
+            },
+        )
+        result = self.body.execute(action)
+        start = _block_pos(self.body.get_state())
+        if not (result.ok and result.accepted):
+            return _result(False, "body_rejected", True, start, [], {"error": result.error, "target_spec": target_spec})
+
+        terminal = self.body.await_action_terminal(
+            action.id,
+            timeout_s=timeout_s + 5.0,
+            terminal_events={"followDone", "death", "respawned"},
+        )
+        td = terminal.data
+        arrived = bool(td.get("arrived", False))
+        reason = str(td.get("reason") or "unknown")
+        self.progress.note_step(
+            ("follow.tick", start, target_spec, reason),
+            success=arrived,
+            fingerprint=self.progress.fingerprint(self.body.get_state()),
+            neutral=reason in ("timeout", "target_lost"),
+        )
+        return _result(
+            arrived,
+            reason,
+            reason in ("timeout", "target_lost", "stuck"),
+            start,
+            [],
+            {"target_spec": target_spec, "keep_distance": keep_distance, "event": terminal.name},
+        )
 
     def move_away(
         self,
@@ -1051,16 +1460,9 @@ def make_block_at_prism_world_update(
     return refresh
 
 
-def _first_terrain_step(path: tuple[PathStep, ...]) -> PathStep | None:
+def _first_action_step(path: tuple[PathStep, ...]) -> PathStep | None:
     for step in path:
-        if step.move in {MoveKind.BREAK, MoveKind.PLACE, MoveKind.PILLAR, MoveKind.DOWNWARD}:
-            return step
-    return None
-
-
-def _first_open_step(path: tuple[PathStep, ...]) -> PathStep | None:
-    for step in path:
-        if step.move == MoveKind.OPEN:
+        if step.move in TERRAIN_ACTION_MOVES or step.move == MoveKind.OPEN:
             return step
     return None
 
@@ -1188,6 +1590,30 @@ def _suffix_after_step(path: tuple[PathStep, ...], target_step: PathStep) -> tup
         elif step is target_step:
             seen = True
     return tuple(out)
+
+
+def _segment_for_path_prefix(segment: NavigationSegment, prefix: tuple[PathStep, ...]) -> NavigationSegment:
+    if not prefix:
+        raise ValueError("prefix must not be empty")
+    prefix_target = prefix[-1].pos
+    prefix_plan = replace(
+        segment.plan,
+        path=prefix,
+        success=False,
+        reason="prefix_before_action",
+        cost=sum(step.cost for step in prefix),
+    )
+    diagnostics = dict(segment.diagnostics)
+    diagnostics["prefix_before_action"] = True
+    diagnostics["action_target"] = list(segment.plan.path[len(prefix)].pos)
+    return replace(
+        segment,
+        status="advanced",
+        target=prefix_target,
+        plan=prefix_plan,
+        recheck=None,
+        diagnostics=diagnostics,
+    )
 
 
 def _segment_original_goal(segment: NavigationSegment) -> Position | None:
@@ -1466,6 +1892,30 @@ def _acceptance_failure(result: Result, action_name: str, target: Position) -> T
 
 def _recoverable_terminal_reason(reason: str) -> bool:
     return reason in {"stuck", "timeout", "deviated"}
+
+
+def _scarpet_failure_can_fallback(
+    reason: str,
+    break_context: BreakContext | str,
+    cfg: NavigationRunConfig,
+) -> bool:
+    if not cfg.allow_local_terrain_fallback:
+        return False
+    if BreakContext(break_context) is not BreakContext.COLLECT_APPROACH:
+        return False
+    return reason in SCARPET_FALLBACK_REASONS or reason.startswith("navigation_blocked:")
+
+
+def _with_fallback_origin(result: ToolResult, original_reason: str) -> ToolResult:
+    metrics = dict(result.metrics or {})
+    metrics.setdefault("terrain_fallback_original_reason", original_reason)
+    return ToolResult(
+        success=result.success,
+        reason=result.reason,
+        can_retry=result.can_retry,
+        next_suggestion=result.next_suggestion,
+        metrics=metrics,
+    )
 
 
 def _path_update_probe(

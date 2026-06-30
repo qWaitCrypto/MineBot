@@ -142,12 +142,22 @@ def read_block_cells_tiled(
         tile_clear = 0
         tile_solid = 0
         tile_liquid = 0
+        facts = read_block_facts(body, tile, failure_label=failure_label)
         for pos in tile:
-            perception = body.perceive("blockAt", {"x": pos[0], "y": pos[1], "z": pos[2]})
+            perception = facts[pos]
             failure = block_perception_failure(perception, pos, label=failure_label)
             if failure is not None:
                 raise ValueError(failure)
             cell = grid_cell_from_block_perception(perception)
+            if _cell_requires_support(pos, cell, facts):
+                cell = GridCell(
+                    block_type=cell.block_type,
+                    walkable=cell.walkable,
+                    liquid=cell.liquid,
+                    fall_depth=cell.fall_depth,
+                    requires_support=True,
+                    headroom_block=cell.headroom_block,
+                )
             read_cells[pos] = cell
             if cell.liquid:
                 liquid_count += 1
@@ -301,6 +311,20 @@ def grid_cell_from_block_perception(perception: PerceptionResult) -> GridCell:
             )
         return GridCell(block_type=block_type, walkable=False)
     return GridCell(block_type=block_type, walkable=True)
+
+
+def _cell_requires_support(
+    pos: Position,
+    cell: GridCell,
+    facts: dict[Position, PerceptionResult],
+) -> bool:
+    if not cell.walkable or cell.liquid:
+        return False
+    below = facts.get((pos[0], pos[1] - 1, pos[2]))
+    if below is None:
+        return False
+    below_cell = grid_cell_from_block_perception(below)
+    return below_cell.walkable or below_cell.liquid
 
 
 def _is_walkthrough_openable(block_type: str, properties: dict[str, str]) -> bool:

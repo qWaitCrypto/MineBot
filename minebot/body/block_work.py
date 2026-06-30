@@ -294,7 +294,10 @@ class BlockWork:
         from minebot.body.navigation import NavigationRunConfig  # local import: navigation.py imports BlockWork at module top
         from dataclasses import replace
 
-        dig_config = NavigationRunConfig(max_break_steps=self.DIG_THROUGH_MAX_BREAK_STEPS)
+        dig_config = NavigationRunConfig(
+            max_break_steps=self.DIG_THROUGH_MAX_BREAK_STEPS,
+            allow_local_terrain_fallback=True,
+        )
         if timeout_s is not None:
             dig_config = replace(dig_config, segment_timeout_s=timeout_s)
         clearance_result = self._clear_collect_approach_stand(
@@ -2037,6 +2040,29 @@ class BlockWork:
         return None
 
     def _standable_feet_at(self, feet_pos: Position) -> dict[str, object] | ToolResult:
+        head_pos = (feet_pos[0], feet_pos[1] + 1, feet_pos[2])
+        support_pos = (feet_pos[0], feet_pos[1] - 1, feet_pos[2])
+        try:
+            facts = read_block_facts(self.body, (feet_pos, head_pos, support_pos), failure_label="surface_stand")
+        except ValueError:
+            return self._standable_feet_at_fallback(feet_pos)
+        feet = facts.get(feet_pos)
+        head = facts.get(head_pos)
+        support = facts.get(support_pos)
+        if feet is None or head is None or support is None:
+            return self._standable_feet_at_fallback(feet_pos)
+        failed = _perception_failure(feet)
+        if failed is not None:
+            return failed
+        failed = _perception_failure(head)
+        if failed is not None:
+            return failed
+        failed = _perception_failure(support)
+        if failed is not None:
+            return failed
+        return self._standable_feet_payload(feet_pos, head_pos, support_pos, feet, head, support)
+
+    def _standable_feet_at_fallback(self, feet_pos: Position) -> dict[str, object] | ToolResult:
         feet = self.body.perceive("blockAt", _block_params(feet_pos))
         failed = _perception_failure(feet)
         if failed is not None:
@@ -2051,6 +2077,17 @@ class BlockWork:
         failed = _perception_failure(support)
         if failed is not None:
             return failed
+        return self._standable_feet_payload(feet_pos, head_pos, support_pos, feet, head, support)
+
+    def _standable_feet_payload(
+        self,
+        feet_pos: Position,
+        head_pos: Position,
+        support_pos: Position,
+        feet: PerceptionResult,
+        head: PerceptionResult,
+        support: PerceptionResult,
+    ) -> dict[str, object]:
         return {
             "standable": _is_clear_perception(feet)
             and _is_clear_perception(head)
@@ -2077,6 +2114,74 @@ class BlockWork:
         if not stand["standable"]:
             return {"constructible": False, "reason": "ascent_origin_not_standable", "stand": stand}
 
+        scan_positions = tuple((ascent_origin[0], y, ascent_origin[2]) for y in range(ascent_origin[1] + 1, target_y + 2))
+        try:
+            facts = read_block_facts(self.body, scan_positions, failure_label="surface_column")
+        except ValueError:
+            return self._constructible_surface_column_at_fallback(
+                ascent_origin,
+                target_y=target_y,
+                world_top_y=world_top_y,
+                stand=stand,
+            )
+
+        checks: list[dict[str, object]] = []
+        for pos in scan_positions:
+            perception = facts.get(pos)
+            if perception is None:
+                return self._constructible_surface_column_at_fallback(
+                    ascent_origin,
+                    target_y=target_y,
+                    world_top_y=world_top_y,
+                    stand=stand,
+                )
+            failed = _perception_failure(perception)
+            if failed is not None:
+                return failed
+            block_type = _normalize_item(str(perception.data.get("type") or "unknown"))
+            state = str(perception.data.get("state") or "UNKNOWN")
+            check = {"pos": list(pos), "block_type": block_type, "state": state}
+            if self._is_liquid_perception(perception):
+                check["clearable"] = False
+                check["reason"] = "liquid"
+                checks.append(check)
+                return {"constructible": False, "reason": "liquid_in_column", "stand": stand, "checks": checks}
+            if _is_clear_perception(perception):
+                check["clearable"] = True
+                check["reason"] = "already_clear"
+                checks.append(check)
+                continue
+            decision = self.governance.can_break(pos, block_type, BreakContext.DIRECT)
+            check["legality"] = _decision_payload(decision)
+            check["clearable"] = decision.allowed
+            checks.append(check)
+            if not decision.allowed:
+                return {
+                    "constructible": False,
+                    "reason": f"blocked:{decision.reason}",
+                    "stand": stand,
+                    "checks": checks,
+                }
+
+        sky = self.sky_exposed((ascent_origin[0], target_y, ascent_origin[2]), world_top_y=world_top_y)
+        if isinstance(sky, ToolResult):
+            return sky
+        return {
+            "constructible": bool(sky["exposed"]),
+            "reason": "constructible" if sky["exposed"] else "sky_blocked_after_target",
+            "stand": stand,
+            "checks": checks,
+            "sky_exposure": sky,
+        }
+
+    def _constructible_surface_column_at_fallback(
+        self,
+        ascent_origin: Position,
+        *,
+        target_y: int,
+        world_top_y: int,
+        stand: dict[str, object],
+    ) -> dict[str, object] | ToolResult:
         checks: list[dict[str, object]] = []
         for y in range(ascent_origin[1] + 1, target_y + 2):
             pos = (ascent_origin[0], y, ascent_origin[2])
@@ -2109,7 +2214,7 @@ class BlockWork:
                     "checks": checks,
                 }
 
-        sky = self._sky_exposure_above((ascent_origin[0], target_y, ascent_origin[2]), world_top_y=world_top_y)
+        sky = self.sky_exposed((ascent_origin[0], target_y, ascent_origin[2]), world_top_y=world_top_y)
         if isinstance(sky, ToolResult):
             return sky
         return {
@@ -2121,6 +2226,41 @@ class BlockWork:
         }
 
     def _surface_candidate_at(
+        self,
+        feet_pos: Position,
+        *,
+        world_top_y: int,
+    ) -> dict[str, object] | ToolResult:
+        head_pos = (feet_pos[0], feet_pos[1] + 1, feet_pos[2])
+        below_pos = (feet_pos[0], feet_pos[1] - 1, feet_pos[2])
+        try:
+            facts = read_block_facts(self.body, (feet_pos, head_pos, below_pos), failure_label="surface_candidate")
+        except ValueError:
+            return self._surface_candidate_at_fallback(feet_pos, world_top_y=world_top_y)
+        feet = facts.get(feet_pos)
+        head = facts.get(head_pos)
+        below = facts.get(below_pos)
+        if feet is None or head is None or below is None:
+            return self._surface_candidate_at_fallback(feet_pos, world_top_y=world_top_y)
+        failed = _perception_failure(feet)
+        if failed is not None:
+            return failed
+        failed = _perception_failure(head)
+        if failed is not None:
+            return failed
+        failed = _perception_failure(below)
+        if failed is not None:
+            return failed
+
+        support_type = str(below.data.get("type") or "unknown")
+        support_legality = self.governance.can_break(below_pos, support_type, BreakContext.DIRECT)
+        sky = self.sky_exposed(feet_pos, world_top_y=world_top_y)
+        if isinstance(sky, ToolResult):
+            return sky
+
+        return self._surface_candidate_payload(feet_pos, head_pos, below_pos, feet, head, below, support_legality, sky)
+
+    def _surface_candidate_at_fallback(
         self,
         feet_pos: Position,
         *,
@@ -2143,10 +2283,24 @@ class BlockWork:
 
         support_type = str(below.data.get("type") or "unknown")
         support_legality = self.governance.can_break(below_pos, support_type, BreakContext.DIRECT)
-        sky = self._sky_exposure_above(feet_pos, world_top_y=world_top_y)
+        sky = self.sky_exposed(feet_pos, world_top_y=world_top_y)
         if isinstance(sky, ToolResult):
             return sky
 
+        return self._surface_candidate_payload(feet_pos, head_pos, below_pos, feet, head, below, support_legality, sky)
+
+    def _surface_candidate_payload(
+        self,
+        feet_pos: Position,
+        head_pos: Position,
+        below_pos: Position,
+        feet: PerceptionResult,
+        head: PerceptionResult,
+        below: PerceptionResult,
+        support_legality,
+        sky: dict[str, object],
+    ) -> dict[str, object]:
+        support_type = str(below.data.get("type") or "unknown")
         return {
             "candidate": (
                 _is_clear_perception(feet)
@@ -2167,7 +2321,45 @@ class BlockWork:
             "sky_exposure": sky,
         }
 
+    def sky_exposed(self, feet_pos: Position, *, world_top_y: int) -> dict[str, object] | ToolResult:
+        """Return whether the column above ``feet_pos`` is truly sky exposed.
+
+        This is the public P1.3 primitive: one bounded authoritative batch read
+        replaces the old per-cell upward walk. The returned payload is reused by
+        `go_to_surface` and other surface-search helpers.
+        """
+
+        return self._sky_exposure_above(feet_pos, world_top_y=world_top_y)
+
     def _sky_exposure_above(self, feet_pos: Position, *, world_top_y: int) -> dict[str, object] | ToolResult:
+        scan_positions = tuple((feet_pos[0], y, feet_pos[2]) for y in range(feet_pos[1] + 2, world_top_y + 1))
+        try:
+            facts = read_block_facts(self.body, scan_positions, failure_label="sky_exposure")
+        except ValueError:
+            return self._sky_exposure_above_fallback(feet_pos, world_top_y=world_top_y)
+
+        first_blocker: dict[str, object] | None = None
+        for pos in scan_positions:
+            perception = facts.get(pos)
+            if perception is None:
+                return self._sky_exposure_above_fallback(feet_pos, world_top_y=world_top_y)
+            failed = _perception_failure(perception)
+            if failed is not None:
+                return failed
+            if not _is_clear_perception(perception):
+                first_blocker = {
+                    "pos": list(pos),
+                    "block_type": _normalize_item(str(perception.data.get("type") or "unknown")),
+                    "block_state": str(perception.data.get("state") or "UNKNOWN"),
+                }
+                break
+        return {
+            "exposed": first_blocker is None,
+            "world_top_y": world_top_y,
+            "first_blocker": first_blocker,
+        }
+
+    def _sky_exposure_above_fallback(self, feet_pos: Position, *, world_top_y: int) -> dict[str, object] | ToolResult:
         first_blocker: dict[str, object] | None = None
         for y in range(feet_pos[1] + 2, world_top_y + 1):
             pos = (feet_pos[0], y, feet_pos[2])
@@ -2526,14 +2718,24 @@ class BlockWork:
         return self._scan_liquid_offsets(pos, self.SEAL_FACE_OFFSETS)
 
     def _scan_liquid_offsets(self, pos: Position, offsets: tuple[Position, ...]) -> "_LiquidScan":
+        scan_positions = tuple(_offset_pos(pos, offset) for offset in offsets)
+        try:
+            facts = read_block_facts(self.body, scan_positions, failure_label="liquid_scan")
+        except ValueError as exc:
+            return _LiquidScan(
+                positions=[],
+                failed=ToolResult(
+                    success=False,
+                    reason="perception_failed",
+                    can_retry=True,
+                    next_suggestion="re-perceive the target block before mutating the world",
+                    metrics={"scope": "blockCells", "ok": False, "complete": False, "error": str(exc), "uncertainty": None},
+                ),
+            )
         liquid: list[Position] = []
-        for offset in offsets:
-            scan_pos = _offset_pos(pos, offset)
-            perception = self.body.perceive("blockAt", _block_params(scan_pos))
-            failed = _perception_failure(perception)
-            if failed is not None:
-                return _LiquidScan(liquid, failed)
-            if self._is_liquid_perception(perception):
+        for scan_pos in scan_positions:
+            perception = facts.get(scan_pos)
+            if perception is not None and self._is_liquid_perception(perception):
                 liquid.append(scan_pos)
         return _LiquidScan(liquid, None)
 
@@ -2775,6 +2977,36 @@ class BlockWork:
         return None
 
     def _fall_probe_after_opening(self, target_pos: Position, *, max_clear_fall: int) -> "_FallProbe":
+        scan_positions = tuple(
+            (target_pos[0], target_pos[1] - 1 - offset, target_pos[2])
+            for offset in range(max_clear_fall)
+        )
+        try:
+            facts = read_block_facts(self.body, scan_positions, failure_label="fall_probe")
+        except ValueError:
+            return self._fall_probe_after_opening_fallback(target_pos, max_clear_fall=max_clear_fall)
+
+        clear_depth = 1
+        for pos in scan_positions:
+            perception = facts.get(pos)
+            if perception is None:
+                return self._fall_probe_after_opening_fallback(target_pos, max_clear_fall=max_clear_fall)
+            failed = _perception_failure(perception)
+            if failed is not None:
+                return _FallProbe(clear_depth, None, None, None, failed)
+            if self._is_liquid_perception(perception):
+                return _FallProbe(clear_depth, None, None, pos, None)
+            if _is_clear_perception(perception):
+                clear_depth += 1
+                if clear_depth > max_clear_fall:
+                    return _FallProbe(clear_depth, None, None, None, None)
+                continue
+            support_type = _normalize_item(str(perception.data.get("type") or "unknown"))
+            return _FallProbe(clear_depth, pos, support_type, None, None)
+
+        return _FallProbe(clear_depth, None, None, None, None)
+
+    def _fall_probe_after_opening_fallback(self, target_pos: Position, *, max_clear_fall: int) -> "_FallProbe":
         clear_depth = 1
         scan_y = target_pos[1] - 1
         while True:

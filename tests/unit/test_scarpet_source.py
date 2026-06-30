@@ -131,8 +131,9 @@ class ScarpetSourceTests(unittest.TestCase):
 
         self.assertIn("global_response_char_budget = 2000;", source)
         # Referenced once in each of nearbyBlocks / findBlocks / nearbyEntities /
-        # blockCells (the batch block-read primitive paginates the same way).
-        self.assertEqual(source.count("global_response_char_budget"), 5)  # 1 decl + 4 uses
+        # nearbyHostiles / blockCells (the batch block-read primitive paginates
+        # the same way).
+        self.assertEqual(source.count("global_response_char_budget"), 6)  # 1 decl + 5 uses
         self.assertIn("length(out) >= global_response_char_budget", source)
 
     def test_find_blocks_scope_is_bounded_and_type_matched(self):
@@ -182,6 +183,23 @@ class ScarpetSourceTests(unittest.TestCase):
                 re.S,
             )
         )
+
+    def test_follow_started_json_uses_json_value_for_target(self):
+        source = MINEBOT_SC.read_text()
+
+        self.assertIn('"target":%s,"target_pos":%s', source)
+        self.assertNotIn('"target":"%s","target_pos":%s', source)
+        self.assertIn("data:0, json_string(data:1), json_pos(data:2), data:3", source)
+
+    def test_follow_entity_arrival_emits_terminal_success(self):
+        source = MINEBOT_SC.read_text()
+        start = source.index("run_follow_tick(name, f) -> (")
+        end = source.index("finish_follow(name, reason) -> (")
+        body = source[start:end]
+
+        self.assertIn("if(dist <= keep_radius,", body)
+        self.assertIn("finish_move(name, 'follow_hold', false)", body)
+        self.assertIn("finish_follow(name, 'arrived')", body)
 
     def test_nearby_entities_scope_is_bounded_and_reports_pos_health(self):
         source = MINEBOT_SC.read_text()

@@ -4,6 +4,7 @@ global_tick = 0;
 global_moves = {};
 global_move_cancels = {};
 global_navigations = {};
+global_follows = {};
 global_mines = {};
 global_places = {};
 global_uses = {};
@@ -20,6 +21,10 @@ global_reflex_scan = true;
 global_water_reflex_air_threshold = 80;
 global_water_reflex_damage_budget = null;
 global_water_reflex_health_baselines = {};
+global_combat_health_baselines = {};
+global_engages = {};
+global_hostile_types = l('minecraft:zombie', 'minecraft:husk', 'minecraft:drowned', 'minecraft:zombie_villager', 'minecraft:skeleton', 'minecraft:stray', 'minecraft:bogged', 'minecraft:creeper', 'minecraft:spider', 'minecraft:cave_spider', 'minecraft:witch', 'minecraft:silverfish', 'minecraft:endmite', 'minecraft:slime', 'minecraft:magma_cube', 'minecraft:enderman', 'minecraft:endermite', 'minecraft:blaze', 'minecraft:ghast', 'minecraft:pillager', 'minecraft:vindicator', 'minecraft:evoker', 'minecraft:ravager', 'minecraft:shulker', 'minecraft:phantom', 'minecraft:wither_skeleton', 'minecraft:zoglin', 'minecraft:hoglin', 'minecraft:piglin_brute');
+global_ranged_types = l('minecraft:skeleton', 'minecraft:stray', 'minecraft:bogged', 'minecraft:witch', 'minecraft:blaze', 'minecraft:ghast', 'minecraft:pillager', 'minecraft:shulker');
 global_response_char_budget = 2000;
 global_respawn_notices = {};
 global_missing_notices = {};
@@ -162,6 +167,26 @@ event_data_json(kind, data) -> (
   if(kind == 'mobilityBlocked',
     out = str('{"reason":"%s","pos":%s,"goal":%s,"expanded":%d}',
       data:0, json_pos(data:1), json_pos(data:2), data:3)
+  );
+  if(kind == 'followStarted',
+    out = str('{"action_id":"%s","target":%s,"target_pos":%s,"keep_radius":%.3f}',
+      data:0, json_string(data:1), json_pos(data:2), data:3)
+  );
+  if(kind == 'followDone',
+    out = str('{"action_id":"%s","arrived":%s,"final_pos":%s,"reason":"%s"}',
+      data:0, json_bool(data:1), json_pos(data:2), data:3)
+  );
+  if(kind == 'engageStarted',
+    out = str('{"action_id":"%s","target":%s,"target_pos":%s,"attack_range":%.3f}',
+      data:0, json_string(data:1), json_pos(data:2), data:3)
+  );
+  if(kind == 'engageDone',
+    out = str('{"action_id":"%s","success":%s,"target":%s,"final_pos":%s,"reason":"%s","target_health":%s,"attacks":%d}',
+      data:0, json_bool(data:1), json_string(data:2), json_pos(data:3), data:4, json_number_null(data:5), data:6)
+  );
+  if(kind == 'underAttack',
+    out = str('{"attacker":%s,"health":%s,"baseline":%s}',
+      json_string(data:0), json_number_null(data:1), json_number_null(data:2))
   );
   if(kind == 'moveCancelDelayed',
     out = str('{"action_id":"%s","stopped_reason":"%s","movement_cancel":%s,"requested_tick":%d}',
@@ -315,6 +340,32 @@ block_kind(bs) -> (
     ,
       'SOLID'
     )
+  )
+);
+
+los_clear(x, y, z, tx, ty, tz) -> (
+  dx = tx - x;
+  dy = ty - y;
+  dz = tz - z;
+  adx = abs(dx);
+  ady = abs(dy);
+  adz = abs(dz);
+  steps = max(adx, max(ady, adz));
+  if(steps < 1, true,
+    clear = true;
+    loop(steps,
+      if(clear,
+        f = (_ + 1) / steps;
+        bx = floor(x + dx * f);
+        by = floor(y + dy * f);
+        bz = floor(z + dz * f);
+        if((bx == floor(x) && by == floor(y) && bz == floor(z)) || (bx == floor(tx) && by == floor(ty) && bz == floor(tz)),
+          null,
+          if(block_kind('' + block(bx, by, bz)) == 'SOLID', clear = false)
+        )
+      )
+    );
+    clear
   )
 );
 
@@ -579,6 +630,30 @@ entity_matches_type(e, wanted) -> (
   wanted == null || wanted == '' || kind == wanted || kind == 'minecraft:' + wanted || 'minecraft:' + kind == wanted
 );
 
+list_contains(lst, item) -> (
+  found = false;
+  loop(length(lst),
+    if(!found && lst:_ == item, found = true)
+  );
+  found
+);
+
+is_hostile(e) -> (
+  found = false;
+  loop(length(global_hostile_types),
+    if(!found && entity_matches_type(e, global_hostile_types:_), found = true)
+  );
+  found
+);
+
+is_ranged_hostile(e) -> (
+  found = false;
+  loop(length(global_ranged_types),
+    if(!found && entity_matches_type(e, global_ranged_types:_), found = true)
+  );
+  found
+);
+
 entity_fact_json(e, center) -> (
   p = query(e, 'pos');
   dx = p:0 - center:0;
@@ -625,6 +700,43 @@ perceive_nearby_entities(name, params) -> (
     data = str('{"center":%s,"radius":%d,"limit":%d,"count":%d,"entities":[%s]}', json_pos(p), radius, limit, count, out);
     uncertainty = if(overflow, '[{"reason":"limit_exceeded"}]', '[]');
     perception_json(name, 'nearbyEntities', true, !overflow, data, uncertainty, if(overflow, 'limit', null), null)
+  )
+);
+
+perceive_hostiles(name, params) -> (
+  p = bot_pos(name);
+  if(p == null,
+    missing_body_perception(name, 'nearbyHostiles')
+  ,
+    radius = floor(number(params:'radius'));
+    if(radius < 1, radius = 1);
+    if(radius > 32, radius = 32);
+    limit = 32;
+    if(params:'limit' != null, limit = floor(number(params:'limit')));
+    if(limit < 1, limit = 1);
+    if(limit > 128, limit = 128);
+    selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,limit=128,sort=nearest]',
+      floor(number(p:0)), floor(number(p:1)), floor(number(p:2)), radius);
+    found = entity_selector(selector);
+    out = '';
+    count = 0;
+    overflow = false;
+    first = true;
+    loop(length(found),
+      e = found:_;
+      if(e != player(name) && is_hostile(e),
+        if(count >= limit || length(out) >= global_response_char_budget,
+          overflow = true
+        ,
+          if(first, first = false, out += ',');
+          out += entity_fact_json(e, p);
+          count += 1
+        )
+      )
+    );
+    data = str('{"center":%s,"radius":%d,"limit":%d,"count":%d,"entities":[%s]}', json_pos(p), radius, limit, count, out);
+    uncertainty = if(overflow, '[{"reason":"limit_exceeded"}]', '[]');
+    perception_json(name, 'nearbyHostiles', true, !overflow, data, uncertainty, if(overflow, 'limit', null), null)
   )
 );
 
@@ -2578,6 +2690,65 @@ start_fire_reflex(name) -> start_hazard_reflex(name, 'fire');
 
 start_water_reflex(name) -> start_hazard_reflex(name, 'water');
 
+combat_reflex_scan(name) -> (
+  if(!global_reflex_scan || global_reflexes:name != null || global_engages:name != null,
+    true
+  ,
+    hp = bot_health(name);
+    if(hp == null,
+      true
+    ,
+      baseline = global_combat_health_baselines:name;
+      if(baseline == null || hp >= baseline,
+        global_combat_health_baselines:name = hp;
+        true
+      ,
+        if(baseline - hp >= 2.0 && nearest_hostile_near(name, 16) != null,
+          start_combat_reflex(name)
+        ,
+          true
+        )
+      )
+    )
+  )
+);
+
+start_combat_reflex(name) -> (
+  hp = bot_health(name);
+  baseline = global_combat_health_baselines:name;
+  global_combat_health_baselines:name = hp;
+  nearest = nearest_hostile_near(name, 16);
+  nearest_kind = if(nearest != null, entity_kind(nearest), null);
+  emit('underAttack', name, l(nearest_kind, hp, baseline));
+  if(nearest == null,
+    true
+  ,
+    if(hp != null && hp > 10.0,
+      minebot_interrupt(name, '{}');
+      start_engage(name, 'auto:combat:' + name, 'nearest_hostile', {'attack_range' -> 2.0, 'cooldown_ticks' -> 10, 'timeout_ticks' -> 200, 'disengage_health' -> 6.0, 'acquire_radius' -> 16, 'grid_radius' -> 24, 'max_expand' -> 150})
+    ,
+      tp = query(nearest, 'pos');
+      start_combat_flee_reflex(name, tp)
+    )
+  );
+  true
+);
+
+start_combat_flee_reflex(name, hostile_pos) -> (
+  minebot_interrupt(name, '{}');
+  if(acquire_owner(name, 'combatReflex', 'SURVIVAL'),
+    p = bot_pos(name);
+    dx = p:0 - hostile_pos:0;
+    dz = p:2 - hostile_pos:2;
+    norm = sqrt(dx*dx + dz*dz);
+    if(norm < 0.1, dx = 1.0; norm = 1.0);
+    fx = p:0 + dx / norm * 8.0;
+    fz = p:2 + dz / norm * 8.0;
+    global_reflexes:name = l(fx, p:1, fz, 0, 'combat_flee', 'combatReflex');
+    emit('reflexTriggered', name, l('combat_flee', p, l(fx, p:1, fz)))
+  )
+);
+
 run_move_tick(name, m) -> (
   p = bot_pos(name);
   target = current_waypoint(m);
@@ -3015,6 +3186,7 @@ tick_bot(name) -> (
       start_hazard_reflex(name, hazard_kind)
     )
   );
+  combat_reflex_scan(name);
   r = global_reflexes:name;
   if(r != null,
     run_reflex_tick(name, r)
@@ -3051,15 +3223,25 @@ tick_bot(name) -> (
                 if(sw != null,
                   run_sow_tick(name, sw)
                 ,
-                  m = global_moves:name;
-                  if(m != null,
-                    run_move_cancel_tick(name, m);
+                  eg = global_engages:name;
+                  if(eg != null,
+                    run_engage_tick(name, eg)
+                  ,
+                  fl = global_follows:name;
+                  if(fl != null,
+                    run_follow_tick(name, fl)
+                  ,
                     m = global_moves:name;
                     if(m != null,
-                      if(global_move_cancels:name == null,
-                        run_move_tick(name, m)
+                      run_move_cancel_tick(name, m);
+                      m = global_moves:name;
+                      if(m != null,
+                        if(global_move_cancels:name == null,
+                          run_move_tick(name, m)
+                        )
                       )
                     )
+                  )
                   )
                 )
               )
@@ -3313,7 +3495,7 @@ minebot_pathfind_probe(name, payload) -> (
     json_bool(found), reason, expanded, path_length, grid_radius, sx, sy, sz, gx, gy, gz)
 );
 
-navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above) -> (
+navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above, cover_target) -> (
   g_costs = {};
   came_from = {};
   start_key = probe_node_key(sx, sy, sz);
@@ -3321,6 +3503,7 @@ navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_abo
   h0 = probe_heuristic(sx, sy, sz, gx, gy, gz);
   open_set = l(l(h0, 0, sx, sy, sz));
   closed = {};
+  los_cache = {};
   expanded = 0;
   found = false;
   found_key = null;
@@ -3373,6 +3556,15 @@ navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_abo
                   null
                 ,
                   step_cost = if(w == 'LIQUID', 3.0, if(w == 'NO_FLOOR', 2.0, 1.0));
+                  if(cover_target != null,
+                    los_key = probe_node_key(nx, ny, nz);
+                    exposed = los_cache:(los_key);
+                    if(exposed == null,
+                      exposed = if(los_clear(nx, ny + 1, nz, cover_target:0, cover_target:1, cover_target:2), 1, 0);
+                      los_cache:(los_key) = exposed
+                    );
+                    if(exposed == 1, step_cost += 6.0)
+                  );
                   new_g = cur_g + step_cost;
                   old_g = g_costs:(nkey);
                   if(old_g == null || new_g < old_g,
@@ -3435,7 +3627,7 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
       arrival_radius = param_number(params, 'arrival_radius', 0.75);
       timeout_ticks = floor(param_number(params, 'timeout_ticks', 400));
       no_progress_ticks = floor(param_number(params, 'no_progress_ticks', 60));
-      plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above);
+      plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above, null);
       plan_status = plan_result:1;
       plan_expanded = plan_result:2;
       plan_path = plan_result:3;
@@ -3499,12 +3691,401 @@ finish_navigate(name, move_event_data) -> (
   )
 );
 
+resolve_follow_target(name, target_spec, radius) -> (
+  if(length(target_spec) == 0,
+    null
+  ,
+    pe = player_entity(target_spec);
+    if(pe != null,
+      pe
+    ,
+      target_entity_named_near(name, target_spec, radius)
+    )
+  )
+);
+
+follow_replan(name, target_pos) -> (
+  f = global_follows:name;
+  action_id = f:0;
+  keep_radius = f:2;
+  grid_radius = f:8;
+  max_expand = f:9;
+  p = bot_pos(name);
+  sx = floor(p:0);
+  sy = floor(p:1);
+  sz = floor(p:2);
+  gx = floor(target_pos:0);
+  gy = floor(target_pos:1);
+  gz = floor(target_pos:2);
+  plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, 8, 8, null);
+  plan_status = plan_result:1;
+  plan_expanded = plan_result:2;
+  plan_path = plan_result:3;
+  global_follows:name = l(f:0, f:1, f:2, f:3, f:4, f:5, target_pos, plan_expanded, f:8, f:9, f:10);
+  direct_wp = l(gx + 0.5, gy, gz + 0.5);
+  if(plan_status == 'no_path' || plan_status == 'budget_exceeded' || length(plan_path) == 0,
+    start_move_to(name, action_id, direct_wp:0, direct_wp:1, direct_wp:2,
+      {'waypoints' -> l(direct_wp), 'arrival_radius' -> keep_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+  ,
+    waypoints = l();
+    loop(length(plan_path),
+      wp = plan_path:_;
+      waypoints += l(wp:0 + 0.5, wp:1, wp:2 + 0.5)
+    );
+    if(length(waypoints) == 0,
+      start_move_to(name, action_id, direct_wp:0, direct_wp:1, direct_wp:2,
+        {'waypoints' -> l(direct_wp), 'arrival_radius' -> keep_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+    ,
+      last_wp = waypoints:(length(waypoints) - 1);
+      start_move_to(name, action_id, last_wp:0, last_wp:1, last_wp:2,
+        {'waypoints' -> waypoints, 'arrival_radius' -> keep_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+    )
+  )
+);
+
+start_follow(name, action_id, target_spec, params) -> (
+  watch_bot(name);
+  p = bot_pos(name);
+  if(p == null,
+    emit('followDone', name, l(action_id, false, l(0, 0, 0), 'missing_body'));
+    true
+  ,
+    acquire_radius = floor(param_number(params, 'acquire_radius', 32));
+    if(acquire_radius < 1, acquire_radius = 1);
+    if(acquire_radius > 64, acquire_radius = 64);
+    target = resolve_follow_target(name, target_spec, acquire_radius);
+    if(target == null,
+      emit('followDone', name, l(action_id, false, p, 'target_not_found'));
+      true
+    ,
+      target_pos = query(target, 'pos');
+      keep_radius = param_number(params, 'keep_radius', 3.0);
+      if(keep_radius < 0, keep_radius = 0);
+      replan_distance = param_number(params, 'replan_distance', 2.0);
+      if(replan_distance < 0.5, replan_distance = 0.5);
+      timeout_ticks = floor(param_number(params, 'timeout_ticks', 600));
+      grid_radius = floor(param_number(params, 'grid_radius', 32));
+      if(grid_radius < 1, grid_radius = 1);
+      if(grid_radius > 64, grid_radius = 64);
+      max_expand = floor(param_number(params, 'max_expand', 200));
+      if(max_expand < 10, max_expand = 10);
+      if(max_expand > 5000, max_expand = 5000);
+      global_follows:name = l(action_id, target_spec, keep_radius, replan_distance, timeout_ticks, 0, target_pos, 0, grid_radius, max_expand, acquire_radius);
+      emit('followStarted', name, l(action_id, target_spec, target_pos, keep_radius));
+      if(dist_to_target(p, target_pos:0, target_pos:1, target_pos:2) > keep_radius,
+        follow_replan(name, target_pos)
+      );
+      true
+    )
+  )
+);
+
+run_follow_tick(name, f) -> (
+  action_id = f:0;
+  target_spec = f:1;
+  keep_radius = f:2;
+  replan_distance = f:3;
+  timeout_ticks = f:4;
+  ticks = f:5 + 1;
+  acquire_radius = f:10;
+  if(timeout_ticks > 0 && ticks > timeout_ticks,
+    p = bot_pos(name);
+    target = resolve_follow_target(name, target_spec, acquire_radius);
+    if(target == null,
+      finish_follow(name, 'target_lost')
+    ,
+      tp = query(target, 'pos');
+      if(dist_to_target(p, tp:0, tp:1, tp:2) <= keep_radius,
+        finish_follow(name, 'arrived')
+      ,
+        finish_follow(name, 'timeout')
+      )
+    )
+  ,
+    p = bot_pos(name);
+    target = resolve_follow_target(name, target_spec, acquire_radius);
+    if(target == null,
+      finish_follow(name, 'target_lost')
+    ,
+      tp = query(target, 'pos');
+      dist = dist_to_target(p, tp:0, tp:1, tp:2);
+      if(dist <= keep_radius,
+        if(global_moves:name != null,
+          finish_move(name, 'follow_hold', false)
+        );
+        stop_body(name);
+        global_follows:name = l(f:0, f:1, f:2, f:3, f:4, ticks, f:6, f:7, f:8, f:9, f:10)
+      ,
+        last_plan_pos = f:6;
+        need_replan = false;
+        if(global_moves:name == null,
+          need_replan = true
+        ,
+          if(last_plan_pos == null,
+            need_replan = true
+          ,
+            if(dist_to_target(tp, last_plan_pos:0, last_plan_pos:1, last_plan_pos:2) >= replan_distance,
+              need_replan = true
+            )
+          )
+        );
+        global_follows:name = l(f:0, f:1, f:2, f:3, f:4, ticks, f:6, f:7, f:8, f:9, f:10);
+        if(need_replan,
+          if(global_moves:name != null,
+            finish_move(name, 'follow_replan', false)
+          );
+          follow_replan(name, tp)
+        );
+        m = global_moves:name;
+        if(m != null && global_move_cancels:name == null,
+          run_move_tick(name, m)
+        )
+      )
+    )
+  )
+);
+
+finish_follow(name, reason) -> (
+  f = global_follows:name;
+  if(f == null,
+    null
+  ,
+    action_id = f:0;
+    p = bot_pos(name);
+    if(global_moves:name != null,
+      finish_move(name, reason, false)
+    );
+    stop_body(name);
+    emit('followDone', name, l(action_id, reason != 'timeout' && reason != 'target_lost' && reason != 'interrupted', p, reason));
+    global_follows:name = null
+  )
+);
+
+resolve_engage_target(name, target_spec, radius) -> (
+  if(target_spec == 'nearest_hostile',
+    nearest_hostile_near(name, radius)
+  ,
+    pe = player_entity(target_spec);
+    if(pe != null,
+      pe
+    ,
+      named = target_entity_named_near(name, target_spec, radius);
+      if(named != null,
+        named
+      ,
+        target_entity_near(name, target_spec, radius)
+      )
+    )
+  )
+);
+
+nearest_hostile_near(name, radius) -> (
+  p = bot_pos(name);
+  if(p == null,
+    null
+  ,
+    selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,limit=32,sort=nearest]',
+      floor(number(p:0)), floor(number(p:1)), floor(number(p:2)), radius);
+    found = entity_selector(selector);
+    result = null;
+    loop(length(found),
+      e = found:_;
+      if(result == null && e != player(name) && is_hostile(e), result = e)
+    );
+    result
+  )
+);
+
+engage_replan(name, target_pos) -> (
+  e = global_engages:name;
+  action_id = e:0;
+  attack_range = e:2;
+  grid_radius = e:8;
+  max_expand = e:9;
+  p = bot_pos(name);
+  sx = floor(p:0);
+  sy = floor(p:1);
+  sz = floor(p:2);
+  gx = floor(target_pos:0);
+  gy = floor(target_pos:1);
+  gz = floor(target_pos:2);
+  cover = null;
+  rt = target_entity_uuid_near(name, e:13, e:10);
+  if(rt != null && is_ranged_hostile(rt), cover = target_pos);
+  engage_max_expand = if(cover != null && max_expand > 120, 120, max_expand);
+  plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, engage_max_expand, 8, 8, cover);
+  plan_status = plan_result:1;
+  plan_expanded = plan_result:2;
+  plan_path = plan_result:3;
+  global_engages:name = l(e:0, e:1, e:2, e:3, e:4, e:5, target_pos, e:7, e:8, e:9, e:10, e:11, e:12, e:13);
+  direct_wp = l(gx + 0.5, gy, gz + 0.5);
+  if(plan_status == 'no_path' || plan_status == 'budget_exceeded' || length(plan_path) == 0,
+    start_move_to(name, action_id, direct_wp:0, direct_wp:1, direct_wp:2,
+      {'waypoints' -> l(direct_wp), 'arrival_radius' -> attack_range, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+  ,
+    waypoints = l();
+    loop(length(plan_path),
+      wp = plan_path:_;
+      waypoints += l(wp:0 + 0.5, wp:1, wp:2 + 0.5)
+    );
+    if(length(waypoints) == 0,
+      start_move_to(name, action_id, direct_wp:0, direct_wp:1, direct_wp:2,
+        {'waypoints' -> l(direct_wp), 'arrival_radius' -> attack_range, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+    ,
+      last_wp = waypoints:(length(waypoints) - 1);
+      start_move_to(name, action_id, last_wp:0, last_wp:1, last_wp:2,
+        {'waypoints' -> waypoints, 'arrival_radius' -> attack_range, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+    )
+  )
+);
+
+start_engage(name, action_id, target_spec, params) -> (
+  watch_bot(name);
+  p = bot_pos(name);
+  if(p == null,
+    emit('engageDone', name, l(action_id, false, target_spec, l(0, 0, 0), 'missing_body', null, 0));
+    true
+  ,
+    acquire_radius = floor(param_number(params, 'acquire_radius', 32));
+    if(acquire_radius < 1, acquire_radius = 1);
+    if(acquire_radius > 64, acquire_radius = 64);
+    target = resolve_engage_target(name, target_spec, acquire_radius);
+    if(target == null,
+      emit('engageDone', name, l(action_id, false, target_spec, p, 'target_not_found', null, 0));
+      true
+    ,
+      target_pos = query(target, 'pos');
+      attack_range = param_number(params, 'attack_range', 2.0);
+      if(attack_range < 1.2, attack_range = 1.2);
+      if(attack_range > 3.0, attack_range = 3.0);
+      cooldown_ticks = floor(param_number(params, 'cooldown_ticks', 10));
+      if(cooldown_ticks < 1, cooldown_ticks = 1);
+      timeout_ticks = floor(param_number(params, 'timeout_ticks', 400));
+      if(timeout_ticks < 1, timeout_ticks = 1);
+      grid_radius = floor(param_number(params, 'grid_radius', 32));
+      if(grid_radius < 1, grid_radius = 1);
+      if(grid_radius > 64, grid_radius = 64);
+      max_expand = floor(param_number(params, 'max_expand', 200));
+      if(max_expand < 10, max_expand = 10);
+      if(max_expand > 5000, max_expand = 5000);
+      disengage_health = param_number(params, 'disengage_health', 6.0);
+      if(disengage_health < 0, disengage_health = 0);
+      target_uuid = query(target, 'uuid');
+      global_engages:name = l(action_id, target_spec, attack_range, cooldown_ticks, timeout_ticks, 0, target_pos, 0, grid_radius, max_expand, acquire_radius, disengage_health, 0, target_uuid);
+      emit('engageStarted', name, l(action_id, target_spec, target_pos, attack_range));
+      if(dist_to_target(p, target_pos:0, target_pos:1, target_pos:2) > attack_range,
+        engage_replan(name, target_pos)
+      );
+      true
+    )
+  )
+);
+
+run_engage_tick(name, e) -> (
+  action_id = e:0;
+  target_spec = e:1;
+  attack_range = e:2;
+  cooldown_ticks = e:3;
+  timeout_ticks = e:4;
+  ticks = e:5 + 1;
+  acquire_radius = e:10;
+  disengage_health = e:11;
+  attacks = e:12;
+  if(timeout_ticks > 0 && ticks > timeout_ticks,
+    finish_engage(name, 'timeout')
+  ,
+    p = bot_pos(name);
+    target = target_entity_uuid_near(name, e:13, acquire_radius);
+    if(target == null,
+      if(attacks > 0,
+        finish_engage(name, 'killed')
+      ,
+        finish_engage(name, 'target_lost')
+      )
+    ,
+      tp = query(target, 'pos');
+      thp = entity_health(target);
+      if(thp != null && thp <= 0,
+        finish_engage(name, 'killed')
+      ,
+        bhp = bot_health(name);
+        if(bhp != null && disengage_health > 0 && bhp <= disengage_health,
+          finish_engage(name, 'disengaged_low_health')
+        ,
+          dist = dist_to_target(p, tp:0, tp:1, tp:2);
+          if(dist <= attack_range && los_clear(p:0, p:1 + 1.0, p:2, tp:0, tp:1, tp:2),
+            if(global_moves:name != null,
+              finish_move(name, 'engage_hold', false)
+            );
+            stop_body(name);
+            run(str('player %s look at %.3f %.3f %.3f', name, tp:0, tp:1 + 1.0, tp:2));
+            last_attack_tick = e:7;
+            if(last_attack_tick == 0 || ticks - last_attack_tick >= cooldown_ticks,
+              run('player ' + name + ' attack once');
+              attacks += 1;
+              last_attack_tick = ticks
+            );
+            global_engages:name = l(e:0, e:1, e:2, e:3, e:4, ticks, e:6, last_attack_tick, e:8, e:9, e:10, e:11, attacks, e:13)
+          ,
+            last_plan_pos = e:6;
+            need_replan = false;
+            if(global_moves:name == null,
+              need_replan = true
+            ,
+              if(last_plan_pos == null,
+                need_replan = true
+              ,
+                if(dist_to_target(tp, last_plan_pos:0, last_plan_pos:1, last_plan_pos:2) >= 2.0,
+                  need_replan = true
+                )
+              )
+            );
+            global_engages:name = l(e:0, e:1, e:2, e:3, e:4, ticks, e:6, e:7, e:8, e:9, e:10, e:11, e:12, e:13);
+            if(need_replan,
+              if(global_moves:name != null,
+                finish_move(name, 'engage_replan', false)
+              );
+              engage_replan(name, tp)
+            );
+            m = global_moves:name;
+            if(m != null && global_move_cancels:name == null,
+              run_move_tick(name, m)
+            )
+          )
+        )
+      )
+    )
+  )
+);
+
+finish_engage(name, reason) -> (
+  e = global_engages:name;
+  if(e == null,
+    null
+  ,
+    action_id = e:0;
+    target_spec = e:1;
+    p = bot_pos(name);
+    if(global_moves:name != null,
+      finish_move(name, reason, false)
+    );
+    stop_body(name);
+    success = reason == 'killed';
+    thp = null;
+    target = target_entity_uuid_near(name, e:13, e:10);
+    if(target != null, thp = entity_health(target));
+    emit('engageDone', name, l(action_id, success, target_spec, p, reason, thp, e:12));
+    global_engages:name = null
+  )
+);
+
 minebot_reset() -> (
   global_events = [];
   global_tick = 0;
   global_moves = {};
   global_move_cancels = {};
   global_navigations = {};
+  global_follows = {};
   global_mines = {};
   global_places = {};
   global_uses = {};
@@ -3521,6 +4102,8 @@ minebot_reset() -> (
   global_water_reflex_air_threshold = 80;
   global_water_reflex_damage_budget = null;
   global_water_reflex_health_baselines = {};
+  global_combat_health_baselines = {};
+  global_engages = {};
   global_respawn_notices = {};
   global_missing_notices = {};
   global_agent_chat_events = [];
@@ -3593,7 +4176,11 @@ minebot_perceive(name, scope, payload) -> (
               if(scope == 'recipeData',
                 perceive_recipe_data(name, params)
               ,
-                perception_json(name, scope, false, true, '{}', '[]', null, 'unknown perception scope')
+                if(scope == 'nearbyHostiles',
+                  perceive_hostiles(name, params)
+                ,
+                  perception_json(name, scope, false, true, '{}', '[]', null, 'unknown perception scope')
+                )
               )
             )
           )
@@ -3625,6 +4212,12 @@ minebot_interrupt(name, payload) -> (
   stop_body(name);
   if(global_navigations:name != null,
     global_navigations:name = null
+  );
+  if(global_follows:name != null,
+    finish_follow(name, 'interrupted')
+  );
+  if(global_engages:name != null,
+    finish_engage(name, 'interrupted')
   );
   if(global_moves:name != null,
     request_move_cancel(name, 'interrupted')
@@ -3678,6 +4271,16 @@ minebot_action(name, payload) -> (
         target = params:'target';
         ok = start_navigate_to(name, action_id, number(target:0), number(target:1), number(target:2), params);
         out = result_json(action_id, name, true, ok, '{"action":"navigateTo"}', null)
+      );
+      if(action_name == 'followEntity',
+        target_spec = params:'target_spec';
+        ok = start_follow(name, action_id, target_spec, params);
+        out = result_json(action_id, name, true, ok, '{"action":"followEntity"}', null)
+      );
+      if(action_name == 'engageEntity',
+        target_spec = params:'target_spec';
+        ok = start_engage(name, action_id, target_spec, params);
+        out = result_json(action_id, name, true, ok, '{"action":"engageEntity"}', null)
       );
       if(action_name == 'lookAt',
         target = params:'target';

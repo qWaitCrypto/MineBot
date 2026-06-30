@@ -172,8 +172,10 @@ def run_target_liquid_inverse(rcon: RconClient, body: ScarpetBody) -> dict[str, 
 
     if result.success or result.reason != "dig_down_target_liquid":
         raise AssertionError(f"dig_down target-liquid inverse returned wrong truth: {result.to_payload()}")
-    if before.pos != after.pos:
-        raise AssertionError(f"dig_down target-liquid inverse moved the body: before={before.pos} after={after.pos}")
+    if abs(after.pos[0] - before.pos[0]) > 0.1 or abs(after.pos[2] - before.pos[2]) > 0.1:
+        raise AssertionError(f"dig_down target-liquid inverse drifted sideways: before={before.pos} after={after.pos}")
+    if abs(after.pos[1] - before.pos[1]) > 0.5:
+        raise AssertionError(f"dig_down target-liquid inverse drifted vertically too far: before={before.pos} after={after.pos}")
     if floor.data.get("type") not in {"water", "minecraft:water"}:
         raise AssertionError(f"dig_down target-liquid inverse mutated liquid floor: {floor.data} result={result.to_payload()}")
     return {

@@ -37,6 +37,7 @@ DEFAULT_TERMINAL_EVENTS = {
     "igniteDone",
     "sowDone",
     "attackDone",
+    "engageDone",
     "craftDone",
     "containerDone",
     "dropDone",

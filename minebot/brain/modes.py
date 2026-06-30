@@ -14,7 +14,7 @@ from minebot.brain.lifecycle import LifecycleState
 from minebot.contract import BodyState, Event, ProgressFacts
 
 RelationshipState = Literal["autonomous.user_request"]
-SituationalState = Literal["normal", "survival", "mobility", "death"]
+SituationalState = Literal["normal", "mobility", "engage", "survival", "death"]
 SignalKind = Literal[
     "goal_started",
     "progress_abort",
@@ -22,6 +22,8 @@ SignalKind = Literal[
     "body_reflex_completed",
     "survival_metric_red",
     "mobility_blocked",
+    "hostile_nearby",
+    "under_attack",
     "death_detected",
     "recovery_completed",
     "tool_results",
@@ -87,6 +89,14 @@ class AgentSignal:
         return cls("mobility_blocked", {"reason": reason, **facts})
 
     @classmethod
+    def hostile_nearby(cls, reason: str = "hostile_nearby", **facts: Any) -> "AgentSignal":
+        return cls("hostile_nearby", {"reason": reason, **facts})
+
+    @classmethod
+    def under_attack(cls, reason: str = "under_attack", **facts: Any) -> "AgentSignal":
+        return cls("under_attack", {"reason": reason, **facts})
+
+    @classmethod
     def death_detected(cls, reason: str = "death_detected", **facts: Any) -> "AgentSignal":
         return cls("death_detected", {"reason": reason, **facts})
 
@@ -143,6 +153,10 @@ class ModeRuntime:
 
             if signal.kind == "mobility_blocked":
                 situational_candidates.append(("mobility", str(signal.facts.get("reason") or "mobility_blocked")))
+                continue
+
+            if signal.kind in {"hostile_nearby", "under_attack"}:
+                situational_candidates.append(("engage", str(signal.facts.get("reason") or signal.kind)))
                 continue
 
             if signal.kind == "death_detected":
@@ -244,6 +258,10 @@ def signalize_events(events: list[Event] | tuple[Event, ...]) -> list[AgentSigna
             signals.append(AgentSignal.death_detected(str(data.get("reason") or name), event=name))
         elif name in {"stuck", "navigationBlocked", "lostPosition"}:
             signals.append(AgentSignal.mobility_blocked(str(data.get("reason") or name), event=name))
+        elif name in {"hostileNearby", "hostile_nearby"}:
+            signals.append(AgentSignal.hostile_nearby(str(data.get("reason") or name), event=name))
+        elif name in {"underAttack", "under_attack"}:
+            signals.append(AgentSignal.under_attack(str(data.get("reason") or name), event=name))
     return signals
 
 
@@ -258,8 +276,9 @@ def _situational_from_progress(progress: Any) -> SituationalState:
 _SITUATIONAL_SEVERITY: dict[SituationalState, int] = {
     "normal": 0,
     "mobility": 1,
-    "survival": 2,
-    "death": 3,
+    "engage": 2,
+    "survival": 3,
+    "death": 4,
 }
 
 _LIFECYCLE_REQUEST_PRIORITY: dict[LifecycleState, int] = {
@@ -293,6 +312,8 @@ def _profile_axes(
 ) -> tuple[tuple[str, ...], Literal["primary", "fast"], Literal["minimal", "standard", "deep"], tuple[str, ...]]:
     if situational == "survival":
         return ("survival", "recovery", "navigation"), "fast", "standard", ("survival",)
+    if situational == "engage":
+        return ("combat", "navigation", "perception"), "fast", "standard", ("combat",)
     if situational == "mobility":
         return ("navigation", "perception", "recovery"), "primary", "standard", ("mobility",)
     if situational == "death":
@@ -303,6 +324,8 @@ def _profile_axes(
 def _context_frame(situational: SituationalState) -> str:
     if situational == "survival":
         return "Survival issue resolved or active; reason from current body facts before continuing."
+    if situational == "engage":
+        return "Hostile nearby or under attack; consider find_hostiles + engage_entity or disengage/heal."
     if situational == "mobility":
         return "Mobility/reachability issue; use fresh position, route, and candidate facts."
     if situational == "death":

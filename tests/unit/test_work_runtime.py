@@ -3,6 +3,7 @@ import unittest
 from minebot.body import BlockWork
 from minebot.game.governance import BreakContext, GovernancePolicy, PlaceContext, Region
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
+from tests.unit._body_batch_helper import batch_block_cells_from_blockat
 
 
 def slot(slot_id: int, item: str | None = None, count: int = 0) -> dict[str, object]:
@@ -88,35 +89,7 @@ class FakeBody:
                 uncertainty=self.find_blocks_uncertainty,
             )
         if self.blocks is not None and scope == "blockCells":
-            cells = params.get("cells") or []
-            start = int(params.get("start") or 0)
-            limit = int(params.get("limit") or 64)
-            page = cells[start : start + limit]
-            facts = []
-            for c in page:
-                pos = (int(c[0]), int(c[1]), int(c[2]))
-                block_type, state = self.blocks.get(pos, ("air", "CLEAR"))
-                facts.append(
-                    {
-                        "x": pos[0],
-                        "y": pos[1],
-                        "z": pos[2],
-                        "type": block_type,
-                        "state": state,
-                        "properties": {},
-                    }
-                )
-            next_idx = start + len(page)
-            nxt = None if next_idx >= len(cells) else next_idx
-            return PerceptionResult(
-                bot="Bot1",
-                scope="blockCells",
-                type="perception",
-                ok=True,
-                complete=nxt is None,
-                data={"count": len(page), "total": len(cells), "next": nxt, "cells": facts},
-                uncertainty=[] if nxt is None else [{"reason": "limit_exceeded"}],
-            )
+            return batch_block_cells_from_blockat(self, params)
         if self.blocks is not None and scope == "blockAt":
             pos = (int(params["x"]), int(params["y"]), int(params["z"]))
             block_type, state = self.blocks.get(pos, ("air", "CLEAR"))
@@ -296,6 +269,72 @@ class FallingBody(FakeBody):
             if self.blocks.get(below, ("air", "CLEAR"))[1] == "CLEAR":
                 self.state_pos = (self.state_pos[0], self.state_pos[1] - 1.0, self.state_pos[2])
         return super().get_state()
+
+
+class FallProbeBatchFailureBody(FallingBody):
+    def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
+        self.perceptions.append((scope, params))
+        if scope == "blockCells":
+            return PerceptionResult(
+                bot="Bot1",
+                scope="blockCells",
+                type="perception",
+                ok=False,
+                complete=False,
+                data={"cells": []},
+                uncertainty=[{"reason": "synthetic_deeper_cell_failure"}],
+                next=None,
+                error="synthetic_deeper_cell_failure",
+            )
+        if scope == "blockAt":
+            pos = (int(params["x"]), int(params["y"]), int(params["z"]))
+            block_type, state = self.blocks.get(pos, ("air", "CLEAR"))
+            return PerceptionResult(
+                bot="Bot1",
+                scope="blockAt",
+                type="perception",
+                ok=True,
+                complete=True,
+                data={"x": pos[0], "y": pos[1], "z": pos[2], "type": block_type, "state": state},
+            )
+        return super().perceive(scope, params)
+
+
+class ScopeBatchFailureBody(FakeBody):
+    def __init__(self, *args, failed_scope: str, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.failed_scope = failed_scope
+
+    def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
+        if scope == "blockCells":
+            cells = params.get("cells") or []
+            if cells:
+                sample_y = int(cells[0][1])
+                label = self._batch_label(sample_y, len(cells))
+                if label == self.failed_scope:
+                    self.perceptions.append((scope, params))
+                    return PerceptionResult(
+                        bot="Bot1",
+                        scope="blockCells",
+                        type="perception",
+                        ok=False,
+                        complete=False,
+                        data={"cells": []},
+                        uncertainty=[{"reason": f"synthetic_{label}_failure"}],
+                        next=None,
+                        error=f"synthetic_{label}_failure",
+                    )
+        return super().perceive(scope, params)
+
+    @staticmethod
+    def _batch_label(sample_y: int, count: int) -> str:
+        if count == 3:
+            return "surface_candidate"
+        if count > 3 and sample_y == 65:
+            return "surface_column"
+        if count > 1 and sample_y >= 66:
+            return "sky_exposure"
+        return "other"
 
 
 class BlockWorkTests(unittest.TestCase):
@@ -808,6 +847,63 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(body.actions, [])
         self.assertEqual(len(result.metrics["liquid_faces"]), 3)
 
+    def test_mine_block_dry_batches_liquid_face_scan(self):
+        class NativeBatchBody(FakeBody):
+            def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
+                if scope == "blockCells":
+                    self.perceptions.append((scope, params))
+                    facts = []
+                    for c in params.get("cells") or []:
+                        pos = (int(c[0]), int(c[1]), int(c[2]))
+                        block_type, state = self.blocks.get(pos, ("air", "CLEAR"))
+                        facts.append(
+                            {
+                                "x": pos[0],
+                                "y": pos[1],
+                                "z": pos[2],
+                                "type": block_type,
+                                "state": state,
+                                "properties": {},
+                            }
+                        )
+                    return PerceptionResult(
+                        bot="Bot1",
+                        scope="blockCells",
+                        type="perception",
+                        ok=True,
+                        complete=True,
+                        data={"count": len(facts), "total": len(facts), "next": None, "cells": facts},
+                    )
+                return super().perceive(scope, params)
+
+        blocks = {
+            (0, 64, 0): ("diamond_ore", "SOLID"),
+            (1, 64, 0): ("water", "LIQUID"),
+        }
+        body = NativeBatchBody(blocks=blocks)
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy)
+
+        result = runtime.mine_block_dry((0, 64, 0), max_seal_faces=0)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "dry_mining_too_many_liquid_faces")
+        self.assertEqual(result.metrics["liquid_faces"], [[1, 64, 0]])
+        block_cells_reads = [params for scope, params in body.perceptions if scope == "blockCells"]
+        self.assertGreaterEqual(len(block_cells_reads), 2)
+        self.assertCountEqual(
+            block_cells_reads[0]["cells"],
+            [[0, 64, 0], [0, 65, 0], [0, 63, 0], [1, 64, 0], [-1, 64, 0], [0, 64, 1], [0, 64, -1]],
+        )
+        self.assertCountEqual(
+            block_cells_reads[1]["cells"],
+            [[1, 64, 0], [-1, 64, 0], [0, 64, 1], [0, 64, -1], [0, 65, 0], [0, 63, 0]],
+        )
+        self.assertEqual(
+            [params for scope, params in body.perceptions if scope == "blockAt"],
+            [{"x": 0, "y": 64, "z": 0}],
+        )
+
     def test_mine_block_dry_seals_liquid_face_then_mines(self):
         blocks = {
             (0, 64, 0): ("diamond_ore", "SOLID"),
@@ -1276,6 +1372,63 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.metrics["dig_down"]["fall_clearance"], 1)
         self.assertEqual(result.metrics["dig_down"]["first_support"], [0, 62, 0])
         self.assertTrue(result.metrics["dig_down"]["safe_to_continue"])
+
+    def test_dig_down_one_batches_fall_probe_cells(self):
+        blocks = {
+            (0, 64, 0): ("air", "CLEAR"),
+            (0, 65, 0): ("air", "CLEAR"),
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 62, 0): ("air", "CLEAR"),
+            (0, 61, 0): ("stone", "SOLID"),
+        }
+        body = FallingBody(blocks=blocks)
+        policy = GovernancePolicy(natural_regions=[Region("shaft", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, settle=lambda _seconds: None)
+
+        result = runtime.dig_down_one(current_pos=(0, 64, 0), max_clear_fall=2, timeout_s=1.0)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["dig_down"]["fall_clearance"], 2)
+        self.assertEqual(result.metrics["dig_down"]["first_support"], [0, 61, 0])
+        block_cells_reads = [params for scope, params in body.perceptions if scope == "blockCells"]
+        self.assertEqual(len(block_cells_reads), 1)
+        self.assertEqual(block_cells_reads[0]["cells"], [[0, 62, 0], [0, 61, 0]])
+
+    def test_dig_down_one_fall_probe_batch_failure_preserves_short_circuit(self):
+        blocks = {
+            (0, 64, 0): ("air", "CLEAR"),
+            (0, 65, 0): ("air", "CLEAR"),
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 62, 0): ("stone", "SOLID"),
+            (0, 61, 0): ("air", "CLEAR"),
+        }
+        body = FallProbeBatchFailureBody(blocks=blocks)
+        policy = GovernancePolicy(natural_regions=[Region("shaft", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, settle=lambda _seconds: None)
+
+        result = runtime.dig_down_one(current_pos=(0, 64, 0), max_clear_fall=2, timeout_s=1.0)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["dig_down"]["fall_clearance"], 1)
+        self.assertEqual(result.metrics["dig_down"]["first_support"], [0, 62, 0])
+        self.assertEqual(
+            [params for scope, params in body.perceptions if scope == "blockCells"],
+            [{"cells": [[0, 62, 0], [0, 61, 0]], "start": 0, "limit": 64}],
+        )
+        self.assertEqual(
+            [params for scope, params in body.perceptions if scope == "blockAt"],
+            [
+                {"x": 0, "y": 64, "z": 0},
+                {"x": 0, "y": 65, "z": 0},
+                {"x": 0, "y": 63, "z": 0},
+                {"x": 0, "y": 62, "z": 0},
+                {"x": 0, "y": 63, "z": 0},
+            ],
+        )
+        self.assertNotIn(
+            {"x": 0, "y": 61, "z": 0},
+            [params for scope, params in body.perceptions if scope == "blockAt"],
+        )
 
     def test_dig_down_one_reports_already_open_with_support_truth(self):
         blocks = {
@@ -2069,6 +2222,78 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.reason, "surface_not_found_in_column")
         self.assertEqual(result.metrics["origin"], [0, 64, 0])
         self.assertEqual(body.actions, [])
+
+    def test_sky_exposed_batches_surface_window(self):
+        class NativeBatchBody(FakeBody):
+            def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
+                self.perceptions.append((scope, params))
+                if scope == "blockCells":
+                    cells = params.get("cells") or []
+                    facts = []
+                    for c in cells:
+                        pos = (int(c[0]), int(c[1]), int(c[2]))
+                        block_type, state = self.blocks.get(pos, ("air", "CLEAR"))
+                        facts.append(
+                            {
+                                "x": pos[0],
+                                "y": pos[1],
+                                "z": pos[2],
+                                "type": block_type,
+                                "state": state,
+                                "properties": {},
+                            }
+                        )
+                    return PerceptionResult(
+                        bot="Bot1",
+                        scope="blockCells",
+                        type="perception",
+                        ok=True,
+                        complete=True,
+                        data={"count": len(facts), "total": len(cells), "next": None, "cells": facts},
+                    )
+                return super().perceive(scope, params)
+
+        blocks = {
+            (0, 64, 0): ("air", "CLEAR"),
+            (0, 65, 0): ("air", "CLEAR"),
+            (0, 66, 0): ("air", "CLEAR"),
+            (0, 67, 0): ("stone", "SOLID"),
+        }
+        body = NativeBatchBody(blocks=blocks)
+        runtime = BlockWork(body, GovernancePolicy())
+
+        sky = runtime.sky_exposed((0, 64, 0), world_top_y=70)
+
+        self.assertEqual(sky["exposed"], False)
+        self.assertEqual(sky["first_blocker"], {"pos": [0, 67, 0], "block_type": "stone", "block_state": "SOLID"})
+        self.assertEqual(
+            [params for scope, params in body.perceptions if scope == "blockCells"],
+            [{"cells": [[0, 66, 0], [0, 67, 0], [0, 68, 0], [0, 69, 0], [0, 70, 0]], "start": 0, "limit": 64}],
+        )
+        self.assertEqual([params for scope, params in body.perceptions if scope == "blockAt"], [])
+
+    def test_constructible_surface_column_batches_and_falls_back_on_batch_failure(self):
+        blocks = {
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 64, 0): ("air", "CLEAR"),
+            (0, 65, 0): ("air", "CLEAR"),
+            (0, 66, 0): ("air", "CLEAR"),
+            (0, 67, 0): ("air", "CLEAR"),
+            (0, 68, 0): ("air", "CLEAR"),
+        }
+        body = ScopeBatchFailureBody(blocks=blocks, failed_scope="surface_column")
+        runtime = BlockWork(body, GovernancePolicy(natural_regions=[Region("surface", (-10, 0, -10), (10, 120, 10))]))
+
+        result = runtime._constructible_surface_column_at((0, 64, 0), target_y=67, world_top_y=70)
+
+        self.assertIsInstance(result, dict)
+        self.assertTrue(result["constructible"])
+        self.assertEqual(result["reason"], "constructible")
+        self.assertTrue(
+            any(scope == "blockCells" for scope, _params in body.perceptions),
+            body.perceptions,
+        )
+        self.assertIn(("blockAt", {"x": 0, "y": 65, "z": 0}), body.perceptions)
 
     def test_place_block_denies_unknown_region_without_executing_action(self):
         body = FakeBody(

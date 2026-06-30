@@ -65,6 +65,7 @@ class FakeBody:
         self.actions: list[Action] = []
         self.await_timeouts: list[float] = []
         self.blocks = dict(blocks or {})
+        self.perceptions: list[tuple[str, dict[str, object]]] = []
 
     def get_state(self):
         if not self.states:
@@ -74,6 +75,44 @@ class FakeBody:
         return self.states.pop(0)
 
     def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
+        self.perceptions.append((scope, dict(params)))
+        if scope == "blockCells":
+            cells = params.get("cells") or []
+            start = int(params.get("start") or 0)
+            limit = int(params.get("limit") or 64)
+            page = cells[start : start + limit]
+            facts = []
+            for raw_pos in page:
+                pos = (int(raw_pos[0]), int(raw_pos[1]), int(raw_pos[2]))
+                raw = self.blocks.get(pos, ("air", "CLEAR"))
+                if len(raw) == 2:
+                    block_type, state = raw
+                    properties = {}
+                else:
+                    block_type, state, properties = raw
+                facts.append(
+                    {
+                        "x": pos[0],
+                        "y": pos[1],
+                        "z": pos[2],
+                        "type": block_type,
+                        "state": state,
+                        "properties": properties,
+                    }
+                )
+            next_index = start + len(page)
+            nxt = None if next_index >= len(cells) else next_index
+            return PerceptionResult(
+                bot="Bot1",
+                scope="blockCells",
+                type="perception",
+                ok=True,
+                complete=nxt is None,
+                data={"cells": facts, "next": nxt, "count": len(facts), "total": len(cells)},
+                uncertainty=[] if nxt is None else [{"reason": "limit_exceeded"}],
+                next=None,
+                error=None,
+            )
         if scope != "blockAt":
             raise AssertionError(f"unexpected scope {scope}")
         pos = (int(params["x"]), int(params["y"]), int(params["z"]))
@@ -138,6 +177,7 @@ class FakeBody:
         event_name = {
             "moveTo": "moveDone",
             "navigateTo": "navigateDone",
+            "followEntity": "followDone",
             "mineBlock": "mineDone",
             "placeBlock": "placeDone",
             "useItem": "useDone",
@@ -150,6 +190,9 @@ class FakeBody:
             data["goal_dist"] = 0.0 if arrived else 10.0
             data["expanded"] = 50
             data["waypoints"] = 5
+        elif action.name == "followEntity":
+            data["arrived"] = stopped_reason == "arrived"
+            data["reason"] = stopped_reason
         elif action.name == "moveTo":
             data["arrived"] = success
         elif action.name == "useItem":
@@ -180,9 +223,10 @@ class FakeNavigator:
 
 
 class FakeWork:
-    def __init__(self, success=True, reason="completed"):
+    def __init__(self, success=True, reason="completed", *, body: FakeBody | None = None):
         self.success = success
         self.reason = reason
+        self.body = body
         self.mine_calls = []
         self.place_calls = []
         self.dig_up_calls = []
@@ -192,6 +236,8 @@ class FakeWork:
         self.mine_calls.append((pos, context, timeout_s))
         from minebot.contract import ToolResult
 
+        if self.success and self.body is not None:
+            self.body.blocks[pos] = ("air", "CLEAR")
         return ToolResult(success=self.success, reason=self.reason, can_retry=not self.success)
 
     def place_block(
@@ -207,6 +253,8 @@ class FakeWork:
         self.place_calls.append((pos, block_type, face, context, purpose, timeout_s))
         from minebot.contract import ToolResult
 
+        if self.success and self.body is not None:
+            self.body.blocks[pos] = (block_type, "SOLID")
         return ToolResult(
             success=self.success,
             reason=self.reason,
@@ -224,6 +272,10 @@ class FakeWork:
         self.dig_up_calls.append((current_pos, context, timeout_s))
         from minebot.contract import ToolResult
 
+        if self.success and self.body is not None and current_pos is not None:
+            self.body.blocks[current_pos] = ("minecraft:cobblestone", "SOLID")
+            self.body.blocks[(current_pos[0], current_pos[1] + 1, current_pos[2])] = ("air", "CLEAR")
+            self.body.blocks[(current_pos[0], current_pos[1] + 2, current_pos[2])] = ("air", "CLEAR")
         return ToolResult(
             success=self.success,
             reason="dig_up_step_completed" if self.success else self.reason,
@@ -241,6 +293,8 @@ class FakeWork:
         self.dig_down_calls.append((current_pos, context, timeout_s))
         from minebot.contract import ToolResult
 
+        if self.success and self.body is not None and current_pos is not None:
+            self.body.blocks[(current_pos[0], current_pos[1] - 1, current_pos[2])] = ("air", "CLEAR")
         return ToolResult(
             success=self.success,
             reason="dig_down_already_open" if self.success else self.reason,
@@ -261,6 +315,8 @@ class FakeWork:
         self.dig_down_calls.append((target_y, current_pos, context, max_steps, dig_timeout_s, move_timeout_s))
         from minebot.contract import ToolResult
 
+        if self.success and self.body is not None and current_pos is not None:
+            self.body.blocks[(current_pos[0], target_y, current_pos[2])] = ("air", "CLEAR")
         return ToolResult(
             success=self.success,
             reason="dig_down_target_reached" if self.success else self.reason,
@@ -523,6 +579,73 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertIsInstance(segments, list)
         self.assertEqual(len(segments), 1)
 
+    def test_follow_entity_sends_follow_action_and_returns_arrived(self):
+        nav = FakeNavigator([])
+        body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["arrived"])
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.follow_entity("TargetPlayer", keep_distance=3.0, timeout_s=5.0)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "arrived")
+        self.assertEqual(len(body.actions), 1)
+        self.assertEqual(body.actions[0].name, "followEntity")
+        self.assertEqual(body.actions[0].params["target_spec"], "TargetPlayer")
+        self.assertEqual(body.actions[0].params["keep_radius"], 3.0)
+
+    def test_follow_entity_returns_target_lost(self):
+        nav = FakeNavigator([])
+        body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["target_lost"])
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.follow_entity("Ghost", timeout_s=5.0)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "target_lost")
+        self.assertTrue(result.can_retry)
+
+    def test_follow_entity_returns_timeout(self):
+        nav = FakeNavigator([])
+        body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["timeout"])
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.follow_entity("Runner", timeout_s=5.0)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "timeout")
+
+    def test_follow_entity_returns_body_rejected(self):
+        nav = FakeNavigator([])
+        body = FakeBody([state_at((0, 64, 0))], accept=False)
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.follow_entity("Someone", timeout_s=5.0)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "body_rejected")
+
+    def test_follow_entity_rejects_empty_target_and_bad_timeout(self):
+        nav = FakeNavigator([])
+        body = FakeBody([state_at((0, 64, 0))])
+        runtime = NavigationTransactions(body, nav)
+
+        with self.assertRaises(ValueError):
+            runtime.follow_entity("", timeout_s=5.0)
+        with self.assertRaises(ValueError):
+            runtime.follow_entity("X", timeout_s=0)
+        with self.assertRaises(ValueError):
+            runtime.follow_entity("X", keep_distance=-1, timeout_s=5.0)
+
+    def test_follow_entity_metrics_carry_target_spec(self):
+        nav = FakeNavigator([])
+        body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["arrived"])
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.follow_entity("TargetPlayer", timeout_s=5.0)
+
+        self.assertEqual(result.metrics["target_spec"], "TargetPlayer")
+        self.assertEqual(result.metrics["event"], "followDone")
+
 
 def _navigator(cells):
     policy = GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (20, 100, 10))])
@@ -635,6 +758,130 @@ class WorldRefreshNavigationIntegrationTests(unittest.TestCase):
 
         self.assertTrue(any(action.name == "navigateTo" for action in body.actions))
         self.assertEqual(result.reason, "arrived")
+
+    def test_world_refresh_uses_block_cells_batches_not_per_cell_block_at(self):
+        body = FakeBody([state_at((0, 64, 0))], blocks={(0, 63, 0): ("stone", "SOLID")})
+        world = GridWorld({})
+
+        refresh_grid_world_around(body, world, (0, 64, 0), h_radius=1, y_below=1, y_above=1)
+
+        scopes = [scope for scope, _params in body.perceptions]
+        self.assertIn("blockCells", scopes)
+        self.assertNotIn("blockAt", scopes)
+        self.assertFalse(world.cell_at((0, 63, 0)).walkable)
+
+    def test_navigate_to_does_not_use_local_terrain_fallback_by_default(self):
+        body = FakeBody(
+            [
+                state_at((0, 64, 0)),
+                state_at((0, 64, 0)),
+            ],
+            terminal_reasons=["stuck"],
+        )
+        policy = GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))])
+        navigator = SegmentedNavigator(GridWorld({}), NavigationCostModel(policy))
+        work = FakeWork(success=True, body=body)
+        runtime = NavigationTransactions(body, navigator, work=work)
+
+        result = runtime.navigate_to(
+            (0, 65, 0),
+            break_context=BreakContext.RECOVERY,
+            config=NavigationRunConfig(max_segments=4, min_partial_progress=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "stuck")
+        self.assertEqual([action.name for action in body.actions], ["navigateTo"])
+        self.assertEqual(work.place_calls, [])
+        self.assertEqual(work.dig_up_calls, [])
+        self.assertNotIn("blockCells", [scope for scope, _params in body.perceptions])
+
+    def test_collect_approach_can_opt_in_to_terrain_fallback_after_scarpet_stuck(self):
+        body = FakeBody(
+            [
+                state_at((0, 64, 0)),
+                state_at((0, 64, 0)),
+                state_at((0, 64, 0)),
+                state_at((0, 64, 0)),
+                state_at((0, 64, 0)),
+                state_at((0, 65, 0)),
+            ],
+            terminal_reasons=["stuck"],
+        )
+        policy = GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))])
+        navigator = SegmentedNavigator(GridWorld({}), NavigationCostModel(policy))
+        work = FakeWork(success=True, body=body)
+        runtime = NavigationTransactions(body, navigator, work=work)
+
+        result = runtime.navigate_to(
+            (0, 65, 0),
+            break_context=BreakContext.COLLECT_APPROACH,
+            config=NavigationRunConfig(
+                max_segments=4,
+                min_partial_progress=1,
+                allow_local_terrain_fallback=True,
+            ),
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "arrived")
+        self.assertEqual(body.actions[0].name, "navigateTo")
+        self.assertEqual(work.place_calls, [((0, 64, 0), "minecraft:cobblestone", None, BreakContext.TRAVEL, "scaffold", 15.0)])
+        self.assertEqual(work.dig_up_calls, [((0, 64, 0), BreakContext.COLLECT_APPROACH, 15.0)])
+        self.assertTrue(any(scope == "blockCells" for scope, _params in body.perceptions))
+        self.assertNotIn("blockAt", [scope for scope, _params in body.perceptions])
+        segments = result.metrics["segments"]
+        self.assertTrue(any(item["status"] == "terrain_place" for item in segments))
+        self.assertTrue(any(item["status"] == "terrain_pillar" for item in segments))
+        self.assertEqual(result.metrics["terrain_fallback_original_reason"], "stuck")
+
+    def test_collect_approach_fallback_moves_to_prefix_before_terrain_action(self):
+        class MovingFakeBody(FakeBody):
+            def await_action_terminal(self, action_id: str, timeout_s: float = 15.0, **kwargs) -> Event:
+                terminal = super().await_action_terminal(action_id, timeout_s=timeout_s, **kwargs)
+                action = next(action for action in self.actions if action.id == action_id)
+                if action.name == "moveTo" and terminal.data.get("arrived"):
+                    self.states.insert(0, state_at(tuple(action.params["target"])))
+                return terminal
+
+        body = MovingFakeBody(
+            [
+                state_at((0, 64, 0)),
+                state_at((0, 64, 0)),
+                state_at((0, 64, 0)),
+            ],
+            terminal_reasons=["stuck", "arrived"],
+            blocks={
+                (0, 63, 0): ("stone", "SOLID"),
+                (1, 63, 0): ("stone", "SOLID"),
+                (2, 63, 0): ("stone", "SOLID"),
+                (3, 63, 0): ("stone", "SOLID"),
+                (3, 64, 0): ("stone", "SOLID"),
+            },
+        )
+        policy = GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))])
+        navigator = SegmentedNavigator(GridWorld({}), NavigationCostModel(policy))
+        work = FakeWork(success=True, body=body)
+        runtime = NavigationTransactions(body, navigator, work=work)
+
+        result = runtime.navigate_to(
+            (3, 64, 0),
+            break_context=BreakContext.COLLECT_APPROACH,
+            config=NavigationRunConfig(
+                max_segments=5,
+                min_partial_progress=1,
+                allow_local_terrain_fallback=True,
+            ),
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "arrived")
+        self.assertEqual([action.name for action in body.actions[:2]], ["navigateTo", "moveTo"])
+        self.assertEqual(body.actions[1].params["target"], [2, 64, 0])
+        self.assertEqual(work.mine_calls, [((3, 64, 0), BreakContext.COLLECT_APPROACH, 15.0)])
+        segments = result.metrics["segments"]
+        self.assertTrue(any(item["status"] == "advanced" for item in segments))
+        self.assertTrue(any(item["status"] == "terrain_break" for item in segments))
 
 
 if __name__ == "__main__":

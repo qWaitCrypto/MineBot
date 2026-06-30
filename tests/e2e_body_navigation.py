@@ -14,9 +14,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from minebot.body.navigation import NavigationRunConfig, NavigationTransactions, make_block_at_prism_world_update
 from minebot.game import (
     BreakContext,
-    GoalYLevel,
-    GoalNear,
     GovernancePolicy,
+    RconClient,
+    Region,
+    ScarpetBody,
+)
+from minebot.game.navigation import (
+    GoalNear,
+    GoalYLevel,
     GridCell,
     GridWorld,
     MoveKind,
@@ -24,10 +29,7 @@ from minebot.game import (
     NavigationSegment,
     PathResult,
     PathStep,
-    RconClient,
     RecheckResult,
-    Region,
-    ScarpetBody,
     SegmentedNavigator,
 )
 from minebot.game.errors import RconError
