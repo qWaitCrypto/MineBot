@@ -213,6 +213,18 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(by_name["search_for_block"]["tool_type"], "perception")
         self.assertEqual(by_name["mine_block_collect"]["tool_type"], "work")
 
+    def test_phase1_registry_uses_server_side_navigation_factory(self):
+        from minebot.body.navigation import NavigationTransactions
+
+        body = HarnessBody()
+        cfg = Phase1RuntimeConfig(natural_region=Region("test", (0, 0, 0), (16, 128, 16)))
+        original = NavigationTransactions.server_side
+
+        with patch.object(NavigationTransactions, "server_side", wraps=original) as server_side:
+            build_phase1_registry(body, cfg)
+
+        server_side.assert_called_once()
+
     def test_interactive_loop_terminal_truth_uses_replaced_current_goal(self):
         session = ReplacedGoalSession(
             steps=[
@@ -298,6 +310,28 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(final.status, "completed_turn")
         self.assertEqual([command.kind for command in session.submitted], [SessionCommandKind.REPLACE_GOAL])
 
+    def test_interactive_loop_terminal_truth_failure_does_not_crash(self):
+        session = ReplacedGoalSession(
+            steps=[
+                SessionStep("completed_turn", LifecycleState.ACTIVE),
+                SessionStep("waiting", LifecycleState.YIELDED),
+            ],
+            goals=["collect 64 logs"],
+        )
+        body = BrokenInventoryBody()
+
+        final = asyncio.run(
+            _run_interactive_loop(
+                session,
+                fallback_goal="collect 64 logs",
+                body=body,
+                max_steps=2,
+            )
+        )
+
+        self.assertEqual(final.status, "waiting")
+        self.assertEqual(session.step_count, 2)
+
 
 class InventoryBody:
     def __init__(self, counts):
@@ -322,6 +356,13 @@ class InventoryBody:
         if next_start is not None:
             data["nextStart"] = next_start
         return PerceptionResult("Bot", scope, "perception", True, next_start is None, data)
+
+
+class BrokenInventoryBody:
+    def perceive(self, scope, params):
+        if scope == "inventory":
+            raise ValueError("inventory perception failed: missing_body")
+        return PerceptionResult("Bot", scope, "perception", False, False, {}, error="unsupported")
 
 
 class HarnessBody:

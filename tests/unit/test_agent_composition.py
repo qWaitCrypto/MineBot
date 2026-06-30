@@ -488,6 +488,34 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.success, result)
         self.assertEqual([call["pos"] for call in mine_calls], [[5, 70, 0]])
 
+    def test_collect_resource_diversifies_same_tree_candidates_before_budget_exhaustion(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        # Search commonly returns several blocks from the same trunk/canopy before
+        # any other tree. The orchestrator should spread attempts across clusters
+        # instead of spending the whole candidate budget on one blocked tree.
+        search, _search_calls = candidate_search_tool(
+            [
+                [10, 66, 10],
+                [10, 67, 10],
+                [11, 68, 10],
+                [30, 66, 30],
+            ]
+        )
+        registry.register(search)
+        miner, mine_calls = mine_tool(body, fail_reason="mine_failed:no_inventory_delta")
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "logs", "count": 1}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.reason, "partial_budget_exhausted")
+        # We still try the nearest log first, but the second attempt should jump
+        # to the distant tree rather than another block from the same trunk.
+        self.assertEqual([call["pos"] for call in mine_calls], [[10, 66, 10], [30, 66, 30], [10, 67, 10]])
+
     def test_collect_resource_tries_candidates_when_search_skip_fails_on_top_pick(self):
         # The live bug: search navigated to its own nearest candidate (underground,
         # no stand point) and returned success=False with a candidate-skip reason,

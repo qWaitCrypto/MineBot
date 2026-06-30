@@ -24,9 +24,8 @@ from minebot.brain.modes import AgentSignal, ModeRuntime  # noqa: E402
 from minebot.brain.progress import ProgressAuthority  # noqa: E402
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool  # noqa: E402
 from minebot.contract import BreakContext, ToolResult  # noqa: E402
-from minebot.game import GovernancePolicy, GridCell, GridWorld, NavigationCostModel, RconClient, Region, ScarpetBody  # noqa: E402
+from minebot.game import GovernancePolicy, RconClient, Region, ScarpetBody  # noqa: E402
 from minebot.game.errors import RconError  # noqa: E402
-from minebot.game.navigation import SegmentedNavigator  # noqa: E402
 from minebot.game.rcon import RconConfig  # noqa: E402
 from tests.e2e_support import SKIP_EXIT_CODE, spawn_or_fail  # noqa: E402
 
@@ -80,10 +79,6 @@ def reset_subject(rcon: RconClient, *, item: str = "dirt", blocks: list[tuple[in
         command(rcon, f"setblock {x} {y} {z} {block_type}", delay=0.0)
 
 
-def flat_world() -> GridWorld:
-    return GridWorld({(x, 70, z): GridCell() for x in range(-10, 17) for z in range(-10, 11)})
-
-
 def make_registry(
     body: ScarpetBody,
     *,
@@ -95,7 +90,7 @@ def make_registry(
         natural_regions=[REGION],
         protected_regions=[Region("protected-target", (3, 70, 0), (8, 70, 0))] if protected else [],
     )
-    navigator = NavigationTransactions(body, SegmentedNavigator(flat_world(), NavigationCostModel(policy)))
+    navigator = NavigationTransactions.server_side(body, policy)
     work = BlockWork(body, policy, navigator=navigator)
     registry = ToolRegistry()
     register_inventory_tools(registry, body)

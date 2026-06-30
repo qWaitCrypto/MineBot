@@ -232,10 +232,10 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
                 max_steps=max_steps,
             )
             terminal_goal = _session_goal(session, goal)
-            truth = evaluate_terminal_truth(body, terminal_goal, final)
+            truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
             if truth.satisfied:
                 final = session.complete_current_goal("terminal_truth_satisfied")
-                truth = evaluate_terminal_truth(body, terminal_goal, final)
+                truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
             if session.parts is not None:
                 session.parts.runtime.trace.emit(
                     "session_terminal",
@@ -270,7 +270,7 @@ async def _run_interactive_loop(
     while remaining is None or remaining > 0:
         _poll_chat_commands(session, chat_source)
         last = await session.step()
-        if evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last).satisfied:
+        if safe_evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last, session=session).satisfied:
             return last
         if last.lifecycle.value == "idle" and not session.pending:
             return last

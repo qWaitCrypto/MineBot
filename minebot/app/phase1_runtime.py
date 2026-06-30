@@ -14,6 +14,7 @@ from minebot.app.runner import RuntimeTrace
 from minebot.app.runner import sdk_tool_for
 from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
 from minebot.body import BlockWork, NavigationRunConfig, NavigationTransactions
+from minebot.body.combat import CombatTransactions, find_hostiles
 from minebot.brain.composition import (
     CompositionBudget,
     CompositionContext,
@@ -22,8 +23,8 @@ from minebot.brain.composition import (
 )
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
 from minebot.contract import Body, BreakContext, Position, Region, ToolResult
-from minebot.game import GovernancePolicy, GridWorld, NavigationCostModel, ScarpetBody
-from minebot.game.navigation import GoalNear, SegmentedNavigator
+from minebot.game import GovernancePolicy, ScarpetBody
+from minebot.game.navigation import GoalNear
 
 
 @dataclass(frozen=True)
@@ -78,19 +79,16 @@ def build_phase1_agent_runtime(
 
 def build_phase1_registry(body: ScarpetBody, config: Phase1RuntimeConfig) -> ToolRegistry:
     policy = GovernancePolicy(natural_regions=[config.natural_region])
-    # SegmentedNavigator still carries governance policy for fallback/legacy
-    # transaction seams, but production move_to delegates primary pathfinding to
-    # Scarpet navigateTo instead of populating a Python-local terrain grid.
-    world = GridWorld({})
-    navigator = NavigationTransactions(
-        body,
-        SegmentedNavigator(world, NavigationCostModel(policy)),
-    )
+    navigator = NavigationTransactions.server_side(body, policy)
     work = BlockWork(body, policy, navigator=navigator)
     registry = ToolRegistry()
     registry.register(_read_state_tool(body))
     register_inventory_tools(registry, body)
     registry.register(_move_to_tool(navigator))
+    registry.register(_follow_tool(navigator))
+    combat = CombatTransactions(body)
+    registry.register(_engage_tool(combat))
+    registry.register(_find_hostiles_tool(body))
     registry.register(_search_tool(work))
     registry.register(_mine_collect_tool(work))
     return registry
@@ -183,6 +181,103 @@ def _move_to_tool(navigator: NavigationTransactions) -> RegisteredTool:
             body_scope=("navigation",),
             terminal_truth=("navigateDone", "position"),
             timeout_s=120.0,
+        ),
+    )
+
+
+def _follow_tool(navigator: NavigationTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "follow_entity",
+        "Follow a moving player or named entity, keeping a distance. The Body re-plans the path server-side as the target moves.",
+        {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "minLength": 1},
+                "keep_distance": {"type": "number", "minimum": 0},
+                "timeout_s": {"type": "number", "exclusiveMinimum": 0},
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+        lambda params: navigator.follow_entity(
+            str(params["target"]),
+            keep_distance=float(params.get("keep_distance") or 3.0),
+            timeout_s=float(params.get("timeout_s") or 30.0),
+        ),
+        ToolSidecar(
+            "follow_entity",
+            mutating=True,
+            source="body.navigation",
+            tool_type="navigation",
+            permission="move",
+            body_scope=("navigation",),
+            terminal_truth=("followDone", "position"),
+            timeout_s=120.0,
+        ),
+    )
+
+
+def _engage_tool(combat: CombatTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "engage_entity",
+        "Engage and fight a hostile target (by name/type/uuid, or 'nearest_hostile'). The Body approaches via server-side pathfinding, swings on cooldown when in range with line-of-sight, disengages on low health, and kill-verifies. Melee; ranged mobs use cover-aware approach.",
+        {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "minLength": 1},
+                "attack_range": {"type": "number", "minimum": 1.2, "maximum": 3.0},
+                "cooldown_ticks": {"type": "integer", "minimum": 1},
+                "timeout_s": {"type": "number", "exclusiveMinimum": 0},
+                "disengage_health": {"type": "number", "minimum": 0},
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+        lambda params: combat.engage_entity(
+            str(params["target"]),
+            attack_range=float(params.get("attack_range") or 2.0),
+            cooldown_ticks=int(params.get("cooldown_ticks") or 10),
+            timeout_s=float(params.get("timeout_s") or 20.0),
+            disengage_health=float(params.get("disengage_health") or 6.0),
+        ),
+        ToolSidecar(
+            "engage_entity",
+            mutating=True,
+            source="body.combat",
+            tool_type="combat",
+            permission="combat",
+            body_scope=("combat", "nearby_entities"),
+            terminal_truth=("engageDone", "position"),
+            timeout_s=120.0,
+        ),
+    )
+
+
+def _find_hostiles_tool(body: Body) -> RegisteredTool:
+    return RegisteredTool(
+        "find_hostiles",
+        "Find nearby hostile mobs via the nearbyHostiles perception, sorted nearest-first. Returns type/name/pos/health for each.",
+        {
+            "type": "object",
+            "properties": {
+                "radius": {"type": "integer", "minimum": 1, "maximum": 32},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 128},
+            },
+            "additionalProperties": False,
+        },
+        lambda params: find_hostiles(
+            body,
+            radius=int(params.get("radius") or 16),
+            limit=int(params.get("limit") or 16),
+        ),
+        ToolSidecar(
+            "find_hostiles",
+            mutating=False,
+            source="body.perception",
+            tool_type="perception",
+            permission="read_world",
+            body_scope=("nearby_entities",),
+            timeout_s=15.0,
         ),
     )
 

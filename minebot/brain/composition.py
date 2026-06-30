@@ -417,7 +417,41 @@ def _targets_from_search(payload: JsonObject) -> list[list[int]]:
             parsed = _parse_pos(pos)
             if parsed is not None and parsed not in targets:
                 targets.append(parsed)
-    return targets
+    return _diversify_targets(targets)
+
+
+def _diversify_targets(targets: list[list[int]]) -> list[list[int]]:
+    if len(targets) < 3:
+        return targets
+    clusters: list[list[list[int]]] = []
+    for target in targets:
+        cluster = _find_target_cluster(clusters, target)
+        if cluster is None:
+            clusters.append([target])
+        else:
+            cluster.append(target)
+
+    diversified: list[list[int]] = []
+    pending = True
+    while pending:
+        pending = False
+        for cluster in clusters:
+            if not cluster:
+                continue
+            diversified.append(cluster.pop(0))
+            pending = True
+    return diversified
+
+
+def _find_target_cluster(clusters: list[list[list[int]]], target: list[int]) -> list[list[int]] | None:
+    for cluster in clusters:
+        if any(_targets_share_patch(candidate, target) for candidate in cluster):
+            return cluster
+    return None
+
+
+def _targets_share_patch(left: list[int], right: list[int]) -> bool:
+    return abs(left[0] - right[0]) <= 2 and abs(left[2] - right[2]) <= 2 and abs(left[1] - right[1]) <= 6
 
 
 def _parse_pos(value: object) -> list[int] | None:
