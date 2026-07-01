@@ -9,8 +9,11 @@ from minebot.app.config import agent_language_from_env
 from minebot.app.console import parse_collect_goal
 from minebot.app.runner import (
     AgentRuntime,
+    BodyRecoveryRequired,
+    RecoveryOutcome,
     RuntimeRunContext,
     RuntimeTrace,
+    _model_tool_payload,
     extract_model_response_observations,
     extract_run_observations,
     sdk_tool_for,
@@ -43,6 +46,26 @@ def body_state(x=0.0):
         weather=None,
         dimension="overworld",
         complete=True,
+    )
+
+
+def missing_body_state():
+    return BodyState(
+        bot="Bot",
+        pos=(0.0, 0.0, 0.0),
+        yaw=None,
+        pitch=None,
+        health=0.0,
+        food=0,
+        oxygen=None,
+        inventory_raw="",
+        inventory_hash="",
+        effects=None,
+        time=1000,
+        weather=None,
+        dimension=None,
+        complete=True,
+        missing=True,
     )
 
 
@@ -321,11 +344,115 @@ class AgentRunnerSpineTests(unittest.TestCase):
 
         self.assertTrue(out["success"])
         self.assertEqual(out["reason"], "completed")
+        self.assertTrue(out["complete"])
         self.assertEqual(body.x, 2.0)
         self.assertIsNotNone(authority.last_action)
         self.assertIsNone(runtime_context.weld_context.writer.holder)
         self.assertIsNone(sdk_tool._failure_error_function)
         self.assertFalse(sdk_tool._use_default_failure_error_function)
+
+    def test_sdk_tool_returns_compact_model_payload_and_traces_full_result(self):
+        def callable_(_params):
+            return ToolResult(
+                False,
+                "partial_budget_exhausted",
+                True,
+                next_suggestion="reselect candidates",
+                metrics={
+                    "item": "oak_log",
+                    "target_count": 64,
+                    "before_count": 0,
+                    "after_count": 7,
+                    "remaining_count": 57,
+                    "attempts": [{"target": [i, 64, 0], "mine": {"metrics": {"huge": "x" * 100}}} for i in range(20)],
+                    "skipped": [{"reason": "navigation_blocked:no_path"} for _ in range(4)],
+                    "uncertainty": [{"reason": "limit_exceeded"}],
+                },
+            )
+
+        tool = RegisteredTool(
+            name="collect_resource",
+            description="Collect",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="collect_resource", mutating=False, tool_type="resource"),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        trace = RuntimeTrace()
+        runtime_context = RuntimeRunContext(
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            weld_context=WeldContext(body=FakeBody(), authority=ProgressAuthority(), goal_text="collect"),
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+
+        self.assertEqual(out["reason"], "partial_budget_exhausted")
+        self.assertFalse(out["complete"])
+        self.assertIn("traceRef", out)
+        self.assertEqual(out["summary"]["item"], "oak_log")
+        self.assertEqual(out["summary"]["remaining_count"], 57)
+        self.assertEqual(out["summary"]["attempt_count"], 20)
+        self.assertNotIn("metrics", out)
+        result_event = next(event for event in trace.snapshot() if event["event"] == "tool_result")
+        self.assertIn("full_result", result_event)
+        self.assertIn("model_result", result_event)
+        self.assertIn("attempts", result_event["full_result"]["metrics"])
+
+    def test_sdk_tool_marks_truncated_result_incomplete_for_model(self):
+        def callable_(_params):
+            return ToolResult(
+                True,
+                "block_in_range",
+                False,
+                metrics={
+                    "target": [3, 70, 0],
+                    "truncated": True,
+                    "pages_read": 2,
+                    "total_matches": 128,
+                },
+            )
+
+        tool = RegisteredTool(
+            name="search_for_block",
+            description="Search",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="search_for_block", mutating=False, tool_type="perception"),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        trace = RuntimeTrace()
+        runtime_context = RuntimeRunContext(
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            weld_context=WeldContext(body=FakeBody(), authority=ProgressAuthority(), goal_text="collect"),
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+
+        self.assertTrue(out["success"])
+        self.assertFalse(out["complete"])
+        self.assertEqual(out["summary"]["truncated"], True)
+        self.assertEqual(out["summary"]["pages_read"], 2)
+        self.assertEqual(out["summary"]["total_matches"], 128)
+
+    def test_sdk_tool_marks_top_level_next_result_incomplete_for_model(self):
+        projected = _model_tool_payload(
+            "debug_page",
+            {"success": True, "reason": "page_read", "canRetry": False, "next": "64", "metrics": {"count": 64}},
+            trace_ref="trace-1",
+        )
+
+        self.assertFalse(projected["complete"])
+        self.assertEqual(projected["summary"]["count"], 64)
 
     def test_sdk_tool_converts_transport_exception_to_tool_result(self):
         def callable_(_params):
@@ -361,7 +488,261 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertFalse(out["success"])
         self.assertEqual(out["reason"], "transport_error")
         self.assertTrue(out["canRetry"])
+        self.assertNotIn("metrics", out)
+        self.assertEqual(out["summary"]["error_type"], "RconError")
         self.assertTrue(any(event["event"] == "tool_exception" and event["tool"] == "read_state" for event in trace.snapshot()))
+
+    def test_sdk_tool_invalid_json_uses_same_model_projection_and_full_trace(self):
+        def callable_(_params):
+            raise AssertionError("invalid JSON should not call tool")
+
+        tool = RegisteredTool(
+            name="read_state",
+            description="Read state",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="read_state", mutating=False),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        trace = RuntimeTrace()
+        runtime_context = RuntimeRunContext(
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            weld_context=WeldContext(body=FakeBody(), authority=ProgressAuthority(), goal_text="collect"),
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{bad json"))
+
+        self.assertFalse(out["success"])
+        self.assertEqual(out["reason"], "invalid_tool_json")
+        self.assertIn("traceRef", out)
+        self.assertNotIn("metrics", out)
+        result_event = next(event for event in trace.snapshot() if event["event"] == "tool_result")
+        self.assertEqual(result_event["full_result"]["reason"], "invalid_tool_json")
+        self.assertEqual(result_event["model_result"], out)
+
+    def test_sdk_tool_invalid_input_uses_same_model_projection_and_full_trace(self):
+        def callable_(_params):
+            raise AssertionError("invalid input should not call tool")
+
+        tool = RegisteredTool(
+            name="read_state",
+            description="Read state",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="read_state", mutating=False),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        trace = RuntimeTrace()
+        runtime_context = RuntimeRunContext(
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            weld_context=WeldContext(body=FakeBody(), authority=ProgressAuthority(), goal_text="collect"),
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "[]"))
+
+        self.assertFalse(out["success"])
+        self.assertEqual(out["reason"], "invalid_tool_input")
+        self.assertIn("traceRef", out)
+        self.assertNotIn("metrics", out)
+        result_event = next(event for event in trace.snapshot() if event["event"] == "tool_result")
+        self.assertEqual(result_event["full_result"]["reason"], "invalid_tool_input")
+        self.assertEqual(result_event["model_result"], out)
+
+    def test_sdk_tool_preempts_missing_body_result_into_recovery_required(self):
+        def callable_(_params):
+            return ToolResult(
+                False,
+                "missing_body",
+                True,
+                metrics={"final_pos": [0, 0, 0], "stopped_reason": "missing_body"},
+            )
+
+        tool = RegisteredTool(
+            name="move_to",
+            description="Move",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="move_to", mutating=False, tool_type="navigation"),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        trace = RuntimeTrace()
+        runtime_context = RuntimeRunContext(
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            weld_context=WeldContext(body=FakeBody(), authority=ProgressAuthority(), goal_text="collect"),
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        with self.assertRaises(BodyRecoveryRequired):
+            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+        self.assertTrue(any(event["event"] == "tool_body_recovery_preempt" for event in trace.snapshot()))
+
+    def test_sdk_tool_preempts_nested_missing_body_perception_failure(self):
+        def callable_(_params):
+            return ToolResult(
+                False,
+                "perception_failed",
+                True,
+                metrics={
+                    "scope": "findBlocks",
+                    "error": "missing_body",
+                    "uncertainty": [{"reason": "missing_body"}],
+                },
+            )
+
+        tool = RegisteredTool(
+            name="search_for_block",
+            description="Search",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="search_for_block", mutating=False, tool_type="perception"),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        trace = RuntimeTrace()
+        runtime_context = RuntimeRunContext(
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            weld_context=WeldContext(body=FakeBody(), authority=ProgressAuthority(), goal_text="collect"),
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        with self.assertRaises(BodyRecoveryRequired) as raised:
+            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+
+        self.assertEqual(raised.exception.facts["tool"], "search_for_block")
+        self.assertEqual(raised.exception.reason, "missing_body")
+        self.assertEqual(raised.exception.facts["tool_result_reason"], "perception_failed")
+        self.assertTrue(any(event["event"] == "tool_body_recovery_preempt" for event in trace.snapshot()))
+
+    def test_sdk_tool_success_state_metrics_refresh_last_known_body_state(self):
+        def callable_(_params):
+            return ToolResult(
+                True,
+                "state_read",
+                False,
+                metrics={
+                    "bot": "Bot",
+                    "pos": [4.5, 70.0, -2.25],
+                    "health": 13.0,
+                    "food": 20,
+                    "oxygen": 300,
+                    "dimension": "overworld",
+                    "inventory_hash": "inv2",
+                    "missing": False,
+                },
+            )
+
+        tool = RegisteredTool(
+            name="read_state",
+            description="Read",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="read_state", mutating=False, tool_type="state"),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=RuntimeTrace(),
+            runtime=runtime,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+
+        self.assertEqual(runtime.last_known_body_state["pos"], [4.5, 70.0, -2.25])
+        self.assertEqual(runtime.last_known_body_state["health"], 13.0)
+        self.assertEqual(runtime.last_known_body_state["inventory_hash"], "inv2")
+
+    def test_sdk_tool_preempts_body_missing_camel_case_event(self):
+        def callable_(_params):
+            return ToolResult(False, "perception_failed", True, metrics={"event": "bodyMissing"})
+
+        tool = RegisteredTool(
+            name="read_state",
+            description="Read",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="read_state", mutating=False, tool_type="perception"),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        runtime_context = RuntimeRunContext(
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            weld_context=WeldContext(body=FakeBody(), authority=ProgressAuthority(), goal_text="collect"),
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=RuntimeTrace(),
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        with self.assertRaises(BodyRecoveryRequired):
+            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+
+    def test_sdk_tool_preserves_death_inventory_counts_for_recovery_driver(self):
+        def callable_(_params):
+            return ToolResult(
+                False,
+                "death",
+                True,
+                metrics={
+                    "event": "death",
+                    "inventory_counts_before": {"minecraft:oak_log": 8},
+                    "inventory_hash": "dead-inventory",
+                    "pos": [1, 64, 1],
+                },
+            )
+
+        tool = RegisteredTool(
+            name="mine_block_collect",
+            description="Mine",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="mine_block_collect", mutating=False, tool_type="work"),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        runtime_context = RuntimeRunContext(
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            weld_context=WeldContext(body=FakeBody(), authority=ProgressAuthority(), goal_text="collect"),
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=RuntimeTrace(),
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        with self.assertRaises(BodyRecoveryRequired) as raised:
+            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+
+        self.assertEqual(raised.exception.facts["inventory_counts_before"], {"minecraft:oak_log": 8})
+        self.assertEqual(raised.exception.facts["inventory_hash"], "dead-inventory")
 
     def test_tool_projection_uses_governance_and_preconditions_not_mode_hiding(self):
         body = FakeBody()
@@ -566,6 +947,133 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(outcome.status, "yielded")
         self.assertEqual(outcome.lifecycle, LifecycleState.YIELDED)
         self.assertIs(outcome.yielded_facts, facts)
+
+    def test_body_recovery_required_from_runner_enters_recovering(self):
+        body = FakeBody()
+
+        async def fake_runner(*args, **kwargs):
+            raise BodyRecoveryRequired("missing_body", facts={"tool": "move_to"})
+
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=fake_runner,
+        )
+
+        outcome = asyncio.run(runtime.run_turn())
+
+        self.assertEqual(outcome.status, "stopped")
+        self.assertEqual(outcome.lifecycle, LifecycleState.RECOVERING)
+        self.assertEqual(outcome.profile.situational, "death")
+        self.assertTrue(any(event["event"] == "body_recovery_required" for event in runtime.trace.snapshot()))
+
+    def test_repeated_tool_transport_errors_yield_without_death_recovery(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+
+        def broken_tool(_params):
+            raise RconError("RCON socket closed")
+
+        registry.register(
+            RegisteredTool(
+                "read_state",
+                "Read state",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+                broken_tool,
+                ToolSidecar("read_state", mutating=False, permission="read_state", body_scope=("state",)),
+            )
+        )
+
+        async def fake_runner(agent, input_text, *, context=None, **kwargs):
+            tool = next(tool for tool in agent.tools if tool.name == "read_state")
+
+            class Wrapper:
+                def __init__(self, context):
+                    self.context = context
+
+            for _ in range(3):
+                await tool.on_invoke_tool(Wrapper(context), "{}")
+
+        runtime = AgentRuntime(
+            body=body,
+            registry=registry,
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=fake_runner,
+        )
+
+        outcome = asyncio.run(runtime.run_turn())
+
+        self.assertEqual(outcome.status, "yielded")
+        self.assertEqual(outcome.lifecycle, LifecycleState.YIELDED)
+        self.assertIn("body_transport_unstable", outcome.message)
+        self.assertIn("body_transport_unstable", outcome.yielded_facts.recent_events[-1])
+        trace = runtime.trace.snapshot()
+        self.assertEqual(len([event for event in trace if event["event"] == "body_transport_error"]), 3)
+        self.assertFalse(any(event["event"] == "body_recovery_required" for event in trace))
+        self.assertTrue(any(event["event"] == "progress_yielded" for event in trace))
+
+    def test_body_recovery_required_wrapped_by_sdk_user_error_enters_recovering(self):
+        body = FakeBody()
+
+        async def fake_runner(*args, **kwargs):
+            try:
+                raise BodyRecoveryRequired("death", facts={"tool": "mine_block_collect", "inventory_counts_before": {"oak_log": 3}})
+            except BodyRecoveryRequired as exc:
+                raise UserError("Error running tool mine_block_collect: body recovery required") from exc
+
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=fake_runner,
+        )
+
+        outcome = asyncio.run(runtime.run_turn())
+
+        self.assertEqual(outcome.status, "stopped")
+        self.assertEqual(outcome.lifecycle, LifecycleState.RECOVERING)
+        self.assertEqual(outcome.profile.situational, "death")
+        event = next(event for event in runtime.trace.snapshot() if event["event"] == "body_recovery_required")
+        self.assertEqual(event["reason"], "death")
+        self.assertEqual(event["facts"]["inventory_counts_before"], {"oak_log": 3})
+
+    def test_missing_body_state_enters_recovering_before_model_call(self):
+        body = FakeBody()
+
+        def missing_state():
+            return missing_body_state()
+
+        body.get_state = missing_state  # type: ignore[method-assign]
+
+        async def fake_runner(*args, **kwargs):
+            raise AssertionError("model runner should not be called while body is missing")
+
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=fake_runner,
+        )
+
+        outcome = asyncio.run(runtime.run_turn())
+
+        self.assertEqual(outcome.status, "stopped")
+        self.assertEqual(outcome.lifecycle, LifecycleState.RECOVERING)
+        self.assertEqual(outcome.profile.situational, "death")
+        self.assertTrue(any(event["event"] == "turn_stopped" for event in runtime.trace.snapshot()))
 
     def test_recovery_resume_consumes_suspend_slot_and_injects_resume_context_once(self):
         body = FakeBody()

@@ -74,13 +74,28 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(cm.exception.facts.failure_steps, FAILURE_STORM_LIMIT)
 
 
-    def test_neutral_preempted_does_not_increment_failure_storm(self):
+    def test_neutral_preempted_does_not_increment_progress_sensors(self):
         progress = ProgressAuthority()
         fp = progress.fingerprint(state())
 
-        progress.note_step(("move_to", 1), success=False, fingerprint=fp, neutral=True)
+        for index in range(max(FAILURE_STORM_LIMIT, STAGNATION_LIMIT, STALL_LIMIT) + 1):
+            progress.note_step(("move_to", index), success=False, fingerprint=fp, neutral=True)
 
         self.assertEqual(progress.failure_steps, 0)
+        self.assertEqual(progress.stagnant_steps, 0)
+        self.assertEqual(progress.stalled_steps, 0)
+        self.assertFalse(progress.should_yield())
+
+    def test_observation_step_counts_stagnation_without_failure_storm(self):
+        progress = ProgressAuthority()
+        fp = progress.fingerprint(state())
+
+        for _ in range(STAGNATION_LIMIT + 1):
+            progress.observe_step(("read_inventory", "{}"), fp)
+
+        self.assertEqual(progress.stagnant_steps, STAGNATION_LIMIT)
+        self.assertEqual(progress.failure_steps, 0)
+        self.assertTrue(progress.should_yield())
 
 
     def test_generation_invalidation_makes_old_generation_stale(self):
@@ -91,6 +106,15 @@ class ProgressTests(unittest.TestCase):
         progress.invalidate_generation("lava_reflex")
 
         self.assertFalse(progress.generation_current(generation))
+
+    def test_current_generation_captures_without_invalidating_active_owner(self):
+        progress = ProgressAuthority()
+        generation = progress.next_generation()
+
+        captured = progress.current_generation()
+
+        self.assertEqual(captured, generation)
+        self.assertTrue(progress.generation_current(generation))
 
 
 if __name__ == "__main__":

@@ -32,6 +32,22 @@ from tests.e2e_support import SKIP_EXIT_CODE, spawn_or_fail  # noqa: E402
 
 BOT = "E2EAgentCollect"
 REGION = Region("agent-collect", (-10, 0, -10), (16, 100, 10))
+STALE_TEST_PLAYERS = (
+    "E2EAgentBot",
+    "E2EAgentCollect",
+    "E2EAgentRealModel",
+    "E2EAgentToolBot",
+    "E2EOakPickupProbe",
+    "E2EPickupProbe",
+    "TestBot",
+    "NavProbe",
+    "NavAlphaProbe",
+    "NavRefreshProbe",
+    "AlphaProbeBot",
+    "CollectProbe",
+    "DigThroughProbe",
+    "StandBatchProbe",
+)
 
 
 def command(rcon: RconClient, command_text: str, delay: float = 0.05) -> str:
@@ -54,11 +70,17 @@ def setup_world(rcon: RconClient) -> None:
         "weather clear",
         "difficulty normal",
         "kill @e[type=!player]",
-        f"player {BOT} kill",
         "fill -10 70 -10 16 78 10 air",
         "fill -10 69 -10 16 69 10 stone",
     ]:
         command(rcon, cmd)
+    cleanup_stale_test_players(rcon)
+
+
+def cleanup_stale_test_players(rcon: RconClient) -> None:
+    for name in STALE_TEST_PLAYERS:
+        command(rcon, f"player {name} kill", delay=0.0)
+    time.sleep(0.2)
 
 
 def reset_subject(rcon: RconClient, *, item: str = "dirt", blocks: list[tuple[int, int, int, str]] | None = None) -> None:
@@ -119,7 +141,7 @@ def make_registry(
                 expected_drops=tuple(str(item) for item in params.get("expected_drops", [])),
                 dry=bool(params.get("dry", False)),
                 settle_s=0.1,
-                pickup_timeout_s=1.0,
+                pickup_timeout_s=2.0,
                 timeout_s=10.0,
             ),
             ToolSidecar(

@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from minebot.brain.modes import RuntimeProfile
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
-from minebot.contract import Body, InventorySlot, JsonObject, ToolResult, is_candidate_skip
+from minebot.contract import Body, InventorySlot, JsonObject, ToolResult, is_candidate_skip, perception_next_cursor
 
 
 @dataclass(frozen=True)
@@ -118,7 +118,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     allow_dry = bool(constraints.get("allow_dry", False))
     started = time.monotonic()
     plan = _resource_plan(item)
-    radius = int(constraints.get("radius") or _default_search_radius(plan))
+    radius = _resolve_search_radius(plan, constraints)
 
     before_result = _read_count(context, plan.inventory_items)
     if not before_result.success:
@@ -195,10 +195,11 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         # itself is untrustworthy.
         search_is_candidate_skip = is_candidate_skip(search_reason)
         if target is None or (not search_ok and not search_is_candidate_skip):
-            last_failure = {"phase": "search", "reason": search_reason, "result": search}
+            failure_reason = "candidate_targets_exhausted" if target is None and targets else search_reason
+            last_failure = {"phase": "search", "reason": failure_reason, "result": search}
             return _collect_result(
                 False,
-                _search_failure_reason(search_reason, bool(targets)),
+                _search_failure_reason(failure_reason, bool(targets), before_count=before_count, current_count=current_count),
                 True,
                 plan,
                 count,
@@ -303,6 +304,12 @@ def _budget_from_constraints(default: CompositionBudget, constraints: dict[str, 
     )
 
 
+def _resolve_search_radius(plan: ResourcePlan, constraints: dict[str, object]) -> int:
+    requested = constraints.get("radius")
+    radius = int(requested) if requested is not None else _default_search_radius(plan)
+    return min(max(1, radius), _max_search_radius(plan))
+
+
 def _read_count(context: CompositionContext, items: tuple[str, ...]) -> ToolResult:
     payload = execute_tool(context.registry.get("read_inventory"), {}, context.weld_context)
     if not payload.get("success"):
@@ -366,8 +373,14 @@ def resource_plan_for(item: str) -> ResourcePlan:
 
 def _default_search_radius(plan: ResourcePlan) -> int:
     if plan.requested_item in {"log", "logs"}:
-        return 96
+        return 48
     return 16
+
+
+def _max_search_radius(plan: ResourcePlan) -> int:
+    if plan.requested_item in {"log", "logs"}:
+        return 64
+    return 48
 
 
 def _read_inventory_counts(body: Body, *, page_size: int = 12) -> ToolResult:
@@ -379,7 +392,7 @@ def _read_inventory_counts(body: Body, *, page_size: int = 12) -> ToolResult:
         if not perception.ok:
             break
         slots.extend(dict(slot) for slot in perception.data.get("slots") or [])
-        next_start = perception.data.get("nextStart")
+        next_start = _next_start(perception)
         start = int(next_start) if next_start is not None else None
     if perception is None:
         return ToolResult(False, "perception_failed", True, metrics={"scope": "inventory", "error": "no pages read"})
@@ -467,7 +480,9 @@ def _first_untried_target(targets: list[list[int]], tried_positions: set[tuple[i
     return None
 
 
-def _search_failure_reason(reason: str, had_candidates: bool) -> str:
+def _search_failure_reason(reason: str, had_candidates: bool, *, before_count: int, current_count: int) -> str:
+    if current_count > before_count:
+        return "partial_candidate_targets_exhausted"
     if had_candidates:
         return "candidate_targets_exhausted"
     return "target_not_found" if reason == "search_block_not_found" else f"search_failed:{reason}"
@@ -516,6 +531,10 @@ def _collect_result(
 
 def _normalize_item(item: str) -> str:
     return item.removeprefix("minecraft:")
+
+
+def _next_start(perception) -> object | None:
+    return perception_next_cursor(perception)
 
 
 def _emit_trace(context: CompositionContext, event: str, payload: dict[str, object]) -> None:

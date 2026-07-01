@@ -48,6 +48,8 @@ PREEMPTED_PAYLOAD: JsonObject = ToolResult(
     success=True, reason="preempted", can_retry=True, metrics={"paused": True}
 ).to_payload()
 
+PROGRESS_YIELDED_REASON = "progress_yielded"
+
 
 @dataclass(frozen=True)
 class ToolSidecar:
@@ -186,9 +188,17 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
     """
     sidecar = tool.sidecar
 
-    # Read-only path: pure observation, no progress accounting, no writer.
+    # Read-only path: concurrent observation, no single-writer. Body state /
+    # perception reads still feed stagnation/stall sensors so tool-only
+    # observation loops cannot run forever. Agent composition tools stay leaf-led
+    # per phase1 design: their inner Body calls own progress accounting.
     if not sidecar.mutating:
-        return tool.callable(tool_input).to_payload()
+        result = tool.callable(tool_input)
+        if sidecar.source.startswith("body."):
+            fingerprint = ctx.authority.fingerprint(ctx.body.get_state())
+            ctx.authority.observe_step(_action_key(sidecar.progress_key, tool_input), fingerprint)
+            ctx.authority.require_can_continue(ctx.goal_text)
+        return result.to_payload()
 
     # Mutating path — single-writer first (schema §8).
     if not ctx.writer.try_acquire(sidecar.progress_key):
@@ -208,6 +218,19 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
         # call. Neutral preempted — not noted as fresh world truth (schema §8).
         if not ctx.authority.generation_current(generation):
             return PREEMPTED_PAYLOAD
+
+        # Some long Body transactions feed intermediate movement/combat steps
+        # into this same ProgressAuthority. If that inner controller already
+        # yielded, surface the yield directly instead of counting the wrapper
+        # call as another failed tool result.
+        if result.reason == PROGRESS_YIELDED_REASON:
+            facts = ctx.authority.facts(ctx.goal_text)
+            raise ProgressAbort(
+                "progress authority yielded: "
+                f"goal={facts.goal!r} stagnant={facts.stagnant_steps} "
+                f"stalled={facts.stalled_steps} failures={facts.failure_steps}",
+                facts=facts,
+            )
 
         post_fingerprint = ctx.authority.fingerprint(ctx.body.get_state())  # step 5: post fp
         action_key = _action_key(sidecar.progress_key, tool_input)

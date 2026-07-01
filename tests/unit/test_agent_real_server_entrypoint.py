@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry, tool_manifest
+from minebot.app.phase1_runtime import Phase1RuntimeConfig, _phase1_recovery_handler, build_phase1_registry, tool_manifest
+from minebot.app.runner import AgentRuntime
+from minebot.brain.context import AgentContext
+from minebot.brain.lifecycle import LifecycleController
+from minebot.brain.modes import AgentSignal, ModeRuntime
+from minebot.brain.progress import ProgressAuthority
+from minebot.brain.registry import ToolRegistry
 from minebot.app.real_server_session import (
     RealServerConfigError,
     _poll_chat_commands,
@@ -225,6 +231,30 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         server_side.assert_called_once()
 
+    def test_phase1_registry_wires_navigation_and_combat_to_shared_authority(self):
+        from minebot.body.combat import CombatTransactions
+        from minebot.body.navigation import NavigationTransactions
+
+        body = HarnessBody()
+        cfg = Phase1RuntimeConfig(natural_region=Region("test", (0, 0, 0), (16, 128, 16)))
+        authority = ProgressAuthority()
+
+        original_combat_init = CombatTransactions.__init__
+        combat_progress: list[ProgressAuthority] = []
+
+        def capture_combat_init(self, body, *, progress=None):
+            combat_progress.append(progress)
+            original_combat_init(self, body, progress=progress)
+
+        with (
+            patch.object(NavigationTransactions, "server_side", wraps=NavigationTransactions.server_side) as server_side,
+            patch.object(CombatTransactions, "__init__", capture_combat_init),
+        ):
+            build_phase1_registry(body, cfg, authority=authority)
+
+        self.assertIs(server_side.call_args.kwargs["progress"], authority)
+        self.assertEqual(combat_progress, [authority])
+
     def test_interactive_loop_terminal_truth_uses_replaced_current_goal(self):
         session = ReplacedGoalSession(
             steps=[
@@ -332,6 +362,112 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(final.status, "waiting")
         self.assertEqual(session.step_count, 2)
 
+    def test_interactive_loop_keeps_driving_recovering_session(self):
+        session = ReplacedGoalSession(
+            steps=[
+                SessionStep("stopped", LifecycleState.RECOVERING, "death"),
+                SessionStep("completed_turn", LifecycleState.ACTIVE),
+                SessionStep("waiting", LifecycleState.YIELDED),
+            ],
+            goals=["collect 64 logs"],
+        )
+        body = InventoryBody({"oak_log": 0})
+
+        final = asyncio.run(
+            _run_interactive_loop(
+                session,
+                fallback_goal="collect 64 logs",
+                body=body,
+                max_steps=3,
+            )
+        )
+
+        self.assertEqual(final.lifecycle, LifecycleState.YIELDED)
+        self.assertEqual(session.step_count, 3)
+
+    def test_phase1_recovery_facts_include_inventory_recount_delta(self):
+        body = RecoveringInventoryBody(
+            before_counts={"oak_log": 8, "bread": 2},
+            after_counts={},
+        )
+        cfg = Phase1RuntimeConfig(
+            natural_region=Region("test", (0, 0, 0), (16, 128, 16)),
+            recovery_gamemode="survival",
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect 64 logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        runtime.last_known_body_state = {"pos": [0.5, 64.0, 0.5], "yaw": 90.0, "pitch": 0.0, "dimension": "overworld"}
+        runtime.lifecycle.ready()
+        runtime.lifecycle.start()
+        runtime.mode_runtime.reduce(
+            [
+                AgentSignal.death_detected("death", inventory_counts_before={"minecraft:oak_log": 8, "minecraft:bread": 2})
+            ],
+            runtime.lifecycle.state,
+            goal_text=runtime.agent_context.goal_text,
+        )
+
+        outcome = _phase1_recovery_handler(body, cfg)(runtime)
+
+        self.assertTrue(outcome.success)
+        self.assertEqual(outcome.reason, "respawned")
+        self.assertEqual(outcome.facts["inventory_before_recovery"], {"ok": True, "source": "death_event", "counts": {"oak_log": 8, "bread": 2}})
+        self.assertEqual(outcome.facts["inventory_after_recovery"], {"ok": True, "source": "body_recount", "counts": {}})
+        self.assertEqual(outcome.facts["inventory_recovery_delta"]["lost"], {"bread": 2, "oak_log": 8})
+        self.assertEqual(body.recover_calls[0]["respawn_pos"], (0, 64, 0))
+        self.assertEqual(body.recover_calls[0]["gamemode"], "survival")
+
+    def test_phase1_recovery_without_last_position_uses_server_safe_spawn(self):
+        body = RecoveringInventoryBody(before_counts={}, after_counts={})
+        cfg = Phase1RuntimeConfig(
+            natural_region=Region("test", (0, 0, 0), (16, 128, 16)),
+            recovery_gamemode="survival",
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect 64 logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+
+        outcome = _phase1_recovery_handler(body, cfg)(runtime)
+
+        self.assertTrue(outcome.success)
+        self.assertEqual(outcome.reason, "respawned")
+        self.assertIsNone(body.recover_calls[0]["respawn_pos"])
+        self.assertIsNone(outcome.facts["respawn_pos"])
+
+    def test_phase1_recovery_rejects_authoritative_position_mismatch(self):
+        body = AdjustedSpawnRecoveryBody()
+        cfg = Phase1RuntimeConfig(
+            natural_region=Region("test", (0, 0, 0), (16, 128, 16)),
+            recovery_respawn_pos=(0, 64, 0),
+            recovery_gamemode="survival",
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect 64 logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+
+        outcome = _phase1_recovery_handler(body, cfg)(runtime)
+
+        self.assertFalse(outcome.success)
+        self.assertEqual(outcome.reason, "respawn_position_mismatch")
+        self.assertEqual(outcome.facts["recovery_reason"], "respawn_position_mismatch")
+        self.assertEqual(outcome.facts["recovery_metrics"]["state_after"]["pos"], [1.13, 59.0, 0.5])
+
 
 class InventoryBody:
     def __init__(self, counts):
@@ -363,6 +499,118 @@ class BrokenInventoryBody:
         if scope == "inventory":
             raise ValueError("inventory perception failed: missing_body")
         return PerceptionResult("Bot", scope, "perception", False, False, {}, error="unsupported")
+
+
+class RecoveringInventoryBody:
+    bot_name = "Bot"
+
+    def __init__(self, *, before_counts, after_counts):
+        self.before_counts = dict(before_counts)
+        self.after_counts = dict(after_counts)
+        self.recovered = False
+        self.recover_calls = []
+        self.events = []
+
+    def get_state(self):
+        return BodyState(
+            bot=self.bot_name,
+            pos=(0.0, 64.0, 0.0) if not self.recovered else (0.5, 64.0, 0.5),
+            yaw=90.0,
+            pitch=0.0,
+            health=0.0 if not self.recovered else 20.0,
+            food=0 if not self.recovered else 20,
+            oxygen=None if not self.recovered else 300,
+            inventory_raw="[]",
+            inventory_hash="before" if not self.recovered else "after",
+            effects=None,
+            time=1000,
+            weather=None,
+            dimension="overworld",
+            complete=True,
+            missing=not self.recovered,
+        )
+
+    def perceive(self, scope, params):
+        if scope != "inventory":
+            return PerceptionResult(self.bot_name, scope, "perception", False, False, {}, error="unsupported")
+        counts = self.after_counts if self.recovered else self.before_counts
+        slots = [
+            {"slot": index, "item": f"minecraft:{item}", "count": count, "empty": False}
+            for index, (item, count) in enumerate(counts.items())
+        ]
+        return PerceptionResult(self.bot_name, "inventory", "perception", True, True, {"slots": slots})
+
+    def spawn(self, pos=None, *, yaw=None, pitch=None, dimension=None, gamemode=None, emit_respawned=False, timeout_s=10.0):
+        self.recover_calls.append(
+            {
+                "respawn_pos": None if pos is None else tuple(pos),
+                "yaw": yaw,
+                "pitch": pitch,
+                "dimension": dimension,
+                "gamemode": gamemode,
+                "emit_respawned": emit_respawned,
+            }
+        )
+        self.recovered = True
+        if emit_respawned:
+            self.events.append(Event(seq=1, tick=1, bot=self.bot_name, name="respawned", data={"final_pos": [0.5, 64.0, 0.5]}))
+        return Result(None, self.bot_name, "result", True, True, True)
+
+    def await_action_terminal(self, action_id, timeout_s=15.0, terminal_events=None):
+        return Event(seq=1, tick=1, bot=self.bot_name, name="respawned", data={"final_pos": [0.5, 64.0, 0.5]})
+
+    def poll_events(self):
+        events = list(self.events)
+        self.events.clear()
+        return events
+
+    def interrupt(self, reason=None):
+        return Result(None, self.bot_name, "result", True, True, True)
+
+
+class AdjustedSpawnRecoveryBody:
+    bot_name = "Bot"
+
+    def __init__(self):
+        self.recovered = False
+        self.events = []
+
+    def get_state(self):
+        return BodyState(
+            bot=self.bot_name,
+            pos=(0.0, 0.0, 0.0) if not self.recovered else (1.13, 59.0, 0.5),
+            yaw=None,
+            pitch=None,
+            health=0.0 if not self.recovered else 20.0,
+            food=0 if not self.recovered else 20,
+            oxygen=None,
+            inventory_raw="[]",
+            inventory_hash="before" if not self.recovered else "after",
+            effects=None,
+            time=1000,
+            weather=None,
+            dimension="overworld",
+            complete=True,
+            missing=not self.recovered,
+        )
+
+    def perceive(self, scope, params):
+        if scope != "inventory":
+            return PerceptionResult(self.bot_name, scope, "perception", False, False, {}, error="unsupported")
+        if not self.recovered:
+            return PerceptionResult(self.bot_name, "inventory", "perception", False, True, {}, error="missing_body")
+        return PerceptionResult(self.bot_name, "inventory", "perception", True, True, {"slots": []})
+
+    def spawn(self, pos, *, yaw=None, pitch=None, dimension=None, gamemode=None, emit_respawned=False, timeout_s=10.0):
+        self.recovered = True
+        if emit_respawned:
+            self.events.append(Event(seq=1, tick=1, bot=self.bot_name, name="respawned", data={"final_pos": [1.13, 59.0, 0.5]}))
+        return Result(None, self.bot_name, "result", True, True, True, data={"action": "spawn"})
+
+    def poll_events(self):
+        events = list(self.events)
+        self.events.clear()
+        return events
 
 
 class HarnessBody:

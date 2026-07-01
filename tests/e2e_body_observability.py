@@ -103,10 +103,12 @@ def run_debug_blocks_happy_and_budget_inverse(body: ScarpetBody) -> dict[str, ob
     if not degraded.ok or degraded.complete:
         raise AssertionError(f"debugBlocks budget inverse did not degrade honestly: {degraded}")
     uncertainty = degraded.uncertainty or []
-    if not any(item.get("reason") == "limit_exceeded" for item in uncertainty):
-        raise AssertionError(f"debugBlocks budget inverse lost limit_exceeded truth: {degraded}")
-    if degraded.next != "limit":
-        raise AssertionError(f"debugBlocks budget inverse lost next=limit truth: {degraded}")
+    if not any(item.get("reason") in {"limit_exceeded", "page_limit"} for item in uncertainty):
+        raise AssertionError(f"debugBlocks budget inverse lost pagination truth: {degraded}")
+    if degraded.next is None or int(degraded.next) <= 0:
+        raise AssertionError(f"debugBlocks budget inverse lost numeric resume cursor truth: {degraded}")
+    if degraded.data.get("nextStart") is None or int(degraded.data["nextStart"]) != int(degraded.next):
+        raise AssertionError(f"debugBlocks budget inverse nextStart/next drifted: {degraded}")
     if int(degraded.data.get("count") or 0) != 4:
         raise AssertionError(f"debugBlocks budget inverse count drifted: {degraded.data}")
 

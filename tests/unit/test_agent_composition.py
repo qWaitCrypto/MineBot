@@ -201,6 +201,30 @@ def mine_tool_fail_once(body):
     ), calls
 
 
+def mine_tool_with_outcomes(body, outcomes):
+    calls = []
+    planned = list(outcomes)
+
+    def callable_(params):
+        calls.append(dict(params))
+        outcome = planned.pop(0) if planned else "fail"
+        target = params.get("pos")
+        if outcome == "success":
+            expected = params.get("expected_drops") or ["dirt"]
+            item = str(expected[0]).removeprefix("minecraft:")
+            body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+            return ToolResult(True, "collected", False, metrics={"target": target, "collected_total": 1})
+        return ToolResult(False, "collect_no_inventory_delta", True, metrics={"target": target, "collected_total": 0})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
 def composition_context(body, registry, *, max_candidates=4):
     trace_events = []
     return CompositionContext(
@@ -249,7 +273,8 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual([call["pos"] for call in mine_calls], [[1, 59, 0], [2, 59, 0]])
         self.assertEqual(len(mine_calls), 2)
         self.assertIsNotNone(ctx.weld_context.authority.last_action)
-        self.assertEqual(ctx.weld_context.authority.last_action[0], "mine_block_collect")
+        self.assertIn(ctx.weld_context.authority.last_action[0], {"mine_block_collect", "read_inventory"})
+        self.assertNotEqual(ctx.weld_context.authority.last_action[0], "collect_resource")
         self.assertFalse(registry.get("collect_resource").sidecar.mutating)
         self.assertIsNone(ctx.weld_context.writer.holder)
 
@@ -272,7 +297,7 @@ class AgentCompositionTests(unittest.TestCase):
 
         self.assertTrue(result["success"], result)
         self.assertFalse(registry.get("collect_resource").sidecar.mutating)
-        self.assertEqual(ctx.weld_context.authority.last_action[0], "mine_block_collect")
+        self.assertIn(ctx.weld_context.authority.last_action[0], {"mine_block_collect", "read_inventory"})
         self.assertNotEqual(ctx.weld_context.authority.last_action[0], "collect_resource")
         self.assertIsNone(ctx.weld_context.writer.holder)
 
@@ -351,6 +376,62 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(authority.failure_steps, 0)
         authority.require_can_continue("collect 1 dirt")  # does not raise
 
+    def test_weld_counts_repeated_read_only_observation_loops(self):
+        # Read-only tools do not acquire the Body writer and do not feed the
+        # failure-storm sensor, but repeated identical observations with no world
+        # fingerprint change still have to trip stagnation. Otherwise a model can
+        # spin forever on tool-only read_inventory calls.
+        body = FakeBody()
+        body.get_state = lambda: state("stable")
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 64 logs")
+
+        def callable_(_params):
+            return ToolResult(True, "inventory_counted", False, metrics={"counts": {}})
+
+        tool = RegisteredTool(
+            "read_inventory",
+            "read",
+            {"type": "object"},
+            callable_,
+            ToolSidecar("read_inventory", mutating=False, source="body.perception", permission="read_state"),
+        )
+
+        with self.assertRaises(ProgressAbort) as cm:
+            for _ in range(10):
+                execute_tool(tool, {}, weld)
+
+        self.assertGreaterEqual(cm.exception.facts.stagnant_steps, 3)
+        self.assertEqual(cm.exception.facts.failure_steps, 0)
+
+    def test_weld_does_not_count_outer_agent_composition_observation(self):
+        # collect_resource is mutating=False by design because its leaf Body
+        # calls own progress accounting. The outer composition wrapper must not
+        # become a second progress engine just because read-only body tools are
+        # now observed for anti-spin protection.
+        body = FakeBody()
+        body.get_state = lambda: state("stable")
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 64 logs")
+
+        def callable_(_params):
+            return ToolResult(False, "candidate_targets_exhausted", True)
+
+        tool = RegisteredTool(
+            "collect_resource",
+            "collect",
+            {"type": "object"},
+            callable_,
+            ToolSidecar("collect_resource", mutating=False, source="agent.composition", permission="compose_collect"),
+        )
+
+        for _ in range(10):
+            execute_tool(tool, {"item": "logs", "count": 64}, weld)
+
+        self.assertEqual(authority.stagnant_steps, 0)
+        self.assertEqual(authority.stalled_steps, 0)
+        self.assertEqual(authority.failure_steps, 0)
+
     def test_weld_counts_genuine_failure_toward_storm(self):
         # A non-skip failure (a real error) is still counted and still trips the
         # storm via the weld itself — the skip set must not swallow genuine failures.
@@ -365,6 +446,37 @@ class AgentCompositionTests(unittest.TestCase):
 
         with self.assertRaises(ProgressAbort):
             execute_tool(miner, {"pos": [1, 59, 0]}, weld)
+
+    def test_weld_surfaces_inner_progress_yield_without_double_counting_failure(self):
+        # Long Body transactions (navigation/combat) feed intermediate progress
+        # into the same authority. If they return progress_yielded, the wrapper
+        # must surface that yield instead of recording one more failed tool call.
+        body = FakeBody()
+        authority = ProgressAuthority()
+        authority.note_step(
+            ("navigate.segment", (0, 59, 0), (64, 64, 64), "stuck"),
+            success=False,
+            fingerprint=authority.fingerprint(body.get_state()),
+        )
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 64 logs")
+
+        def callable_(_params):
+            return ToolResult(False, "progress_yielded", True, metrics={"error": "inner yield"})
+
+        tool = RegisteredTool(
+            "move_to",
+            "move",
+            {"type": "object"},
+            callable_,
+            ToolSidecar("move_to", mutating=True, permission="move"),
+        )
+
+        before = authority.failure_steps
+        with self.assertRaises(ProgressAbort) as cm:
+            execute_tool(tool, {"pos": [64, 64, 64]}, weld)
+
+        self.assertEqual(authority.failure_steps, before)
+        self.assertEqual(cm.exception.facts.failure_steps, before)
 
     def test_collect_resource_maps_resource_to_blocks_and_inventory_item(self):
         body = FakeBody()
@@ -412,6 +524,22 @@ class AgentCompositionTests(unittest.TestCase):
 
         self.assertTrue(result.success, result)
         self.assertEqual(search_calls[0]["find_limit"], 12)
+        self.assertEqual(search_calls[0]["search_radius"], 48)
+
+    def test_collect_resource_caps_requested_log_radius_for_server_tick_safety(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, search_calls = search_tool([[1, 59, 0]])
+        registry.register(search)
+        miner, _mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=96)
+
+        result = collect_resource({"item": "logs", "count": 1, "constraints": {"radius": 96}}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(search_calls[0]["search_radius"], 64)
 
     def test_collect_resource_counts_equivalent_log_inventory_items(self):
         body = FakeBody()
@@ -540,6 +668,25 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(any(event["event"] == "composition_search_skip" for event in trace_events))
         # The search-skip is recorded as a neutral skip, not a task failure.
         self.assertTrue(any(entry.get("phase") == "search" and entry.get("skip") for entry in result.metrics["skipped"]))
+
+    def test_collect_resource_reports_partial_when_progress_made_then_local_candidates_exhaust(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[1, 59, 0], [2, 59, 0], [3, 59, 0]])
+        registry.register(search)
+        miner, _mine_calls = mine_tool_with_outcomes(body, ["fail", "success", "fail"])
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=6)
+
+        result = collect_resource({"item": "dirt", "count": 2}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.reason, "partial_candidate_targets_exhausted")
+        self.assertEqual(result.metrics["before_count"], 0)
+        self.assertEqual(result.metrics["after_count"], 1)
+        self.assertEqual(result.metrics["collected_delta"], 1)
+        self.assertEqual(result.metrics["last_failure"]["reason"], "candidate_targets_exhausted")
 
     def test_collect_resource_aborts_when_search_fails_for_non_skip_reason(self):
         # A non-skip search failure (perception_failed: the candidate list itself is

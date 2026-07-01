@@ -143,6 +143,25 @@ class ModeRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(modes.suspend_slot)
         self.assertEqual(modes.suspend_slot.reason, "death")
 
+    def test_suspend_slot_preserves_nested_recovery_facts(self):
+        modes = ModeRuntime()
+
+        modes.reduce(
+            [
+                AgentSignal.death_detected(
+                    "death",
+                    inventory_counts_before={"minecraft:oak_log": 8},
+                    pos=[0, -80, 0],
+                )
+            ],
+            LifecycleState.ACTIVE,
+            goal_text="collect 64 logs",
+        )
+
+        self.assertIsNotNone(modes.suspend_slot)
+        self.assertEqual(modes.suspend_slot.last_progress["inventory_counts_before"], {"minecraft:oak_log": 8})
+        self.assertEqual(modes.suspend_slot.last_progress["pos"], [0, -80, 0])
+
     def test_direct_no_path_tool_result_enters_mobility_profile(self):
         modes = ModeRuntime()
 
@@ -182,6 +201,20 @@ class ModeRuntimeTests(unittest.TestCase):
         ]
         kinds = [signal.kind for signal in signalize_events(events)]
         self.assertEqual(kinds, ["body_reflex_started", "mobility_blocked"])
+
+    def test_signalize_production_death_missing_and_respawn_events(self):
+        events = [
+            Event(seq=1, tick=10, bot="Bot", name="death", data={"pos": [0, -80, 0]}),
+            Event(seq=2, tick=11, bot="Bot", name="bodyMissing", data={"lastPos": [0, -80, 0]}),
+            Event(seq=3, tick=12, bot="Bot", name="respawned", data={"final_pos": [3, 64, 0]}),
+        ]
+
+        signals = signalize_events(events)
+
+        self.assertEqual([signal.kind for signal in signals], ["death_detected", "death_detected", "recovery_completed"])
+        self.assertEqual(signals[0].facts["event"], "death")
+        self.assertEqual(signals[1].facts["event"], "bodyMissing")
+        self.assertEqual(signals[2].facts["event"], "respawned")
 
 
 if __name__ == "__main__":

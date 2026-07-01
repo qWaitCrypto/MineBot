@@ -254,8 +254,10 @@ def signalize_events(events: list[Event] | tuple[Event, ...]) -> list[AgentSigna
             signals.append(AgentSignal.body_reflex_started(str(data.get("kind") or name), event=name))
         elif name in {"reflexCompleted", "recoveryCompleted"}:
             signals.append(AgentSignal.body_reflex_completed(str(data.get("kind") or name), event=name))
-        elif name in {"deathDetected", "botDied", "respawned"}:
-            signals.append(AgentSignal.death_detected(str(data.get("reason") or name), event=name))
+        elif name in {"death", "deathDetected", "botDied", "bodyMissing"}:
+            signals.append(AgentSignal.death_detected(str(data.get("reason") or name), event=name, **data))
+        elif name == "respawned":
+            signals.append(AgentSignal.recovery_completed(str(data.get("reason") or name), event=name, **data))
         elif name in {"stuck", "navigationBlocked", "lostPosition"}:
             signals.append(AgentSignal.mobility_blocked(str(data.get("reason") or name), event=name))
         elif name in {"hostileNearby", "hostile_nearby"}:
@@ -353,22 +355,29 @@ def _maybe_str(value: Any) -> str | None:
 def _jsonish(value: Any) -> dict[str, object]:
     out: dict[str, object] = {}
     for key, item in value.items():
-        if isinstance(item, ProgressFacts):
-            out[key] = {
-                "goal": item.goal,
-                "last_action": list(item.last_action) if item.last_action else None,
-                "stagnant_steps": item.stagnant_steps,
-                "stalled_steps": item.stalled_steps,
-                "failure_steps": item.failure_steps,
-                "last_fingerprint": item.last_fingerprint,
-                "current_fingerprint": item.current_fingerprint,
-                "recent_events": list(item.recent_events),
-            }
-        elif isinstance(item, (str, int, float, bool)) or item is None:
-            out[key] = item
-        else:
-            out[key] = str(item)
+        out[str(key)] = _jsonish_value(item)
     return out
+
+
+def _jsonish_value(item: Any) -> object:
+    if isinstance(item, ProgressFacts):
+        return {
+            "goal": item.goal,
+            "last_action": list(item.last_action) if item.last_action else None,
+            "stagnant_steps": item.stagnant_steps,
+            "stalled_steps": item.stalled_steps,
+            "failure_steps": item.failure_steps,
+            "last_fingerprint": item.last_fingerprint,
+            "current_fingerprint": item.current_fingerprint,
+            "recent_events": list(item.recent_events),
+        }
+    if isinstance(item, (str, int, float, bool)) or item is None:
+        return item
+    if isinstance(item, dict):
+        return {str(key): _jsonish_value(value) for key, value in item.items()}
+    if isinstance(item, (list, tuple)):
+        return [_jsonish_value(value) for value in item]
+    return str(item)
 
 
 __all__ = [

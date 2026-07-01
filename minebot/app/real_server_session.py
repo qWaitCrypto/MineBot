@@ -144,7 +144,7 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
                 body=body,
                 goal_text=goal_text,
                 model_provider=provider,
-                config=Phase1RuntimeConfig(natural_region=config.natural_region),
+                config=Phase1RuntimeConfig(natural_region=config.natural_region, recovery_gamemode="survival"),
                 agent_name="MineBotRealServer",
                 language=config.language,
                 trace=trace,
@@ -213,7 +213,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
                 body=body,
                 goal_text=goal_text,
                 model_provider=provider,
-                config=Phase1RuntimeConfig(natural_region=config.natural_region),
+                config=Phase1RuntimeConfig(natural_region=config.natural_region, recovery_gamemode="survival"),
                 agent_name="MineBotRealServer",
                 language=config.language,
                 trace=trace,
@@ -274,7 +274,7 @@ async def _run_interactive_loop(
             return last
         if last.lifecycle.value == "idle" and not session.pending:
             return last
-        if last.lifecycle is not LifecycleState.ACTIVE and not session.pending:
+        if last.lifecycle not in {LifecycleState.ACTIVE, LifecycleState.RECOVERING, LifecycleState.RESUMING} and not session.pending:
             return last
         if remaining is not None:
             remaining -= 1

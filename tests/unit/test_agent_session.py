@@ -3,7 +3,7 @@ import unittest
 
 from agents.exceptions import MaxTurnsExceeded
 
-from minebot.app.runner import AgentRuntime
+from minebot.app.runner import AgentRuntime, RecoveryOutcome
 from minebot.app.session import AgentSession, SessionCommand
 from minebot.app.wiring import AgentRuntimeParts
 from minebot.brain.context import AgentContext
@@ -249,6 +249,264 @@ class AgentSessionTests(unittest.TestCase):
         events = session.parts.runtime.trace.snapshot()
         self.assertFalse(any(event["event"] == "session_step_failed" for event in events))
         self.assertTrue(any(event["event"] == "runaway_ceiling_yielded" for event in events))
+
+    def test_recovering_session_drives_recovery_handler_and_resumes_active(self):
+        calls: list[str] = []
+        recovered_calls: list[str] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = FakeBody()
+
+            async def fake_runner(agent, input_text, *, context=None, **kwargs):
+                calls.append(input_text)
+                return {"ok": True}
+
+            def recover(runtime: AgentRuntime) -> RecoveryOutcome:
+                recovered_calls.append(runtime.lifecycle.state.value)
+                return RecoveryOutcome(True, "respawned", facts={"state_after_pos": [1, 64, 0]})
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=fake_runner,
+                recovery_handler=recover,
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("collect 64 logs"))
+        first = asyncio.run(session.step())
+        self.assertEqual(first.lifecycle, LifecycleState.ACTIVE)
+        session.parts.lifecycle.enter_recovery()
+
+        recovery_step = asyncio.run(session.step())
+        active_step = asyncio.run(session.step())
+
+        self.assertEqual(recovered_calls, ["recovering"])
+        self.assertEqual(recovery_step.lifecycle, LifecycleState.RESUMING)
+        self.assertEqual(active_step.lifecycle, LifecycleState.ACTIVE)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(any(event["event"] == "session_recovery_result" for event in session.parts.runtime.trace.snapshot()))
+
+    def test_recovering_session_yields_on_recovery_failure(self):
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = FakeBody()
+
+            async def fake_runner(*args, **kwargs):
+                return {"ok": True}
+
+            def recover(_runtime: AgentRuntime) -> RecoveryOutcome:
+                return RecoveryOutcome(False, "respawn_failed", facts={"reason": "spawn_refused"}, can_retry=False)
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=fake_runner,
+                recovery_handler=recover,
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+        session.parts.lifecycle.enter_recovery()
+
+        yielded = asyncio.run(session.step())
+
+        self.assertEqual(yielded.status, "yielded")
+        self.assertEqual(yielded.message, "recovery_failed:respawn_failed")
+        self.assertEqual(yielded.lifecycle, LifecycleState.IDLE)
+
+    def test_recovering_session_retries_bounded_can_retry_failures_then_resumes(self):
+        attempts: list[int] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = FakeBody()
+
+            async def fake_runner(*args, **kwargs):
+                return {"ok": True}
+
+            def recover(_runtime: AgentRuntime) -> RecoveryOutcome:
+                attempts.append(len(attempts) + 1)
+                if len(attempts) < 3:
+                    return RecoveryOutcome(False, "respawn_waiting", facts={"attempt": len(attempts)}, can_retry=True)
+                return RecoveryOutcome(True, "respawned", facts={"attempt": len(attempts)}, can_retry=False)
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=fake_runner,
+                recovery_handler=recover,
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+        session.parts.lifecycle.enter_recovery()
+
+        first = asyncio.run(session.step())
+        second = asyncio.run(session.step())
+        third = asyncio.run(session.step())
+
+        self.assertEqual(first.status, "recovery_retry")
+        self.assertEqual(second.status, "recovery_retry")
+        self.assertEqual(third.lifecycle, LifecycleState.RESUMING)
+        self.assertEqual(attempts, [1, 2, 3])
+        events = session.parts.runtime.trace.snapshot()
+        self.assertEqual(len([event for event in events if event["event"] == "session_recovery_result"]), 3)
+
+    def test_recovering_session_gives_up_after_retry_budget(self):
+        attempts: list[int] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = FakeBody()
+
+            async def fake_runner(*args, **kwargs):
+                return {"ok": True}
+
+            def recover(_runtime: AgentRuntime) -> RecoveryOutcome:
+                attempts.append(len(attempts) + 1)
+                return RecoveryOutcome(False, "respawn_waiting", facts={"attempt": len(attempts)}, can_retry=True)
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=fake_runner,
+                recovery_handler=recover,
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+        session.parts.lifecycle.enter_recovery()
+
+        first = asyncio.run(session.step())
+        second = asyncio.run(session.step())
+        final = asyncio.run(session.step())
+
+        self.assertEqual(first.status, "recovery_retry")
+        self.assertEqual(second.status, "recovery_retry")
+        self.assertEqual(final.status, "yielded")
+        self.assertEqual(final.lifecycle, LifecycleState.IDLE)
+        self.assertEqual(attempts, [1, 2, 3])
+        self.assertTrue(any(event["event"] == "session_recovery_gave_up" for event in session.parts.runtime.trace.snapshot()))
+
+    def test_continue_during_recovering_does_not_bypass_recovery_driver(self):
+        attempts: list[int] = []
+        calls: list[str] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = FakeBody()
+
+            async def fake_runner(agent, input_text, *, context=None, **kwargs):
+                calls.append(input_text)
+                return {"ok": True}
+
+            def recover(_runtime: AgentRuntime) -> RecoveryOutcome:
+                attempts.append(len(attempts) + 1)
+                return RecoveryOutcome(True, "respawned", facts={"attempt": len(attempts)}, can_retry=False)
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=fake_runner,
+                recovery_handler=recover,
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+        session.parts.lifecycle.enter_recovery()
+        session.submit(SessionCommand.continue_("继续原任务"))
+
+        recovering_step = asyncio.run(session.step())
+        active_step = asyncio.run(session.step())
+
+        self.assertEqual(recovering_step.lifecycle, LifecycleState.RESUMING)
+        self.assertEqual(active_step.lifecycle, LifecycleState.ACTIVE)
+        self.assertEqual(attempts, [1])
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(
+            any(event["event"] == "session_continue_deferred_during_recovery" for event in session.parts.runtime.trace.snapshot())
+        )
 
 
 if __name__ == "__main__":

@@ -7,12 +7,14 @@ future conversation entrypoints; it must not live in `brain/`.
 
 from __future__ import annotations
 
+import inspect
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
 from minebot.app.wiring import AgentRuntimeParts
+from minebot.app.runner import RecoveryOutcome
 from minebot.brain.lifecycle import LifecycleError, LifecycleState
 from minebot.brain.modes import AgentSignal
 
@@ -77,6 +79,8 @@ class AgentSession:
     parts_factory: PartsFactory
     parts: AgentRuntimeParts | None = None
     pending: deque[SessionCommand] = field(default_factory=deque)
+    max_recovery_attempts: int = 3
+    _recovery_attempts: int = 0
 
     def submit(self, command: SessionCommand) -> None:
         self.pending.append(command)
@@ -111,6 +115,9 @@ class AgentSession:
         if suppress_run:
             return SessionStep("waiting", self.parts.lifecycle.state)
 
+        if self.parts.lifecycle.state is LifecycleState.RECOVERING:
+            return await self._drive_recovery()
+
         runnable_states = {LifecycleState.INIT, LifecycleState.IDLE, LifecycleState.ACTIVE, LifecycleState.RESUMING}
         if self.parts.lifecycle.state not in runnable_states:
             return SessionStep("waiting", self.parts.lifecycle.state)
@@ -130,6 +137,72 @@ class AgentSession:
             return SessionStep("failed", self.parts.lifecycle.state, f"runtime_error:{type(exc).__name__}")
         return SessionStep(outcome.status, outcome.lifecycle, outcome.message)
 
+    async def _drive_recovery(self) -> SessionStep:
+        assert self.parts is not None
+        handler = self.parts.runtime.recovery_handler
+        if handler is None:
+            self._trace("session_recovery_missing_driver", lifecycle=self.parts.lifecycle.state.value)
+            return self._yield_recovery_failure("recovery_driver_missing", {})
+        self._recovery_attempts += 1
+        try:
+            outcome = handler(self.parts.runtime)
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
+        except Exception as exc:
+            self._trace(
+                "session_recovery_failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                lifecycle=self.parts.lifecycle.state.value,
+                attempt=self._recovery_attempts,
+            )
+            return self._yield_recovery_failure("recovery_driver_error", {"error_type": type(exc).__name__, "message": str(exc)})
+        if not isinstance(outcome, RecoveryOutcome):
+            self._trace(
+                "session_recovery_invalid_result",
+                result_type=type(outcome).__name__,
+                lifecycle=self.parts.lifecycle.state.value,
+                attempt=self._recovery_attempts,
+            )
+            return self._yield_recovery_failure("recovery_driver_invalid_result", {"result_type": type(outcome).__name__})
+
+        self._trace(
+            "session_recovery_result",
+            success=outcome.success,
+            reason=outcome.reason,
+            can_retry=outcome.can_retry,
+            attempt=self._recovery_attempts,
+            max_attempts=self.max_recovery_attempts,
+            facts=outcome.facts,
+        )
+        if not outcome.success:
+            if outcome.can_retry and self._recovery_attempts < self.max_recovery_attempts:
+                return SessionStep("recovery_retry", self.parts.lifecycle.state, f"recovery_retry:{outcome.reason}")
+            return self._yield_recovery_failure(outcome.reason, outcome.facts)
+
+        self._recovery_attempts = 0
+        recovered = await self.parts.runtime.run_turn(
+            extra_signals=[AgentSignal.recovery_completed(outcome.reason, **outcome.facts)]
+        )
+        return SessionStep(recovered.status, recovered.lifecycle, recovered.message)
+
+    def _yield_recovery_failure(self, reason: str, facts: dict[str, object]) -> SessionStep:
+        assert self.parts is not None
+        self._trace(
+            "session_recovery_gave_up",
+            reason=reason,
+            attempts=self._recovery_attempts,
+            max_attempts=self.max_recovery_attempts,
+            facts=facts,
+        )
+        self._recovery_attempts = 0
+        try:
+            if self.parts.lifecycle.state is LifecycleState.RECOVERING:
+                self.parts.lifecycle.stand_down()
+        except LifecycleError:
+            self._trace("session_lifecycle_error", action="recovery_stand_down", state=self.parts.lifecycle.state.value)
+        return SessionStep("yielded", self.parts.lifecycle.state, f"recovery_failed:{reason}")
+
     async def run_until_waiting(
         self,
         *,
@@ -146,7 +219,7 @@ class AgentSession:
             return last
         remaining = None if max_steps is None else max(0, max_steps - 1)
         while remaining is None or remaining > 0:
-            if last.lifecycle is not LifecycleState.ACTIVE:
+            if last.lifecycle not in {LifecycleState.ACTIVE, LifecycleState.RECOVERING, LifecycleState.RESUMING}:
                 return last
             last = await self.step()
             if should_stop is not None and should_stop(last):
@@ -213,7 +286,10 @@ class AgentSession:
     def _resume_if_waiting(self) -> None:
         assert self.parts is not None
         state = self.parts.lifecycle.state
-        if state in {LifecycleState.YIELDED, LifecycleState.INTERRUPTED, LifecycleState.RECOVERING}:
+        if state is LifecycleState.RECOVERING:
+            self._trace("session_continue_deferred_during_recovery", lifecycle=state.value)
+            return
+        if state in {LifecycleState.YIELDED, LifecycleState.INTERRUPTED}:
             self.parts.lifecycle.resume()
 
     def _stand_down(self) -> None:
