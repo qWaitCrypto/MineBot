@@ -135,6 +135,36 @@ class EngageRuntimeTests(unittest.TestCase):
         CombatTransactions(body).engage_entity("X", timeout_s=5.0)
         self.assertEqual(body.await_timeouts, [10.0])  # timeout_s + 5.0
 
+    def test_engage_entity_does_not_invalidate_outer_generation_when_shared(self):
+        from minebot.brain.progress import ProgressAuthority
+
+        progress = ProgressAuthority()
+        outer_generation = progress.next_generation()
+        body = FakeBody(terminal_reason="killed")
+
+        result = CombatTransactions(body, progress=progress).engage_entity("nearest_hostile", timeout_s=5.0)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "killed")
+        self.assertTrue(progress.generation_current(outer_generation))
+
+    def test_engage_entity_returns_preempted_when_generation_stale(self):
+        from minebot.brain.progress import ProgressAuthority
+
+        progress = ProgressAuthority()
+
+        class PreemptingBody(FakeBody):
+            def await_action_terminal(self, action_id: str, timeout_s: float = 15.0, **kwargs) -> Event:
+                progress.invalidate_generation("test_preempt")
+                return super().await_action_terminal(action_id, timeout_s=timeout_s, **kwargs)
+
+        result = CombatTransactions(PreemptingBody(terminal_reason="killed"), progress=progress).engage_entity(
+            "nearest_hostile", timeout_s=5.0
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "preempted")
+
 
 if __name__ == "__main__":
     unittest.main()

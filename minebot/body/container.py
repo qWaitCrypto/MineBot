@@ -13,7 +13,7 @@ from minebot.body.interaction_support import (
     normalize_block_type,
     perception_failure as shared_perception_failure,
 )
-from minebot.contract import Action, Body, InteractionContext, InventorySlot, PerceptionResult, Position, Result, ToolResult
+from minebot.contract import Action, Body, InteractionContext, InventorySlot, PerceptionResult, Position, Result, ToolResult, perception_next_cursor
 from minebot.contract import terminal_event_to_tool_result
 from minebot.game.governance import GovernancePolicy
 
@@ -292,7 +292,7 @@ def _read_paged(
         if not last.ok:
             return last
         slots.extend(dict(item) for item in last.data.get("slots") or [])
-        start = last.data.get("nextStart")
+        start = perception_next_cursor(last)
         if start is not None:
             start = int(start)
     if last is None:

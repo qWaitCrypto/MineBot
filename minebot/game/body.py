@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from minebot.contract import Action, BodyState, Event, InventorySlot, PerceptionResult, Result
+from minebot.contract import Action, BodyState, Event, InventorySlot, PerceptionResult, Result, perception_next_cursor
 from minebot.game.protocol import (
     build_action_call,
     build_chat_drain_call,
@@ -16,6 +16,7 @@ from minebot.game.protocol import (
     build_spawn_call,
     build_state_call,
     parse_events,
+    parse_events_page,
     parse_perception,
     parse_result,
     parse_state,
@@ -45,6 +46,13 @@ DEFAULT_TERMINAL_EVENTS = {
     "furnaceDone",
     "moveItemDone",
     "death",
+    "respawned",
+    "ownerPreempted",
+    "interrupted",
+}
+GLOBAL_TERMINAL_EVENTS = {
+    "death",
+    "bodyMissing",
     "respawned",
     "ownerPreempted",
     "interrupted",
@@ -281,7 +289,7 @@ class ScarpetBody:
             if not perception.ok:
                 raise ValueError(f"inventory perception failed: {perception.error}")
             slots.extend(InventorySlot.from_payload(item) for item in perception.data.get("slots") or [])
-            start = perception.data.get("nextStart")
+            start = _next_start(perception)
             if start is not None:
                 start = int(start)
         return slots
@@ -303,7 +311,7 @@ class ScarpetBody:
             if not perception.ok:
                 raise ValueError(f"container perception failed: {perception.error}")
             slots.extend(InventorySlot.from_payload(item) for item in perception.data.get("slots") or [])
-            start = perception.data.get("nextStart")
+            start = _next_start(perception)
             if start is not None:
                 start = int(start)
         return slots
@@ -562,12 +570,7 @@ class ScarpetBody:
         return self._dispatch_action_and_await(action, timeout_s=timeout_s, action_name="furnaceTransfer")
 
     def poll_events(self) -> list[Event]:
-        events = parse_events(
-            self._timed_request(
-                build_drain_call(self.bot_name, self.app, since_seq=self.last_seq),
-                kind="event_drain",
-            )
-        )
+        events = self._poll_events_pages(kind="event_drain", since_seq=self.last_seq)
         normalized: list[Event] = []
         for event in events:
             if event.seq <= self.last_seq:
@@ -587,18 +590,27 @@ class ScarpetBody:
         self.event_log.extend(normalized)
         return normalized
 
+    def _poll_events_pages(self, *, kind: str, since_seq: int, chat: bool = False) -> list[Event]:
+        events: list[Event] = []
+        cursor: int | None = since_seq
+        while cursor is not None:
+            command = (
+                build_chat_drain_call(self.bot_name, self.app, since_seq=cursor)
+                if chat
+                else build_drain_call(self.bot_name, self.app, since_seq=cursor)
+            )
+            page, next_cursor = parse_events_page(self._timed_request(command, kind=kind))
+            events.extend(page)
+            cursor = int(next_cursor) if next_cursor is not None else None
+        return events
+
     def poll_chat_events(self) -> list[Event]:
         """Drain app-level public chat directed at this bot.
 
         Chat is intentionally separate from Body action events so it cannot
         satisfy `await_action_terminal(...)` by accident.
         """
-        events = parse_events(
-            self._timed_request(
-                build_chat_drain_call(self.bot_name, self.app, since_seq=self.last_chat_seq),
-                kind="chat_drain",
-            )
-        )
+        events = self._poll_events_pages(kind="chat_drain", since_seq=self.last_chat_seq, chat=True)
         fresh = [event for event in events if event.seq > self.last_chat_seq]
         for event in fresh:
             self.last_chat_seq = max(self.last_chat_seq, event.seq)
@@ -621,7 +633,10 @@ class ScarpetBody:
             poll_count += 1
             for event in self.poll_events():
                 observed_events += 1
-                if event.name in names and event.data.get("action_id") == action_id:
+                if event.name in names and (
+                    event.data.get("action_id") == action_id
+                    or event.name in GLOBAL_TERMINAL_EVENTS
+                ):
                     self._finish_action_trace(
                         action_id,
                         terminal=event,
@@ -647,3 +662,7 @@ def _transport_snapshot(transport: BodyTransport) -> dict[str, object]:
     if isinstance(value, dict):
         return {"transport_stats": dict(value)}
     return {}
+
+
+def _next_start(perception) -> object | None:
+    return perception_next_cursor(perception)

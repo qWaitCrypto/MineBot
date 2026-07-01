@@ -64,7 +64,7 @@ class CombatTransactions:
         if disengage_health < 0:
             raise ValueError("disengage_health must be >= 0")
 
-        generation = self.progress.next_generation()
+        generation = self.progress.current_generation()
         if not self.progress.generation_current(generation):
             return _result(False, "preempted", True, _pos(self.body.get_state()), {"generation_current": False, "target_spec": target_spec})
         try:
@@ -95,6 +95,9 @@ class CombatTransactions:
             timeout_s=timeout_s + 5.0,
             terminal_events={"engageDone", "death", "respawned"},
         )
+        if not self.progress.generation_current(generation):
+            return _result(False, "preempted", True, start, {"generation_current": False, "target_spec": target_spec})
+
         td = terminal.data
         success = bool(td.get("success", False))
         reason = str(td.get("reason") or "unknown")

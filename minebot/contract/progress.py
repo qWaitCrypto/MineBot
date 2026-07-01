@@ -33,9 +33,11 @@ class ProgressAbort(Exception):
 
 
 class ProgressController(Protocol):
+    def current_generation(self) -> int: ...
     def next_generation(self) -> int: ...
     def generation_current(self, generation: int) -> bool: ...
     def fingerprint(self, state: BodyState) -> str: ...
+    def observe_step(self, action_key: tuple[Any, ...], fingerprint: str) -> None: ...
     def note_step(
         self,
         action_key: tuple[Any, ...],
@@ -66,6 +68,9 @@ class LocalProgressController:
         self._generation += 1
         return self._generation
 
+    def current_generation(self) -> int:
+        return self._generation
+
     def generation_current(self, generation: int) -> bool:
         return generation == self._generation
 
@@ -73,14 +78,7 @@ class LocalProgressController:
         pos = ",".join(f"{value:.1f}" for value in state.pos)
         return "|".join([pos, f"{state.health:.1f}", str(int(state.food)), str(state.time // 1000), state.inventory_hash])
 
-    def note_step(
-        self,
-        action_key: tuple[Any, ...],
-        success: bool,
-        fingerprint: str,
-        *,
-        neutral: bool = False,
-    ) -> None:
+    def observe_step(self, action_key: tuple[Any, ...], fingerprint: str) -> None:
         self.current_fingerprint = fingerprint
         progressed = bool(self.last_fingerprint) and fingerprint != self.last_fingerprint
         if not self.last_fingerprint or progressed:
@@ -91,10 +89,23 @@ class LocalProgressController:
             self.stalled_steps += 1
         else:
             self.stalled_steps += 1
+        self.last_action = action_key
+        self.last_fingerprint = fingerprint
 
+    def note_step(
+        self,
+        action_key: tuple[Any, ...],
+        success: bool,
+        fingerprint: str,
+        *,
+        neutral: bool = False,
+    ) -> None:
         if neutral:
-            pass
-        elif success:
+            self.current_fingerprint = fingerprint
+            return
+        self.observe_step(action_key, fingerprint)
+
+        if success:
             self.failure_steps = 0
         else:
             self.failure_steps += 1

@@ -90,23 +90,24 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("block_state(b)", source)
         self.assertIn("state:pname", source)
         self.assertIn('"properties":%s', source)
-        self.assertIn("perception_json(name, 'nearbyBlocks', true, !overflow", source)
-        self.assertIn("perception_json(name, 'findBlocks', true, !overflow", source)
+        self.assertIn("perception_json(name, 'nearbyBlocks', true, complete", source)
+        self.assertIn("perception_json(name, 'findBlocks', true, complete", source)
+        self.assertIn("perception_json(name, 'debugBlocks', true, complete", source)
         self.assertIn("perception_json(name, 'nearbyEntities', true, !overflow", source)
         self.assertIn("perception_json(name, 'inventory', true, complete", source)
         self.assertIn("perception_json(name, 'container', true, complete", source)
 
-    def test_state_json_escapes_inventory_raw_and_emits_inventory_hash(self):
+    def test_state_json_emits_compact_inventory_hash_not_full_inventory_raw(self):
         source = MINEBOT_SC.read_text()
 
         self.assertIn("json_string(v)", source)
         self.assertIn("encode_json(str('%s', v))", source)
-        self.assertIn('"inventory_raw":%s', source)
+        self.assertIn('"inventory_raw":""', source)
         self.assertIn('"inventory_hash":%s', source)
         self.assertIn('"oxygen":%s', source)
         self.assertIn('"sleeping":%s', source)
-        self.assertIn("json_string(raw)", source)
         self.assertIn("json_string(hash_code(raw))", source)
+        self.assertNotIn('"inventory_raw":%s', source)
         self.assertIn("nbt:'Air'", source)
         self.assertIn("json_int_null(air)", source)
         self.assertIn("nbt:'SleepTimer'", source)
@@ -130,11 +131,34 @@ class ScarpetSourceTests(unittest.TestCase):
         source = MINEBOT_SC.read_text()
 
         self.assertIn("global_response_char_budget = 2000;", source)
-        # Referenced once in each of nearbyBlocks / findBlocks / nearbyEntities /
-        # nearbyHostiles / blockCells (the batch block-read primitive paginates
-        # the same way).
-        self.assertEqual(source.count("global_response_char_budget"), 6)  # 1 decl + 5 uses
+        # Referenced in each list-style perception. Static block scopes expose
+        # resumable cursors; moving-entity scopes remain bounded top-k results.
+        self.assertEqual(source.count("global_response_char_budget"), 7)  # 1 decl + 6 uses
+        self.assertIn("length(out) + length(fact) >= global_response_char_budget", source)
         self.assertIn("length(out) >= global_response_char_budget", source)
+
+    def test_static_block_perceptions_use_numeric_resume_cursors(self):
+        source = MINEBOT_SC.read_text()
+        self.assertIn('"nextStart":%s', source)
+        self.assertIn("perception_json(name, 'blockCells'", source)
+        self.assertIn("data, uncertainty, next_value, null)", source)
+        self.assertIn("next_value = if(complete, null, str('%d', idx));", source)
+        self.assertIn("next_value = if(complete, null, str('%d', out_idx));", source)
+        self.assertIn("perception_json(name, 'debugBlocks', true, complete, data, uncertainty, next_value, null)", source)
+        self.assertIn("perception_json(name, 'nearbyBlocks', true, complete, data, uncertainty, next_value, null)", source)
+        self.assertIn("perception_json(name, 'findBlocks', true, complete, data, uncertainty, next_value, null)", source)
+        self.assertNotIn("perception_json(name, 'debugBlocks', true, !overflow", source)
+        self.assertNotIn("perception_json(name, 'nearbyBlocks', true, !overflow", source)
+        self.assertNotIn("perception_json(name, 'findBlocks', true, !overflow", source)
+        self.assertNotIn("perception_json(name, 'debugBlocks', true, complete, data, uncertainty, if(overflow, 'limit', null)", source)
+        self.assertNotIn("perception_json(name, 'nearbyBlocks', true, complete, data, uncertainty, if(overflow, 'limit', null)", source)
+        self.assertNotIn("perception_json(name, 'findBlocks', true, complete, data, uncertainty, if(overflow, 'limit', null)", source)
+
+    def test_moving_entity_perceptions_remain_bounded_top_k_not_cursor_paged(self):
+        source = MINEBOT_SC.read_text()
+        self.assertIn("perception_json(name, 'nearbyEntities', true, !overflow, data, uncertainty, if(overflow, 'limit', null), null)", source)
+        self.assertIn("perception_json(name, 'nearbyHostiles', true, !overflow, data, uncertainty, if(overflow, 'limit', null), null)", source)
+        self.assertNotIn('"nextStart":%s,"entities"', source)
 
     def test_find_blocks_scope_is_bounded_and_type_matched(self):
         source = MINEBOT_SC.read_text()
@@ -142,12 +166,13 @@ class ScarpetSourceTests(unittest.TestCase):
         for expected in (
             "block_type_matches",
             "wanted = if(params:'type' == null",
-            "if(radius > 16, radius = 16)",
+            "if(radius > 128, radius = 128)",
             "if(limit > 128, limit = 128)",
             "found = l();",
             "entry = l(dist2, x, y, z, bs, block_kind(bs));",
             "put(found:insert_at, entry, 'insert');",
-            "delete(found:limit);",
+            "delete(found:window_limit);",
+            "totalMatches",
             '"dist2":%.3f',
             '"blocks":[%s]',
         ):
@@ -221,6 +246,15 @@ class ScarpetSourceTests(unittest.TestCase):
         ):
             self.assertIn(expected, source)
 
+    def test_auto_combat_reflex_flees_ranged_or_flying_hostiles(self):
+        source = MINEBOT_SC.read_text()
+
+        self.assertIn("is_flying_hostile(e)", source)
+        self.assertIn("entity_matches_type(e, 'minecraft:phantom')", source)
+        self.assertIn("!is_ranged_hostile(nearest) && !is_flying_hostile(nearest)", source)
+        self.assertIn("start_combat_flee_reflex(name, tp)", source)
+        self.assertIn("start_engage(name, 'auto:combat:' + name", source)
+
     def test_item_pickup_event_is_emitted_in_production_app(self):
         source = MINEBOT_SC.read_text()
 
@@ -249,6 +283,15 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertNotIn("global_seq = 0;", body)
         self.assertNotIn("global_agent_chat_seq = 0;", body)
 
+    def test_event_drains_are_char_budgeted_and_pageable(self):
+        source = MINEBOT_SC.read_text()
+
+        self.assertIn("if(complete && e:3 == name", source)
+        self.assertIn("if(complete && e:3 == name && e:0 > since_seq", source)
+        self.assertIn("if(length(candidate) > 2600", source)
+        self.assertIn('"next":%s', source)
+        self.assertIn("next_value = if(complete, null, last_seq)", source)
+
     def test_death_and_respawn_events_are_emitted_in_production_app(self):
         source = MINEBOT_SC.read_text()
 
@@ -258,6 +301,10 @@ class ScarpetSourceTests(unittest.TestCase):
             'if(kind == \'death\'',
             '"inventory_before":%s',
             '"inventory_hash":%s',
+            '"inventory_counts_before":%s',
+            "json_string('')",
+            "inventory_counts_json(name)",
+            "previous_count = if(counts:item == null, 0, counts:item);",
             "minebot_spawn(name, payload)",
             "decode_json(payload)",
             "global_respawn_notices",
@@ -285,9 +332,12 @@ class ScarpetSourceTests(unittest.TestCase):
             "params:'dimension'",
             "params:'gamemode'",
             "spawn_cmd += ' in ' + params:'dimension'",
-            "spawn_cmd += ' in ' + params:'gamemode'",
+            "global_pending_spawns:name",
+            "finalize_pending_spawn(name)",
+            "run('gamemode ' + gamemode + ' ' + name)",
         ):
             self.assertIn(expected, source)
+        self.assertNotIn("spawn_cmd = 'player ' + name + ' spawn in ' + params:'gamemode'", source)
 
     def test_inventory_scope_is_paged_and_structured(self):
         source = MINEBOT_SC.read_text()
@@ -756,6 +806,8 @@ class ScarpetSourceTests(unittest.TestCase):
             "water_hazard_clear(name)",
             "bs != 'water' && bs != 'minecraft:water'",
             "queue_immediate_water_reflex(name)",
+            "movement_water_escape_should_trigger(name, m, stuck_ticks)",
+            "start_water_reflex(name)",
             "start_water_reflex(name) -> start_hazard_reflex(name, 'water');",
             "if(kind == 'water', water_escape_target(p), safe_escape_target(p))",
             "if(kind == 'fire', 'fireReflex', if(kind == 'water', 'waterReflex', 'lavaReflex'))",
@@ -771,6 +823,10 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIsNotNone(hazard, "hazard_kind_near_name function not found")
         self.assertIn("water_reflex_should_trigger(name)", hazard.group(1))
         self.assertNotIn("if(in_water_now(name),", hazard.group(1))
+        move_tick = re.search(r"run_move_tick\(name, m\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(move_tick, "run_move_tick function not found")
+        self.assertIn("movement_water_escape_should_trigger(name, updated_move, stuck_ticks)", move_tick.group(1))
+        self.assertIn("start_water_reflex(name)", move_tick.group(1))
 
     def test_ranged_attack_controller_uses_weapon_specific_fire_and_authoritative_damage_truth(self):
         source = MINEBOT_SC.read_text()

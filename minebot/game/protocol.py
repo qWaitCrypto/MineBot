@@ -122,6 +122,10 @@ def parse_perception(raw: str) -> PerceptionResult:
 
 
 def parse_events(raw: str) -> list[Event]:
+    return parse_events_page(raw)[0]
+
+
+def parse_events_page(raw: str) -> tuple[list[Event], str | None]:
     envelope = _parse_envelope(raw)
     _require_type(envelope, "events")
     _require_complete(envelope)
@@ -138,7 +142,8 @@ def parse_events(raw: str) -> list[Event]:
                 data=dict(item.get("data") or {}),
             )
         )
-    return events
+    next_cursor = envelope.get("next")
+    return events, None if next_cursor is None else str(next_cursor)
 
 
 def _script_call(app: str, fn: str, *args: Any) -> str:

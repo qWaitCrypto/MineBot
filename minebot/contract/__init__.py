@@ -18,6 +18,7 @@ from .messages import (
     Result,
     ToolResult,
     is_candidate_skip,
+    perception_next_cursor,
 )
 from .body_iface import Body
 from .progress import (
@@ -45,6 +46,7 @@ __all__ = [
     "JsonObject",
     "LegalityDecision",
     "PerceptionResult",
+    "perception_next_cursor",
     "PlaceContext",
     "Position",
     "ProgressAbort",

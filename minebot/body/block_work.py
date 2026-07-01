@@ -8,7 +8,7 @@ import time
 from typing import Callable, Protocol
 
 from minebot.body.interaction_support import (
-    find_blocks_metadata,
+    find_nearby_block_search,
     find_nearby_block_targets,
     find_block_target,
     interaction_stand_points,
@@ -25,6 +25,7 @@ from minebot.contract import (
     Position,
     Result,
     ToolResult,
+    perception_next_cursor,
     terminal_event_to_tool_result,
 )
 from minebot.game.governance import GovernancePolicy
@@ -778,21 +779,32 @@ class BlockWork:
         # the mined cell.
         if self.navigator is not None:
             assist["moved"] = True
-            drop_positions = self._nearby_drop_positions(radius=8, limit=16)
-            assist["drop_targets_seen"] = len(drop_positions)
-            walk_targets = drop_positions or [pos]
+            assist["pickup_arrival_radius"] = 0.25
+            assist["scan_rounds"] = 0
             assist["move_attempts"] = []
-            for target_pos in walk_targets[:4]:
-                nav = self.navigator.navigate_to(target_pos, break_context=BreakContext.TRAVEL)
-                assist["move_result"] = nav.to_payload()
-                assist["move_attempts"].append({"target": list(target_pos), "result": nav.to_payload()})
-                if not nav.success:
-                    continue
-                after, deltas, collected_total = poll(pickup_timeout_s)
-                if isinstance(after, ToolResult):
-                    return {"failed": after, "assist": assist}
-                if collected_total > 0:
-                    return {"after": after, "deltas": deltas, "collected_total": collected_total, "assist": assist}
+            max_drop_targets_seen = 0
+            for scan_round in range(2):
+                assist["scan_rounds"] = scan_round + 1
+                drop_positions = self._nearby_drop_positions(radius=8, limit=16)
+                max_drop_targets_seen = max(max_drop_targets_seen, len(drop_positions))
+                assist["drop_targets_seen"] = max_drop_targets_seen
+                walk_targets = _pickup_walk_targets(pos, drop_positions)
+                for target_pos in walk_targets[:5]:
+                    nav = self.navigator.navigate_to(
+                        target_pos,
+                        break_context=BreakContext.TRAVEL,
+                        arrival_radius=0.25,
+                        timeout_s=4.0,
+                    )
+                    assist["move_result"] = nav.to_payload()
+                    assist["move_attempts"].append({"target": list(target_pos), "result": nav.to_payload()})
+                    if not nav.success:
+                        continue
+                    after, deltas, collected_total = poll(pickup_timeout_s)
+                    if isinstance(after, ToolResult):
+                        return {"failed": after, "assist": assist}
+                    if collected_total > 0:
+                        return {"after": after, "deltas": deltas, "collected_total": collected_total, "assist": assist}
 
         return {"after": after, "deltas": deltas, "collected_total": collected_total, "assist": assist}
 
@@ -1829,21 +1841,17 @@ class BlockWork:
                 },
             )
 
-        targets = find_nearby_block_targets(
+        search = find_nearby_block_search(
             self.body,
             block_types=block_types,
             radius=search_radius,
             limit=find_limit,
+            max_pages=1,
             not_found_reason="search_block_not_found",
         )
-        if isinstance(targets, ToolResult):
-            return targets
-        search_meta = find_blocks_metadata(
-            self.body,
-            block_types=block_types,
-            radius=search_radius,
-            limit=find_limit,
-        )
+        if isinstance(search, ToolResult):
+            return search
+        targets = search.targets
         target = targets[0]
 
         target_center = (target.pos[0] + 0.5, target.pos[1] + 0.5, target.pos[2] + 0.5)
@@ -1863,11 +1871,13 @@ class BlockWork:
                 {"pos": list(candidate.pos), "type": candidate.block_type, "distance": candidate.distance}
                 for candidate in targets
             ],
-            "truncated": bool(search_meta.get("truncated")),
-            "uncertainty": list(search_meta.get("uncertainty") or []),
+            "truncated": search.truncated,
+            "uncertainty": list(search.uncertainty),
+            "pages_read": search.pages_read,
+            "total_matches": search.total_matches,
         }
-        if search_meta.get("errors"):
-            context["perception_errors"] = list(search_meta.get("errors") or [])
+        if search.errors:
+            context["perception_errors"] = list(search.errors)
 
         if initial_distance <= interaction_radius:
             return ToolResult(
@@ -1917,7 +1927,18 @@ class BlockWork:
                 continue
 
             for stand in stand_points:
-                nav_result = self.navigator.navigate_to(stand, timeout_s=timeout_s, break_context=BreakContext.TRAVEL)
+                from minebot.body.navigation import NavigationRunConfig
+
+                nav_config = NavigationRunConfig(
+                    allow_local_terrain_fallback=True,
+                    progress_neutral_failures=True,
+                )
+                nav_result = self.navigator.navigate_to(
+                    stand,
+                    timeout_s=timeout_s,
+                    break_context=BreakContext.COLLECT_APPROACH,
+                    config=nav_config,
+                )
                 attempts.append({"target": target_context, "goal": list(stand), "result": nav_result.to_payload()})
                 if not nav_result.success:
                     last_failure = nav_result
@@ -3151,7 +3172,7 @@ def _read_inventory_slots(body: Body, page_size: int = 12) -> PerceptionResult:
         if not last.ok:
             return last
         slots.extend(dict(item) for item in last.data.get("slots") or [])
-        start = last.data.get("nextStart")
+        start = perception_next_cursor(last)
         if start is not None:
             start = int(start)
     if last is None:
@@ -3433,6 +3454,30 @@ def _mining_reach_distance(pos: tuple[float, float, float], target: Position) ->
 
 def _block_center_target(pos: Position) -> tuple[float, float, float]:
     return (pos[0] + 0.5, float(pos[1]), pos[2] + 0.5)
+
+
+def _pickup_walk_targets(pos: Position, drop_positions: list[Position]) -> list[Position]:
+    targets: list[Position] = [*drop_positions]
+    px, py, pz = pos
+    targets.extend(
+        [
+            (px + 0.5, py, pz + 0.5),
+            (px, py, pz),
+            (px - 0.25, py, pz + 0.5),
+            (px + 1.25, py, pz + 0.5),
+            (px + 0.5, py, pz - 0.25),
+            (px + 0.5, py, pz + 1.25),
+        ]
+    )
+    unique: list[Position] = []
+    seen: set[tuple[float, float, float]] = set()
+    for target in targets:
+        key = (round(float(target[0]), 3), round(float(target[1]), 3), round(float(target[2]), 3))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(target)
+    return unique
 
 
 def _same_column(pos: tuple[float, float, float], target: Position) -> bool:

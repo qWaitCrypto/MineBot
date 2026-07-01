@@ -26,6 +26,7 @@ global_engages = {};
 global_hostile_types = l('minecraft:zombie', 'minecraft:husk', 'minecraft:drowned', 'minecraft:zombie_villager', 'minecraft:skeleton', 'minecraft:stray', 'minecraft:bogged', 'minecraft:creeper', 'minecraft:spider', 'minecraft:cave_spider', 'minecraft:witch', 'minecraft:silverfish', 'minecraft:endmite', 'minecraft:slime', 'minecraft:magma_cube', 'minecraft:enderman', 'minecraft:endermite', 'minecraft:blaze', 'minecraft:ghast', 'minecraft:pillager', 'minecraft:vindicator', 'minecraft:evoker', 'minecraft:ravager', 'minecraft:shulker', 'minecraft:phantom', 'minecraft:wither_skeleton', 'minecraft:zoglin', 'minecraft:hoglin', 'minecraft:piglin_brute');
 global_ranged_types = l('minecraft:skeleton', 'minecraft:stray', 'minecraft:bogged', 'minecraft:witch', 'minecraft:blaze', 'minecraft:ghast', 'minecraft:pillager', 'minecraft:shulker');
 global_response_char_budget = 2000;
+global_pending_spawns = {};
 global_respawn_notices = {};
 global_missing_notices = {};
 global_agent_chat_events = [];
@@ -118,7 +119,43 @@ missing_body_perception(name, scope) -> (
   perception_json(name, scope, false, true, '{}', '[{"reason":"missing_body"}]', null, 'missing_body')
 );
 
+finalize_pending_spawn(name) -> (
+  pending = global_pending_spawns:name;
+  if(pending != null,
+    pe = player_entity(name);
+    if(pe != null,
+      pos = pending:0;
+      yaw = pending:1;
+      pitch = pending:2;
+      gamemode = pending:3;
+      emit_respawned = pending:4;
+      phase = if(length(pending) > 5, pending:5, 0);
+      if(phase == 0,
+        if(pos != null,
+          if(yaw != null && pitch != null,
+            run(str('tp %s %d %d %d %.3f %.3f', name, floor(number(pos:0)), floor(number(pos:1)), floor(number(pos:2)), number(yaw), number(pitch)))
+          ,
+            run(str('tp %s %d %d %d', name, floor(number(pos:0)), floor(number(pos:1)), floor(number(pos:2))))
+          )
+        );
+        if(gamemode != null,
+          run('gamemode ' + gamemode + ' ' + name)
+        );
+        run('player ' + name + ' stop');
+        watch_bot(name);
+        global_pending_spawns:name = l(pos, yaw, pitch, gamemode, emit_respawned, 1)
+      ,
+        if(bool(emit_respawned),
+          emit('respawned', name, l(bot_pos(name)))
+        );
+        global_pending_spawns:name = null
+      )
+    )
+  )
+);
+
 state_json(name) -> (
+  finalize_pending_spawn(name);
   pe = player_entity(name);
   if(pe == null,
     str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":[0.000,0.000,0.000],"yaw":null,"pitch":null,"health":0.000,"food":0,"oxygen":null,"inventory_raw":"","inventory_hash":%s,"effects":null,"time":%d,"weather":null,"dimension":null,"sleeping":null,"missing":true},"error":null}',
@@ -133,16 +170,16 @@ state_json(name) -> (
     sleeping = sleep_timer > 0;
     inv = inventory_get(name);
     raw = str('%s', inv);
-    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":%s,"yaw":null,"pitch":null,"health":%.3f,"food":%d,"oxygen":%s,"inventory_raw":%s,"inventory_hash":%s,"effects":%s,"time":%d,"weather":null,"dimension":null,"sleeping":%s,"missing":false},"error":null}',
-      name, json_pos(p), health, food, json_int_null(air), json_string(raw), json_string(hash_code(raw)), effects_json(pe), floor(number(day_time()) % 24000), json_bool(sleeping))
+    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":%s,"yaw":null,"pitch":null,"health":%.3f,"food":%d,"oxygen":%s,"inventory_raw":"","inventory_hash":%s,"effects":%s,"time":%d,"weather":null,"dimension":null,"sleeping":%s,"missing":false},"error":null}',
+      name, json_pos(p), health, food, json_int_null(air), json_string(hash_code(raw)), effects_json(pe), floor(number(day_time()) % 24000), json_bool(sleeping))
   )
 );
 
 event_data_json(kind, data) -> (
   out = '{}';
   if(kind == 'death',
-    out = str('{"pos":%s,"inventory_before":%s,"inventory_hash":%s}',
-      json_pos(data:0), json_string(data:1), json_string(data:2))
+    out = str('{"pos":%s,"inventory_before":%s,"inventory_hash":%s,"inventory_counts_before":%s}',
+      json_pos(data:0), json_string(''), json_string(data:2), data:3)
   );
   if(kind == 'respawned',
     out = str('{"final_pos":%s}', json_pos(data:0))
@@ -290,29 +327,49 @@ event_json(e) -> (
 events_json(name, evs) -> (
   out = '';
   first = true;
+  last_seq = null;
+  complete = true;
   loop(length(evs),
     e = evs:_;
     if(length(e) == 1, e = e:0);
-    if(e:3 == name,
-      if(first, first = false, out += ',');
-      out += event_json(e)
+    if(complete && e:3 == name,
+      item = event_json(e);
+      candidate = if(first, item, out + ',' + item);
+      if(length(candidate) > 2600,
+        complete = false
+      ,
+        if(first, first = false, out += ',');
+        out += item;
+        last_seq = e:0
+      )
     )
   );
-  str('{"type":"events","bot":"%s","ok":true,"complete":true,"next":null,"events":[%s],"error":null}', name, out)
+  next_value = if(complete, null, last_seq);
+  str('{"type":"events","bot":"%s","ok":true,"complete":true,"next":%s,"events":[%s],"error":null}', name, json_int_null(next_value), out)
 );
 
 events_since_json(name, evs, since_seq) -> (
   out = '';
   first = true;
+  last_seq = null;
+  complete = true;
   loop(length(evs),
     e = evs:_;
     if(length(e) == 1, e = e:0);
-    if(e:3 == name && e:0 > since_seq,
-      if(first, first = false, out += ',');
-      out += event_json(e)
+    if(complete && e:3 == name && e:0 > since_seq,
+      item = event_json(e);
+      candidate = if(first, item, out + ',' + item);
+      if(length(candidate) > 2600,
+        complete = false
+      ,
+        if(first, first = false, out += ',');
+        out += item;
+        last_seq = e:0
+      )
     )
   );
-  str('{"type":"events","bot":"%s","ok":true,"complete":true,"next":null,"events":[%s],"error":null}', name, out)
+  next_value = if(complete, null, last_seq);
+  str('{"type":"events","bot":"%s","ok":true,"complete":true,"next":%s,"events":[%s],"error":null}', name, json_int_null(next_value), out)
 );
 
 priority_value(priority) -> (
@@ -438,13 +495,14 @@ perceive_block_cells(name, params) -> (
         )
       )
     );
-    next_value = if(idx >= total, 'null', str('%d', idx));
-    data = str('{"count":%d,"total":%d,"next":%s,"cells":[%s]}', count, total, next_value, out);
+    next_start = if(idx >= total, null, idx);
+    next_value = if(idx >= total, null, str('%d', idx));
+    data = str('{"count":%d,"total":%d,"nextStart":%s,"cells":[%s]}', count, total, json_int_null(next_start), out);
     uncertainty = if(overflow, '[{"reason":"limit_exceeded"}]', '[]');
     if(overflow && count == 0,
       perception_json(name, 'blockCells', false, true, data, '[{"reason":"single_cell_exceeds_budget"}]', null, 'single_cell_exceeds_budget')
     ,
-      perception_json(name, 'blockCells', true, !overflow, data, uncertainty, null, null)
+      perception_json(name, 'blockCells', true, !overflow, data, uncertainty, next_value, null)
     )
   )
 );
@@ -464,38 +522,53 @@ perceive_debug_blocks(name, params) -> (
     cx = floor(p:0);
     cy = floor(p:1);
     cz = floor(p:2);
+    side = radius * 2 + 1;
+    total = side * side * side;
+    start = 0;
+    if(params:'start' != null, start = floor(number(params:'start')));
+    if(start < 0, start = 0);
+    if(start > total, start = total);
     out = '';
     count = 0;
     overflow = false;
     first = true;
-    loop(radius * 2 + 1,
-      ox = _ - radius;
-      loop(radius * 2 + 1,
-        oy = _ - radius;
-        loop(radius * 2 + 1,
-          oz = _ - radius;
-          if(!overflow,
-            x = cx + ox;
-            y = cy + oy;
-            z = cz + oz;
-            if(count >= limit,
-              overflow = true
-            ,
-              if(first, first = false, out += ',');
-              out += block_fact_json(x, y, z);
-              count += 1
-            )
-          )
+    idx = start;
+    plane = side * side;
+    loop(total - start,
+      if(!overflow,
+        scan_i = start + _;
+        ox_i = floor(scan_i / plane);
+        rem_i = scan_i - ox_i * plane;
+        oy_i = floor(rem_i / side);
+        oz_i = rem_i - oy_i * side;
+        x = cx + ox_i - radius;
+        y = cy + oy_i - radius;
+        z = cz + oz_i - radius;
+        fact = block_fact_json(x, y, z);
+        if(count >= limit || length(out) + length(fact) >= global_response_char_budget,
+          overflow = true
+        ,
+          if(first, first = false, out += ',');
+          out += fact;
+          count += 1;
+          idx += 1
         )
       )
     );
+    complete = idx >= total;
+    next_start = if(complete, null, idx);
+    next_value = if(complete, null, str('%d', idx));
     cursor = block_fact_json(cx, cy, cz);
     feet = block_fact_json(cx, cy - 1, cz);
     head = block_fact_json(cx, cy + 1, cz);
-    data = str('{"center":%s,"radius":%d,"limit":%d,"count":%d,"cursor":%s,"feet":%s,"head":%s,"blocks":[%s]}',
-      json_pos(p), radius, limit, count, cursor, feet, head, out);
-    uncertainty = if(overflow, '[{"reason":"limit_exceeded"}]', '[]');
-    perception_json(name, 'debugBlocks', true, !overflow, data, uncertainty, if(overflow, 'limit', null), null)
+    data = str('{"center":%s,"radius":%d,"start":%d,"limit":%d,"count":%d,"total":%d,"nextStart":%s,"cursor":%s,"feet":%s,"head":%s,"blocks":[%s]}',
+      json_pos(p), radius, start, limit, count, total, json_int_null(next_start), cursor, feet, head, out);
+    uncertainty = if(complete, '[]', '[{"reason":"page_limit"}]');
+    if(!complete && count == 0,
+      perception_json(name, 'debugBlocks', false, true, data, '[{"reason":"single_entry_exceeds_budget"}]', null, 'single_entry_exceeds_budget')
+    ,
+      perception_json(name, 'debugBlocks', true, complete, data, uncertainty, next_value, null)
+    )
   )
 );
 
@@ -514,37 +587,54 @@ perceive_nearby_blocks(name, params) -> (
     cx = floor(p:0);
     cy = floor(p:1);
     cz = floor(p:2);
+    side = radius * 2 + 1;
+    total = side * side * side;
+    start = 0;
+    if(params:'start' != null, start = floor(number(params:'start')));
+    if(start < 0, start = 0);
+    if(start > total, start = total);
     out = '';
     count = 0;
     overflow = false;
     first = true;
-    loop(radius * 2 + 1,
-      ox = _ - radius;
-      loop(radius * 2 + 1,
-        oy = _ - radius;
-        loop(radius * 2 + 1,
-          oz = _ - radius;
-          if(!overflow,
-            x = cx + ox;
-            y = cy + oy;
-            z = cz + oz;
-            bs = '' + block(x, y, z);
-            if(block_kind(bs) != 'CLEAR',
-              if(count >= limit || length(out) >= global_response_char_budget,
-                overflow = true
-              ,
-                if(first, first = false, out += ',');
-                out += block_fact_json(x, y, z);
-                count += 1
-              )
-            )
+    idx = start;
+    plane = side * side;
+    loop(total - start,
+      if(!overflow,
+        scan_i = start + _;
+        ox_i = floor(scan_i / plane);
+        rem_i = scan_i - ox_i * plane;
+        oy_i = floor(rem_i / side);
+        oz_i = rem_i - oy_i * side;
+        x = cx + ox_i - radius;
+        y = cy + oy_i - radius;
+        z = cz + oz_i - radius;
+        bs = '' + block(x, y, z);
+        if(block_kind(bs) != 'CLEAR',
+          fact = block_fact_json(x, y, z);
+          if(count >= limit || length(out) + length(fact) >= global_response_char_budget,
+            overflow = true
+          ,
+            if(first, first = false, out += ',');
+            out += fact;
+            count += 1;
+            idx += 1
           )
+        ,
+          idx += 1
         )
       )
     );
-    data = str('{"center":%s,"radius":%d,"limit":%d,"count":%d,"blocks":[%s]}', json_pos(p), radius, limit, count, out);
-    uncertainty = if(overflow, '[{"reason":"limit_exceeded"}]', '[]');
-    perception_json(name, 'nearbyBlocks', true, !overflow, data, uncertainty, if(overflow, 'limit', null), null)
+    complete = idx >= total;
+    next_start = if(complete, null, idx);
+    next_value = if(complete, null, str('%d', idx));
+    data = str('{"center":%s,"radius":%d,"start":%d,"limit":%d,"count":%d,"total":%d,"nextStart":%s,"blocks":[%s]}', json_pos(p), radius, start, limit, count, total, json_int_null(next_start), out);
+    uncertainty = if(complete, '[]', '[{"reason":"page_limit"}]');
+    if(!complete && count == 0,
+      perception_json(name, 'nearbyBlocks', false, true, data, '[{"reason":"single_entry_exceeds_budget"}]', null, 'single_entry_exceeds_budget')
+    ,
+      perception_json(name, 'nearbyBlocks', true, complete, data, uncertainty, next_value, null)
+    )
   )
 );
 
@@ -561,12 +651,16 @@ perceive_find_blocks(name, params) -> (
     if(params:'limit' != null, limit = floor(number(params:'limit')));
     if(limit < 1, limit = 1);
     if(limit > 128, limit = 128);
+    start = 0;
+    if(params:'start' != null, start = floor(number(params:'start')));
+    if(start < 0, start = 0);
+    window_limit = start + limit;
     cx = floor(p:0);
     cy = floor(p:1);
     cz = floor(p:2);
     found = l();
     count = 0;
-    overflow = false;
+    matched = 0;
     loop(radius * 2 + 1,
       ox = _ - radius;
       loop(radius * 2 + 1,
@@ -578,6 +672,7 @@ perceive_find_blocks(name, params) -> (
           z = cz + oz;
           bs = '' + block(x, y, z);
           if(block_type_matches(bs, wanted),
+            matched += 1;
             dx = x + 0.5 - p:0;
             dy = y + 0.5 - p:1;
             dz = z + 0.5 - p:2;
@@ -590,10 +685,9 @@ perceive_find_blocks(name, params) -> (
             );
             put(found:insert_at, entry, 'insert');
             count += 1;
-            if(count > limit,
-              overflow = true;
-              delete(found:limit);
-              count = limit
+            if(count > window_limit,
+              delete(found:window_limit);
+              count = window_limit
             )
           )
         )
@@ -601,18 +695,35 @@ perceive_find_blocks(name, params) -> (
     );
     out = '';
     first = true;
-    loop(count,
-      entry = found:_;
-      if(length(out) >= global_response_char_budget,
-        overflow = true
-      ,
-        if(first, first = false, out += ',');
-        out += str('{"x":%d,"y":%d,"z":%d,"type":"%s","state":"%s","dist2":%.3f}', entry:1, entry:2, entry:3, entry:4, entry:5, entry:0)
+    out_count = 0;
+    out_idx = start;
+    overflow = false;
+    if(start < count,
+      loop(count - start,
+        if(!overflow,
+          entry = found:(start + _);
+          fact = str('{"x":%d,"y":%d,"z":%d,"type":"%s","state":"%s","dist2":%.3f}', entry:1, entry:2, entry:3, entry:4, entry:5, entry:0);
+          if(out_count >= limit || length(out) + length(fact) >= global_response_char_budget,
+            overflow = true
+          ,
+            if(first, first = false, out += ',');
+            out += fact;
+            out_count += 1;
+            out_idx += 1
+          )
+        )
       )
     );
-    data = str('{"center":%s,"type":"%s","radius":%d,"limit":%d,"count":%d,"blocks":[%s]}', json_pos(p), wanted, radius, limit, count, out);
-    uncertainty = if(overflow, '[{"reason":"limit_exceeded"}]', '[]');
-    perception_json(name, 'findBlocks', true, !overflow, data, uncertainty, if(overflow, 'limit', null), null)
+    complete = !overflow && matched <= out_idx;
+    next_start = if(complete, null, out_idx);
+    next_value = if(complete, null, str('%d', out_idx));
+    data = str('{"center":%s,"type":"%s","radius":%d,"start":%d,"limit":%d,"count":%d,"totalMatches":%d,"nextStart":%s,"blocks":[%s]}', json_pos(p), wanted, radius, start, limit, out_count, matched, json_int_null(next_start), out);
+    uncertainty = if(complete, '[]', '[{"reason":"page_limit"}]');
+    if(!complete && out_count == 0,
+      perception_json(name, 'findBlocks', false, true, data, '[{"reason":"single_entry_exceeds_budget"}]', null, 'single_entry_exceeds_budget')
+    ,
+      perception_json(name, 'findBlocks', true, complete, data, uncertainty, next_value, null)
+    )
   )
 );
 entity_kind(e) -> (
@@ -653,6 +764,8 @@ is_ranged_hostile(e) -> (
   );
   found
 );
+
+is_flying_hostile(e) -> entity_matches_type(e, 'minecraft:phantom') || entity_matches_type(e, 'minecraft:ghast') || entity_matches_type(e, 'minecraft:shulker');
 
 entity_fact_json(e, center) -> (
   p = query(e, 'pos');
@@ -779,7 +892,6 @@ inventory_slot_type(slot) -> (
         )
       )
     )
-  )
 );
 
 inventory_slot_label(slot) -> (
@@ -829,6 +941,25 @@ stack_json(stack) -> (
   ,
     str('{"empty":false,"item":"%s","count":%d}', stack_item(stack), stack_count(stack))
   )
+);
+
+inventory_counts_json(name) -> (
+  counts = m();
+  loop(46,
+    stack = inventory_get(name, _);
+    if(!stack_empty(stack),
+      item = stack_item(stack);
+      previous_count = if(counts:item == null, 0, counts:item);
+      counts:item = previous_count + stack_count(stack)
+    )
+  );
+  out = '';
+  first = true;
+  for(counts,
+    if(first, first = false, out += ',');
+    out += str('%s:%d', json_string(_), counts:_)
+  );
+  str('{%s}', out)
 );
 
 entity_slot_path(slot) -> (
@@ -2602,6 +2733,17 @@ queue_immediate_water_reflex(name) -> (
   true
 );
 
+movement_water_escape_ticks(m) -> (
+  max(10, min(40, floor(m:10 / 3)))
+);
+
+movement_water_escape_should_trigger(name, m, stuck_ticks) -> (
+  global_reflex_scan &&
+  global_reflexes:name == null &&
+  in_water_now(name) &&
+  stuck_ticks >= movement_water_escape_ticks(m)
+);
+
 cancel_move_preempted(name) -> (
   if(global_moves:name != null,
     request_move_cancel(name, 'preempted')
@@ -2723,7 +2865,7 @@ start_combat_reflex(name) -> (
   if(nearest == null,
     true
   ,
-    if(hp != null && hp > 10.0,
+    if(hp != null && hp > 10.0 && !is_ranged_hostile(nearest) && !is_flying_hostile(nearest),
       minebot_interrupt(name, '{}');
       start_engage(name, 'auto:combat:' + name, 'nearest_hostile', {'attack_range' -> 2.0, 'cooldown_ticks' -> 10, 'timeout_ticks' -> 200, 'disengage_health' -> 6.0, 'acquire_radius' -> 16, 'grid_radius' -> 24, 'max_expand' -> 150})
     ,
@@ -2770,20 +2912,25 @@ run_move_tick(name, m) -> (
       finish_move(name, 'arrived', true)
     )
   ,
-    if(ticks > m:9,
-      finish_move(name, 'timeout', false)
-    ,
-      if(stuck_ticks >= m:10,
-        finish_move(name, 'stuck', false)
+      if(ticks > m:9,
+        finish_move(name, 'timeout', false)
       ,
-        if(deviation > m:12,
-          finish_move(name, 'deviated', false)
+        if(movement_water_escape_should_trigger(name, updated_move, stuck_ticks),
+          start_water_reflex(name)
         ,
-          run(str('player %s look at %.3f %.3f %.3f', name, target:0, target:1 + 1.0, target:2));
-          if(target:1 > p:1 + 0.35,
-            run('player ' + name + ' jump once')
-          );
-          run('player ' + name + ' move forward')
+          if(stuck_ticks >= m:10,
+            finish_move(name, 'stuck', false)
+          ,
+            if(deviation > m:12,
+              finish_move(name, 'deviated', false)
+            ,
+              run(str('player %s look at %.3f %.3f %.3f', name, target:0, target:1 + 1.0, target:2));
+              if(target:1 > p:1 + 0.35,
+                run('player ' + name + ' jump once')
+              );
+              run('player ' + name + ' move forward')
+            )
+          )
         )
       )
     )
@@ -3256,6 +3403,10 @@ tick_bot(name) -> (
 
 __on_tick() -> (
   global_tick += 1;
+  pending_names = keys(global_pending_spawns);
+  loop(length(pending_names),
+    finalize_pending_spawn(pending_names:_)
+  );
   respawn_names = keys(global_respawn_notices);
   loop(length(respawn_names),
     rname = respawn_names:_;
@@ -3333,7 +3484,7 @@ __on_player_dies(player) -> (
   if(global_watched:name != null,
     inv = inventory_get(name);
     raw = str('%s', inv);
-    emit('death', name, l(query(player, 'pos'), raw, hash_code(raw)))
+    emit('death', name, l(query(player, 'pos'), raw, hash_code(raw), inventory_counts_json(name)))
   )
 );
 
@@ -4104,6 +4255,7 @@ minebot_reset() -> (
   global_water_reflex_health_baselines = {};
   global_combat_health_baselines = {};
   global_engages = {};
+  global_pending_spawns = {};
   global_respawn_notices = {};
   global_missing_notices = {};
   global_agent_chat_events = [];
@@ -4127,16 +4279,9 @@ minebot_spawn(name, payload) -> (
   if(params:'dimension' != null,
     spawn_cmd += ' in ' + params:'dimension'
   );
-  if(params:'gamemode' != null,
-    spawn_cmd += ' in ' + params:'gamemode'
-  );
-  missing_before = player_entity(name) == null;
+  global_pending_spawns:name = l(params:'pos', params:'yaw', params:'pitch', params:'gamemode', params:'emit_respawned');
   run(spawn_cmd);
-  run('player ' + name + ' stop');
-  watch_bot(name);
-  if(missing_before && bool(params:'emit_respawned'),
-    global_respawn_notices:name = true
-  );
+  finalize_pending_spawn(name);
   result_json(null, name, true, true, '{"action":"spawn"}', null)
 );
 

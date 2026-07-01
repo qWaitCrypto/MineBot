@@ -8,6 +8,7 @@ from minebot.game.protocol import (
     build_chat_drain_call,
     build_perceive_call,
     parse_events,
+    parse_events_page,
     parse_perception,
     parse_result,
     parse_state,
@@ -152,6 +153,35 @@ class ProtocolTests(unittest.TestCase):
             '[cobblestone, 16, {count:16,id:"minecraft:cobblestone"}]',
         )
 
+    def test_parse_state_allows_compact_state_without_inventory_raw(self):
+        raw = json.dumps(
+            {
+                "type": "state",
+                "bot": "Bot1",
+                "ok": True,
+                "complete": True,
+                "data": {
+                    "pos": [0.5, 60, 0.5],
+                    "yaw": None,
+                    "pitch": None,
+                    "health": 20.0,
+                    "food": 20,
+                    "oxygen": 300,
+                    "inventory_hash": "server-hash-2",
+                    "sleeping": False,
+                    "effects": None,
+                    "time": 12345,
+                    "weather": None,
+                    "dimension": None,
+                },
+                "error": None,
+            }
+        )
+
+        state = parse_state(raw)
+
+        self.assertEqual(state.inventory_raw, "")
+        self.assertEqual(state.inventory_hash, "server-hash-2")
 
     def test_parse_events_preserves_order_and_data(self):
         raw = json.dumps(
@@ -180,6 +210,26 @@ class ProtocolTests(unittest.TestCase):
 
         self.assertEqual([e.name for e in events], ["moveStarted", "moveDone"])
         self.assertTrue(events[1].data["arrived"])
+
+    def test_parse_events_page_preserves_next_cursor(self):
+        raw = json.dumps(
+            {
+                "type": "events",
+                "bot": "Bot1",
+                "ok": True,
+                "complete": True,
+                "next": "42",
+                "events": [
+                    {"type": "event", "seq": 41, "tick": 10, "bot": "Bot1", "name": "moveStarted", "data": {}},
+                ],
+                "error": None,
+            }
+        )
+
+        events, next_cursor = parse_events_page(raw)
+
+        self.assertEqual([event.seq for event in events], [41])
+        self.assertEqual(next_cursor, "42")
 
     def test_parse_events_allows_scarpet_load_banner_prefix(self):
         raw = (
@@ -276,7 +326,7 @@ class ProtocolTests(unittest.TestCase):
                 "complete": False,
                 "data": {"blocks": []},
                 "uncertainty": [{"reason": "limit_exceeded"}],
-                "next": "limit",
+                "next": "64",
                 "error": None,
             }
         )
@@ -284,7 +334,7 @@ class ProtocolTests(unittest.TestCase):
         perception = parse_perception(raw)
 
         self.assertFalse(perception.complete)
-        self.assertEqual(perception.next, "limit")
+        self.assertEqual(perception.next, "64")
         self.assertEqual(perception.uncertainty, [{"reason": "limit_exceeded"}])
 
 

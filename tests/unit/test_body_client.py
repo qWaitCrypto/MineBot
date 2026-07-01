@@ -258,8 +258,42 @@ class BodyClientTests(unittest.TestCase):
 
         self.assertEqual([event.seq for event in first], [1, 2])
         self.assertEqual(second, [])
+
+    def test_poll_events_follows_event_pages(self):
+        first = envelope(
+            {
+                "type": "events",
+                "bot": "Bot1",
+                "ok": True,
+                "complete": True,
+                "next": "1",
+                "events": [
+                    {"type": "event", "seq": 1, "tick": 10, "bot": "Bot1", "name": "moveStarted", "data": {}},
+                ],
+                "error": None,
+            }
+        )
+        second = envelope(
+            {
+                "type": "events",
+                "bot": "Bot1",
+                "ok": True,
+                "complete": True,
+                "next": None,
+                "events": [
+                    {"type": "event", "seq": 2, "tick": 20, "bot": "Bot1", "name": "moveDone", "data": {}},
+                ],
+                "error": None,
+            }
+        )
+        transport = FakeTransport([first, second])
+        body = ScarpetBody("Bot1", transport)
+
+        events = body.poll_events()
+
+        self.assertEqual([event.seq for event in events], [1, 2])
         self.assertIn("'0'", transport.commands[0])
-        self.assertIn("'2'", transport.commands[1])
+        self.assertIn("'1'", transport.commands[1])
 
     def test_poll_chat_events_uses_separate_chat_drain(self):
         transport = FakeTransport(
@@ -428,6 +462,38 @@ class BodyClientTests(unittest.TestCase):
         event = body.await_action_terminal("a1", timeout_s=1.0, poll_interval_s=0.0)
 
         self.assertEqual(event.name, "mineDone")
+
+    def test_await_action_terminal_accepts_global_death_event_without_action_id(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "events",
+                        "bot": "Bot1",
+                        "ok": True,
+                        "complete": True,
+                        "next": None,
+                        "events": [
+                            {
+                                "type": "event",
+                                "seq": 1,
+                                "tick": 12,
+                                "bot": "Bot1",
+                                "name": "death",
+                                "data": {"pos": [1, 59, 2], "inventory_hash": "dead"},
+                            }
+                        ],
+                        "error": None,
+                    }
+                )
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        event = body.await_action_terminal("a1", timeout_s=1.0, poll_interval_s=0.0)
+
+        self.assertEqual(event.name, "death")
+        self.assertEqual(event.data["inventory_hash"], "dead")
 
     def test_await_action_terminal_accepts_instant_body_action_events(self):
         transport = FakeTransport(
@@ -846,6 +912,54 @@ class BodyClientTests(unittest.TestCase):
         self.assertEqual(slots[1].slot_type, "hotbar")
         self.assertEqual(slots[1].slot_label, "hotbar.1")
         self.assertIsNone(slots[1].stack_raw)
+        self.assertEqual(len(transport.commands), 2)
+
+    def test_get_inventory_uses_envelope_next_when_data_next_start_missing(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "perception",
+                        "bot": "Bot1",
+                        "scope": "inventory",
+                        "ok": True,
+                        "complete": False,
+                        "data": {
+                            "start": 0,
+                            "limit": 1,
+                            "totalSlots": 2,
+                            "slots": [{"slot": 0, "empty": False, "item": "minecraft:stone", "count": 3}],
+                        },
+                        "uncertainty": [{"reason": "page_limit"}],
+                        "next": "1",
+                        "error": None,
+                    }
+                ),
+                envelope(
+                    {
+                        "type": "perception",
+                        "bot": "Bot1",
+                        "scope": "inventory",
+                        "ok": True,
+                        "complete": True,
+                        "data": {
+                            "start": 1,
+                            "limit": 1,
+                            "totalSlots": 2,
+                            "slots": [{"slot": 1, "empty": False, "item": "minecraft:dirt", "count": 2}],
+                        },
+                        "uncertainty": [],
+                        "next": None,
+                        "error": None,
+                    }
+                ),
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        slots = body.get_inventory(page_size=1)
+
+        self.assertEqual([slot.item for slot in slots], ["minecraft:stone", "minecraft:dirt"])
         self.assertEqual(len(transport.commands), 2)
 
     def test_get_container_pages_until_complete(self):

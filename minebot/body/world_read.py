@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from time import monotonic
 
-from minebot.contract import Body, PerceptionResult, Position
+from minebot.contract import Body, PerceptionResult, Position, perception_next_cursor
 from minebot.game.navigation import GridCell, GridWorld
 
 
@@ -72,7 +72,7 @@ def read_block_facts(
                 next=None,
                 error=None,
             )
-        nxt = perception.data.get("next")
+        nxt = perception_next_cursor(perception, "next", "nextStart")
         if nxt is None:
             if not perception.complete:
                 raise ValueError(f"blockCells {failure_label} incomplete without next at start={start}")

@@ -28,6 +28,7 @@ class BatchFakeBody:
         unexpected_fact=None,
         force_next=None,
         force_complete=None,
+        envelope_only_next=False,
     ):
         self.blocks = dict(blocks or {})
         self.fail = fail
@@ -36,6 +37,7 @@ class BatchFakeBody:
         self.unexpected_fact = unexpected_fact
         self.force_next = force_next
         self.force_complete = force_complete
+        self.envelope_only_next = envelope_only_next
         self.calls = 0
 
     def perceive(self, scope, params):
@@ -73,12 +75,16 @@ class BatchFakeBody:
         complete = nxt is None
         if self.force_complete is not None:
             complete = self.force_complete
+        data = {"count": len(page), "total": len(cells), "cells": facts}
+        if not self.envelope_only_next:
+            data["nextStart"] = nxt
         return PerceptionResult(
             bot="Bot1", scope="blockCells", type="perception",
             ok=True, complete=complete,
-            data={"count": len(page), "total": len(cells), "next": nxt, "cells": facts},
+            data=data,
             uncertainty=[] if nxt is None else [{"reason": "limit_exceeded"}],
-            next=None, error=None,
+            next=str(nxt) if self.envelope_only_next and nxt is not None else None,
+            error=None,
         )
 
 
@@ -116,6 +122,15 @@ class ReadBlockFactsTests(unittest.TestCase):
         self.assertEqual(len(facts), 5)
         for x in range(5):
             self.assertEqual(facts[(x, 64, 0)].data["state"], "SOLID")
+
+    def test_paginates_with_envelope_next_when_data_cursor_is_absent(self):
+        blocks = {(x, 64, 0): ("stone", "SOLID") for x in range(3)}
+        body = BatchFakeBody(blocks, page_limit=1, envelope_only_next=True)
+
+        facts = read_block_facts(body, tuple((x, 64, 0) for x in range(3)), page_size=1)
+
+        self.assertEqual(body.calls, 3)
+        self.assertEqual(len(facts), 3)
 
     def test_unknown_positions_default_to_air_clear(self):
         body = BatchFakeBody({})

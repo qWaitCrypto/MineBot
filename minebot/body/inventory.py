@@ -15,7 +15,7 @@ from minebot.body.interaction_support import (
 
 from minebot.contract import Body
 from minebot.contract import terminal_event_to_tool_result
-from minebot.contract import Action, BreakContext, InteractionContext, InventorySlot, PerceptionResult, PlaceContext, Result, ToolResult
+from minebot.contract import Action, BreakContext, InteractionContext, InventorySlot, PerceptionResult, PlaceContext, Result, ToolResult, perception_next_cursor
 from minebot.game.governance import GovernancePolicy
 
 
@@ -835,7 +835,7 @@ def _read_inventory(body: Body, page_size: int = 12) -> PerceptionResult:
         if not last.ok:
             return last
         slots.extend(dict(item) for item in last.data.get("slots") or [])
-        start = last.data.get("nextStart")
+        start = perception_next_cursor(last)
         if start is not None:
             start = int(start)
     if last is None:

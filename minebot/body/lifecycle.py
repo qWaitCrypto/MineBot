@@ -25,7 +25,7 @@ class LifecycleTransactions:
     def recover_after_death(
         self,
         *,
-        respawn_pos: Position,
+        respawn_pos: Position | None,
         yaw: float | None = None,
         pitch: float | None = None,
         dimension: str | None = None,
@@ -36,7 +36,7 @@ class LifecycleTransactions:
     ) -> ToolResult:
         state_before = self.body.get_state()
         metrics: dict[str, object] = {
-            "respawn_pos": list(respawn_pos),
+            "respawn_pos": _pos_payload(respawn_pos),
             "state_before_missing": state_before.missing,
             "state_before_pos": list(state_before.pos),
         }
@@ -70,6 +70,21 @@ class LifecycleTransactions:
         if respawned is None:
             final_state = self.body.get_state()
             metrics["state_after"] = _state_metrics(final_state)
+            if not final_state.missing:
+                metrics["respawn_event"] = "missing_but_state_recovered"
+                if respawn_pos is None:
+                    return ToolResult(success=True, reason="completed", can_retry=False, metrics=metrics)
+                state_distance = _state_distance(final_state, respawn_pos)
+                metrics["state_distance"] = state_distance
+                metrics["arrival_tolerance"] = arrival_tolerance
+                if state_distance <= arrival_tolerance:
+                    return ToolResult(success=True, reason="completed", can_retry=False, metrics=metrics)
+                return ToolResult(
+                    success=False,
+                    reason="respawn_position_mismatch",
+                    can_retry=True,
+                    metrics=metrics,
+                )
             return ToolResult(
                 success=False,
                 reason="respawn_event_missing",
@@ -89,15 +104,14 @@ class LifecycleTransactions:
                 metrics=metrics,
             )
         if len(final_pos) != 3:
-            return ToolResult(
-                success=False,
-                reason="respawn_event_invalid",
-                can_retry=True,
-                metrics=metrics,
-            )
+            if respawn_pos is None:
+                return ToolResult(success=True, reason="completed", can_retry=False, metrics=metrics)
+            return ToolResult(False, "respawn_event_invalid", True, metrics=metrics)
+        if respawn_pos is None:
+            return ToolResult(success=True, reason="completed", can_retry=False, metrics=metrics)
         target = (float(respawn_pos[0]), float(respawn_pos[1]), float(respawn_pos[2]))
         event_distance = dist((float(final_pos[0]), float(final_pos[1]), float(final_pos[2])), target)
-        state_distance = dist(final_state.pos, target)
+        state_distance = _state_distance(final_state, respawn_pos)
         metrics["event_distance"] = event_distance
         metrics["state_distance"] = state_distance
         metrics["arrival_tolerance"] = arrival_tolerance
@@ -119,6 +133,15 @@ def _wait_for_event(body: Body, name: str, *, timeout_s: float) -> Event | None:
                 return event
         sleep(0.05)
     return None
+
+
+def _state_distance(state, target_pos: Position) -> float:
+    target = (float(target_pos[0]), float(target_pos[1]), float(target_pos[2]))
+    return dist(state.pos, target)
+
+
+def _pos_payload(pos: Position | None) -> list[int] | None:
+    return None if pos is None else list(pos)
 
 
 def _result_metrics(result: Result) -> dict[str, object]:

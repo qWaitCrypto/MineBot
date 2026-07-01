@@ -206,6 +206,40 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertEqual(body.actions[0].name, "moveItem")
         self.assertEqual(body.actions[0].params["from_slot"], 12)
 
+    def test_inventory_reads_follow_envelope_next_when_data_cursor_is_absent(self):
+        body = FakeInventoryBody(
+            [
+                PerceptionResult(
+                    bot="Bot1",
+                    scope="inventory",
+                    type="perception",
+                    ok=True,
+                    complete=False,
+                    data={"start": 0, "limit": 12, "totalSlots": 46, "slots": [slot(0)]},
+                    uncertainty=[{"reason": "page_limit"}],
+                    next="12",
+                ),
+                PerceptionResult(
+                    bot="Bot1",
+                    scope="inventory",
+                    type="perception",
+                    ok=True,
+                    complete=True,
+                    data={"start": 12, "limit": 12, "totalSlots": 46, "slots": [slot(12, "minecraft:diamond", 1)]},
+                    uncertainty=[],
+                    next=None,
+                ),
+            ],
+            drop_delta=1,
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.discard_item(item="diamond", count=1)
+
+        self.assertTrue(result.success, result.to_payload())
+        inventory_reads = [params for scope, params in body.perceptions if scope == "inventory"]
+        self.assertEqual(inventory_reads, [{"start": 0, "limit": 12}, {"start": 12, "limit": 12}])
+
     def test_discards_matching_hotbar_stack_without_staging(self):
         body = FakeInventoryBody([perception([slot(0, "minecraft:dirt", 5), slot(1)])], drop_delta=5)
         runtime = InventoryTransactions(body)

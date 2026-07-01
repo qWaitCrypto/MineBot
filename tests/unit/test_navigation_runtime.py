@@ -170,6 +170,14 @@ class FakeBody:
         self.await_timeouts.append(timeout_s)
         action = next(action for action in self.actions if action.id == action_id)
         reason = self.terminal_reasons.pop(0) if self.terminal_reasons else None
+        if reason in {"death", "bodyMissing", "respawned"}:
+            return Event(
+                seq=len(self.actions),
+                tick=10,
+                bot="Bot1",
+                name=reason,
+                data={"pos": [0, 59, 0], "inventory_hash": "dead"},
+            )
         default_reason = "completed" if action.name in {"mineBlock", "placeBlock"} else ("arrived" if self.terminal_success else "stuck")
         stopped_reason = reason or default_reason
         arrived = stopped_reason == "arrived"
@@ -492,6 +500,17 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(result.reason, "stuck")
         self.assertTrue(result.can_retry)
 
+    def test_navigate_to_surfaces_global_death_event_as_body_fact(self):
+        nav = FakeNavigator([_segment("arrived", (10, 64, 0), success=True, reason="arrived")])
+        body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["death"])
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((10, 64, 0))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "death")
+        self.assertEqual(result.metrics["segments"][0]["diagnostics"]["event"], "death")
+
     def test_navigate_to_returns_failure_on_no_path(self):
         nav = FakeNavigator([_segment("blocked", None, success=False, reason="no_path")])
         body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["no_path"])
@@ -536,7 +555,18 @@ class NavigationRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         action = body.actions[0]
-        self.assertEqual(action.params["timeout_ticks"], 100)
+        self.assertEqual(action.params["timeout_ticks"], 300)
+
+    def test_navigate_to_spreads_long_timeout_across_segments(self):
+        nav = FakeNavigator([_segment("arrived", (3, 64, 0), success=True, reason="arrived")])
+        body = FakeBody([state_at((0, 64, 0))])
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((3, 64, 0), timeout_s=80.0, config=NavigationRunConfig(max_segments=4))
+
+        self.assertTrue(result.success)
+        action = body.actions[0]
+        self.assertEqual(action.params["timeout_ticks"], 400)
 
     def test_navigate_to_rejects_non_positive_timeout_s(self):
         nav = FakeNavigator([])
@@ -566,6 +596,20 @@ class NavigationRuntimeTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "preempted")
+
+    def test_navigate_to_does_not_invalidate_outer_generation_when_shared(self):
+        nav = FakeNavigator([_segment("arrived", (3, 64, 0), success=True, reason="arrived")])
+        from minebot.brain.progress import ProgressAuthority
+        progress = ProgressAuthority()
+        outer_generation = progress.next_generation()
+        body = FakeBody([state_at((0, 64, 0)), state_at((3, 64, 0))], terminal_reasons=["arrived"])
+        runtime = NavigationTransactions(body, nav, progress=progress)
+
+        result = runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_segments=4))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "arrived")
+        self.assertTrue(progress.generation_current(outer_generation))
 
     def test_navigate_to_metrics_include_segments(self):
         nav = FakeNavigator([_segment("arrived", (3, 64, 0), success=True, reason="arrived")])
@@ -758,6 +802,27 @@ class WorldRefreshNavigationIntegrationTests(unittest.TestCase):
 
         self.assertTrue(any(action.name == "navigateTo" for action in body.actions))
         self.assertEqual(result.reason, "arrived")
+
+    def test_navigate_to_uses_real_terrain_server_side_budget(self):
+        body = FakeBody(
+            [state_at((0, 64, 0)), state_at((1, 64, -1))],
+            terminal_success=True,
+        )
+        policy = GovernancePolicy(natural_regions=[Region("work", (-128, 0, -128), (128, 160, 128))])
+        runtime = NavigationTransactions.server_side(body, policy)
+
+        result = runtime.navigate_to(
+            (64, 70, -64),
+            timeout_s=80.0,
+            config=NavigationRunConfig(max_segments=8),
+        )
+
+        self.assertEqual(result.reason, "arrived")
+        action = next(action for action in body.actions if action.name == "navigateTo")
+        self.assertEqual(action.params["grid_radius"], 64)
+        self.assertEqual(action.params["max_expand"], 2500)
+        self.assertEqual(action.params["no_progress_ticks"], 120)
+        self.assertEqual(action.params["timeout_ticks"], 300)
 
     def test_world_refresh_uses_block_cells_batches_not_per_cell_block_at(self):
         body = FakeBody([state_at((0, 64, 0))], blocks={(0, 63, 0): ("stone", "SOLID")})

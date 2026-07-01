@@ -42,6 +42,9 @@ TERRAIN_FALLBACK_MAX_TILES = 64
 class NavigationRunConfig:
     max_segments: int = 8
     segment_timeout_s: float = 15.0
+    server_grid_radius: int = 64
+    server_max_expand: int = 2500
+    server_no_progress_ticks: int = 120
     recheck_lookahead: int = 5
     min_partial_progress: int = 5
     recovery_attempts: int = 2
@@ -63,6 +66,7 @@ class NavigationRunConfig:
     world_update: Callable[[object, NavigationSegment], dict[str, object] | None] | None = None
     movement_arrival_radius: float | None = None
     allow_local_terrain_fallback: bool = False
+    progress_neutral_failures: bool = False
 
 
 @dataclass(frozen=True)
@@ -136,13 +140,14 @@ class NavigationTransactions:
         if timeout_s is not None:
             if timeout_s <= 0:
                 raise ValueError("timeout_s must be > 0")
-            cfg = replace(cfg, segment_timeout_s=timeout_s)
+            per_segment = max(cfg.segment_timeout_s, timeout_s / max(1, cfg.max_segments))
+            cfg = replace(cfg, segment_timeout_s=per_segment)
         if arrival_radius is not None:
             if arrival_radius <= 0:
                 raise ValueError("arrival_radius must be > 0")
             cfg = replace(cfg, movement_arrival_radius=arrival_radius)
 
-        generation = self.progress.next_generation()
+        generation = self.progress.current_generation()
         executed: list[ExecutedSegment] = []
         nav_goal = normalize_goal(goal)
         state = self.body.get_state()
@@ -165,13 +170,13 @@ class NavigationTransactions:
                 "navigateTo",
                 {
                     "target": [gx, gy, gz],
-                    "grid_radius": 32,
-                    "max_expand": 200,
+                    "grid_radius": cfg.server_grid_radius,
+                    "max_expand": cfg.server_max_expand,
                     "y_below": 8,
                     "y_above": 8,
                     "arrival_radius": ar,
                     "timeout_ticks": max(20, int(cfg.segment_timeout_s * 20)),
-                    "no_progress_ticks": 60,
+                    "no_progress_ticks": cfg.server_no_progress_ticks,
                 },
             )
             result = self.body.execute(action)
@@ -188,10 +193,12 @@ class NavigationTransactions:
                 timeout_s=cfg.segment_timeout_s + 5.0,
                 terminal_events={"navigateDone", "death", "respawned", "ownerPreempted"},
             )
+            if not self.progress.generation_current(generation):
+                return _result(False, "preempted", True, goal_anchor, executed, {"generation_current": False})
 
             td = terminal.data
             nav_arrived = td.get("arrived", False)
-            nav_reason = td.get("reason") or td.get("nav_reason") or td.get("stopped_reason", "unknown")
+            nav_reason = td.get("reason") or td.get("nav_reason") or td.get("stopped_reason") or terminal.name
             goal_dist = td.get("goal_dist", td.get("dist_to_target", 9999.0))
 
             executed.append(ExecutedSegment(
@@ -205,15 +212,28 @@ class NavigationTransactions:
                 },
             ))
 
+            neutral_step = nav_reason == "partial" or nav_reason == "preempted" or (
+                cfg.progress_neutral_failures and nav_reason in SCARPET_FALLBACK_REASONS
+            )
             self.progress.note_step(
                 ("navigate.segment", start, nav_goal.payload(), nav_reason, goal_anchor),
                 success=nav_arrived or nav_reason == "partial",
                 fingerprint=self.progress.fingerprint(self.body.get_state()),
-                neutral=nav_reason == "partial",
+                neutral=neutral_step,
             )
 
             if nav_arrived:
                 return _result(True, "arrived", False, goal_anchor, executed, {"navigation_goal": nav_goal.payload()})
+
+            if nav_reason == "preempted":
+                return _result(
+                    True,
+                    "preempted",
+                    True,
+                    goal_anchor,
+                    executed,
+                    {"navigation_goal": nav_goal.payload(), "paused": True},
+                )
 
             if nav_reason == "partial":
                 state = self.body.get_state()
@@ -557,7 +577,7 @@ class NavigationTransactions:
         if keep_distance < 0:
             raise ValueError("keep_distance must be >= 0")
 
-        generation = self.progress.next_generation()
+        generation = self.progress.current_generation()
         if not self.progress.generation_current(generation):
             return _result(False, "preempted", True, _block_pos(self.body.get_state()), [], {"generation_current": False})
         try:
@@ -587,6 +607,9 @@ class NavigationTransactions:
             timeout_s=timeout_s + 5.0,
             terminal_events={"followDone", "death", "respawned"},
         )
+        if not self.progress.generation_current(generation):
+            return _result(False, "preempted", True, start, [], {"generation_current": False, "target_spec": target_spec})
+
         td = terminal.data
         arrived = bool(td.get("arrived", False))
         reason = str(td.get("reason") or "unknown")

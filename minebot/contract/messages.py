@@ -68,7 +68,7 @@ class BodyState:
 
     @classmethod
     def from_envelope_data(cls, bot: str, complete: bool, data: JsonObject) -> "BodyState":
-        inventory_raw = str(data["inventory_raw"])
+        inventory_raw = str(data.get("inventory_raw") or "")
         inventory_hash = str(data.get("inventory_hash") or stable_hash(inventory_raw))
         pos = data["pos"]
         if len(pos) != 3:
@@ -104,6 +104,23 @@ class PerceptionResult:
     uncertainty: list[JsonObject] | None = None
     next: str | None = None
     error: str | None = None
+
+
+def perception_next_cursor(perception: PerceptionResult, *data_keys: str) -> object | None:
+    """Return the next-page cursor from a perception envelope.
+
+    Static RCON pages mirror their resume cursor through the protocol envelope
+    `next`; older and scope-specific payloads may also carry it inside `data`.
+    Keeping this lookup in the shared contract prevents callers from silently
+    stopping after page one when only one surface is populated.
+    """
+
+    keys = data_keys or ("nextStart", "next")
+    for key in keys:
+        value = perception.data.get(key)
+        if value is not None:
+            return value
+    return perception.next
 
 
 @dataclass(frozen=True)

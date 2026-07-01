@@ -135,7 +135,7 @@ class LifecycleRuntimeTests(unittest.TestCase):
         body = FakeLifecycleBody(
             states=[
                 state_at((0, -80, 0), missing=True),
-                state_at((3, 59, 0), missing=False),
+                state_at((0, -80, 0), missing=True),
             ],
             spawn_result=Result(
                 id=None,
@@ -155,3 +155,54 @@ class LifecycleRuntimeTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "respawn_event_missing")
+
+    def test_recover_after_death_accepts_state_recovery_when_respawn_event_missing(self):
+        body = FakeLifecycleBody(
+            states=[
+                state_at((0, -80, 0), missing=True),
+                state_at((3, 59, 0), missing=False),
+            ],
+            spawn_result=Result(
+                id=None,
+                bot="Bot1",
+                type="result",
+                ok=True,
+                accepted=True,
+                complete=True,
+                data={"action": "spawn"},
+                error=None,
+            ),
+            event_batches=[[]],
+        )
+        runtime = LifecycleTransactions(body)
+
+        result = runtime.recover_after_death(respawn_pos=(3, 59, 0), respawn_event_timeout_s=0.01)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(result.metrics["respawn_event"], "missing_but_state_recovered")
+
+    def test_recover_after_death_still_rejects_wrong_state_when_respawn_event_missing(self):
+        body = FakeLifecycleBody(
+            states=[
+                state_at((0, -80, 0), missing=True),
+                state_at((9, 59, 0), missing=False),
+            ],
+            spawn_result=Result(
+                id=None,
+                bot="Bot1",
+                type="result",
+                ok=True,
+                accepted=True,
+                complete=True,
+                data={"action": "spawn"},
+                error=None,
+            ),
+            event_batches=[[]],
+        )
+        runtime = LifecycleTransactions(body)
+
+        result = runtime.recover_after_death(respawn_pos=(3, 59, 0), respawn_event_timeout_s=0.01)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "respawn_position_mismatch")

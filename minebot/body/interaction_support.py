@@ -8,7 +8,7 @@ from math import floor
 from math import dist
 from typing import Protocol
 
-from minebot.contract import Action, Body, PerceptionResult, Position, ToolResult
+from minebot.contract import Action, Body, PerceptionResult, Position, ToolResult, perception_next_cursor
 from minebot.contract import terminal_event_to_tool_result
 from minebot.body.world_read import read_block_facts
 
@@ -103,6 +103,67 @@ class NearbyEntityTarget:
     distance: float
 
 
+@dataclass(frozen=True)
+class NearbyBlockSearch:
+    targets: list[NearbyBlockTarget]
+    truncated: bool
+    uncertainty: list[object]
+    errors: list[str]
+    pages_read: int
+    total_matches: int
+
+
+def _read_find_blocks_pages(
+    body: Body,
+    *,
+    wanted_type: str,
+    radius: int,
+    limit: int,
+    max_pages: int = 32,
+) -> dict[str, object] | ToolResult:
+    start: int | None = 0
+    pages_read = 0
+    blocks: list[dict[str, object]] = []
+    uncertainty: list[object] = []
+    complete = False
+    total_matches = 0
+    while start is not None:
+        found = body.perceive(
+            "findBlocks",
+            {
+                "type": wanted_type,
+                "radius": radius,
+                "limit": limit,
+                "start": start,
+            },
+        )
+        pages_read += 1
+        if not found.ok:
+            failed = perception_failure(found)
+            if failed is not None:
+                return failed
+            return ToolResult(False, "perception_failed", True, metrics={"scope": "findBlocks", "error": found.error})
+        page_blocks = [dict(item) for item in found.data.get("blocks") or [] if isinstance(item, dict)]
+        blocks.extend(page_blocks)
+        uncertainty.extend(list(found.uncertainty or ()))
+        total_matches = max(total_matches, int(found.data.get("totalMatches") or len(blocks)))
+        next_start = perception_next_cursor(found)
+        if found.complete or next_start is None:
+            complete = found.complete
+            break
+        if pages_read >= max_pages:
+            uncertainty.append({"reason": "page_limit", "max_pages": max_pages})
+            break
+        start = int(next_start)
+    return {
+        "blocks": blocks,
+        "complete": complete,
+        "uncertainty": uncertainty,
+        "pages_read": pages_read,
+        "total_matches": total_matches,
+    }
+
+
 def find_nearby_block_targets(
     body: Body,
     block_types: tuple[str, ...],
@@ -111,28 +172,46 @@ def find_nearby_block_targets(
     not_found_reason: str,
     limit: int = 64,
 ) -> list[NearbyBlockTarget] | ToolResult:
+    search = find_nearby_block_search(body, block_types, radius, not_found_reason=not_found_reason, limit=limit)
+    if isinstance(search, ToolResult):
+        return search
+    return search.targets
+
+
+def find_nearby_block_search(
+    body: Body,
+    block_types: tuple[str, ...],
+    radius: int,
+    *,
+    not_found_reason: str,
+    limit: int = 64,
+    max_pages: int = 1,
+) -> NearbyBlockSearch | ToolResult:
     state = body.get_state()
     wanted = sorted({normalize_block_type(block_type) for block_type in block_types})
     candidates: list[NearbyBlockTarget] = []
     seen: set[Position] = set()
+    uncertainty: list[object] = []
+    errors: list[str] = []
+    truncated = False
+    pages_read = 0
+    total_matches = 0
     for wanted_type in wanted:
-        found = body.perceive(
-            "findBlocks",
-            {
-                "type": wanted_type,
-                "radius": radius,
-                "limit": limit,
-            },
+        pages = _read_find_blocks_pages(
+            body,
+            wanted_type=wanted_type,
+            radius=radius,
+            limit=limit,
+            max_pages=max_pages,
         )
-        if not found.ok:
-            failed = perception_failure(found)
-            if failed is not None:
-                return failed
-        blocks = found.data.get("blocks") or []
-        if not found.complete and not blocks:
-            failed = perception_failure(found)
-            if failed is not None:
-                return failed
+        if isinstance(pages, ToolResult):
+            return pages
+        blocks = pages["blocks"]
+        uncertainty.extend(pages["uncertainty"])
+        pages_read += int(pages["pages_read"])
+        total_matches += int(pages["total_matches"])
+        if not pages["complete"]:
+            truncated = True
         for item in blocks:
             block_type = normalize_block_type(str(item.get("type") or ""))
             if not block_type_matches_wanted(block_type, set(wanted)):
@@ -155,42 +234,16 @@ def find_nearby_block_targets(
             reason=not_found_reason,
             can_retry=True,
             next_suggestion="move closer or expand the search radius before retrying",
-            metrics={"search_radius": radius, "block_types": list(block_types), "limit": limit},
+            metrics={"search_radius": radius, "block_types": list(block_types), "limit": limit, "uncertainty": uncertainty},
         )
-    return sorted(candidates, key=lambda candidate: (candidate.distance, candidate.pos))
-
-
-def find_blocks_metadata(
-    body: Body,
-    *,
-    block_types: tuple[str, ...],
-    radius: int,
-    limit: int,
-) -> dict[str, object]:
-    wanted = sorted({normalize_block_type(block_type) for block_type in block_types})
-    truncated = False
-    uncertainty: list[object] = []
-    errors: list[str] = []
-    for wanted_type in wanted:
-        found = body.perceive(
-            "findBlocks",
-            {
-                "type": wanted_type,
-                "radius": radius,
-                "limit": limit,
-            },
-        )
-        if not found.ok:
-            errors.append(str(found.error or "perception_failed"))
-            continue
-        if not found.complete:
-            truncated = True
-            uncertainty.extend(list(found.uncertainty or ()))
-    return {
-        "truncated": truncated,
-        "uncertainty": uncertainty,
-        "errors": errors,
-    }
+    return NearbyBlockSearch(
+        targets=sorted(candidates, key=lambda candidate: (candidate.distance, candidate.pos)),
+        truncated=truncated,
+        uncertainty=uncertainty,
+        errors=errors,
+        pages_read=pages_read,
+        total_matches=total_matches,
+    )
 
 
 def find_block_target(
