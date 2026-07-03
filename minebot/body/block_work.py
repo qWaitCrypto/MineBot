@@ -147,6 +147,7 @@ class BlockWork:
         approach_failed, approach_metrics = self._approach_mining_target(
             pos,
             context=context,
+            target_block_type=block_type,
             timeout_s=timeout_s,
         )
         if approach_failed is not None:
@@ -184,7 +185,12 @@ class BlockWork:
         )
 
     def _approach_mining_target(
-        self, pos: Position, *, context: BreakContext | str, timeout_s: float
+        self,
+        pos: Position,
+        *,
+        context: BreakContext | str,
+        target_block_type: str,
+        timeout_s: float,
     ) -> tuple[ToolResult | None, dict[str, object] | None]:
         state = self.body.get_state()
         reach_limit = self._mine_reach_limit(context)
@@ -202,6 +208,7 @@ class BlockWork:
                 stand_block,
                 state=state,
                 reach_limit=reach_limit,
+                target_block_type=target_block_type,
                 timeout_s=timeout_s,
             )
             if failure is None:
@@ -239,6 +246,7 @@ class BlockWork:
         *,
         state: BodyState,
         reach_limit: float,
+        target_block_type: str,
         timeout_s: float,
     ) -> tuple[ToolResult | None, dict[str, object] | None]:
         move_target = _block_center_target(stand_block)
@@ -270,7 +278,13 @@ class BlockWork:
             # collect-approach clearance: clear the selected stand point under
             # COLLECT_APPROACH governance, then let the navigator move there.
             # Only if that fails is it an honest candidate-skip.
-            dig = self._dig_through_approach(pos, stand_block, move_target, timeout_s=timeout_s)
+            dig = self._dig_through_approach(
+                pos,
+                stand_block,
+                move_target,
+                target_block_type=target_block_type,
+                timeout_s=timeout_s,
+            )
             if dig is not None:
                 return dig
             return _with_metric(
@@ -301,7 +315,13 @@ class BlockWork:
         if reach > reach_limit:
             # Arrived near the guessed stand cell but still out of mining reach —
             # try collect-approach clearance before giving up on the target.
-            dig = self._dig_through_approach(pos, stand_block, move_target, timeout_s=timeout_s)
+            dig = self._dig_through_approach(
+                pos,
+                stand_block,
+                move_target,
+                target_block_type=target_block_type,
+                timeout_s=timeout_s,
+            )
             if dig is not None:
                 return dig
             return ToolResult(
@@ -319,6 +339,7 @@ class BlockWork:
         stand_block: Position,
         move_target: tuple[float, float, float],
         *,
+        target_block_type: str,
         timeout_s: float,
     ) -> tuple[ToolResult | None, dict[str, object] | None] | None:
         """Escalate a failed lightweight approach to collect-approach clearance.
@@ -352,7 +373,7 @@ class BlockWork:
 
         dig_config = NavigationRunConfig(
             max_break_steps=self.DIG_THROUGH_MAX_BREAK_STEPS,
-            allow_local_terrain_fallback=True,
+            allow_local_terrain_fallback=not _is_log_block_type(target_block_type),
             progress_neutral_failures=True,
         )
         if timeout_s is not None:
@@ -3170,6 +3191,10 @@ def _inventory_counts_from_body(body: Body) -> dict[str, int] | ToolResult:
 
 def _normalize_item(item: str) -> str:
     return item.removeprefix("minecraft:")
+
+
+def _is_log_block_type(block_type: str) -> bool:
+    return _normalize_item(block_type).endswith("_log")
 
 
 def _is_clear_perception(perception: PerceptionResult) -> bool:

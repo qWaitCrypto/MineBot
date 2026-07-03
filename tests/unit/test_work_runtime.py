@@ -952,6 +952,7 @@ class BlockWorkTests(unittest.TestCase):
         # ...with a bounded break budget so one target can't dig a runaway tunnel.
         nav_config = nav_kwargs["config"]
         self.assertEqual(nav_config.max_break_steps, BlockWork.DIG_THROUGH_MAX_BREAK_STEPS)
+        self.assertTrue(nav_config.allow_local_terrain_fallback)
         self.assertEqual(body.blocks[(0, 65, 4)], ("air", "CLEAR"))
         mine_actions = [action for action in body.actions if action.name == "mineBlock"]
         self.assertTrue(any(action.params["target"] == [0, 65, 4] for action in mine_actions))
@@ -1033,6 +1034,51 @@ class BlockWorkTests(unittest.TestCase):
         ]
         self.assertNotIn([0, 65, 4], cleared_targets)
         self.assertIn([-1, 65, 5], cleared_targets)
+
+    def test_mine_block_collect_disables_local_terrain_fallback_for_logs(self):
+        class StuckThenNavBody(FakeBody):
+            def execute(self, action: Action) -> Result:
+                result = super().execute(action)
+                if action.name == "moveTo":
+                    self.terminal = Event(
+                        seq=self.terminal.seq,
+                        tick=self.terminal.tick,
+                        bot=self.terminal.bot,
+                        name="moveDone",
+                        data={
+                            "action_id": action.id,
+                            "arrived": False,
+                            "final_pos": list(self.state_pos),
+                            "target": list(action.params["target"]),
+                            "stopped_reason": "stuck",
+                        },
+                    )
+                return result
+
+        body = StuckThenNavBody(
+            blocks={
+                (0, 64, 5): ("oak_log", "SOLID"),
+                (0, 65, 4): ("air", "CLEAR"),
+            },
+            inventory_pages=[
+                inventory_page([slot(9, "minecraft:oak_log", 0)]),
+                inventory_page([slot(9, "minecraft:oak_log", 0)]),
+            ],
+        )
+        body.state_pos = (0.5, 65.0, 0.5)
+        navigator = FakeNavigator(result=False, reason="no_path")
+        navigator.body = body
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.mine_block_collect((0, 64, 5), context=BreakContext.COLLECT, timeout_s=1.0)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "mine_approach_failed:dig_through:no_path")
+        self.assertTrue(navigator.calls)
+        nav_config = navigator.calls[-1][1]["config"]
+        self.assertFalse(nav_config.allow_local_terrain_fallback)
+        self.assertTrue(nav_config.progress_neutral_failures)
 
     def test_mine_block_collect_dig_through_candidate_navigation_is_progress_neutral(self):
         from minebot.brain.progress import FAILURE_STORM_LIMIT, ProgressAuthority
