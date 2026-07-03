@@ -828,7 +828,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             )
         )
 
-    def test_tool_projection_keeps_proactive_combat_out_of_resource_focus(self):
+    def test_tool_projection_keeps_shared_pool_visible_across_modes(self):
         normal = ModeRuntime().profile_for(LifecycleState.ACTIVE)
         modes = ModeRuntime()
         engage = modes.reduce([AgentSignal.hostile_nearby("zombie")], LifecycleState.ACTIVE).profile
@@ -854,8 +854,8 @@ class AgentRunnerSpineTests(unittest.TestCase):
             body_scope=("blocks",),
         )
 
-        self.assertFalse(tool_is_enabled(combat_sidecar, normal, {}))
-        self.assertFalse(tool_is_enabled(hostile_read_sidecar, normal, {}))
+        self.assertTrue(tool_is_enabled(combat_sidecar, normal, {}))
+        self.assertTrue(tool_is_enabled(hostile_read_sidecar, normal, {}))
         self.assertTrue(tool_is_enabled(block_read_sidecar, normal, {}))
         self.assertTrue(tool_is_enabled(combat_sidecar, engage, {}))
         self.assertTrue(tool_is_enabled(hostile_read_sidecar, engage, {}))

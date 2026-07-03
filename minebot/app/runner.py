@@ -165,9 +165,9 @@ def tool_is_enabled(
 ) -> bool:
     """Shared-pool tool projection predicate.
 
-    The registry remains the single shared tool pool. Runtime profiles project
-    that pool through hard capability gates so a resource task does not turn
-    into proactive combat unless the FSM has actually entered combat policy.
+    The registry remains the single shared tool pool. Runtime profiles may
+    foreground capabilities through context, but they must not hide tools as a
+    behavior-forcing mechanism.
     """
     facts = facts or {}
     if facts.get("disabled") is True or facts.get("precondition_missing") is True:
@@ -177,14 +177,6 @@ def tool_is_enabled(
         return bool(decision.allowed)
     if isinstance(decision, dict) and decision.get("allowed") is False:
         return False
-    policy_tags = set(profile.policy_tags)
-    body_scope = set(getattr(sidecar, "body_scope", ()) or ())
-    permission = str(getattr(sidecar, "permission", "") or "")
-    tool_type = str(getattr(sidecar, "tool_type", "") or "")
-    if permission == "combat":
-        return "combat" in policy_tags
-    if tool_type == "perception" and "nearby_entities" in body_scope:
-        return "combat" in policy_tags
     return True
 
 
