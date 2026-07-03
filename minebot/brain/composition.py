@@ -334,10 +334,10 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
 
         if not mined.get("success"):
             reason = str(mined.get("reason") or "mine_failed")
-            skip = _is_collect_candidate_rejection(reason)
+            skip = _is_collect_candidate_rejection(reason, mined)
             skipped.append({"pos": target, "reason": reason, "skip": skip})
             last_failure = {"phase": "mine", "target": target, "reason": mined.get("reason"), "result": mined}
-            if _is_collect_control_yield(reason):
+            if _is_collect_control_yield(reason, mined):
                 _emit_collect_summary(
                     context,
                     reason=reason,
@@ -464,19 +464,52 @@ def _execute_candidate_probe_tool(context: CompositionContext, tool: RegisteredT
                 "progress_facts": _progress_facts_payload(exc),
             },
         ).to_payload()
-    if not result.get("success") and _is_collect_candidate_rejection(str(result.get("reason") or "")):
+    if not result.get("success") and _is_collect_candidate_rejection(str(result.get("reason") or ""), result):
         authority.failure_steps = before_failures
     return result
 
 
-def _is_collect_candidate_rejection(reason: str) -> bool:
+def _is_collect_candidate_rejection(reason: str, result: JsonObject | None = None) -> bool:
     if is_candidate_skip(reason):
+        return True
+    if reason == "body_rejected" and _is_mining_stand_body_rejection(result):
         return True
     return reason == "mine_progress_yielded"
 
 
-def _is_collect_control_yield(reason: str) -> bool:
+def _is_collect_control_yield(reason: str, result: JsonObject | None = None) -> bool:
+    if reason == "body_rejected" and _is_mining_stand_body_rejection(result):
+        return False
     return reason in {"body_rejected", "mine_progress_yielded"} or reason.endswith(":preempted")
+
+
+def _is_mining_stand_body_rejection(result: JsonObject | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    metrics = result.get("metrics")
+    if not isinstance(metrics, dict):
+        return False
+    failures = metrics.get("stand_candidate_failures")
+    if not isinstance(failures, list) or not failures:
+        return False
+    if not isinstance(metrics.get("mine_approach"), dict):
+        return False
+    for failure in failures:
+        if not isinstance(failure, dict):
+            return False
+        if str(failure.get("reason") or "") != "body_rejected":
+            return False
+        nested = failure.get("result")
+        if not isinstance(nested, dict):
+            return False
+        nested_metrics = nested.get("metrics")
+        if not isinstance(nested_metrics, dict):
+            return False
+        if str(nested_metrics.get("action") or "") != "moveTo":
+            return False
+        if not isinstance(nested_metrics.get("mine_approach"), dict):
+            return False
+    return True
 
 
 def _recent_body_requests(body: Body, *, limit: int = 6) -> list[dict[str, object]]:

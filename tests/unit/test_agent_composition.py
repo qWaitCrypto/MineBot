@@ -245,6 +245,61 @@ def mine_tool_body_rejected(body):
     ), calls
 
 
+def mine_tool_approach_body_rejected_then_success(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        target = params.get("pos")
+        if len(calls) == 1:
+            stand_block = [target[0], target[1], target[2] + 1]
+            move_target = [stand_block[0] + 0.5, float(stand_block[1]), stand_block[2] + 0.5]
+            approach = {"target": target, "stand_block": stand_block, "move_target": move_target}
+            rejection = {
+                "success": False,
+                "reason": "body_rejected",
+                "canRetry": True,
+                "metrics": {
+                    "action": "moveTo",
+                    "target": stand_block,
+                    "ok": True,
+                    "accepted": False,
+                    "error": None,
+                    "data": {"action": "moveTo"},
+                    "mine_approach": approach,
+                },
+            }
+            return ToolResult(
+                False,
+                "body_rejected",
+                True,
+                metrics={
+                    "target": stand_block,
+                    "action": "moveTo",
+                    "ok": True,
+                    "accepted": False,
+                    "error": None,
+                    "data": {"action": "moveTo"},
+                    "mine_approach": approach,
+                    "stand_candidate_failures": [
+                        {"stand_block": stand_block, "reason": "body_rejected", "result": rejection}
+                    ],
+                },
+            )
+        expected = params.get("expected_drops") or ["dirt"]
+        item = str(expected[0]).removeprefix("minecraft:")
+        body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+        return ToolResult(True, "collected", False, metrics={"target": target, "collected_total": 1})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
 def mine_tool_clearance_denied(body):
     calls = []
 
@@ -737,6 +792,25 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(len(mine_calls), 1)
         self.assertEqual(ctx.weld_context.authority.failure_steps, 1)
         self.assertFalse(result.metrics["skipped"][0]["skip"])
+
+    def test_collect_resource_skips_body_rejected_mining_stand_candidate(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[1, 59, 0], [2, 59, 0]])
+        registry.register(search)
+        miner, mine_calls = mine_tool_approach_body_rejected_then_success(body)
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=2)
+
+        result = collect_resource({"item": "logs", "count": 1}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "collected")
+        self.assertEqual([call["pos"] for call in mine_calls], [[1, 59, 0], [2, 59, 0]])
+        self.assertEqual(result.metrics["skipped"][0]["reason"], "body_rejected")
+        self.assertTrue(result.metrics["skipped"][0]["skip"])
+        self.assertEqual(ctx.weld_context.authority.failure_steps, 0)
 
     def test_collect_resource_trace_keeps_clearance_denial_block_fact(self):
         body = FakeBody()
