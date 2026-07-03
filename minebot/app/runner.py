@@ -245,6 +245,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             )
         try:
             result = execute_tool(tool, params, ctx.context.weld_context)
+            result = _continue_collect_resource_tool(tool, result, ctx.context, tool_call_id=tool_call_id)
         except ProgressAbort:
             raise
         except BodyRecoveryRequired:
@@ -612,6 +613,95 @@ def _tool_result_summaries(results: list[dict[str, Any]]) -> list[JsonObject]:
             }
         )
     return out
+
+
+def _should_continue_collect(result: JsonObject, metrics: dict[str, object]) -> bool:
+    if not bool(result.get("success")):
+        return False
+    if metrics.get("complete") is True:
+        return False
+    if str(metrics.get("resume_hint") or "") != "reselect_candidates":
+        return False
+    if str(result.get("reason") or "") not in {"partial_budget_exhausted", "partial_candidate_targets_exhausted"}:
+        return False
+    collected_delta = int(metrics.get("collected_delta") or 0)
+    remaining_count = int(metrics.get("remaining_count") or 0)
+    after_count = int(metrics.get("after_count") or 0)
+    before_count = int(metrics.get("before_count") or 0)
+    return collected_delta > 0 and after_count > before_count and remaining_count > 0
+
+
+def _continuation_constraints(metrics: dict[str, object]) -> dict[str, object]:
+    budget = metrics.get("budget")
+    if not isinstance(budget, dict):
+        return {}
+    out: dict[str, object] = {}
+    for key in ("max_candidates", "max_mutating_calls", "max_wall_s"):
+        value = budget.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            out[key] = value
+    return out
+
+
+def _continue_collect_resource_tool(
+    tool: RegisteredTool,
+    result: JsonObject,
+    context: RuntimeRunContext,
+    *,
+    tool_call_id: str,
+) -> JsonObject:
+    if tool.name != "collect_resource":
+        return result
+    trace = context.trace
+    current = result
+    iterations = 0
+    while iterations < 8:
+        metrics = current.get("metrics") if isinstance(current, dict) else None
+        if not isinstance(metrics, dict) or not _should_continue_collect(current, metrics):
+            return current
+        item = str(metrics.get("requested_item") or metrics.get("item") or "")
+        target_count = int(metrics.get("target_count") or 0)
+        after_count = int(metrics.get("after_count") or 0)
+        if not item or target_count <= 0 or after_count <= 0:
+            return current
+        params: JsonObject = {
+            "item": item,
+            "count": max(1, target_count - after_count),
+            "constraints": _continuation_constraints(metrics),
+        }
+        iterations += 1
+        if trace is not None:
+            trace.emit(
+                "tool_continuation",
+                tool=tool.name,
+                tool_call_id=tool_call_id,
+                iteration=iterations,
+                reason="collect_partial_progress",
+                item=item,
+                target_count=target_count,
+                current_count=after_count,
+                arguments_summary=_summarize_tool_arguments(json.dumps(params, sort_keys=True)),
+            )
+        current = execute_tool(tool, params, context.weld_context)
+        if trace is not None:
+            trace.emit(
+                "tool_continuation_result",
+                tool=tool.name,
+                tool_call_id=tool_call_id,
+                iteration=iterations,
+                reason=str(current.get("reason") or ""),
+                success=bool(current.get("success")),
+                summary=_tool_result_summary(current),
+            )
+    if trace is not None:
+        trace.emit(
+            "tool_continuation_ceiling",
+            tool=tool.name,
+            tool_call_id=tool_call_id,
+            iteration_limit=8,
+            reason=str(current.get("reason") or ""),
+        )
+    return current
 
 
 def _recent_session_messages(context: AgentContext, *, limit: int = 3) -> list[JsonObject]:

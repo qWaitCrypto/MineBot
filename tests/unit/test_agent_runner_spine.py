@@ -512,6 +512,164 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertFalse(projected["complete"])
         self.assertEqual(projected["summary"]["count"], 64)
 
+    def test_sdk_tool_auto_continues_collect_after_partial_progress(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        collect_calls = []
+
+        def collect_callable(params):
+            collect_calls.append(dict(params))
+            if len(collect_calls) == 1:
+                return ToolResult(
+                    True,
+                    "partial_budget_exhausted",
+                    True,
+                    metrics={
+                        "requested_item": "oak_log",
+                        "item": "oak_log",
+                        "target_count": 64,
+                        "before_count": 0,
+                        "after_count": 10,
+                        "collected_delta": 10,
+                        "remaining_count": 54,
+                        "complete": False,
+                        "resume_hint": "reselect_candidates",
+                        "budget": {"max_candidates": 80, "max_mutating_calls": 80, "max_wall_s": 300},
+                    },
+                )
+            return ToolResult(
+                True,
+                "collected",
+                False,
+                metrics={
+                    "requested_item": "oak_log",
+                    "item": "oak_log",
+                    "target_count": 64,
+                    "before_count": 10,
+                    "after_count": 64,
+                    "collected_delta": 54,
+                    "remaining_count": 0,
+                    "complete": True,
+                    "resume_hint": "complete",
+                },
+            )
+
+        registry.register(
+            RegisteredTool(
+                name="collect_resource",
+                description="Collect",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                callable=collect_callable,
+                sidecar=ToolSidecar(progress_key="collect_resource", mutating=False, tool_type="resource"),
+            )
+        )
+
+        runtime = AgentRuntime(
+            body=body,
+            registry=registry,
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect 64 logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        sdk_tool = sdk_tool_for(registry.get("collect_resource"))
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=runtime.trace,
+            runtime=runtime,
+        )
+
+        class Wrapper:
+            pass
+
+        wrapper = Wrapper()
+        wrapper.context = runtime_context
+        out = asyncio.run(sdk_tool.on_invoke_tool(wrapper, json.dumps({"item": "oak_log", "count": 64})))
+
+        self.assertTrue(out["success"])
+        self.assertTrue(out["complete"])
+        self.assertEqual(out["reason"], "collected")
+        self.assertEqual(
+            collect_calls,
+            [
+                {"item": "oak_log", "count": 64},
+                {
+                    "item": "oak_log",
+                    "count": 54,
+                    "constraints": {"max_candidates": 80, "max_mutating_calls": 80, "max_wall_s": 300},
+                },
+            ],
+        )
+        events = runtime.trace.snapshot()
+        self.assertTrue(any(event["event"] == "tool_continuation" for event in events))
+        self.assertTrue(any(event["event"] == "tool_continuation_result" for event in events))
+        result_event = next(event for event in events if event["event"] == "tool_result")
+        self.assertEqual(result_event["full_result"]["reason"], "collected")
+
+    def test_sdk_tool_does_not_continue_collect_without_inventory_delta(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        collect_calls = []
+
+        def collect_callable(params):
+            collect_calls.append(dict(params))
+            return ToolResult(
+                True,
+                "partial_budget_exhausted",
+                True,
+                metrics={
+                    "requested_item": "oak_log",
+                    "item": "oak_log",
+                    "target_count": 64,
+                    "before_count": 10,
+                    "after_count": 10,
+                    "collected_delta": 0,
+                    "remaining_count": 54,
+                    "complete": False,
+                    "resume_hint": "reselect_candidates",
+                },
+            )
+
+        registry.register(
+            RegisteredTool(
+                name="collect_resource",
+                description="Collect",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                callable=collect_callable,
+                sidecar=ToolSidecar(progress_key="collect_resource", mutating=False, tool_type="resource"),
+            )
+        )
+
+        runtime = AgentRuntime(
+            body=body,
+            registry=registry,
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect 64 logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        sdk_tool = sdk_tool_for(registry.get("collect_resource"))
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=runtime.trace,
+            runtime=runtime,
+        )
+
+        class Wrapper:
+            pass
+
+        wrapper = Wrapper()
+        wrapper.context = runtime_context
+        out = asyncio.run(sdk_tool.on_invoke_tool(wrapper, json.dumps({"item": "oak_log", "count": 64})))
+
+        self.assertEqual(out["reason"], "partial_budget_exhausted")
+        self.assertEqual(len(collect_calls), 1)
+        self.assertFalse(any(event["event"] == "tool_continuation" for event in runtime.trace.snapshot()))
+
     def test_sdk_tool_converts_transport_exception_to_tool_result(self):
         def callable_(_params):
             raise RconError("RCON socket closed")
