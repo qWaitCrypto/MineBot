@@ -119,9 +119,10 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     budget = _budget_from_constraints(context.budget, constraints)
     allow_dry = bool(constraints.get("allow_dry", False))
     started = time.monotonic()
-    plan = _resource_plan(item)
     requested_count = count
+    requested_plan = _resource_plan(item)
     goal_target = _goal_collect_target(context.weld_context.goal_text)
+    plan = _resolve_collect_plan(requested_plan, goal_target)
     goal_target_count: int | None = None
     if goal_target is not None and _goal_target_matches_plan(goal_target, plan):
         count = max(count, goal_target[1])
@@ -473,6 +474,15 @@ def _goal_target_matches_plan(goal_target: tuple[str, int], plan: ResourcePlan) 
     except ValueError:
         return False
     return bool(set(goal_plan.inventory_items) & set(plan.inventory_items))
+
+
+def _resolve_collect_plan(requested_plan: ResourcePlan, goal_target: tuple[str, int] | None) -> ResourcePlan:
+    if goal_target is None:
+        return requested_plan
+    goal_plan = _resource_plan(goal_target[0])
+    if _is_log_plan(goal_plan) and _is_log_plan(requested_plan):
+        return goal_plan
+    return requested_plan
 
 
 def _search_max_pages_for_budget(budget: CompositionBudget, find_limit: int) -> int:

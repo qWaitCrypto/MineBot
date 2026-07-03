@@ -1299,6 +1299,49 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.metrics["target_count"], 64)
         self.assertEqual(result.metrics["after_count"], 18)
         self.assertEqual(result.metrics["remaining_count"], 46)
+        self.assertEqual(result.metrics["requested_item"], "logs")
+
+    def test_collect_resource_keeps_log_family_when_model_narrows_goal_to_oak_log(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, search_calls = search_tool([[1, 59, 0]])
+        registry.register(search)
+        miner, _mine_calls = mine_tool(body, fail_reason="break_denied:protected_region")
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=1)
+        ctx.weld_context.goal_text = "collect 64 logs"
+
+        result = collect_resource({"item": "oak_log", "count": 46}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.metrics["requested_item"], "logs")
+        self.assertEqual(result.metrics["item"], "oak_log")
+        self.assertEqual(
+            result.metrics["block_types"],
+            ["oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log"],
+        )
+        self.assertEqual(
+            search_calls[0]["block_types"],
+            ["oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log"],
+        )
+
+    def test_collect_resource_does_not_widen_specific_oak_log_goal(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, search_calls = search_tool([[1, 59, 0]])
+        registry.register(search)
+        miner, _mine_calls = mine_tool(body, fail_reason="break_denied:protected_region")
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=1)
+        ctx.weld_context.goal_text = "collect 64 oak_log"
+
+        result = collect_resource({"item": "logs", "count": 64}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.metrics["requested_item"], "oak_log")
+        self.assertEqual(search_calls[0]["block_types"], ["oak_log"])
 
     def test_collect_resource_aborts_when_search_fails_for_non_skip_reason(self):
         # A non-skip search failure (perception_failed: the candidate list itself is
