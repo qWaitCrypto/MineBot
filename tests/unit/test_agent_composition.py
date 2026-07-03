@@ -606,6 +606,26 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertGreaterEqual(cm.exception.facts.stagnant_steps, 3)
         self.assertEqual(cm.exception.facts.failure_steps, 0)
 
+    def test_collect_resource_internal_inventory_reads_do_not_trip_observation_stall(self):
+        body = FakeBody()
+        body.get_state = lambda: state("stable")
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[index, 59, 0] for index in range(8)])
+        registry.register(search)
+        miner, mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=8)
+
+        result = collect_resource({"item": "dirt", "count": 5}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "collected")
+        self.assertEqual(result.metrics["after_count"], 5)
+        self.assertEqual(len(mine_calls), 5)
+        self.assertEqual(ctx.weld_context.authority.stagnant_steps, 0)
+        self.assertNotEqual(ctx.weld_context.authority.last_action[0], "read_inventory")
+
     def test_weld_does_not_count_outer_agent_composition_observation(self):
         # collect_resource is mutating=False by design because its leaf Body
         # calls own progress accounting. The outer composition wrapper must not

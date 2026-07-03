@@ -668,7 +668,21 @@ def _resolve_search_radius(plan: ResourcePlan, constraints: dict[str, object]) -
 
 
 def _read_count(context: CompositionContext, items: tuple[str, ...]) -> ToolResult:
-    payload = _execute_composition_phase(context, "inventory", context.registry.get("read_inventory"), {})
+    try:
+        payload = context.registry.get("read_inventory").callable({}).to_payload()
+    except Exception as exc:
+        _emit_trace(
+            context,
+            "composition_phase_exception",
+            {
+                "phase": "inventory",
+                "tool": "read_inventory",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "recent_requests": _recent_body_requests(context.weld_context.body),
+            },
+        )
+        raise
     if not payload.get("success"):
         return ToolResult(
             False,
