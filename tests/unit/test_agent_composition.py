@@ -229,6 +229,30 @@ def mine_tool_with_outcomes(body, outcomes):
     ), calls
 
 
+def mine_tool_with_reason_sequence(body, outcomes):
+    calls = []
+    planned = list(outcomes)
+
+    def callable_(params):
+        calls.append(dict(params))
+        outcome = planned.pop(0) if planned else "collect_no_inventory_delta"
+        target = params.get("pos")
+        if outcome == "success":
+            expected = params.get("expected_drops") or ["dirt"]
+            item = str(expected[0]).removeprefix("minecraft:")
+            body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+            return ToolResult(True, "collected", False, metrics={"target": target, "collected_total": 1})
+        return ToolResult(False, str(outcome), True, metrics={"target": target, "collected_total": 0})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
 def mine_tool_body_rejected(body):
     calls = []
 
@@ -1012,6 +1036,79 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(
             [call["pos"] for call in mine_calls],
             [[-75, 63, 62], [-82, 64, 75], [-79, 72, 75], [-79, 73, 75]],
+        )
+
+    def test_collect_resource_skips_remaining_log_patch_after_approach_blocker(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool(
+            [
+                [-382, 83, -2],
+                [-381, 83, -2],
+                [-380, 83, -2],
+                [-382, 84, -2],
+                [-381, 84, -2],
+                [-380, 84, -2],
+                [-399, 85, -3],
+                [-399, 86, -3],
+            ]
+        )
+        registry.register(search)
+        miner, mine_calls = mine_tool_with_reason_sequence(
+            body,
+            [
+                "mine_approach_failed:dig_through:no_path",
+                "mine_approach_failed:dig_through:break_denied:not_natural_breakable",
+                "mine_approach_failed:dig_through:no_path",
+                "mine_approach_failed:dig_through:no_path",
+                "mine_approach_failed:dig_through:no_path",
+            ],
+        )
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=6)
+
+        result = collect_resource({"item": "logs", "count": 1}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.reason, "candidate_targets_exhausted")
+        attempted = [call["pos"] for call in mine_calls]
+        self.assertEqual(attempted[:2], [[-382, 83, -2], [-399, 85, -3]])
+        self.assertNotIn([-399, 86, -3], attempted)
+
+    def test_collect_resource_does_not_block_log_patch_after_progress(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool(
+            [
+                [-387, 83, -2],
+                [-386, 83, -2],
+                [-387, 84, -2],
+                [-386, 84, -2],
+                [-399, 85, -3],
+            ]
+        )
+        registry.register(search)
+        miner, mine_calls = mine_tool_with_reason_sequence(
+            body,
+            [
+                "success",
+                "mine_approach_failed:dig_through:no_path",
+                "mine_approach_failed:dig_through:break_denied:not_natural_breakable",
+            ],
+        )
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=4)
+
+        result = collect_resource({"item": "logs", "count": 2}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "partial_candidate_targets_exhausted")
+        self.assertEqual(result.metrics["collected_delta"], 1)
+        self.assertEqual(
+            [call["pos"] for call in mine_calls],
+            [[-387, 83, -2], [-399, 85, -3], [-386, 83, -2]],
         )
 
     def test_collect_resource_stops_candidate_loop_on_inner_progress_yield(self):

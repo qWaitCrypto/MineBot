@@ -164,6 +164,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     attempts: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
     tried_positions: set[tuple[int, int, int]] = set()
+    blocked_log_patches: list[list[int]] = []
     mutating_calls = 0
     last_failure: dict[str, object] | None = None
     targets: list[list[int]] = []
@@ -204,7 +205,11 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 goal_target_count=goal_target_count,
             )
 
-        target = _first_untried_target(targets, tried_positions)
+        target = _first_untried_target(
+            targets,
+            tried_positions,
+            blocked_log_patches=blocked_log_patches if _is_log_plan(plan) else None,
+        )
         if target is None:
             find_limit = min(12, max(6, min(budget.max_candidates, radius // 2 if radius > 1 else 1)))
             max_pages = _search_max_pages_for_budget(budget, find_limit)
@@ -232,12 +237,20 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 },
             )
             targets = _targets_from_search(search, plan=plan)
-            target = _first_untried_target(targets, tried_positions)
+            target = _first_untried_target(
+                targets,
+                tried_positions,
+                blocked_log_patches=blocked_log_patches if _is_log_plan(plan) else None,
+            )
             search_ok = bool(search.get("success"))
             search_reason = str(search.get("reason") or "search_failed")
         if search is None:
             search = {}
-        target = _first_untried_target(targets, tried_positions)
+        target = _first_untried_target(
+            targets,
+            tried_positions,
+            blocked_log_patches=blocked_log_patches if _is_log_plan(plan) else None,
+        )
         # A search that navigated to its own nearest pick and could not stand there
         # (no_stand_point / out_of_range / target_lost / navigation_blocked) is a
         # CANDIDATE skip, not a search failure: the candidate list it returned is
@@ -354,6 +367,8 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             skip = _is_collect_candidate_rejection(reason, mined)
             skipped.append({"pos": target, "reason": reason, "skip": skip})
             last_failure = {"phase": "mine", "target": target, "reason": mined.get("reason"), "result": mined}
+            if skip and _is_log_plan(plan) and _is_log_patch_blocker(reason):
+                _mark_log_patch_blocked(blocked_log_patches, target)
             if _is_collect_control_yield(reason, mined):
                 partial_success = _collect_partial_success(before_count, current_count)
                 _emit_collect_summary(
@@ -393,6 +408,8 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             # bound the loop, so we deliberately do not stop here on a bad candidate.
         else:
             all_skips = False
+            if _is_log_plan(plan):
+                _unmark_log_patch_blocked(blocked_log_patches, target)
 
     candidate_budget_hit = len(attempts) >= budget.max_candidates
     if attempts and candidate_budget_hit and all_skips:
@@ -1154,11 +1171,37 @@ def _parse_pos(value: object) -> list[int] | None:
     return [int(value[0]), int(value[1]), int(value[2])]
 
 
-def _first_untried_target(targets: list[list[int]], tried_positions: set[tuple[int, int, int]]) -> list[int] | None:
+def _first_untried_target(
+    targets: list[list[int]],
+    tried_positions: set[tuple[int, int, int]],
+    *,
+    blocked_log_patches: list[list[int]] | None = None,
+) -> list[int] | None:
     for target in targets:
         if tuple(target) not in tried_positions:
+            if blocked_log_patches is not None and _target_in_blocked_log_patch(target, blocked_log_patches):
+                continue
             return target
     return None
+
+
+def _is_log_patch_blocker(reason: str) -> bool:
+    if "break_denied:not_natural_breakable" in reason:
+        return True
+    return False
+
+
+def _target_in_blocked_log_patch(target: list[int], blocked_log_patches: list[list[int]]) -> bool:
+    return any(_targets_share_patch(target, blocked) for blocked in blocked_log_patches)
+
+
+def _mark_log_patch_blocked(blocked_log_patches: list[list[int]], target: list[int]) -> None:
+    if not _target_in_blocked_log_patch(target, blocked_log_patches):
+        blocked_log_patches.append(list(target))
+
+
+def _unmark_log_patch_blocked(blocked_log_patches: list[list[int]], target: list[int]) -> None:
+    blocked_log_patches[:] = [blocked for blocked in blocked_log_patches if not _targets_share_patch(target, blocked)]
 
 
 def _search_failure_reason(reason: str, had_candidates: bool, *, before_count: int, current_count: int) -> str:
