@@ -253,6 +253,36 @@ def mine_tool_with_reason_sequence(body, outcomes):
     ), calls
 
 
+def mine_tool_no_path_sequence(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        target = params.get("pos")
+        return ToolResult(
+            False,
+            "mine_approach_failed:dig_through:no_path",
+            True,
+            metrics={
+                "target": target,
+                "dig_through_result": {
+                    "success": False,
+                    "reason": "no_path",
+                    "canRetry": False,
+                    "metrics": {"goal": target},
+                },
+            },
+        )
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
 def mine_tool_body_rejected(body):
     calls = []
 
@@ -1075,6 +1105,31 @@ class AgentCompositionTests(unittest.TestCase):
         attempted = [call["pos"] for call in mine_calls]
         self.assertEqual(attempted[:2], [[-382, 83, -2], [-399, 85, -3]])
         self.assertNotIn([-399, 86, -3], attempted)
+
+    def test_collect_resource_skips_remaining_log_patch_after_no_path(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool(
+            [
+                [-383, 81, 29],
+                [-382, 82, 29],
+                [-381, 83, 29],
+                [-371, 81, 29],
+                [-370, 82, 29],
+            ]
+        )
+        registry.register(search)
+        miner, mine_calls = mine_tool_no_path_sequence(body)
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=5)
+
+        result = collect_resource({"item": "logs", "count": 1}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.reason, "candidate_targets_exhausted")
+        attempted = [call["pos"] for call in mine_calls]
+        self.assertEqual(attempted, [[-383, 81, 29], [-371, 81, 29]])
 
     def test_collect_resource_does_not_block_log_patch_after_progress(self):
         body = FakeBody()

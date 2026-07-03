@@ -368,7 +368,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             skip = _is_collect_candidate_rejection(reason, mined)
             skipped.append({"pos": target, "reason": reason, "skip": skip})
             last_failure = {"phase": "mine", "target": target, "reason": mined.get("reason"), "result": mined}
-            if skip and _is_log_plan(plan) and _is_log_patch_blocker(reason):
+            if skip and _is_log_plan(plan) and _is_log_patch_blocker(reason, mined):
                 _mark_log_patch_blocked(blocked_log_patches, target)
             if _is_collect_control_yield(reason, mined):
                 partial_success = _collect_partial_success(before_count, current_count)
@@ -1195,8 +1195,13 @@ def _first_untried_target(
     return None
 
 
-def _is_log_patch_blocker(reason: str) -> bool:
+def _is_log_patch_blocker(reason: str, result: JsonObject | None = None) -> bool:
     if "break_denied:not_natural_breakable" in reason:
+        return True
+    if reason == "mine_approach_failed:dig_through:no_path":
+        metrics = result.get("metrics") if isinstance(result, dict) else None
+        if isinstance(metrics, dict) and isinstance(metrics.get("progress_facts"), dict):
+            return False
         return True
     return False
 
