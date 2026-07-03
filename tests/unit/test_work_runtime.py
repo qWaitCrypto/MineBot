@@ -1080,6 +1080,137 @@ class BlockWorkTests(unittest.TestCase):
         self.assertFalse(nav_config.allow_local_terrain_fallback)
         self.assertTrue(nav_config.progress_neutral_failures)
 
+    def test_mine_block_collect_retargets_local_tree_log_after_unreachable_canopy_log(self):
+        class HighMoveStuckBody(FakeBody):
+            def execute(self, action: Action) -> Result:
+                if action.name == "moveTo" and float(action.params["target"][1]) >= 70.0:
+                    self.actions.append(action)
+                    self.terminal = Event(
+                        seq=self.terminal.seq,
+                        tick=self.terminal.tick,
+                        bot=self.terminal.bot,
+                        name="moveDone",
+                        data={
+                            "action_id": action.id,
+                            "arrived": False,
+                            "final_pos": list(self.state_pos),
+                            "target": list(action.params["target"]),
+                            "stopped_reason": "stuck",
+                        },
+                    )
+                    return Result(
+                        id=action.id,
+                        bot="Bot1",
+                        type="result",
+                        ok=True,
+                        accepted=True,
+                        complete=True,
+                        data={"action": action.name},
+                    )
+                return super().execute(action)
+
+        body = HighMoveStuckBody(
+            blocks={
+                (4, 72, 0): ("oak_log", "SOLID"),
+                (1, 64, 0): ("oak_log", "SOLID"),
+            },
+            find_blocks=[
+                {"x": 4, "y": 72, "z": 0, "type": "minecraft:oak_log"},
+                {"x": 1, "y": 64, "z": 0, "type": "minecraft:oak_log"},
+            ],
+            inventory_pages=[
+                inventory_page([slot(9, "minecraft:oak_log", 0)]),
+                inventory_page([slot(9, "minecraft:oak_log", 1)]),
+            ],
+        )
+        body.state_pos = (0.5, 64.0, 0.5)
+        navigator = FakeNavigator(result=False, reason="no_path")
+        navigator.body = body
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, navigator=navigator, settle=lambda _s: None)
+
+        result = runtime.mine_block_collect(
+            (4, 72, 0),
+            context=BreakContext.COLLECT,
+            expected_drops=("oak_log",),
+            timeout_s=1.0,
+        )
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "collected")
+        self.assertEqual(result.metrics["target"], [1, 64, 0])
+        self.assertEqual(result.metrics["original_target"], [4, 72, 0])
+        tree = result.metrics["tree_domain_retarget"]
+        self.assertEqual(tree["original_target"], [4, 72, 0])
+        self.assertEqual(tree["original_failure"]["reason"], "mine_approach_failed:dig_through:no_path")
+        self.assertEqual(tree["attempts"][0]["target"], [1, 64, 0])
+        self.assertEqual(result.metrics["deltas"], {"oak_log": 1})
+        mine_targets = [action.params["target"] for action in body.actions if action.name == "mineBlock"]
+        self.assertIn([1, 64, 0], mine_targets)
+        self.assertNotIn([4, 72, 0], mine_targets)
+
+    def test_mine_block_collect_preserves_original_log_approach_failure_when_tree_retarget_fails(self):
+        class HighMoveStuckBody(FakeBody):
+            def execute(self, action: Action) -> Result:
+                if action.name == "moveTo":
+                    self.actions.append(action)
+                    self.terminal = Event(
+                        seq=self.terminal.seq,
+                        tick=self.terminal.tick,
+                        bot=self.terminal.bot,
+                        name="moveDone",
+                        data={
+                            "action_id": action.id,
+                            "arrived": False,
+                            "final_pos": list(self.state_pos),
+                            "target": list(action.params["target"]),
+                            "stopped_reason": "stuck",
+                        },
+                    )
+                    return Result(
+                        id=action.id,
+                        bot="Bot1",
+                        type="result",
+                        ok=True,
+                        accepted=True,
+                        complete=True,
+                        data={"action": action.name},
+                    )
+                return super().execute(action)
+
+        body = HighMoveStuckBody(
+            blocks={
+                (4, 72, 0): ("oak_log", "SOLID"),
+                (5, 72, 0): ("oak_log", "SOLID"),
+            },
+            find_blocks=[
+                {"x": 4, "y": 72, "z": 0, "type": "minecraft:oak_log"},
+                {"x": 5, "y": 72, "z": 0, "type": "minecraft:oak_log"},
+            ],
+            inventory_pages=[inventory_page([slot(9, "minecraft:oak_log", 0)])],
+        )
+        body.state_pos = (0.5, 64.0, 0.5)
+        navigator = FakeNavigator(result=False, reason="no_path")
+        navigator.body = body
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, navigator=navigator, settle=lambda _s: None)
+
+        result = runtime.mine_block_collect(
+            (4, 72, 0),
+            context=BreakContext.COLLECT,
+            expected_drops=("oak_log",),
+            timeout_s=1.0,
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "mine_approach_failed:dig_through:no_path")
+        collect = result.metrics["collect"]
+        self.assertEqual(collect["target"], [4, 72, 0])
+        tree = collect["tree_domain_retarget"]
+        self.assertEqual(tree["candidate_count"], 1)
+        self.assertEqual(tree["attempts"][0]["target"], [5, 72, 0])
+        self.assertEqual(tree["attempts"][0]["mine_result"]["reason"], "mine_approach_failed:dig_through:no_path")
+
     def test_mine_block_collect_dig_through_candidate_navigation_is_progress_neutral(self):
         from minebot.brain.progress import FAILURE_STORM_LIMIT, ProgressAuthority
         from minebot.body.navigation import NavigationRunConfig

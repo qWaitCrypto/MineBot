@@ -103,6 +103,9 @@ class BlockWork:
     # navigation; a future terrain-aware navigator can consume the same budget
     # when BREAK/DOWNWARD steps move fully into Scarpet.
     DIG_THROUGH_MAX_BREAK_STEPS = 8
+    TREE_DOMAIN_SEARCH_RADIUS = 6
+    TREE_DOMAIN_TARGET_LIMIT = 24
+    TREE_DOMAIN_MAX_RETARGETS = 4
 
     def __init__(
         self,
@@ -743,15 +746,31 @@ class BlockWork:
         else:
             mined = self.mine_block(pos, context=context, timeout_s=timeout_s)
         if not mined.success:
+            tree_retarget_result, tree_retarget_metrics = self._try_tree_domain_collect_retarget(
+                pos=pos,
+                original_failure=mined,
+                context=context,
+                before=before,
+                expected=expected,
+                pickup_timeout_s=pickup_timeout_s,
+                timeout_s=timeout_s,
+                settle_s=settle_s,
+                enabled=not dry and _is_log_block_type(block_type),
+            )
+            if tree_retarget_result is not None:
+                return tree_retarget_result
+            collect_metrics = {
+                "target": list(pos),
+                "block_type": block_type,
+                "expected_drops": list(expected),
+                "before": before,
+            }
+            if tree_retarget_metrics is not None:
+                collect_metrics["tree_domain_retarget"] = tree_retarget_metrics
             return _with_metric(
                 mined,
                 "collect",
-                {
-                    "target": list(pos),
-                    "block_type": block_type,
-                    "expected_drops": list(expected),
-                    "before": before,
-                },
+                collect_metrics,
             )
 
         self._pause(settle_s)
@@ -796,6 +815,118 @@ class BlockWork:
                 metrics=metrics,
             )
         return ToolResult(success=True, reason="collected", can_retry=False, metrics=metrics)
+
+    def _try_tree_domain_collect_retarget(
+        self,
+        *,
+        pos: Position,
+        original_failure: ToolResult,
+        context: BreakContext | str,
+        before: dict[str, int],
+        expected: tuple[str, ...],
+        pickup_timeout_s: float,
+        timeout_s: float,
+        settle_s: float,
+        enabled: bool,
+    ) -> tuple[ToolResult | None, dict[str, object] | None]:
+        if not enabled or not _tree_domain_retarget_reason(original_failure.reason):
+            return None, None
+
+        log_types = _tree_domain_log_types(expected)
+        if not log_types:
+            return None, None
+
+        retarget_metrics: dict[str, object] = {
+            "original_target": list(pos),
+            "original_failure": original_failure.to_payload(),
+            "search_radius": self.TREE_DOMAIN_SEARCH_RADIUS,
+            "block_types": list(log_types),
+            "attempts": [],
+        }
+        targets = find_nearby_block_targets(
+            self.body,
+            log_types,
+            self.TREE_DOMAIN_SEARCH_RADIUS,
+            not_found_reason="tree_domain_log_not_found",
+            limit=self.TREE_DOMAIN_TARGET_LIMIT,
+        )
+        if isinstance(targets, ToolResult):
+            retarget_metrics["search_result"] = targets.to_payload()
+            return None, retarget_metrics
+
+        state = self.body.get_state()
+        candidates = sorted(
+            (target for target in targets if target.pos != pos),
+            key=lambda target: _tree_domain_target_sort_key(state.pos, target.pos, target.distance),
+        )
+        retarget_metrics["candidate_count"] = len(candidates)
+        for target in candidates[: self.TREE_DOMAIN_MAX_RETARGETS]:
+            mined = self.mine_block(target.pos, context=context, timeout_s=timeout_s)
+            attempt: dict[str, object] = {
+                "target": list(target.pos),
+                "block_type": target.block_type,
+                "distance": target.distance,
+                "mine_result": mined.to_payload(),
+            }
+            retarget_metrics["attempts"].append(attempt)
+            if not mined.success:
+                continue
+
+            self._pause(settle_s)
+            pickup = self._collect_inventory_delta(
+                pos=target.pos,
+                before=before,
+                expected=expected,
+                pickup_timeout_s=pickup_timeout_s,
+            )
+            attempt["pickup_assist"] = pickup.get("assist")
+            failed_after = pickup.get("failed")
+            if isinstance(failed_after, ToolResult):
+                return _with_metric(
+                    failed_after,
+                    "collect",
+                    {
+                        "target": list(target.pos),
+                        "original_target": list(pos),
+                        "block_type": target.block_type,
+                        "phase": "after",
+                        "expected_drops": list(expected),
+                        "before": before,
+                        "pickup_assist": pickup.get("assist"),
+                        "tree_domain_retarget": retarget_metrics,
+                    },
+                ), retarget_metrics
+
+            after = pickup["after"]
+            deltas = pickup["deltas"]
+            collected_total = int(pickup["collected_total"])
+            metrics = {
+                "target": list(target.pos),
+                "original_target": list(pos),
+                "block_type": target.block_type,
+                "expected_drops": list(expected),
+                "before": before,
+                "after": after,
+                "deltas": deltas,
+                "collected_total": collected_total,
+                "mine_result": mined.to_payload(),
+                "pickup_assist": pickup["assist"],
+                "tree_domain_retarget": retarget_metrics,
+            }
+            if collected_total <= 0:
+                return ToolResult(
+                    success=False,
+                    reason="collect_no_inventory_delta",
+                    can_retry=True,
+                    next_suggestion=(
+                        "wait for pickup, move to the drop, or verify the expected drop mapping before "
+                        "counting this tree-domain target complete"
+                    ),
+                    metrics=metrics,
+                ), retarget_metrics
+            return ToolResult(success=True, reason="collected", can_retry=False, metrics=metrics), retarget_metrics
+
+        return None, retarget_metrics
 
     def _collect_inventory_delta(
         self,
@@ -3195,6 +3326,31 @@ def _normalize_item(item: str) -> str:
 
 def _is_log_block_type(block_type: str) -> bool:
     return _normalize_item(block_type).endswith("_log")
+
+
+def _tree_domain_retarget_reason(reason: str) -> bool:
+    reason = str(reason or "")
+    return reason.startswith("mine_approach_failed:")
+
+
+def _tree_domain_log_types(expected: tuple[str, ...]) -> tuple[str, ...]:
+    logs = tuple(dict.fromkeys(_normalize_item(item) for item in expected if _is_log_block_type(item)))
+    return logs
+
+
+def _tree_domain_target_sort_key(
+    current: tuple[float, float, float],
+    target: Position,
+    distance: float,
+) -> tuple[float, int, float, float, int, int]:
+    return (
+        abs(float(target[1]) - current[1]),
+        target[1],
+        _mining_reach_distance(current, target),
+        distance,
+        target[0],
+        target[2],
+    )
 
 
 def _is_clear_perception(perception: PerceptionResult) -> bool:
