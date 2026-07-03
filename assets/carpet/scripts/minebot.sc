@@ -80,6 +80,13 @@ json_waypoints(points) -> (
   str('[%s]', out)
 );
 
+json_waypoint_summary(points) -> (
+  count = length(points);
+  first = if(count > 0, points:0, l(0, 0, 0));
+  last = if(count > 0, points:(count - 1), l(0, 0, 0));
+  str('{"count":%d,"first":%s,"last":%s}', count, json_pos(first), json_pos(last))
+);
+
 json_movement_cancel_steps(steps) -> (
   out = '';
   first = true;
@@ -191,15 +198,27 @@ event_data_json(kind, data) -> (
     out = str('{"sender":%s,"message":%s}', json_string(data:0), json_string(data:1))
   );
   if(kind == 'moveStarted',
-    out = str('{"action_id":"%s","start_pos":%s,"target":%s,"waypoints":%s,"guard":%s,"movement_cancel":%s}', data:0, json_pos(data:1), json_pos(data:2), json_waypoints(data:3), data:4, data:5)
+    out = str('{"action_id":"%s","start_pos":%s,"target":%s,"waypoints":%s,"guard":%s,"movement_cancel":%s}', data:0, json_pos(data:1), json_pos(data:2), json_waypoint_summary(data:3), data:4, data:5)
   );
   if(kind == 'moveDone',
     out = str('{"action_id":"%s","arrived":%s,"final_pos":%s,"target":%s,"dist_to_target":%.3f,"stopped_reason":"%s","ticks":%d,"min_dist":%.3f,"stuck_ticks":%d,"deviation":%.3f,"waypoint_index":%d,"waypoint_count":%d,"guard":%s,"movement_cancel":%s}',
       data:0, json_bool(data:1), json_pos(data:2), json_pos(data:3), data:4, data:5, data:6, data:7, data:8, data:9, data:10, data:11, data:12, data:13)
   );
+  if(kind == 'moveFinishTrace',
+    out = str('{"action_id":"%s","reason":"%s","arrived":%s,"final_pos":%s,"target":%s,"dist_to_target":%.3f,"ticks":%d,"stuck_ticks":%d}',
+      data:0, data:1, json_bool(data:2), json_pos(data:3), json_pos(data:4), data:5, data:6, data:7)
+  );
+  if(kind == 'navigateStartTrace',
+    out = str('{"action_id":"%s","plan_status":"%s","goal":%s,"expanded":%d,"path_length":%d}',
+      data:0, data:1, json_pos(data:2), data:3, data:4)
+  );
+  if(kind == 'navigateFinishTrace',
+    out = str('{"action_id":"%s","arrived":%s,"reason":"%s","final_pos":%s,"goal":%s,"goal_dist":%.3f,"expanded":%d,"waypoints":%d}',
+      data:0, json_bool(data:1), data:2, json_pos(data:3), json_pos(data:4), data:5, data:6, data:7)
+  );
   if(kind == 'navigateDone',
-    out = str('{"action_id":"%s","arrived":%s,"final_pos":%s,"goal":%s,"goal_dist":%.3f,"reason":"%s","expanded":%d,"waypoints":%d,"segments":%d,"nav_reason":"%s"}',
-      data:0, json_bool(data:1), json_pos(data:2), json_pos(data:3), data:4, data:5, data:6, data:7, data:8, data:9)
+    out = str('{"action_id":"%s","arrived":%s,"final_pos":%s,"goal":%s,"goal_dist":%.3f,"reason":"%s","expanded":%d,"waypoints":%d,"segments":%d,"nav_reason":"%s","move_ticks":%d,"move_min_dist":%.3f,"move_stuck_ticks":%d,"move_deviation":%.3f,"move_waypoint_index":%d,"move_waypoint_count":%d,"move_current_waypoint":%s}',
+      data:0, json_bool(data:1), json_pos(data:2), json_pos(data:3), data:4, data:5, data:6, data:7, data:8, data:9, data:10, data:11, data:12, data:13, data:14, data:15, json_pos(data:16))
   );
   if(kind == 'mobilityBlocked',
     out = str('{"reason":"%s","pos":%s,"goal":%s,"expanded":%d}',
@@ -309,11 +328,12 @@ event_data_json(kind, data) -> (
     out = str('{"previous_owner":"%s","new_owner":"%s"}', data:0, data:1)
   );
   if(kind == 'reflexTriggered',
-    out = str('{"kind":"%s","pos":%s,"target":%s}', data:0, json_pos(data:1), json_pos(data:2))
+    out = str('{"kind":"%s","pos":%s,"target":%s,"target_is_dry_stand":%s,"target_block":"%s","target_below":"%s"}',
+      data:0, json_pos(data:1), json_pos(data:2), json_bool(data:3), data:4, data:5)
   );
   if(kind == 'reflexCompleted',
-    out = str('{"final_pos":%s,"dist_to_escape":%.3f,"ticks":%d,"escaped_hazard":%s,"escaped_lava":%s,"kind":"%s"}',
-      json_pos(data:0), data:1, data:2, json_bool(data:3), json_bool(data:3 && data:4 == 'lava'), data:4)
+    out = str('{"final_pos":%s,"dist_to_escape":%.3f,"ticks":%d,"escaped_hazard":%s,"escaped_lava":%s,"kind":"%s","target":%s,"target_is_dry_stand":%s,"final_is_dry_stand":%s,"target_block":"%s","target_below":"%s"}',
+      json_pos(data:0), data:1, data:2, json_bool(data:3), json_bool(data:3 && data:4 == 'lava'), data:4, json_pos(data:5), json_bool(data:6), json_bool(data:7), data:8, data:9)
   );
   out
 );
@@ -647,6 +667,11 @@ perceive_find_blocks(name, params) -> (
     radius = floor(number(params:'radius'));
     if(radius < 0, radius = 0);
     if(radius > 128, radius = 128);
+    y_radius = if(radius > 16, 16, radius);
+    if(params:'y_radius' != null, y_radius = floor(number(params:'y_radius')));
+    if(params:'yRadius' != null, y_radius = floor(number(params:'yRadius')));
+    if(y_radius < 0, y_radius = 0);
+    if(y_radius > 64, y_radius = 64);
     limit = 32;
     if(params:'limit' != null, limit = floor(number(params:'limit')));
     if(limit < 1, limit = 1);
@@ -661,33 +686,36 @@ perceive_find_blocks(name, params) -> (
     found = l();
     count = 0;
     matched = 0;
+    r2 = radius * radius;
     loop(radius * 2 + 1,
       ox = _ - radius;
       loop(radius * 2 + 1,
-        oy = _ - radius;
-        loop(radius * 2 + 1,
-          oz = _ - radius;
-          x = cx + ox;
-          y = cy + oy;
-          z = cz + oz;
-          bs = '' + block(x, y, z);
-          if(block_type_matches(bs, wanted),
-            matched += 1;
-            dx = x + 0.5 - p:0;
-            dy = y + 0.5 - p:1;
-            dz = z + 0.5 - p:2;
-            dist2 = dx*dx + dy*dy + dz*dz;
-            entry = l(dist2, x, y, z, bs, block_kind(bs));
-            insert_at = count;
-            loop(count,
-              cur = found:_;
-              if(insert_at == count && dist2 < cur:0, insert_at = _)
-            );
-            put(found:insert_at, entry, 'insert');
-            count += 1;
-            if(count > window_limit,
-              delete(found:window_limit);
-              count = window_limit
+        oz = _ - radius;
+        if(ox*ox + oz*oz <= r2,
+          loop(y_radius * 2 + 1,
+            oy = _ - y_radius;
+            x = cx + ox;
+            y = cy + oy;
+            z = cz + oz;
+            bs = '' + block(x, y, z);
+            if(block_type_matches(bs, wanted),
+              matched += 1;
+              dx = x + 0.5 - p:0;
+              dy = y + 0.5 - p:1;
+              dz = z + 0.5 - p:2;
+              dist2 = dx*dx + dy*dy + dz*dz;
+              entry = l(dist2, x, y, z, bs, block_kind(bs));
+              insert_at = count;
+              loop(count,
+                cur = found:_;
+                if(insert_at == count && dist2 < cur:0, insert_at = _)
+              );
+              put(found:insert_at, entry, 'insert');
+              count += 1;
+              if(count > window_limit,
+                delete(found:window_limit);
+                count = window_limit
+              )
             )
           )
         )
@@ -717,7 +745,7 @@ perceive_find_blocks(name, params) -> (
     complete = !overflow && matched <= out_idx;
     next_start = if(complete, null, out_idx);
     next_value = if(complete, null, str('%d', out_idx));
-    data = str('{"center":%s,"type":"%s","radius":%d,"start":%d,"limit":%d,"count":%d,"totalMatches":%d,"nextStart":%s,"blocks":[%s]}', json_pos(p), wanted, radius, start, limit, out_count, matched, json_int_null(next_start), out);
+    data = str('{"center":%s,"type":"%s","radius":%d,"yRadius":%d,"start":%d,"limit":%d,"count":%d,"totalMatches":%d,"nextStart":%s,"blocks":[%s]}', json_pos(p), wanted, radius, y_radius, start, limit, out_count, matched, json_int_null(next_start), out);
     uncertainty = if(complete, '[]', '[{"reason":"page_limit"}]');
     if(!complete && out_count == 0,
       perception_json(name, 'findBlocks', false, true, data, '[{"reason":"single_entry_exceeds_budget"}]', null, 'single_entry_exceeds_budget')
@@ -892,6 +920,7 @@ inventory_slot_type(slot) -> (
         )
       )
     )
+  )
 );
 
 inventory_slot_label(slot) -> (
@@ -1192,12 +1221,13 @@ finish_move(name, reason, arrived) -> (
     dist = sqrt(dx*dx + dy*dy + dz*dz);
     stop_body(name);
     deviation = distance_from_start_path(p, m:6, target);
+    emit('moveFinishTrace', name, l(m:0, reason, arrived, p, target, dist, m:5, m:8));
     emit('moveDone', name, l(m:0, arrived, p, target, dist, reason, m:5, m:7, m:8, deviation, m:14, length(m:13), move_guard_json(m), movement_cancel_json(m:15)));
     global_moves:name = null;
     global_move_cancels:name = null;
     release_owner(name, 'moveTo');
     if(global_navigations:name != null,
-      finish_navigate(name, l(m:0, arrived, p, target, dist, reason))
+      finish_navigate(name, l(m:0, arrived, p, target, dist, reason, m:5, m:7, m:8, deviation, m:14, length(m:13), current_waypoint(m)))
     );
     true
   )
@@ -2687,12 +2717,19 @@ water_shore_escape_target(p) -> (
 );
 
 water_escape_target(p) -> (
-  shore = water_shore_escape_target(p);
-  if(shore != null,
-    shore
-  ,
-    water_surface_target(p)
-  )
+  water_shore_escape_target(p)
+);
+
+reflex_target_is_dry_stand(target) -> (
+  target != null && is_dry_stand_cell(floor(target:0), floor(target:1), floor(target:2))
+);
+
+reflex_target_block_type(target) -> (
+  if(target == null, 'null', '' + block(floor(target:0), floor(target:1), floor(target:2)))
+);
+
+reflex_target_below_type(target) -> (
+  if(target == null, 'null', '' + block(floor(target:0), floor(target:1) - 1, floor(target:2)))
 );
 
 water_hazard_clear(name) -> (
@@ -2741,6 +2778,7 @@ movement_water_escape_should_trigger(name, m, stuck_ticks) -> (
   global_reflex_scan &&
   global_reflexes:name == null &&
   in_water_now(name) &&
+  water_reflex_should_trigger(name) &&
   stuck_ticks >= movement_water_escape_ticks(m)
 );
 
@@ -2803,6 +2841,9 @@ start_hazard_reflex(name, kind) -> (
   if(acquire_owner(name, owner_name, 'SURVIVAL'),
     p = bot_pos(name);
     target = if(kind == 'water', water_escape_target(p), safe_escape_target(p));
+    if(kind == 'water' && target == null,
+      target = water_surface_target(p)
+    );
     cancel_move_preempted(name);
     cancel_mine_preempted(name);
     cancel_place_preempted(name);
@@ -2813,12 +2854,12 @@ start_hazard_reflex(name, kind) -> (
     cancel_ignite_preempted(name);
     cancel_sow_preempted(name);
     if(target == null,
-      emit('reflexCompleted', name, l(p, 0.0, 0, false, kind));
+      emit('reflexCompleted', name, l(p, 0.0, 0, false, kind, l(0, 0, 0), false, false, 'null', 'null'));
       release_owner(name, owner_name);
       false
     ,
       global_reflexes:name = l(target:0, target:1, target:2, 0, kind, owner_name);
-      emit('reflexTriggered', name, l(kind, p, target));
+      emit('reflexTriggered', name, l(kind, p, target, reflex_target_is_dry_stand(target), reflex_target_block_type(target), reflex_target_below_type(target)));
       true
     )
   ,
@@ -2865,13 +2906,8 @@ start_combat_reflex(name) -> (
   if(nearest == null,
     true
   ,
-    if(hp != null && hp > 10.0 && !is_ranged_hostile(nearest) && !is_flying_hostile(nearest),
-      minebot_interrupt(name, '{}');
-      start_engage(name, 'auto:combat:' + name, 'nearest_hostile', {'attack_range' -> 2.0, 'cooldown_ticks' -> 10, 'timeout_ticks' -> 200, 'disengage_health' -> 6.0, 'acquire_radius' -> 16, 'grid_radius' -> 24, 'max_expand' -> 150})
-    ,
-      tp = query(nearest, 'pos');
-      start_combat_flee_reflex(name, tp)
-    )
+    tp = query(nearest, 'pos');
+    start_combat_flee_reflex(name, tp)
   );
   true
 );
@@ -2887,7 +2923,8 @@ start_combat_flee_reflex(name, hostile_pos) -> (
     fx = p:0 + dx / norm * 8.0;
     fz = p:2 + dz / norm * 8.0;
     global_reflexes:name = l(fx, p:1, fz, 0, 'combat_flee', 'combatReflex');
-    emit('reflexTriggered', name, l('combat_flee', p, l(fx, p:1, fz)))
+    target = l(fx, p:1, fz);
+    emit('reflexTriggered', name, l('combat_flee', p, target, reflex_target_is_dry_stand(target), reflex_target_block_type(target), reflex_target_below_type(target)))
   )
 );
 
@@ -2934,7 +2971,6 @@ run_move_tick(name, m) -> (
         )
       )
     )
-  )
 );
 
 run_reflex_tick(name, r) -> (
@@ -2950,16 +2986,18 @@ run_reflex_tick(name, r) -> (
   clear_of_hazard = if(kind == 'fire', !on_fire_now(name), if(kind == 'water', water_hazard_clear(name), !lava_near_pos(p)));
   water_target_is_shore = kind == 'water' && is_dry_stand_cell(floor(r:0), floor(r:1), floor(r:2));
   water_on_dry_stand = kind == 'water' && is_dry_stand_cell(floor(p:0), floor(p:1), floor(p:2));
-  escaped = if(kind == 'water', if(water_target_is_shore, dist <= 0.9 && water_on_dry_stand, clear_of_hazard), dist <= 0.9 && clear_of_hazard);
+  escaped = if(kind == 'water', water_target_is_shore && dist <= 0.9 && water_on_dry_stand, dist <= 0.9 && clear_of_hazard);
   if(escaped,
     stop_body(name);
-    emit('reflexCompleted', name, l(p, dist, ticks, true, kind));
+    target = l(r:0, r:1, r:2);
+    emit('reflexCompleted', name, l(p, dist, ticks, true, kind, target, reflex_target_is_dry_stand(target), if(kind == 'water', water_on_dry_stand, reflex_target_is_dry_stand(p)), reflex_target_block_type(target), reflex_target_below_type(target)));
     global_reflexes:name = null;
     release_owner(name, owner_name)
   ,
     if(ticks > 100,
       stop_body(name);
-      emit('reflexCompleted', name, l(p, dist, ticks, false, kind));
+      target = l(r:0, r:1, r:2);
+      emit('reflexCompleted', name, l(p, dist, ticks, false, kind, target, reflex_target_is_dry_stand(target), if(kind == 'water', water_on_dry_stand, reflex_target_is_dry_stand(p)), reflex_target_block_type(target), reflex_target_below_type(target)));
       global_reflexes:name = null;
       release_owner(name, owner_name)
     ,
@@ -3609,10 +3647,10 @@ minebot_pathfind_probe(name, payload) -> (
                 null
               ,
                 w = probe_walkability(nx, ny, nz);
-                if(w == 'SOLID',
+                if(w == 'SOLID' || w == 'NO_FLOOR',
                   null
                 ,
-                  step_cost = if(w == 'LIQUID', 3.0, if(w == 'NO_FLOOR', 2.0, 1.0));
+                  step_cost = if(w == 'LIQUID', 3.0, 1.0);
                   new_g = cur_g + step_cost;
                   old_g = g_costs:(nkey);
                   if(old_g == null || new_g < old_g,
@@ -3646,7 +3684,7 @@ minebot_pathfind_probe(name, payload) -> (
     json_bool(found), reason, expanded, path_length, grid_radius, sx, sy, sz, gx, gy, gz)
 );
 
-navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above, cover_target) -> (
+navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above, cover_target, min_partial_progress, goal_radius) -> (
   g_costs = {};
   came_from = {};
   start_key = probe_node_key(sx, sy, sz);
@@ -3686,7 +3724,7 @@ navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_abo
           best_g = cur_g;
           best_key = cur_key
         );
-        if(cx == gx && cy == gy && cz == gz,
+        if(probe_heuristic(cx, cy, cz, gx, gy, gz) <= goal_radius,
           found = true;
           found_key = cur_key
         ,
@@ -3703,10 +3741,10 @@ navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_abo
                 null
               ,
                 w = probe_walkability(nx, ny, nz);
-                if(w == 'SOLID',
+                if(w == 'SOLID' || w == 'NO_FLOOR',
                   null
                 ,
-                  step_cost = if(w == 'LIQUID', 3.0, if(w == 'NO_FLOOR', 2.0, 1.0));
+                  step_cost = if(w == 'LIQUID', 3.0, 1.0);
                   if(cover_target != null,
                     los_key = probe_node_key(nx, ny, nz);
                     exposed = los_cache:(los_key);
@@ -3730,9 +3768,10 @@ navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_abo
           )
         )
       )
-    )
+  )
   );
-  end_key = if(found, found_key, best_key);
+  partial_progress = h0 - best_h;
+  end_key = if(found || partial_progress >= min_partial_progress, if(found, found_key, best_key), start_key);
   if(end_key == start_key,
     l('result', if(found, 'arrived', if(length(open_set) == 0, 'no_path', 'budget_exceeded')), expanded, l())
   ,
@@ -3760,7 +3799,8 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
   watch_bot(name);
   p = bot_pos(name);
   if(p == null,
-    emit('navigateDone', name, l(action_id, false, l(0, 0, 0), l(gx, gy, gz), 9999.0, 'missing_body', 0, 0, 0, 'missing_body'));
+    emit('navigateStartTrace', name, l(action_id, 'missing_body', l(gx, gy, gz), 0, 0));
+        emit('navigateDone', name, l(action_id, false, l(0, 0, 0), l(gx, gy, gz), 9999.0, 'missing_body', 0, 0, 0, 'missing_body', 0, 9999.0, 0, 0.0, 0, 0, l(0, 0, 0)));
     true
   ,
     (
@@ -3778,12 +3818,17 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
       arrival_radius = param_number(params, 'arrival_radius', 0.75);
       timeout_ticks = floor(param_number(params, 'timeout_ticks', 400));
       no_progress_ticks = floor(param_number(params, 'no_progress_ticks', 60));
-      plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above, null);
+      min_partial_progress = floor(param_number(params, 'min_partial_progress', 5));
+      if(min_partial_progress < 1, min_partial_progress = 1);
+      goal_radius = floor(param_number(params, 'goal_radius', 0));
+      if(goal_radius < 0, goal_radius = 0);
+      plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above, null, min_partial_progress, goal_radius);
       plan_status = plan_result:1;
       plan_expanded = plan_result:2;
       plan_path = plan_result:3;
+      emit('navigateStartTrace', name, l(action_id, plan_status, l(gx, gy, gz), plan_expanded, length(plan_path)));
       if(plan_status == 'no_path' || plan_status == 'budget_exceeded' || length(plan_path) == 0,
-        emit('navigateDone', name, l(action_id, false, p, l(gx, gy, gz), dist_to_target(p, gx, gy, gz), plan_status, plan_expanded, 0, 0, plan_status));
+        emit('navigateDone', name, l(action_id, false, p, l(gx, gy, gz), dist_to_target(p, gx, gy, gz), plan_status, plan_expanded, 0, 0, plan_status, 0, 9999.0, 0, 0.0, 0, 0, l(0, 0, 0)));
         if(plan_status == 'no_path',
           emit('mobilityBlocked', name, l('no_path', p, l(gx, gy, gz), plan_expanded))
         );
@@ -3801,7 +3846,8 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
            'timeout_ticks' -> timeout_ticks, 'no_progress_ticks' -> no_progress_ticks,
            'max_deviation' -> 8.0});
         if(!move_ok,
-          emit('navigateDone', name, l(action_id, false, p, l(gx, gy, gz), dist_to_target(p, gx, gy, gz), 'move_start_failed', plan_expanded, length(waypoints), 0, 'move_start_failed'));
+          emit('navigateFinishTrace', name, l(action_id, false, 'move_start_failed', p, l(gx, gy, gz), dist_to_target(p, gx, gy, gz), plan_expanded, length(waypoints)));
+          emit('navigateDone', name, l(action_id, false, p, l(gx, gy, gz), dist_to_target(p, gx, gy, gz), 'move_start_failed', plan_expanded, length(waypoints), 0, 'move_start_failed', 0, 9999.0, 0, 0.0, 0, length(waypoints), if(length(waypoints) > 0, waypoints:0, l(0, 0, 0))));
           global_navigations:name = null;
           true
         ,
@@ -3834,7 +3880,8 @@ finish_navigate(name, move_event_data) -> (
         if(move_reason == 'stuck', 'stuck',
           if(move_reason == 'timeout', 'timeout',
             if(move_reason == 'deviated', 'deviated', move_reason)))));
-    emit('navigateDone', name, l(action_id, nav_arrived, p, l(gx, gy, gz), goal_dist, nav_reason, plan_expanded, plan_waypoints, 0, nav_reason));
+    emit('navigateFinishTrace', name, l(action_id, nav_arrived, nav_reason, p, l(gx, gy, gz), goal_dist, plan_expanded, plan_waypoints));
+    emit('navigateDone', name, l(action_id, nav_arrived, p, l(gx, gy, gz), goal_dist, nav_reason, plan_expanded, plan_waypoints, 0, nav_reason, move_event_data:6, move_event_data:7, move_event_data:8, move_event_data:9, move_event_data:10, move_event_data:11, move_event_data:12));
     if(!nav_arrived && (nav_reason == 'stuck' || nav_reason == 'no_path'),
       emit('mobilityBlocked', name, l(nav_reason, p, l(gx, gy, gz), plan_expanded))
     );
@@ -3868,7 +3915,7 @@ follow_replan(name, target_pos) -> (
   gx = floor(target_pos:0);
   gy = floor(target_pos:1);
   gz = floor(target_pos:2);
-  plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, 8, 8, null);
+  plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, 8, 8, null, 1, keep_radius);
   plan_status = plan_result:1;
   plan_expanded = plan_result:2;
   plan_path = plan_result:3;
@@ -4064,7 +4111,7 @@ engage_replan(name, target_pos) -> (
   rt = target_entity_uuid_near(name, e:13, e:10);
   if(rt != null && is_ranged_hostile(rt), cover = target_pos);
   engage_max_expand = if(cover != null && max_expand > 120, 120, max_expand);
-  plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, engage_max_expand, 8, 8, cover);
+  plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, engage_max_expand, 8, 8, cover, 1, attack_range);
   plan_status = plan_result:1;
   plan_expanded = plan_result:2;
   plan_path = plan_result:3;

@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from minebot.contract import Action, BodyState, Event, InventorySlot, PerceptionResult, Result, perception_next_cursor
+from minebot.game.errors import BodyActionTimeoutError
 from minebot.game.protocol import (
     build_action_call,
     build_chat_drain_call,
@@ -82,13 +83,25 @@ class ScarpetBody:
         action_id: str | None = None,
         action_name: str | None = None,
         scope: str | None = None,
+        ok: bool = True,
+        error_type: str | None = None,
+        error: str | None = None,
     ) -> None:
         entry: dict[str, object] = {
             "kind": kind,
             "started_at": round(started_at, 6),
             "elapsed_ms": round(elapsed_ms, 3),
-            "command": command,
+            "ok": ok,
+            "command_len": len(command),
         }
+        if ok:
+            entry["command"] = command
+        else:
+            entry["command_head"] = command[:160]
+            if error_type is not None:
+                entry["error_type"] = error_type
+            if error is not None:
+                entry["error"] = error
         if action_id is not None:
             entry["action_id"] = action_id
         if action_name is not None:
@@ -107,7 +120,23 @@ class ScarpetBody:
         scope: str | None = None,
     ) -> str:
         started = time.monotonic()
-        raw = self.transport.request(command)
+        try:
+            raw = self.transport.request(command)
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            self._record_request(
+                kind=kind,
+                started_at=time.time(),
+                elapsed_ms=elapsed_ms,
+                command=command,
+                action_id=action_id,
+                action_name=action_name,
+                scope=scope,
+                ok=False,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
         elapsed_ms = (time.monotonic() - started) * 1000.0
         self._record_request(
             kind=kind,
@@ -629,10 +658,19 @@ class ScarpetBody:
         started = time.monotonic()
         poll_count = 0
         observed_events = 0
+        observed: list[dict[str, object]] = []
         while time.monotonic() < deadline:
             poll_count += 1
             for event in self.poll_events():
                 observed_events += 1
+                observed.append(
+                    {
+                        "seq": event.seq,
+                        "tick": event.tick,
+                        "name": event.name,
+                        "action_id": event.data.get("action_id"),
+                    }
+                )
                 if event.name in names and (
                     event.data.get("action_id") == action_id
                     or event.name in GLOBAL_TERMINAL_EVENTS
@@ -646,7 +684,18 @@ class ScarpetBody:
                     )
                     return event
             time.sleep(poll_interval_s)
-        raise TimeoutError(f"timed out waiting for terminal event for action {action_id}")
+        raise BodyActionTimeoutError(
+            f"timed out waiting for terminal event for action {action_id}",
+            diagnostics={
+                "action_id": action_id,
+                "terminal_events": sorted(names),
+                "poll_count": poll_count,
+                "wait_ms": round((time.monotonic() - started) * 1000.0, 3),
+                "observed_events": observed_events,
+                "observed": observed[-32:],
+                "last_seq": self.last_seq,
+            },
+        )
 
     def interrupt(self, reason: str | None = None) -> Result:
         return parse_result(

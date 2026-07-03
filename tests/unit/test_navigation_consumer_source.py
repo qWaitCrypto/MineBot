@@ -47,8 +47,10 @@ class NavigationConsumerSourceTests(unittest.TestCase):
         self.assertNotIn('Action.create("moveTo"', FURNACE)
 
     def test_block_work_consumers_use_shared_navigation_entrypoints(self):
-        self.assertIn("interaction_stand_points(", function_body(BLOCK_WORK, "search_for_block"))
-        self.assertIn("self.navigator.navigate_to(", function_body(BLOCK_WORK, "search_for_block"))
+        search_body = function_body(BLOCK_WORK, "search_for_block")
+        self.assertIn("find_nearby_block_search(", search_body)
+        self.assertNotIn("interaction_stand_points(", search_body)
+        self.assertNotIn("self.navigator.navigate_to(", search_body)
         self.assertIn("_approach_place_candidate(", function_body(BLOCK_WORK, "place_here"))
         self.assertIn("_approach_surface_candidate(", function_body(BLOCK_WORK, "go_to_surface"))
         self.assertIn("_approach_surface_column(", function_body(BLOCK_WORK, "go_to_surface"))

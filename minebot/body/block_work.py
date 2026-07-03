@@ -18,6 +18,7 @@ from minebot.body.world_read import read_block_facts
 from minebot.contract import (
     Action,
     Body,
+    BodyState,
     BreakContext,
     InventorySlot,
     PerceptionResult,
@@ -54,6 +55,8 @@ class BlockWork:
         "netherrack",
     )
     DEFAULT_PILLAR_BLOCKS = DEFAULT_SEAL_BLOCKS
+    DIRECT_MINE_REACH = 2.25
+    MINE_INTERACTION_RANGE = 4.5
     MAX_SEAL_FACES = 2
     LIQUID_CONTACT_OFFSETS = (
         (0, 0, 0),
@@ -141,7 +144,11 @@ class BlockWork:
         if not decision.allowed:
             return _denied_result("break_denied", pos, block_type, decision)
 
-        approach_failed, approach_metrics = self._approach_mining_target(pos, timeout_s=timeout_s)
+        approach_failed, approach_metrics = self._approach_mining_target(
+            pos,
+            context=context,
+            timeout_s=timeout_s,
+        )
         if approach_failed is not None:
             return approach_failed
 
@@ -177,15 +184,63 @@ class BlockWork:
         )
 
     def _approach_mining_target(
-        self, pos: Position, *, timeout_s: float
+        self, pos: Position, *, context: BreakContext | str, timeout_s: float
     ) -> tuple[ToolResult | None, dict[str, object] | None]:
         state = self.body.get_state()
-        if _mining_reach_distance(state.pos, pos) <= 2.25 or _same_column(state.pos, pos):
+        reach_limit = self._mine_reach_limit(context)
+        if _mining_reach_distance(state.pos, pos) <= reach_limit or _same_column(state.pos, pos):
             return None, None
 
-        stand_block = _best_mining_stand_candidate(self.body, pos, state.pos)
-        if isinstance(stand_block, ToolResult):
-            return stand_block, None
+        stand_candidates = _ranked_mining_stand_candidates(self.body, pos, state.pos)
+        if isinstance(stand_candidates, ToolResult):
+            return stand_candidates, None
+        attempts: list[dict[str, object]] = []
+        last_failure: ToolResult | None = None
+        for index, stand_block in enumerate(stand_candidates):
+            failure, metrics = self._approach_mining_target_from_stand(
+                pos,
+                stand_block,
+                state=state,
+                reach_limit=reach_limit,
+                timeout_s=timeout_s,
+            )
+            if failure is None:
+                if metrics is not None:
+                    metrics["stand_candidate_index"] = index
+                    metrics["stand_candidates_tried"] = len(attempts) + 1
+                    if attempts:
+                        metrics["stand_candidate_failures"] = attempts
+                return None, metrics
+            attempts.append(
+                {
+                    "stand_block": list(stand_block),
+                    "reason": failure.reason,
+                    "result": failure.to_payload(),
+                }
+            )
+            last_failure = failure
+            if _should_try_next_mining_stand(failure):
+                continue
+            break
+        if last_failure is None:
+            return ToolResult(
+                success=False,
+                reason="mine_approach_failed:no_stand_candidate",
+                can_retry=True,
+                next_suggestion="choose another nearby target; no mining stand candidate was available",
+                metrics={"target": list(pos), "stand_candidate_failures": attempts},
+            ), None
+        return _with_metric(last_failure, "stand_candidate_failures", attempts), None
+
+    def _approach_mining_target_from_stand(
+        self,
+        pos: Position,
+        stand_block: Position,
+        *,
+        state: BodyState,
+        reach_limit: float,
+        timeout_s: float,
+    ) -> tuple[ToolResult | None, dict[str, object] | None]:
         move_target = _block_center_target(stand_block)
         action = Action.create(
             "moveTo",
@@ -243,7 +298,7 @@ class BlockWork:
             "approach_settle_s": self._mine_approach_settle_s,
             "move_result": result.to_payload(),
         }
-        if reach > 2.25:
+        if reach > reach_limit:
             # Arrived near the guessed stand cell but still out of mining reach —
             # try collect-approach clearance before giving up on the target.
             dig = self._dig_through_approach(pos, stand_block, move_target, timeout_s=timeout_s)
@@ -298,6 +353,7 @@ class BlockWork:
         dig_config = NavigationRunConfig(
             max_break_steps=self.DIG_THROUGH_MAX_BREAK_STEPS,
             allow_local_terrain_fallback=True,
+            progress_neutral_failures=True,
         )
         if timeout_s is not None:
             dig_config = replace(dig_config, segment_timeout_s=timeout_s)
@@ -341,7 +397,7 @@ class BlockWork:
         }
         if clearance_result is not None:
             metrics["clearance"] = clearance_result.to_payload()
-        if nav.success and reach <= 2.25:
+        if nav.success and reach <= self._mine_reach_limit(BreakContext.COLLECT):
             return None, metrics
         # Dig-through ran but still could not bring the target into reach. Return
         # an honest candidate-skip that CARRIES the A* failure diagnostics
@@ -356,6 +412,11 @@ class BlockWork:
             metrics=metrics,
         ), None
 
+    def _mine_reach_limit(self, context: BreakContext | str) -> float:
+        if BreakContext(context) is BreakContext.COLLECT:
+            return self.MINE_INTERACTION_RANGE
+        return self.DIRECT_MINE_REACH
+
     def _clear_collect_approach_stand(
         self,
         stand_block: Position,
@@ -365,7 +426,7 @@ class BlockWork:
     ) -> ToolResult | None:
         """Clear natural blocks occupying the chosen mining stand.
 
-        Server-side `navigateTo` currently handles WALK/SWIM/NO_FLOOR, but it
+        Server-side `navigateTo` currently handles executable WALK/SWIM nodes, but it
         deliberately does not break blocks. Keep the collect-approach break
         authority here, where governance can check each block before mutation.
         This is a narrow fallback for buried targets: clear the feet/head cells
@@ -1819,8 +1880,14 @@ class BlockWork:
         interaction_radius: float = 4.5,
         timeout_s: float = 15.0,
         find_limit: int = 32,
+        max_pages: int = 1,
     ) -> ToolResult:
-        """Find one block target and, if needed, approach into usable range."""
+        """Find block candidates without moving the body.
+
+        This tool is exposed as read_world/perception. It must not invoke
+        navigation or mutate position; approach belongs to mine_block_collect or
+        an explicit navigation tool.
+        """
 
         if not block_types:
             return ToolResult(
@@ -1846,7 +1913,7 @@ class BlockWork:
             block_types=block_types,
             radius=search_radius,
             limit=find_limit,
-            max_pages=1,
+            max_pages=max(1, int(max_pages)),
             not_found_reason="search_block_not_found",
         )
         if isinstance(search, ToolResult):
@@ -1862,6 +1929,7 @@ class BlockWork:
             "search_radius": search_radius,
             "interaction_radius": interaction_radius,
             "find_limit": find_limit,
+            "max_pages": max(1, int(max_pages)),
             "target": {
                 "pos": list(target.pos),
                 "type": target.block_type,
@@ -1887,128 +1955,11 @@ class BlockWork:
                 metrics={**context, "initial_distance": initial_distance, "final_distance": initial_distance},
             )
 
-        if self.navigator is None:
-            stand_points = interaction_stand_points(self.body, target.pos)
-            if isinstance(stand_points, ToolResult):
-                return merge_context(stand_points, context)
-            return ToolResult(
-                success=False,
-                reason="search_block_navigation_missing",
-                can_retry=True,
-                next_suggestion="attach a navigation transaction before attempting distant block interaction",
-                metrics={
-                    **context,
-                    "initial_distance": initial_distance,
-                    "stand_points": [list(point) for point in stand_points],
-                },
-            )
-
-        attempts: list[dict[str, object]] = []
-        last_failure: ToolResult | None = None
-        for target_index, target in enumerate(targets):
-            target_context = {
-                "pos": list(target.pos),
-                "type": target.block_type,
-                "distance": target.distance,
-                "candidate_index": target_index,
-            }
-            stand_points = interaction_stand_points(self.body, target.pos)
-            if isinstance(stand_points, ToolResult):
-                last_failure = merge_context(stand_points, {**context, "target": target_context})
-                continue
-            if not stand_points:
-                last_failure = ToolResult(
-                    success=False,
-                    reason="search_block_no_stand_point",
-                    can_retry=False,
-                    next_suggestion="clear a standable adjacent block before retrying the block approach",
-                    metrics={**context, "target": target_context, "initial_distance": initial_distance},
-                )
-                continue
-
-            for stand in stand_points:
-                from minebot.body.navigation import NavigationRunConfig
-
-                nav_config = NavigationRunConfig(
-                    allow_local_terrain_fallback=True,
-                    progress_neutral_failures=True,
-                )
-                nav_result = self.navigator.navigate_to(
-                    stand,
-                    timeout_s=timeout_s,
-                    break_context=BreakContext.COLLECT_APPROACH,
-                    config=nav_config,
-                )
-                attempts.append({"target": target_context, "goal": list(stand), "result": nav_result.to_payload()})
-                if not nav_result.success:
-                    last_failure = nav_result
-                    continue
-
-                refreshed = self.body.perceive("blockAt", _block_params(target.pos))
-                failed = _perception_failure(refreshed)
-                if failed is not None:
-                    return merge_context(failed, {**context, "target": target_context, "initial_distance": initial_distance, "attempts": attempts})
-                refreshed_type = _normalize_block_type(str(refreshed.data.get("type") or "unknown"))
-                wanted = {_normalize_block_type(block_type) for block_type in block_types}
-                if refreshed_type not in wanted:
-                    return ToolResult(
-                        success=False,
-                        reason="search_block_target_lost",
-                        can_retry=True,
-                        next_suggestion="reacquire the block target before continuing the approach",
-                        metrics={
-                            **context,
-                            "target": target_context,
-                            "initial_distance": initial_distance,
-                            "attempts": attempts,
-                            "refreshed_block": dict(refreshed.data),
-                        },
-                    )
-
-                target_center = (target.pos[0] + 0.5, target.pos[1] + 0.5, target.pos[2] + 0.5)
-                final_state = self.body.get_state()
-                final_distance = dist(final_state.pos, target_center)
-                metrics = {
-                    **context,
-                    "target": target_context,
-                    "initial_distance": initial_distance,
-                    "final_distance": final_distance,
-                    "body_pos": list(final_state.pos),
-                    "attempts": attempts,
-                    "refreshed_block": dict(refreshed.data),
-                }
-                if final_distance <= interaction_radius:
-                    return ToolResult(
-                        success=True,
-                        reason="block_in_range",
-                        can_retry=False,
-                        metrics=metrics,
-                    )
-                last_failure = ToolResult(
-                    success=False,
-                    reason="search_block_out_of_range",
-                    can_retry=True,
-                    next_suggestion="retry from a clearer route or choose another nearby target before continuing",
-                    metrics=metrics,
-                )
-
-        if last_failure is None:
-            last_failure = ToolResult(
-                success=False,
-                reason="search_block_navigation_failed",
-                can_retry=True,
-                metrics={**context, "initial_distance": initial_distance, "attempts": attempts},
-            )
-        # Preserve the search context (notably the dist2-sorted `candidates` list)
-        # in the failure metrics. The approach to the nearest pick may have failed,
-        # but the candidate list is still real and lets the orchestrator try the
-        # next reachable target instead of aborting the whole collection.
         return ToolResult(
-            success=False,
-            reason=f"search_block_navigation_failed:{last_failure.reason}",
-            can_retry=last_failure.can_retry,
-            next_suggestion=last_failure.next_suggestion,
-            metrics={**context, "initial_distance": initial_distance, "attempts": attempts, **dict(last_failure.metrics or {})},
+            success=True,
+            reason="block_candidates_found",
+            can_retry=False,
+            metrics={**context, "initial_distance": initial_distance, "final_distance": initial_distance},
         )
 
     def _find_surface_in_column(
@@ -3406,7 +3357,7 @@ def _mining_approach_stand_candidates(pos: Position) -> tuple[Position, ...]:
     return tuple(candidates)
 
 
-def _best_mining_stand_candidate(body: Body, pos: Position, current: tuple[float, float, float]) -> Position | ToolResult:
+def _ranked_mining_stand_candidates(body: Body, pos: Position, current: tuple[float, float, float]) -> list[Position] | ToolResult:
     approach = _mining_approach_stand_candidates(pos)
     wanted: list[Position] = []
     for candidate in approach:
@@ -3433,7 +3384,36 @@ def _best_mining_stand_candidate(body: Body, pos: Position, current: tuple[float
         if _is_clear_perception(stand) and _is_solid_support_perception(below) and _is_clear_perception(head):
             standable.append(candidate)
     candidates = standable or list(_mining_stand_candidates((pos[0], pos[1] + 1, pos[2])))
-    return min(candidates, key=lambda candidate: _mining_stand_sort_key(current, pos, candidate))
+    return sorted(candidates, key=lambda candidate: _mining_stand_sort_key(current, pos, candidate))
+
+
+def _best_mining_stand_candidate(body: Body, pos: Position, current: tuple[float, float, float]) -> Position | ToolResult:
+    candidates = _ranked_mining_stand_candidates(body, pos, current)
+    if isinstance(candidates, ToolResult):
+        return candidates
+    if not candidates:
+        return ToolResult(
+            success=False,
+            reason="mine_approach_failed:no_stand_candidate",
+            can_retry=True,
+            next_suggestion="choose another nearby target; no mining stand candidate was available",
+            metrics={"target": list(pos)},
+        )
+    return candidates[0]
+
+
+def _should_try_next_mining_stand(result: ToolResult) -> bool:
+    reason = str(result.reason or "")
+    if reason.startswith("mine_approach_failed:dig_through:break_denied:"):
+        clearance = (result.metrics or {}).get("clearance")
+        if isinstance(clearance, dict):
+            metrics = clearance.get("metrics")
+            if isinstance(metrics, dict):
+                legality = metrics.get("legality")
+                if isinstance(legality, dict) and str(legality.get("reason") or "") == "not_natural_breakable":
+                    return True
+        return "not_natural_breakable" in reason
+    return False
 
 
 def _distance_to_block_center(pos: tuple[float, float, float], target: Position) -> float:

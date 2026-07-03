@@ -167,12 +167,18 @@ class ScarpetSourceTests(unittest.TestCase):
             "block_type_matches",
             "wanted = if(params:'type' == null",
             "if(radius > 128, radius = 128)",
+            "y_radius = if(radius > 16, 16, radius);",
+            "if(params:'y_radius' != null, y_radius = floor(number(params:'y_radius')));",
+            "if(y_radius > 64, y_radius = 64);",
+            "r2 = radius * radius;",
+            "if(ox*ox + oz*oz <= r2,",
             "if(limit > 128, limit = 128)",
             "found = l();",
             "entry = l(dist2, x, y, z, bs, block_kind(bs));",
             "put(found:insert_at, entry, 'insert');",
             "delete(found:window_limit);",
             "totalMatches",
+            '"yRadius":%d',
             '"dist2":%.3f',
             '"blocks":[%s]',
         ):
@@ -187,7 +193,7 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIsNotNone(
             re.search(
                 r"if\(p == null,\s*"
-                r"emit\('navigateDone'.*?'missing_body'.*?\);\s*true",
+                r".*?emit\('navigateDone'.*?'missing_body'.*?\);\s*true",
                 body,
                 re.S,
             )
@@ -202,11 +208,49 @@ class ScarpetSourceTests(unittest.TestCase):
         )
         self.assertIsNotNone(
             re.search(
-                r"emit\('navigateDone'.*?'move_start_failed'.*?\);\s*"
+                r".*?emit\('navigateDone'.*?'move_start_failed'.*?\);\s*"
                 r"global_navigations:name = null;\s*true",
                 body,
                 re.S,
             )
+        )
+        self.assertIn('"move_ticks":%d', source)
+        self.assertIn('"move_min_dist":%.3f', source)
+        self.assertIn('"move_stuck_ticks":%d', source)
+        self.assertIn('"move_deviation":%.3f', source)
+        self.assertIn('"move_waypoint_index":%d', source)
+        self.assertIn('"move_waypoint_count":%d', source)
+        self.assertIn('"move_current_waypoint":%s', source)
+        self.assertIn("finish_navigate(name, l(m:0, arrived, p, target, dist, reason, m:5, m:7, m:8, deviation, m:14, length(m:13), current_waypoint(m)))", source)
+        finish = re.search(r"finish_navigate\(name, move_event_data\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(finish, "finish_navigate function not found")
+        self.assertIn("move_event_data:6", finish.group(1))
+        self.assertIn("move_event_data:12", finish.group(1))
+
+    def test_server_navigation_does_not_plan_through_no_floor_air_waypoints(self):
+        source = MINEBOT_SC.read_text()
+        self.assertIn("if(w == 'SOLID' || w == 'NO_FLOOR',", source)
+        self.assertNotIn("if(w == 'LIQUID', 3.0, if(w == 'NO_FLOOR', 2.0, 1.0))", source)
+
+    def test_server_navigation_requires_meaningful_partial_progress(self):
+        source = MINEBOT_SC.read_text()
+        self.assertIn(
+            "navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above, cover_target, min_partial_progress, goal_radius)",
+            source,
+        )
+        self.assertIn("partial_progress = h0 - best_h", source)
+        self.assertIn("partial_progress >= min_partial_progress", source)
+        self.assertIn("min_partial_progress = floor(param_number(params, 'min_partial_progress', 5))", source)
+        self.assertIn("if(min_partial_progress < 1, min_partial_progress = 1)", source)
+
+    def test_server_navigation_honors_near_goal_radius(self):
+        source = MINEBOT_SC.read_text()
+        self.assertIn("if(probe_heuristic(cx, cy, cz, gx, gy, gz) <= goal_radius,", source)
+        self.assertIn("goal_radius = floor(param_number(params, 'goal_radius', 0))", source)
+        self.assertIn("if(goal_radius < 0, goal_radius = 0)", source)
+        self.assertIn(
+            "navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above, null, min_partial_progress, goal_radius)",
+            source,
         )
 
     def test_follow_started_json_uses_json_value_for_target(self):
@@ -246,14 +290,15 @@ class ScarpetSourceTests(unittest.TestCase):
         ):
             self.assertIn(expected, source)
 
-    def test_auto_combat_reflex_flees_ranged_or_flying_hostiles(self):
+    def test_auto_combat_reflex_is_defensive_not_auto_pursuit(self):
         source = MINEBOT_SC.read_text()
 
         self.assertIn("is_flying_hostile(e)", source)
         self.assertIn("entity_matches_type(e, 'minecraft:phantom')", source)
-        self.assertIn("!is_ranged_hostile(nearest) && !is_flying_hostile(nearest)", source)
         self.assertIn("start_combat_flee_reflex(name, tp)", source)
-        self.assertIn("start_engage(name, 'auto:combat:' + name", source)
+        auto_reflex = re.search(r"start_combat_reflex\(name\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(auto_reflex)
+        self.assertNotIn("start_engage(name, 'auto:combat:' + name", auto_reflex.group(1))
 
     def test_item_pickup_event_is_emitted_in_production_app(self):
         source = MINEBOT_SC.read_text()
@@ -692,6 +737,7 @@ class ScarpetSourceTests(unittest.TestCase):
 
         for helper in (
             "json_waypoints",
+            "json_waypoint_summary",
             "parse_waypoints",
             "normalize_waypoint_point",
             "current_waypoint",
@@ -705,6 +751,9 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("target = current_waypoint(m)", source)
         self.assertIn("advance_waypoint(name, updated_move)", source)
         self.assertIn('"waypoints":%s', source)
+        self.assertIn("json_waypoint_summary(data:3)", source)
+        self.assertIn('{"count":%d,"first":%s,"last":%s}', source)
+        self.assertNotIn("json_waypoints(data:3)", source)
         self.assertIn('"waypoint_index":%d', source)
         self.assertIn('"waypoint_count":%d', source)
 
@@ -808,10 +857,14 @@ class ScarpetSourceTests(unittest.TestCase):
             "queue_immediate_water_reflex(name)",
             "movement_water_escape_should_trigger(name, m, stuck_ticks)",
             "start_water_reflex(name)",
+            "water_reflex_should_trigger(name) &&",
             "start_water_reflex(name) -> start_hazard_reflex(name, 'water');",
             "if(kind == 'water', water_escape_target(p), safe_escape_target(p))",
+            "if(kind == 'water' && target == null,",
+            "target = water_surface_target(p)",
             "if(kind == 'fire', 'fireReflex', if(kind == 'water', 'waterReflex', 'lavaReflex'))",
             "if(kind == 'fire', !on_fire_now(name), if(kind == 'water', water_hazard_clear(name), !lava_near_pos(p)))",
+            "escaped = if(kind == 'water', water_target_is_shore && dist <= 0.9 && water_on_dry_stand",
             "global_pending_reflexes:name = 'water'",
             "global_pending_reflexes:name = 'fire'",
             "global_pending_reflexes:name = 'lava'",
@@ -823,10 +876,17 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIsNotNone(hazard, "hazard_kind_near_name function not found")
         self.assertIn("water_reflex_should_trigger(name)", hazard.group(1))
         self.assertNotIn("if(in_water_now(name),", hazard.group(1))
+        escape = re.search(r"water_escape_target\(p\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(escape, "water_escape_target function not found")
+        self.assertIn("water_shore_escape_target(p)", escape.group(1))
+        self.assertNotIn("water_surface_target(p)", escape.group(1))
         move_tick = re.search(r"run_move_tick\(name, m\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(move_tick, "run_move_tick function not found")
         self.assertIn("movement_water_escape_should_trigger(name, updated_move, stuck_ticks)", move_tick.group(1))
         self.assertIn("start_water_reflex(name)", move_tick.group(1))
+        movement_water = re.search(r"movement_water_escape_should_trigger\(name, m, stuck_ticks\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(movement_water, "movement_water_escape_should_trigger function not found")
+        self.assertIn("water_reflex_should_trigger(name)", movement_water.group(1))
 
     def test_ranged_attack_controller_uses_weapon_specific_fire_and_authoritative_damage_truth(self):
         source = MINEBOT_SC.read_text()

@@ -118,6 +118,7 @@ def _read_find_blocks_pages(
     *,
     wanted_type: str,
     radius: int,
+    y_radius: int,
     limit: int,
     max_pages: int = 32,
 ) -> dict[str, object] | ToolResult:
@@ -133,6 +134,7 @@ def _read_find_blocks_pages(
             {
                 "type": wanted_type,
                 "radius": radius,
+                "y_radius": y_radius,
                 "limit": limit,
                 "start": start,
             },
@@ -178,6 +180,10 @@ def find_nearby_block_targets(
     return search.targets
 
 
+def _default_find_blocks_y_radius(radius: int) -> int:
+    return min(max(4, radius // 2), 16)
+
+
 def find_nearby_block_search(
     body: Body,
     block_types: tuple[str, ...],
@@ -196,11 +202,13 @@ def find_nearby_block_search(
     truncated = False
     pages_read = 0
     total_matches = 0
+    y_radius = _default_find_blocks_y_radius(radius)
     for wanted_type in wanted:
         pages = _read_find_blocks_pages(
             body,
             wanted_type=wanted_type,
             radius=radius,
+            y_radius=y_radius,
             limit=limit,
             max_pages=max_pages,
         )

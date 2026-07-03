@@ -403,6 +403,64 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertIn("model_result", result_event)
         self.assertIn("attempts", result_event["full_result"]["metrics"])
 
+    def test_sdk_tool_records_tool_decision_context(self):
+        def callable_(_params):
+            return ToolResult(
+                True,
+                "state_read",
+                False,
+                metrics={"pos": [1, 70, 2], "health": 10.0, "food": 4, "oxygen": 300},
+            )
+
+        tool = RegisteredTool(
+            name="read_state",
+            description="Read",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="read_state", mutating=False, tool_type="state"),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        trace = RuntimeTrace()
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        runtime.last_known_body_state = {"pos": [0.5, 70.0, 0.5], "health": 12.0, "food": 3}
+        runtime.last_tool_results = [
+            {
+                "tool": "collect_resource",
+                "success": False,
+                "reason": "partial_budget_exhausted",
+                "summary": {"after_count": 12},
+            }
+        ]
+        runtime.agent_context.observe_assistant_message("I will look for food, then continue logs.")
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
+            runtime=runtime,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+
+        self.assertTrue(out["success"])
+        events = trace.snapshot()
+        decision = next(event for event in events if event["event"] == "tool_decision_context")
+        self.assertEqual(decision["tool"], "read_state")
+        self.assertEqual(decision["last_known_body_state"]["food"], 3)
+        self.assertEqual(decision["recent_tool_results"][0]["reason"], "partial_budget_exhausted")
+        self.assertEqual(decision["recent_session_messages"][0]["role"], "assistant")
+        self.assertTrue(runtime.last_tool_results[-1]["success"])
+
     def test_sdk_tool_marks_truncated_result_incomplete_for_model(self):
         def callable_(_params):
             return ToolResult(
@@ -679,6 +737,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
 
         self.assertEqual(runtime.last_known_body_state["pos"], [4.5, 70.0, -2.25])
         self.assertEqual(runtime.last_known_body_state["health"], 13.0)
+        self.assertEqual(runtime.last_known_body_state["oxygen"], 300)
         self.assertEqual(runtime.last_known_body_state["inventory_hash"], "inv2")
 
     def test_sdk_tool_preempts_body_missing_camel_case_event(self):
@@ -768,6 +827,38 @@ class AgentRunnerSpineTests(unittest.TestCase):
                 {"governance": LegalityDecision(True, "allowed_natural")},
             )
         )
+
+    def test_tool_projection_keeps_proactive_combat_out_of_resource_focus(self):
+        normal = ModeRuntime().profile_for(LifecycleState.ACTIVE)
+        modes = ModeRuntime()
+        engage = modes.reduce([AgentSignal.hostile_nearby("zombie")], LifecycleState.ACTIVE).profile
+        combat_sidecar = ToolSidecar(
+            "engage_entity",
+            mutating=True,
+            tool_type="combat",
+            permission="combat",
+            body_scope=("combat", "nearby_entities"),
+        )
+        hostile_read_sidecar = ToolSidecar(
+            "find_hostiles",
+            mutating=False,
+            tool_type="perception",
+            permission="read_world",
+            body_scope=("nearby_entities",),
+        )
+        block_read_sidecar = ToolSidecar(
+            "search_for_block",
+            mutating=False,
+            tool_type="perception",
+            permission="read_world",
+            body_scope=("blocks",),
+        )
+
+        self.assertFalse(tool_is_enabled(combat_sidecar, normal, {}))
+        self.assertFalse(tool_is_enabled(hostile_read_sidecar, normal, {}))
+        self.assertTrue(tool_is_enabled(block_read_sidecar, normal, {}))
+        self.assertTrue(tool_is_enabled(combat_sidecar, engage, {}))
+        self.assertTrue(tool_is_enabled(hostile_read_sidecar, engage, {}))
 
     def test_run_turn_enters_active_once_and_preserves_active_on_second_turn(self):
         body = FakeBody()

@@ -296,6 +296,8 @@ def _highest_situational(
     current: SituationalState,
 ) -> tuple[SituationalState, str | None]:
     if not candidates:
+        if current in {"death", "engage", "survival"}:
+            return "normal", None
         return current, None
     return max(candidates, key=lambda item: _SITUATIONAL_SEVERITY[item[0]])
 
@@ -313,7 +315,7 @@ def _profile_axes(
     situational: SituationalState,
 ) -> tuple[tuple[str, ...], Literal["primary", "fast"], Literal["minimal", "standard", "deep"], tuple[str, ...]]:
     if situational == "survival":
-        return ("survival", "recovery", "navigation"), "fast", "standard", ("survival",)
+        return ("survival", "recovery", "navigation", "resource"), "fast", "standard", ("survival",)
     if situational == "engage":
         return ("combat", "navigation", "perception"), "fast", "standard", ("combat",)
     if situational == "mobility":
@@ -325,7 +327,10 @@ def _profile_axes(
 
 def _context_frame(situational: SituationalState) -> str:
     if situational == "survival":
-        return "Survival issue resolved or active; reason from current body facts before continuing."
+        return (
+            "Survival issue active; preserve the resource goal. Do not initiate combat as a food strategy; "
+            "continue the resource chain only when safe, otherwise yield a typed blocker."
+        )
     if situational == "engage":
         return "Hostile nearby or under attack; consider find_hostiles + engage_entity or disengage/heal."
     if situational == "mobility":

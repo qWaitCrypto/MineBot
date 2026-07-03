@@ -381,7 +381,7 @@ class BlockWorkTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "search_block_not_found")
 
-    def test_search_for_block_requires_navigation_when_target_out_of_range(self):
+    def test_search_for_block_returns_distant_candidates_without_navigation(self):
         blocks = {
             (8, 64, 0): ("minecraft:oak_log", "SOLID"),
             (9, 64, 0): ("minecraft:air", "CLEAR"),
@@ -405,10 +405,13 @@ class BlockWorkTests(unittest.TestCase):
 
         result = work.search_for_block(block_types=("oak_log",), search_radius=12)
 
-        self.assertFalse(result.success)
-        self.assertEqual(result.reason, "search_block_navigation_missing")
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "block_candidates_found")
+        self.assertEqual(result.metrics["target"]["pos"], [8, 64, 0])
+        self.assertEqual(result.metrics["candidates"][0]["pos"], [8, 64, 0])
+        self.assertEqual(body.actions, [])
 
-    def test_search_for_block_reaches_target_after_navigation(self):
+    def test_search_for_block_does_not_navigate_even_when_navigator_is_available(self):
         blocks = {
             (8, 64, 0): ("minecraft:oak_log", "SOLID"),
             (9, 64, 0): ("minecraft:air", "CLEAR"),
@@ -439,11 +442,10 @@ class BlockWorkTests(unittest.TestCase):
         result = work.search_for_block(block_types=("oak_log",), search_radius=12)
 
         self.assertTrue(result.success, result.to_payload())
-        self.assertEqual(result.reason, "block_in_range")
+        self.assertEqual(result.reason, "block_candidates_found")
         self.assertEqual(result.metrics["target"]["type"], "oak_log")
-        self.assertLessEqual(result.metrics["final_distance"], 4.5)
-        self.assertEqual(navigator.calls[0][1]["break_context"], BreakContext.COLLECT_APPROACH)
-        self.assertTrue(navigator.calls[0][1]["config"].allow_local_terrain_fallback)
+        self.assertGreater(result.metrics["final_distance"], 4.5)
+        self.assertEqual(navigator.calls, [])
 
     def test_search_for_block_accepts_truncated_find_blocks_when_candidates_exist(self):
         blocks = {
@@ -469,10 +471,11 @@ class BlockWorkTests(unittest.TestCase):
         result = work.search_for_block(block_types=("oak_log",), search_radius=12)
 
         self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "block_candidates_found")
         self.assertTrue(result.metrics["truncated"])
         self.assertEqual(result.metrics["uncertainty"], [{"reason": "limit_exceeded"}])
 
-    def test_search_for_block_tries_next_candidate_after_navigation_failure(self):
+    def test_search_for_block_returns_all_candidates_without_candidate_navigation(self):
         blocks = {
             (4, 64, 0): ("minecraft:oak_log", "SOLID"),
             (5, 64, 0): ("minecraft:air", "CLEAR"),
@@ -529,18 +532,13 @@ class BlockWorkTests(unittest.TestCase):
         result = work.search_for_block(block_types=("oak_log",), search_radius=12)
 
         self.assertTrue(result.success, result.to_payload())
-        self.assertEqual(result.reason, "block_in_range")
-        self.assertEqual(result.metrics["target"]["pos"], [8, 64, 0])
-        self.assertGreaterEqual(len(navigator.calls), 2)
+        self.assertEqual(result.reason, "block_candidates_found")
+        self.assertEqual(result.metrics["target"]["pos"], [4, 64, 0])
+        self.assertEqual([item["pos"] for item in result.metrics["candidates"]], [[4, 64, 0], [8, 64, 0]])
+        self.assertEqual(navigator.calls, [])
 
-    def test_search_for_block_candidate_navigation_failures_are_progress_neutral(self):
-        # search_for_block is exposed as a perception/search helper, but it may
-        # probe stand points through the shared navigator. Those probes can reject
-        # a bad tree candidate; they must not consume the global failure-storm
-        # budget and cause the next independent move_to call to yield before it
-        # even starts.
+    def test_search_for_block_read_only_does_not_feed_failure_storm(self):
         from minebot.brain.progress import ProgressAuthority
-        from minebot.body.navigation import NavigationRunConfig
 
         blocks: dict[tuple[int, int, int], tuple[str, str]] = {}
         find_blocks = []
@@ -560,18 +558,6 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 self.calls.append((goal, kwargs))
-                cfg = kwargs.get("config")
-                if not isinstance(cfg, NavigationRunConfig):
-                    raise AssertionError(f"expected NavigationRunConfig, got {type(cfg).__name__}")
-                if not cfg.progress_neutral_failures:
-                    raise AssertionError("search_for_block candidate probes must use neutral progress accounting")
-                progress.note_step(
-                    ("navigate.segment", goal, "stuck"),
-                    success=False,
-                    fingerprint=progress.fingerprint(body.get_state()),
-                    neutral=cfg.progress_neutral_failures,
-                )
-                progress.require_can_continue("search_for_block probe")
                 return ToolResult(False, "stuck", True, metrics={"goal": list(goal)})
 
         navigator = AlwaysStuckNavigator()
@@ -583,9 +569,9 @@ class BlockWorkTests(unittest.TestCase):
 
         result = work.search_for_block(block_types=("oak_log",), search_radius=24, find_limit=5)
 
-        self.assertFalse(result.success)
-        self.assertEqual(result.reason, "search_block_navigation_failed:stuck")
-        self.assertEqual(len(navigator.calls), 20)
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "block_candidates_found")
+        self.assertEqual(navigator.calls, [])
         self.assertEqual(progress.failure_steps, 0)
         progress.require_can_continue("next independent move")
 
@@ -659,16 +645,80 @@ class BlockWorkTests(unittest.TestCase):
 
         result = work.search_for_block(block_types=("oak_log",), search_radius=12, find_limit=1)
 
-        self.assertFalse(result.success, result.to_payload())
-        self.assertEqual(result.reason, "search_block_navigation_failed:navigation_blocked:no_path")
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "block_candidates_found")
         find_calls = [params for scope, params in body.perceptions if scope == "findBlocks"]
         self.assertEqual(len(find_calls), 1)
         self.assertEqual(find_calls[0]["start"], 0)
+        self.assertEqual(find_calls[0]["y_radius"], 6)
         self.assertEqual(result.metrics["pages_read"], 1)
         self.assertEqual(result.metrics["total_matches"], 2)
         self.assertTrue(result.metrics["truncated"])
 
-    def test_search_for_block_reports_target_lost_after_navigation(self):
+    def test_search_for_block_can_chase_bounded_extra_find_blocks_pages_when_requested(self):
+        blocks = {
+            (4, 64, 0): ("minecraft:oak_log", "SOLID"),
+            (8, 64, 0): ("minecraft:oak_log", "SOLID"),
+        }
+        pages = [
+            PerceptionResult(
+                "Bot1",
+                "findBlocks",
+                "perception",
+                True,
+                False,
+                {
+                    "blocks": [{"x": 4, "y": 64, "z": 0, "type": "minecraft:oak_log"}],
+                    "totalMatches": 2,
+                },
+                uncertainty=[],
+                next="1",
+            ),
+            PerceptionResult(
+                "Bot1",
+                "findBlocks",
+                "perception",
+                True,
+                True,
+                {
+                    "blocks": [{"x": 8, "y": 64, "z": 0, "type": "minecraft:oak_log"}],
+                    "totalMatches": 2,
+                },
+            ),
+        ]
+        body = FakeBody(blocks=blocks, find_block_pages=pages)
+        work = BlockWork(
+            body,
+            GovernancePolicy(natural_regions=[Region("search", (-20, 0, -20), (20, 100, 20))]),
+        )
+
+        result = work.search_for_block(block_types=("oak_log",), search_radius=12, find_limit=1, max_pages=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        find_calls = [params for scope, params in body.perceptions if scope == "findBlocks"]
+        self.assertEqual([call["start"] for call in find_calls], [0, 1])
+        self.assertEqual(result.metrics["pages_read"], 2)
+        self.assertFalse(result.metrics["truncated"])
+        self.assertEqual([item["pos"] for item in result.metrics["candidates"]], [[4, 64, 0], [8, 64, 0]])
+
+    def test_search_for_block_caps_find_blocks_vertical_window_for_large_radius(self):
+        body = FakeBody(
+            blocks={(4, 64, 0): ("minecraft:oak_log", "SOLID")},
+            find_blocks=[{"x": 4, "y": 64, "z": 0, "type": "minecraft:oak_log"}],
+        )
+        work = BlockWork(
+            body,
+            GovernancePolicy(natural_regions=[Region("search", (-100, 0, -100), (100, 140, 100))]),
+        )
+
+        result = work.search_for_block(block_types=("oak_log",), search_radius=64)
+
+        self.assertTrue(result.success, result.to_payload())
+        find_calls = [params for scope, params in body.perceptions if scope == "findBlocks"]
+        self.assertEqual(find_calls[0]["radius"], 64)
+        self.assertEqual(find_calls[0]["y_radius"], 16)
+
+    def test_search_for_block_does_not_refresh_or_report_target_lost_by_moving(self):
         blocks = {
             (8, 64, 0): ("minecraft:oak_log", "SOLID"),
             (9, 64, 0): ("minecraft:air", "CLEAR"),
@@ -704,8 +754,9 @@ class BlockWorkTests(unittest.TestCase):
 
         result = work.search_for_block(block_types=("oak_log",), search_radius=12)
 
-        self.assertFalse(result.success)
-        self.assertEqual(result.reason, "search_block_target_lost")
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "block_candidates_found")
+        self.assertEqual(navigator.calls, [])
 
     def test_mine_block_denies_unknown_provenance_without_executing_action(self):
         body = FakeBody(
@@ -774,19 +825,40 @@ class BlockWorkTests(unittest.TestCase):
                 return result
 
         body = ApproachingBody(
-            blocks={(0, 64, 3): ("stone", "SOLID")},
+            blocks={(0, 64, 6): ("stone", "SOLID")},
         )
         body.state_pos = (0.5, 65.0, 0.5)
         settled: list[float] = []
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
         runtime = BlockWork(body, policy, settle=settled.append)
 
-        result = runtime.mine_block((0, 64, 3), context=BreakContext.TRAVEL, timeout_s=1.0)
+        result = runtime.mine_block((0, 64, 6), context=BreakContext.TRAVEL, timeout_s=1.0)
 
         self.assertTrue(result.success)
         self.assertEqual([action.name for action in body.actions[:2]], ["moveTo", "mineBlock"])
-        self.assertEqual(body.actions[0].params["target"], [0.5, 65.0, 2.5])
+        self.assertEqual(body.actions[0].params["target"], [0.5, 65.0, 5.5])
         self.assertEqual(settled, [0.3])
+
+    def test_mine_block_collect_does_not_over_approach_inside_interaction_range(self):
+        blocks = {
+            (0, 66, 2): ("spruce_log", "SOLID"),
+        }
+        body = FakeBody(
+            blocks=blocks,
+            inventory_pages=[
+                inventory_page([slot(9, "minecraft:spruce_log", 0)]),
+                inventory_page([slot(9, "minecraft:spruce_log", 1)]),
+            ],
+        )
+        body.state_pos = (0.5, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy)
+
+        result = runtime.mine_block_collect((0, 66, 2), context=BreakContext.COLLECT, timeout_s=1.0)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual([action.name for action in body.actions], ["mineBlock"])
+        self.assertNotIn("mine_approach", result.metrics["mine_result"]["metrics"])
 
     def test_mine_block_collect_classifies_unreachable_approach_as_candidate_skip(self):
         # The live failure: collect walked underground candidates, but the approach
@@ -893,6 +965,143 @@ class BlockWorkTests(unittest.TestCase):
         self.assertTrue(result.success, result)
         self.assertEqual(result.reason, "collected")
         self.assertIn("mineBlock", [action.name for action in body.actions])
+
+    def test_mine_block_collect_skips_leaf_blocked_stand_candidate(self):
+        class StuckThenNavBody(FakeBody):
+            def execute(self, action: Action) -> Result:
+                result = super().execute(action)
+                if action.name == "moveTo":
+                    self.terminal = Event(
+                        seq=self.terminal.seq,
+                        tick=self.terminal.tick,
+                        bot=self.terminal.bot,
+                        name="moveDone",
+                        data={
+                            "action_id": action.id,
+                            "arrived": False,
+                            "final_pos": list(self.state_pos),
+                            "target": list(action.params["target"]),
+                            "stopped_reason": "stuck",
+                        },
+                    )
+                return result
+
+        body = StuckThenNavBody(
+            blocks={
+                (0, 64, 5): ("dirt", "SOLID"),
+                (0, 65, 4): ("spruce_leaves", "SOLID"),
+                (0, 66, 4): ("air", "CLEAR"),
+                (0, 64, 4): ("stone", "SOLID"),
+                (0, 65, 6): ("stone", "SOLID"),
+                (0, 66, 6): ("air", "CLEAR"),
+                (0, 64, 6): ("stone", "SOLID"),
+                (-1, 65, 5): ("stone", "SOLID"),
+                (-1, 66, 5): ("air", "CLEAR"),
+                (-1, 64, 5): ("stone", "SOLID"),
+                (1, 65, 5): ("stone", "SOLID"),
+                (1, 66, 5): ("air", "CLEAR"),
+                (1, 64, 5): ("stone", "SOLID"),
+            },
+            inventory_pages=[
+                inventory_page([slot(9, "minecraft:dirt", 0)]),
+                inventory_page([slot(9, "minecraft:dirt", 1)]),
+            ],
+        )
+        body.state_pos = (0.5, 65.0, 0.5)
+        navigator = FakeNavigator(result=True, reason="arrived")
+        navigator.body = body
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.mine_block_collect((0, 64, 5), context=BreakContext.COLLECT, timeout_s=1.0)
+
+        self.assertTrue(result.success, result)
+        approach = result.metrics["mine_result"]["metrics"]["mine_approach"]
+        failures = approach["stand_candidate_failures"]
+        self.assertEqual(failures[0]["stand_block"], [0, 65, 4])
+        self.assertEqual(
+            failures[0]["reason"],
+            "mine_approach_failed:dig_through:break_denied:not_natural_breakable",
+        )
+        self.assertEqual(approach["stand_block"], [-1, 65, 5])
+        self.assertEqual(body.blocks[(0, 65, 4)], ("spruce_leaves", "SOLID"))
+        self.assertEqual(body.blocks[(-1, 65, 5)], ("air", "CLEAR"))
+        cleared_targets = [
+            action.params["target"]
+            for action in body.actions
+            if action.name == "mineBlock" and action.params.get("context") == BreakContext.COLLECT_APPROACH.value
+        ]
+        self.assertNotIn([0, 65, 4], cleared_targets)
+        self.assertIn([-1, 65, 5], cleared_targets)
+
+    def test_mine_block_collect_dig_through_candidate_navigation_is_progress_neutral(self):
+        from minebot.brain.progress import FAILURE_STORM_LIMIT, ProgressAuthority
+        from minebot.body.navigation import NavigationRunConfig
+
+        class StuckThenNavBody(FakeBody):
+            def execute(self, action: Action) -> Result:
+                result = super().execute(action)
+                if action.name == "moveTo":
+                    self.terminal = Event(
+                        seq=self.terminal.seq,
+                        tick=self.terminal.tick,
+                        bot=self.terminal.bot,
+                        name="moveDone",
+                        data={
+                            "action_id": action.id,
+                            "arrived": False,
+                            "final_pos": list(self.state_pos),
+                            "target": list(action.params["target"]),
+                            "stopped_reason": "stuck",
+                        },
+                    )
+                return result
+
+        class ProgressRecordingNavigator(FakeNavigator):
+            def __init__(self, progress: ProgressAuthority, body: FakeBody) -> None:
+                super().__init__(result=False, reason="stuck")
+                self.progress = progress
+                self.body = body
+
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                cfg = kwargs.get("config")
+                if isinstance(cfg, NavigationRunConfig):
+                    self.progress.note_step(
+                        ("collect_approach_probe", goal),
+                        success=False,
+                        fingerprint=self.progress.fingerprint(self.body.get_state()),
+                        neutral=cfg.progress_neutral_failures,
+                    )
+                    self.progress.require_can_continue("collect approach candidate probe")
+                return ToolResult(False, "stuck", True, metrics={"goal": list(goal)})
+
+        body = StuckThenNavBody(
+            blocks={
+                (0, 64, 5): ("dirt", "SOLID"),
+                (0, 65, 4): ("air", "CLEAR"),
+            },
+            inventory_pages=[inventory_page([]) for _ in range(FAILURE_STORM_LIMIT + 1)],
+        )
+        body.state_pos = (0.5, 65.0, 0.5)
+        progress = ProgressAuthority()
+        navigator = ProgressRecordingNavigator(progress, body)
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        for _ in range(FAILURE_STORM_LIMIT):
+            body.blocks[(0, 64, 5)] = ("dirt", "SOLID")
+            result = runtime.mine_block_collect((0, 64, 5), context=BreakContext.COLLECT, timeout_s=1.0)
+            self.assertFalse(result.success)
+            self.assertIn(result.reason, {"mine_approach_failed:dig_through:stuck", "collect_no_inventory_delta"})
+
+        self.assertEqual(progress.failure_steps, 0)
+        collect_probe_calls = [
+            call for call in navigator.calls if isinstance(call[1].get("config"), NavigationRunConfig)
+        ]
+        self.assertTrue(collect_probe_calls)
+        self.assertTrue(all(call[1]["config"].progress_neutral_failures for call in collect_probe_calls))
+        progress.require_can_continue("next collect candidate")
 
     def test_mine_block_approach_uses_feet_level_stand_for_headroom_target(self):
         class ApproachingBody(FakeBody):

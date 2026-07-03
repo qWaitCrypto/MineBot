@@ -30,10 +30,12 @@ class FakeLifecycleBody:
     def __init__(self, *, states, spawn_result, event_batches):
         self.states = list(states)
         self.spawn_result = spawn_result
-        self.event_batches = [list(batch) for batch in event_batches]
+        self.event_batches = [batch if isinstance(batch, Exception) else list(batch) for batch in event_batches]
         self.spawn_calls = []
 
     def get_state(self):
+        if self.states and isinstance(self.states[0], Exception):
+            raise self.states.pop(0)
         if len(self.states) == 1:
             return self.states[0]
         return self.states.pop(0)
@@ -65,7 +67,14 @@ class FakeLifecycleBody:
     def poll_events(self):
         if not self.event_batches:
             return []
-        return self.event_batches.pop(0)
+        batch = self.event_batches.pop(0)
+        if isinstance(batch, Exception):
+            raise batch
+        return batch
+
+
+class FakeLifecycleTransportError(Exception):
+    pass
 
 
 class LifecycleRuntimeTests(unittest.TestCase):
@@ -130,6 +139,80 @@ class LifecycleRuntimeTests(unittest.TestCase):
         self.assertEqual(body.spawn_calls[0]["pos"], (3, 59, 0))
         self.assertTrue(body.spawn_calls[0]["emit_respawned"])
         self.assertEqual(result.metrics["state_after"]["pos"], [3.0, 59.0, 0.0])
+
+    def test_recover_after_death_retries_initial_state_transport_error(self):
+        body = FakeLifecycleBody(
+            states=[
+                FakeLifecycleTransportError("RCON socket closed"),
+                state_at((0, -80, 0), missing=True),
+                state_at((3, 59, 0), missing=False),
+            ],
+            spawn_result=Result(
+                id=None,
+                bot="Bot1",
+                type="result",
+                ok=True,
+                accepted=True,
+                complete=True,
+                data={"action": "spawn"},
+                error=None,
+            ),
+            event_batches=[
+                [
+                    Event(
+                        seq=1,
+                        tick=20,
+                        bot="Bot1",
+                        name="respawned",
+                        data={"final_pos": [3.5, 59.0, 0.5]},
+                    )
+                ],
+            ],
+        )
+        runtime = LifecycleTransactions(body)
+
+        result = runtime.recover_after_death(respawn_pos=(3, 59, 0))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(result.metrics["state_before_recheck_errors"][0]["message"], "RCON socket closed")
+
+    def test_recover_after_death_accepts_respawn_event_when_state_drifted_after_spawn(self):
+        body = FakeLifecycleBody(
+            states=[
+                state_at((0, -80, 0), missing=True),
+                state_at((4.5, 59, 0), missing=False),
+            ],
+            spawn_result=Result(
+                id=None,
+                bot="Bot1",
+                type="result",
+                ok=True,
+                accepted=True,
+                complete=True,
+                data={"action": "spawn"},
+                error=None,
+            ),
+            event_batches=[
+                [
+                    Event(
+                        seq=1,
+                        tick=20,
+                        bot="Bot1",
+                        name="respawned",
+                        data={"final_pos": [3.5, 59.0, 0.5]},
+                    )
+                ],
+            ],
+        )
+        runtime = LifecycleTransactions(body)
+
+        result = runtime.recover_after_death(respawn_pos=(3, 59, 0))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(result.metrics["validated_by"], ["respawned_event"])
+        self.assertGreater(result.metrics["state_distance"], result.metrics["arrival_tolerance"])
 
     def test_recover_after_death_reports_missing_respawn_event(self):
         body = FakeLifecycleBody(
@@ -206,3 +289,81 @@ class LifecycleRuntimeTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "respawn_position_mismatch")
+
+    def test_recover_after_death_accepts_state_recovery_after_respawn_event_transport_error(self):
+        body = FakeLifecycleBody(
+            states=[
+                state_at((0, -80, 0), missing=True),
+                state_at((3, 59, 0), missing=False),
+            ],
+            spawn_result=Result(
+                id=None,
+                bot="Bot1",
+                type="result",
+                ok=True,
+                accepted=True,
+                complete=True,
+                data={"action": "spawn"},
+                error=None,
+            ),
+            event_batches=[FakeLifecycleTransportError("RCON socket closed")],
+        )
+        runtime = LifecycleTransactions(body)
+
+        result = runtime.recover_after_death(respawn_pos=(3, 59, 0), respawn_event_timeout_s=0.01)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed_after_transport_recheck")
+        self.assertEqual(result.metrics["respawn_event"], "transport_error_but_state_recovered")
+        self.assertEqual(result.metrics["transport_recheck"]["phase"], "wait_respawn_event")
+        self.assertEqual(result.metrics["transport_recheck"]["result"], "state_recovered")
+
+    def test_recover_after_death_retries_state_recheck_after_transport_error(self):
+        body = FakeLifecycleBody(
+            states=[
+                state_at((0, -80, 0), missing=True),
+                FakeLifecycleTransportError("RCON socket closed"),
+                state_at((3, 59, 0), missing=False),
+            ],
+            spawn_result=Result(
+                id=None,
+                bot="Bot1",
+                type="result",
+                ok=True,
+                accepted=True,
+                complete=True,
+                data={"action": "spawn"},
+                error=None,
+            ),
+            event_batches=[FakeLifecycleTransportError("RCON socket closed")],
+        )
+        runtime = LifecycleTransactions(body)
+
+        result = runtime.recover_after_death(respawn_pos=(3, 59, 0), respawn_event_timeout_s=0.01)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed_after_transport_recheck")
+        self.assertEqual(result.metrics["transport_recheck"]["state_errors"][0]["message"], "RCON socket closed")
+
+    def test_recover_after_death_keeps_transport_error_when_recheck_still_missing(self):
+        body = FakeLifecycleBody(
+            states=[
+                state_at((0, -80, 0), missing=True),
+                state_at((0, -80, 0), missing=True),
+            ],
+            spawn_result=Result(
+                id=None,
+                bot="Bot1",
+                type="result",
+                ok=True,
+                accepted=True,
+                complete=True,
+                data={"action": "spawn"},
+                error=None,
+            ),
+            event_batches=[FakeLifecycleTransportError("RCON socket closed")],
+        )
+        runtime = LifecycleTransactions(body)
+
+        with self.assertRaises(FakeLifecycleTransportError):
+            runtime.recover_after_death(respawn_pos=(3, 59, 0), respawn_event_timeout_s=0.01)

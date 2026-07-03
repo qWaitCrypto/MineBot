@@ -15,6 +15,7 @@ from minebot.contract import (
     Body,
     BodyState,
     BreakContext,
+    Event,
     LocalProgressController,
     PlaceContext,
     Position,
@@ -31,7 +32,7 @@ from minebot.game.navigation import GoalLike, normalize_goal
 
 WAYPOINT_MOVES = frozenset({MoveKind.WALK, MoveKind.DIAGONAL, MoveKind.ASCEND, MoveKind.DESCEND, MoveKind.SWIM, MoveKind.FALL})
 TERRAIN_ACTION_MOVES = frozenset({MoveKind.BREAK, MoveKind.PLACE, MoveKind.PILLAR, MoveKind.DOWNWARD})
-SCARPET_FALLBACK_REASONS = frozenset({"no_path", "stuck", "timeout", "deviated", "segment_budget_exhausted"})
+SCARPET_FALLBACK_REASONS = frozenset({"no_path", "stuck", "timeout", "deviated", "segment_budget_exhausted", "partial_segment_budget_exhausted"})
 TERRAIN_FALLBACK_H_RADIUS = 5
 TERRAIN_FALLBACK_Y_BELOW = 3
 TERRAIN_FALLBACK_Y_ABOVE = 8
@@ -40,7 +41,8 @@ TERRAIN_FALLBACK_MAX_TILES = 64
 
 @dataclass(frozen=True)
 class NavigationRunConfig:
-    max_segments: int = 8
+    max_segments: int = 32
+    max_partial_segments: int | None = None
     segment_timeout_s: float = 15.0
     server_grid_radius: int = 64
     server_max_expand: int = 2500
@@ -155,8 +157,11 @@ class NavigationTransactions:
         goal_anchor = nav_goal.representative(start)
         gx, gy, gz = int(goal_anchor[0]), int(goal_anchor[1]), int(goal_anchor[2])
         ar = cfg.movement_arrival_radius or 0.75
+        goal_radius = int(getattr(nav_goal, "radius", 0) or 0)
 
         segment_index = 0
+        partial_segments = 0
+        max_partial_segments = cfg.max_partial_segments if cfg.max_partial_segments is not None else cfg.max_segments
         while segment_index < cfg.max_segments:
             if not self.progress.generation_current(generation):
                 return _result(False, "preempted", True, goal_anchor, executed, {"generation_current": False})
@@ -175,8 +180,10 @@ class NavigationTransactions:
                     "y_below": 8,
                     "y_above": 8,
                     "arrival_radius": ar,
+                    "goal_radius": goal_radius,
                     "timeout_ticks": max(20, int(cfg.segment_timeout_s * 20)),
                     "no_progress_ticks": cfg.server_no_progress_ticks,
+                    "min_partial_progress": max(1, cfg.min_partial_progress),
                 },
             )
             result = self.body.execute(action)
@@ -197,8 +204,9 @@ class NavigationTransactions:
                 return _result(False, "preempted", True, goal_anchor, executed, {"generation_current": False})
 
             td = terminal.data
-            nav_arrived = td.get("arrived", False)
-            nav_reason = td.get("reason") or td.get("nav_reason") or td.get("stopped_reason") or terminal.name
+            raw_nav_reason = td.get("reason") or td.get("nav_reason") or td.get("stopped_reason") or terminal.name
+            nav_reason = "preempted" if terminal.name == "ownerPreempted" else raw_nav_reason
+            nav_arrived = bool(td.get("arrived", False)) or nav_reason == "arrived"
             goal_dist = td.get("goal_dist", td.get("dist_to_target", 9999.0))
 
             executed.append(ExecutedSegment(
@@ -209,6 +217,15 @@ class NavigationTransactions:
                     "waypoints": td.get("waypoints", 0),
                     "goal_dist": goal_dist,
                     "event": terminal.name,
+                    "raw_reason": raw_nav_reason,
+                    "move_ticks": td.get("move_ticks"),
+                    "move_min_dist": td.get("move_min_dist"),
+                    "move_stuck_ticks": td.get("move_stuck_ticks"),
+                    "move_deviation": td.get("move_deviation"),
+                    "move_waypoint_index": td.get("move_waypoint_index"),
+                    "move_waypoint_count": td.get("move_waypoint_count"),
+                    "move_current_waypoint": td.get("move_current_waypoint"),
+                    "event_data": dict(td),
                 },
             ))
 
@@ -226,18 +243,66 @@ class NavigationTransactions:
                 return _result(True, "arrived", False, goal_anchor, executed, {"navigation_goal": nav_goal.payload()})
 
             if nav_reason == "preempted":
+                reflex = _wait_for_reflex_completion(
+                    self.body,
+                    timeout_s=min(5.0, max(1.0, cfg.segment_timeout_s / 3.0)),
+                )
+                if reflex is not None and reflex.name == "reflexCompleted":
+                    if executed:
+                        executed[-1].diagnostics["reflex_handoff"] = {
+                            "event": reflex.name,
+                            "seq": reflex.seq,
+                            "data": dict(reflex.data),
+                        }
+                    if reflex.data.get("escaped_hazard") is False:
+                        return _result(
+                            False,
+                            "water_egress_failed" if reflex.data.get("kind") == "water" else "reflex_failed",
+                            True,
+                            goal_anchor,
+                            executed,
+                            {
+                                "navigation_goal": nav_goal.payload(),
+                                "paused": False,
+                                "reflex_handoff": "reflex_failed",
+                                "reflex": dict(reflex.data),
+                            },
+                        )
+                    state = self.body.get_state()
+                    start = _block_pos(state)
+                    segment_index += 1
+                    continue
                 return _result(
                     True,
                     "preempted",
                     True,
                     goal_anchor,
                     executed,
-                    {"navigation_goal": nav_goal.payload(), "paused": True},
+                    {
+                        "navigation_goal": nav_goal.payload(),
+                        "paused": True,
+                        "reflex_handoff": "timeout" if reflex is None else reflex.name,
+                    },
                 )
 
             if nav_reason == "partial":
                 state = self.body.get_state()
                 start = _block_pos(state)
+                partial_segments += 1
+                if partial_segments >= max_partial_segments:
+                    return _result(
+                        False,
+                        "partial_segment_budget_exhausted",
+                        True,
+                        goal_anchor,
+                        executed,
+                        {
+                            "navigation_goal": nav_goal.payload(),
+                            "goal_dist": goal_dist,
+                            "partial_segments": partial_segments,
+                            "max_partial_segments": max_partial_segments,
+                        },
+                    )
                 segment_index += 1
                 continue
 
@@ -1929,6 +1994,18 @@ def _scarpet_failure_can_fallback(
     return reason in SCARPET_FALLBACK_REASONS or reason.startswith("navigation_blocked:")
 
 
+def _wait_for_reflex_completion(body: Body, *, timeout_s: float) -> Event | None:
+    deadline = monotonic() + timeout_s
+    while monotonic() < deadline:
+        for event in body.poll_events():
+            if event.name == "reflexCompleted":
+                return event
+            if event.name in {"death", "bodyMissing", "respawned"}:
+                return event
+        sleep(0.05)
+    return None
+
+
 def _with_fallback_origin(result: ToolResult, original_reason: str) -> ToolResult:
     metrics = dict(result.metrics or {})
     metrics.setdefault("terrain_fallback_original_reason", original_reason)
@@ -1976,7 +2053,7 @@ def _path_update_probe(
 def _path_update_category(source: str, reason: str, segment: NavigationSegment | None) -> str:
     if segment is not None and segment.plan.diagnostics.get("stop_reason") == "unloaded_boundary":
         return "unloaded_boundary"
-    if reason in {"timeout", "segment_budget_exhausted", "expansion_limit"}:
+    if reason in {"timeout", "segment_budget_exhausted", "partial_segment_budget_exhausted", "expansion_limit"}:
         return "timeout"
     if reason in {"stuck", "deviated"}:
         return reason

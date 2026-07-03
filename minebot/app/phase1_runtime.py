@@ -7,6 +7,7 @@ not silently expose only a resource-only registry.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from minebot.app.model_provider import ModelProviderRegistry
@@ -15,6 +16,7 @@ from minebot.app.runner import sdk_tool_for
 from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
 from minebot.body import BlockWork, LifecycleTransactions, NavigationRunConfig, NavigationTransactions
 from minebot.body.combat import CombatTransactions, find_hostiles
+from minebot.body.world_read import read_block_facts
 from minebot.brain.composition import (
     CompositionBudget,
     CompositionContext,
@@ -23,7 +25,7 @@ from minebot.brain.composition import (
 )
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
 from minebot.brain.progress import ProgressAuthority
-from minebot.contract import Body, BreakContext, InventorySlot, Position, Region, ToolResult, perception_next_cursor
+from minebot.contract import Body, BreakContext, InventorySlot, PerceptionResult, Position, Region, ToolResult, perception_next_cursor
 from minebot.game import GovernancePolicy, ScarpetBody
 from minebot.game.navigation import GoalNear
 
@@ -88,7 +90,7 @@ def _phase1_recovery_handler(body: ScarpetBody, config: Phase1RuntimeConfig):
 
     def recover(runtime: AgentRuntime) -> RecoveryOutcome:
         pre_recovery_inventory = _pre_recovery_inventory_facts(runtime, body)
-        before_state = body.get_state()
+        before_state, before_state_errors = _body_state_with_transport_retry(body)
         respawn_pos = _recovery_respawn_pos(runtime, config)
         runtime.trace.emit(
             "recovery_driver_start",
@@ -97,6 +99,7 @@ def _phase1_recovery_handler(body: ScarpetBody, config: Phase1RuntimeConfig):
             state_before_pos=list(before_state.pos),
             inventory_before_recovery=pre_recovery_inventory,
             last_known_body_state=runtime.last_known_body_state,
+            state_before_recheck_errors=before_state_errors,
         )
         result = lifecycle.recover_after_death(
             respawn_pos=respawn_pos,
@@ -112,13 +115,25 @@ def _phase1_recovery_handler(body: ScarpetBody, config: Phase1RuntimeConfig):
             "recovery_reason": result.reason,
             "inventory_before_recovery": pre_recovery_inventory,
         }
+        if before_state_errors:
+            facts["state_before_recheck_errors"] = before_state_errors
         if runtime.last_known_body_state is not None:
             facts["last_known_body_state"] = dict(runtime.last_known_body_state)
         if isinstance(result.metrics, dict):
             facts["recovery_metrics"] = dict(result.metrics)
         if not result.success:
             return RecoveryOutcome(False, result.reason, facts=facts, can_retry=result.can_retry)
-        after_state = body.get_state()
+        after_state, after_state_errors = _body_state_with_transport_retry(body)
+        if after_state_errors:
+            facts["state_after_recheck_errors"] = after_state_errors
+        safe_respawn = _ensure_safe_recovery_stand(body, lifecycle, after_state, config)
+        if safe_respawn is not None:
+            facts["safe_respawn"] = safe_respawn.to_payload()
+            if not safe_respawn.success:
+                return RecoveryOutcome(False, safe_respawn.reason, facts=facts, can_retry=safe_respawn.can_retry)
+            after_state, safe_after_errors = _body_state_with_transport_retry(body)
+            if safe_after_errors:
+                facts["safe_respawn_state_recheck_errors"] = safe_after_errors
         runtime._remember_body_state(after_state)
         post_recovery_inventory = _safe_inventory_counts(body)
         facts["inventory_after_recovery"] = post_recovery_inventory
@@ -135,6 +150,33 @@ def _phase1_recovery_handler(body: ScarpetBody, config: Phase1RuntimeConfig):
     return recover
 
 
+def _body_state_with_transport_retry(body: Body, *, attempts: int = 5, delay_s: float = 0.2):
+    errors: list[dict[str, object]] = []
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return body.get_state(), errors
+        except Exception as exc:
+            if not _is_recheckable_recovery_transport_error(exc):
+                raise
+            last_exc = exc
+            errors.append({"attempt": attempt, "error_type": type(exc).__name__, "message": str(exc)})
+            if attempt < attempts:
+                time.sleep(delay_s)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("body state recheck failed")
+
+
+def _is_recheckable_recovery_transport_error(exc: Exception) -> bool:
+    if isinstance(exc, (OSError, TimeoutError)):
+        return True
+    error_type = type(exc).__name__
+    if error_type in {"BodyProtocolError", "EnvelopeError", "RconError", "TruncatedPayloadError", "IncompletePayloadError"}:
+        return True
+    return "RCON" in str(exc)
+
+
 def _pre_recovery_inventory_facts(runtime: AgentRuntime, body: Body) -> dict[str, object]:
     slot = runtime.mode_runtime.suspend_slot
     progress = slot.last_progress if slot is not None else {}
@@ -148,10 +190,144 @@ def _recovery_respawn_pos(runtime: AgentRuntime, config: Phase1RuntimeConfig) ->
     if config.recovery_respawn_pos is not None:
         return tuple(int(value) for value in config.recovery_respawn_pos)
     state = runtime.last_known_body_state or {}
+    if _last_known_state_is_hazardous_for_respawn(state):
+        return None
     pos = state.get("pos")
     if isinstance(pos, list) and len(pos) == 3:
         return (round(float(pos[0])), round(float(pos[1])), round(float(pos[2])))
     return None
+
+
+def _last_known_state_is_hazardous_for_respawn(state: dict[str, object]) -> bool:
+    oxygen = state.get("oxygen")
+    if oxygen is None:
+        return False
+    try:
+        return float(oxygen) <= 80.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _ensure_safe_recovery_stand(
+    body: ScarpetBody,
+    lifecycle: LifecycleTransactions,
+    state,
+    config: Phase1RuntimeConfig,
+) -> ToolResult | None:
+    if not _state_requires_safe_respawn(state):
+        return None
+    safe_pos = _find_recovery_dry_stand(body, state.pos)
+    if safe_pos is None:
+        return ToolResult(
+            False,
+            "respawn_unsafe:no_dry_stand",
+            True,
+            metrics={"state_after": _recovery_state_metrics(state)},
+        )
+    despawn = body.despawn()
+    if not (despawn.ok and despawn.accepted):
+        return ToolResult(
+            False,
+            f"respawn_unsafe:despawn_failed:{despawn.error or 'despawn_failed'}",
+            True,
+            metrics={
+                "state_after": _recovery_state_metrics(state),
+                "safe_respawn_pos": list(safe_pos),
+                "despawn": {
+                    "ok": despawn.ok,
+                    "accepted": despawn.accepted,
+                    "complete": despawn.complete,
+                    "error": despawn.error,
+                    "data": despawn.data,
+                },
+            },
+        )
+    result = lifecycle.recover_after_death(
+        respawn_pos=safe_pos,
+        yaw=getattr(state, "yaw", None),
+        pitch=getattr(state, "pitch", None),
+        dimension=getattr(state, "dimension", None),
+        gamemode=config.recovery_gamemode,
+    )
+    metrics = dict(result.metrics or {})
+    metrics["safe_respawn_pos"] = list(safe_pos)
+    metrics["unsafe_state_after_default_spawn"] = _recovery_state_metrics(state)
+    return ToolResult(result.success, f"safe_{result.reason}", result.can_retry, result.next_suggestion, metrics)
+
+
+def _state_requires_safe_respawn(state) -> bool:
+    if getattr(state, "missing", False):
+        return True
+    oxygen = getattr(state, "oxygen", None)
+    if oxygen is not None:
+        try:
+            if float(oxygen) <= 80.0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    health = getattr(state, "health", None)
+    if health is not None:
+        try:
+            if float(health) <= 0.0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def _find_recovery_dry_stand(body: Body, pos: tuple[float, float, float]) -> Position | None:
+    bx, by, bz = round(float(pos[0])), round(float(pos[1])), round(float(pos[2]))
+    origins: list[Position] = []
+    for radius in range(0, 7):
+        for dx in range(-radius, radius + 1):
+            for dz in range(-radius, radius + 1):
+                if max(abs(dx), abs(dz)) != radius:
+                    continue
+                for dy in range(4, -7, -1):
+                    origins.append((bx + dx, by + dy, bz + dz))
+    wanted: list[Position] = []
+    for x, y, z in origins:
+        wanted.extend(((x, y, z), (x, y + 1, z), (x, y - 1, z)))
+    try:
+        facts = read_block_facts(body, tuple(wanted), page_size=96, failure_label="recovery_safe_stand")
+    except ValueError:
+        return None
+    for stand in origins:
+        feet = facts.get(stand)
+        head = facts.get((stand[0], stand[1] + 1, stand[2]))
+        support = facts.get((stand[0], stand[1] - 1, stand[2]))
+        if feet is None or head is None or support is None:
+            continue
+        if _is_recovery_clear(feet) and _is_recovery_clear(head) and _is_recovery_support(support):
+            return stand
+    return None
+
+
+def _is_recovery_clear(perception: PerceptionResult) -> bool:
+    block_type = _normalize_block_type(str(perception.data.get("type") or "unknown"))
+    block_state = str(perception.data.get("state") or "UNKNOWN")
+    return block_type == "air" or block_state == "CLEAR"
+
+
+def _is_recovery_support(perception: PerceptionResult) -> bool:
+    block_type = _normalize_block_type(str(perception.data.get("type") or "unknown"))
+    block_state = str(perception.data.get("state") or "UNKNOWN")
+    return block_type not in {"air", "water", "lava"} and block_state not in {"CLEAR", "LIQUID"}
+
+
+def _normalize_block_type(value: str) -> str:
+    return value.removeprefix("minecraft:")
+
+
+def _recovery_state_metrics(state) -> dict[str, object]:
+    return {
+        "pos": list(getattr(state, "pos", ())),
+        "health": getattr(state, "health", None),
+        "food": getattr(state, "food", None),
+        "oxygen": getattr(state, "oxygen", None),
+        "missing": getattr(state, "missing", None),
+        "dimension": getattr(state, "dimension", None),
+    }
 
 
 def _maybe_float_from_state(state: dict[str, object] | None, key: str) -> float | None:
@@ -245,6 +421,7 @@ def build_phase1_registry(
     registry.register(_read_state_tool(body))
     register_inventory_tools(registry, body)
     registry.register(_move_to_tool(navigator))
+    registry.register(_go_to_surface_tool(work))
     registry.register(_follow_tool(navigator))
     combat = CombatTransactions(body, progress=progress)
     registry.register(_engage_tool(combat))
@@ -330,7 +507,7 @@ def _move_to_tool(navigator: NavigationTransactions) -> RegisteredTool:
         lambda params: navigator.navigate_to(
             _nav_goal(params),
             break_context=BreakContext.TRAVEL,
-            config=NavigationRunConfig(max_segments=8, segment_timeout_s=float(params.get("timeout_s") or 12.0)),
+            config=NavigationRunConfig(max_segments=32, segment_timeout_s=float(params.get("timeout_s") or 12.0)),
         ),
         ToolSidecar(
             "move_to",
@@ -340,6 +517,44 @@ def _move_to_tool(navigator: NavigationTransactions) -> RegisteredTool:
             permission="move",
             body_scope=("navigation",),
             terminal_truth=("navigateDone", "position"),
+            timeout_s=120.0,
+        ),
+    )
+
+
+def _go_to_surface_tool(work: BlockWork) -> RegisteredTool:
+    return RegisteredTool(
+        "go_to_surface",
+        "Move from a pit, water pocket, or below-grade position to a verified nearby natural surface using Body-owned navigation/ascent logic.",
+        {
+            "type": "object",
+            "properties": {
+                "timeout_s": {"type": "number", "exclusiveMinimum": 0},
+                "surface_scan_height": {"type": "integer", "minimum": 0},
+                "surface_scan_radius": {"type": "integer", "minimum": 0},
+                "max_steps": {"type": "integer", "minimum": 1},
+                "allow_staircase_fallback": {"type": "boolean"},
+                "world_top_y": {"type": "integer"},
+            },
+            "additionalProperties": False,
+        },
+        lambda params: work.go_to_surface(
+            context=BreakContext.COLLECT_APPROACH,
+            timeout_s=float(params.get("timeout_s") or 30.0),
+            surface_scan_height=int(params.get("surface_scan_height") or 32),
+            surface_scan_radius=int(params.get("surface_scan_radius") or 2),
+            max_steps=(int(params["max_steps"]) if params.get("max_steps") is not None else None),
+            allow_staircase_fallback=bool(params.get("allow_staircase_fallback", True)),
+            world_top_y=int(params.get("world_top_y") or 320),
+        ),
+        ToolSidecar(
+            "go_to_surface",
+            mutating=True,
+            source="body.block_work",
+            tool_type="navigation",
+            permission="move",
+            body_scope=("navigation", "surface"),
+            terminal_truth=("position", "ToolResult"),
             timeout_s=120.0,
         ),
     )
@@ -452,6 +667,7 @@ def _search_tool(work: BlockWork) -> RegisteredTool:
                 "block_types": {"type": "array", "items": {"type": "string"}},
                 "search_radius": {"type": "integer"},
                 "find_limit": {"type": "integer"},
+                "max_pages": {"type": "integer"},
             },
             "required": ["block_types"],
             "additionalProperties": True,
@@ -460,6 +676,7 @@ def _search_tool(work: BlockWork) -> RegisteredTool:
             block_types=tuple(str(item) for item in params.get("block_types", [])),
             search_radius=min(max(1, int(params.get("search_radius") or 16)), 64),
             find_limit=int(params.get("find_limit") or 6),
+            max_pages=min(max(1, int(params.get("max_pages") or 1)), 8),
             timeout_s=12.0,
         ),
         ToolSidecar(

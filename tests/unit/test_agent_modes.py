@@ -124,6 +124,22 @@ class ModeRuntimeTests(unittest.TestCase):
         self.assertEqual(recovered.profile.situational, "normal")
         self.assertEqual(recovered.requested_lifecycle, LifecycleState.RESUMING)
 
+    def test_transient_survival_does_not_stick_after_healthy_turn(self):
+        modes = ModeRuntime()
+
+        low = modes.reduce(
+            [AgentSignal.survival_metric_red("low_health")],
+            LifecycleState.ACTIVE,
+            goal_text="collect 64 logs",
+        )
+        self.assertEqual(low.profile.situational, "survival")
+        self.assertIn("resource", low.profile.tool_focus)
+
+        healthy = modes.reduce([], LifecycleState.ACTIVE, goal_text="collect 64 logs")
+
+        self.assertEqual(healthy.profile.situational, "normal")
+        self.assertIn("resource", healthy.profile.tool_focus)
+
     def test_death_priority_beats_same_turn_mobility_and_stale_tool_results(self):
         modes = ModeRuntime()
 

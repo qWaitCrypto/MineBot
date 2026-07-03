@@ -39,11 +39,13 @@ class BatchFakeBody:
         self.force_complete = force_complete
         self.envelope_only_next = envelope_only_next
         self.calls = 0
+        self.request_log = []
 
     def perceive(self, scope, params):
         if scope != "blockCells":
             raise AssertionError(f"unexpected scope {scope}")
         self.calls += 1
+        self.request_log.append(dict(params))
         if self.fail:
             return PerceptionResult(
                 bot="Bot1", scope="blockCells", type="perception",
@@ -122,6 +124,23 @@ class ReadBlockFactsTests(unittest.TestCase):
         self.assertEqual(len(facts), 5)
         for x in range(5):
             self.assertEqual(facts[(x, 64, 0)].data["state"], "SOLID")
+
+    def test_pagination_chunks_outbound_cells_to_bound_rcon_command_size(self):
+        blocks = {(x, 64, 0): ("stone", "SOLID") for x in range(5)}
+        body = BatchFakeBody(blocks)
+
+        facts = read_block_facts(body, tuple((x, 64, 0) for x in range(5)), page_size=2)
+
+        self.assertEqual(len(facts), 5)
+        self.assertEqual(
+            [call["cells"] for call in body.request_log],
+            [
+                [[0, 64, 0], [1, 64, 0]],
+                [[2, 64, 0], [3, 64, 0]],
+                [[4, 64, 0]],
+            ],
+        )
+        self.assertTrue(all(call["start"] == 0 for call in body.request_log))
 
     def test_paginates_with_envelope_next_when_data_cursor_is_absent(self):
         blocks = {(x, 64, 0): ("stone", "SOLID") for x in range(3)}

@@ -165,9 +165,9 @@ def tool_is_enabled(
 ) -> bool:
     """Shared-pool tool projection predicate.
 
-    State foregrounds capabilities through context and ordering; it does not
-    hide tools. Only governance/refusal facts and hard preconditions disable a
-    tool.
+    The registry remains the single shared tool pool. Runtime profiles project
+    that pool through hard capability gates so a resource task does not turn
+    into proactive combat unless the FSM has actually entered combat policy.
     """
     facts = facts or {}
     if facts.get("disabled") is True or facts.get("precondition_missing") is True:
@@ -177,6 +177,14 @@ def tool_is_enabled(
         return bool(decision.allowed)
     if isinstance(decision, dict) and decision.get("allowed") is False:
         return False
+    policy_tags = set(profile.policy_tags)
+    body_scope = set(getattr(sidecar, "body_scope", ()) or ())
+    permission = str(getattr(sidecar, "permission", "") or "")
+    tool_type = str(getattr(sidecar, "tool_type", "") or "")
+    if permission == "combat":
+        return "combat" in policy_tags
+    if tool_type == "perception" and "nearby_entities" in body_scope:
+        return "combat" in policy_tags
     return True
 
 
@@ -186,6 +194,19 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
         tool_call_id = f"tool-{uuid4()}-{tool.name}"
         arguments_summary = _tool_arguments_summary_from_json(input_json)
         if trace is not None:
+            runtime = getattr(ctx.context, "runtime", None)
+            trace.emit(
+                "tool_decision_context",
+                tool_call_id=tool_call_id,
+                tool=tool.name,
+                situational=ctx.context.profile.situational,
+                lifecycle=ctx.context.profile.lifecycle,
+                tool_focus=list(ctx.context.profile.tool_focus),
+                policy_tags=list(ctx.context.profile.policy_tags),
+                last_known_body_state=dict(runtime.last_known_body_state or {}) if runtime is not None else None,
+                recent_tool_results=_tool_result_summaries(runtime.last_tool_results if runtime is not None else []),
+                recent_session_messages=_recent_session_messages(ctx.context.agent_context),
+            )
             trace.emit(
                 "tool_invoke",
                 tool_call_id=tool_call_id,
@@ -246,6 +267,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                     error_type=type(exc).__name__,
                     reason=result["reason"],
                     message=str(exc),
+                    await_diagnostics=result.get("metrics", {}).get("await_diagnostics"),
                 )
             if result.get("reason") == "transport_error":
                 ctx.context.weld_context.authority.invalidate_generation(f"transport_error:{tool.name}")
@@ -255,6 +277,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                     tool=tool.name,
                     reason=result["reason"],
                     error_type=type(exc).__name__,
+                    await_diagnostics=result.get("metrics", {}).get("await_diagnostics"),
                 )
                 runtime = getattr(ctx.context, "runtime", None)
                 if runtime is not None:
@@ -273,6 +296,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
 
         runtime = getattr(ctx.context, "runtime", None)
         if runtime is not None:
+            runtime.remember_tool_result(tool.name, result)
             runtime.remember_tool_body_facts(result)
         return _finalize_tool_payload(
             tool=tool,
@@ -333,15 +357,19 @@ def _finalize_tool_payload(
 
 def _tool_exception_payload(exc: Exception) -> JsonObject:
     reason = "transport_error" if isinstance(exc, (BodyProtocolError, OSError, TimeoutError)) else "tool_runtime_error"
+    diagnostics = getattr(exc, "diagnostics", None)
+    metrics: JsonObject = {
+        "error_type": type(exc).__name__,
+        "message": _shorten(str(exc), limit=300),
+    }
+    if isinstance(diagnostics, dict):
+        metrics["await_diagnostics"] = dict(diagnostics)
     return {
         "success": False,
         "reason": reason,
         "canRetry": True,
         "nextSuggestion": "retry after refreshing state; choose a different action if the same failure repeats",
-        "metrics": {
-            "error_type": type(exc).__name__,
-            "message": _shorten(str(exc), limit=300),
-        },
+        "metrics": metrics,
     }
 
 
@@ -516,6 +544,7 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
         "dimension",
         "inventory_hash",
         "error_type",
+        "reflex_handoff",
     )
     summary: JsonObject = {}
     for key in allowed_keys:
@@ -535,9 +564,69 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
         summary["deltas"] = {str(k): v for k, v in list(metrics["deltas"].items())[:8]}
     if "uncertainty" in metrics:
         summary["uncertainty"] = _bounded_summary_value(metrics["uncertainty"])
+    if isinstance(metrics.get("reflex"), dict):
+        reflex = metrics["reflex"]
+        summary["reflex"] = {
+            key: _bounded_summary_value(reflex[key])
+            for key in (
+                "kind",
+                "escaped_hazard",
+                "target_is_dry_stand",
+                "final_is_dry_stand",
+                "target",
+                "final_pos",
+                "target_block",
+                "target_below",
+                "dist_to_escape",
+            )
+            if key in reflex
+        }
+    if isinstance(metrics.get("clearance"), dict):
+        clearance = metrics["clearance"]
+        clearance_metrics = clearance.get("metrics") if isinstance(clearance.get("metrics"), dict) else {}
+        legality = clearance_metrics.get("legality") if isinstance(clearance_metrics.get("legality"), dict) else {}
+        summary["clearance"] = {
+            "reason": clearance.get("reason"),
+            "block_type": clearance_metrics.get("block_type"),
+            "target": _bounded_summary_value(clearance_metrics.get("target")),
+            "stand_block": _bounded_summary_value(
+                (clearance_metrics.get("collect_approach_clearance") or {}).get("stand_block")
+                if isinstance(clearance_metrics.get("collect_approach_clearance"), dict)
+                else None
+            ),
+            "legality_reason": legality.get("reason"),
+        }
     if not summary and reason:
         summary["tool"] = tool_name
     return summary
+
+
+def _tool_result_summary(result: JsonObject) -> JsonObject:
+    metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+    return _metrics_summary("tool", str(result.get("reason") or ""), metrics)
+
+
+def _tool_result_summaries(results: list[dict[str, Any]]) -> list[JsonObject]:
+    out: list[JsonObject] = []
+    for item in results[-6:]:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            {
+                "tool": item.get("tool"),
+                "success": item.get("success"),
+                "reason": item.get("reason"),
+                "summary": item.get("summary"),
+            }
+        )
+    return out
+
+
+def _recent_session_messages(context: AgentContext, *, limit: int = 3) -> list[JsonObject]:
+    return [
+        {"role": role, "content": _shorten(content, limit=300)}
+        for role, content in context.session_messages()[-limit:]
+    ]
 
 
 def _bounded_summary_value(value: object) -> object:
@@ -822,6 +911,18 @@ class AgentRuntime:
         if has_tool_call and not has_content:
             self.trace.emit("assistant_no_content_tool_only")
 
+    def remember_tool_result(self, tool_name: str, result: JsonObject) -> None:
+        self.last_tool_results.append(
+            {
+                "tool": tool_name,
+                "success": bool(result.get("success")),
+                "reason": str(result.get("reason") or ""),
+                "summary": _tool_result_summary(result),
+            }
+        )
+        if len(self.last_tool_results) > 12:
+            del self.last_tool_results[: len(self.last_tool_results) - 12]
+
     def _remember_body_state(self, state: Any) -> None:
         if getattr(state, "missing", False):
             return
@@ -832,6 +933,7 @@ class AgentRuntime:
             "pitch": getattr(state, "pitch", None),
             "health": getattr(state, "health", None),
             "food": getattr(state, "food", None),
+            "oxygen": getattr(state, "oxygen", None),
             "dimension": getattr(state, "dimension", None),
             "inventory_hash": getattr(state, "inventory_hash", None),
         }
@@ -854,6 +956,7 @@ class AgentRuntime:
                 "pitch": metrics.get("pitch", previous.get("pitch")),
                 "health": metrics.get("health", previous.get("health")),
                 "food": metrics.get("food", previous.get("food")),
+                "oxygen": metrics.get("oxygen", previous.get("oxygen")),
                 "dimension": metrics.get("dimension", previous.get("dimension")),
                 "inventory_hash": metrics.get("inventory_hash", previous.get("inventory_hash")),
             }
@@ -915,6 +1018,7 @@ class AgentRuntime:
             threshold=BODY_TRANSPORT_RECOVERY_LIMIT,
             error_type=metrics.get("error_type"),
             reason=str(result.get("reason") or ""),
+            await_diagnostics=metrics.get("await_diagnostics"),
         )
         if self.consecutive_transport_errors >= BODY_TRANSPORT_RECOVERY_LIMIT:
             facts = self.authority.facts(self.agent_context.goal_text)

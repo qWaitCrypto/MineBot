@@ -203,6 +203,25 @@ class BodyClientTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("minebot_action", transport.command_seen)
 
+    def test_failed_transport_request_is_recorded_with_safe_summary(self):
+        class FailingTransport:
+            def request(self, command: str) -> str:
+                raise OSError("socket closed")
+
+        body = ScarpetBody("Bot1", FailingTransport())
+
+        with self.assertRaises(OSError):
+            body.perceive("blockAt", {"x": 1, "y": 2, "z": 3})
+
+        self.assertEqual(len(body.request_history), 1)
+        entry = body.request_history[0]
+        self.assertFalse(entry["ok"])
+        self.assertEqual(entry["kind"], "perception")
+        self.assertEqual(entry["scope"], "blockAt")
+        self.assertEqual(entry["error_type"], "OSError")
+        self.assertIn("minebot_perceive", entry["command_head"])
+        self.assertNotIn("command", entry)
+
 
     def test_poll_events_inserts_desync_fact_on_gap(self):
         transport = FakeTransport(

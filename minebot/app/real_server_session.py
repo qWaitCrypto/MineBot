@@ -25,7 +25,8 @@ from minebot.brain.lifecycle import LifecycleState
 from minebot.brain.composition import resource_plan_for
 from minebot.contract import Body, Region
 from minebot.game import RconClient, ScarpetBody
-from minebot.game.errors import RconError
+from minebot.game.errors import EnvelopeError, RconError
+from minebot.game.protocol import build_state_call, parse_state
 from minebot.game.rcon import RconConfig
 
 
@@ -34,6 +35,7 @@ class RealServerConfig:
     rcon: RconConfig
     bot_name: str
     natural_region: Region
+    recovery_respawn_pos: tuple[int, int, int] | None
     log_path: Path
     language: str
 
@@ -93,12 +95,14 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
     bot_name = env_required(env, "MINEBOT_REAL_BOT")
     timeout_s = float(env.get("MINEBOT_REAL_RCON_TIMEOUT", "20"))
     natural_region = _region_from_env(env)
+    recovery_respawn_pos = _position_from_env(env, "MINEBOT_REAL_RECOVERY_RESPAWN_POS")
     log_path = Path(env.get("MINEBOT_AGENT_LOG_PATH") or "logs/agent-session.jsonl")
     language = agent_language_from_env(env)
     return RealServerConfig(
         rcon=RconConfig(host=host, port=port, password=password, timeout_s=timeout_s),
         bot_name=bot_name,
         natural_region=natural_region,
+        recovery_respawn_pos=recovery_respawn_pos,
         log_path=log_path,
         language=language,
     )
@@ -112,6 +116,16 @@ def _region_from_env(env: Mapping[str, str]) -> Region:
             raise RealServerConfigError("MINEBOT_REAL_NATURAL_REGION must be six comma-separated ints")
         return Region("real-server-natural", tuple(parts[:3]), tuple(parts[3:]))
     return Region("real-server-natural", (-256, -64, -256), (256, 320, 256))
+
+
+def _position_from_env(env: Mapping[str, str], name: str) -> tuple[int, int, int] | None:
+    raw = env.get(name)
+    if not raw:
+        return None
+    parts = [int(part.strip()) for part in raw.split(",")]
+    if len(parts) != 3:
+        raise RealServerConfigError(f"{name} must be three comma-separated ints")
+    return tuple(parts)
 
 
 async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps: int | None) -> int:
@@ -129,6 +143,16 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
         return 3
 
     with rcon:
+        try:
+            _ensure_scarpet_global_app(rcon, config.bot_name)
+        except (EnvelopeError, RconError) as exc:
+            print(
+                f"Real-server Scarpet app unavailable at {config.rcon.host}:{config.rcon.port}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            await provider.aclose()
+            return 4
         body = ScarpetBody(config.bot_name, rcon)
         sink = JsonlObservationSink(config.log_path)
 
@@ -144,7 +168,11 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
                 body=body,
                 goal_text=goal_text,
                 model_provider=provider,
-                config=Phase1RuntimeConfig(natural_region=config.natural_region, recovery_gamemode="survival"),
+                config=Phase1RuntimeConfig(
+                    natural_region=config.natural_region,
+                    recovery_respawn_pos=config.recovery_respawn_pos,
+                    recovery_gamemode="survival",
+                ),
                 agent_name="MineBotRealServer",
                 language=config.language,
                 trace=trace,
@@ -198,6 +226,16 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
         return 3
 
     with rcon:
+        try:
+            _ensure_scarpet_global_app(rcon, config.bot_name)
+        except (EnvelopeError, RconError) as exc:
+            print(
+                f"Real-server Scarpet app unavailable at {config.rcon.host}:{config.rcon.port}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            await provider.aclose()
+            return 4
         body = ScarpetBody(config.bot_name, rcon)
         sink = JsonlObservationSink(config.log_path)
 
@@ -213,7 +251,11 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
                 body=body,
                 goal_text=goal_text,
                 model_provider=provider,
-                config=Phase1RuntimeConfig(natural_region=config.natural_region, recovery_gamemode="survival"),
+                config=Phase1RuntimeConfig(
+                    natural_region=config.natural_region,
+                    recovery_respawn_pos=config.recovery_respawn_pos,
+                    recovery_gamemode="survival",
+                ),
                 agent_name="MineBotRealServer",
                 language=config.language,
                 trace=trace,
@@ -255,6 +297,12 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
         finally:
             reader.cancel()
             await provider.aclose()
+
+
+def _ensure_scarpet_global_app(rcon: RconClient, bot_name: str) -> None:
+    rcon.request("script load minebot global")
+    command = build_state_call(bot_name)
+    parse_state(rcon.request(command))
 
 
 async def _run_interactive_loop(

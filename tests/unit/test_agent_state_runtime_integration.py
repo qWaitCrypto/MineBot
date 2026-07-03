@@ -78,13 +78,14 @@ class AgentStateRuntimeIntegrationTests(unittest.TestCase):
         self.assertIn("survival", outcome.profile.tool_focus)
         self.assertEqual(outcome.profile.model_route, "fast")
         self.assertIn("PROFILE: relationship=autonomous.user_request situational=survival", calls[0]["input"])
+        self.assertIn("Do not initiate combat as a food strategy", calls[0]["input"])
         self.assertTrue(
             any(
                 event["event"] == "turn_profile"
                 and event["situational"] == "survival"
                 and event["model_route"] == "fast"
                 and "survival" in event["tool_focus"]
-                and event["context_frame"]
+                and "Do not initiate combat as a food strategy" in event["context_frame"]
                 for event in runtime.trace.snapshot()
             )
         )

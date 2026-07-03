@@ -13,6 +13,7 @@ from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import ToolRegistry
 from minebot.app.real_server_session import (
     RealServerConfigError,
+    _ensure_scarpet_global_app,
     _poll_chat_commands,
     _run_interactive_loop,
     evaluate_terminal_truth,
@@ -45,6 +46,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
                 "MINEBOT_REAL_BOT": "MineBot",
                 "MINEBOT_REAL_RCON_TIMEOUT": "7",
                 "MINEBOT_REAL_NATURAL_REGION": "-1,2,-3,4,5,6",
+                "MINEBOT_REAL_RECOVERY_RESPAWN_POS": "7,80,9",
                 "MINEBOT_AGENT_LOG_PATH": "logs/custom.jsonl",
                 "MINEBOT_AGENT_LANGUAGE": "Chinese",
             }
@@ -56,8 +58,24 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(cfg.bot_name, "MineBot")
         self.assertEqual(cfg.natural_region.min_pos, (-1, 2, -3))
         self.assertEqual(cfg.natural_region.max_pos, (4, 5, 6))
+        self.assertEqual(cfg.recovery_respawn_pos, (7, 80, 9))
         self.assertEqual(cfg.log_path, Path("logs/custom.jsonl"))
         self.assertEqual(cfg.language, "Chinese")
+
+    def test_config_rejects_bad_recovery_respawn_pos(self):
+        with self.assertRaises(RealServerConfigError) as ctx:
+            real_server_config_from_env(
+                {
+                    "MINEBOT_REAL_RCON_HOST": "example.invalid",
+                    "MINEBOT_REAL_RCON_PORT": "25576",
+                    "MINEBOT_REAL_RCON_PASSWORD": "secret",
+                    "MINEBOT_REAL_BOT": "MineBot",
+                    "MINEBOT_REAL_NATURAL_REGION": "-1,2,-3,4,5,6",
+                    "MINEBOT_REAL_RECOVERY_RESPAWN_POS": "1,2",
+                }
+            )
+
+        self.assertIn("MINEBOT_REAL_RECOVERY_RESPAWN_POS", str(ctx.exception))
 
     def test_provider_manifest_is_written_to_real_server_log(self):
         from minebot.app.model_provider import ModelProviderRegistry
@@ -108,6 +126,44 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             code = main(["collect 64 logs", "--max-steps", "1"])
 
         self.assertEqual(code, 2)
+
+    def test_real_server_entrypoint_loads_scarpet_app_global_before_state_probe(self):
+        rcon = ScriptLoadRcon(
+            [
+                "minebot app reloaded",
+                _state_envelope("MineBotReal"),
+            ]
+        )
+
+        _ensure_scarpet_global_app(rcon, "MineBotReal")
+
+        self.assertEqual(
+            rcon.commands,
+            [
+                "script load minebot global",
+                "script in minebot run minebot_state('MineBotReal')",
+            ],
+        )
+
+    def test_real_server_entrypoint_global_load_does_not_reset_or_seed_world(self):
+        rcon = ScriptLoadRcon(
+            [
+                "minebot app reloaded",
+                _state_envelope("MineBotReal"),
+            ]
+        )
+
+        _ensure_scarpet_global_app(rcon, "MineBotReal")
+
+        self.assertEqual(
+            rcon.commands,
+            [
+                "script load minebot global",
+                "script in minebot run minebot_state('MineBotReal')",
+            ],
+        )
+        self.assertFalse(any("minebot_reset" in command for command in rcon.commands))
+        self.assertFalse(any(command.startswith("setblock ") for command in rcon.commands))
 
     def test_interactive_flag_still_requires_explicit_real_env_before_connecting(self):
         clean_env = {
@@ -208,6 +264,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertIn("read_state", registry.names())
         self.assertIn("read_inventory", registry.names())
         self.assertIn("move_to", registry.names())
+        self.assertIn("go_to_surface", registry.names())
         self.assertIn("search_for_block", registry.names())
         self.assertIn("mine_block_collect", registry.names())
 
@@ -215,6 +272,8 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         by_name = {row["name"]: row for row in manifest}
         self.assertEqual(by_name["move_to"]["source"], "body.navigation")
         self.assertEqual(by_name["move_to"]["tool_type"], "navigation")
+        self.assertEqual(by_name["go_to_surface"]["source"], "body.block_work")
+        self.assertEqual(by_name["go_to_surface"]["tool_type"], "navigation")
         self.assertEqual(by_name["read_state"]["source"], "body.perception")
         self.assertEqual(by_name["search_for_block"]["tool_type"], "perception")
         self.assertEqual(by_name["mine_block_collect"]["tool_type"], "work")
@@ -445,6 +504,87 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertIsNone(body.recover_calls[0]["respawn_pos"])
         self.assertIsNone(outcome.facts["respawn_pos"])
 
+    def test_phase1_recovery_ignores_low_oxygen_last_position_for_respawn(self):
+        body = RecoveringInventoryBody(before_counts={}, after_counts={})
+        cfg = Phase1RuntimeConfig(
+            natural_region=Region("test", (0, 0, 0), (16, 128, 16)),
+            recovery_gamemode="survival",
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect 64 logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        runtime.last_known_body_state = {
+            "pos": [30.5, 49.0, -43.5],
+            "yaw": 90.0,
+            "pitch": 0.0,
+            "dimension": "overworld",
+            "oxygen": -1,
+        }
+
+        outcome = _phase1_recovery_handler(body, cfg)(runtime)
+
+        self.assertTrue(outcome.success)
+        self.assertEqual(outcome.reason, "respawned")
+        self.assertIsNone(body.recover_calls[0]["respawn_pos"])
+        self.assertIsNone(outcome.facts["respawn_pos"])
+        self.assertEqual(outcome.facts["last_known_body_state"]["pos"], [30.5, 49.0, -43.5])
+
+    def test_phase1_recovery_retries_after_state_transport_error(self):
+        body = RecoveringInventoryBody(before_counts={}, after_counts={})
+        cfg = Phase1RuntimeConfig(
+            natural_region=Region("test", (0, 0, 0), (16, 128, 16)),
+            recovery_gamemode="survival",
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect 64 logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        body.after_recovery_state_errors.append(RuntimeError("RCON socket closed"))
+
+        outcome = _phase1_recovery_handler(body, cfg)(runtime)
+
+        self.assertTrue(outcome.success)
+        self.assertEqual(outcome.reason, "respawned")
+        self.assertEqual(outcome.facts["recovery_metrics"]["state_after_recheck_errors"][0]["message"], "RCON socket closed")
+
+    def test_phase1_recovery_relocates_unsafe_default_spawn_to_nearby_dry_stand(self):
+        body = RecoveringInventoryBody(before_counts={}, after_counts={})
+        body.default_spawn_pos = (0.0, 79.922, 0.0)
+        body.default_spawn_oxygen = 8
+        body.blocks[(2, 80, 0)] = ("air", "CLEAR")
+        body.blocks[(2, 81, 0)] = ("air", "CLEAR")
+        body.blocks[(2, 79, 0)] = ("stone", "SOLID")
+        cfg = Phase1RuntimeConfig(
+            natural_region=Region("test", (0, 0, 0), (16, 128, 16)),
+            recovery_gamemode="survival",
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect 64 logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+
+        outcome = _phase1_recovery_handler(body, cfg)(runtime)
+
+        self.assertTrue(outcome.success, outcome)
+        self.assertEqual(outcome.reason, "respawned")
+        self.assertEqual([call["respawn_pos"] for call in body.recover_calls], [None, (2, 80, 0)])
+        self.assertEqual(outcome.facts["safe_respawn"]["reason"], "safe_completed")
+        self.assertEqual(outcome.facts["safe_respawn"]["metrics"]["safe_respawn_pos"], [2, 80, 0])
+        self.assertEqual(outcome.facts["state_after_pos"], [2.5, 80.0, 0.5])
+
     def test_phase1_recovery_rejects_authoritative_position_mismatch(self):
         body = AdjustedSpawnRecoveryBody()
         cfg = Phase1RuntimeConfig(
@@ -508,18 +648,29 @@ class RecoveringInventoryBody:
         self.before_counts = dict(before_counts)
         self.after_counts = dict(after_counts)
         self.recovered = False
+        self.recovered_pos = (0.5, 64.0, 0.5)
+        self.recovered_oxygen = 300
+        self.default_spawn_pos = (0.5, 64.0, 0.5)
+        self.default_spawn_oxygen = 300
         self.recover_calls = []
         self.events = []
+        self.blocks = {}
+        self.state_errors = []
+        self.after_recovery_state_errors = []
 
     def get_state(self):
+        if self.state_errors:
+            raise self.state_errors.pop(0)
+        if self.recovered and self.after_recovery_state_errors:
+            raise self.after_recovery_state_errors.pop(0)
         return BodyState(
             bot=self.bot_name,
-            pos=(0.0, 64.0, 0.0) if not self.recovered else (0.5, 64.0, 0.5),
+            pos=(0.0, 64.0, 0.0) if not self.recovered else self.recovered_pos,
             yaw=90.0,
             pitch=0.0,
             health=0.0 if not self.recovered else 20.0,
             food=0 if not self.recovered else 20,
-            oxygen=None if not self.recovered else 300,
+            oxygen=None if not self.recovered else self.recovered_oxygen,
             inventory_raw="[]",
             inventory_hash="before" if not self.recovered else "after",
             effects=None,
@@ -531,6 +682,26 @@ class RecoveringInventoryBody:
         )
 
     def perceive(self, scope, params):
+        if scope == "blockCells":
+            cells = params.get("cells") or []
+            start = int(params.get("start") or 0)
+            limit = int(params.get("limit") or 64)
+            page = cells[start : start + limit]
+            facts = []
+            for cell in page:
+                pos = (int(cell[0]), int(cell[1]), int(cell[2]))
+                block_type, state = self.blocks.get(pos, ("water", "LIQUID"))
+                facts.append({"x": pos[0], "y": pos[1], "z": pos[2], "type": block_type, "state": state, "properties": {}})
+            next_start = start + len(page)
+            nxt = next_start if next_start < len(cells) else None
+            return PerceptionResult(
+                self.bot_name,
+                "blockCells",
+                "perception",
+                True,
+                nxt is None,
+                {"cells": facts, "next": nxt},
+            )
         if scope != "inventory":
             return PerceptionResult(self.bot_name, scope, "perception", False, False, {}, error="unsupported")
         counts = self.after_counts if self.recovered else self.before_counts
@@ -552,8 +723,20 @@ class RecoveringInventoryBody:
             }
         )
         self.recovered = True
+        if pos is None:
+            self.recovered_pos = self.default_spawn_pos
+            self.recovered_oxygen = self.default_spawn_oxygen
+            final_pos = list(self.recovered_pos)
+        else:
+            self.recovered_pos = (float(pos[0]) + 0.5, float(pos[1]), float(pos[2]) + 0.5)
+            self.recovered_oxygen = 300
+            final_pos = list(self.recovered_pos)
         if emit_respawned:
-            self.events.append(Event(seq=1, tick=1, bot=self.bot_name, name="respawned", data={"final_pos": [0.5, 64.0, 0.5]}))
+            self.events.append(Event(seq=1, tick=1, bot=self.bot_name, name="respawned", data={"final_pos": final_pos}))
+        return Result(None, self.bot_name, "result", True, True, True)
+
+    def despawn(self):
+        self.recovered = False
         return Result(None, self.bot_name, "result", True, True, True)
 
     def await_action_terminal(self, action_id, timeout_s=15.0, terminal_events=None):
@@ -711,6 +894,28 @@ class ChatSource:
         events = self.events
         self.events = []
         return events
+
+
+class ScriptLoadRcon:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.commands = []
+
+    def request(self, command):
+        self.commands.append(command)
+        if not self.responses:
+            raise AssertionError(f"unexpected RCON request {command}")
+        return self.responses.pop(0)
+
+
+def _state_envelope(bot):
+    return (
+        f' = {{"type":"state","bot":"{bot}","ok":true,"complete":true,'
+        '"data":{"pos":[0,0,0],"yaw":null,"pitch":null,"health":20,'
+        '"food":20,"oxygen":300,"inventory_raw":"","inventory_hash":"",'
+        '"effects":null,"time":1000,"weather":null,"dimension":"overworld",'
+        '"sleeping":false,"missing":false},"error":null} (1ms)'
+    )
 
 
 if __name__ == "__main__":

@@ -57,11 +57,12 @@ def corridor(x_min, x_max, y=64):
 class FakeBody:
     bot_name = "Bot1"
 
-    def __init__(self, states, *, accept=True, terminal_success=True, terminal_reasons=None, blocks=None):
+    def __init__(self, states, *, accept=True, terminal_success=True, terminal_reasons=None, blocks=None, poll_events=None):
         self.states = list(states)
         self.accept = accept
         self.terminal_success = terminal_success
         self.terminal_reasons = list(terminal_reasons or [])
+        self.poll_event_batches = [list(batch) for batch in (poll_events or [])]
         self.actions: list[Action] = []
         self.await_timeouts: list[float] = []
         self.blocks = dict(blocks or {})
@@ -198,6 +199,13 @@ class FakeBody:
             data["goal_dist"] = 0.0 if arrived else 10.0
             data["expanded"] = 50
             data["waypoints"] = 5
+            data["move_ticks"] = 37
+            data["move_min_dist"] = 4.25
+            data["move_stuck_ticks"] = 12
+            data["move_deviation"] = 0.5
+            data["move_waypoint_index"] = 2
+            data["move_waypoint_count"] = 5
+            data["move_current_waypoint"] = [2.5, 64.0, 0.5]
         elif action.name == "followEntity":
             data["arrived"] = stopped_reason == "arrived"
             data["reason"] = stopped_reason
@@ -214,6 +222,11 @@ class FakeBody:
             name=event_name,
             data=data,
         )
+
+    def poll_events(self) -> list[Event]:
+        if not self.poll_event_batches:
+            return []
+        return self.poll_event_batches.pop(0)
 
 
 class FakeNavigator:
@@ -451,6 +464,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(len(body.actions), 1)
         self.assertEqual(body.actions[0].name, "navigateTo")
         self.assertEqual(body.actions[0].params["target"], [3, 64, 0])
+        self.assertEqual(body.actions[0].params["goal_radius"], 0)
 
     def test_navigate_to_accepts_typed_goal(self):
         nav = FakeNavigator([_segment("arrived", (5, 64, 0), success=True, reason="arrived")])
@@ -464,6 +478,34 @@ class NavigationRuntimeTests(unittest.TestCase):
         action = body.actions[0]
         self.assertEqual(action.name, "navigateTo")
         self.assertEqual(action.params["target"], [5, 64, 0])
+        self.assertEqual(action.params["goal_radius"], 2)
+
+    def test_navigate_to_treats_arrived_reason_as_terminal_truth(self):
+        class ArrivedReasonBody(FakeBody):
+            def await_action_terminal(self, action_id: str, timeout_s: float = 15.0, **kwargs) -> Event:
+                terminal = super().await_action_terminal(action_id, timeout_s=timeout_s, **kwargs)
+                data = dict(terminal.data)
+                data["arrived"] = False
+                data["reason"] = "arrived"
+                data["nav_reason"] = "arrived"
+                data["goal_dist"] = 1.42
+                return Event(
+                    seq=terminal.seq,
+                    tick=terminal.tick,
+                    bot=terminal.bot,
+                    name=terminal.name,
+                    data=data,
+                )
+
+        nav = FakeNavigator([_segment("arrived", (5, 64, 0), success=True, reason="arrived")])
+        body = ArrivedReasonBody([state_at((0, 64, 0))], terminal_reasons=["arrived"])
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to(GoalNear((5, 64, 0), radius=3))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "arrived")
+        self.assertTrue(result.metrics["segments"][0]["success"])
 
     def test_navigate_to_can_send_precise_arrival_radius(self):
         nav = FakeNavigator([_segment("arrived", (3, 64, 0), success=True, reason="arrived")])
@@ -543,8 +585,36 @@ class NavigationRuntimeTests(unittest.TestCase):
         result = runtime.navigate_to((30, 64, 0), config=NavigationRunConfig(max_segments=3))
 
         self.assertFalse(result.success)
-        self.assertEqual(result.reason, "segment_budget_exhausted")
+        self.assertEqual(result.reason, "partial_segment_budget_exhausted")
         self.assertEqual(len(body.actions), 3)
+
+    def test_navigate_to_default_budget_allows_long_partial_progress_chain(self):
+        nav = FakeNavigator([_segment("arrived", (50, 64, 0), success=True, reason="arrived")])
+        body = FakeBody(
+            [state_at((idx, 64, 0)) for idx in range(12)],
+            terminal_reasons=["partial"] * 10 + ["arrived"],
+        )
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((50, 64, 0))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "arrived")
+        self.assertEqual(len(body.actions), 11)
+
+    def test_navigate_to_respects_partial_segment_budget(self):
+        nav = FakeNavigator([_segment("arrived", (50, 64, 0), success=True, reason="arrived")])
+        body = FakeBody(
+            [state_at((idx, 64, 0)) for idx in range(5)],
+            terminal_reasons=["partial"] * 4,
+        )
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((50, 64, 0), config=NavigationRunConfig(max_segments=8, max_partial_segments=3))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "partial_segment_budget_exhausted")
+        self.assertEqual(result.metrics["partial_segments"], 3)
 
     def test_navigate_to_accepts_timeout_s(self):
         nav = FakeNavigator([_segment("arrived", (3, 64, 0), success=True, reason="arrived")])
@@ -597,6 +667,99 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "preempted")
 
+    def test_navigate_to_waits_for_reflex_completed_after_body_preempt(self):
+        nav = FakeNavigator([])
+        body = FakeBody(
+            [
+                state_at((0, 64, 0)),
+                state_at((1, 64, 0)),
+                state_at((1, 64, 0)),
+                state_at((2, 64, 0)),
+            ],
+            terminal_reasons=["preempted", "arrived"],
+            poll_events=[
+                [Event(seq=10, tick=20, bot="Bot1", name="reflexCompleted", data={"kind": "water"})],
+            ],
+        )
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((2, 64, 0), config=NavigationRunConfig(max_segments=4))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "arrived")
+        self.assertEqual(len(body.actions), 2)
+
+    def test_navigate_to_waits_for_reflex_completed_after_owner_preempted_event(self):
+        nav = FakeNavigator([])
+
+        class OwnerPreemptBody(FakeBody):
+            def await_action_terminal(self, action_id: str, timeout_s: float = 15.0, **kwargs) -> Event:
+                if len(self.actions) == 1:
+                    return Event(
+                        seq=10,
+                        tick=20,
+                        bot="Bot1",
+                        name="ownerPreempted",
+                        data={"previous_owner": "moveTo", "new_owner": "waterReflex"},
+                    )
+                return super().await_action_terminal(action_id, timeout_s=timeout_s, **kwargs)
+
+        body = OwnerPreemptBody(
+            [
+                state_at((0, 64, 0)),
+                state_at((1, 64, 0)),
+                state_at((1, 64, 0)),
+                state_at((2, 64, 0)),
+            ],
+            terminal_reasons=["arrived"],
+            poll_events=[
+                [Event(seq=11, tick=21, bot="Bot1", name="reflexCompleted", data={"kind": "water"})],
+            ],
+        )
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((2, 64, 0), config=NavigationRunConfig(max_segments=4))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "arrived")
+        self.assertEqual(len(body.actions), 2)
+
+    def test_navigate_to_fails_when_reflex_completed_without_escape(self):
+        nav = FakeNavigator([])
+        body = FakeBody(
+            [
+                state_at((0, 64, 0)),
+                state_at((1, 63, 0)),
+            ],
+            terminal_reasons=["preempted", "arrived"],
+            poll_events=[
+                [
+                    Event(
+                        seq=10,
+                        tick=20,
+                        bot="Bot1",
+                        name="reflexCompleted",
+                        data={
+                            "kind": "water",
+                            "escaped_hazard": False,
+                            "target_is_dry_stand": False,
+                            "final_is_dry_stand": False,
+                        },
+                    )
+                ],
+            ],
+        )
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((2, 64, 0), config=NavigationRunConfig(max_segments=4))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "water_egress_failed")
+        self.assertEqual(result.metrics["paused"], False)
+        self.assertEqual(result.metrics["reflex_handoff"], "reflex_failed")
+        self.assertEqual(result.metrics["reflex"]["final_is_dry_stand"], False)
+        self.assertEqual(len(body.actions), 1)
+
     def test_navigate_to_does_not_invalidate_outer_generation_when_shared(self):
         nav = FakeNavigator([_segment("arrived", (3, 64, 0), success=True, reason="arrived")])
         from minebot.brain.progress import ProgressAuthority
@@ -622,6 +785,23 @@ class NavigationRuntimeTests(unittest.TestCase):
         segments = result.metrics.get("segments")
         self.assertIsInstance(segments, list)
         self.assertEqual(len(segments), 1)
+
+    def test_navigate_to_segment_diagnostics_include_server_move_execution_fields(self):
+        nav = FakeNavigator([])
+        body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["stuck"])
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_segments=1))
+
+        self.assertFalse(result.success)
+        diagnostics = result.metrics["segments"][0]["diagnostics"]
+        self.assertEqual(diagnostics["move_ticks"], 37)
+        self.assertEqual(diagnostics["move_min_dist"], 4.25)
+        self.assertEqual(diagnostics["move_stuck_ticks"], 12)
+        self.assertEqual(diagnostics["move_deviation"], 0.5)
+        self.assertEqual(diagnostics["move_waypoint_index"], 2)
+        self.assertEqual(diagnostics["move_waypoint_count"], 5)
+        self.assertEqual(diagnostics["move_current_waypoint"], [2.5, 64.0, 0.5])
 
     def test_follow_entity_sends_follow_action_and_returns_arrived(self):
         nav = FakeNavigator([])
@@ -823,6 +1003,25 @@ class WorldRefreshNavigationIntegrationTests(unittest.TestCase):
         self.assertEqual(action.params["max_expand"], 2500)
         self.assertEqual(action.params["no_progress_ticks"], 120)
         self.assertEqual(action.params["timeout_ticks"], 300)
+        self.assertEqual(action.params["min_partial_progress"], 5)
+        self.assertEqual(action.params["goal_radius"], 0)
+
+    def test_navigate_to_passes_configured_min_partial_progress_to_body(self):
+        body = FakeBody(
+            [state_at((0, 64, 0)), state_at((1, 64, -1))],
+            terminal_success=True,
+        )
+        policy = GovernancePolicy(natural_regions=[Region("work", (-128, 0, -128), (128, 160, 128))])
+        runtime = NavigationTransactions.server_side(body, policy)
+
+        result = runtime.navigate_to(
+            (64, 70, -64),
+            config=NavigationRunConfig(max_segments=8, min_partial_progress=9),
+        )
+
+        self.assertEqual(result.reason, "arrived")
+        action = next(action for action in body.actions if action.name == "navigateTo")
+        self.assertEqual(action.params["min_partial_progress"], 9)
 
     def test_world_refresh_uses_block_cells_batches_not_per_cell_block_at(self):
         body = FakeBody([state_at((0, 64, 0))], blocks={(0, 63, 0): ("stone", "SOLID")})
