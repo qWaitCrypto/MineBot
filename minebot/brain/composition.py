@@ -174,10 +174,11 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
 
     while len(attempts) < budget.max_candidates and mutating_calls < budget.max_mutating_calls:
         if time.monotonic() - started > budget.max_wall_s:
+            partial_success = _collect_partial_success(before_count, current_count)
             _emit_collect_summary(
                 context,
                 reason="partial_budget_exhausted",
-                success=False,
+                success=partial_success,
                 plan=plan,
                 target_count=count,
                 before_count=before_count,
@@ -187,7 +188,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 last_failure=last_failure,
             )
             return _collect_result(
-                False,
+                partial_success,
                 "partial_budget_exhausted",
                 True,
                 plan,
@@ -255,10 +256,11 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 before_count=before_count,
                 current_count=current_count,
             )
+            partial_success = _collect_partial_success(before_count, current_count)
             _emit_collect_summary(
                 context,
                 reason=result_reason,
-                success=False,
+                success=partial_success,
                 plan=plan,
                 target_count=count,
                 before_count=before_count,
@@ -268,7 +270,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 last_failure=last_failure,
             )
             return _collect_result(
-                False,
+                partial_success,
                 result_reason,
                 True,
                 plan,
@@ -353,10 +355,11 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             skipped.append({"pos": target, "reason": reason, "skip": skip})
             last_failure = {"phase": "mine", "target": target, "reason": mined.get("reason"), "result": mined}
             if _is_collect_control_yield(reason, mined):
+                partial_success = _collect_partial_success(before_count, current_count)
                 _emit_collect_summary(
                     context,
                     reason=reason,
-                    success=False,
+                    success=partial_success,
                     plan=plan,
                     target_count=count,
                     before_count=before_count,
@@ -366,7 +369,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                     last_failure=last_failure,
                 )
                 return _collect_result(
-                    False,
+                    partial_success,
                     reason,
                     True,
                     plan,
@@ -396,10 +399,11 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         reason = "candidate_targets_exhausted"
     else:
         reason = "partial_budget_exhausted"
+    partial_success = _collect_partial_success(before_count, current_count)
     _emit_collect_summary(
         context,
         reason=reason,
-        success=False,
+        success=partial_success,
         plan=plan,
         target_count=count,
         before_count=before_count,
@@ -409,7 +413,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         last_failure=last_failure,
     )
     return _collect_result(
-        False,
+        partial_success,
         reason,
         True,
         plan,
@@ -1151,6 +1155,10 @@ def _search_failure_reason(reason: str, had_candidates: bool, *, before_count: i
     return "target_not_found" if reason == "search_block_not_found" else f"search_failed:{reason}"
 
 
+def _collect_partial_success(before_count: int, current_count: int) -> bool:
+    return current_count > before_count
+
+
 def _collect_result(
     success: bool,
     reason: str,
@@ -1178,6 +1186,7 @@ def _collect_result(
         "after_count": after_count,
         "collected_delta": max(0, after_count - before_count),
         "remaining_count": max(0, target_count - after_count),
+        "complete": after_count >= target_count,
         "candidates_tried": len(attempts),
         "attempts": attempts,
         "skipped": skipped,

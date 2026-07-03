@@ -1105,7 +1105,7 @@ class AgentCompositionTests(unittest.TestCase):
         # The search-skip is recorded as a neutral skip, not a task failure.
         self.assertTrue(any(entry.get("phase") == "search" and entry.get("skip") for entry in result.metrics["skipped"]))
 
-    def test_collect_resource_reports_partial_when_progress_made_then_local_candidates_exhaust(self):
+    def test_collect_resource_reports_successful_partial_when_progress_made_then_local_candidates_exhaust(self):
         body = FakeBody()
         registry = ToolRegistry()
         register_inventory_tools(registry, body)
@@ -1117,12 +1117,50 @@ class AgentCompositionTests(unittest.TestCase):
 
         result = collect_resource({"item": "dirt", "count": 2}, ctx)
 
-        self.assertFalse(result.success, result)
+        self.assertTrue(result.success, result)
         self.assertEqual(result.reason, "partial_candidate_targets_exhausted")
         self.assertEqual(result.metrics["before_count"], 0)
         self.assertEqual(result.metrics["after_count"], 1)
         self.assertEqual(result.metrics["collected_delta"], 1)
+        self.assertFalse(result.metrics["complete"])
         self.assertEqual(result.metrics["last_failure"]["reason"], "candidate_targets_exhausted")
+
+    def test_collect_resource_reports_successful_partial_when_progress_made_then_budget_exhausts(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[1, 59, 0], [2, 59, 0], [3, 59, 0]])
+        registry.register(search)
+        miner, _mine_calls = mine_tool_with_outcomes(body, ["success", "fail", "fail"])
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 2}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "partial_budget_exhausted")
+        self.assertEqual(result.metrics["before_count"], 0)
+        self.assertEqual(result.metrics["after_count"], 1)
+        self.assertEqual(result.metrics["collected_delta"], 1)
+        self.assertEqual(result.metrics["remaining_count"], 1)
+        self.assertFalse(result.metrics["complete"])
+
+    def test_collect_resource_keeps_budget_exhaustion_failure_when_no_progress_made(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[1, 59, 0], [2, 59, 0], [3, 59, 0]])
+        registry.register(search)
+        miner, _mine_calls = mine_tool(body, fail_reason="mine_failed:no_inventory_delta")
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 2}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.reason, "partial_budget_exhausted")
+        self.assertEqual(result.metrics["collected_delta"], 0)
+        self.assertFalse(result.metrics["complete"])
 
     def test_collect_resource_keeps_goal_total_when_model_passes_remaining_count(self):
         body = FakeBody()
