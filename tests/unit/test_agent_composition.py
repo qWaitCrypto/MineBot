@@ -1033,10 +1033,30 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.success, result)
         self.assertEqual(result.reason, "collected")
         self.assertEqual([call["pos"] for call in mine_calls], [[1, 59, 0], [2, 59, 0]])
-        self.assertEqual(result.metrics["skipped"][0]["reason"], "mine_progress_yielded")
+        self.assertEqual(result.metrics["skipped"][0]["reason"], "mine_approach_failed:dig_through:no_path")
         self.assertTrue(result.metrics["skipped"][0]["skip"])
         self.assertEqual(ctx.weld_context.authority.stalled_steps, 0)
         self.assertEqual(ctx.weld_context.authority.failure_steps, 0)
+
+    def test_collect_resource_keeps_probing_after_candidate_navigation_no_path_abort(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[10, 59, 0], [2, 59, 0]])
+        registry.register(search)
+        miner, mine_calls = mine_tool_candidate_navigation_yields_then_success(body)
+        registry.register(miner)
+        ctx, trace_events = composition_context(body, registry, max_candidates=2)
+
+        result = collect_resource({"item": "logs", "count": 1}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual([call["pos"] for call in mine_calls], [[10, 59, 0], [2, 59, 0]])
+        self.assertEqual(result.metrics["skipped"][0]["reason"], "mine_approach_failed:dig_through:no_path")
+        self.assertTrue(result.metrics["skipped"][0]["skip"])
+        self.assertEqual(ctx.weld_context.authority.failure_steps, 0)
+        mine_events = [event for event in trace_events if event["event"] == "composition_mine_attempt"]
+        self.assertEqual(mine_events[0]["reason"], "mine_approach_failed:dig_through:no_path")
 
     def test_collect_resource_keeps_non_log_candidate_diversification(self):
         body = FakeBody()

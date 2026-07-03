@@ -494,6 +494,16 @@ def _execute_candidate_probe_tool(context: CompositionContext, tool: RegisteredT
         result = _execute_composition_phase(context, "mine", tool, tool_input)
     except ProgressAbort as exc:
         _restore_progress_authority(authority, progress_snapshot)
+        if _is_candidate_navigation_progress_yield_facts(exc.facts.last_action):
+            return ToolResult(
+                False,
+                "mine_approach_failed:dig_through:no_path",
+                True,
+                metrics={
+                    "target": tool_input.get("pos"),
+                    "progress_facts": _progress_facts_payload(exc),
+                },
+            ).to_payload()
         return ToolResult(
             False,
             "mine_progress_yielded",
@@ -566,6 +576,12 @@ def _is_candidate_navigation_progress_yield(result: JsonObject | None) -> bool:
         return False
     last_action = facts.get("last_action")
     if not isinstance(last_action, list) or not last_action:
+        return False
+    return _is_candidate_navigation_progress_yield_facts(last_action)
+
+
+def _is_candidate_navigation_progress_yield_facts(last_action: object) -> bool:
+    if not isinstance(last_action, (list, tuple)) or not last_action:
         return False
     if str(last_action[0]) != "navigate.segment":
         return False
