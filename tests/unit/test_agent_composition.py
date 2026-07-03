@@ -431,7 +431,7 @@ def composition_context(body, registry, *, max_candidates=4):
     trace_events = []
     return CompositionContext(
         registry=registry,
-        weld_context=WeldContext(body=body, authority=ProgressAuthority(), goal_text="collect 2 dirt"),
+        weld_context=WeldContext(body=body, authority=ProgressAuthority(), goal_text="collect dirt"),
         runtime_profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
         budget=CompositionBudget(max_candidates=max_candidates, max_mutating_calls=max_candidates, max_wall_s=10),
         trace=lambda event, payload: trace_events.append({"event": event, **payload}),
@@ -1103,6 +1103,27 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.metrics["after_count"], 1)
         self.assertEqual(result.metrics["collected_delta"], 1)
         self.assertEqual(result.metrics["last_failure"]["reason"], "candidate_targets_exhausted")
+
+    def test_collect_resource_keeps_goal_total_when_model_passes_remaining_count(self):
+        body = FakeBody()
+        body.inventory_counts = {"oak_log": 18}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[1, 59, 0]])
+        registry.register(search)
+        miner, _mine_calls = mine_tool(body, fail_reason="break_denied:protected_region")
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=1)
+        ctx.weld_context.goal_text = "collect 64 logs"
+
+        result = collect_resource({"item": "oak_log", "count": 46}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.metrics["requested_count"], 46)
+        self.assertEqual(result.metrics["goal_target_count"], 64)
+        self.assertEqual(result.metrics["target_count"], 64)
+        self.assertEqual(result.metrics["after_count"], 18)
+        self.assertEqual(result.metrics["remaining_count"], 46)
 
     def test_collect_resource_aborts_when_search_fails_for_non_skip_reason(self):
         # A non-skip search failure (perception_failed: the candidate list itself is

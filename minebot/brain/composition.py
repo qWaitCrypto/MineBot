@@ -6,6 +6,7 @@ do not import Body transactions or game transport.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -119,6 +120,12 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     allow_dry = bool(constraints.get("allow_dry", False))
     started = time.monotonic()
     plan = _resource_plan(item)
+    requested_count = count
+    goal_target = _goal_collect_target(context.weld_context.goal_text)
+    goal_target_count: int | None = None
+    if goal_target is not None and _goal_target_matches_plan(goal_target, plan):
+        count = max(count, goal_target[1])
+        goal_target_count = goal_target[1]
     radius = _resolve_search_radius(plan, constraints)
 
     before_result = _read_count(context, plan.inventory_items)
@@ -150,6 +157,8 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             [],
             [],
             "complete",
+            requested_count=requested_count,
+            goal_target_count=goal_target_count,
         )
 
     attempts: list[dict[str, object]] = []
@@ -190,6 +199,8 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 "reselect_candidates",
                 last_failure=last_failure,
                 budget=budget,
+                requested_count=requested_count,
+                goal_target_count=goal_target_count,
             )
 
         target = _first_untried_target(targets, tried_positions)
@@ -269,6 +280,8 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 "reselect_candidates",
                 last_failure=last_failure,
                 budget=budget,
+                requested_count=requested_count,
+                goal_target_count=goal_target_count,
             )
         if not search_ok:
             # Candidate-skip search outcome: record it, keep the candidate list, and
@@ -330,6 +343,8 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                 skipped,
                 "complete",
                 budget=budget,
+                requested_count=requested_count,
+                goal_target_count=goal_target_count,
             )
 
         if not mined.get("success"):
@@ -363,6 +378,8 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                     "resume_after_body_control",
                     last_failure=last_failure,
                     budget=budget,
+                    requested_count=requested_count,
+                    goal_target_count=goal_target_count,
                 )
             if not skip:
                 all_skips = False
@@ -404,6 +421,8 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         "reselect_candidates",
         last_failure=last_failure,
         budget=budget,
+        requested_count=requested_count,
+        goal_target_count=goal_target_count,
     )
 
 
@@ -413,6 +432,26 @@ def _budget_from_constraints(default: CompositionBudget, constraints: dict[str, 
         max_mutating_calls=int(constraints.get("max_mutating_calls") or default.max_mutating_calls),
         max_wall_s=float(constraints.get("max_wall_s") or default.max_wall_s),
     )
+
+
+def _goal_collect_target(goal_text: str) -> tuple[str, int] | None:
+    text = goal_text.strip().lower().replace("minecraft:", "")
+    match = re.search(r"\b(?:collect|get|gather|mine)\s+(\d+)\s+([a-z_]+)\b", text)
+    if match:
+        return (_normalize_item(match.group(2)), int(match.group(1)))
+    match = re.search(r"\b(?:collect|get|gather|mine)\s+([a-z_]+)\s+(\d+)\b", text)
+    if match:
+        return (_normalize_item(match.group(1)), int(match.group(2)))
+    return None
+
+
+def _goal_target_matches_plan(goal_target: tuple[str, int], plan: ResourcePlan) -> bool:
+    goal_item = _normalize_item(goal_target[0])
+    try:
+        goal_plan = _resource_plan(goal_item)
+    except ValueError:
+        return False
+    return bool(set(goal_plan.inventory_items) & set(plan.inventory_items))
 
 
 def _search_max_pages_for_budget(budget: CompositionBudget, find_limit: int) -> int:
@@ -1110,6 +1149,8 @@ def _collect_result(
     *,
     last_failure: dict[str, object] | None = None,
     budget: CompositionBudget | None = None,
+    requested_count: int | None = None,
+    goal_target_count: int | None = None,
 ) -> ToolResult:
     metrics: dict[str, object] = {
         "item": plan.inventory_item,
@@ -1126,6 +1167,10 @@ def _collect_result(
         "skipped": skipped,
         "resume_hint": resume_hint,
     }
+    if requested_count is not None and requested_count != target_count:
+        metrics["requested_count"] = requested_count
+    if goal_target_count is not None:
+        metrics["goal_target_count"] = goal_target_count
     if last_failure is not None:
         metrics["last_failure"] = last_failure
     if budget is not None:
