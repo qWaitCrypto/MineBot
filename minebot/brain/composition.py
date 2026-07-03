@@ -474,11 +474,15 @@ def _is_collect_candidate_rejection(reason: str, result: JsonObject | None = Non
         return True
     if reason == "body_rejected" and _is_mining_stand_body_rejection(result):
         return True
+    if reason == "mine_progress_yielded" and _is_candidate_navigation_progress_yield(result):
+        return True
     return reason == "mine_progress_yielded"
 
 
 def _is_collect_control_yield(reason: str, result: JsonObject | None = None) -> bool:
     if reason == "body_rejected" and _is_mining_stand_body_rejection(result):
+        return False
+    if reason == "mine_progress_yielded" and _is_candidate_navigation_progress_yield(result):
         return False
     return reason in {"body_rejected", "mine_progress_yielded"} or reason.endswith(":preempted")
 
@@ -510,6 +514,23 @@ def _is_mining_stand_body_rejection(result: JsonObject | None) -> bool:
         if not isinstance(nested_metrics.get("mine_approach"), dict):
             return False
     return True
+
+
+def _is_candidate_navigation_progress_yield(result: JsonObject | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    metrics = result.get("metrics")
+    if not isinstance(metrics, dict):
+        return False
+    facts = metrics.get("progress_facts")
+    if not isinstance(facts, dict):
+        return False
+    last_action = facts.get("last_action")
+    if not isinstance(last_action, list) or not last_action:
+        return False
+    if str(last_action[0]) != "navigate.segment":
+        return False
+    return any(str(part) == "no_path" for part in last_action)
 
 
 def _recent_body_requests(body: Body, *, limit: int = 6) -> list[dict[str, object]]:

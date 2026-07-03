@@ -397,6 +397,36 @@ def mine_tool_that_progress_yields(body):
     ), calls
 
 
+def mine_tool_candidate_navigation_yields_then_success(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        target = params.get("pos")
+        if len(calls) == 1:
+            raise ProgressAbort(
+                "simulated candidate navigation yield",
+                facts=ProgressAuthority(
+                    stagnant_steps=0,
+                    stalled_steps=8,
+                    failure_steps=1,
+                    last_action=("navigate.segment", [0, 59, 0], {"kind": "block", "pos": target}, "no_path", target),
+                ).facts("collect logs"),
+            )
+        expected = params.get("expected_drops") or ["dirt"]
+        item = str(expected[0]).removeprefix("minecraft:")
+        body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+        return ToolResult(True, "collected", False, metrics={"target": target, "collected_total": 1})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
 def composition_context(body, registry, *, max_candidates=4):
     trace_events = []
     return CompositionContext(
@@ -987,6 +1017,26 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.metrics["skipped"][0]["reason"], "mine_progress_yielded")
         self.assertEqual(result.metrics["attempts"][0]["mine"]["metrics"]["target"], [-79, 65, 75])
         self.assertEqual(result.metrics["attempts"][0]["mine"]["metrics"]["progress_facts"]["failure_steps"], 5)
+
+    def test_collect_resource_skips_candidate_navigation_progress_yield(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[1, 59, 0], [2, 59, 0]])
+        registry.register(search)
+        miner, mine_calls = mine_tool_candidate_navigation_yields_then_success(body)
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=2)
+
+        result = collect_resource({"item": "logs", "count": 1}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "collected")
+        self.assertEqual([call["pos"] for call in mine_calls], [[1, 59, 0], [2, 59, 0]])
+        self.assertEqual(result.metrics["skipped"][0]["reason"], "mine_progress_yielded")
+        self.assertTrue(result.metrics["skipped"][0]["skip"])
+        self.assertEqual(ctx.weld_context.authority.stalled_steps, 0)
+        self.assertEqual(ctx.weld_context.authority.failure_steps, 0)
 
     def test_collect_resource_keeps_non_log_candidate_diversification(self):
         body = FakeBody()
