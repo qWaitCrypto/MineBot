@@ -622,7 +622,11 @@ def _should_continue_collect(result: JsonObject, metrics: dict[str, object]) -> 
         return False
     if str(metrics.get("resume_hint") or "") != "reselect_candidates":
         return False
-    if str(result.get("reason") or "") not in {"partial_budget_exhausted", "partial_candidate_targets_exhausted"}:
+    if str(result.get("reason") or "") not in {
+        "partial_budget_exhausted",
+        "partial_candidate_targets_exhausted",
+        "candidate_targets_exhausted",
+    }:
         return False
     collected_delta = int(metrics.get("collected_delta") or 0)
     remaining_count = int(metrics.get("remaining_count") or 0)
