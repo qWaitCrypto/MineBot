@@ -91,12 +91,69 @@ import sys
 from minebot.game.rcon import RconClient, RconConfig
 host, port, password = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 with RconClient(RconConfig(host=host, port=port, password=password, timeout_s=3, reconnect_attempts=0)) as r:
+    r.command("difficulty peaceful")
+    r.command("gamerule spawn_mobs false")
+    r.command("gamerule advance_time false")
+    r.command("gamerule advance_weather false")
+    r.command("gamerule random_tick_speed 0")
+    r.command("gamerule fire_spread_radius_around_player 0")
+    r.command("weather clear")
+    r.command("time set day")
+    r.command("kill @e[type=!minecraft:player,type=!minecraft:item]")
     r.command("script load minebot global")
     r.command("script load w1_probe global")
     reset = r.command("script in minebot run minebot_reset()")
     if "true" not in reset.lower():
         raise RuntimeError(reset)
-    r.command("list")
+    difficulty = r.command("difficulty").lower()
+    spawn_mobs = r.command("gamerule spawn_mobs").lower()
+    advance_time = r.command("gamerule advance_time").lower()
+    random_tick_speed = r.command("gamerule random_tick_speed").lower()
+    hostile_types = (
+        "blaze",
+        "cave_spider",
+        "creeper",
+        "drowned",
+        "elder_guardian",
+        "enderman",
+        "endermite",
+        "evoker",
+        "ghast",
+        "guardian",
+        "hoglin",
+        "husk",
+        "magma_cube",
+        "phantom",
+        "piglin_brute",
+        "pillager",
+        "ravager",
+        "shulker",
+        "silverfish",
+        "skeleton",
+        "slime",
+        "spider",
+        "stray",
+        "vex",
+        "vindicator",
+        "warden",
+        "witch",
+        "wither_skeleton",
+        "zoglin",
+        "zombie",
+        "zombie_villager",
+    )
+    if "peaceful" not in difficulty:
+        raise RuntimeError(difficulty)
+    if "false" not in spawn_mobs:
+        raise RuntimeError(spawn_mobs)
+    if "false" not in advance_time:
+        raise RuntimeError(advance_time)
+    if "0" not in random_tick_speed:
+        raise RuntimeError(random_tick_speed)
+    for entity_type in hostile_types:
+        found = r.command(f"execute as @e[type=minecraft:{entity_type}] run data get entity @s Pos")
+        if found.strip():
+            raise RuntimeError(f"{entity_type}: {found[:500]}")
 PY
   then
     ready_count=$((ready_count + 1))
