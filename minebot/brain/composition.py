@@ -523,6 +523,20 @@ def _execute_candidate_probe_tool(context: CompositionContext, tool: RegisteredT
     before_failures = authority.failure_steps
     try:
         result = _execute_composition_phase(context, "mine", tool, tool_input)
+    except TimeoutError as exc:
+        if not _is_body_action_timeout(exc):
+            raise
+        _restore_progress_authority(authority, progress_snapshot)
+        return ToolResult(
+            False,
+            "mine_approach_failed:body_action_timeout",
+            True,
+            metrics={
+                "target": tool_input.get("pos"),
+                "await_diagnostics": dict(getattr(exc, "diagnostics", {}) or {}),
+                **_interrupt_orphan_action(context, "candidate_action_timeout"),
+            },
+        ).to_payload()
     except ProgressAbort as exc:
         _restore_progress_authority(authority, progress_snapshot)
         if _is_candidate_navigation_progress_yield_facts(exc.facts.last_action):
@@ -547,6 +561,37 @@ def _execute_candidate_probe_tool(context: CompositionContext, tool: RegisteredT
     if not result.get("success") and _is_collect_candidate_rejection(str(result.get("reason") or ""), result):
         authority.failure_steps = before_failures
     return result
+
+
+def _is_body_action_timeout(exc: TimeoutError) -> bool:
+    diagnostics = getattr(exc, "diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        return False
+    return bool(
+        diagnostics.get("action_id")
+        and "terminal_events" in diagnostics
+        and "poll_count" in diagnostics
+    )
+
+
+def _interrupt_orphan_action(context: CompositionContext, reason: str) -> dict[str, object]:
+    try:
+        result = context.weld_context.body.interrupt(reason)
+    except Exception as exc:
+        return {
+            "interrupt_error": {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            }
+        }
+    return {
+        "interrupt_result": {
+            "ok": bool(result.ok),
+            "accepted": bool(result.accepted),
+            "complete": bool(result.complete),
+            "error": result.error,
+        }
+    }
 
 
 def _is_collect_candidate_rejection(reason: str, result: JsonObject | None = None) -> bool:

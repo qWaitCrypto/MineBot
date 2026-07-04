@@ -12,7 +12,7 @@ from minebot.brain.modes import ModeRuntime
 from minebot.brain.progress import FAILURE_STORM_LIMIT, ProgressAbort, ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
 from minebot.brain.lifecycle import LifecycleState
-from minebot.contract import BodyState, PerceptionResult, ToolResult
+from minebot.contract import BodyState, PerceptionResult, Result, ToolResult
 
 
 def state(inventory_hash="inv"):
@@ -45,6 +45,7 @@ class FakeBody:
         self.inventory_counts = {"dirt": 0}
         self.state_reads = 0
         self.inventory_reads = 0
+        self.interrupts = []
 
     @property
     def inventory_count(self):
@@ -68,6 +69,10 @@ class FakeBody:
             if count
         ]
         return PerceptionResult("Bot", "inventory", "perception", True, True, {"slots": slots})
+
+    def interrupt(self, reason=None):
+        self.interrupts.append(reason)
+        return Result(None, "Bot", "result", True, True, True, {"action": "interrupt"}, None)
 
 
 class PagedInventoryBody(FakeBody):
@@ -467,6 +472,36 @@ def mine_tool_candidate_navigation_yields_then_success(body):
                     last_action=("navigate.segment", [0, 59, 0], {"kind": "block", "pos": target}, "no_path", target),
                 ).facts("collect logs"),
             )
+        expected = params.get("expected_drops") or ["dirt"]
+        item = str(expected[0]).removeprefix("minecraft:")
+        body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+        return ToolResult(True, "collected", False, metrics={"target": target, "collected_total": 1})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def mine_tool_body_action_timeout_then_success(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        target = params.get("pos")
+        if len(calls) == 1:
+            exc = TimeoutError("timed out waiting for terminal event for action a1")
+            exc.diagnostics = {
+                "action_id": "a1",
+                "terminal_events": ["mineDone"],
+                "poll_count": 88,
+                "wait_ms": 12043.456,
+                "observed_events": 0,
+            }
+            raise exc
         expected = params.get("expected_drops") or ["dirt"]
         item = str(expected[0]).removeprefix("minecraft:")
         body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
@@ -1209,6 +1244,37 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.metrics["skipped"][0]["skip"])
         self.assertEqual(ctx.weld_context.authority.stalled_steps, 0)
         self.assertEqual(ctx.weld_context.authority.failure_steps, 0)
+
+    def test_collect_resource_skips_candidate_body_action_timeout_and_interrupts_orphan(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[1, 59, 0], [2, 59, 0]])
+        registry.register(search)
+        miner, mine_calls = mine_tool_body_action_timeout_then_success(body)
+        registry.register(miner)
+        ctx, trace_events = composition_context(body, registry, max_candidates=2)
+
+        result = collect_resource({"item": "logs", "count": 1}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "collected")
+        self.assertEqual([call["pos"] for call in mine_calls], [[1, 59, 0], [2, 59, 0]])
+        self.assertEqual(body.interrupts, ["candidate_action_timeout"])
+        self.assertEqual(result.metrics["skipped"][0]["reason"], "mine_approach_failed:body_action_timeout")
+        self.assertTrue(result.metrics["skipped"][0]["skip"])
+        self.assertEqual(
+            result.metrics["attempts"][0]["mine"]["metrics"]["await_diagnostics"]["action_id"],
+            "a1",
+        )
+        self.assertEqual(
+            result.metrics["attempts"][0]["mine"]["metrics"]["interrupt_result"]["accepted"],
+            True,
+        )
+        self.assertEqual(ctx.weld_context.authority.failure_steps, 0)
+        mine_events = [event for event in trace_events if event["event"] == "composition_mine_attempt"]
+        self.assertEqual(mine_events[0]["reason"], "mine_approach_failed:body_action_timeout")
+        self.assertEqual(mine_events[0]["diagnostics"]["target"], [1, 59, 0])
 
     def test_collect_resource_keeps_probing_after_candidate_navigation_no_path_abort(self):
         body = FakeBody()
