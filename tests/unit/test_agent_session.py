@@ -4,7 +4,7 @@ import unittest
 from agents.exceptions import MaxTurnsExceeded
 
 from minebot.app.runner import AgentRuntime, RecoveryOutcome
-from minebot.app.session import AgentSession, SessionCommand
+from minebot.app.session import AgentSession, SessionCommand, SessionStep
 from minebot.app.wiring import AgentRuntimeParts
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleState
@@ -76,6 +76,28 @@ class AgentSessionTests(unittest.TestCase):
 
         self.assertEqual(final.status, "completed_turn")
         self.assertEqual(len(calls), 2)
+
+    def test_goal_driver_can_handle_collect_goal_before_model_tool_choice(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        driven_goals: list[str] = []
+
+        def driver(parts: AgentRuntimeParts, _signals) -> SessionStep | None:
+            driven_goals.append(parts.context.goal_text)
+            return SessionStep("completed_turn", parts.lifecycle.state, "driver_handled")
+
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies), goal_driver=driver)
+        session.submit(SessionCommand.start("collect 64 logs"))
+
+        first = asyncio.run(session.step())
+        second = asyncio.run(session.step())
+
+        self.assertEqual(first.status, "completed_turn")
+        self.assertEqual(first.message, "driver_handled")
+        self.assertEqual(driven_goals, ["collect 64 logs"])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("GOAL: collect 64 logs", calls[0])
+        self.assertEqual(second.status, "completed_turn")
 
     def test_pause_while_active_interrupts_body_and_yields_lifecycle(self):
         calls: list[str] = []
@@ -302,6 +324,76 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(active_step.lifecycle, LifecycleState.ACTIVE)
         self.assertEqual(len(calls), 2)
         self.assertTrue(any(event["event"] == "session_recovery_result" for event in session.parts.runtime.trace.snapshot()))
+
+    def test_goal_driver_retries_after_preflight_recovery(self):
+        driver_calls: list[tuple[str, str]] = []
+        model_calls: list[str] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = FakeBody()
+
+            async def fake_runner(agent, input_text, *, context=None, **kwargs):
+                model_calls.append(input_text)
+                return {"ok": True}
+
+            def recover(_runtime: AgentRuntime) -> RecoveryOutcome:
+                return RecoveryOutcome(True, "respawned", facts={"state_after_pos": [1, 64, 0]})
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=fake_runner,
+                recovery_handler=recover,
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        def driver(parts: AgentRuntimeParts, signals) -> SessionStep | None:
+            driver_calls.append((parts.context.goal_text, parts.lifecycle.state.value))
+            if len(driver_calls) == 1:
+                parts.lifecycle.ready()
+                parts.lifecycle.start()
+                parts.lifecycle.enter_recovery()
+                return SessionStep("stopped", parts.lifecycle.state, "death_detected")
+            if parts.lifecycle.state is LifecycleState.RECOVERING:
+                parts.lifecycle.resume()
+                return SessionStep("stopped", parts.lifecycle.state, "respawned")
+            if parts.lifecycle.state is LifecycleState.RESUMING:
+                parts.lifecycle.reenter_active()
+            return SessionStep("completed_turn", parts.lifecycle.state, "driver_handled")
+
+        session = AgentSession(parts_factory, goal_driver=driver)
+        session.submit(SessionCommand.start("collect 64 logs"))
+
+        first = asyncio.run(session.step())
+        second = asyncio.run(session.step())
+        third = asyncio.run(session.step())
+        fourth = asyncio.run(session.step())
+
+        self.assertEqual(first.lifecycle, LifecycleState.RECOVERING)
+        self.assertEqual(second.lifecycle, LifecycleState.RESUMING)
+        self.assertEqual(third.message, "driver_handled")
+        self.assertEqual(third.lifecycle, LifecycleState.ACTIVE)
+        self.assertEqual(fourth.status, "completed_turn")
+        self.assertEqual(
+            driver_calls,
+            [("collect 64 logs", "init"), ("collect 64 logs", "recovering"), ("collect 64 logs", "resuming")],
+        )
+        self.assertEqual(len(model_calls), 1)
 
     def test_recovering_session_yields_on_recovery_failure(self):
         def parts_factory(goal: str) -> AgentRuntimeParts:

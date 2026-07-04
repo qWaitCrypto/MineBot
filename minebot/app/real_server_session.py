@@ -20,8 +20,10 @@ from minebot.app.config import AppConfigError, agent_language_from_env, provider
 from minebot.app.observability import JsonlObservationSink
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime, inventory_count
 from minebot.app.runner import RuntimeTrace
+from minebot.app.wiring import AgentRuntimeParts
 from minebot.app.session import DEFAULT_RUNAWAY_STEP_LIMIT, AgentSession, SessionCommand, SessionStep
 from minebot.brain.lifecycle import LifecycleState
+from minebot.brain.modes import AgentSignal
 from minebot.brain.composition import resource_plan_for
 from minebot.contract import Body, Region
 from minebot.game import RconClient, ScarpetBody
@@ -179,7 +181,7 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
             )
             return parts
 
-        session = AgentSession(make_parts)
+        session = AgentSession(make_parts, goal_driver=_collect_goal_driver)
         session.submit(SessionCommand.start(goal))
         try:
             final = await session.run_until_waiting(
@@ -262,7 +264,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
             )
             return parts
 
-        session = AgentSession(make_parts)
+        session = AgentSession(make_parts, goal_driver=_collect_goal_driver)
         session.submit(SessionCommand.start(goal))
         reader = asyncio.create_task(_stdin_command_reader(session))
         try:
@@ -371,6 +373,20 @@ def _poll_chat_commands(session: AgentSession, chat_source: object | None) -> in
 
 def _session_goal(session: AgentSession, fallback: str) -> str:
     return session.current_goal or fallback
+
+
+def _collect_goal_driver(parts: AgentRuntimeParts, signals: list[AgentSignal]) -> SessionStep | None:
+    target = parse_collect_target(parts.context.goal_text)
+    if target is None:
+        parts.runtime.trace.emit("goal_driver_skipped", reason="not_collect_goal", goal=parts.context.goal_text)
+        return None
+    outcome = parts.runtime.drive_tool_once(
+        "collect_resource",
+        {"item": target.item, "count": target.count},
+        reason="canonical_collect_goal",
+        extra_signals=signals,
+    )
+    return SessionStep(outcome.status, outcome.lifecycle, outcome.message)
 
 
 async def _stdin_command_reader(session: AgentSession) -> None:

@@ -13,6 +13,7 @@ from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import ToolRegistry
 from minebot.app.real_server_session import (
     RealServerConfigError,
+    _collect_goal_driver,
     _ensure_scarpet_global_app,
     _poll_chat_commands,
     _run_interactive_loop,
@@ -202,6 +203,83 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(target.count, 64)
         self.assertIn("spruce_log", target.inventory_items)
         self.assertIn("birch_log", target.inventory_items)
+
+    def test_collect_goal_driver_routes_collect_goal_through_canonical_transaction(self):
+        body = HarnessBody()
+        context = AgentContext(system_prompt="sys", goal_text="collect 64 logs")
+        lifecycle = LifecycleController()
+        modes = ModeRuntime()
+        authority = ProgressAuthority()
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=context,
+            lifecycle=lifecycle,
+            mode_runtime=modes,
+            authority=authority,
+        )
+        calls = []
+
+        def drive_tool_once(tool_name, params, *, reason, extra_signals=None):
+            calls.append((tool_name, params, reason, extra_signals))
+            lifecycle.ready()
+            lifecycle.start()
+            return type(
+                "Outcome",
+                (),
+                {"status": "completed_turn", "lifecycle": lifecycle.state, "message": "driven"},
+            )()
+
+        runtime.drive_tool_once = drive_tool_once  # type: ignore[method-assign]
+        parts = type(
+            "Parts",
+            (),
+            {
+                "runtime": runtime,
+                "registry": ToolRegistry(),
+                "context": context,
+                "lifecycle": lifecycle,
+                "modes": modes,
+                "authority": authority,
+            },
+        )()
+
+        signal = AgentSignal.goal_started("collect 64 logs")
+        step = _collect_goal_driver(parts, [signal])
+
+        self.assertIsNotNone(step)
+        self.assertEqual(step.status, "completed_turn")
+        self.assertEqual(
+            calls,
+            [("collect_resource", {"item": "logs", "count": 64}, "canonical_collect_goal", [signal])],
+        )
+
+    def test_collect_goal_driver_ignores_non_collect_goal(self):
+        body = HarnessBody()
+        context = AgentContext(system_prompt="sys", goal_text="come here")
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=context,
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        parts = type(
+            "Parts",
+            (),
+            {
+                "runtime": runtime,
+                "registry": ToolRegistry(),
+                "context": context,
+                "lifecycle": runtime.lifecycle,
+                "modes": runtime.mode_runtime,
+                "authority": runtime.authority,
+            },
+        )()
+
+        self.assertIsNone(_collect_goal_driver(parts, []))
+        self.assertTrue(any(event["event"] == "goal_driver_skipped" for event in runtime.trace.snapshot()))
 
     def test_terminal_truth_succeeds_only_on_authoritative_inventory(self):
         body = InventoryBody({"spruce_log": 32, "birch_log": 32})

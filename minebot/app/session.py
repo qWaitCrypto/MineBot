@@ -70,6 +70,7 @@ class SessionStep:
 
 PartsFactory = Callable[[str], AgentRuntimeParts]
 ShouldStop = Callable[[SessionStep], bool]
+GoalDriver = Callable[[AgentRuntimeParts, list[AgentSignal]], SessionStep | None]
 
 
 @dataclass
@@ -77,10 +78,12 @@ class AgentSession:
     """Persistent outer session around one AgentRuntimeParts instance."""
 
     parts_factory: PartsFactory
+    goal_driver: GoalDriver | None = None
     parts: AgentRuntimeParts | None = None
     pending: deque[SessionCommand] = field(default_factory=deque)
     max_recovery_attempts: int = 3
     _recovery_attempts: int = 0
+    _goal_driver_keys: set[str] = field(default_factory=set)
 
     def submit(self, command: SessionCommand) -> None:
         self.pending.append(command)
@@ -121,6 +124,10 @@ class AgentSession:
         runnable_states = {LifecycleState.INIT, LifecycleState.IDLE, LifecycleState.ACTIVE, LifecycleState.RESUMING}
         if self.parts.lifecycle.state not in runnable_states:
             return SessionStep("waiting", self.parts.lifecycle.state)
+
+        driven = self._drive_goal_once_if_available(signals)
+        if driven is not None:
+            return driven
 
         try:
             outcome = await self.parts.runtime.run_turn(extra_signals=signals)
@@ -181,9 +188,11 @@ class AgentSession:
             return self._yield_recovery_failure(outcome.reason, outcome.facts)
 
         self._recovery_attempts = 0
-        recovered = await self.parts.runtime.run_turn(
-            extra_signals=[AgentSignal.recovery_completed(outcome.reason, **outcome.facts)]
-        )
+        signals = [AgentSignal.recovery_completed(outcome.reason, **outcome.facts)]
+        driven = self._drive_goal_once_if_available(signals)
+        if driven is not None:
+            return driven
+        recovered = await self.parts.runtime.run_turn(extra_signals=signals)
         return SessionStep(recovered.status, recovered.lifecycle, recovered.message)
 
     def _yield_recovery_failure(self, reason: str, facts: dict[str, object]) -> SessionStep:
@@ -239,6 +248,7 @@ class AgentSession:
     async def _apply_command(self, command: SessionCommand) -> list[AgentSignal]:
         if command.kind is SessionCommandKind.START:
             self.parts = self.parts_factory(command.text)
+            self._goal_driver_keys.clear()
             self.parts.context.observe_user_message(command.text)
             self._trace("user_message", command="start", content=command.text)
             return [AgentSignal.goal_started(command.text)]
@@ -256,6 +266,7 @@ class AgentSession:
             self.parts.context.observe_user_message(command.text)
             self.parts.runtime.weld_context.goal_text = command.text
             self.parts.authority.invalidate_generation("goal_replaced")
+            self._goal_driver_keys.clear()
             self._trace("user_message", command="replace_goal", content=command.text)
             return [AgentSignal.goal_started(command.text)]
 
@@ -272,6 +283,7 @@ class AgentSession:
             if command.text:
                 self.parts.context.set_goal(command.text)
                 self.parts.runtime.weld_context.goal_text = command.text
+                self._goal_driver_keys.clear()
                 return [AgentSignal.goal_started(command.text)]
             return []
 
@@ -308,6 +320,20 @@ class AgentSession:
     def _trace(self, event: str, **fields: object) -> None:
         if self.parts is not None:
             self.parts.runtime.trace.emit(event, **fields)
+
+    def _drive_goal_once_if_available(self, signals: list[AgentSignal]) -> SessionStep | None:
+        if self.goal_driver is None or self.parts is None:
+            return None
+        goal = self.parts.context.goal_text
+        if goal in self._goal_driver_keys:
+            return None
+        driven = self.goal_driver(self.parts, signals)
+        if driven is None:
+            self._goal_driver_keys.add(goal)
+            return None
+        if driven.status != "stopped" and driven.lifecycle not in {LifecycleState.RECOVERING, LifecycleState.RESUMING}:
+            self._goal_driver_keys.add(goal)
+        return driven
 
     def _body_interrupt(self, reason: str) -> None:
         assert self.parts is not None

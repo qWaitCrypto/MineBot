@@ -799,68 +799,10 @@ class AgentRuntime:
         self.tool_facts[tool_name] = dict(facts)
 
     async def run_turn(self, extra_signals: list[AgentSignal] | None = None) -> AgentTurnOutcome:
-        self._ensure_active()
-        self.agent_context.begin_turn()
-
-        state = self.body.get_state()
-        events = self.body.poll_events()
-        self._remember_body_state(state)
-        self.trace.emit(
-            "body_state",
-            bot=state.bot,
-            pos=list(state.pos),
-            health=state.health,
-            food=state.food,
-            oxygen=state.oxygen,
-            inventory_hash=state.inventory_hash,
-            dimension=state.dimension,
-            complete=state.complete,
-            missing=state.missing,
-        )
-        self.trace.emit(
-            "body_events",
-            count=len(events),
-            names=[event.name for event in events],
-            seqs=[event.seq for event in events],
-        )
-        signals = [
-            *signalize_body_state(state),
-            *signalize_events(events),
-            *(extra_signals or []),
-        ]
-        if self.last_tool_results:
-            signals.append(AgentSignal.tool_results(list(self.last_tool_results)))
-
-        reduction = self.mode_runtime.reduce(
-            signals,
-            self.lifecycle.state,
-            goal_text=self.agent_context.goal_text,
-        )
-        self._apply_lifecycle_request(reduction.requested_lifecycle)
-        profile = self.mode_runtime.profile_for(self.lifecycle.state)
-        self.agent_context.observe_state(state)
-        self.agent_context.observe_profile(profile)
-        self.weld_context.goal_text = self.agent_context.goal_text
-        self.trace.emit(
-            "turn_profile",
-            relationship=profile.relationship,
-            situational=profile.situational,
-            lifecycle=profile.lifecycle,
-            tool_focus=list(profile.tool_focus),
-            model_route=profile.model_route,
-            effort=profile.effort,
-            policy_tags=list(profile.policy_tags),
-            context_frame=profile.context_frame,
-        )
-
-        if not self.lifecycle.is_active:
-            self.trace.emit("turn_stopped", lifecycle=self.lifecycle.state.value, reason=reduction.reason)
-            return AgentTurnOutcome(
-                status="stopped",
-                lifecycle=self.lifecycle.state,
-                profile=profile,
-                message=reduction.reason,
-            )
+        prepared = self._prepare_turn(extra_signals=extra_signals)
+        if isinstance(prepared, AgentTurnOutcome):
+            return prepared
+        profile = prepared
 
         run_context = RuntimeRunContext(
             agent_context=self.agent_context,
@@ -1156,6 +1098,167 @@ class AgentRuntime:
             yielded_facts=facts,
             message=message,
         )
+
+    def drive_tool_once(
+        self,
+        tool_name: str,
+        params: JsonObject,
+        *,
+        reason: str = "goal_driver",
+        extra_signals: list[AgentSignal] | None = None,
+    ) -> AgentTurnOutcome:
+        prepared = self._prepare_turn(extra_signals=extra_signals)
+        if isinstance(prepared, AgentTurnOutcome):
+            return prepared
+        profile = prepared
+        tool = self.registry.get(tool_name)
+        tool_call_id = f"goal-{uuid4()}-{tool.name}"
+        arguments_summary = _summarize_tool_arguments(json.dumps(params, sort_keys=True, default=str))
+        self.trace.emit(
+            "goal_driver_start",
+            tool=tool.name,
+            reason=reason,
+            tool_call_id=tool_call_id,
+            arguments_summary=arguments_summary,
+        )
+        self.trace.emit(
+            "tool_invoke",
+            tool_call_id=tool_call_id,
+            tool=tool.name,
+            source=tool.sidecar.source,
+            tool_type=tool.sidecar.tool_type,
+            mutating=tool.sidecar.mutating,
+            permission=tool.sidecar.permission,
+            body_scope=list(tool.sidecar.body_scope),
+            terminal_truth=list(tool.sidecar.terminal_truth),
+            situational=profile.situational,
+            lifecycle=profile.lifecycle,
+            arguments_summary=arguments_summary,
+            driver=reason,
+        )
+        try:
+            result = execute_tool(tool, params, self.weld_context)
+            driver_context = RuntimeRunContext(
+                agent_context=self.agent_context,
+                weld_context=self.weld_context,
+                profile=profile,
+                tool_facts={name: dict(facts) for name, facts in self.tool_facts.items()},
+                trace=self.trace,
+                runtime=self,
+            )
+            result = _continue_collect_resource_tool(tool, result, driver_context, tool_call_id=tool_call_id)
+        except ProgressAbort as exc:
+            return self._yield_from_progress_abort(exc)
+        except BodyRecoveryRequired as exc:
+            return self._enter_recovery_from_body_fact(exc.reason, exc.facts)
+        except Exception as exc:
+            result = _tool_exception_payload(exc)
+            self.trace.emit(
+                "tool_exception",
+                tool_call_id=tool_call_id,
+                tool=tool.name,
+                error_type=type(exc).__name__,
+                reason=result["reason"],
+                message=str(exc),
+                await_diagnostics=result.get("metrics", {}).get("await_diagnostics"),
+                driver=reason,
+            )
+            if result.get("reason") == "transport_error":
+                self.weld_context.authority.invalidate_generation(f"transport_error:{tool.name}")
+                self.record_transport_error(tool.name, result, tool_call_id=tool_call_id)
+
+        if _requires_body_recovery(result):
+            facts = _recovery_facts_from_tool(tool.name, result)
+            return self._enter_recovery_from_body_fact(_recovery_reason_from_tool_result(result, facts), facts)
+
+        self.remember_tool_result(tool.name, result)
+        self.remember_tool_body_facts(result)
+        model_result = _finalize_tool_payload(
+            tool=tool,
+            result=result,
+            trace=self.trace,
+            tool_call_id=tool_call_id,
+        )
+        self.trace.emit(
+            "goal_driver_result",
+            tool=tool.name,
+            reason=str(result.get("reason") or ""),
+            success=bool(result.get("success")),
+            complete=model_result.get("complete"),
+            tool_call_id=tool_call_id,
+        )
+        self._reset_transport_errors()
+        return AgentTurnOutcome(
+            status="completed_turn",
+            lifecycle=self.lifecycle.state,
+            profile=profile,
+            result=result,
+        )
+
+    def _prepare_turn(self, *, extra_signals: list[AgentSignal] | None = None) -> RuntimeProfile | AgentTurnOutcome:
+        self._ensure_active()
+        self.agent_context.begin_turn()
+
+        state = self.body.get_state()
+        events = self.body.poll_events()
+        self._remember_body_state(state)
+        self.trace.emit(
+            "body_state",
+            bot=state.bot,
+            pos=list(state.pos),
+            health=state.health,
+            food=state.food,
+            oxygen=state.oxygen,
+            inventory_hash=state.inventory_hash,
+            dimension=state.dimension,
+            complete=state.complete,
+            missing=state.missing,
+        )
+        self.trace.emit(
+            "body_events",
+            count=len(events),
+            names=[event.name for event in events],
+            seqs=[event.seq for event in events],
+        )
+        signals = [
+            *signalize_body_state(state),
+            *signalize_events(events),
+            *(extra_signals or []),
+        ]
+        if self.last_tool_results:
+            signals.append(AgentSignal.tool_results(list(self.last_tool_results)))
+
+        reduction = self.mode_runtime.reduce(
+            signals,
+            self.lifecycle.state,
+            goal_text=self.agent_context.goal_text,
+        )
+        self._apply_lifecycle_request(reduction.requested_lifecycle)
+        profile = self.mode_runtime.profile_for(self.lifecycle.state)
+        self.agent_context.observe_state(state)
+        self.agent_context.observe_profile(profile)
+        self.weld_context.goal_text = self.agent_context.goal_text
+        self.trace.emit(
+            "turn_profile",
+            relationship=profile.relationship,
+            situational=profile.situational,
+            lifecycle=profile.lifecycle,
+            tool_focus=list(profile.tool_focus),
+            model_route=profile.model_route,
+            effort=profile.effort,
+            policy_tags=list(profile.policy_tags),
+            context_frame=profile.context_frame,
+        )
+
+        if not self.lifecycle.is_active:
+            self.trace.emit("turn_stopped", lifecycle=self.lifecycle.state.value, reason=reduction.reason)
+            return AgentTurnOutcome(
+                status="stopped",
+                lifecycle=self.lifecycle.state,
+                profile=profile,
+                message=reduction.reason,
+            )
+        return profile
 
 
 def _yield_message(facts: ProgressFacts, goal_text: str) -> str:
