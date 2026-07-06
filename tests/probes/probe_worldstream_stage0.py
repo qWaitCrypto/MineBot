@@ -81,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bot", default=os.environ.get("MINEBOT_WORLDSTREAM_BOT", DEFAULT_BOT))
     parser.add_argument("--dimension", default=os.environ.get("MINEBOT_WORLDSTREAM_DIMENSION", DEFAULT_DIMENSION))
     parser.add_argument("--timeout", type=float, default=8.0)
+    parser.add_argument("--linger-after-success", type=float, default=0.0)
     args = parser.parse_args(argv)
 
     client = WsClient.connect(args.host, args.port, timeout_s=args.timeout)
@@ -169,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
             },
         }
         print(json.dumps(summary, indent=2, sort_keys=True))
+        if args.linger_after_success > 0:
+            time.sleep(args.linger_after_success)
         return 0
     finally:
         client.close()
@@ -211,23 +214,38 @@ def _client_text_frame(data: bytes) -> bytes:
 
 
 def _read_frame(sock: socket.socket) -> bytes:
-    first = _recv_exact(sock, 2)
-    opcode = first[0] & 0x0F
-    if opcode == 0x8:
-        raise RuntimeError("websocket closed by server")
-    if opcode != 0x1:
+    while True:
+        first = _recv_exact(sock, 2)
+        opcode = first[0] & 0x0F
+        masked = bool(first[1] & 0x80)
+        length = first[1] & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", _recv_exact(sock, 2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", _recv_exact(sock, 8))[0]
+        mask = _recv_exact(sock, 4) if masked else b""
+        data = _recv_exact(sock, length)
+        if masked:
+            data = bytes(byte ^ mask[i % 4] for i, byte in enumerate(data))
+
+        if opcode == 0x1:
+            return data
+        if opcode == 0x8:
+            raise RuntimeError("websocket closed by server")
+        if opcode == 0x9:
+            sock.sendall(_client_control_frame(0xA, data))
+            continue
+        if opcode == 0xA:
+            continue
         raise RuntimeError(f"unexpected websocket opcode: {opcode}")
-    masked = bool(first[1] & 0x80)
-    length = first[1] & 0x7F
-    if length == 126:
-        length = struct.unpack("!H", _recv_exact(sock, 2))[0]
-    elif length == 127:
-        length = struct.unpack("!Q", _recv_exact(sock, 8))[0]
-    mask = _recv_exact(sock, 4) if masked else b""
-    data = _recv_exact(sock, length)
-    if masked:
-        data = bytes(byte ^ mask[i % 4] for i, byte in enumerate(data))
-    return data
+
+
+def _client_control_frame(opcode: int, data: bytes) -> bytes:
+    if len(data) > 125:
+        raise RuntimeError("websocket control payload too large")
+    mask = os.urandom(4)
+    masked = bytes(byte ^ mask[i % 4] for i, byte in enumerate(data))
+    return bytes([0x80 | opcode, 0x80 | len(data)]) + mask + masked
 
 
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -273,4 +291,8 @@ def _require(condition: bool, message: str) -> None:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("interrupted; websocket closed", file=sys.stderr)
+        raise SystemExit(130)
