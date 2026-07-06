@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from camera.model.world import SectionData
+from camera.assets.vanilla import Atlas
 from camera.render.mesher import Mesh, mesh_section
 from camera.worldstream.protocol import SectionKey
 
@@ -21,6 +22,13 @@ class SectionMeshCache:
         self._meshes: dict[SectionKey, Mesh] = {}
         self._combined_signature: tuple[SectionKey, ...] | None = None
         self._combined_mesh: Mesh | None = None
+        self._atlas: Atlas | None = None
+
+    def set_atlas(self, atlas: Atlas | None) -> None:
+        if atlas is self._atlas:
+            return
+        self._atlas = atlas
+        self.clear()
 
     def clear(self) -> None:
         self._meshes.clear()
@@ -44,7 +52,7 @@ class SectionMeshCache:
             if section is None:
                 self._meshes.pop(key, None)
                 continue
-            self._meshes[key] = mesh_section(section)
+            self._meshes[key] = mesh_section(section, self._atlas)
             rebuilt += 1
 
         max_distance = max(0, view_radius_chunks)

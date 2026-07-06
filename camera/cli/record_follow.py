@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from camera.assets.vanilla import build_atlas, resolve_client_jar
 from camera.control.follow import FollowConfig, FollowController
 from camera.dependencies import DependencyError, check_dependencies
 from camera.model.world import SectionStore, TransformBuffer
@@ -26,6 +27,7 @@ class RecordSummary:
     sections_loaded: int
     face_count_last: int
     dependencies: dict[str, str]
+    assets: dict[str, object]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--view-radius-chunks", type=int, default=4)
     parser.add_argument("--min-sections", type=int, default=24)
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--client-jar", default=None)
+    parser.add_argument("--asset-cache-dir", default=".camera-assets/26.1.2")
     args = parser.parse_args(argv)
 
     try:
@@ -120,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("no transform sample received")
 
     controller = FollowController(FollowConfig(stiffness=0.22))
+    client_jar = resolve_client_jar(args.client_jar)
+    atlas = build_atlas(client_jar, Path(args.asset_cache_dir))
     timing_path = Path(args.timing_log)
     timing_path.parent.mkdir(parents=True, exist_ok=True)
     frame_count = max(1, int(args.duration * args.fps))
@@ -127,10 +133,11 @@ def main(argv: list[str] | None = None) -> int:
     record_start = 0.0
     face_count_last = 0
     mesh_cache = SectionMeshCache()
+    mesh_cache.set_atlas(atlas)
     renderer: GLRenderer | None = None
     writer: FfmpegWriter | None = None
     try:
-        renderer = GLRenderer(args.width, args.height)
+        renderer = GLRenderer(args.width, args.height, atlas.image_rgba_u8())
         writer = FfmpegWriter(deps.ffmpeg_path, Path(args.output), args.width, args.height, args.fps)
         record_start = time.monotonic()
         with timing_path.open("w", encoding="utf-8") as timing_file:
@@ -205,6 +212,14 @@ def main(argv: list[str] | None = None) -> int:
             "gl_renderer": deps.gl_renderer,
             "gl_vendor": deps.gl_vendor,
             "hello_mc_version": str(hello_holder.get("mc_version")),
+        },
+        assets={
+            "client_jar": str(client_jar.resolve()),
+            "atlas_path": str(atlas.atlas_path.resolve()),
+            "texture_count": len(atlas.texture_uvs),
+            "covered_blocks": list(atlas.covered_blocks),
+            "approximate_blocks": list(atlas.approximate_blocks),
+            "missing_blocks": list(atlas.missing_blocks),
         },
     )
     print(json.dumps(asdict(summary), indent=2, sort_keys=True))

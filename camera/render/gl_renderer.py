@@ -13,21 +13,30 @@ from camera.render.mesher import Mesh
 VERTEX_SHADER = """
 #version 330
 in vec3 in_pos;
-in vec3 in_color;
+in vec2 in_uv;
+in float in_light;
 uniform mat4 mvp;
-out vec3 v_color;
+out vec2 v_uv;
+out float v_light;
 void main() {
     gl_Position = mvp * vec4(in_pos, 1.0);
-    v_color = in_color;
+    v_uv = in_uv;
+    v_light = in_light;
 }
 """
 
 FRAGMENT_SHADER = """
 #version 330
-in vec3 v_color;
+uniform sampler2D atlas;
+in vec2 v_uv;
+in float v_light;
 out vec4 fragColor;
 void main() {
-    fragColor = vec4(v_color, 1.0);
+    vec4 texel = texture(atlas, v_uv);
+    if (texel.a < 0.08) {
+        discard;
+    }
+    fragColor = vec4(texel.rgb * v_light, texel.a);
 }
 """
 
@@ -39,13 +48,17 @@ class RenderStats:
 
 
 class GLRenderer:
-    def __init__(self, width: int, height: int) -> None:
+    def __init__(self, width: int, height: int, atlas_rgba: np.ndarray | None = None) -> None:
         self.width = width
         self.height = height
         self.ctx = moderngl.create_standalone_context(backend="egl")
         self.ctx.enable(moderngl.DEPTH_TEST)
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
         self.program = self.ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=FRAGMENT_SHADER)
+        self.program["atlas"].value = 0
         self.fbo = self.ctx.simple_framebuffer((width, height), components=3)
+        self.texture = self._make_texture(atlas_rgba)
         self._buffer: moderngl.Buffer | None = None
         self._vao: moderngl.VertexArray | None = None
         self._vertex_count = 0
@@ -58,6 +71,7 @@ class GLRenderer:
         self.fbo.use()
         self.ctx.clear(0.52, 0.72, 0.92, 1.0)
         if mesh.vertices.size:
+            self.texture.use(location=0)
             self._ensure_geometry(mesh)
             self.program["mvp"].write(_mvp_matrix(pose, self.width / self.height).T.astype("f4").tobytes())
             if self._vao is not None:
@@ -78,6 +92,7 @@ class GLRenderer:
         if self._buffer is not None:
             self._buffer.release()
             self._buffer = None
+        self.texture.release()
         self.fbo.release()
         self.program.release()
         self.ctx.release()
@@ -93,9 +108,18 @@ class GLRenderer:
             self._buffer.release()
             self._buffer = None
         self._buffer = self.ctx.buffer(mesh.vertices.astype("f4", copy=False).tobytes())
-        self._vao = self.ctx.vertex_array(self.program, [(self._buffer, "3f 3f", "in_pos", "in_color")])
+        self._vao = self.ctx.vertex_array(self.program, [(self._buffer, "3f 2f 1f", "in_pos", "in_uv", "in_light")])
         self._vertex_count = int(mesh.vertices.shape[0])
         self._mesh_signature = signature
+
+    def _make_texture(self, atlas_rgba: np.ndarray | None) -> moderngl.Texture:
+        if atlas_rgba is None:
+            atlas_rgba = np.asarray([[[255, 0, 255, 255]]], dtype=np.uint8)
+        texture = self.ctx.texture((int(atlas_rgba.shape[1]), int(atlas_rgba.shape[0])), 4, atlas_rgba.tobytes())
+        texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        texture.repeat_x = False
+        texture.repeat_y = False
+        return texture
 
 
 def _mvp_matrix(pose: CameraPose, aspect: float) -> np.ndarray:

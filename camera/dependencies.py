@@ -15,6 +15,8 @@ class DependencyReport:
     gl_backend: str
     gl_renderer: str
     gl_vendor: str
+    asset_client_jar: str | None = None
+    asset_atlas_path: str | None = None
 
 
 class DependencyError(RuntimeError):

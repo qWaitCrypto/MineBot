@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
+from camera.assets.vanilla import MISSING_TEXTURE, block_id, build_atlas, resolve_client_jar
 from camera.model.world import SectionData, SectionStore, TransformBuffer
 from camera.render.cache import SectionMeshCache
 from camera.render.mesher import mesh_section, visible_face_masks
@@ -60,6 +61,9 @@ def test_mesh_section_emits_vectorized_visible_faces() -> None:
     assert mesh.vertices.shape == (36, 6)
     assert np.isclose(mesh.vertices[:, 0].min(), 8.0)
     assert np.isclose(mesh.vertices[:, 0].max(), 9.0)
+    assert np.all(mesh.vertices[:, 3:5] >= 0.0)
+    assert np.all(mesh.vertices[:, 3:5] <= 1.0)
+    assert np.all(mesh.vertices[:, 5] > 0.0)
 
 
 def test_section_mesh_cache_reuses_clean_visible_mesh() -> None:
@@ -119,3 +123,15 @@ def test_world_model_and_mesh_cache_clear_on_reconnect() -> None:
     cache.clear()
     rebuilt = cache.mesh_visible({key: section}, {key}, key, view_radius_chunks=4)
     assert rebuilt.rebuilt_sections == 1
+
+
+def test_vanilla_asset_atlas_uses_local_client_jar() -> None:
+    client_jar = resolve_client_jar()
+    atlas = build_atlas(client_jar)
+
+    assert atlas.client_jar.exists()
+    assert atlas.atlas_path.exists()
+    assert "block/stone" in atlas.texture_uvs
+    assert "block/grass_block_top" in atlas.texture_uvs
+    assert MISSING_TEXTURE in atlas.texture_uvs
+    assert block_id("minecraft:stone[foo=bar]") == "minecraft:stone"
