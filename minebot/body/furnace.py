@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import asdict
 from dataclasses import dataclass
 import time
+from math import ceil
 from math import dist
+from typing import Callable
 
 from minebot.body.block_work import BlockWork
+from minebot.body.inventory import _ScarpetValueParser
 from minebot.body.interaction_support import (
     InteractionNavigator,
     find_nearby_block_targets,
@@ -49,6 +52,67 @@ FUEL_BURN_SECONDS = {
 
 FURNACE_SLOTS = {"input": 0, "fuel": 1, "output": 2}
 CLEAR_ORDER = ("output", "input", "fuel")
+FUEL_SELECTION_ORDER = (
+    "coal",
+    "charcoal",
+    "coal_block",
+    "oak_planks",
+    "spruce_planks",
+    "birch_planks",
+    "jungle_planks",
+    "acacia_planks",
+    "dark_oak_planks",
+    "stick",
+    "bamboo",
+    "dried_kelp_block",
+    "blaze_rod",
+    "oak_log",
+    "spruce_log",
+    "birch_log",
+    "jungle_log",
+    "acacia_log",
+    "dark_oak_log",
+    "lava_bucket",
+)
+SMELT_OUTPUT_CANDIDATES = {
+    "raw_iron": ("iron_ingot",),
+    "iron_ore": ("iron_ingot",),
+    "deepslate_iron_ore": ("iron_ingot",),
+    "raw_gold": ("gold_ingot",),
+    "gold_ore": ("gold_ingot",),
+    "deepslate_gold_ore": ("gold_ingot",),
+    "nether_gold_ore": ("gold_ingot",),
+    "raw_copper": ("copper_ingot",),
+    "copper_ore": ("copper_ingot",),
+    "deepslate_copper_ore": ("copper_ingot",),
+    "oak_log": ("charcoal",),
+    "spruce_log": ("charcoal",),
+    "birch_log": ("charcoal",),
+    "jungle_log": ("charcoal",),
+    "acacia_log": ("charcoal",),
+    "dark_oak_log": ("charcoal",),
+    "oak_wood": ("charcoal",),
+    "spruce_wood": ("charcoal",),
+    "birch_wood": ("charcoal",),
+    "jungle_wood": ("charcoal",),
+    "acacia_wood": ("charcoal",),
+    "dark_oak_wood": ("charcoal",),
+    "stripped_oak_log": ("charcoal",),
+    "stripped_spruce_log": ("charcoal",),
+    "stripped_birch_log": ("charcoal",),
+    "stripped_jungle_log": ("charcoal",),
+    "stripped_acacia_log": ("charcoal",),
+    "stripped_dark_oak_log": ("charcoal",),
+    "stripped_oak_wood": ("charcoal",),
+    "stripped_spruce_wood": ("charcoal",),
+    "stripped_birch_wood": ("charcoal",),
+    "stripped_jungle_wood": ("charcoal",),
+    "stripped_acacia_wood": ("charcoal",),
+    "stripped_dark_oak_wood": ("charcoal",),
+    "cobblestone": ("stone",),
+    "sand": ("glass",),
+    "red_sand": ("glass",),
+}
 
 
 @dataclass(frozen=True)
@@ -73,6 +137,40 @@ class SmeltPlan:
     output_item: str
     output_count: int
     output_slot: int
+
+
+def select_fuel(counts: dict[str, int], seconds_needed: float) -> tuple[str, int] | None:
+    if seconds_needed <= 0:
+        return None
+    normalized_counts = _normalize_counts(counts)
+    for fuel in FUEL_SELECTION_ORDER:
+        seconds_per_item = FUEL_BURN_SECONDS.get(fuel)
+        if seconds_per_item is None:
+            continue
+        required_count = max(1, ceil(seconds_needed / seconds_per_item))
+        if normalized_counts.get(fuel, 0) >= required_count:
+            return (fuel, required_count)
+    return None
+
+
+def resolve_smelt_output(
+    input_item: str,
+    recipe_lookup: Callable[[str], PerceptionResult | None] | None = None,
+) -> tuple[str, int] | None:
+    normalized_input = _plain_item(input_item)
+    candidates = SMELT_OUTPUT_CANDIDATES.get(normalized_input, ())
+    if not candidates:
+        return None
+    if recipe_lookup is None:
+        return (candidates[0], 1)
+    for output_item in candidates:
+        perception = recipe_lookup(output_item)
+        if perception is None or not perception.ok:
+            continue
+        resolved = _resolve_smelt_output_from_recipe(normalized_input, output_item, perception)
+        if resolved is not None:
+            return resolved
+    return None
 
 
 class FurnaceTransactions:
@@ -1327,8 +1425,106 @@ def _available_item_count(slots: list[InventorySlot], item: str, *, exclude: set
 
 
 def _fuel_seconds_per_item(item: str) -> float | None:
-    normalized = item.removeprefix("minecraft:")
+    normalized = _plain_item(item)
     return FUEL_BURN_SECONDS.get(normalized)
+
+
+def _normalize_counts(counts: dict[str, int]) -> dict[str, int]:
+    normalized: dict[str, int] = {}
+    for raw_item, raw_count in counts.items():
+        try:
+            count = int(raw_count or 0)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        item = _plain_item(str(raw_item))
+        normalized[item] = normalized.get(item, 0) + count
+    return normalized
+
+
+def _plain_item(item: object) -> str:
+    return str(item).removeprefix("minecraft:").strip().lower()
+
+
+def _resolve_smelt_output_from_recipe(
+    normalized_input: str,
+    expected_output: str,
+    perception: PerceptionResult,
+) -> tuple[str, int] | None:
+    recipe_raw = str(perception.data.get("recipe_raw") or "")
+    if not recipe_raw:
+        return None
+    try:
+        parsed = _ScarpetValueParser(recipe_raw).parse()
+    except ValueError:
+        return None
+    variants = parsed if _is_recipe_variant_list(parsed) else [parsed]
+    for variant in variants:
+        resolved = _resolve_smelt_output_from_variant(normalized_input, expected_output, variant)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _is_recipe_variant_list(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(entry, list) and len(entry) >= 3 for entry in value)
+        and not _looks_like_recipe_variant(value)
+    )
+
+
+def _looks_like_recipe_variant(value: object) -> bool:
+    if not (isinstance(value, list) and len(value) >= 3 and isinstance(value[0], list) and isinstance(value[1], list)):
+        return False
+    outputs = value[0]
+    if not outputs:
+        return False
+    first_output = outputs[0]
+    return isinstance(first_output, list) and bool(first_output) and not isinstance(first_output[0], list)
+
+
+def _resolve_smelt_output_from_variant(
+    normalized_input: str,
+    expected_output: str,
+    variant: object,
+) -> tuple[str, int] | None:
+    if not isinstance(variant, list) or len(variant) < 3:
+        return None
+    outputs_raw, groups_raw = variant[0], variant[1]
+    if not isinstance(outputs_raw, list) or not outputs_raw:
+        return None
+    output = outputs_raw[0]
+    if not isinstance(output, list) or len(output) < 2:
+        return None
+    output_item = _plain_item(output[0])
+    if output_item != _plain_item(expected_output):
+        return None
+    try:
+        output_count = int(output[1])
+    except (TypeError, ValueError):
+        return None
+    if output_count <= 0:
+        return None
+    if not _smelt_variant_accepts_input(normalized_input, groups_raw):
+        return None
+    return (output_item, output_count)
+
+
+def _smelt_variant_accepts_input(normalized_input: str, groups_raw: object) -> bool:
+    if not isinstance(groups_raw, list):
+        return False
+    for group in groups_raw:
+        if group is None:
+            continue
+        if isinstance(group, list):
+            if any(_plain_item(entry) == normalized_input for entry in group if entry is not None):
+                return True
+        elif _plain_item(group) == normalized_input:
+            return True
+    return False
 
 
 def _plan_fuel_budget(

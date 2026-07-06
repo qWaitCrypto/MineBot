@@ -1,6 +1,7 @@
 import unittest
 
 from minebot.body import BlockWork, FurnaceTransactions
+from minebot.body.furnace import resolve_smelt_output, select_fuel
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
 from minebot.game.governance import GovernancePolicy, Region
 from tests.unit._body_batch_helper import batch_block_cells_from_blockat
@@ -253,6 +254,20 @@ def perception(scope, slots, *, complete=True, ok=True, next_start=None, total_s
     )
 
 
+def recipe_perception(item, recipe_raw, *, ok=True):
+    return PerceptionResult(
+        bot="Bot1",
+        scope="recipeData",
+        type="perception",
+        ok=ok,
+        complete=True,
+        data={"item": item, "recipe_raw": recipe_raw} if ok else {},
+        uncertainty=[],
+        next=None,
+        error=None if ok else "recipe_not_found",
+    )
+
+
 def slot(index, item=None, count=0):
     return {"slot": index, "empty": item is None or count <= 0, "item": item, "count": count}
 
@@ -297,6 +312,65 @@ class FakeInteractionNavigator:
 
 
 class FurnaceRuntimeTests(unittest.TestCase):
+    def test_select_fuel_prefers_dedicated_fuels_and_normalizes_counts(self):
+        result = select_fuel(
+            {
+                "minecraft:oak_log": 4,
+                "minecraft:oak_planks": 1,
+                "charcoal": 1,
+                "coal": 1,
+            },
+            30.0,
+        )
+
+        self.assertEqual(result, ("coal", 1))
+
+    def test_select_fuel_requires_one_kind_to_cover_budget(self):
+        result = select_fuel({"minecraft:stick": 1, "minecraft:bamboo": 2}, 10.0)
+
+        self.assertIsNone(result)
+
+    def test_select_fuel_uses_planks_before_logs(self):
+        result = select_fuel({"oak_log": 2, "oak_planks": 2}, 30.0)
+
+        self.assertEqual(result, ("oak_planks", 2))
+
+    def test_select_fuel_returns_none_for_empty_or_nonpositive_budget(self):
+        self.assertIsNone(select_fuel({}, 10.0))
+        self.assertIsNone(select_fuel({"coal": 1}, 0.0))
+
+    def test_resolve_smelt_output_static_candidates(self):
+        self.assertEqual(resolve_smelt_output("minecraft:raw_iron"), ("iron_ingot", 1))
+        self.assertEqual(resolve_smelt_output("sand"), ("glass", 1))
+        self.assertEqual(resolve_smelt_output("oak_log"), ("charcoal", 1))
+        self.assertIsNone(resolve_smelt_output("minecraft:diamond"))
+
+    def test_resolve_smelt_output_verifies_runtime_recipe_input(self):
+        calls = []
+
+        def lookup(output_item):
+            calls.append(output_item)
+            return recipe_perception(
+                output_item,
+                '[[[[iron_ingot, 1, {count:1,id:"minecraft:iron_ingot"}]], [[deepslate_iron_ore]], [smelting, 200, 0.699999988079]], '
+                '[[[iron_ingot, 1, {count:1,id:"minecraft:iron_ingot"}]], [[iron_ore]], [smelting, 200, 0.699999988079]], '
+                '[[[iron_ingot, 1, {count:1,id:"minecraft:iron_ingot"}]], [[raw_iron]], [smelting, 200, 0.699999988079]]]'
+            )
+
+        result = resolve_smelt_output("minecraft:raw_iron", lookup)
+
+        self.assertEqual(result, ("iron_ingot", 1))
+        self.assertEqual(calls, ["iron_ingot"])
+
+    def test_resolve_smelt_output_rejects_runtime_recipe_without_input(self):
+        def lookup(output_item):
+            return recipe_perception(
+                output_item,
+                '[[[[iron_ingot, 1, {count:1,id:"minecraft:iron_ingot"}]], [[iron_ore]], [smelting, 200, 0.699999988079]]]'
+            )
+
+        self.assertIsNone(resolve_smelt_output("minecraft:raw_iron", lookup))
+
     def test_smelt_preflight_reads_inventory_in_small_pages(self):
         body = FakeFurnaceBody(
             perception("container", [slot(0), slot(1), slot(2)]),

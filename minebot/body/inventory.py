@@ -1581,12 +1581,17 @@ class _ScarpetValueParser:
             self.index += 1
         raise ValueError("unterminated string")
 
-    def _parse_number(self) -> int:
+    def _parse_number(self) -> int | float:
         start = self.index
         if self.text[self.index] == "-":
             self.index += 1
         while self.index < len(self.text) and self.text[self.index].isdigit():
             self.index += 1
+        if self.index < len(self.text) and self.text[self.index] == ".":
+            self.index += 1
+            while self.index < len(self.text) and self.text[self.index].isdigit():
+                self.index += 1
+            return float(self.text[start:self.index])
         return int(self.text[start:self.index])
 
     def _parse_identifier(self) -> object:
