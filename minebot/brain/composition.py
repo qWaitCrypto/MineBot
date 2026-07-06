@@ -825,6 +825,10 @@ def _resource_plan(item: str) -> ResourcePlan:
         "coal": ("coal", ("coal_ore", "deepslate_coal_ore"), ("coal",)),
         "iron": ("raw_iron", ("iron_ore", "deepslate_iron_ore"), ("raw_iron",)),
         "raw_iron": ("raw_iron", ("iron_ore", "deepslate_iron_ore"), ("raw_iron",)),
+        "gold": ("raw_gold", ("gold_ore", "deepslate_gold_ore"), ("raw_gold",)),
+        "raw_gold": ("raw_gold", ("gold_ore", "deepslate_gold_ore"), ("raw_gold",)),
+        "stone": ("cobblestone", ("stone", "cobblestone"), ("cobblestone",)),
+        "cobblestone": ("cobblestone", ("stone", "cobblestone"), ("cobblestone",)),
         "diamond": ("diamond", ("diamond_ore", "deepslate_diamond_ore"), ("diamond",)),
         "dirt": ("dirt", ("dirt", "grass_block", "coarse_dirt", "rooted_dirt"), ("dirt",)),
     }

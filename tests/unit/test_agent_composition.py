@@ -861,6 +861,22 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["requested_item"], "iron")
         self.assertEqual(result["metrics"]["item"], "raw_iron")
 
+    def test_resource_plan_maps_stone_cobblestone_and_raw_gold_aliases(self):
+        stone = resource_plan_for("stone")
+        self.assertEqual(stone.inventory_item, "cobblestone")
+        self.assertEqual(stone.inventory_items, ("cobblestone",))
+        self.assertEqual(stone.expected_drops, ("cobblestone",))
+        self.assertEqual(stone.block_types, ("stone", "cobblestone"))
+
+        cobblestone = resource_plan_for("cobblestone")
+        self.assertEqual(cobblestone.inventory_item, "cobblestone")
+        self.assertEqual(cobblestone.block_types, ("stone", "cobblestone"))
+
+        raw_gold = resource_plan_for("raw_gold")
+        self.assertEqual(raw_gold.inventory_item, "raw_gold")
+        self.assertEqual(raw_gold.expected_drops, ("raw_gold",))
+        self.assertEqual(raw_gold.block_types, ("gold_ore", "deepslate_gold_ore"))
+
     def test_collect_resource_maps_dirt_to_dirt_dropping_surface_blocks(self):
         plan = resource_plan_for("dirt")
 
