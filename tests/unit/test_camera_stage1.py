@@ -5,7 +5,15 @@ from pathlib import Path
 
 import numpy as np
 
-from camera.assets.vanilla import MISSING_TEXTURE, block_id, build_atlas, is_renderable_cube_state, resolve_client_jar
+from camera.assets.vanilla import (
+    MISSING_TEXTURE,
+    block_id,
+    build_atlas,
+    is_occluding_cube_state,
+    is_renderable_cube_state,
+    load_blockstate_model,
+    resolve_client_jar,
+)
 from camera.model.world import SectionData, SectionStore, TransformBuffer
 from camera.render.cache import SectionMeshCache
 from camera.render.mesher import mesh_section, visible_face_masks
@@ -49,6 +57,18 @@ def test_visible_face_masks_are_neighbor_shift_based() -> None:
     assert sum(int(mask.sum()) for mask in masks) == 10
 
 
+def test_visible_face_masks_follow_yzx_section_axes() -> None:
+    occupied = np.zeros((16, 16, 16), dtype=bool)
+    occupied[8, 8, 8] = True
+
+    occupied[9, 8, 8] = True
+    masks = visible_face_masks(occupied)
+    assert not masks[2][8, 8, 8]
+    assert not masks[3][9, 8, 8]
+    assert masks[0][8, 8, 8]
+    assert masks[4][8, 8, 8]
+
+
 def test_mesh_section_emits_vectorized_visible_faces() -> None:
     key = SectionKey(0, 4, 0)
     indices = np.zeros((16, 16, 16), dtype=np.uint16)
@@ -64,6 +84,45 @@ def test_mesh_section_emits_vectorized_visible_faces() -> None:
     assert np.all(mesh.vertices[:, 3:5] >= 0.0)
     assert np.all(mesh.vertices[:, 3:5] <= 1.0)
     assert np.all(mesh.vertices[:, 5] > 0.0)
+
+
+def test_mesh_section_uses_per_corner_ao() -> None:
+    key = SectionKey(0, 4, 0)
+    indices = np.zeros((16, 16, 16), dtype=np.uint16)
+    indices[8, 8, 8] = 1
+    indices[8, 9, 8] = 1
+    indices[8, 8, 7] = 1
+    section = SectionData(key=key, palette=("minecraft:air", "minecraft:stone"), indices=indices)
+
+    mesh = mesh_section(section)
+    faces = mesh.vertices.reshape((-1, 6, 6))
+    top_faces = [
+        face
+        for face in faces
+        if np.allclose(face[:, 1], 73.0)
+        and np.isclose(face[:, 0].min(), 8.0)
+        and np.isclose(face[:, 0].max(), 9.0)
+        and np.isclose(face[:, 2].min(), 8.0)
+        and np.isclose(face[:, 2].max(), 9.0)
+    ]
+
+    assert len(top_faces) == 1
+    assert np.unique(np.round(top_faces[0][:, 5], 4)).size > 1
+
+
+def test_water_renders_as_non_occluding_top_surface() -> None:
+    key = SectionKey(0, 4, 0)
+    indices = np.zeros((16, 16, 16), dtype=np.uint16)
+    indices[8, 8, 8] = 1
+    indices[8, 8, 9] = 2
+    indices[8, 8, 10] = 2
+    section = SectionData(key=key, palette=("minecraft:air", "minecraft:stone", "minecraft:water"), indices=indices)
+
+    mesh = mesh_section(section)
+
+    assert is_renderable_cube_state("minecraft:water")
+    assert not is_occluding_cube_state("minecraft:water")
+    assert mesh.face_count == 8
 
 
 def test_mesh_section_omits_non_cube_plants_without_placeholder_cube() -> None:
@@ -150,6 +209,9 @@ def test_world_model_and_mesh_cache_clear_on_reconnect() -> None:
 def test_vanilla_asset_atlas_uses_local_client_jar() -> None:
     client_jar = resolve_client_jar()
     atlas = build_atlas(client_jar)
+    stone_model = load_blockstate_model(client_jar, "minecraft:stone")
+    grass_model = load_blockstate_model(client_jar, "minecraft:grass_block")
+    oak_log_model = load_blockstate_model(client_jar, "minecraft:oak_log")
 
     assert atlas.client_jar.exists()
     assert atlas.atlas_path.exists()
@@ -157,3 +219,14 @@ def test_vanilla_asset_atlas_uses_local_client_jar() -> None:
     assert "block/grass_block_top" in atlas.texture_uvs
     assert MISSING_TEXTURE in atlas.texture_uvs
     assert block_id("minecraft:stone[foo=bar]") == "minecraft:stone"
+    assert stone_model is not None
+    assert set(stone_model.values()) == {"block/stone"}
+    assert grass_model is not None
+    assert grass_model["up"] == "block/grass_block_top"
+    assert grass_model["down"] == "block/dirt"
+    assert grass_model["north"] == "block/grass_block_side_overlay"
+    assert atlas.materials["minecraft:grass_block"]["north"] == "block/grass_block_side"
+    assert oak_log_model is not None
+    assert oak_log_model["north"] == "block/oak_log"
+    assert oak_log_model["up"] == "block/oak_log_top"
+    assert atlas.texture_for_state("minecraft:oak_log[axis=y]", 2) == "block/oak_log_top"

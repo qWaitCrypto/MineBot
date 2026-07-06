@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from camera.model.world import SectionData
-from camera.assets.vanilla import Atlas, MISSING_TEXTURE, is_renderable_cube_state
+from camera.assets.vanilla import Atlas, MISSING_TEXTURE, is_fluid_state, is_occluding_cube_state, is_renderable_cube_state
 from camera.worldstream.protocol import SectionKey
 
 
@@ -35,6 +35,16 @@ FACE_VERTEX_OFFSETS = np.asarray(
     dtype=np.float32,
 )
 
+FACE_AO_AXES_YZX = (
+    (0, 1),  # +x: y/z
+    (0, 1),  # -x: y/z
+    (1, 2),  # +y: z/x
+    (1, 2),  # -y: z/x
+    (0, 2),  # +z: y/x
+    (0, 2),  # -z: y/x
+)
+AO_LEVELS = np.asarray([1.0, 0.82, 0.68, 0.54], dtype=np.float32)
+
 
 @dataclass(frozen=True)
 class Mesh:
@@ -42,27 +52,40 @@ class Mesh:
     face_count: int
 
 
-def visible_face_masks(occupied: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    padded = np.pad(occupied, 1, mode="constant", constant_values=False)
-    center = padded[1:-1, 1:-1, 1:-1]
-    xp = center & ~padded[2:, 1:-1, 1:-1]
-    xm = center & ~padded[:-2, 1:-1, 1:-1]
-    yp = center & ~padded[1:-1, 2:, 1:-1]
-    ym = center & ~padded[1:-1, :-2, 1:-1]
-    zp = center & ~padded[1:-1, 1:-1, 2:]
-    zm = center & ~padded[1:-1, 1:-1, :-2]
+def visible_face_masks(
+    renderable: np.ndarray,
+    occluding: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if occluding is None:
+        occluding = renderable
+    padded_renderable = np.pad(renderable, 1, mode="constant", constant_values=False)
+    padded_occluding = np.pad(occluding, 1, mode="constant", constant_values=False)
+    center = padded_renderable[1:-1, 1:-1, 1:-1]
+    xp = center & ~padded_occluding[1:-1, 1:-1, 2:]
+    xm = center & ~padded_occluding[1:-1, 1:-1, :-2]
+    yp = center & ~padded_occluding[2:, 1:-1, 1:-1]
+    ym = center & ~padded_occluding[:-2, 1:-1, 1:-1]
+    zp = center & ~padded_occluding[1:-1, 2:, 1:-1]
+    zm = center & ~padded_occluding[1:-1, :-2, 1:-1]
     return xp, xm, yp, ym, zp, zm
 
 
 def mesh_section(section: SectionData, atlas: Atlas | None = None) -> Mesh:
-    occupied = _renderable_cube_mask(section)
-    masks = visible_face_masks(occupied)
+    renderable = _renderable_cube_mask(section)
+    fluid = _fluid_cube_mask(section)
+    solid = renderable & ~fluid
+    occluding = _occluding_cube_mask(section)
+    masks = visible_face_masks(solid, occluding)
+    fluid_masks = list(visible_face_masks(fluid, occluding | fluid))
+    for face_index in (0, 1, 3, 4, 5):
+        fluid_masks[face_index] = np.zeros_like(fluid_masks[face_index], dtype=bool)
     parts: list[np.ndarray] = []
     base = np.asarray((section.key.x * 16.0, section.key.y * 16.0, section.key.z * 16.0), dtype=np.float32)
-    for face_index, mask in enumerate(masks):
+    for face_index, mask in enumerate((*masks, *fluid_masks)):
+        material_face = face_index % 6
         coords = np.argwhere(mask)
         if coords.size:
-            parts.append(_face_vertices(section, coords, base, face_index, occupied, atlas))
+            parts.append(_face_vertices(section, coords, base, material_face, occluding, atlas))
     if not parts:
         return Mesh(vertices=np.zeros((0, 6), dtype=np.float32), face_count=0)
     vertices = np.concatenate(parts, axis=0)
@@ -73,6 +96,22 @@ def _renderable_cube_mask(section: SectionData) -> np.ndarray:
     mask = np.zeros_like(section.indices, dtype=bool)
     for palette_index, state in enumerate(section.palette):
         if is_renderable_cube_state(state):
+            mask |= section.indices == palette_index
+    return mask
+
+
+def _occluding_cube_mask(section: SectionData) -> np.ndarray:
+    mask = np.zeros_like(section.indices, dtype=bool)
+    for palette_index, state in enumerate(section.palette):
+        if is_occluding_cube_state(state):
+            mask |= section.indices == palette_index
+    return mask
+
+
+def _fluid_cube_mask(section: SectionData) -> np.ndarray:
+    mask = np.zeros_like(section.indices, dtype=bool)
+    for palette_index, state in enumerate(section.palette):
+        if is_fluid_state(state):
             mask |= section.indices == palette_index
     return mask
 
@@ -151,20 +190,25 @@ def _uv_template(uv_rect: tuple[float, float, float, float], count: int) -> np.n
 
 
 def _vertex_ao(occupied: np.ndarray, coords_yzx: np.ndarray, face: int) -> np.ndarray:
-    # Cheap AO spike: more nearby solid blocks darken every vertex of the face.
     padded = np.pad(occupied, 1, mode="constant", constant_values=False)
-    y = coords_yzx[:, 0] + 1
-    z = coords_yzx[:, 1] + 1
-    x = coords_yzx[:, 2] + 1
-    neighbor_count = (
-        padded[y - 1, z, x].astype(np.uint8)
-        + padded[y + 1, z, x].astype(np.uint8)
-        + padded[y, z - 1, x].astype(np.uint8)
-        + padded[y, z + 1, x].astype(np.uint8)
-        + padded[y, z, x - 1].astype(np.uint8)
-        + padded[y, z, x + 1].astype(np.uint8)
-    )
-    shade = np.clip(1.0 - neighbor_count.astype(np.float32) * 0.055, 0.68, 1.0)
+    base = coords_yzx + 1
+    local_yzx = FACE_VERTEX_OFFSETS[face][:, [1, 2, 0]]
+    axis_a, axis_b = FACE_AO_AXES_YZX[face]
+    shades = np.empty((coords_yzx.shape[0], 6), dtype=np.float32)
+    for vertex_index in range(6):
+        offset_a = np.zeros(3, dtype=np.int8)
+        offset_b = np.zeros(3, dtype=np.int8)
+        offset_a[axis_a] = 1 if local_yzx[vertex_index, axis_a] > 0.5 else -1
+        offset_b[axis_b] = 1 if local_yzx[vertex_index, axis_b] > 0.5 else -1
+        side_a = _sample_padded(padded, base + offset_a)
+        side_b = _sample_padded(padded, base + offset_b)
+        corner = _sample_padded(padded, base + offset_a + offset_b)
+        occlusion = np.where(side_a & side_b, 3, side_a.astype(np.uint8) + side_b.astype(np.uint8) + corner.astype(np.uint8))
+        shades[:, vertex_index] = AO_LEVELS[occlusion]
     if face == 2:
-        shade = np.maximum(shade, 0.82)
-    return np.broadcast_to(shade[:, np.newaxis], (coords_yzx.shape[0], 6)).copy()
+        shades = np.maximum(shades, 0.82)
+    return shades
+
+
+def _sample_padded(padded: np.ndarray, coords_yzx: np.ndarray) -> np.ndarray:
+    return padded[coords_yzx[:, 0], coords_yzx[:, 1], coords_yzx[:, 2]]

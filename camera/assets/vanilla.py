@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,13 +38,14 @@ class Atlas:
     texture_size: int
     atlas_path: Path
     client_jar: Path
+    materials: dict[str, dict[str, str]]
     covered_blocks: tuple[str, ...]
     approximate_blocks: tuple[str, ...]
     missing_blocks: tuple[str, ...]
 
     def texture_for_state(self, state: str, face: int) -> str:
         block_name = block_id(state)
-        material = material_for_block(block_name)
+        material = self.materials.get(block_name, material_for_block(block_name))
         face_name = FACE_TO_MODEL_FACE[face]
         return material.get(face_name, material.get("all", MISSING_TEXTURE))
 
@@ -65,6 +65,15 @@ def is_renderable_cube_state(state: str) -> bool:
     if name in _AIR_BLOCKS or name in _NON_CUBE_OMIT_BLOCKS:
         return False
     return True
+
+
+def is_occluding_cube_state(state: str) -> bool:
+    name = block_id(state)
+    return is_renderable_cube_state(state) and name not in _NON_OCCLUDING_BLOCKS
+
+
+def is_fluid_state(state: str) -> bool:
+    return block_id(state) in _FLUID_BLOCKS
 
 
 def material_for_block(block_name: str) -> dict[str, str]:
@@ -87,7 +96,8 @@ def resolve_client_jar(explicit: str | Path | None = None) -> Path:
 
 def build_atlas(client_jar: Path, cache_dir: Path = DEFAULT_CACHE_DIR, tile_size: int = 16) -> Atlas:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    textures = sorted(required_textures(client_jar))
+    materials = build_materials(client_jar)
+    textures = sorted(required_textures(client_jar, materials))
     if MISSING_TEXTURE not in textures:
         textures.append(MISSING_TEXTURE)
     cols = 16
@@ -118,13 +128,27 @@ def build_atlas(client_jar: Path, cache_dir: Path = DEFAULT_CACHE_DIR, tile_size
         texture_size=tile_size,
         atlas_path=atlas_path,
         client_jar=client_jar,
-        covered_blocks=tuple(sorted(_MATERIALS)),
+        materials=materials,
+        covered_blocks=tuple(sorted(materials)),
         approximate_blocks=tuple(sorted(_APPROXIMATE_BLOCKS)),
         missing_blocks=tuple(sorted(_MISSING_BLOCKS)),
     )
 
 
-def required_textures(client_jar: Path) -> set[str]:
+def build_materials(client_jar: Path) -> dict[str, dict[str, str]]:
+    materials = dict(_MATERIALS)
+    for short_name in sorted(_JSON_MODEL_BLOCKS):
+        block_name = "minecraft:" + short_name
+        parsed = load_blockstate_model(client_jar, block_name)
+        if parsed and MISSING_TEXTURE not in parsed.values() and block_name not in _MANUAL_PRIORITY_BLOCKS:
+            materials[block_name] = parsed
+        else:
+            materials.setdefault(block_name, _all_faces("block/" + short_name))
+    return materials
+
+
+def required_textures(client_jar: Path, materials: dict[str, dict[str, str]] | None = None) -> set[str]:
+    materials = materials or build_materials(client_jar)
     with zipfile.ZipFile(client_jar) as jar:
         available = {
             path.removeprefix("assets/minecraft/textures/").removesuffix(".png")
@@ -132,13 +156,9 @@ def required_textures(client_jar: Path) -> set[str]:
             if path.startswith("assets/minecraft/textures/block/") and path.endswith(".png")
         }
         textures = set()
-        for material in _MATERIALS.values():
+        for material in materials.values():
             textures.update(material.values())
-        for block_name in _AUTO_CUBE_BLOCKS:
-            texture_name = _auto_texture_name(block_name)
-            if texture_name in available:
-                textures.add(texture_name)
-        return textures
+        return {texture for texture in textures if texture == MISSING_TEXTURE or texture in available}
 
 
 def load_blockstate_model(client_jar: Path, block_name: str) -> dict[str, str] | None:
@@ -218,27 +238,21 @@ def _first_model_ref(blockstate: dict[str, Any]) -> str | None:
 
 
 def _resolve_model_textures(jar: zipfile.ZipFile, model_ref: str) -> dict[str, str] | None:
-    model_name = model_ref.removeprefix("minecraft:").removeprefix("block/")
-    path = f"assets/minecraft/models/block/{model_name}.json"
-    try:
-        model = json.loads(jar.read(path))
-    except KeyError:
+    chain = _model_chain(jar, model_ref)
+    if not chain:
         return None
     textures: dict[str, str] = {}
-    parent_ref = model.get("parent")
-    if isinstance(parent_ref, str):
-        parent = _resolve_model_textures(jar, parent_ref)
-        if parent:
-            textures.update(parent)
-    raw_textures = model.get("textures", {})
-    if isinstance(raw_textures, dict):
-        for key, value in raw_textures.items():
-            if isinstance(value, str):
-                textures[key] = _resolve_texture_ref(value, textures)
+    for model in reversed(chain):
+        raw_textures = model.get("textures", {})
+        if isinstance(raw_textures, dict):
+            for key, value in raw_textures.items():
+                if isinstance(value, str):
+                    textures[key] = value
+    textures = {key: _resolve_texture_ref(value, textures) for key, value in textures.items()}
+    face_model = next((model for model in chain if isinstance(model.get("elements"), list)), None)
     face_textures: dict[str, str] = {}
-    elements = model.get("elements")
-    if isinstance(elements, list):
-        for element in elements:
+    if face_model is not None:
+        for element in face_model.get("elements", []):
             faces = element.get("faces") if isinstance(element, dict) else None
             if not isinstance(faces, dict):
                 continue
@@ -246,9 +260,27 @@ def _resolve_model_textures(jar: zipfile.ZipFile, model_ref: str) -> dict[str, s
                 if isinstance(face_data, dict) and isinstance(face_data.get("texture"), str):
                     face_textures[face_name] = _resolve_texture_ref(face_data["texture"], textures)
     if not face_textures:
-        for face in ("north", "south", "east", "west", "up", "down"):
-            face_textures[face] = textures.get(face) or textures.get("side") or textures.get("all") or textures.get("top") or textures.get("particle", MISSING_TEXTURE)
+        fallback = textures.get("all") or textures.get("side") or textures.get("top") or textures.get("particle", MISSING_TEXTURE)
+        face_textures = {face: fallback for face in ("north", "south", "east", "west", "up", "down")}
     return face_textures
+
+
+def _model_chain(jar: zipfile.ZipFile, model_ref: str, seen: set[str] | None = None) -> list[dict[str, Any]]:
+    seen = seen or set()
+    model_name = model_ref.removeprefix("minecraft:").removeprefix("block/")
+    if model_name in seen:
+        return []
+    seen.add(model_name)
+    path = f"assets/minecraft/models/block/{model_name}.json"
+    try:
+        model = json.loads(jar.read(path))
+    except KeyError:
+        return []
+    parent_ref = model.get("parent")
+    chain = [model]
+    if isinstance(parent_ref, str):
+        chain.extend(_model_chain(jar, parent_ref, seen))
+    return chain
 
 
 def _resolve_texture_ref(value: str, textures: dict[str, str]) -> str:
@@ -382,10 +414,40 @@ _AUTO_CUBE_BLOCKS = {
     "magenta_wool",
     "pink_wool",
 }
+_WOOD_FAMILIES = ("oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry")
+_LEAF_BLOCKS = {
+    "oak_leaves",
+    "birch_leaves",
+    "spruce_leaves",
+    "jungle_leaves",
+    "acacia_leaves",
+    "dark_oak_leaves",
+    "mangrove_leaves",
+    "cherry_leaves",
+    "azalea_leaves",
+    "flowering_azalea_leaves",
+}
+_JSON_MODEL_BLOCKS = set(_AUTO_CUBE_BLOCKS) | _LEAF_BLOCKS | {"water", "lava", "magma_block"}
+for _wood in _WOOD_FAMILIES:
+    _JSON_MODEL_BLOCKS.update(
+        {
+            _wood + "_log",
+            "stripped_" + _wood + "_log",
+            _wood + "_wood",
+            "stripped_" + _wood + "_wood",
+            _wood + "_planks",
+        }
+    )
+_MANUAL_PRIORITY_BLOCKS = {
+    "minecraft:grass_block",
+    "minecraft:snowy_grass_block",
+}
 
 _APPROXIMATE_BLOCKS: set[str] = set()
 _MISSING_BLOCKS: set[str] = set()
 _AIR_BLOCKS = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
+_FLUID_BLOCKS = {"minecraft:water"}
+_NON_OCCLUDING_BLOCKS = _FLUID_BLOCKS
 _NON_CUBE_OMIT_BLOCKS = {
     "minecraft:short_grass",
     "minecraft:grass",
@@ -447,7 +509,7 @@ _MATERIALS: dict[str, dict[str, str]] = {
 for _name in _AUTO_CUBE_BLOCKS:
     _MATERIALS.setdefault("minecraft:" + _name, _all_faces("block/" + _name))
 
-for _wood in ("oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry"):
+for _wood in _WOOD_FAMILIES:
     _MATERIALS["minecraft:" + _wood + "_log"] = _column("block/" + _wood + "_log", "block/" + _wood + "_log_top")
     _MATERIALS["minecraft:stripped_" + _wood + "_log"] = _column("block/stripped_" + _wood + "_log", "block/stripped_" + _wood + "_log_top")
     _MATERIALS["minecraft:" + _wood + "_wood"] = _all_faces("block/" + _wood + "_log")
