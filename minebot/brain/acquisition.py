@@ -240,7 +240,7 @@ class _Planner:
             return None
         crafts = ceil(missing / route.output_count)
         input_needed = crafts * route.input_count
-        error = self.resolve(route.input_item, self.counts.get(route.input_item, 0) + input_needed, (*chain, item))
+        error = self.resolve(route.input_item, input_needed, (*chain, item))
         if error is not None:
             return error
         if self.counts.get("furnace", 0) < 1:
@@ -495,11 +495,38 @@ def _step_key(step: AcquisitionStep) -> tuple[object, ...]:
 
 def _merge_step(left: AcquisitionStep, right: AcquisitionStep) -> AcquisitionStep:
     detail = dict(left.detail)
+    if left.kind == "craft":
+        detail["ingredients"] = _merge_counts(
+            _dict_of_ints(left.detail.get("ingredients")),
+            _dict_of_ints(right.detail.get("ingredients")),
+        )
     if left.kind == "smelt":
         detail["input_count"] = int(detail.get("input_count") or 0) + int(right.detail.get("input_count") or 0)
         detail["fuel_count"] = int(detail.get("fuel_count") or 0) + int(right.detail.get("fuel_count") or 0)
         detail["seconds_needed"] = float(detail.get("seconds_needed") or 0.0) + float(right.detail.get("seconds_needed") or 0.0)
     return AcquisitionStep(left.kind, left.item, left.count + right.count, detail)
+
+
+def _merge_counts(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
+    merged = dict(left)
+    for item, count in right.items():
+        merged[item] = merged.get(item, 0) + count
+    return merged
+
+
+def _dict_of_ints(value: object) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for raw_item, raw_count in value.items():
+        try:
+            count = int(raw_count or 0)
+        except (TypeError, ValueError):
+            continue
+        item = _normalize_item(raw_item)
+        if item and count:
+            result[item] = result.get(item, 0) + count
+    return result
 
 
 def _normalize_counts(counts: dict[str, int]) -> dict[str, int]:

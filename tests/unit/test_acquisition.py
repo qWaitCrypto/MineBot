@@ -1,6 +1,6 @@
 import unittest
 
-from minebot.brain.acquisition import AcquisitionError, AcquisitionStep, RecipeVariant, resolve_acquisition
+from minebot.brain.acquisition import AcquisitionError, RecipeVariant, resolve_acquisition
 
 
 def recipe_lookup(item: str) -> list[RecipeVariant] | None:
@@ -88,6 +88,17 @@ class AcquisitionResolverTests(unittest.TestCase):
         self.assertEqual(smelt_step.detail["input_count"], 3)
         self.assertIn(smelt_step.detail["fuel_item"], {"oak_planks", "oak_log"})
 
+    def test_merged_craft_steps_keep_ingredient_counts_precise(self):
+        steps = resolve_acquisition("iron_pickaxe", 1, {}, recipe_lookup, max_depth=16)
+
+        self.assertIsInstance(steps, list)
+        planks = next(step for step in steps if step.kind == "craft" and step.item == "oak_planks")
+        self.assertEqual(planks.count, 16)
+        self.assertEqual(planks.detail["ingredients"], {"oak_log": 4})
+        sticks = next(step for step in steps if step.kind == "craft" and step.item == "stick")
+        self.assertEqual(sticks.count, 8)
+        self.assertEqual(sticks.detail["ingredients"], {"oak_planks": 4})
+
     def test_empty_backpack_plans_diamond_after_iron_pickaxe(self):
         steps = resolve_acquisition("diamond", 3, {}, recipe_lookup, max_depth=18)
 
@@ -127,6 +138,59 @@ class AcquisitionResolverTests(unittest.TestCase):
         self.assertIn(("collect", "raw_iron"), sequence)
         self.assertIn(("smelt", "iron_ingot"), sequence)
         self.assertEqual(sequence[-1], ("craft", "iron_pickaxe"))
+
+    def test_existing_resources_prune_collection_and_smelt_inputs(self):
+        steps = resolve_acquisition(
+            "iron_pickaxe",
+            1,
+            {
+                "stone_pickaxe": 1,
+                "crafting_table": 1,
+                "furnace": 1,
+                "raw_iron": 3,
+                "oak_planks": 5,
+                "stick": 2,
+            },
+            recipe_lookup,
+            max_depth=8,
+        )
+
+        self.assertIsInstance(steps, list)
+        sequence = [(step.kind, step.item) for step in steps]
+        self.assertNotIn(("collect", "raw_iron"), sequence)
+        self.assertNotIn(("craft", "furnace"), sequence)
+        self.assertEqual(sequence, [("smelt", "iron_ingot"), ("craft", "iron_pickaxe")])
+
+    def test_smelt_bootstraps_plank_fuel_when_none_owned(self):
+        steps = resolve_acquisition(
+            "iron_ingot",
+            1,
+            {"raw_iron": 1, "furnace": 1},
+            recipe_lookup,
+            max_depth=3,
+        )
+
+        self.assertIsInstance(steps, list)
+        self.assertEqual(
+            [(step.kind, step.item) for step in steps],
+            [("collect", "oak_log"), ("craft", "oak_planks"), ("smelt", "iron_ingot")],
+        )
+        smelt = steps[-1]
+        self.assertEqual(smelt.detail["fuel_item"], "oak_planks")
+        self.assertEqual(smelt.detail["fuel_count"], 1)
+
+    def test_smelt_reports_unplannable_when_fuel_recipe_missing(self):
+        result = resolve_acquisition(
+            "iron_ingot",
+            1,
+            {"raw_iron": 1, "furnace": 1},
+            lambda item: None,
+            max_depth=4,
+        )
+
+        self.assertIsInstance(result, AcquisitionError)
+        self.assertEqual(result.reason, "unplannable")
+        self.assertEqual(result.item, "oak_planks")
 
     def test_recipe_cycle_returns_unplannable_error_with_chain(self):
         def cyclic_lookup(item: str) -> list[RecipeVariant] | None:
