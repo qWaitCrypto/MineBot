@@ -80,6 +80,7 @@ def build_phase1_agent_runtime(
         weld_context=parts.runtime.weld_context,
         runtime_profile=parts.modes.profile_for(parts.lifecycle.state),
         budget=config.budget,
+        recipe_lookup=_recipe_lookup(body),
         trace=lambda event, payload: parts.runtime.trace.emit(event, **payload),
     )
     register_collect_resource_tool(registry, context)

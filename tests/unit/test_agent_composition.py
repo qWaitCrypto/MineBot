@@ -527,6 +527,7 @@ def composition_context(body, registry, *, max_candidates=4):
         weld_context=WeldContext(body=body, authority=ProgressAuthority(), goal_text="collect dirt"),
         runtime_profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
         budget=CompositionBudget(max_candidates=max_candidates, max_mutating_calls=max_candidates, max_wall_s=10),
+        recipe_lookup=acquisition_recipe_lookup,
         trace=lambda event, payload: trace_events.append({"event": event, **payload}),
     ), trace_events
 
@@ -677,7 +678,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.reason, "ensured")
         self.assertEqual(result.metrics["current_count"], 1)
-        self.assertEqual(calls[0], ("collect_resource", {"item": "oak_log", "count": 4}))
+        self.assertEqual(calls[0], ("collect_resource", {"item": "oak_log", "count": 4, "constraints": {"auto_prerequisites": False}}))
         self.assertIn(("smelt_item", {"input_item": "raw_iron", "count": 3}), calls)
         self.assertEqual(calls[-1], ("craft_item", {"item": "iron_pickaxe", "count": 1}))
         self.assertFalse(registry.get("collect_resource").sidecar.mutating)
@@ -807,7 +808,7 @@ class AgentCompositionTests(unittest.TestCase):
         )
         ctx, trace_events = composition_context(body, registry, max_candidates=2)
 
-        result = collect_resource({"item": "diamond", "count": 1}, ctx)
+        result = collect_resource({"item": "diamond", "count": 1, "constraints": {"auto_prerequisites": False}}, ctx)
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "missing_required_tool")
@@ -821,6 +822,64 @@ class AgentCompositionTests(unittest.TestCase):
         mine_events = [event for event in trace_events if event["event"] == "composition_mine_attempt"]
         self.assertEqual(mine_events[-1]["diagnostics"]["required_tier"], "iron")
         self.assertEqual(mine_events[-1]["diagnostics"]["best_owned"], {"item": "stone_pickaxe", "tier": "stone"})
+
+    def test_collect_resource_auto_prerequisites_acquires_tool_before_mining(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        register_fake_acquisition_leaf_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[1, -55, 0]])
+        registry.register(search)
+        miner, mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = collect_resource({"item": "diamond", "count": 1}, ctx)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "collected")
+        self.assertEqual(body.inventory_counts["iron_pickaxe"], 1)
+        self.assertEqual(len(mine_calls), 1)
+        self.assertEqual(mine_calls[0]["expected_drops"], ["diamond"])
+
+    def test_collect_resource_auto_prerequisites_false_keeps_missing_tool_failure(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        register_fake_acquisition_leaf_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[1, -55, 0]])
+        registry.register(search)
+
+        mine_calls = []
+
+        def mine(_params):
+            mine_calls.append(dict(_params))
+            return ToolResult(
+                False,
+                "missing_required_tool",
+                False,
+                metrics={"block_type": "diamond_ore", "required_tier": "iron", "best_owned": None},
+            )
+
+        registry.register(
+            RegisteredTool(
+                "mine_block_collect",
+                "mine",
+                {"type": "object"},
+                mine,
+                ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+            )
+        )
+        ctx, _trace_events = composition_context(body, registry, max_candidates=2)
+
+        result = collect_resource({"item": "diamond", "count": 1, "constraints": {"auto_prerequisites": False}}, ctx)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "missing_required_tool")
+        self.assertEqual(len(mine_calls), 1)
+        self.assertNotIn("iron_pickaxe", body.inventory_counts)
 
     def test_weld_treats_candidate_skip_as_neutral_not_failure(self):
         # A mutating tool returning a candidate-skip reason must NOT accrue the
@@ -972,7 +1031,7 @@ class AgentCompositionTests(unittest.TestCase):
 
         result = execute_tool(
             registry.get("collect_resource"),
-            {"item": "iron", "count": 1, "constraints": {"max_candidates": 1}},
+            {"item": "iron", "count": 1, "constraints": {"max_candidates": 1, "auto_prerequisites": False}},
             ctx.weld_context,
         )
 

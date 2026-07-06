@@ -16,7 +16,7 @@ from minebot.brain.modes import RuntimeProfile
 from minebot.brain.progress import ProgressAbort
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
 from minebot.contract import Body, InventorySlot, JsonObject, ToolResult, is_candidate_skip, perception_next_cursor
-from minebot.contract.harvest import PICKAXE_BY_TIER, required_pickaxe_tier, tier_satisfies
+from minebot.contract.harvest import PICKAXE_BY_TIER, best_owned_pickaxe, required_pickaxe_tier, tier_satisfies
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,7 @@ class CompositionContext:
     weld_context: WeldContext
     runtime_profile: RuntimeProfile
     budget: CompositionBudget
+    recipe_lookup: RecipeLookup | None = None
     trace: Callable[[str, dict[str, object]], None] | None = None
 
 
@@ -86,6 +87,7 @@ def register_collect_resource_tool(registry: ToolRegistry, context: CompositionC
                             "max_mutating_calls": {"type": "integer", "minimum": 1},
                             "max_wall_s": {"type": "number", "exclusiveMinimum": 0},
                             "allow_dry": {"type": "boolean"},
+                            "auto_prerequisites": {"type": "boolean"},
                         },
                         "additionalProperties": True,
                     },
@@ -194,6 +196,50 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             requested_count=requested_count,
             goal_target_count=goal_target_count,
         )
+
+    auto_prerequisites = bool(constraints.get("auto_prerequisites", True))
+    if auto_prerequisites:
+        prerequisite = _collect_prerequisite_tool(plan, _inventory_counts_from_result(before_result))
+        if prerequisite is not None:
+            ensured = ensure_item(
+                {"item": prerequisite, "count": 1, "resource": plan.requested_item},
+                context,
+                _recipe_lookup_from_context(context),
+            )
+            if not ensured.success:
+                return ToolResult(
+                    False,
+                    ensured.reason,
+                    ensured.can_retry,
+                    ensured.next_suggestion,
+                    metrics={
+                        "item": plan.inventory_item,
+                        "requested_item": plan.requested_item,
+                        "required_tool": prerequisite,
+                        "ensure_result": ensured.to_payload(),
+                        "resume_hint": (ensured.metrics or {}).get("resume_hint", "reinvoke_ensure"),
+                    },
+                )
+            before_result = _read_count(context, plan.inventory_items)
+            if not before_result.success:
+                return before_result
+            before_count = int((before_result.metrics or {}).get("count") or 0)
+            current_count = before_count
+            if before_count >= count:
+                return _collect_result(
+                    True,
+                    "already_satisfied",
+                    False,
+                    plan,
+                    count,
+                    before_count,
+                    current_count,
+                    [],
+                    [],
+                    "complete",
+                    requested_count=requested_count,
+                    goal_target_count=goal_target_count,
+                )
 
     attempts: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
@@ -1518,13 +1564,36 @@ def _ensure_target_for(resource: str) -> str:
     return resource
 
 
+def _collect_prerequisite_tool(plan: ResourcePlan, counts: dict[str, int]) -> str | None:
+    required_tier = None
+    for block_type in plan.block_types:
+        candidate = required_pickaxe_tier(block_type)
+        if candidate is not None and (required_tier is None or not tier_satisfies(required_tier, candidate)):
+            required_tier = candidate
+    if required_tier is None:
+        return None
+    best = best_owned_pickaxe(counts)
+    if best is not None and tier_satisfies(best[1], required_tier):
+        return None
+    return PICKAXE_BY_TIER[required_tier]
+
+
+def _recipe_lookup_from_context(context: CompositionContext) -> RecipeLookup:
+    if context.recipe_lookup is None:
+        def missing(_item: str) -> list[RecipeVariant] | None:
+            return None
+
+        return missing
+    return context.recipe_lookup
+
+
 def _execute_acquisition_step(context: CompositionContext, step: AcquisitionStep) -> JsonObject:
     if step.kind == "collect":
         return _execute_composition_phase(
             context,
             "ensure_collect",
             context.registry.get("collect_resource"),
-            {"item": step.item, "count": step.count},
+            {"item": step.item, "count": step.count, "constraints": {"auto_prerequisites": False}},
         )
     if step.kind == "craft":
         return _execute_composition_phase(
