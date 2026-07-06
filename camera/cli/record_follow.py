@@ -50,6 +50,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--client-jar", default=None)
     parser.add_argument("--asset-cache-dir", default=".camera-assets/26.1.2")
+    parser.add_argument("--follow-distance", type=float, default=5.0)
+    parser.add_argument("--follow-azimuth", type=float, default=180.0)
+    parser.add_argument("--follow-elevation", type=float, default=25.0)
+    parser.add_argument("--follow-height-offset", type=float, default=1.6)
+    parser.add_argument("--follow-stiffness", type=float, default=0.22)
+    parser.add_argument("--fov", type=float, default=70.0)
     args = parser.parse_args(argv)
 
     try:
@@ -123,7 +129,16 @@ def main(argv: list[str] | None = None) -> int:
     if not has_transform:
         raise RuntimeError("no transform sample received")
 
-    controller = FollowController(FollowConfig(stiffness=0.22))
+    controller = FollowController(
+        FollowConfig(
+            distance=args.follow_distance,
+            azimuth_deg=args.follow_azimuth,
+            elevation_deg=args.follow_elevation,
+            height_offset=args.follow_height_offset,
+            stiffness=args.follow_stiffness,
+            fov_deg=args.fov,
+        )
+    )
     client_jar = resolve_client_jar(args.client_jar)
     atlas = build_atlas(client_jar, Path(args.asset_cache_dir))
     timing_path = Path(args.timing_log)

@@ -60,6 +60,13 @@ def block_id(state: str) -> str:
     return state.split("[", 1)[0]
 
 
+def is_renderable_cube_state(state: str) -> bool:
+    name = block_id(state)
+    if name in _AIR_BLOCKS or name in _NON_CUBE_OMIT_BLOCKS:
+        return False
+    return True
+
+
 def material_for_block(block_name: str) -> dict[str, str]:
     return _MATERIALS.get(block_name, _material_from_name(block_name))
 
@@ -85,7 +92,7 @@ def build_atlas(client_jar: Path, cache_dir: Path = DEFAULT_CACHE_DIR, tile_size
         textures.append(MISSING_TEXTURE)
     cols = 16
     rows = max(1, (len(textures) + cols - 1) // cols)
-    image = Image.new("RGBA", (cols * tile_size, rows * tile_size), (255, 0, 255, 255))
+    image = Image.new("RGBA", (cols * tile_size, rows * tile_size), (0, 0, 0, 0))
     uvs: dict[str, tuple[float, float, float, float]] = {}
     with zipfile.ZipFile(client_jar) as jar:
         for index, texture_name in enumerate(textures):
@@ -96,7 +103,7 @@ def build_atlas(client_jar: Path, cache_dir: Path = DEFAULT_CACHE_DIR, tile_size
             else:
                 tile = _load_texture(jar, texture_name, tile_size)
                 tile = _apply_tint(texture_name, tile)
-            image.alpha_composite(tile, (x, y))
+            image.paste(tile, (x, y))
             uvs[texture_name] = (
                 x / image.width,
                 y / image.height,
@@ -378,6 +385,40 @@ _AUTO_CUBE_BLOCKS = {
 
 _APPROXIMATE_BLOCKS: set[str] = set()
 _MISSING_BLOCKS: set[str] = set()
+_AIR_BLOCKS = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
+_NON_CUBE_OMIT_BLOCKS = {
+    "minecraft:short_grass",
+    "minecraft:grass",
+    "minecraft:fern",
+    "minecraft:tall_grass",
+    "minecraft:large_fern",
+    "minecraft:dandelion",
+    "minecraft:poppy",
+    "minecraft:blue_orchid",
+    "minecraft:allium",
+    "minecraft:azure_bluet",
+    "minecraft:red_tulip",
+    "minecraft:orange_tulip",
+    "minecraft:white_tulip",
+    "minecraft:pink_tulip",
+    "minecraft:oxeye_daisy",
+    "minecraft:cornflower",
+    "minecraft:lily_of_the_valley",
+    "minecraft:torchflower",
+    "minecraft:wither_rose",
+    "minecraft:brown_mushroom",
+    "minecraft:red_mushroom",
+    "minecraft:sugar_cane",
+    "minecraft:vine",
+    "minecraft:glow_lichen",
+    "minecraft:snow",
+    "minecraft:wildflowers",
+    "minecraft:leaf_litter",
+    "minecraft:pointed_dripstone",
+    "minecraft:peony",
+    "minecraft:bush",
+}
+_APPROXIMATE_BLOCKS.update(_NON_CUBE_OMIT_BLOCKS)
 
 _MATERIALS: dict[str, dict[str, str]] = {
     "minecraft:air": _all_faces(MISSING_TEXTURE),
@@ -388,6 +429,9 @@ _MATERIALS: dict[str, dict[str, str]] = {
     "minecraft:dirt": _all_faces("block/dirt"),
     "minecraft:stone": _all_faces("block/stone"),
     "minecraft:water": _water(),
+    "minecraft:lava": _all_faces("block/lava_still"),
+    "minecraft:magma_block": _all_faces("block/magma"),
+    "minecraft:infested_stone": _all_faces("block/stone"),
     "minecraft:oak_leaves": _leaves("oak_leaves"),
     "minecraft:birch_leaves": _leaves("birch_leaves"),
     "minecraft:spruce_leaves": _leaves("spruce_leaves"),

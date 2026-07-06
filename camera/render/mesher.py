@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from camera.model.world import SectionData
-from camera.assets.vanilla import Atlas, MISSING_TEXTURE
+from camera.assets.vanilla import Atlas, MISSING_TEXTURE, is_renderable_cube_state
 from camera.worldstream.protocol import SectionKey
 
 
@@ -55,7 +55,7 @@ def visible_face_masks(occupied: np.ndarray) -> tuple[np.ndarray, np.ndarray, np
 
 
 def mesh_section(section: SectionData, atlas: Atlas | None = None) -> Mesh:
-    occupied = section.occupied_mask()
+    occupied = _renderable_cube_mask(section)
     masks = visible_face_masks(occupied)
     parts: list[np.ndarray] = []
     base = np.asarray((section.key.x * 16.0, section.key.y * 16.0, section.key.z * 16.0), dtype=np.float32)
@@ -67,6 +67,14 @@ def mesh_section(section: SectionData, atlas: Atlas | None = None) -> Mesh:
         return Mesh(vertices=np.zeros((0, 6), dtype=np.float32), face_count=0)
     vertices = np.concatenate(parts, axis=0)
     return Mesh(vertices=vertices, face_count=int(vertices.shape[0] // 6))
+
+
+def _renderable_cube_mask(section: SectionData) -> np.ndarray:
+    mask = np.zeros_like(section.indices, dtype=bool)
+    for palette_index, state in enumerate(section.palette):
+        if is_renderable_cube_state(state):
+            mask |= section.indices == palette_index
+    return mask
 
 
 def mesh_sections(sections: list[SectionData], center: SectionKey, view_radius_chunks: int, atlas: Atlas | None = None) -> Mesh:

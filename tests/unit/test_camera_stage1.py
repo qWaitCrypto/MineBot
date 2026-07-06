@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from camera.assets.vanilla import MISSING_TEXTURE, block_id, build_atlas, resolve_client_jar
+from camera.assets.vanilla import MISSING_TEXTURE, block_id, build_atlas, is_renderable_cube_state, resolve_client_jar
 from camera.model.world import SectionData, SectionStore, TransformBuffer
 from camera.render.cache import SectionMeshCache
 from camera.render.mesher import mesh_section, visible_face_masks
@@ -64,6 +64,28 @@ def test_mesh_section_emits_vectorized_visible_faces() -> None:
     assert np.all(mesh.vertices[:, 3:5] >= 0.0)
     assert np.all(mesh.vertices[:, 3:5] <= 1.0)
     assert np.all(mesh.vertices[:, 5] > 0.0)
+
+
+def test_mesh_section_omits_non_cube_plants_without_placeholder_cube() -> None:
+    key = SectionKey(0, 4, 0)
+    indices = np.ones((16, 16, 16), dtype=np.uint16)
+    section = SectionData(key=key, palette=("minecraft:air", "minecraft:short_grass"), indices=indices)
+
+    mesh = mesh_section(section)
+
+    assert not is_renderable_cube_state("minecraft:short_grass")
+    assert mesh.face_count == 0
+
+
+def test_common_fidelity_spike_non_cubes_are_omitted() -> None:
+    for state in (
+        "minecraft:wildflowers",
+        "minecraft:leaf_litter",
+        "minecraft:pointed_dripstone",
+        "minecraft:bush",
+        "minecraft:peony",
+    ):
+        assert not is_renderable_cube_state(state)
 
 
 def test_section_mesh_cache_reuses_clean_visible_mesh() -> None:
