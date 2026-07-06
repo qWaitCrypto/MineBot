@@ -11,6 +11,29 @@ RCON_PORT="${MINEBOT_REAL_RCON_PORT:-25576}"
 RCON_PASSWORD="${MINEBOT_REAL_RCON_PASSWORD:-test}"
 STOP_TIMEOUT_S="${MINEBOT_RESET_STOP_TIMEOUT_S:-180}"
 
+server_pids() {
+  python3 - "$SERVER_DIR" <<'PY'
+import sys
+from pathlib import Path
+
+server_dir = Path(sys.argv[1]).resolve()
+for proc in Path("/proc").iterdir():
+    if not proc.name.isdigit():
+        continue
+    try:
+        cwd = proc.joinpath("cwd").resolve()
+        cmdline = proc.joinpath("cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        continue
+    if cwd == server_dir and "fabric-server-launch.jar" in cmdline and "nogui" in cmdline:
+        print(proc.name)
+PY
+}
+
+server_running() {
+  [[ -n "$(server_pids)" ]]
+}
+
 if [[ ! -d "$GOLDEN" ]]; then
   echo "missing golden world: $GOLDEN" >&2
   exit 2
@@ -28,12 +51,12 @@ except Exception:
 PY
 
 for ((i = 0; i < STOP_TIMEOUT_S; i++)); do
-  if ! pgrep -f "fabric-server-launch.jar nogui" >/dev/null; then
+  if ! server_running; then
     break
   fi
   sleep 1
 done
-if pgrep -f "fabric-server-launch.jar nogui" >/dev/null; then
+if server_running; then
   python3 - "$SERVER_DIR" <<'PY'
 import os
 import signal
@@ -53,13 +76,13 @@ for proc in Path("/proc").iterdir():
         os.kill(int(proc.name), signal.SIGTERM)
 PY
   for _ in {1..30}; do
-    if ! pgrep -f "fabric-server-launch.jar nogui" >/dev/null; then
+    if ! server_running; then
       break
     fi
     sleep 1
   done
 fi
-if pgrep -f "fabric-server-launch.jar nogui" >/dev/null; then
+if server_running; then
   echo "server did not stop within ${STOP_TIMEOUT_S}s" >&2
   exit 3
 fi
@@ -68,6 +91,32 @@ rm -rf "$WORLD"
 cp -a "$GOLDEN" "$WORLD"
 
 mkdir -p "$(dirname "$LOG")"
+: > "$LOG"
+rm -f "$SERVER_DIR/logs/latest.log"
+python3 - "$SERVER_DIR/server.properties" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+updates = {"max-tick-time": "-1", "pause-when-empty-seconds": "-1"}
+lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+seen = set()
+out = []
+for line in lines:
+    if "=" not in line or line.startswith("#"):
+        out.append(line)
+        continue
+    key, _value = line.split("=", 1)
+    if key in updates:
+        out.append(f"{key}={updates[key]}")
+        seen.add(key)
+    else:
+        out.append(line)
+for key, value in updates.items():
+    if key not in seen:
+        out.append(f"{key}={value}")
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
 (
   cd "$SERVER_DIR"
   setsid -f bash -c 'tail -f /dev/null | exec java -Xmx2G -jar fabric-server-launch.jar nogui' >> "$LOG" 2>&1 < /dev/null
@@ -76,13 +125,24 @@ mkdir -p "$(dirname "$LOG")"
 
 ready_count=0
 for _ in {1..10}; do
-  if pgrep -f "fabric-server-launch.jar nogui" >/dev/null; then
+  if server_running; then
+    break
+  fi
+  sleep 1
+done
+for _ in {1..180}; do
+  if ! server_running; then
+    echo "server process exited before startup completed" >&2
+    exit 4
+  fi
+  if [[ -f "$SERVER_DIR/logs/latest.log" ]] && grep -q "Done (" "$SERVER_DIR/logs/latest.log"; then
+    sleep 5
     break
   fi
   sleep 1
 done
 for _ in {1..120}; do
-  if ! pgrep -f "fabric-server-launch.jar nogui" >/dev/null; then
+  if ! server_running; then
     echo "server process exited during startup" >&2
     exit 4
   fi
@@ -142,6 +202,8 @@ with RconClient(RconConfig(host=host, port=port, password=password, timeout_s=3,
         "zombie",
         "zombie_villager",
     )
+    for entity_type in hostile_types:
+        r.command(f"kill @e[type=minecraft:{entity_type}]")
     if "peaceful" not in difficulty:
         raise RuntimeError(difficulty)
     if "false" not in spawn_mobs:
@@ -151,7 +213,7 @@ with RconClient(RconConfig(host=host, port=port, password=password, timeout_s=3,
     if "0" not in random_tick_speed:
         raise RuntimeError(random_tick_speed)
     for entity_type in hostile_types:
-        found = r.command(f"execute as @e[type=minecraft:{entity_type}] run data get entity @s Pos")
+        found = r.command(f"execute as @e[type=minecraft:{entity_type},limit=1] run data get entity @s Pos")
         if found.strip():
             raise RuntimeError(f"{entity_type}: {found[:500]}")
 PY
@@ -159,7 +221,7 @@ PY
     ready_count=$((ready_count + 1))
     if [[ "$ready_count" -ge 3 ]]; then
       sleep 5
-      if pgrep -f "fabric-server-launch.jar nogui" >/dev/null; then
+      if server_running; then
         echo "world reset complete"
         exit 0
       fi
