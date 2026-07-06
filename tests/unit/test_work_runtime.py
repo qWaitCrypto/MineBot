@@ -24,6 +24,15 @@ def inventory_page(slots: list[dict[str, object]], *, next_start: int | None = N
     )
 
 
+def inv_page_with_pickaxe(
+    slots: list[dict[str, object]],
+    pickaxe: str = "minecraft:iron_pickaxe",
+    *,
+    next_start: int | None = None,
+) -> PerceptionResult:
+    return inventory_page([slot(0, pickaxe, 1), *slots], next_start=next_start)
+
+
 class FakeBody:
     bot_name = "Bot1"
 
@@ -143,6 +152,30 @@ class FakeBody:
                     complete=True,
                     data={"action": action.name},
                 )
+            elif action.name == "selectItem":
+                self.terminal = Event(
+                    seq=self.terminal.seq,
+                    tick=self.terminal.tick,
+                    bot=self.terminal.bot,
+                    name="selectItemDone",
+                    data={
+                        "action_id": action.id,
+                        "success": True,
+                        "item": action.params["item"],
+                        "slot": 0,
+                        "count": 1,
+                        "stopped_reason": "completed",
+                    },
+                )
+                return Result(
+                    id=action.id,
+                    bot="Bot1",
+                    type="result",
+                    ok=True,
+                    accepted=True,
+                    complete=True,
+                    data={"action": action.name},
+                )
             elif action.name == "moveTo":
                 target = tuple(action.params["target"])
                 self.state_pos = (float(target[0]), float(target[1]), float(target[2]))
@@ -190,6 +223,30 @@ class FakeBody:
                     complete=True,
                     data={"action": action.name},
                 )
+            return Result(
+                id=action.id,
+                bot="Bot1",
+                type="result",
+                ok=True,
+                accepted=True,
+                complete=True,
+                data={"action": action.name},
+            )
+        if action.name == "selectItem":
+            self.terminal = Event(
+                seq=self.terminal.seq,
+                tick=self.terminal.tick,
+                bot=self.terminal.bot,
+                name="selectItemDone",
+                data={
+                    "action_id": action.id,
+                    "success": True,
+                    "item": action.params["item"],
+                    "slot": 0,
+                    "count": 1,
+                    "stopped_reason": "completed",
+                },
+            )
             return Result(
                 id=action.id,
                 bot="Bot1",
@@ -1591,8 +1648,9 @@ class BlockWorkTests(unittest.TestCase):
         body = FakeBody(
             blocks=blocks,
             inventory_pages=[
-                inventory_page([slot(9, "minecraft:diamond", 0)]),
-                inventory_page([slot(9, "minecraft:diamond", 1)]),
+                inv_page_with_pickaxe([slot(9, "minecraft:diamond", 0)]),
+                inv_page_with_pickaxe([slot(9, "minecraft:diamond", 0)]),
+                inv_page_with_pickaxe([slot(9, "minecraft:diamond", 1)]),
             ],
         )
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
@@ -1602,11 +1660,37 @@ class BlockWorkTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "collected")
-        self.assertEqual([action.name for action in body.actions], ["mineBlock"])
+        self.assertEqual([action.name for action in body.actions], ["selectItem", "mineBlock"])
+        self.assertEqual(body.actions[0].params["item"], "iron_pickaxe")
         self.assertEqual(result.metrics["expected_drops"], ["diamond"])
         self.assertEqual(result.metrics["deltas"], {"diamond": 1})
         self.assertEqual(result.metrics["collected_total"], 1)
         self.assertEqual(result.metrics["mine_result"]["reason"], "mineDone")
+        self.assertEqual(result.metrics["tool_gate"]["required_tier"], "iron")
+
+    def test_mine_block_collect_refuses_missing_required_tool_before_breaking(self):
+        blocks = {
+            (0, 64, 0): ("diamond_ore", "SOLID"),
+        }
+        body = FakeBody(
+            blocks=blocks,
+            inventory_pages=[
+                inventory_page([slot(9, "minecraft:stone_pickaxe", 1)]),
+            ],
+        )
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy)
+
+        result = runtime.mine_block_collect((0, 64, 0), timeout_s=1.0)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "missing_required_tool")
+        self.assertFalse(result.can_retry)
+        self.assertEqual(body.actions, [])
+        self.assertEqual(blocks[(0, 64, 0)], ("diamond_ore", "SOLID"))
+        self.assertEqual(result.metrics["block_type"], "diamond_ore")
+        self.assertEqual(result.metrics["required_tier"], "iron")
+        self.assertEqual(result.metrics["best_owned"], {"item": "stone_pickaxe", "tier": "stone"})
 
     def test_mine_block_collect_reports_no_inventory_delta_after_successful_mine(self):
         blocks = {
@@ -1615,8 +1699,9 @@ class BlockWorkTests(unittest.TestCase):
         body = FakeBody(
             blocks=blocks,
             inventory_pages=[
-                inventory_page([slot(9, "minecraft:diamond", 0)]),
-                inventory_page([slot(9, "minecraft:diamond", 0)]),
+                inv_page_with_pickaxe([slot(9, "minecraft:diamond", 0)]),
+                inv_page_with_pickaxe([slot(9, "minecraft:diamond", 0)]),
+                inv_page_with_pickaxe([slot(9, "minecraft:diamond", 0)]),
             ],
         )
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
@@ -1627,7 +1712,7 @@ class BlockWorkTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "collect_no_inventory_delta")
         self.assertTrue(result.can_retry)
-        self.assertEqual([action.name for action in body.actions], ["mineBlock"])
+        self.assertEqual([action.name for action in body.actions], ["selectItem", "mineBlock"])
         self.assertEqual(result.metrics["expected_drops"], ["diamond"])
         self.assertEqual(result.metrics["deltas"], {"diamond": 0})
         # No navigator wired in, so the assist walk must not have fired.
@@ -1761,8 +1846,9 @@ class BlockWorkTests(unittest.TestCase):
         body = FakeBody(
             blocks=blocks,
             inventory_pages=[
-                inventory_page([slot(9, "minecraft:raw_iron", 2)]),
-                inventory_page([slot(9, "minecraft:raw_iron", 3)]),
+                inv_page_with_pickaxe([slot(9, "minecraft:raw_iron", 2)], "minecraft:stone_pickaxe"),
+                inv_page_with_pickaxe([slot(9, "minecraft:raw_iron", 2)], "minecraft:stone_pickaxe"),
+                inv_page_with_pickaxe([slot(9, "minecraft:raw_iron", 3)], "minecraft:stone_pickaxe"),
             ],
         )
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
@@ -1771,6 +1857,8 @@ class BlockWorkTests(unittest.TestCase):
         result = runtime.mine_block_collect((0, 64, 0), timeout_s=1.0)
 
         self.assertTrue(result.success)
+        self.assertEqual([action.name for action in body.actions], ["selectItem", "mineBlock"])
+        self.assertEqual(body.actions[0].params["item"], "stone_pickaxe")
         self.assertEqual(result.metrics["expected_drops"], ["raw_iron"])
         self.assertEqual(result.metrics["deltas"], {"raw_iron": 1})
 
@@ -1782,9 +1870,10 @@ class BlockWorkTests(unittest.TestCase):
         body = FakeBody(
             blocks=blocks,
             inventory_pages=[
-                inventory_page([slot(9, "minecraft:diamond", 0)]),
-                inventory_page([slot(10, "minecraft:cobblestone", 3)]),
-                inventory_page([slot(9, "minecraft:diamond", 1), slot(10, "minecraft:cobblestone", 2)]),
+                inv_page_with_pickaxe([slot(9, "minecraft:diamond", 0), slot(10, "minecraft:cobblestone", 3)]),
+                inv_page_with_pickaxe([slot(9, "minecraft:diamond", 0), slot(10, "minecraft:cobblestone", 3)]),
+                inv_page_with_pickaxe([slot(9, "minecraft:diamond", 0), slot(10, "minecraft:cobblestone", 3)]),
+                inv_page_with_pickaxe([slot(9, "minecraft:diamond", 1), slot(10, "minecraft:cobblestone", 2)]),
             ],
         )
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
@@ -1798,8 +1887,8 @@ class BlockWorkTests(unittest.TestCase):
         )
 
         self.assertTrue(result.success)
-        self.assertEqual([action.name for action in body.actions], ["placeBlock", "mineBlock"])
-        self.assertEqual(body.actions[0].params["purpose"], "seal")
+        self.assertEqual([action.name for action in body.actions], ["selectItem", "placeBlock", "mineBlock"])
+        self.assertEqual(body.actions[1].params["purpose"], "seal")
         self.assertEqual(result.metrics["deltas"], {"diamond": 1})
         self.assertEqual(result.metrics["mine_result"]["metrics"]["dry_mining"]["initial_liquid_faces"], 1)
 

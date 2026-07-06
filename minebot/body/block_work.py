@@ -26,8 +26,12 @@ from minebot.contract import (
     Position,
     Result,
     ToolResult,
+    PICKAXE_BY_TIER,
+    best_owned_pickaxe,
     perception_next_cursor,
+    required_pickaxe_tier,
     terminal_event_to_tool_result,
+    tier_satisfies,
 )
 from minebot.game.governance import GovernancePolicy
 
@@ -733,6 +737,16 @@ class BlockWork:
         if failed is not None:
             return failed
         block_type = _normalize_item(str(target.data.get("type") or "unknown"))
+
+        decision = self.governance.can_break(pos, block_type, context)
+        if not decision.allowed:
+            return _denied_result("break_denied", pos, block_type, decision)
+
+        tool_gate = self._ensure_collect_pickaxe(pos, block_type, timeout_s=timeout_s)
+        if not tool_gate.success:
+            return tool_gate
+        tool_gate_metrics = dict(tool_gate.metrics or {})
+
         expected = tuple(_normalize_item(item) for item in (expected_drops or ()))
         if not expected:
             expected = _expected_drops_for_block(block_type, drop_map or self.DEFAULT_DROP_MAP)
@@ -764,6 +778,7 @@ class BlockWork:
                 "block_type": block_type,
                 "expected_drops": list(expected),
                 "before": before,
+                "tool_gate": tool_gate_metrics,
             }
             if tree_retarget_metrics is not None:
                 collect_metrics["tree_domain_retarget"] = tree_retarget_metrics
@@ -805,6 +820,7 @@ class BlockWork:
             "collected_total": collected_total,
             "mine_result": mined.to_payload(),
             "pickup_assist": pickup["assist"],
+            "tool_gate": tool_gate_metrics,
         }
         if collected_total <= 0:
             return ToolResult(
@@ -815,6 +831,56 @@ class BlockWork:
                 metrics=metrics,
             )
         return ToolResult(success=True, reason="collected", can_retry=False, metrics=metrics)
+
+    def _ensure_collect_pickaxe(self, pos: Position, block_type: str, *, timeout_s: float) -> ToolResult:
+        required = required_pickaxe_tier(block_type)
+        if required is None:
+            return ToolResult(
+                success=True,
+                reason="no_required_tool",
+                can_retry=False,
+                metrics={"target": list(pos), "block_type": block_type, "required_tier": None},
+            )
+
+        counts = _inventory_counts_from_body(self.body)
+        if isinstance(counts, ToolResult):
+            return _with_metric(
+                counts,
+                "tool_gate",
+                {"target": list(pos), "block_type": block_type, "required_tier": required, "phase": "inventory"},
+            )
+
+        best = best_owned_pickaxe(counts)
+        best_owned = None if best is None else {"item": best[0], "tier": best[1]}
+        metrics: dict[str, object] = {
+            "target": list(pos),
+            "block_type": block_type,
+            "required_tier": required,
+            "best_owned": best_owned,
+        }
+        if best is None or not tier_satisfies(best[1], required):
+            return ToolResult(
+                success=False,
+                reason="missing_required_tool",
+                can_retry=False,
+                next_suggestion=f"craft and equip a {PICKAXE_BY_TIER[required]} or better first",
+                metrics=metrics,
+            )
+
+        item, tier = best
+        selected = _dispatch_select_item(self.body, item, timeout_s=min(timeout_s, 5.0))
+        metrics["selected_item"] = item
+        metrics["selected_tier"] = tier
+        metrics["select_result"] = selected.to_payload()
+        if not selected.success:
+            return ToolResult(
+                success=False,
+                reason=f"tool_equip_failed:{selected.reason}",
+                can_retry=selected.can_retry,
+                next_suggestion=selected.next_suggestion or f"make {item} available in the hotbar before mining {block_type}",
+                metrics=metrics,
+            )
+        return ToolResult(success=True, reason="tool_ready", can_retry=False, metrics=metrics)
 
     def _try_tree_domain_collect_retarget(
         self,
@@ -3318,6 +3384,34 @@ def _inventory_counts_from_body(body: Body) -> dict[str, int] | ToolResult:
     if failed is not None:
         return failed
     return _inventory_counts([InventorySlot.from_payload(slot) for slot in inventory.data.get("slots") or []])
+
+
+def _dispatch_select_item(body: Body, item: str, *, timeout_s: float) -> ToolResult:
+    action = Action.create("selectItem", {"item": item})
+    accepted = body.execute(action)
+    if accepted.ok and accepted.accepted:
+        terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+        return terminal_event_to_tool_result(terminal)
+    if accepted.ok and not accepted.accepted and (accepted.data or {}).get("action") == "selectItem":
+        try:
+            terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+        except TimeoutError:
+            pass
+        else:
+            return terminal_event_to_tool_result(terminal)
+    return ToolResult(
+        success=False,
+        reason="body_rejected",
+        can_retry=True,
+        metrics={
+            "action": "selectItem",
+            "item": item,
+            "ok": accepted.ok,
+            "accepted": accepted.accepted,
+            "error": accepted.error,
+            "data": accepted.data,
+        },
+    )
 
 
 def _normalize_item(item: str) -> str:
