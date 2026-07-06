@@ -143,6 +143,14 @@ def test_common_fidelity_spike_non_cubes_are_omitted() -> None:
         "minecraft:pointed_dripstone",
         "minecraft:bush",
         "minecraft:peony",
+        "minecraft:seagrass",
+        "minecraft:tall_seagrass",
+        "minecraft:rose_bush",
+        "minecraft:small_amethyst_bud",
+        "minecraft:medium_amethyst_bud",
+        "minecraft:large_amethyst_bud",
+        "minecraft:amethyst_cluster",
+        "minecraft:chest",
     ):
         assert not is_renderable_cube_state(state)
 
@@ -212,11 +220,17 @@ def test_vanilla_asset_atlas_uses_local_client_jar() -> None:
     stone_model = load_blockstate_model(client_jar, "minecraft:stone")
     grass_model = load_blockstate_model(client_jar, "minecraft:grass_block")
     oak_log_model = load_blockstate_model(client_jar, "minecraft:oak_log")
+    sandstone_model = load_blockstate_model(client_jar, "minecraft:sandstone")
 
     assert atlas.client_jar.exists()
     assert atlas.atlas_path.exists()
     assert "block/stone" in atlas.texture_uvs
     assert "block/grass_block_top" in atlas.texture_uvs
+    assert "block/raw_copper_block" in atlas.texture_uvs
+    assert "block/smooth_basalt" in atlas.texture_uvs
+    assert "block/amethyst_block" in atlas.texture_uvs
+    assert "block/spawner" in atlas.texture_uvs
+    assert "block/pumpkin_side" in atlas.texture_uvs
     assert MISSING_TEXTURE in atlas.texture_uvs
     assert block_id("minecraft:stone[foo=bar]") == "minecraft:stone"
     assert stone_model is not None
@@ -230,3 +244,7 @@ def test_vanilla_asset_atlas_uses_local_client_jar() -> None:
     assert oak_log_model["north"] == "block/oak_log"
     assert oak_log_model["up"] == "block/oak_log_top"
     assert atlas.texture_for_state("minecraft:oak_log[axis=y]", 2) == "block/oak_log_top"
+    assert sandstone_model is not None
+    assert sandstone_model["up"] == "block/sandstone_top"
+    assert sandstone_model["down"] == "block/sandstone_bottom"
+    assert atlas.texture_for_state("minecraft:bubble_column[drag=true]", 2) == "block/water_still"

@@ -428,6 +428,20 @@ _LEAF_BLOCKS = {
     "flowering_azalea_leaves",
 }
 _JSON_MODEL_BLOCKS = set(_AUTO_CUBE_BLOCKS) | _LEAF_BLOCKS | {"water", "lava", "magma_block"}
+_JSON_MODEL_BLOCKS.update(
+    {
+        "amethyst_block",
+        "budding_amethyst",
+        "infested_deepslate",
+        "pumpkin",
+        "raw_copper_block",
+        "raw_gold_block",
+        "raw_iron_block",
+        "sandstone",
+        "smooth_basalt",
+        "spawner",
+    }
+)
 for _wood in _WOOD_FAMILIES:
     _JSON_MODEL_BLOCKS.update(
         {
@@ -446,7 +460,7 @@ _MANUAL_PRIORITY_BLOCKS = {
 _APPROXIMATE_BLOCKS: set[str] = set()
 _MISSING_BLOCKS: set[str] = set()
 _AIR_BLOCKS = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
-_FLUID_BLOCKS = {"minecraft:water"}
+_FLUID_BLOCKS = {"minecraft:water", "minecraft:bubble_column"}
 _NON_OCCLUDING_BLOCKS = _FLUID_BLOCKS
 _NON_CUBE_OMIT_BLOCKS = {
     "minecraft:short_grass",
@@ -479,6 +493,14 @@ _NON_CUBE_OMIT_BLOCKS = {
     "minecraft:pointed_dripstone",
     "minecraft:peony",
     "minecraft:bush",
+    "minecraft:seagrass",
+    "minecraft:tall_seagrass",
+    "minecraft:rose_bush",
+    "minecraft:small_amethyst_bud",
+    "minecraft:medium_amethyst_bud",
+    "minecraft:large_amethyst_bud",
+    "minecraft:amethyst_cluster",
+    "minecraft:chest",
 }
 _APPROXIMATE_BLOCKS.update(_NON_CUBE_OMIT_BLOCKS)
 
@@ -491,6 +513,7 @@ _MATERIALS: dict[str, dict[str, str]] = {
     "minecraft:dirt": _all_faces("block/dirt"),
     "minecraft:stone": _all_faces("block/stone"),
     "minecraft:water": _water(),
+    "minecraft:bubble_column": _water(),
     "minecraft:lava": _all_faces("block/lava_still"),
     "minecraft:magma_block": _all_faces("block/magma"),
     "minecraft:infested_stone": _all_faces("block/stone"),
