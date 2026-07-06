@@ -551,6 +551,8 @@ class InventoryTransactions:
         approach_timeout_s: float = 12.0,
         place_timeout_s: float = 12.0,
         reclaim_timeout_s: float = 12.0,
+        keep_temporary_table: bool = False,
+        cleanup_existing_bot_table: bool = False,
     ) -> ToolResult:
         if count <= 0:
             return ToolResult(
@@ -638,6 +640,15 @@ class InventoryTransactions:
         )
         reclaim = None
         if isinstance(workspace, dict) and workspace.get("mode") == "temporary_table":
+            if keep_temporary_table:
+                workspace["retained"] = True
+            else:
+                reclaim = self.work.mine_block(
+                    tuple(workspace["table_pos"]),
+                    context=BreakContext.BOT_CLEANUP,
+                    timeout_s=reclaim_timeout_s,
+                )
+        elif isinstance(workspace, dict) and workspace.get("mode") == "existing_table" and cleanup_existing_bot_table:
             reclaim = self.work.mine_block(
                 tuple(workspace["table_pos"]),
                 context=BreakContext.BOT_CLEANUP,
@@ -680,14 +691,6 @@ class InventoryTransactions:
                 reason=f"craft_residue_post_failed:{cleanup_after.reason}",
                 can_retry=cleanup_after.can_retry,
                 next_suggestion=cleanup_after.next_suggestion,
-                metrics=metrics,
-            )
-        if reclaim is not None and not reclaim.success:
-            return ToolResult(
-                success=False,
-                reason=f"craft_table_reclaim_failed:{reclaim.reason}",
-                can_retry=reclaim.can_retry,
-                next_suggestion=reclaim.next_suggestion,
                 metrics=metrics,
             )
         if equip is not None and not equip.success:
@@ -770,7 +773,7 @@ class InventoryTransactions:
                 metrics={"item": item, "crafting_table_item": crafting_table_item, "attempted_targets": attempted},
             )
 
-        select = _dispatch(self.body, "selectItem", {"item": crafting_table_item}, timeout_s=place_timeout_s)
+        select = _dispatch_select_item(self.body, crafting_table_item, timeout_s=place_timeout_s)
         if not select.success:
             return ToolResult(
                 success=False,

@@ -670,6 +670,92 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(len(collect_calls), 1)
         self.assertFalse(any(event["event"] == "tool_continuation" for event in runtime.trace.snapshot()))
 
+    def test_sdk_tool_auto_continues_collect_after_prerequisite_partial(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        collect_calls = []
+
+        def collect_callable(params):
+            collect_calls.append(dict(params))
+            if len(collect_calls) == 1:
+                return ToolResult(
+                    False,
+                    "ensure_step_incomplete",
+                    True,
+                    metrics={
+                        "item": "diamond",
+                        "requested_item": "diamond",
+                        "target_count": 3,
+                        "required_tool": "iron_pickaxe",
+                        "resume_hint": "reinvoke_ensure",
+                        "ensure_result": {
+                            "success": False,
+                            "reason": "ensure_step_incomplete",
+                            "canRetry": True,
+                            "metrics": {
+                                "item": "iron_pickaxe",
+                                "target_count": 1,
+                                "resume_hint": "reinvoke_ensure",
+                            },
+                        },
+                    },
+                )
+            return ToolResult(
+                True,
+                "collected",
+                False,
+                metrics={
+                    "requested_item": "diamond",
+                    "item": "diamond",
+                    "target_count": 3,
+                    "after_count": 3,
+                    "collected_delta": 3,
+                    "remaining_count": 0,
+                    "complete": True,
+                    "resume_hint": "complete",
+                },
+            )
+
+        registry.register(
+            RegisteredTool(
+                name="collect_resource",
+                description="Collect",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                callable=collect_callable,
+                sidecar=ToolSidecar(progress_key="collect_resource", mutating=False, tool_type="resource"),
+            )
+        )
+
+        runtime = AgentRuntime(
+            body=body,
+            registry=registry,
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect 3 diamond"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        sdk_tool = sdk_tool_for(registry.get("collect_resource"))
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=runtime.trace,
+            runtime=runtime,
+        )
+
+        class Wrapper:
+            pass
+
+        wrapper = Wrapper()
+        wrapper.context = runtime_context
+        out = asyncio.run(sdk_tool.on_invoke_tool(wrapper, json.dumps({"item": "diamond", "count": 3})))
+
+        self.assertTrue(out["success"])
+        self.assertEqual(out["reason"], "collected")
+        self.assertEqual(collect_calls, [{"item": "diamond", "count": 3}, {"item": "diamond", "count": 3}])
+        continuation = next(event for event in runtime.trace.snapshot() if event["event"] == "tool_continuation")
+        self.assertEqual(continuation["reason"], "collect_prerequisite_resume")
+
     def test_sdk_tool_auto_continues_collect_after_candidate_exhaustion_progress(self):
         body = FakeBody()
         registry = ToolRegistry()

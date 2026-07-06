@@ -61,6 +61,7 @@ class RconClient(BodyTransport):
                 (self.config.host, self.config.port),
                 timeout=self.config.timeout_s,
             )
+            self._sock.settimeout(self.config.timeout_s)
             self._request(3, self.config.password)
 
     def close(self) -> None:

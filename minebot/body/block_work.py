@@ -3594,7 +3594,7 @@ def _surface_scan_targets(origin: Position, y: int, *, radius: int = 1) -> tuple
 
 
 def _place_here_retryable_reason(reason: str) -> bool:
-    return reason.startswith("place_denied:")
+    return reason == "timeout" or reason.startswith("place_denied:")
 
 
 def _state_block_pos(pos: tuple[float, float, float]) -> Position:

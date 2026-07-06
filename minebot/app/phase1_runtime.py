@@ -715,6 +715,9 @@ def _craft_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:
             item=str(params["item"]),
             count=int(params.get("count") or 1),
             auto_equip=bool(params.get("auto_equip", False)),
+            search_radius=min(max(1, int(params.get("search_radius") or 8)), 64),
+            keep_temporary_table=bool(params.get("keep_temporary_table", False)),
+            cleanup_existing_bot_table=bool(params.get("cleanup_existing_bot_table", False)),
         ),
         ToolSidecar(
             "craft_item",
@@ -868,7 +871,7 @@ def _run_smelt_tool(body: Body, furnace_txn: FurnaceTransactions, params: dict[s
         transfer_timeout_s=6.0,
         approach_timeout_s=15.0,
     )
-    if result.success or result.reason != "furnace_not_found" or counts.get("furnace", 0) <= 0:
+    if result.success or not result.can_retry or counts.get("furnace", 0) <= 0:
         return result
     temporary = furnace_txn.smelt_with_nearby_temporary_furnace(
         input_item=input_item,
@@ -882,7 +885,15 @@ def _run_smelt_tool(body: Body, furnace_txn: FurnaceTransactions, params: dict[s
         place_timeout_s=8.0,
         reclaim_timeout_s=8.0,
     )
-    return temporary
+    metrics = dict(temporary.metrics or {})
+    metrics["nearest_furnace_result"] = result.to_payload()
+    return ToolResult(
+        temporary.success,
+        temporary.reason,
+        temporary.can_retry,
+        temporary.next_suggestion,
+        metrics=metrics,
+    )
 
 
 def _tool_inventory_counts(body: Body, *, page_size: int = 12) -> dict[str, int] | ToolResult:

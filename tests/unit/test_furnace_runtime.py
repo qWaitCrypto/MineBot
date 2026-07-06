@@ -2,7 +2,7 @@ import unittest
 
 from minebot.body import BlockWork, FurnaceTransactions
 from minebot.body.furnace import resolve_smelt_output, select_fuel
-from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
+from minebot.contract import Action, BodyState, BreakContext, Event, PerceptionResult, Result, ToolResult
 from minebot.game.governance import GovernancePolicy, Region
 from tests.unit._body_batch_helper import batch_block_cells_from_blockat
 
@@ -361,6 +361,17 @@ class FurnaceRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result, ("iron_ingot", 1))
         self.assertEqual(calls, ["iron_ingot"])
+
+    def test_resolve_smelt_output_falls_back_when_runtime_recipe_unavailable(self):
+        self.assertEqual(resolve_smelt_output("minecraft:raw_iron", lambda output_item: None), ("iron_ingot", 1))
+        self.assertEqual(
+            resolve_smelt_output("minecraft:raw_iron", lambda output_item: recipe_perception(output_item, "", ok=False)),
+            ("iron_ingot", 1),
+        )
+        self.assertEqual(
+            resolve_smelt_output("minecraft:raw_iron", lambda output_item: recipe_perception(output_item, "")),
+            ("iron_ingot", 1),
+        )
 
     def test_resolve_smelt_output_rejects_runtime_recipe_without_input(self):
         def lookup(output_item):
@@ -1208,6 +1219,85 @@ class FurnaceRuntimeTests(unittest.TestCase):
         self.assertTrue(result.metrics["smelt"]["success"])
         self.assertTrue(result.metrics["reclaim"]["success"])
 
+    def test_smelt_with_temporary_furnace_retries_reclaim_timeout_inside_transaction(self):
+        body = FakeFurnaceBody(
+            perception("container", [slot(0), slot(1), slot(2)]),
+            perception("inventory", [slot(0, "minecraft:furnace", 1), slot(1, "minecraft:iron_ore", 1), slot(2, "minecraft:coal", 1), slot(3)]),
+            mutable=True,
+            block_states={(2, 59, 0): ("minecraft:air", "CLEAR")},
+            auto_smelt_output=("minecraft:iron_ingot", 1),
+            auto_smelt_after_reads=6,
+        )
+        policy = GovernancePolicy(natural_regions=[Region("work", (0, 0, -2), (4, 100, 2))])
+
+        class RetryReclaimWork(BlockWork):
+            def __init__(self, body, governance):
+                super().__init__(body, governance)
+                self.reclaim_calls = 0
+
+            def mine_block(self, pos, *, context=BreakContext.DIRECT, timeout_s=30.0):
+                self.reclaim_calls += 1
+                if self.reclaim_calls == 1:
+                    return ToolResult(False, "timeout", True, metrics={"target": list(pos)})
+                return super().mine_block(pos, context=context, timeout_s=timeout_s)
+
+        work = RetryReclaimWork(body, policy)
+        runtime = FurnaceTransactions(body, governance=policy, work=work)
+
+        result = runtime.smelt_with_temporary_furnace(
+            (2, 59, 0),
+            input_item="minecraft:iron_ore",
+            input_count=1,
+            fuel_item="minecraft:coal",
+            output_item="minecraft:iron_ingot",
+            output_count=1,
+            output_slot=3,
+            poll_interval_s=0.0,
+            smelt_timeout_s=1.0,
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(work.reclaim_calls, 2)
+        self.assertEqual(result.metrics["reclaim_attempts"][0]["reason"], "timeout")
+        self.assertTrue(result.metrics["reclaim"]["success"])
+        self.assertEqual(body.block_states[(2, 59, 0)], ("minecraft:air", "CLEAR"))
+
+    def test_smelt_with_temporary_furnace_keeps_success_when_reclaim_times_out(self):
+        body = FakeFurnaceBody(
+            perception("container", [slot(0), slot(1), slot(2)]),
+            perception("inventory", [slot(0, "minecraft:furnace", 1), slot(1, "minecraft:iron_ore", 1), slot(2, "minecraft:coal", 1), slot(3)]),
+            mutable=True,
+            block_states={(2, 59, 0): ("minecraft:air", "CLEAR")},
+            auto_smelt_output=("minecraft:iron_ingot", 1),
+            auto_smelt_after_reads=6,
+        )
+        policy = GovernancePolicy(natural_regions=[Region("work", (0, 0, -2), (4, 100, 2))])
+
+        class TimeoutReclaimWork(BlockWork):
+            def mine_block(self, pos, *, context=BreakContext.DIRECT, timeout_s=30.0):
+                return ToolResult(False, "timeout", True, metrics={"target": list(pos)})
+
+        runtime = FurnaceTransactions(body, governance=policy, work=TimeoutReclaimWork(body, policy))
+
+        result = runtime.smelt_with_temporary_furnace(
+            (2, 59, 0),
+            input_item="minecraft:iron_ore",
+            input_count=1,
+            fuel_item="minecraft:coal",
+            output_item="minecraft:iron_ingot",
+            output_count=1,
+            output_slot=3,
+            poll_interval_s=0.0,
+            smelt_timeout_s=1.0,
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertFalse(result.metrics["reclaim"]["success"])
+        self.assertEqual(result.metrics["reclaim"]["reason"], "timeout")
+        self.assertEqual(len(result.metrics["reclaim_attempts"]), 2)
+
     def test_smelt_with_temporary_furnace_requires_block_work_runtime(self):
         body = FakeFurnaceBody(
             perception("container", [slot(0), slot(1), slot(2)]),
@@ -1283,6 +1373,155 @@ class FurnaceRuntimeTests(unittest.TestCase):
             [action.name for action in body.actions],
             ["selectItem", "placeBlock", "furnaceTransfer", "furnaceTransfer", "furnaceTransfer", "mineBlock"],
         )
+
+    def test_smelt_with_nearby_temporary_furnace_retries_next_site_after_body_collision(self):
+        block_states = {
+            (-1, 59, -1): ("minecraft:air", "CLEAR"),
+            (-1, 58, -1): ("minecraft:air", "CLEAR"),
+            (0, 59, -1): ("minecraft:air", "CLEAR"),
+            (0, 58, -1): ("minecraft:stone", "SOLID"),
+            (1, 59, -1): ("minecraft:air", "CLEAR"),
+            (1, 58, -1): ("minecraft:air", "CLEAR"),
+            (-1, 59, 0): ("minecraft:air", "CLEAR"),
+            (-1, 58, 0): ("minecraft:stone", "SOLID"),
+            (1, 59, 0): ("minecraft:air", "CLEAR"),
+            (1, 58, 0): ("minecraft:air", "CLEAR"),
+            (-1, 59, 1): ("minecraft:air", "CLEAR"),
+            (-1, 58, 1): ("minecraft:air", "CLEAR"),
+            (0, 59, 1): ("minecraft:air", "CLEAR"),
+            (0, 58, 1): ("minecraft:air", "CLEAR"),
+            (1, 59, 1): ("minecraft:air", "CLEAR"),
+            (1, 58, 1): ("minecraft:air", "CLEAR"),
+        }
+
+        class DriftingFurnaceBody(FakeFurnaceBody):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.state_reads = 0
+
+            def get_state(self) -> BodyState:
+                self.state_reads += 1
+                if self.state_reads <= 2:
+                    return state_at((0.5, 59.0, 0.5))
+                return state_at((0.5, 59.0, -0.5))
+
+        body = DriftingFurnaceBody(
+            perception("container", [slot(0), slot(1), slot(2)]),
+            perception("inventory", [slot(0, "minecraft:furnace", 1), slot(1, "minecraft:iron_ore", 1), slot(2, "minecraft:coal", 1), slot(3)]),
+            mutable=True,
+            block_states=block_states,
+            auto_smelt_output=("minecraft:iron_ingot", 1),
+            auto_smelt_after_reads=6,
+        )
+        policy = GovernancePolicy(natural_regions=[Region("work", (-2, 0, -2), (2, 100, 2))])
+        work = BlockWork(body, policy)
+        runtime = FurnaceTransactions(body, governance=policy, work=work)
+
+        result = runtime.smelt_with_nearby_temporary_furnace(
+            input_item="minecraft:iron_ore",
+            input_count=1,
+            fuel_item="minecraft:coal",
+            output_item="minecraft:iron_ingot",
+            output_count=1,
+            output_slot=3,
+            radius=1,
+            poll_interval_s=0.0,
+            smelt_timeout_s=1.0,
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(result.metrics["attempted_sites"][0]["target"], [0, 59, -1])
+        self.assertEqual(
+            result.metrics["attempted_sites"][0]["result"]["reason"],
+            "temporary_furnace_place_failed:place_denied:body_collision",
+        )
+        self.assertEqual(result.metrics["attempted_sites"][1]["target"], [-1, 59, 0])
+        self.assertEqual(result.metrics["temporary_furnace_site"], [-1, 59, 0])
+        place_actions = [action for action in body.actions if action.name == "placeBlock"]
+        self.assertEqual(len(place_actions), 1)
+        self.assertEqual(place_actions[0].params["target"], [-1, 59, 0])
+
+    def test_smelt_with_nearby_temporary_furnace_retries_next_site_after_place_timeout(self):
+        block_states = {
+            (-1, 59, -1): ("minecraft:air", "CLEAR"),
+            (-1, 58, -1): ("minecraft:air", "CLEAR"),
+            (0, 59, -1): ("minecraft:air", "CLEAR"),
+            (0, 58, -1): ("minecraft:stone", "SOLID"),
+            (1, 59, -1): ("minecraft:air", "CLEAR"),
+            (1, 58, -1): ("minecraft:air", "CLEAR"),
+            (-1, 59, 0): ("minecraft:air", "CLEAR"),
+            (-1, 58, 0): ("minecraft:stone", "SOLID"),
+            (1, 59, 0): ("minecraft:air", "CLEAR"),
+            (1, 58, 0): ("minecraft:air", "CLEAR"),
+            (-1, 59, 1): ("minecraft:air", "CLEAR"),
+            (-1, 58, 1): ("minecraft:air", "CLEAR"),
+            (0, 59, 1): ("minecraft:air", "CLEAR"),
+            (0, 58, 1): ("minecraft:air", "CLEAR"),
+            (1, 59, 1): ("minecraft:air", "CLEAR"),
+            (1, 58, 1): ("minecraft:air", "CLEAR"),
+        }
+        body = FakeFurnaceBody(
+            perception("container", [slot(0), slot(1), slot(2)]),
+            perception("inventory", [slot(0, "minecraft:furnace", 1), slot(1, "minecraft:iron_ore", 1), slot(2, "minecraft:coal", 1), slot(3)]),
+            mutable=True,
+            block_states=block_states,
+            auto_smelt_output=("minecraft:iron_ingot", 1),
+            auto_smelt_after_reads=6,
+        )
+        policy = GovernancePolicy(natural_regions=[Region("work", (-2, 0, -2), (2, 100, 2))])
+
+        class TimeoutFirstPlaceWork(BlockWork):
+            def __init__(self, body, governance):
+                super().__init__(body, governance)
+                self.place_calls = 0
+
+            def place_block(
+                self,
+                pos,
+                block_type,
+                *,
+                face=None,
+                context="work",
+                purpose="scaffold",
+                allow_replace_liquid=False,
+                timeout_s=30.0,
+            ):
+                self.place_calls += 1
+                if self.place_calls == 1:
+                    return ToolResult(False, "timeout", True, metrics={"target": list(pos)})
+                return super().place_block(
+                    pos,
+                    block_type,
+                    face=face,
+                    context=context,
+                    purpose=purpose,
+                    allow_replace_liquid=allow_replace_liquid,
+                    timeout_s=timeout_s,
+                )
+
+        work = TimeoutFirstPlaceWork(body, policy)
+        runtime = FurnaceTransactions(body, governance=policy, work=work)
+
+        result = runtime.smelt_with_nearby_temporary_furnace(
+            input_item="minecraft:iron_ore",
+            input_count=1,
+            fuel_item="minecraft:coal",
+            output_item="minecraft:iron_ingot",
+            output_count=1,
+            output_slot=3,
+            radius=1,
+            poll_interval_s=0.0,
+            smelt_timeout_s=1.0,
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(result.metrics["attempted_sites"][0]["target"], [0, 59, -1])
+        self.assertEqual(result.metrics["attempted_sites"][0]["result"]["reason"], "temporary_furnace_place_failed:timeout")
+        self.assertEqual(result.metrics["attempted_sites"][1]["target"], [-1, 59, 0])
+        self.assertEqual(result.metrics["temporary_furnace_site"], [-1, 59, 0])
+        self.assertEqual(work.place_calls, 2)
 
     def test_smelt_with_nearby_temporary_furnace_no_supported_site_is_no_action(self):
         block_states = {

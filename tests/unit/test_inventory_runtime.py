@@ -1,7 +1,7 @@
 import unittest
 
 from minebot.body import InventoryTransactions
-from minebot.contract import Action, Event, PerceptionResult, Result
+from minebot.contract import Action, Event, PerceptionResult, Result, ToolResult
 
 
 class FakeInventoryBody:
@@ -609,6 +609,129 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertEqual([action.name for action in body.actions], ["craftItem"])
         self.assertEqual(body.actions[0].params["inputs"], [{"slot": 0, "item": "minecraft:oak_log", "count": 1}])
         self.assertEqual(body.actions[0].params["output"], {"slot": 1, "item": "minecraft:oak_planks", "count": 4})
+
+    def test_craft_recipe_treats_select_item_sync_rejection_as_terminal_for_temporary_table(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1), slot(41), slot(42)]),
+            ],
+            select_rejected=True,
+            recipe_data={
+                "minecraft:furnace": '[[[[furnace, 1, {count:1,id:"minecraft:furnace"}]], [[cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone]], [shaped, 3, 3]]]'
+            },
+        )
+
+        class FakeWork:
+            def __init__(self):
+                self.place_calls = []
+                self.mine_calls = []
+
+            def place_here(self, block_type, *, radius, context, purpose, timeout_s):
+                self.place_calls.append((block_type, radius, context, purpose, timeout_s))
+                return ToolResult(
+                    True,
+                    "completed",
+                    False,
+                    metrics={"place_here": {"chosen_target": [2, 64, 0]}},
+                )
+
+            def mine_block(self, pos, *, context, timeout_s):
+                self.mine_calls.append((pos, context, timeout_s))
+                return ToolResult(True, "completed", False)
+
+        work = FakeWork()
+        runtime = InventoryTransactions(body, work=work)
+
+        result = runtime.craft_recipe(item="minecraft:furnace", count=1, output_slot=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual([action.name for action in body.actions], ["selectItem", "craftItem"])
+        self.assertEqual(work.place_calls[0][0], "minecraft:crafting_table")
+        self.assertEqual(work.mine_calls[0][0], (2, 64, 0))
+
+    def test_craft_recipe_keeps_success_when_temporary_table_reclaim_times_out(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1), slot(41), slot(42)]),
+            ],
+            recipe_data={
+                "minecraft:furnace": '[[[[furnace, 1, {count:1,id:"minecraft:furnace"}]], [[cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone]], [shaped, 3, 3]]]'
+            },
+        )
+
+        class FakeWork:
+            def place_here(self, block_type, *, radius, context, purpose, timeout_s):
+                return ToolResult(
+                    True,
+                    "completed",
+                    False,
+                    metrics={"place_here": {"chosen_target": [2, 64, 0]}},
+                )
+
+            def mine_block(self, pos, *, context, timeout_s):
+                return ToolResult(False, "timeout", True, metrics={"target": list(pos)})
+
+        runtime = InventoryTransactions(body, work=FakeWork())
+
+        result = runtime.craft_recipe(item="minecraft:furnace", count=1, output_slot=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertFalse(result.metrics["reclaim"]["success"])
+        self.assertEqual(result.metrics["reclaim"]["reason"], "timeout")
+
+    def test_craft_recipe_can_keep_temporary_table_for_composition_chain(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1), slot(41), slot(42)]),
+            ],
+            recipe_data={
+                "minecraft:furnace": '[[[[furnace, 1, {count:1,id:"minecraft:furnace"}]], [[cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone]], [shaped, 3, 3]]]'
+            },
+        )
+
+        class FakeWork:
+            def __init__(self):
+                self.place_calls = []
+                self.mine_calls = []
+
+            def place_here(self, block_type, *, radius, context, purpose, timeout_s):
+                self.place_calls.append((block_type, radius, context, purpose, timeout_s))
+                return ToolResult(
+                    True,
+                    "completed",
+                    False,
+                    metrics={"place_here": {"chosen_target": [2, 64, 0]}},
+                )
+
+            def mine_block(self, pos, *, context, timeout_s):
+                self.mine_calls.append((pos, context, timeout_s))
+                return ToolResult(True, "completed", False)
+
+        work = FakeWork()
+        runtime = InventoryTransactions(body, work=work)
+
+        result = runtime.craft_recipe(item="minecraft:furnace", count=1, output_slot=2, keep_temporary_table=True)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(work.place_calls[0][0], "minecraft:crafting_table")
+        self.assertEqual(work.mine_calls, [])
+        self.assertTrue(result.metrics["workspace"]["retained"])
+        self.assertNotIn("reclaim", result.metrics)
 
     def test_cleanup_crafting_residue_merges_then_moves_to_empty_inventory_slot(self):
         body = FakeInventoryBody(

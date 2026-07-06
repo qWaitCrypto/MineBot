@@ -45,6 +45,9 @@ class ResourcePlan:
     expected_drops: tuple[str, ...]
 
 
+COMPOSITION_WORKSTATION_SEARCH_RADIUS = 64
+
+
 def register_inventory_tools(registry: ToolRegistry, body: Body) -> None:
     registry.register(
         RegisteredTool(
@@ -291,7 +294,11 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             blocked_log_patches=blocked_log_patches if _is_log_plan(plan) else None,
         )
         if target is None:
-            find_limit = min(12, max(6, min(budget.max_candidates, radius // 2 if radius > 1 else 1)))
+            remaining_needed = max(1, count - current_count)
+            find_limit = min(
+                12,
+                max(6, remaining_needed + 2, min(budget.max_candidates, radius // 2 if radius > 1 else 1)),
+            )
             max_pages = _search_max_pages_for_budget(budget, find_limit)
             search = _execute_composition_phase(
                 context,
@@ -393,7 +400,12 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         mined = _execute_candidate_probe_tool(
             context,
             context.registry.get("mine_block_collect"),
-            {"pos": target, "expected_drops": list(plan.expected_drops), "dry": allow_dry},
+            {
+                "pos": target,
+                "expected_drops": list(plan.expected_drops),
+                "target_block_types": list(plan.block_types),
+                "dry": allow_dry,
+            },
         )
         _emit_trace(
             context,
@@ -598,6 +610,7 @@ def ensure_item(params: JsonObject, context: CompositionContext, recipe_lookup: 
 
     completed_steps: list[dict[str, object]] = []
     step_payloads = [_acquisition_step_payload(step) for step in plan]
+    last_table_craft_index = _last_table_craft_index(plan)
     for index, step in enumerate(plan):
         if time.monotonic() - started > context.budget.max_wall_s:
             return _ensure_result(
@@ -611,8 +624,32 @@ def ensure_item(params: JsonObject, context: CompositionContext, recipe_lookup: 
                 failed_step={"index": index, "step": _acquisition_step_payload(step), "reason": "max_wall_s"},
                 resume_hint="reinvoke_ensure",
             )
-        result = _execute_acquisition_step(context, step)
-        completed_steps.append({"index": index, "step": _acquisition_step_payload(step), "result": result})
+        before_step_count = _acquisition_step_inventory_count(context, step)
+        if before_step_count is None:
+            failed_step = {
+                "index": index,
+                "step": _acquisition_step_payload(step),
+                "reason": "inventory_read_failed_before_step",
+            }
+            return _ensure_result(
+                False,
+                "ensure_step_failed:inventory_read_failed",
+                True,
+                item,
+                count,
+                plan=step_payloads,
+                completed_steps=completed_steps,
+                failed_step=failed_step,
+                resume_hint="reinvoke_ensure",
+            )
+        result = _execute_acquisition_step(
+            context,
+            step,
+            before_count=before_step_count,
+            keep_workstation=_should_keep_workstation(step, index, last_table_craft_index),
+            cleanup_workstation=_should_cleanup_workstation(step, index, last_table_craft_index),
+        )
+        step_record = {"index": index, "step": _acquisition_step_payload(step), "result": result}
         if not result.get("success"):
             return _ensure_result(
                 False,
@@ -621,10 +658,42 @@ def ensure_item(params: JsonObject, context: CompositionContext, recipe_lookup: 
                 item,
                 count,
                 plan=step_payloads,
-                completed_steps=completed_steps[:-1],
-                failed_step=completed_steps[-1],
+                completed_steps=completed_steps,
+                failed_step=step_record,
                 resume_hint="reinvoke_ensure",
             )
+        step_count = _acquisition_step_inventory_count(context, step)
+        if step_count is None:
+            return _ensure_result(
+                False,
+                "ensure_step_failed:inventory_read_failed",
+                True,
+                item,
+                count,
+                plan=step_payloads,
+                completed_steps=completed_steps,
+                failed_step=step_record,
+                resume_hint="reinvoke_ensure",
+            )
+        required_step_count = before_step_count if step.kind == "equip" else before_step_count + step.count
+        if step_count < required_step_count:
+            step_record = dict(step_record)
+            step_record["before_count"] = before_step_count
+            step_record["current_count"] = step_count
+            step_record["required_count"] = required_step_count
+            step_record["remaining_count"] = max(0, required_step_count - step_count)
+            return _ensure_result(
+                False,
+                "ensure_step_incomplete",
+                True,
+                item,
+                count,
+                plan=step_payloads,
+                completed_steps=completed_steps,
+                failed_step=step_record,
+                resume_hint="reinvoke_ensure",
+            )
+        completed_steps.append(step_record)
         inventory = _read_count(context, (item,))
         if not inventory.success:
             return inventory
@@ -711,8 +780,9 @@ def _execute_composition_phase(
     tool: RegisteredTool,
     tool_input: JsonObject,
 ) -> JsonObject:
+    _emit_tool_invoke(context, phase, tool, tool_input)
     try:
-        return execute_tool(tool, tool_input, context.weld_context)
+        result = execute_tool(tool, tool_input, context.weld_context)
     except Exception as exc:
         _emit_trace(
             context,
@@ -726,6 +796,151 @@ def _execute_composition_phase(
             },
         )
         raise
+    summary = _summarize_composition_result(result)
+    _emit_trace(
+        context,
+        "composition_tool_result",
+        {
+            "phase": phase,
+            "tool": tool.name,
+            "success": bool(result.get("success", False)),
+            "reason": str(result.get("reason") or ""),
+            "canRetry": bool(result.get("canRetry", False)),
+            "summary": summary,
+        },
+    )
+    return result
+
+
+def _emit_tool_invoke(
+    context: CompositionContext,
+    phase: str,
+    tool: RegisteredTool,
+    tool_input: JsonObject,
+) -> None:
+    _emit_trace(
+        context,
+        "tool_invoke",
+        {
+            "tool_call_id": f"composition-{phase}-{tool.name}",
+            "tool": tool.name,
+            "source": tool.sidecar.source,
+            "tool_type": tool.sidecar.tool_type,
+            "mutating": tool.sidecar.mutating,
+            "permission": tool.sidecar.permission,
+            "body_scope": list(tool.sidecar.body_scope),
+            "terminal_truth": list(tool.sidecar.terminal_truth),
+            "situational": context.runtime_profile.situational,
+            "lifecycle": context.runtime_profile.lifecycle,
+            "driver": f"composition:{phase}",
+            "arguments_summary": _summarize_composition_arguments(tool_input),
+        },
+    )
+
+
+def _summarize_composition_arguments(tool_input: JsonObject) -> dict[str, object]:
+    summary: dict[str, object] = {}
+    for key in (
+        "item",
+        "count",
+        "input_item",
+        "resource",
+        "target",
+        "pos",
+        "search_radius",
+        "keep_temporary_table",
+        "cleanup_existing_bot_table",
+    ):
+        if key in tool_input:
+            summary[key] = tool_input[key]
+    constraints = tool_input.get("constraints")
+    if isinstance(constraints, dict):
+        summary["constraints"] = {
+            key: constraints[key]
+            for key in ("auto_prerequisites", "max_candidates", "max_mutating_calls", "max_wall_s")
+            if key in constraints
+        }
+    return summary
+
+
+def _summarize_composition_result(result: JsonObject) -> dict[str, object]:
+    summary: dict[str, object] = {}
+    for key in ("success", "reason", "canRetry", "nextSuggestion"):
+        if key in result:
+            summary[key] = result[key]
+    metrics = result.get("metrics")
+    if isinstance(metrics, dict):
+        selected = _summarize_composition_metrics(metrics)
+        if selected:
+            summary["metrics"] = selected
+    return summary
+
+
+def _summarize_composition_metrics(metrics: dict[str, object]) -> dict[str, object]:
+    selected: dict[str, object] = {}
+    for key in (
+        "item",
+        "input_item",
+        "fuel_item",
+        "output_item",
+        "count",
+        "target_count",
+        "before_count",
+        "after_count",
+        "current_count",
+        "remaining_count",
+        "collected_delta",
+        "resume_hint",
+        "temporary_furnace_site",
+        "furnace_pos",
+        "seconds_needed",
+    ):
+        if key in metrics:
+            selected[key] = metrics[key]
+    for key in ("input", "fuel", "output", "usable_fuels"):
+        value = metrics.get(key)
+        if isinstance(value, dict):
+            selected[key] = value
+    for key in ("nearest_furnace_result", "place", "smelt", "reclaim_select"):
+        value = metrics.get(key)
+        if isinstance(value, dict):
+            selected[key] = _compact_tool_result_payload(value)
+    reclaim = metrics.get("reclaim")
+    if isinstance(reclaim, dict):
+        selected["reclaim"] = _compact_tool_result_payload(reclaim)
+    elif isinstance(reclaim, list):
+        selected["reclaim"] = _compact_reclaim_entries(reclaim)
+    return selected
+
+
+def _compact_tool_result_payload(payload: dict[str, object]) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key in ("success", "reason", "canRetry", "nextSuggestion"):
+        if key in payload:
+            out[key] = payload[key]
+    metrics = payload.get("metrics")
+    if isinstance(metrics, dict):
+        selected = _summarize_composition_metrics(metrics)
+        if selected:
+            out["metrics"] = selected
+    return out
+
+
+def _compact_reclaim_entries(entries: list[object]) -> dict[str, object]:
+    tail: list[dict[str, object]] = []
+    for entry in entries[-3:]:
+        if not isinstance(entry, dict):
+            continue
+        compact = {
+            key: entry[key]
+            for key in ("furnace_slot", "success", "reason")
+            if key in entry
+        }
+        result = entry.get("result")
+        if isinstance(result, dict):
+            compact["result"] = _compact_tool_result_payload(result)
+        tail.append(compact)
+    return {"count": len(entries), "tail": tail}
 
 
 def _execute_candidate_probe_tool(context: CompositionContext, tool: RegisteredTool, tool_input: JsonObject) -> JsonObject:
@@ -1587,20 +1802,34 @@ def _recipe_lookup_from_context(context: CompositionContext) -> RecipeLookup:
     return context.recipe_lookup
 
 
-def _execute_acquisition_step(context: CompositionContext, step: AcquisitionStep) -> JsonObject:
+def _execute_acquisition_step(
+    context: CompositionContext,
+    step: AcquisitionStep,
+    *,
+    before_count: int = 0,
+    keep_workstation: bool = False,
+    cleanup_workstation: bool = False,
+) -> JsonObject:
     if step.kind == "collect":
         return _execute_composition_phase(
             context,
             "ensure_collect",
             context.registry.get("collect_resource"),
-            {"item": step.item, "count": step.count, "constraints": {"auto_prerequisites": False}},
+            {"item": step.item, "count": before_count + step.count, "constraints": {"auto_prerequisites": False}},
         )
     if step.kind == "craft":
+        craft_input: JsonObject = {"item": step.item, "count": step.count}
+        if bool(step.detail.get("requires_table")):
+            craft_input["search_radius"] = COMPOSITION_WORKSTATION_SEARCH_RADIUS
+            if keep_workstation:
+                craft_input["keep_temporary_table"] = True
+            if cleanup_workstation:
+                craft_input["cleanup_existing_bot_table"] = True
         return _execute_composition_phase(
             context,
             "ensure_craft",
             context.registry.get("craft_item"),
-            {"item": step.item, "count": step.count},
+            craft_input,
         )
     if step.kind == "smelt":
         return _execute_composition_phase(
@@ -1617,6 +1846,41 @@ def _execute_acquisition_step(context: CompositionContext, step: AcquisitionStep
             {"item": step.item, "target": "mainhand"},
         )
     return ToolResult(False, "unknown_acquisition_step", False, metrics={"step": _acquisition_step_payload(step)}).to_payload()
+
+
+def _acquisition_step_inventory_count(context: CompositionContext, step: AcquisitionStep) -> int | None:
+    if step.kind == "equip":
+        return step.count
+    inventory = _read_count(context, (step.item,))
+    if not inventory.success:
+        return None
+    return int((inventory.metrics or {}).get("count") or 0)
+
+
+def _last_table_craft_index(plan: list[AcquisitionStep]) -> int | None:
+    last: int | None = None
+    for index, step in enumerate(plan):
+        if step.kind == "craft" and bool(step.detail.get("requires_table")):
+            last = index
+    return last
+
+
+def _should_keep_workstation(step: AcquisitionStep, index: int, last_table_craft_index: int | None) -> bool:
+    return (
+        step.kind == "craft"
+        and bool(step.detail.get("requires_table"))
+        and last_table_craft_index is not None
+        and index < last_table_craft_index
+    )
+
+
+def _should_cleanup_workstation(step: AcquisitionStep, index: int, last_table_craft_index: int | None) -> bool:
+    return (
+        step.kind == "craft"
+        and bool(step.detail.get("requires_table"))
+        and last_table_craft_index is not None
+        and index == last_table_craft_index
+    )
 
 
 def _inventory_counts_from_result(result: ToolResult) -> dict[str, int]:

@@ -3164,6 +3164,49 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.metrics["place_here"]["chosen_target"], [0, 64, 1])
         self.assertEqual(body.actions[-1].params["target"], [0, 64, 1])
 
+    def test_place_here_skips_physical_timeout_candidate_and_uses_next_supported_spot(self):
+        class TimeoutFirstPlaceBody(FakeBody):
+            def execute(self, action):
+                result = super().execute(action)
+                if action.name == "placeBlock" and len([item for item in self.actions if item.name == "placeBlock"]) == 1:
+                    target = tuple(action.params["target"])
+                    self.blocks[target] = ("air", "CLEAR")
+                    self.terminal = Event(
+                        seq=self.terminal.seq,
+                        tick=self.terminal.tick,
+                        bot=self.terminal.bot,
+                        name="placeDone",
+                        data={
+                            "action_id": action.id,
+                            "success": False,
+                            "block_at_target": "air",
+                            "stopped_reason": "timeout",
+                        },
+                    )
+                return result
+
+        body = TimeoutFirstPlaceBody(
+            blocks={
+                (0, 63, 0): ("stone", "SOLID"),
+                (0, 64, 1): ("air", "CLEAR"),
+                (0, 63, 1): ("stone", "SOLID"),
+                (1, 64, 0): ("air", "CLEAR"),
+                (1, 63, 0): ("stone", "SOLID"),
+            },
+        )
+        body.state_pos = (0.5, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy)
+
+        result = runtime.place_here("minecraft:cobblestone", radius=1, context=PlaceContext.WORK)
+
+        self.assertTrue(result.success)
+        place_actions = [action for action in body.actions if action.name == "placeBlock"]
+        self.assertEqual(len(place_actions), 2)
+        self.assertEqual(result.metrics["place_here"]["attempts"][0]["result"]["reason"], "timeout")
+        self.assertEqual(result.metrics["place_here"]["chosen_target"], place_actions[-1].params["target"])
+        self.assertNotEqual(place_actions[0].params["target"], place_actions[-1].params["target"])
+
     def test_place_here_reports_navigation_missing_when_only_remote_stand_point_exists(self):
         body = FakeBody(
             blocks={

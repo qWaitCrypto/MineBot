@@ -163,13 +163,17 @@ def resolve_smelt_output(
         return None
     if recipe_lookup is None:
         return (candidates[0], 1)
+    runtime_recipe_available = False
     for output_item in candidates:
         perception = recipe_lookup(output_item)
-        if perception is None or not perception.ok:
+        if not _smelt_recipe_payload_available(perception):
             continue
+        runtime_recipe_available = True
         resolved = _resolve_smelt_output_from_recipe(normalized_input, output_item, perception)
         if resolved is not None:
             return resolved
+    if not runtime_recipe_available:
+        return (candidates[0], 1)
     return None
 
 
@@ -886,10 +890,10 @@ class FurnaceTransactions:
                     metrics=metrics,
                 )
 
-        reclaim = self.work.mine_block(
+        reclaim, reclaim_attempts = self._reclaim_temporary_furnace(
             furnace_pos,
-            context=BreakContext.BOT_CLEANUP,
             timeout_s=reclaim_timeout_s,
+            max_attempts=2,
         )
         metrics = {
             "furnace_pos": list(furnace_pos),
@@ -898,6 +902,7 @@ class FurnaceTransactions:
             "place": place.to_payload(),
             "smelt": smelt.to_payload(),
             "reclaim": reclaim.to_payload(),
+            "reclaim_attempts": reclaim_attempts,
         }
         if reclaim_select is not None:
             metrics["reclaim_tool"] = reclaim_tool
@@ -910,15 +915,30 @@ class FurnaceTransactions:
                 next_suggestion=smelt.next_suggestion,
                 metrics=metrics,
             )
-        if not reclaim.success:
-            return ToolResult(
-                success=False,
-                reason=f"temporary_furnace_reclaim_failed:{reclaim.reason}",
-                can_retry=reclaim.can_retry,
-                next_suggestion=reclaim.next_suggestion,
-                metrics=metrics,
-            )
         return ToolResult(success=True, reason="completed", can_retry=False, metrics=metrics)
+
+    def _reclaim_temporary_furnace(
+        self,
+        pos: Position,
+        *,
+        timeout_s: float,
+        max_attempts: int,
+    ) -> tuple[ToolResult, list[dict[str, object]]]:
+        attempts: list[dict[str, object]] = []
+        last = ToolResult(False, "temporary_furnace_reclaim_not_attempted", True, metrics={"target": list(pos)})
+        for attempt in range(1, max(1, max_attempts) + 1):
+            assert self.work is not None
+            last = self.work.mine_block(
+                pos,
+                context=BreakContext.BOT_CLEANUP,
+                timeout_s=timeout_s,
+            )
+            attempts.append({"attempt": attempt, **last.to_payload()})
+            if last.success:
+                return last, attempts
+            if not _retry_temporary_furnace_reclaim(last):
+                return last, attempts
+        return last, attempts
 
     def smelt_with_nearby_temporary_furnace(
         self,
@@ -978,33 +998,52 @@ class FurnaceTransactions:
                 },
             )
 
-        chosen = tuple(candidates[0]["target"])
-        result = self.smelt_with_temporary_furnace(
-            chosen,
-            input_item=input_item,
-            input_count=input_count,
-            fuel_item=fuel_item,
-            fuel_count=fuel_count,
-            output_item=output_item,
-            output_count=output_count,
-            output_slot=output_slot,
-            furnace_item=furnace_item,
-            place_context=place_context,
-            place_purpose="temporary_furnace_auto_site",
-            poll_interval_s=poll_interval_s,
-            smelt_timeout_s=smelt_timeout_s,
-            transfer_timeout_s=transfer_timeout_s,
-            place_timeout_s=place_timeout_s,
-            reclaim_timeout_s=reclaim_timeout_s,
-            reclaim_tool=reclaim_tool,
-        )
+        attempted: list[dict[str, object]] = []
+        last_result: ToolResult | None = None
+        for candidate in candidates:
+            chosen = tuple(candidate["target"])
+            result = self.smelt_with_temporary_furnace(
+                chosen,
+                input_item=input_item,
+                input_count=input_count,
+                fuel_item=fuel_item,
+                fuel_count=fuel_count,
+                output_item=output_item,
+                output_count=output_count,
+                output_slot=output_slot,
+                furnace_item=furnace_item,
+                place_context=place_context,
+                place_purpose="temporary_furnace_auto_site",
+                poll_interval_s=poll_interval_s,
+                smelt_timeout_s=smelt_timeout_s,
+                transfer_timeout_s=transfer_timeout_s,
+                place_timeout_s=place_timeout_s,
+                reclaim_timeout_s=reclaim_timeout_s,
+                reclaim_tool=reclaim_tool,
+            )
+            attempted.append({"target": list(chosen), "result": result.to_payload()})
+            last_result = result
+            if result.success or not _retry_temporary_furnace_candidate(result):
+                return merge_context(
+                    result,
+                    {
+                        "temporary_furnace_site": list(chosen),
+                        "origin": list(origin),
+                        "radius": radius,
+                        "site_scan": scan,
+                        "attempted_sites": attempted,
+                    },
+                )
+
+        assert last_result is not None
         return merge_context(
-            result,
+            last_result,
             {
-                "temporary_furnace_site": list(chosen),
+                "temporary_furnace_site": list(attempted[-1]["target"]),
                 "origin": list(origin),
                 "radius": radius,
                 "site_scan": scan,
+                "attempted_sites": attempted,
             },
         )
 
@@ -1187,6 +1226,19 @@ def _read_furnace(body: Body, pos: Position) -> PerceptionResult:
     return body.perceive("container", {"pos": list(pos), "start": 0, "limit": 3, "total_slots": 3})
 
 
+def _retry_temporary_furnace_reclaim(result: ToolResult) -> bool:
+    if not result.can_retry:
+        return False
+    return result.reason in {"timeout", "stuck", "deviated", "body_rejected"} or result.reason.startswith("mine_approach_failed:")
+
+
+def _retry_temporary_furnace_candidate(result: ToolResult) -> bool:
+    return result.reason in {
+        "temporary_furnace_place_failed:place_denied:body_collision",
+        "temporary_furnace_place_failed:timeout",
+    }
+
+
 def _dispatch(body: Body, action_name: str, params: dict[str, object], *, timeout_s: float) -> ToolResult:
     action = Action.create(action_name, params)
     accepted = body.execute(action)
@@ -1263,6 +1315,8 @@ def _scan_temporary_furnace_sites(
     radius: int,
 ) -> list[dict[str, object]] | ToolResult:
     scanned: list[dict[str, object]] = []
+    feet = _state_block_pos(body.get_state().pos)
+    head = (feet[0], feet[1] + 1, feet[2])
     for target in _temporary_furnace_site_targets(origin, radius):
         target_block = body.perceive("blockAt", {"x": target[0], "y": target[1], "z": target[2]})
         failed = _perception_failure(target_block)
@@ -1278,6 +1332,11 @@ def _scan_temporary_furnace_sites(
         support_state = str(support_block.data.get("state") or "UNKNOWN")
         target_clear = target_state == "CLEAR"
         support_solid = support_state == "SOLID"
+        collision_part = None
+        if target == feet:
+            collision_part = "feet"
+        elif target == head:
+            collision_part = "head"
         scanned.append(
             {
                 "target": list(target),
@@ -1286,7 +1345,9 @@ def _scan_temporary_furnace_sites(
                 "target_state": target_state,
                 "support_block": normalize_block_type(str(support_block.data.get("type") or "unknown")),
                 "support_state": support_state,
-                "candidate": target_clear and support_solid,
+                "body_collision": collision_part is not None,
+                "collision_part": collision_part,
+                "candidate": target_clear and support_solid and collision_part is None,
             }
         )
     return scanned
@@ -1465,6 +1526,19 @@ def _resolve_smelt_output_from_recipe(
         if resolved is not None:
             return resolved
     return None
+
+
+def _smelt_recipe_payload_available(perception: PerceptionResult | None) -> bool:
+    if perception is None or not perception.ok:
+        return False
+    recipe_raw = str(perception.data.get("recipe_raw") or "")
+    if not recipe_raw:
+        return False
+    try:
+        _ScarpetValueParser(recipe_raw).parse()
+    except ValueError:
+        return False
+    return True
 
 
 def _is_recipe_variant_list(value: object) -> bool:

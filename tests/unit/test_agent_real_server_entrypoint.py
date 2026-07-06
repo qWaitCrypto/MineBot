@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from minebot.app.phase1_runtime import Phase1RuntimeConfig, _phase1_recovery_handler, _recipe_lookup, build_phase1_agent_runtime, build_phase1_registry, tool_manifest
+from minebot.app.phase1_runtime import Phase1RuntimeConfig, _phase1_recovery_handler, _recipe_lookup, _run_smelt_tool, build_phase1_agent_runtime, build_phase1_registry, tool_manifest
 from minebot.app.runner import AgentRuntime
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController
@@ -28,7 +28,7 @@ from minebot.app.resource_runtime import ResourceRuntimeConfig
 from minebot.app.session import SessionCommandKind
 from minebot.app.session import SessionStep
 from minebot.brain.lifecycle import LifecycleState
-from minebot.contract import BodyState, InventorySlot, PerceptionResult, Region, Result
+from minebot.contract import BodyState, InventorySlot, PerceptionResult, Region, Result, ToolResult
 from minebot.contract import Event
 
 
@@ -602,6 +602,81 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "fuel_not_found")
         self.assertEqual(body.actions, [])
+
+    def test_phase1_smelt_item_falls_back_to_carried_temporary_furnace_after_retryable_nearest_failure(self):
+        body = CraftToolBody(
+            inventory_pages=[
+                _inventory_page(
+                    [
+                        _slot(0, "minecraft:raw_iron", 3),
+                        _slot(1, "minecraft:oak_planks", 2),
+                        _slot(2, "minecraft:furnace", 1),
+                        _slot(3),
+                    ]
+                ),
+            ],
+            recipe_data={
+                "iron_ingot": '[[[[iron_ingot, 1, {count:1,id:"minecraft:iron_ingot"}]], [[raw_iron]], [smelting, 200, 0.699999988079]]]'
+            },
+        )
+
+        class FakeFurnaceTransactions:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            def smelt_nearest_furnace(self, **_kwargs):
+                self.calls.append("nearest")
+                return ToolResult(False, "furnace_no_stand_point", True, metrics={"furnace_target": [1, 70, 0]})
+
+            def smelt_with_nearby_temporary_furnace(self, **_kwargs):
+                self.calls.append("temporary")
+                return ToolResult(True, "completed", False, metrics={"temporary_furnace_site": [2, 70, 0]})
+
+        furnace = FakeFurnaceTransactions()
+
+        result = _run_smelt_tool(body, furnace, {"input_item": "minecraft:raw_iron", "count": 3})
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(furnace.calls, ["nearest", "temporary"])
+        self.assertEqual(result.metrics["nearest_furnace_result"]["reason"], "furnace_no_stand_point")
+
+    def test_phase1_smelt_item_does_not_fallback_after_nonretryable_nearest_failure(self):
+        body = CraftToolBody(
+            inventory_pages=[
+                _inventory_page(
+                    [
+                        _slot(0, "minecraft:raw_iron", 3),
+                        _slot(1, "minecraft:oak_planks", 2),
+                        _slot(2, "minecraft:furnace", 1),
+                        _slot(3),
+                    ]
+                ),
+            ],
+            recipe_data={
+                "iron_ingot": '[[[[iron_ingot, 1, {count:1,id:"minecraft:iron_ingot"}]], [[raw_iron]], [smelting, 200, 0.699999988079]]]'
+            },
+        )
+
+        class FakeFurnaceTransactions:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            def smelt_nearest_furnace(self, **_kwargs):
+                self.calls.append("nearest")
+                return ToolResult(False, "furnace_access_denied", False, metrics={"furnace_target": [1, 70, 0]})
+
+            def smelt_with_nearby_temporary_furnace(self, **_kwargs):
+                self.calls.append("temporary")
+                return ToolResult(True, "completed", False)
+
+        furnace = FakeFurnaceTransactions()
+
+        result = _run_smelt_tool(body, furnace, {"input_item": "minecraft:raw_iron", "count": 3})
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "furnace_access_denied")
+        self.assertEqual(furnace.calls, ["nearest"])
 
     def test_phase1_registry_uses_server_side_navigation_factory(self):
         from minebot.body.navigation import NavigationTransactions

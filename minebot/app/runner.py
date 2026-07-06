@@ -717,6 +717,10 @@ def _continuation_params(
     initial_params: JsonObject,
 ) -> JsonObject | None:
     if tool.name == "collect_resource":
+        if str(metrics.get("resume_hint") or "") == "reinvoke_ensure":
+            if not bool(current.get("canRetry", False)):
+                return None
+            return dict(initial_params)
         if not _should_continue_collect(current, metrics):
             return None
         item = str(metrics.get("requested_item") or metrics.get("item") or "")
@@ -742,6 +746,8 @@ def _continuation_params(
 
 def _continuation_reason(tool_name: str, metrics: dict[str, object]) -> str:
     if tool_name == "collect_resource":
+        if str(metrics.get("resume_hint") or "") == "reinvoke_ensure":
+            return "collect_prerequisite_resume"
         return "collect_partial_progress"
     return str(metrics.get("resume_hint") or "composition_resume")
 

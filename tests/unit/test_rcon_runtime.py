@@ -1,4 +1,5 @@
 import struct
+from unittest import mock
 import unittest
 
 from minebot.game.errors import RconError
@@ -72,6 +73,36 @@ class ReconnectingRconClient(RconClient):
 
 
 class RconRuntimeTests(unittest.TestCase):
+    def test_connect_sets_socket_read_timeout_after_tcp_connect(self):
+        class Socket:
+            def __init__(self):
+                self.timeout = None
+                self.sent = []
+                self._buf = _packet(1, 2, "")
+
+            def settimeout(self, value):
+                self.timeout = value
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+            def recv(self, n):
+                chunk = self._buf[:n]
+                self._buf = self._buf[n:]
+                return chunk
+
+            def close(self):
+                pass
+
+        sock = Socket()
+        with mock.patch("socket.create_connection", return_value=sock) as create_connection:
+            client = RconClient(RconConfig(timeout_s=2.5))
+
+            client.connect()
+
+        create_connection.assert_called_once_with(("127.0.0.1", 25576), timeout=2.5)
+        self.assertEqual(sock.timeout, 2.5)
+
     def test_command_reconnects_once_after_closed_socket(self):
         client = ReconnectingRconClient()
 
