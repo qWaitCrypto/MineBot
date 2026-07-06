@@ -41,6 +41,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fps", type=int, default=15)
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--radius-chunks", type=int, default=4)
+    parser.add_argument("--y-band-below", type=int, default=0)
+    parser.add_argument("--y-band-above", type=int, default=0)
     parser.add_argument("--view-radius-chunks", type=int, default=4)
     parser.add_argument("--min-sections", type=int, default=24)
     parser.add_argument("--timeout", type=float, default=10.0)
@@ -68,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
                 bot=args.bot,
                 dimension=args.dimension,
                 radius_chunks=args.radius_chunks,
-                y_band_sections=(0, 0),
+                y_band_sections=(args.y_band_below, args.y_band_above),
                 rate_hz=20,
                 timeout_s=2.0,
             )

@@ -29,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--y-band-above", type=int, default=0)
     parser.add_argument("--rate-hz", type=int, default=5)
     parser.add_argument("--min-keyframes", type=int, default=16)
+    parser.add_argument("--min-y-levels", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=12.0)
     args = parser.parse_args(argv)
 
@@ -113,6 +114,13 @@ def main(argv: list[str] | None = None) -> int:
         first_section = tuple(int(item) for item in keyframes[0].get("section", []))
         require(first_section == center_section, f"first keyframe should be center section {center_section}, got {first_section}")
         require(any(section != center_section for section in decoded_sections), "region stream only returned the center section")
+        y_levels = sorted({section[1] for section in decoded_sections})
+        require(len(y_levels) >= args.min_y_levels, f"expected >= {args.min_y_levels} y-levels, got {y_levels}")
+        if args.y_band_below or args.y_band_above:
+            expected_min_y = center_section[1] - args.y_band_below
+            expected_max_y = center_section[1] + args.y_band_above
+            require(min(y_levels) <= expected_min_y, f"missing lower y-band {expected_min_y}: {y_levels}")
+            require(max(y_levels) >= expected_max_y, f"missing upper y-band {expected_max_y}: {y_levels}")
 
         summary = {
             "hello": {
@@ -131,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
                 "first_section": list(first_section),
                 "sample_sections": [list(section) for section in list(decoded_sections)[:10]],
                 "encodings": sorted({str(frame.get("encoding")) for frame in keyframes}),
+                "y_levels": y_levels,
             },
             "seq": {"last": last_seq, "contiguous": True},
         }
