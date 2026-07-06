@@ -190,7 +190,7 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
             )
             return parts
 
-        session = AgentSession(make_parts, goal_driver=_collect_goal_driver)
+        session = AgentSession(make_parts, goal_driver=_goal_driver)
         session.submit(SessionCommand.start(goal))
         try:
             final = await session.run_until_waiting(
@@ -273,7 +273,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
             )
             return parts
 
-        session = AgentSession(make_parts, goal_driver=_collect_goal_driver)
+        session = AgentSession(make_parts, goal_driver=_goal_driver)
         session.submit(SessionCommand.start(goal))
         reader = asyncio.create_task(_stdin_command_reader(session))
         try:
@@ -384,15 +384,23 @@ def _session_goal(session: AgentSession, fallback: str) -> str:
     return session.current_goal or fallback
 
 
-def _collect_goal_driver(parts: AgentRuntimeParts, signals: list[AgentSignal]) -> SessionStep | None:
-    target = parse_collect_target(parts.context.goal_text)
+def _goal_driver(parts: AgentRuntimeParts, signals: list[AgentSignal]) -> SessionStep | None:
+    target = parse_goal_target(parts.context.goal_text)
     if target is None:
-        parts.runtime.trace.emit("goal_driver_skipped", reason="not_collect_goal", goal=parts.context.goal_text)
+        parts.runtime.trace.emit("goal_driver_skipped", reason="no_supported_goal_target", goal=parts.context.goal_text)
         return None
+    if target.kind == "collect":
+        outcome = parts.runtime.drive_tool_once(
+            "collect_resource",
+            {"item": target.item, "count": target.count},
+            reason="canonical_collect_goal",
+            extra_signals=signals,
+        )
+        return SessionStep(outcome.status, outcome.lifecycle, outcome.message)
     outcome = parts.runtime.drive_tool_once(
-        "collect_resource",
-        {"item": target.item, "count": target.count},
-        reason="canonical_collect_goal",
+        "ensure_tool_for",
+        {"resource": target.item},
+        reason="canonical_acquire_goal",
         extra_signals=signals,
     )
     return SessionStep(outcome.status, outcome.lifecycle, outcome.message)
@@ -592,6 +600,7 @@ __all__ = [
     "env_required",
     "evaluate_terminal_truth",
     "main",
+    "parse_goal_target",
     "parse_collect_target",
     "parse_session_command",
     "real_server_config_from_env",
