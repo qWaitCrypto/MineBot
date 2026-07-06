@@ -140,7 +140,10 @@ def test_common_fidelity_spike_non_cubes_are_omitted() -> None:
     for state in (
         "minecraft:wildflowers",
         "minecraft:leaf_litter",
+        "minecraft:lilac",
+        "minecraft:firefly_bush",
         "minecraft:pointed_dripstone",
+        "minecraft:iron_chain",
         "minecraft:bush",
         "minecraft:peony",
         "minecraft:seagrass",

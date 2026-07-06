@@ -56,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--follow-height-offset", type=float, default=1.6)
     parser.add_argument("--follow-stiffness", type=float, default=0.22)
     parser.add_argument("--fov", type=float, default=70.0)
+    parser.add_argument("--console-fifo", default=None)
+    parser.add_argument("--control-script", default=None)
     args = parser.parse_args(argv)
 
     try:
@@ -149,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
     face_count_last = 0
     mesh_cache = SectionMeshCache()
     mesh_cache.set_atlas(atlas)
+    control_events = _load_control_events(Path(args.control_script)) if args.control_script else {}
+    console_fifo = Path(args.console_fifo) if args.console_fifo else None
     renderer: GLRenderer | None = None
     writer: FfmpegWriter | None = None
     try:
@@ -157,6 +161,8 @@ def main(argv: list[str] | None = None) -> int:
         record_start = time.monotonic()
         with timing_path.open("w", encoding="utf-8") as timing_file:
             for frame_index in range(frame_count):
+                for command in control_events.get(frame_index, ()):
+                    _send_console_command(console_fifo, command)
                 frame_due = record_start + frame_index * frame_interval
                 sleep_s = frame_due - time.monotonic()
                 if sleep_s > 0:
@@ -187,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
                     json.dumps(
                         {
                             "frame": frame_index,
+                            "sample_pos": [sample.pos[0], sample.pos[1], sample.pos[2]],
+                            "sample_yaw": sample.yaw,
                             "mesh_ms": mesh_ms,
                             "draw_ms": render_stats.draw_ms,
                             "readback_ms": render_stats.readback_ms,
@@ -202,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     + "\n"
                 )
+                timing_file.flush()
     finally:
         stop_ingest.set()
         if writer is not None:
@@ -239,6 +248,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(json.dumps(asdict(summary), indent=2, sort_keys=True))
     return 0
+
+
+def _load_control_events(path: Path) -> dict[int, list[str]]:
+    events: dict[int, list[str]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        frame = int(event["frame"])
+        command = str(event["command"])
+        events.setdefault(frame, []).append(command)
+    return events
+
+
+def _send_console_command(fifo_path: Path | None, command: str) -> None:
+    if fifo_path is None:
+        raise RuntimeError("control script requires --console-fifo")
+    with fifo_path.open("w", encoding="utf-8") as console:
+        console.write(command.rstrip() + "\n")
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
