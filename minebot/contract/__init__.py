@@ -6,6 +6,14 @@ transport/transactions can import these names without crossing the
 """
 
 from .governance import BotPlacement, BreakContext, InteractionContext, LegalityDecision, PlaceContext, Position, Region
+from .harvest import (
+    MIN_PICKAXE_TIER,
+    PICKAXE_BY_TIER,
+    TOOL_TIER_ORDER,
+    best_owned_pickaxe,
+    required_pickaxe_tier,
+    tier_satisfies,
+)
 from .messages import (
     Action,
     BodyState,
@@ -45,9 +53,11 @@ __all__ = [
     "InventorySlot",
     "JsonObject",
     "LegalityDecision",
+    "MIN_PICKAXE_TIER",
     "PerceptionResult",
     "perception_next_cursor",
     "PlaceContext",
+    "PICKAXE_BY_TIER",
     "Position",
     "ProgressAbort",
     "ProgressController",
@@ -59,6 +69,10 @@ __all__ = [
     "ToolResult",
     "STAGNATION_LIMIT",
     "STALL_LIMIT",
+    "TOOL_TIER_ORDER",
+    "best_owned_pickaxe",
     "is_candidate_skip",
+    "required_pickaxe_tier",
+    "tier_satisfies",
     "terminal_event_to_tool_result",
 ]
