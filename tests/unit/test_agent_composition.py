@@ -4,10 +4,14 @@ from minebot.brain.composition import (
     CompositionBudget,
     CompositionContext,
     collect_resource,
+    ensure_item,
+    ensure_tool_for,
     register_collect_resource_tool,
+    register_ensure_tool_for_tool,
     register_inventory_tools,
     resource_plan_for,
 )
+from minebot.brain.acquisition import RecipeVariant
 from minebot.brain.modes import ModeRuntime
 from minebot.brain.progress import FAILURE_STORM_LIMIT, ProgressAbort, ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
@@ -527,6 +531,59 @@ def composition_context(body, registry, *, max_candidates=4):
     ), trace_events
 
 
+def acquisition_recipe_lookup(item):
+    recipes = {
+        "oak_planks": [RecipeVariant("oak_planks", 4, (("oak_log",),))],
+        "stick": [RecipeVariant("stick", 4, (("oak_planks",), ("oak_planks",)))],
+        "crafting_table": [RecipeVariant("crafting_table", 1, (("oak_planks",),) * 4)],
+        "wooden_pickaxe": [
+            RecipeVariant("wooden_pickaxe", 1, (("oak_planks",), ("oak_planks",), ("oak_planks",), ("stick",), ("stick",)), requires_table=True)
+        ],
+        "stone_pickaxe": [
+            RecipeVariant("stone_pickaxe", 1, (("cobblestone",), ("cobblestone",), ("cobblestone",), ("stick",), ("stick",)), requires_table=True)
+        ],
+        "iron_pickaxe": [
+            RecipeVariant("iron_pickaxe", 1, (("iron_ingot",), ("iron_ingot",), ("iron_ingot",), ("stick",), ("stick",)), requires_table=True)
+        ],
+        "furnace": [RecipeVariant("furnace", 1, tuple(("cobblestone",) for _ in range(8)), requires_table=True)],
+    }
+    return recipes.get(item)
+
+
+def register_fake_acquisition_leaf_tools(registry, body, *, fail_tool=None):
+    calls = []
+
+    def record(name, params):
+        calls.append((name, dict(params)))
+        if fail_tool == name:
+            return ToolResult(False, f"{name}_failed", True, metrics={"params": dict(params)})
+        if name == "collect_resource":
+            item = str(params["item"]).removeprefix("minecraft:")
+            count = int(params.get("count") or 1)
+            body.inventory_counts[item] = body.inventory_counts.get(item, 0) + count
+        elif name == "craft_item":
+            item = str(params["item"]).removeprefix("minecraft:")
+            count = int(params.get("count") or 1)
+            body.inventory_counts[item] = body.inventory_counts.get(item, 0) + count
+        elif name == "smelt_item":
+            input_item = str(params["input_item"]).removeprefix("minecraft:")
+            count = int(params.get("count") or 1)
+            output = {"raw_iron": "iron_ingot", "raw_gold": "gold_ingot", "raw_copper": "copper_ingot"}.get(input_item, input_item)
+            body.inventory_counts[output] = body.inventory_counts.get(output, 0) + count
+        elif name == "equip_item":
+            pass
+        return ToolResult(True, "completed", False, metrics={"params": dict(params)})
+
+    for name, sidecar in (
+        ("collect_resource", ToolSidecar("collect_resource", mutating=False, source="agent.composition", permission="compose_collect")),
+        ("craft_item", ToolSidecar("craft_item", mutating=True, source="body.inventory", permission="craft")),
+        ("smelt_item", ToolSidecar("smelt_item", mutating=True, source="body.furnace", permission="smelt")),
+        ("equip_item", ToolSidecar("equip_item", mutating=True, source="body.inventory", permission="equip")),
+    ):
+        registry.register(RegisteredTool(name, name, {"type": "object"}, lambda params, tool_name=name: record(tool_name, params), sidecar))
+    return calls
+
+
 class AgentCompositionTests(unittest.TestCase):
     def test_read_inventory_tool_pages_to_avoid_truncated_payloads(self):
         body = PagedInventoryBody()
@@ -591,6 +648,70 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertIn(ctx.weld_context.authority.last_action[0], {"mine_block_collect", "read_inventory"})
         self.assertNotEqual(ctx.weld_context.authority.last_action[0], "collect_resource")
         self.assertIsNone(ctx.weld_context.writer.holder)
+
+    def test_register_ensure_tool_for_is_leaf_led_composition_tool(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry)
+        register_ensure_tool_for_tool(registry, ctx, acquisition_recipe_lookup)
+
+        tool = registry.get("ensure_tool_for")
+
+        self.assertFalse(tool.sidecar.mutating)
+        self.assertEqual(tool.sidecar.source, "agent.composition")
+        self.assertEqual(tool.sidecar.permission, "compose_ensure")
+        self.assertEqual(tool.sidecar.terminal_truth, ("inventory", "ToolResult"))
+
+    def test_ensure_item_executes_resolver_plan_through_leaf_tools(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_item({"item": "iron_pickaxe", "count": 1}, ctx, acquisition_recipe_lookup)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "ensured")
+        self.assertEqual(result.metrics["current_count"], 1)
+        self.assertEqual(calls[0], ("collect_resource", {"item": "oak_log", "count": 4}))
+        self.assertIn(("smelt_item", {"input_item": "raw_iron", "count": 3}), calls)
+        self.assertEqual(calls[-1], ("craft_item", {"item": "iron_pickaxe", "count": 1}))
+        self.assertFalse(registry.get("collect_resource").sidecar.mutating)
+        self.assertNotEqual(ctx.weld_context.authority.last_action[0], "ensure_tool_for")
+
+    def test_ensure_tool_for_resource_targets_required_pickaxe(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_tool_for({"resource": "diamond"}, ctx, acquisition_recipe_lookup)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["item"], "iron_pickaxe")
+        self.assertEqual(calls[-1], ("craft_item", {"item": "iron_pickaxe", "count": 1}))
+
+    def test_ensure_item_failure_reports_failed_step_and_plan(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        register_fake_acquisition_leaf_tools(registry, body, fail_tool="smelt_item")
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_item({"item": "iron_pickaxe", "count": 1}, ctx, acquisition_recipe_lookup)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "ensure_step_failed:smelt_item_failed")
+        self.assertEqual(result.metrics["resume_hint"], "reinvoke_ensure")
+        self.assertGreater(len(result.metrics["plan"]), 1)
+        self.assertEqual(result.metrics["failed_step"]["step"]["kind"], "smelt")
 
     def test_mutating_leaf_owner_busy_is_honest_retryable_failure(self):
         body = FakeBody()

@@ -11,10 +11,12 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from minebot.brain.acquisition import AcquisitionError, AcquisitionStep, RecipeLookup, RecipeVariant, resolve_acquisition
 from minebot.brain.modes import RuntimeProfile
 from minebot.brain.progress import ProgressAbort
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
 from minebot.contract import Body, InventorySlot, JsonObject, ToolResult, is_candidate_skip, perception_next_cursor
+from minebot.contract.harvest import PICKAXE_BY_TIER, required_pickaxe_tier, tier_satisfies
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,37 @@ def register_collect_resource_tool(registry: ToolRegistry, context: CompositionC
                 body_scope=("composition",),
                 terminal_truth=("inventory", "ToolResult"),
                 timeout_s=context.budget.max_wall_s,
+            ),
+        )
+    )
+
+
+def register_ensure_tool_for_tool(registry: ToolRegistry, context: CompositionContext, recipe_lookup: RecipeLookup) -> None:
+    registry.register(
+        RegisteredTool(
+            name="ensure_tool_for",
+            description="Ensure the bot owns and equips the tool needed for harvesting a resource, or obtain a requested item through deterministic collect/craft/smelt/equip steps. Uses existing Body tools and fails honestly with the planned step that failed.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "resource": {
+                        "type": "string",
+                        "description": "Resource/block to harvest, e.g. 'diamond', or item/tool to obtain directly, e.g. 'iron_pickaxe'.",
+                    }
+                },
+                "required": ["resource"],
+                "additionalProperties": False,
+            },
+            callable=lambda params: ensure_tool_for(params, context, recipe_lookup),
+            sidecar=ToolSidecar(
+                progress_key="ensure_tool_for",
+                mutating=False,
+                source="agent.composition",
+                tool_type="resource",
+                permission="compose_ensure",
+                body_scope=("composition",),
+                terminal_truth=("inventory", "ToolResult"),
+                timeout_s=900.0,
             ),
         )
     )
@@ -476,6 +509,107 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         budget=budget,
         requested_count=requested_count,
         goal_target_count=goal_target_count,
+    )
+
+
+def ensure_tool_for(params: JsonObject, context: CompositionContext, recipe_lookup: RecipeLookup) -> ToolResult:
+    resource = _normalize_item(str(params.get("resource") or ""))
+    if not resource:
+        return ToolResult(False, "invalid_resource", False, metrics={"resource": params.get("resource")})
+    target = _ensure_target_for(resource)
+    return ensure_item({"item": target, "count": 1, "resource": resource}, context, recipe_lookup)
+
+
+def ensure_item(params: JsonObject, context: CompositionContext, recipe_lookup: RecipeLookup) -> ToolResult:
+    item = _normalize_item(str(params.get("item") or params.get("resource") or ""))
+    count = int(params.get("count") or 1)
+    if not item:
+        return ToolResult(False, "invalid_item", False, metrics={"item": params.get("item")})
+    if count <= 0:
+        return ToolResult(False, "invalid_count", False, metrics={"item": item, "target_count": count})
+
+    started = time.monotonic()
+    inventory = _read_count(context, (item,))
+    if not inventory.success:
+        return inventory
+    counts = _inventory_counts_from_result(inventory)
+    plan = resolve_acquisition(item, count, counts, recipe_lookup, max_depth=18)
+    if isinstance(plan, AcquisitionError):
+        return ToolResult(
+            False,
+            plan.reason,
+            False,
+            next_suggestion="choose a reachable item/resource or add a recipe/acquisition route",
+            metrics={"item": item, "target_count": count, "error": _acquisition_error_payload(plan)},
+        )
+    if not plan:
+        return ToolResult(
+            True,
+            "already_satisfied",
+            False,
+            metrics={"item": item, "target_count": count, "plan": [], "completed_steps": []},
+        )
+
+    completed_steps: list[dict[str, object]] = []
+    step_payloads = [_acquisition_step_payload(step) for step in plan]
+    for index, step in enumerate(plan):
+        if time.monotonic() - started > context.budget.max_wall_s:
+            return _ensure_result(
+                False,
+                "partial_budget_exhausted",
+                True,
+                item,
+                count,
+                plan=step_payloads,
+                completed_steps=completed_steps,
+                failed_step={"index": index, "step": _acquisition_step_payload(step), "reason": "max_wall_s"},
+                resume_hint="reinvoke_ensure",
+            )
+        result = _execute_acquisition_step(context, step)
+        completed_steps.append({"index": index, "step": _acquisition_step_payload(step), "result": result})
+        if not result.get("success"):
+            return _ensure_result(
+                False,
+                f"ensure_step_failed:{result.get('reason') or 'unknown'}",
+                bool(result.get("canRetry", True)),
+                item,
+                count,
+                plan=step_payloads,
+                completed_steps=completed_steps[:-1],
+                failed_step=completed_steps[-1],
+                resume_hint="reinvoke_ensure",
+            )
+        inventory = _read_count(context, (item,))
+        if not inventory.success:
+            return inventory
+        current = int((inventory.metrics or {}).get("count") or 0)
+        if current >= count:
+            return _ensure_result(
+                True,
+                "ensured",
+                False,
+                item,
+                count,
+                plan=step_payloads,
+                completed_steps=completed_steps,
+                current_count=current,
+                resume_hint="complete",
+            )
+
+    inventory = _read_count(context, (item,))
+    if not inventory.success:
+        return inventory
+    current = int((inventory.metrics or {}).get("count") or 0)
+    return _ensure_result(
+        current >= count,
+        "ensured" if current >= count else "ensure_no_inventory_delta",
+        current < count,
+        item,
+        count,
+        plan=step_payloads,
+        completed_steps=completed_steps,
+        current_count=current,
+        resume_hint="complete" if current >= count else "reinvoke_ensure",
     )
 
 
@@ -1372,8 +1506,111 @@ def _collect_result(
     return ToolResult(success, reason, can_retry, metrics=metrics)
 
 
+def _ensure_target_for(resource: str) -> str:
+    plan = _resource_plan(resource)
+    required_tier = None
+    for block_type in plan.block_types:
+        candidate = required_pickaxe_tier(block_type)
+        if candidate is not None and (required_tier is None or not tier_satisfies(required_tier, candidate)):
+            required_tier = candidate
+    if required_tier is not None:
+        return PICKAXE_BY_TIER[required_tier]
+    return resource
+
+
+def _execute_acquisition_step(context: CompositionContext, step: AcquisitionStep) -> JsonObject:
+    if step.kind == "collect":
+        return _execute_composition_phase(
+            context,
+            "ensure_collect",
+            context.registry.get("collect_resource"),
+            {"item": step.item, "count": step.count},
+        )
+    if step.kind == "craft":
+        return _execute_composition_phase(
+            context,
+            "ensure_craft",
+            context.registry.get("craft_item"),
+            {"item": step.item, "count": step.count},
+        )
+    if step.kind == "smelt":
+        return _execute_composition_phase(
+            context,
+            "ensure_smelt",
+            context.registry.get("smelt_item"),
+            {"input_item": step.detail.get("input_item") or step.item, "count": int(step.detail.get("input_count") or step.count)},
+        )
+    if step.kind == "equip":
+        return _execute_composition_phase(
+            context,
+            "ensure_equip",
+            context.registry.get("equip_item"),
+            {"item": step.item, "target": "mainhand"},
+        )
+    return ToolResult(False, "unknown_acquisition_step", False, metrics={"step": _acquisition_step_payload(step)}).to_payload()
+
+
+def _inventory_counts_from_result(result: ToolResult) -> dict[str, int]:
+    metrics = result.metrics or {}
+    counts = metrics.get("counts")
+    if not isinstance(counts, dict):
+        return {}
+    normalized: dict[str, int] = {}
+    for raw_item, raw_count in counts.items():
+        try:
+            count = int(raw_count or 0)
+        except (TypeError, ValueError):
+            continue
+        item = _normalize_item(str(raw_item))
+        if item and count > 0:
+            normalized[item] = normalized.get(item, 0) + count
+    return normalized
+
+
+def _ensure_result(
+    success: bool,
+    reason: str,
+    can_retry: bool,
+    item: str,
+    target_count: int,
+    *,
+    plan: list[dict[str, object]],
+    completed_steps: list[dict[str, object]],
+    failed_step: dict[str, object] | None = None,
+    current_count: int | None = None,
+    resume_hint: str,
+) -> ToolResult:
+    metrics: dict[str, object] = {
+        "item": item,
+        "target_count": target_count,
+        "plan": plan,
+        "completed_steps": completed_steps,
+        "resume_hint": resume_hint,
+    }
+    if failed_step is not None:
+        metrics["failed_step"] = failed_step
+    if current_count is not None:
+        metrics["current_count"] = current_count
+        metrics["remaining_count"] = max(0, target_count - current_count)
+    return ToolResult(success, reason, can_retry, metrics=metrics)
+
+
+def _acquisition_step_payload(step: AcquisitionStep) -> dict[str, object]:
+    return {"kind": step.kind, "item": step.item, "count": step.count, "detail": dict(step.detail)}
+
+
+def _acquisition_error_payload(error: AcquisitionError) -> dict[str, object]:
+    return {
+        "reason": error.reason,
+        "item": error.item,
+        "count": error.count,
+        "chain": list(error.chain),
+        "detail": dict(error.detail),
+    }
+
+
 def _normalize_item(item: str) -> str:
-    return item.removeprefix("minecraft:")
+    return item.removeprefix("minecraft:").strip().lower().replace(" ", "_")
 
 
 def _next_start(perception) -> object | None:
@@ -1390,7 +1627,10 @@ __all__ = [
     "CompositionContext",
     "ResourcePlan",
     "collect_resource",
+    "ensure_item",
+    "ensure_tool_for",
     "register_collect_resource_tool",
+    "register_ensure_tool_for_tool",
     "register_inventory_tools",
     "resource_plan_for",
 ]

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from minebot.app.phase1_runtime import Phase1RuntimeConfig, _phase1_recovery_handler, build_phase1_registry, tool_manifest
+from minebot.app.phase1_runtime import Phase1RuntimeConfig, _phase1_recovery_handler, _recipe_lookup, build_phase1_agent_runtime, build_phase1_registry, tool_manifest
 from minebot.app.runner import AgentRuntime
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController
@@ -413,6 +413,43 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertTrue(by_name["smelt_item"]["mutating"])
         self.assertEqual(by_name["smelt_item"]["body_scope"], ["inventory", "blocks"])
         self.assertEqual(by_name["smelt_item"]["terminal_truth"], ["inventory", "furnace", "ToolResult"])
+
+    def test_phase1_runtime_registers_ensure_tool_for_shared_pool_tool(self):
+        body = HarnessBody()
+        parts = build_phase1_agent_runtime(
+            body=body,
+            goal_text="collect 3 diamond",
+            model_provider=None,
+            config=Phase1RuntimeConfig(natural_region=Region("test", (0, 0, 0), (16, 128, 16))),
+        )
+
+        self.assertIn("collect_resource", parts.registry.names())
+        self.assertIn("ensure_tool_for", parts.registry.names())
+        manifest = tool_manifest(parts.registry)
+        by_name = {row["name"]: row for row in manifest}
+        self.assertEqual(by_name["ensure_tool_for"]["source"], "agent.composition")
+        self.assertEqual(by_name["ensure_tool_for"]["tool_type"], "resource")
+        self.assertEqual(by_name["ensure_tool_for"]["permission"], "compose_ensure")
+        self.assertFalse(by_name["ensure_tool_for"]["mutating"])
+        self.assertEqual(by_name["ensure_tool_for"]["body_scope"], ["composition"])
+        self.assertEqual(by_name["ensure_tool_for"]["terminal_truth"], ["inventory", "ToolResult"])
+
+    def test_phase1_recipe_lookup_adapts_runtime_recipe_data_for_acquisition(self):
+        body = CraftToolBody(
+            inventory_pages=[],
+            recipe_data={
+                "minecraft:stone_pickaxe": '[[[[stone_pickaxe, 1, {count:1,id:"minecraft:stone_pickaxe"}]], [[cobblestone], [cobblestone], [cobblestone], [stick], [stick]], [shaped, 3, 3]]]'
+            },
+        )
+        lookup = _recipe_lookup(body)
+
+        variants = lookup("minecraft:stone_pickaxe")
+
+        self.assertIsNotNone(variants)
+        self.assertEqual(variants[0].output_item, "stone_pickaxe")
+        self.assertEqual(variants[0].output_count, 1)
+        self.assertTrue(variants[0].requires_table)
+        self.assertEqual(variants[0].ingredient_groups[0], ("cobblestone",))
 
     def test_phase1_craft_item_reports_missing_materials_honestly(self):
         body = CraftToolBody(

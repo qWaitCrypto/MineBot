@@ -17,11 +17,14 @@ from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
 from minebot.body import BlockWork, FurnaceTransactions, InventoryTransactions, LifecycleTransactions, NavigationRunConfig, NavigationTransactions
 from minebot.body.combat import CombatTransactions, find_hostiles
 from minebot.body.furnace import DEFAULT_SMELT_SECONDS_PER_ITEM, resolve_smelt_output, select_fuel
+from minebot.body.inventory import _parse_recipe_variants
 from minebot.body.world_read import read_block_facts
+from minebot.brain.acquisition import RecipeVariant
 from minebot.brain.composition import (
     CompositionBudget,
     CompositionContext,
     register_collect_resource_tool,
+    register_ensure_tool_for_tool,
     register_inventory_tools,
 )
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
@@ -80,6 +83,7 @@ def build_phase1_agent_runtime(
         trace=lambda event, payload: parts.runtime.trace.emit(event, **payload),
     )
     register_collect_resource_tool(registry, context)
+    register_ensure_tool_for_tool(registry, context, _recipe_lookup(body))
     parts.runtime.registry = registry
     parts.runtime.agent = parts.runtime.agent.clone(tools=[sdk_tool_for(registry.get(name)) for name in registry.names()])
     parts.runtime.trace.emit("tool_manifest", tools=tool_manifest(registry))
@@ -435,6 +439,32 @@ def build_phase1_registry(
     registry.register(_equip_tool(inventory_txn))
     registry.register(_smelt_tool(body, furnace_txn))
     return registry
+
+
+def _recipe_lookup(body: Body):
+    def lookup(item: str) -> list[RecipeVariant] | None:
+        perception = body.perceive("recipeData", {"item": item})
+        if not perception.ok:
+            return None
+        parsed = _parse_recipe_variants(item, perception)
+        if isinstance(parsed, ToolResult):
+            return None
+        return [
+            RecipeVariant(
+                output_item=_phase1_recipe_item(variant.output_item),
+                output_count=variant.output_count,
+                ingredient_groups=tuple(tuple(_phase1_recipe_item(item) for item in group) for group in variant.ingredient_groups if group),
+                requires_table=variant.requires_table,
+                recipe_kind=variant.recipe_kind,
+            )
+            for variant in parsed
+        ]
+
+    return lookup
+
+
+def _phase1_recipe_item(item: object) -> str:
+    return str(item).removeprefix("minecraft:").strip().lower()
 
 
 def tool_manifest(registry: ToolRegistry) -> list[dict[str, object]]:
