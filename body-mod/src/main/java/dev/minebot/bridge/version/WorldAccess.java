@@ -10,5 +10,7 @@ public interface WorldAccess {
 
     SectionSnapshot sectionSnapshot(ServerLevel level, String subId, int sectionX, int sectionY, int sectionZ);
 
+    boolean hasChunk(ServerLevel level, int sectionX, int sectionZ);
+
     String dimensionId(ServerLevel level);
 }

@@ -59,6 +59,11 @@ public final class Mojmap2612WorldAccess implements WorldAccess {
     }
 
     @Override
+    public boolean hasChunk(ServerLevel level, int sectionX, int sectionZ) {
+        return level.hasChunk(sectionX, sectionZ);
+    }
+
+    @Override
     public String dimensionId(ServerLevel level) {
         return level.dimension().identifier().toString();
     }
