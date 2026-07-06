@@ -1,7 +1,19 @@
-# MineBot Body Mod Status
+# MineBot Bridge Mod Status
 
-This directory currently contains an early Java/Fabric WebSocket proof of
-concept. It is **not** the canonical MineBot Body runtime.
+This directory is becoming the thin Java/Fabric bridge for MineBot advanced
+features. It is **not** the canonical MineBot Body runtime: the main action path
+remains Python -> RCON -> Scarpet -> Carpet until an explicit Body IPC transport
+upgrade is made.
+
+Current entrypoint:
+
+- `dev.minebot.bridge.MineBotBridgeMod`
+
+First formal bridge channel:
+
+- `dev.minebot.worldstream` — Stage-0 read-only `world-stream` data plane for
+  camera/vision: `HELLO`, `SUBSCRIBE{center:entity}`, followed-entity
+  `TRANSFORM`, and one center `SECTION_KEYFRAME`.
 
 Canonical direction:
 
@@ -12,21 +24,25 @@ Canonical direction:
 - Java/Fabric code is allowed only as a thin bridge or no-downgrade補强 layer
   when Scarpet/RCON cannot reliably cover a required capability.
 
-The existing `MineBotBodyMod.java` creates its own Fabric API fake player and a
-WebSocket protocol. That was useful as a probe, but it does not match the
-current canonical stack. Do not extend it into a second body implementation.
+The old `dev.minebot.body.MineBotBodyMod` creates its own Fabric API fake player
+and exposes control-style WebSocket messages. That was useful as a probe, but
+it does not match the current canonical stack and is no longer the Fabric
+entrypoint. Do not extend it into a second body implementation.
 
 Acceptable future use:
 
-- expose the same logical envelopes as `minebot/game/protocol.py`;
-- provide high-throughput transport for the existing Scarpet Body app;
-- expose fields/events Scarpet cannot read;
-- support GUI/trade/container mechanisms only when no Scarpet/Carpet path is
-  reliable.
+- `world-stream`: expose high-throughput read-only world/entity data for camera
+  and vision;
+- `body-ipc`: optionally expose the same logical envelopes as
+  `minebot/game/protocol.py` if RCON is deliberately replaced later;
+- `server-facts`: expose fields/events Scarpet cannot read cleanly;
+- tightly scoped no-downgrade补强 only when no Scarpet/Carpet path is reliable.
 
 Non-goals:
 
 - no independent body state model;
 - no second movement/combat controller stack;
+- no world-stream writes (`setBlock`, teleport, fake-player creation, entity
+  spawn/discard, inventory mutation, command dispatch);
 - no Brain/Skill schema changes;
 - no JS or mineflayer runtime.
