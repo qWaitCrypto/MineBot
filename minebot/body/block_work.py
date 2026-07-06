@@ -721,6 +721,7 @@ class BlockWork:
         context: BreakContext | str = BreakContext.COLLECT,
         dry: bool = False,
         expected_drops: tuple[str, ...] | list[str] | None = None,
+        target_block_types: tuple[str, ...] | list[str] | None = None,
         drop_map: dict[str, tuple[str, ...]] | None = None,
         settle_s: float = 0.2,
         pickup_timeout_s: float = 1.5,
@@ -737,8 +738,22 @@ class BlockWork:
         if failed is not None:
             return failed
         block_type = _normalize_item(str(target.data.get("type") or "unknown"))
+        allowed_targets = tuple(_normalize_item(item) for item in (target_block_types or ()))
+        if allowed_targets and block_type not in allowed_targets:
+            return ToolResult(
+                success=False,
+                reason="break_denied:collect_target_required",
+                can_retry=False,
+                next_suggestion="retry with a candidate whose observed block type matches the collect plan",
+                metrics={
+                    "target": list(pos),
+                    "block_type": block_type,
+                    "target_block_types": list(allowed_targets),
+                },
+            )
+        break_context = BreakContext.COLLECT_APPROACH if allowed_targets else context
 
-        decision = self.governance.can_break(pos, block_type, context)
+        decision = self.governance.can_break(pos, block_type, break_context)
         if not decision.allowed:
             return _denied_result("break_denied", pos, block_type, decision)
 
@@ -756,9 +771,9 @@ class BlockWork:
             return _with_metric(before, "collect", {"target": list(pos), "block_type": block_type, "phase": "before"})
 
         if dry:
-            mined = self.mine_block_dry(pos, context=context, settle_s=settle_s, timeout_s=timeout_s)
+            mined = self.mine_block_dry(pos, context=break_context, settle_s=settle_s, timeout_s=timeout_s)
         else:
-            mined = self.mine_block(pos, context=context, timeout_s=timeout_s)
+            mined = self.mine_block(pos, context=break_context, timeout_s=timeout_s)
         if not mined.success:
             tree_retarget_result, tree_retarget_metrics = self._try_tree_domain_collect_retarget(
                 pos=pos,
@@ -776,6 +791,7 @@ class BlockWork:
             collect_metrics = {
                 "target": list(pos),
                 "block_type": block_type,
+                "target_block_types": list(allowed_targets),
                 "expected_drops": list(expected),
                 "before": before,
                 "tool_gate": tool_gate_metrics,
@@ -813,6 +829,7 @@ class BlockWork:
         metrics = {
             "target": list(pos),
             "block_type": block_type,
+            "target_block_types": list(allowed_targets),
             "expected_drops": list(expected),
             "before": before,
             "after": after,

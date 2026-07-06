@@ -1038,6 +1038,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result["success"], result)
         self.assertEqual(search_calls[0]["block_types"], ["iron_ore", "deepslate_iron_ore"])
         self.assertEqual(mine_calls[0]["expected_drops"], ["raw_iron"])
+        self.assertEqual(mine_calls[0]["target_block_types"], ["iron_ore", "deepslate_iron_ore"])
         self.assertEqual(result["metrics"]["requested_item"], "iron")
         self.assertEqual(result["metrics"]["item"], "raw_iron")
 

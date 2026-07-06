@@ -964,6 +964,7 @@ def _mine_collect_tool(work: BlockWork) -> RegisteredTool:
             "properties": {
                 "pos": {"type": "array", "items": {"type": "integer"}, "minItems": 3, "maxItems": 3},
                 "expected_drops": {"type": "array", "items": {"type": "string"}},
+                "target_block_types": {"type": "array", "items": {"type": "string"}},
                 "dry": {"type": "boolean"},
             },
             "required": ["pos"],
@@ -973,6 +974,7 @@ def _mine_collect_tool(work: BlockWork) -> RegisteredTool:
             tuple(int(v) for v in params["pos"]),
             context=BreakContext.COLLECT,
             expected_drops=tuple(str(item) for item in params.get("expected_drops", [])),
+            target_block_types=tuple(str(item) for item in params.get("target_block_types", [])),
             dry=bool(params.get("dry", False)),
             settle_s=0.1,
             pickup_timeout_s=2.0,

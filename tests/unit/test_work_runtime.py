@@ -1862,6 +1862,61 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.metrics["expected_drops"], ["raw_iron"])
         self.assertEqual(result.metrics["deltas"], {"raw_iron": 1})
 
+    def test_mine_block_collect_allows_explicit_target_block_to_drop_different_item(self):
+        blocks = {
+            (0, 64, 0): ("stone", "SOLID"),
+        }
+        body = FakeBody(
+            blocks=blocks,
+            inventory_pages=[
+                inv_page_with_pickaxe([slot(9, "minecraft:cobblestone", 0)], "minecraft:wooden_pickaxe"),
+                inv_page_with_pickaxe([slot(9, "minecraft:cobblestone", 0)], "minecraft:wooden_pickaxe"),
+                inv_page_with_pickaxe([slot(9, "minecraft:cobblestone", 1)], "minecraft:wooden_pickaxe"),
+            ],
+        )
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy)
+
+        result = runtime.mine_block_collect(
+            (0, 64, 0),
+            expected_drops=("minecraft:cobblestone",),
+            target_block_types=("minecraft:stone", "minecraft:cobblestone"),
+            timeout_s=1.0,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual([action.name for action in body.actions], ["selectItem", "mineBlock"])
+        self.assertEqual(body.actions[0].params["item"], "wooden_pickaxe")
+        self.assertEqual(result.metrics["block_type"], "stone")
+        self.assertEqual(result.metrics["target_block_types"], ["stone", "cobblestone"])
+        self.assertEqual(result.metrics["expected_drops"], ["cobblestone"])
+        self.assertEqual(result.metrics["deltas"], {"cobblestone": 1})
+
+    def test_mine_block_collect_refuses_explicit_target_block_mismatch_before_breaking(self):
+        blocks = {
+            (0, 64, 0): ("stone", "SOLID"),
+        }
+        body = FakeBody(
+            blocks=blocks,
+            inventory_pages=[inv_page_with_pickaxe([slot(9, "minecraft:diamond", 0)])],
+        )
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy)
+
+        result = runtime.mine_block_collect(
+            (0, 64, 0),
+            expected_drops=("minecraft:diamond",),
+            target_block_types=("minecraft:diamond_ore",),
+            timeout_s=1.0,
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "break_denied:collect_target_required")
+        self.assertEqual(body.actions, [])
+        self.assertEqual(blocks[(0, 64, 0)], ("stone", "SOLID"))
+        self.assertEqual(result.metrics["block_type"], "stone")
+        self.assertEqual(result.metrics["target_block_types"], ["diamond_ore"])
+
     def test_mine_block_collect_can_use_dry_mining_before_inventory_delta_check(self):
         blocks = {
             (0, 64, 0): ("diamond_ore", "SOLID"),
