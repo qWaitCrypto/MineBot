@@ -365,6 +365,37 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
 
         if not mined.get("success"):
             reason = str(mined.get("reason") or "mine_failed")
+            if reason == "missing_required_tool":
+                skipped.append({"pos": target, "reason": reason, "skip": False})
+                last_failure = {"phase": "mine", "target": target, "reason": reason, "result": mined}
+                _emit_collect_summary(
+                    context,
+                    reason=reason,
+                    success=False,
+                    plan=plan,
+                    target_count=count,
+                    before_count=before_count,
+                    current_count=current_count,
+                    attempts=attempts,
+                    skipped=skipped,
+                    last_failure=last_failure,
+                )
+                return _collect_result(
+                    False,
+                    reason,
+                    False,
+                    plan,
+                    count,
+                    before_count,
+                    current_count,
+                    attempts,
+                    skipped,
+                    "missing_required_tool",
+                    last_failure=last_failure,
+                    budget=budget,
+                    requested_count=requested_count,
+                    goal_target_count=goal_target_count,
+                )
             skip = _is_collect_candidate_rejection(reason, mined)
             skipped.append({"pos": target, "reason": reason, "skip": skip})
             last_failure = {"phase": "mine", "target": target, "reason": mined.get("reason"), "result": mined}
@@ -861,7 +892,20 @@ def _mine_attempt_diagnostics(result: dict[str, Any]) -> dict[str, object]:
     if not isinstance(metrics, dict):
         return {}
     diagnostics: dict[str, object] = {}
-    for key in ("target", "stand_block", "move_target", "state_after", "reach_distance", "error", "accepted", "data"):
+    for key in (
+        "target",
+        "block_type",
+        "required_tier",
+        "best_owned",
+        "selected_item",
+        "stand_block",
+        "move_target",
+        "state_after",
+        "reach_distance",
+        "error",
+        "accepted",
+        "data",
+    ):
         if key in metrics:
             diagnostics[key] = metrics[key]
     clearance = metrics.get("clearance")

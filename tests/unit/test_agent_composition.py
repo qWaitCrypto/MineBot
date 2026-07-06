@@ -652,6 +652,55 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.metrics["skipped"][0]["reason"], "break_denied:protected_region")
         self.assertTrue(result.metrics["skipped"][0]["skip"])
 
+    def test_collect_resource_surfaces_missing_required_tool_without_trying_more_candidates(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        search, _search_calls = candidate_search_tool([[1, -55, 0], [2, -55, 0]])
+        registry.register(search)
+
+        mine_calls = []
+
+        def mine(_params):
+            mine_calls.append(dict(_params))
+            return ToolResult(
+                False,
+                "missing_required_tool",
+                False,
+                next_suggestion="craft and equip an iron_pickaxe or better first",
+                metrics={
+                    "block_type": "diamond_ore",
+                    "required_tier": "iron",
+                    "best_owned": {"item": "stone_pickaxe", "tier": "stone"},
+                },
+            )
+
+        registry.register(
+            RegisteredTool(
+                "mine_block_collect",
+                "mine",
+                {"type": "object"},
+                mine,
+                ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+            )
+        )
+        ctx, trace_events = composition_context(body, registry, max_candidates=2)
+
+        result = collect_resource({"item": "diamond", "count": 1}, ctx)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "missing_required_tool")
+        self.assertFalse(result.can_retry)
+        self.assertEqual(len(mine_calls), 1)
+        self.assertEqual(result.metrics["resume_hint"], "missing_required_tool")
+        self.assertEqual(result.metrics["last_failure"]["result"]["metrics"]["required_tier"], "iron")
+        self.assertEqual(result.metrics["skipped"], [{"pos": [1, -55, 0], "reason": "missing_required_tool", "skip": False}])
+        summaries = [event for event in trace_events if event["event"] == "composition_summary"]
+        self.assertEqual(summaries[-1]["reason"], "missing_required_tool")
+        mine_events = [event for event in trace_events if event["event"] == "composition_mine_attempt"]
+        self.assertEqual(mine_events[-1]["diagnostics"]["required_tier"], "iron")
+        self.assertEqual(mine_events[-1]["diagnostics"]["best_owned"], {"item": "stone_pickaxe", "tier": "stone"})
+
     def test_weld_treats_candidate_skip_as_neutral_not_failure(self):
         # A mutating tool returning a candidate-skip reason must NOT accrue the
         # failure-storm counter, even repeated past the limit.
