@@ -1107,11 +1107,12 @@ perceive_container(name, params) -> (
 
 perceive_recipe_data(name, params) -> (
   item = if(params:'item' == null, '', params:'item');
-  recipe = recipe_data(item);
+  recipe_type = params:'type';
+  recipe = if(recipe_type == null, recipe_data(item), recipe_data(item, recipe_type));
   if(recipe == null,
     perception_json(name, 'recipeData', false, true, '{}', '[]', null, 'recipe_not_found')
   ,
-    data = str('{"item":%s,"recipe_raw":%s}', json_string(item), json_string(str('%s', recipe)));
+    data = str('{"item":%s,"type":%s,"recipe_raw":%s}', json_string(item), if(recipe_type == null, 'null', json_string(recipe_type)), json_string(str('%s', l(recipe))));
     perception_json(name, 'recipeData', true, true, data, '[]', null, null)
   )
 );

@@ -14,8 +14,9 @@ from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.runner import AgentRuntime, RecoveryOutcome, RuntimeTrace
 from minebot.app.runner import sdk_tool_for
 from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
-from minebot.body import BlockWork, InventoryTransactions, LifecycleTransactions, NavigationRunConfig, NavigationTransactions
+from minebot.body import BlockWork, FurnaceTransactions, InventoryTransactions, LifecycleTransactions, NavigationRunConfig, NavigationTransactions
 from minebot.body.combat import CombatTransactions, find_hostiles
+from minebot.body.furnace import DEFAULT_SMELT_SECONDS_PER_ITEM, resolve_smelt_output, select_fuel
 from minebot.body.world_read import read_block_facts
 from minebot.brain.composition import (
     CompositionBudget,
@@ -418,6 +419,7 @@ def build_phase1_registry(
     navigator = NavigationTransactions.server_side(body, policy, progress=progress)
     work = BlockWork(body, policy, navigator=navigator)
     inventory_txn = InventoryTransactions(body, navigator=navigator, governance=policy, work=work)
+    furnace_txn = FurnaceTransactions(body, navigator=navigator, governance=policy, work=work)
     registry = ToolRegistry()
     registry.register(_read_state_tool(body))
     register_inventory_tools(registry, body)
@@ -431,6 +433,7 @@ def build_phase1_registry(
     registry.register(_mine_collect_tool(work))
     registry.register(_craft_tool(inventory_txn))
     registry.register(_equip_tool(inventory_txn))
+    registry.register(_smelt_tool(body, furnace_txn))
     return registry
 
 
@@ -727,6 +730,164 @@ def _equip_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:
             timeout_s=10.0,
         ),
     )
+
+
+def _smelt_tool(body: Body, furnace_txn: FurnaceTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "smelt_item",
+        "Smelt items already in inventory using a nearby furnace, or a carried furnace placed temporarily and reclaimed. It auto-selects fuel from inventory unless fuel_item is provided. It fails honestly if the input has no smelting recipe, no fuel is owned, or no furnace is available or carried; it does not gather materials.",
+        {
+            "type": "object",
+            "properties": {
+                "input_item": {
+                    "type": "string",
+                    "description": "Input item to smelt, e.g. 'raw_iron'.",
+                },
+                "count": {"type": "integer", "minimum": 1, "maximum": 16},
+                "fuel_item": {"type": "string"},
+            },
+            "required": ["input_item", "count"],
+            "additionalProperties": False,
+        },
+        lambda params: _run_smelt_tool(body, furnace_txn, params),
+        ToolSidecar(
+            "smelt_item",
+            mutating=True,
+            source="body.furnace",
+            tool_type="inventory",
+            permission="smelt",
+            body_scope=("inventory", "blocks"),
+            terminal_truth=("inventory", "furnace", "ToolResult"),
+            timeout_s=190.0,
+        ),
+    )
+
+
+def _run_smelt_tool(body: Body, furnace_txn: FurnaceTransactions, params: dict[str, object]) -> ToolResult:
+    input_item = str(params["input_item"])
+    count = int(params.get("count") or 1)
+    if count <= 0 or count > 16:
+        return ToolResult(
+            success=False,
+            reason="invalid_smelt_count",
+            can_retry=False,
+            metrics={"input_item": input_item, "count": count},
+        )
+
+    output = resolve_smelt_output(input_item, lambda item: body.perceive("recipeData", {"item": item, "type": "smelting"}))
+    if output is None:
+        return ToolResult(
+            success=False,
+            reason="smelt_recipe_not_found",
+            can_retry=False,
+            next_suggestion="choose an input item with a furnace smelting recipe",
+            metrics={"input_item": input_item, "count": count},
+        )
+    output_item, output_count_per_input = output
+    output_count = output_count_per_input * count
+
+    counts_result = _tool_inventory_counts(body)
+    if isinstance(counts_result, ToolResult):
+        return counts_result
+    counts = counts_result
+
+    fuel_item = str(params.get("fuel_item") or "")
+    fuel_count: int | None = None
+    if fuel_item:
+        normalized_fuel = fuel_item.removeprefix("minecraft:")
+        if counts.get(normalized_fuel, 0) <= 0:
+            return ToolResult(
+                success=False,
+                reason="fuel_not_found",
+                can_retry=False,
+                next_suggestion="choose a fuel item currently present in inventory",
+                metrics={"fuel_item": fuel_item, "counts": counts},
+            )
+    else:
+        seconds_needed = max(count, output_count) * DEFAULT_SMELT_SECONDS_PER_ITEM
+        selected = select_fuel(counts, seconds_needed)
+        if selected is None:
+            return ToolResult(
+                success=False,
+                reason="fuel_not_found",
+                can_retry=False,
+                next_suggestion="collect or craft a valid furnace fuel before smelting",
+                metrics={
+                    "input_item": input_item,
+                    "count": count,
+                    "seconds_needed": seconds_needed,
+                    "usable_fuels": {
+                        item: amount
+                        for item, amount in counts.items()
+                        if select_fuel({item: amount}, seconds_needed) is not None
+                    },
+                },
+            )
+        fuel_item, fuel_count = selected
+
+    smelt_timeout_s = count * DEFAULT_SMELT_SECONDS_PER_ITEM + 10.0
+    result = furnace_txn.smelt_nearest_furnace(
+        input_item=input_item,
+        input_count=count,
+        fuel_item=fuel_item,
+        fuel_count=fuel_count,
+        output_item=output_item,
+        output_count=output_count,
+        smelt_timeout_s=smelt_timeout_s,
+        transfer_timeout_s=6.0,
+        approach_timeout_s=15.0,
+    )
+    if result.success or result.reason != "furnace_not_found" or counts.get("furnace", 0) <= 0:
+        return result
+    temporary = furnace_txn.smelt_with_nearby_temporary_furnace(
+        input_item=input_item,
+        input_count=count,
+        fuel_item=fuel_item,
+        fuel_count=fuel_count,
+        output_item=output_item,
+        output_count=output_count,
+        smelt_timeout_s=smelt_timeout_s,
+        transfer_timeout_s=6.0,
+        place_timeout_s=8.0,
+        reclaim_timeout_s=8.0,
+    )
+    return temporary
+
+
+def _tool_inventory_counts(body: Body, *, page_size: int = 12) -> dict[str, int] | ToolResult:
+    counts: dict[str, int] = {}
+    start: int | None = 0
+    saw_page = False
+    while start is not None:
+        perception = body.perceive("inventory", {"start": start, "limit": page_size})
+        saw_page = True
+        if not perception.ok:
+            return ToolResult(
+                success=False,
+                reason="perception_failed",
+                can_retry=True,
+                metrics={"scope": "inventory", "error": perception.error, "uncertainty": list(perception.uncertainty)},
+            )
+        for payload in perception.data.get("slots") or []:
+            if not isinstance(payload, dict):
+                continue
+            slot = InventorySlot.from_payload(payload)
+            if slot.empty or not slot.item:
+                continue
+            item = str(slot.item).removeprefix("minecraft:")
+            counts[item] = counts.get(item, 0) + slot.count
+        next_start = _next_start(perception)
+        start = int(next_start) if next_start is not None else None
+        if start is None and not perception.complete:
+            return ToolResult(
+                success=False,
+                reason="perception_failed",
+                can_retry=True,
+                metrics={"scope": "inventory", "error": perception.error, "uncertainty": list(perception.uncertainty)},
+            )
+    if not saw_page:
+        return ToolResult(False, "perception_failed", True, metrics={"scope": "inventory", "error": "no pages read"})
+    return counts
 
 
 def _search_tool(work: BlockWork) -> RegisteredTool:

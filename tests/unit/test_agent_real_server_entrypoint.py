@@ -347,6 +347,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertIn("mine_block_collect", registry.names())
         self.assertIn("craft_item", registry.names())
         self.assertIn("equip_item", registry.names())
+        self.assertIn("smelt_item", registry.names())
 
         manifest = tool_manifest(registry)
         by_name = {row["name"]: row for row in manifest}
@@ -369,6 +370,12 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertTrue(by_name["equip_item"]["mutating"])
         self.assertEqual(by_name["equip_item"]["body_scope"], ["inventory"])
         self.assertEqual(by_name["equip_item"]["terminal_truth"], ["inventory", "ToolResult"])
+        self.assertEqual(by_name["smelt_item"]["source"], "body.furnace")
+        self.assertEqual(by_name["smelt_item"]["tool_type"], "inventory")
+        self.assertEqual(by_name["smelt_item"]["permission"], "smelt")
+        self.assertTrue(by_name["smelt_item"]["mutating"])
+        self.assertEqual(by_name["smelt_item"]["body_scope"], ["inventory", "blocks"])
+        self.assertEqual(by_name["smelt_item"]["terminal_truth"], ["inventory", "furnace", "ToolResult"])
 
     def test_phase1_craft_item_reports_missing_materials_honestly(self):
         body = CraftToolBody(
@@ -441,6 +448,37 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(result.reason, "completed")
         self.assertEqual([action.name for action in body.actions], ["selectItem"])
         self.assertEqual(body.actions[0].params["item"], "minecraft:iron_pickaxe")
+
+    def test_phase1_smelt_item_reports_missing_recipe_honestly(self):
+        body = CraftToolBody(
+            inventory_pages=[_inventory_page([_slot(0, "minecraft:diamond", 1), _slot(1, "minecraft:coal", 1)])],
+            recipe_data={},
+        )
+        registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=Region("test", (0, 0, 0), (16, 128, 16))))
+
+        result = registry.get("smelt_item").callable({"input_item": "minecraft:diamond", "count": 1})
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "smelt_recipe_not_found")
+        self.assertEqual(body.actions, [])
+
+    def test_phase1_smelt_item_reports_missing_fuel_honestly(self):
+        body = CraftToolBody(
+            inventory_pages=[
+                _inventory_page([_slot(0, "minecraft:raw_iron", 1)], complete=False, next_start=12),
+                _inventory_page([_slot(12)], start=12),
+            ],
+            recipe_data={
+                "iron_ingot": '[[[[iron_ingot, 1, {count:1,id:"minecraft:iron_ingot"}]], [[raw_iron]], [smelting, 200, 0.699999988079]]]'
+            },
+        )
+        registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=Region("test", (0, 0, 0), (16, 128, 16))))
+
+        result = registry.get("smelt_item").callable({"input_item": "minecraft:raw_iron", "count": 1})
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "fuel_not_found")
+        self.assertEqual(body.actions, [])
 
     def test_phase1_registry_uses_server_side_navigation_factory(self):
         from minebot.body.navigation import NavigationTransactions
@@ -1028,14 +1066,14 @@ class CraftToolBody(HarnessBody):
             return self.inventory_pages.pop(0)
         if scope == "recipeData":
             item = str(params.get("item"))
-            recipe_raw = self.recipe_data.get(item)
+            recipe_raw = self.recipe_data.get(item) or self.recipe_data.get(item.removeprefix("minecraft:"))
             return PerceptionResult(
                 self.bot_name,
                 scope,
                 "perception",
                 recipe_raw is not None,
                 True,
-                {"item": item, "recipe_raw": recipe_raw} if recipe_raw is not None else {},
+                {"item": item, "type": params.get("type"), "recipe_raw": recipe_raw} if recipe_raw is not None else {},
                 error=None if recipe_raw is not None else "recipe_not_found",
             )
         return super().perceive(scope, params)
@@ -1104,14 +1142,16 @@ class CraftToolBody(HarnessBody):
         return super().await_action_terminal(action_id, timeout_s=timeout_s)
 
 
-def _inventory_page(slots):
+def _inventory_page(slots, *, complete=True, next_start=None, start=0):
     return PerceptionResult(
         "Bot",
         "inventory",
         "perception",
         True,
-        True,
-        {"slots": slots},
+        complete,
+        {"slots": slots, "nextStart": next_start, "start": start},
+        uncertainty=[] if complete else [{"reason": "page_limit"}],
+        next=None if complete else str(next_start),
     )
 
 

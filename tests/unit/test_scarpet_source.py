@@ -462,6 +462,17 @@ class ScarpetSourceTests(unittest.TestCase):
         ):
             self.assertIn(expected, source)
 
+    def test_recipe_data_perception_supports_optional_recipe_type(self):
+        source = MINEBOT_SC.read_text()
+
+        for expected in (
+            "recipe_type = params:'type'",
+            "recipe_data(item), recipe_data(item, recipe_type)",
+            "str('%s', l(recipe))",
+            '"type":%s',
+        ):
+            self.assertIn(expected, source)
+
     def test_use_item_controller_uses_physical_use_and_reports_inventory_delta_facts(self):
         source = MINEBOT_SC.read_text()
 

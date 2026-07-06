@@ -95,6 +95,7 @@ async def run_probe(body: ScarpetBody) -> dict[str, object]:
         "collect_resource",
         "craft_item",
         "equip_item",
+        "smelt_item",
     }
     missing = sorted(required - set(tools))
     if missing:
@@ -171,6 +172,31 @@ async def run_probe(body: ScarpetBody) -> dict[str, object]:
             f"equip_item missing-material inverse changed inventory: before={before_missing_equip} after={after_missing_equip}"
         )
 
+    _clear_inventory(body)
+    _set_inventory_slot(body, 0, "minecraft:furnace", 1)
+    _set_inventory_slot(body, 1, "minecraft:raw_iron", 3)
+    _set_inventory_slot(body, 2, "minecraft:oak_planks", 2)
+    _set_inventory_slot(body, 3, None)
+    before_smelt = _inventory_counts(body)
+    smelt_result = await invoke(tools["smelt_item"], context, {"input_item": "minecraft:raw_iron", "count": 3})
+    after_smelt = _inventory_counts(body)
+    if not smelt_result.get("success") or smelt_result.get("reason") != "completed":
+        raise AssertionError(f"smelt_item failed: {smelt_result} before={before_smelt} after={after_smelt}")
+    if int(after_smelt.get("iron_ingot", 0)) - int(before_smelt.get("iron_ingot", 0)) != 3:
+        raise AssertionError(f"smelt_item did not produce three iron ingots: before={before_smelt} after={after_smelt}")
+    if int(after_smelt.get("furnace", 0)) != int(before_smelt.get("furnace", 0)):
+        raise AssertionError(f"smelt_item did not reclaim carried furnace: before={before_smelt} after={after_smelt}")
+
+    _clear_inventory(body)
+    _set_inventory_slot(body, 0, "minecraft:raw_iron", 1)
+    before_missing_fuel = _inventory_counts(body)
+    missing_fuel = await invoke(tools["smelt_item"], context, {"input_item": "minecraft:raw_iron", "count": 1})
+    after_missing_fuel = _inventory_counts(body)
+    if missing_fuel.get("success") is not False or missing_fuel.get("reason") != "fuel_not_found":
+        raise AssertionError(f"smelt_item missing-fuel inverse returned wrong result: {missing_fuel}")
+    if after_missing_fuel != before_missing_fuel:
+        raise AssertionError(f"smelt_item missing-fuel inverse changed inventory: before={before_missing_fuel} after={after_missing_fuel}")
+
     trace = parts.runtime.trace.snapshot()
     manifest = next((event for event in trace if event.get("event") == "tool_manifest"), None)
     if manifest is None:
@@ -204,6 +230,11 @@ async def run_probe(body: ScarpetBody) -> dict[str, object]:
         "missing_craft_reason": missing_result.get("reason"),
         "equip_reason": equip_result.get("reason"),
         "missing_equip_reason": missing_equip.get("reason"),
+        "smelt_delta": {
+            item: int(after_smelt.get(item, 0)) - int(before_smelt.get(item, 0))
+            for item in sorted(set(before_smelt) | set(after_smelt))
+        },
+        "missing_smelt_fuel_reason": missing_fuel.get("reason"),
         "events": [event.get("event") for event in trace],
     }
 
