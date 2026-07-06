@@ -54,9 +54,17 @@ class CollectTarget:
 
 
 @dataclass(frozen=True)
+class GoalTarget:
+    kind: str
+    item: str
+    count: int
+    inventory_items: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class TerminalTruth:
     goal: str
-    target: CollectTarget | None
+    target: GoalTarget | CollectTarget | None
     inventory_count: int | None
     satisfied: bool
     status: str
@@ -67,6 +75,7 @@ class TerminalTruth:
         target_payload: dict[str, object] | None = None
         if self.target is not None:
             target_payload = {
+                "kind": getattr(self.target, "kind", "collect"),
                 "item": self.target.item,
                 "count": self.target.count,
                 "inventory_items": list(self.target.inventory_items),
@@ -424,7 +433,7 @@ def _command_tail(text: str, command: str) -> str:
 
 
 def evaluate_terminal_truth(body: Body, goal: str, final: SessionStep) -> TerminalTruth:
-    target = parse_collect_target(goal)
+    target = parse_goal_target(goal)
     count: int | None = None
     satisfied = False
     if target is not None:
@@ -464,7 +473,7 @@ def safe_evaluate_terminal_truth(
             )
         return TerminalTruth(
             goal=goal,
-            target=parse_collect_target(goal),
+            target=parse_goal_target(goal),
             inventory_count=None,
             satisfied=False,
             status=final.status,
@@ -498,9 +507,50 @@ def parse_collect_target(goal: str) -> CollectTarget | None:
     return None
 
 
+def parse_goal_target(goal: str) -> GoalTarget | None:
+    collect = parse_collect_target(goal)
+    if collect is not None:
+        return GoalTarget(kind="collect", item=collect.item, count=collect.count, inventory_items=collect.inventory_items)
+
+    parsed = _parse_acquire_goal(goal)
+    if parsed is None:
+        return None
+    item, count = parsed
+    return GoalTarget(kind="acquire", item=item, count=count, inventory_items=(item,))
+
+
 def _collect_target(item: str, count: int) -> CollectTarget:
     plan = resource_plan_for(item)
     return CollectTarget(item=plan.requested_item, count=count, inventory_items=plan.inventory_items)
+
+
+def _parse_acquire_goal(goal: str) -> tuple[str, int] | None:
+    text = goal.strip().lower().replace("minecraft:", "")
+    match = re.search(r"\b(?:craft|make|build)\s+(.+)$", text)
+    if match:
+        return _parse_acquire_tail(match.group(1))
+    match = re.search(r"\bget\s+(?:an?\s+)?([a-z_]+)\b", text)
+    if match:
+        return (_normalize_goal_item(match.group(1)), 1)
+    return None
+
+
+def _parse_acquire_tail(tail: str) -> tuple[str, int] | None:
+    parts = tail.strip().split()
+    if not parts:
+        return None
+    count = 1
+    if parts[0].isdigit():
+        count = int(parts.pop(0))
+    elif parts[0] in {"a", "an"}:
+        parts.pop(0)
+    if not parts:
+        return None
+    return (_normalize_goal_item(" ".join(parts)), count)
+
+
+def _normalize_goal_item(item: str) -> str:
+    return re.sub(r"\s+", "_", item.strip().replace("-", "_"))
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -20,6 +20,7 @@ from minebot.app.real_server_session import (
     evaluate_terminal_truth,
     main,
     parse_collect_target,
+    parse_goal_target,
     parse_session_command,
     real_server_config_from_env,
 )
@@ -204,6 +205,21 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertIn("spruce_log", target.inventory_items)
         self.assertIn("birch_log", target.inventory_items)
 
+    def test_parse_goal_target_handles_acquire_forms(self):
+        target = parse_goal_target("craft an iron pickaxe")
+
+        self.assertIsNotNone(target)
+        self.assertEqual(target.kind, "acquire")
+        self.assertEqual(target.item, "iron_pickaxe")
+        self.assertEqual(target.count, 1)
+        self.assertEqual(target.inventory_items, ("iron_pickaxe",))
+
+        target = parse_goal_target("make 2 chests")
+        self.assertIsNotNone(target)
+        self.assertEqual(target.kind, "acquire")
+        self.assertEqual(target.item, "chests")
+        self.assertEqual(target.count, 2)
+
     def test_collect_goal_driver_routes_collect_goal_through_canonical_transaction(self):
         body = HarnessBody()
         context = AgentContext(system_prompt="sys", goal_text="collect 64 logs")
@@ -309,6 +325,27 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         self.assertFalse(truth.satisfied)
         self.assertEqual(truth.inventory_count, 12)
+        self.assertEqual(truth.exit_code, 6)
+
+    def test_terminal_truth_succeeds_for_acquire_goal_inventory(self):
+        body = InventoryBody({"iron_pickaxe": 1})
+        final = SessionStep("completed_turn", LifecycleState.ACTIVE)
+
+        truth = evaluate_terminal_truth(body, "craft an iron pickaxe", final)
+
+        self.assertTrue(truth.satisfied)
+        self.assertEqual(truth.target.kind, "acquire")
+        self.assertEqual(truth.inventory_count, 1)
+        self.assertEqual(truth.exit_code, 0)
+
+    def test_terminal_truth_fails_for_acquire_goal_missing_inventory(self):
+        body = InventoryBody({})
+        final = SessionStep("completed_turn", LifecycleState.ACTIVE)
+
+        truth = evaluate_terminal_truth(body, "make 2 chests", final)
+
+        self.assertFalse(truth.satisfied)
+        self.assertEqual(truth.inventory_count, 0)
         self.assertEqual(truth.exit_code, 6)
 
     def test_terminal_truth_keeps_yield_nonzero(self):
