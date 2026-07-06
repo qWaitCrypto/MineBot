@@ -139,6 +139,38 @@ class AcquisitionResolverTests(unittest.TestCase):
         self.assertIn(("smelt", "iron_ingot"), sequence)
         self.assertEqual(sequence[-1], ("craft", "iron_pickaxe"))
 
+    def test_live_recipe_groups_prefer_reachable_cobblestone_over_blackstone(self):
+        def live_like_lookup(item: str) -> list[RecipeVariant] | None:
+            if item == "stone_pickaxe":
+                return [
+                    RecipeVariant(
+                        output_item="stone_pickaxe",
+                        output_count=1,
+                        ingredient_groups=(
+                            ("cobblestone", "blackstone", "cobbled_deepslate"),
+                            ("cobblestone", "blackstone", "cobbled_deepslate"),
+                            ("cobblestone", "blackstone", "cobbled_deepslate"),
+                            ("stick",),
+                            ("stick",),
+                        ),
+                        requires_table=True,
+                    )
+                ]
+            return recipe_lookup(item)
+
+        steps = resolve_acquisition(
+            "stone_pickaxe",
+            1,
+            {"wooden_pickaxe": 1, "crafting_table": 1, "stick": 2},
+            live_like_lookup,
+            max_depth=8,
+        )
+
+        self.assertIsInstance(steps, list)
+        collect = next(step for step in steps if step.kind == "collect" and step.item == "cobblestone")
+        self.assertEqual(collect.count, 3)
+        self.assertNotIn(("collect", "blackstone"), [(step.kind, step.item) for step in steps])
+
     def test_existing_resources_prune_collection_and_smelt_inputs(self):
         steps = resolve_acquisition(
             "iron_pickaxe",

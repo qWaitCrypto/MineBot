@@ -433,6 +433,16 @@ def _ingredient_priority(item: str) -> tuple[int, str]:
 
 
 def _item_preference(item: str) -> int:
+    if item == "cobblestone":
+        return -10
+    if item == "cobbled_deepslate":
+        return -9
+    if item == "blackstone":
+        return -8
+    if item in COLLECT_ROUTES:
+        return -1
+    if item in SMELT_ROUTES:
+        return 0
     if item in PLANK_ITEMS:
         return PLANK_ITEMS.index(item)
     if item in LOG_ITEMS:
