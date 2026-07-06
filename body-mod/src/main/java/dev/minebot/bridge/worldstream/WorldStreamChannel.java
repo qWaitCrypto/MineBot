@@ -2,8 +2,10 @@ package dev.minebot.bridge.worldstream;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import dev.minebot.bridge.transport.OutboundMessage;
 import dev.minebot.bridge.transport.BridgeConnection;
 import dev.minebot.bridge.version.EntitySnapshot;
+import dev.minebot.bridge.version.SectionSnapshot;
 import dev.minebot.bridge.version.WorldAccess;
 import net.minecraft.server.MinecraftServer;
 
@@ -49,8 +51,15 @@ public final class WorldStreamChannel {
             }
             EntitySnapshot snapshot = world.findEntity(server, subscription.entityName(), subscription.dimension());
             if (snapshot == null) {
-                connection.send(error(null, "entity_not_found", "subscribed entity not found: " + subscription.entityName(), true), serverTick);
+                if (!subscription.entityMissing()) {
+                    connection.send(error(null, "entity_not_found", "subscribed entity not found: " + subscription.entityName(), true), serverTick);
+                    subscription.markEntityMissing(serverTick);
+                }
                 continue;
+            }
+            if (subscription.entityMissing()) {
+                subscription.markEntityPresent();
+                sendKeyframe(connection, subscription, snapshot, serverTick);
             }
             connection.send(transform(subscription, snapshot), serverTick);
             subscription.markTransformSent(serverTick);
@@ -58,25 +67,43 @@ public final class WorldStreamChannel {
     }
 
     private void handleHello(BridgeConnection connection, JsonObject request) {
+        String id = stringField(request, "id");
+        String mcVersion = world.minecraftVersion();
+        connection.send(new OutboundMessage.Json(() -> helloAck(id, mcVersion)), currentTick());
+    }
+
+    private static JsonObject helloAck(String id, String mcVersion) {
         JsonObject response = new JsonObject();
         response.addProperty("channel", "world-stream");
         response.addProperty("type", "HELLO_ACK");
-        copyId(request, response);
+        if (id != null) {
+            response.addProperty("id", id);
+        }
         response.addProperty("protocol", "world-stream/1");
-        response.addProperty("mc_version", world.minecraftVersion());
+        response.addProperty("mc_version", mcVersion);
         JsonArray capabilities = new JsonArray();
         capabilities.add("sections");
         capabilities.add("transform");
         response.add("capabilities", capabilities);
-        response.addProperty("palette_mode", "string-state");
+        response.addProperty("palette_mode", "per-section-string-state");
+        JsonArray encodings = new JsonArray();
+        encodings.add("json-array-debug-u16");
+        encodings.add("base64-deflate-u8");
+        encodings.add("base64-deflate-u16le");
+        response.add("encodings", encodings);
         response.addProperty("section_size", 16);
         JsonObject limits = new JsonObject();
         limits.addProperty("max_radius_chunks", MAX_RADIUS_CHUNKS);
+        JsonArray maxYBandSections = new JsonArray();
+        maxYBandSections.add(4);
+        maxYBandSections.add(4);
+        limits.add("max_y_band_sections", maxYBandSections);
         limits.addProperty("max_subscriptions", MAX_SUBSCRIPTIONS);
         limits.addProperty("max_rate_hz", MAX_RATE_HZ);
+        limits.addProperty("max_keyframes_per_tick", 4);
         limits.addProperty("keyframe_resync_s", KEYFRAME_RESYNC_S);
         response.add("limits", limits);
-        connection.send(response, currentTick());
+        return response;
     }
 
     private void handleSubscribe(BridgeConnection connection, JsonObject request) {
@@ -122,7 +149,7 @@ public final class WorldStreamChannel {
         connection.worldStreamSubscriptions().put(subId, subscription);
         connection.send(ack(id, subId, appliedRadius, appliedRateHz), currentTick());
         connection.send(transform(subscription, snapshot), currentTick());
-        connection.send(world.sectionKeyframe(snapshot.level(), subId, snapshot.sectionX(), snapshot.sectionY(), snapshot.sectionZ()), currentTick());
+        sendKeyframe(connection, subscription, snapshot, currentTick());
     }
 
     private void handleUnsubscribe(BridgeConnection connection, JsonObject request) {
@@ -133,64 +160,78 @@ public final class WorldStreamChannel {
         connection.send(ack(stringField(request, "id"), subId, 0, 0), currentTick());
     }
 
-    private static JsonObject transform(WorldStreamSubscription subscription, EntitySnapshot snapshot) {
-        JsonObject message = new JsonObject();
-        message.addProperty("channel", "world-stream");
-        message.addProperty("type", "TRANSFORM");
-        message.addProperty("sub_id", subscription.subId());
-        message.addProperty("entity", snapshot.name());
-        message.addProperty("dimension", snapshot.level().dimension().identifier().toString());
-        JsonArray pos = new JsonArray();
-        pos.add(snapshot.x());
-        pos.add(snapshot.y());
-        pos.add(snapshot.z());
-        message.add("pos", pos);
-        message.addProperty("yaw", snapshot.yaw());
-        message.addProperty("pitch", snapshot.pitch());
-        message.addProperty("on_ground", snapshot.onGround());
-        message.addProperty("pose", snapshot.pose());
-        return message;
+    private static OutboundMessage transform(WorldStreamSubscription subscription, EntitySnapshot snapshot) {
+        String subId = subscription.subId();
+        String entity = snapshot.name();
+        String dimension = snapshot.level().dimension().identifier().toString();
+        double x = snapshot.x();
+        double y = snapshot.y();
+        double z = snapshot.z();
+        float yaw = snapshot.yaw();
+        float pitch = snapshot.pitch();
+        boolean onGround = snapshot.onGround();
+        String pose = snapshot.pose();
+        return new OutboundMessage.Json(() -> {
+            JsonObject message = new JsonObject();
+            message.addProperty("channel", "world-stream");
+            message.addProperty("type", "TRANSFORM");
+            message.addProperty("sub_id", subId);
+            message.addProperty("entity", entity);
+            message.addProperty("dimension", dimension);
+            JsonArray pos = new JsonArray();
+            pos.add(x);
+            pos.add(y);
+            pos.add(z);
+            message.add("pos", pos);
+            message.addProperty("yaw", yaw);
+            message.addProperty("pitch", pitch);
+            message.addProperty("on_ground", onGround);
+            message.addProperty("pose", pose);
+            return message;
+        });
     }
 
-    private static JsonObject ack(String id, String subId, int radiusChunks, int rateHz) {
-        JsonObject response = new JsonObject();
-        response.addProperty("channel", "world-stream");
-        response.addProperty("type", "ACK");
-        if (id != null) {
-            response.addProperty("id", id);
-        }
-        if (subId != null) {
-            response.addProperty("sub_id", subId);
-        }
-        JsonObject applied = new JsonObject();
-        if (radiusChunks > 0) {
-            applied.addProperty("radius_chunks", radiusChunks);
-        }
-        if (rateHz > 0) {
-            applied.addProperty("rate_hz", rateHz);
-        }
-        response.add("applied", applied);
-        return response;
+    private void sendKeyframe(BridgeConnection connection, WorldStreamSubscription subscription, EntitySnapshot snapshot, int serverTick) {
+        SectionSnapshot section = world.sectionSnapshot(snapshot.level(), subscription.subId(), snapshot.sectionX(), snapshot.sectionY(), snapshot.sectionZ());
+        connection.send(new OutboundMessage.SectionKeyframe(section), serverTick);
     }
 
-    private static JsonObject error(String id, String code, String message, boolean retryable) {
-        JsonObject response = new JsonObject();
-        response.addProperty("channel", "world-stream");
-        response.addProperty("type", "ERROR");
-        if (id != null) {
-            response.addProperty("id", id);
-        }
-        response.addProperty("code", code);
-        response.addProperty("message", message);
-        response.addProperty("retryable", retryable);
-        return response;
+    private static OutboundMessage ack(String id, String subId, int radiusChunks, int rateHz) {
+        return new OutboundMessage.Json(() -> {
+            JsonObject response = new JsonObject();
+            response.addProperty("channel", "world-stream");
+            response.addProperty("type", "ACK");
+            if (id != null) {
+                response.addProperty("id", id);
+            }
+            if (subId != null) {
+                response.addProperty("sub_id", subId);
+            }
+            JsonObject applied = new JsonObject();
+            if (radiusChunks > 0) {
+                applied.addProperty("radius_chunks", radiusChunks);
+            }
+            if (rateHz > 0) {
+                applied.addProperty("rate_hz", rateHz);
+            }
+            response.add("applied", applied);
+            return response;
+        });
     }
 
-    private static void copyId(JsonObject source, JsonObject target) {
-        String id = stringField(source, "id");
-        if (id != null) {
-            target.addProperty("id", id);
-        }
+    private static OutboundMessage error(String id, String code, String message, boolean retryable) {
+        return new OutboundMessage.Json(() -> {
+            JsonObject response = new JsonObject();
+            response.addProperty("channel", "world-stream");
+            response.addProperty("type", "ERROR");
+            if (id != null) {
+                response.addProperty("id", id);
+            }
+            response.addProperty("code", code);
+            response.addProperty("message", message);
+            response.addProperty("retryable", retryable);
+            return response;
+        });
     }
 
     private static String stringField(JsonObject object, String name) {

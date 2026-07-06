@@ -7,6 +7,7 @@ public final class WorldStreamSubscription {
     private final int radiusChunks;
     private final int rateHz;
     private int lastTransformTick = Integer.MIN_VALUE;
+    private boolean entityMissing;
 
     public WorldStreamSubscription(String subId, String entityName, String dimension, int radiusChunks, int rateHz) {
         this.subId = subId;
@@ -43,5 +44,18 @@ public final class WorldStreamSubscription {
 
     public void markTransformSent(int serverTick) {
         lastTransformTick = serverTick;
+    }
+
+    public boolean entityMissing() {
+        return entityMissing;
+    }
+
+    public void markEntityMissing(int serverTick) {
+        entityMissing = true;
+        lastTransformTick = serverTick;
+    }
+
+    public void markEntityPresent() {
+        entityMissing = false;
     }
 }

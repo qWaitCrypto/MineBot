@@ -3,7 +3,7 @@
 
 This probe uses only the Python standard library. It connects to the bridge
 WebSocket, performs HELLO/SUBSCRIBE, and verifies that a real TRANSFORM plus one
-SECTION_KEYFRAME arrive with monotonic seq/server_tick metadata.
+SECTION_KEYFRAME arrive with contiguous seq/server_tick metadata.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import socket
 import struct
 import sys
 import time
+import zlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -99,6 +100,10 @@ def main(argv: list[str] | None = None) -> int:
         _require(hello.get("protocol") == "world-stream/1", "HELLO_ACK protocol mismatch")
         _require("sections" in hello.get("capabilities", []), "HELLO_ACK missing sections capability")
         _require("transform" in hello.get("capabilities", []), "HELLO_ACK missing transform capability")
+        encodings = hello.get("encodings")
+        _require(isinstance(encodings, list), "HELLO_ACK missing encodings")
+        for encoding in ("json-array-debug-u16", "base64-deflate-u8", "base64-deflate-u16le"):
+            _require(encoding in encodings, f"HELLO_ACK missing encoding {encoding}")
 
         client.send_json(
             {
@@ -119,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         while time.monotonic() < deadline and not {"ACK", "TRANSFORM", "SECTION_KEYFRAME"} <= set(seen):
             msg = client.recv_json(max(0.1, deadline - time.monotonic()))
             seq = int(msg.get("seq", -1))
-            _require(seq > last_seq, f"non-monotonic seq: {seq} after {last_seq}")
+            _require(seq == last_seq + 1, f"non-contiguous seq: {seq} after {last_seq}")
             last_seq = seq
             _require("server_tick" in msg, f"{msg.get('type')} missing server_tick")
             _require(msg.get("channel") == "world-stream", f"wrong channel: {msg!r}")
@@ -135,11 +140,18 @@ def main(argv: list[str] | None = None) -> int:
         _require(transform.get("entity") == args.bot, f"transform entity mismatch: {transform}")
         _require(_num_array(transform.get("pos"), 3), f"invalid transform pos: {transform}")
         _require(isinstance(keyframe.get("palette"), list) and keyframe["palette"], "empty keyframe palette")
-        _require(isinstance(keyframe.get("indices"), list), "keyframe indices must be debug JSON array")
-        _require(len(keyframe["indices"]) == 4096, f"expected 4096 section indices, got {len(keyframe['indices'])}")
+        indices = _decode_indices(keyframe)
+        _require(len(indices) == 4096, f"expected 4096 section indices, got {len(indices)}")
+        palette_size = len(keyframe["palette"])
+        _require(all(isinstance(index, int) and 0 <= index < palette_size for index in indices), "keyframe index outside palette")
 
         summary = {
-            "hello": {"mc_version": hello.get("mc_version"), "capabilities": hello.get("capabilities")},
+            "hello": {
+                "mc_version": hello.get("mc_version"),
+                "capabilities": hello.get("capabilities"),
+                "encodings": encodings,
+                "limits": hello.get("limits"),
+            },
             "ack": {"applied": ack.get("applied")},
             "transform": {
                 "entity": transform.get("entity"),
@@ -152,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
                 "dimension": keyframe.get("dimension"),
                 "section": keyframe.get("section"),
                 "palette_size": len(keyframe["palette"]),
-                "indices": len(keyframe["indices"]),
+                "indices": len(indices),
                 "encoding": keyframe.get("encoding"),
             },
         }
@@ -236,6 +248,23 @@ def _expect_type(msg: dict[str, Any] | None, msg_type: str) -> dict[str, Any]:
 
 def _num_array(value: Any, length: int) -> bool:
     return isinstance(value, list) and len(value) == length and all(isinstance(item, int | float) for item in value)
+
+
+def _decode_indices(keyframe: dict[str, Any]) -> list[int]:
+    encoding = keyframe.get("encoding")
+    indices = keyframe.get("indices")
+    if encoding == "json-array-debug-u16":
+        _require(isinstance(indices, list), "json-array-debug-u16 indices must be a JSON array")
+        return [int(index) for index in indices]
+    _require(isinstance(indices, str), f"{encoding} indices must be base64 string")
+    raw = zlib.decompress(base64.b64decode(indices))
+    if encoding == "base64-deflate-u8":
+        _require(len(raw) == 4096, f"u8 keyframe expected 4096 bytes, got {len(raw)}")
+        return list(raw)
+    if encoding == "base64-deflate-u16le":
+        _require(len(raw) == 8192, f"u16 keyframe expected 8192 bytes, got {len(raw)}")
+        return [raw[offset] | (raw[offset + 1] << 8) for offset in range(0, len(raw), 2)]
+    raise RuntimeError(f"unknown keyframe encoding: {encoding}")
 
 
 def _require(condition: bool, message: str) -> None:

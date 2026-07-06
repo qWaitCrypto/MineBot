@@ -13,12 +13,10 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicLong;
 
 public final class BridgeWebSocketServer extends WebSocketServer {
     private final MinecraftServer server;
     private final WorldStreamChannel worldStream;
-    private final AtomicLong sequence = new AtomicLong();
     private final ExecutorService outboundExecutor = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "minebot-bridge-outbound");
         thread.setDaemon(true);
@@ -40,7 +38,7 @@ public final class BridgeWebSocketServer extends WebSocketServer {
 
     @Override
     public void onOpen(WebSocket conn, ClientHandshake handshake) {
-        connections.put(conn, new BridgeConnection(conn, sequence, outboundExecutor));
+        connections.put(conn, new BridgeConnection(conn, outboundExecutor));
     }
 
     @Override
