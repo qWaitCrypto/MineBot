@@ -2,7 +2,7 @@ package dev.minebot.bridge;
 
 import dev.minebot.bridge.transport.BridgeWebSocketServer;
 import dev.minebot.bridge.version.Mojmap2612WorldAccess;
-import dev.minebot.worldstream.WorldStreamChannel;
+import dev.minebot.bridge.worldstream.WorldStreamChannel;
 import net.fabricmc.api.DedicatedServerModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;

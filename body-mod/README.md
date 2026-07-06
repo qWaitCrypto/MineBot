@@ -11,7 +11,7 @@ Current entrypoint:
 
 First formal bridge channel:
 
-- `dev.minebot.worldstream` — Stage-0 read-only `world-stream` data plane for
+- `dev.minebot.bridge.worldstream` — Stage-0 read-only `world-stream` data plane for
   camera/vision: `HELLO`, `SUBSCRIBE{center:entity}`, followed-entity
   `TRANSFORM`, and one center `SECTION_KEYFRAME`.
 
@@ -25,9 +25,9 @@ Canonical direction:
   when Scarpet/RCON cannot reliably cover a required capability.
 
 The old `dev.minebot.body.MineBotBodyMod` creates its own Fabric API fake player
-and exposes control-style WebSocket messages. That was useful as a probe, but
-it does not match the current canonical stack and is no longer the Fabric
-entrypoint. Do not extend it into a second body implementation.
+and exposes control-style WebSocket messages. It is quarantined under
+`attic/` so it is not compiled into the production jar. Do not extend it into a
+second body implementation.
 
 Acceptable future use:
 

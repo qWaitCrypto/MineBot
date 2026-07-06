@@ -2,7 +2,7 @@ package dev.minebot.bridge.transport;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import dev.minebot.worldstream.WorldStreamChannel;
+import dev.minebot.bridge.worldstream.WorldStreamChannel;
 import net.minecraft.server.MinecraftServer;
 import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;

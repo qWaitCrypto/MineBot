@@ -1,4 +1,4 @@
-package dev.minebot.worldstream;
+package dev.minebot.bridge.worldstream;
 
 public final class WorldStreamSubscription {
     private final String subId;

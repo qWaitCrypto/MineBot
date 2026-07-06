@@ -2,7 +2,7 @@ package dev.minebot.bridge.transport;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
-import dev.minebot.worldstream.WorldStreamSubscription;
+import dev.minebot.bridge.worldstream.WorldStreamSubscription;
 import org.java_websocket.WebSocket;
 
 import java.util.Map;

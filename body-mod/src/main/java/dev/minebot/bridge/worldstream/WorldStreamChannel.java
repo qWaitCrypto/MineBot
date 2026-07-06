@@ -1,4 +1,4 @@
-package dev.minebot.worldstream;
+package dev.minebot.bridge.worldstream;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
