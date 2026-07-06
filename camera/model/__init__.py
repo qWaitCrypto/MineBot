@@ -1,0 +1,2 @@
+"""Camera-side world model."""
+
