@@ -758,6 +758,133 @@ class AgentRunnerSpineTests(unittest.TestCase):
         )
         self.assertTrue(any(event["event"] == "tool_continuation" for event in runtime.trace.snapshot()))
 
+    def test_sdk_tool_auto_continues_ensure_by_resume_hint(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        ensure_calls = []
+
+        def ensure_callable(params):
+            ensure_calls.append(dict(params))
+            if len(ensure_calls) == 1:
+                return ToolResult(
+                    False,
+                    "partial_budget_exhausted",
+                    True,
+                    metrics={
+                        "item": "iron_pickaxe",
+                        "target_count": 1,
+                        "plan": [],
+                        "completed_steps": [],
+                        "resume_hint": "reinvoke_ensure",
+                    },
+                )
+            return ToolResult(
+                True,
+                "ensured",
+                False,
+                metrics={
+                    "item": "iron_pickaxe",
+                    "target_count": 1,
+                    "current_count": 1,
+                    "plan": [],
+                    "completed_steps": [],
+                    "resume_hint": "complete",
+                },
+            )
+
+        registry.register(
+            RegisteredTool(
+                name="ensure_tool_for",
+                description="Ensure",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                callable=ensure_callable,
+                sidecar=ToolSidecar(progress_key="ensure_tool_for", mutating=False, tool_type="resource"),
+            )
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=registry,
+            agent_context=AgentContext(system_prompt="sys", goal_text="craft an iron pickaxe"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        sdk_tool = sdk_tool_for(registry.get("ensure_tool_for"))
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=runtime.trace,
+            runtime=runtime,
+        )
+
+        class Wrapper:
+            pass
+
+        wrapper = Wrapper()
+        wrapper.context = runtime_context
+        out = asyncio.run(sdk_tool.on_invoke_tool(wrapper, json.dumps({"resource": "iron_pickaxe"})))
+
+        self.assertTrue(out["success"])
+        self.assertEqual(out["reason"], "ensured")
+        self.assertEqual(ensure_calls, [{"resource": "iron_pickaxe"}, {"resource": "iron_pickaxe"}])
+        events = runtime.trace.snapshot()
+        continuation = next(event for event in events if event["event"] == "tool_continuation")
+        self.assertEqual(continuation["tool"], "ensure_tool_for")
+        self.assertEqual(continuation["reason"], "reinvoke_ensure")
+
+    def test_goal_driver_auto_continues_ensure_by_resume_hint(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        ensure_calls = []
+
+        def ensure_callable(params):
+            ensure_calls.append(dict(params))
+            if len(ensure_calls) == 1:
+                return ToolResult(
+                    False,
+                    "partial_budget_exhausted",
+                    True,
+                    metrics={
+                        "item": "iron_pickaxe",
+                        "target_count": 1,
+                        "plan": [],
+                        "completed_steps": [],
+                        "resume_hint": "reinvoke_ensure",
+                    },
+                )
+            return ToolResult(
+                True,
+                "ensured",
+                False,
+                metrics={"item": "iron_pickaxe", "target_count": 1, "current_count": 1, "resume_hint": "complete"},
+            )
+
+        registry.register(
+            RegisteredTool(
+                name="ensure_tool_for",
+                description="Ensure",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                callable=ensure_callable,
+                sidecar=ToolSidecar(progress_key="ensure_tool_for", mutating=False, tool_type="resource"),
+            )
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=registry,
+            agent_context=AgentContext(system_prompt="sys", goal_text="craft an iron pickaxe"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+
+        outcome = runtime.drive_tool_once("ensure_tool_for", {"resource": "iron_pickaxe"}, reason="canonical_acquire_goal")
+
+        self.assertEqual(outcome.status, "completed_turn")
+        self.assertEqual(outcome.result["reason"], "ensured")
+        self.assertEqual(ensure_calls, [{"resource": "iron_pickaxe"}, {"resource": "iron_pickaxe"}])
+        self.assertTrue(any(event["event"] == "tool_continuation" and event["tool"] == "ensure_tool_for" for event in runtime.trace.snapshot()))
+
     def test_sdk_tool_converts_transport_exception_to_tool_result(self):
         def callable_(_params):
             raise RconError("RCON socket closed")

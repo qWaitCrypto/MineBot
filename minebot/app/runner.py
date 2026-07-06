@@ -245,7 +245,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             )
         try:
             result = execute_tool(tool, params, ctx.context.weld_context)
-            result = _continue_collect_resource_tool(tool, result, ctx.context, tool_call_id=tool_call_id)
+            result = _continue_composition_tool(tool, result, ctx.context, tool_call_id=tool_call_id, initial_params=params)
         except ProgressAbort:
             raise
         except BodyRecoveryRequired:
@@ -647,44 +647,46 @@ def _continuation_constraints(metrics: dict[str, object]) -> dict[str, object]:
     return out
 
 
-def _continue_collect_resource_tool(
+def _continue_composition_tool(
     tool: RegisteredTool,
     result: JsonObject,
     context: RuntimeRunContext,
     *,
     tool_call_id: str,
+    initial_params: JsonObject,
 ) -> JsonObject:
-    if tool.name != "collect_resource":
+    if tool.name not in {"collect_resource", "ensure_tool_for"}:
         return result
     trace = context.trace
     current = result
     iterations = 0
     while iterations < 8:
         metrics = current.get("metrics") if isinstance(current, dict) else None
-        if not isinstance(metrics, dict) or not _should_continue_collect(current, metrics):
+        if not isinstance(metrics, dict):
             return current
-        item = str(metrics.get("requested_item") or metrics.get("item") or "")
-        target_count = int(metrics.get("target_count") or 0)
-        after_count = int(metrics.get("after_count") or 0)
-        if not item or target_count <= 0 or after_count <= 0:
+        params = _continuation_params(tool, current, metrics, initial_params)
+        if params is None:
             return current
-        params: JsonObject = {
-            "item": item,
-            "count": max(1, target_count - after_count),
-            "constraints": _continuation_constraints(metrics),
-        }
         iterations += 1
         if trace is not None:
+            payload: JsonObject = {
+                "tool": tool.name,
+                "tool_call_id": tool_call_id,
+                "iteration": iterations,
+                "reason": _continuation_reason(tool.name, metrics),
+                "arguments_summary": _summarize_tool_arguments(json.dumps(params, sort_keys=True)),
+            }
+            if tool.name == "collect_resource":
+                payload.update(
+                    {
+                        "item": str(metrics.get("requested_item") or metrics.get("item") or ""),
+                        "target_count": int(metrics.get("target_count") or 0),
+                        "current_count": int(metrics.get("after_count") or 0),
+                    }
+                )
             trace.emit(
                 "tool_continuation",
-                tool=tool.name,
-                tool_call_id=tool_call_id,
-                iteration=iterations,
-                reason="collect_partial_progress",
-                item=item,
-                target_count=target_count,
-                current_count=after_count,
-                arguments_summary=_summarize_tool_arguments(json.dumps(params, sort_keys=True)),
+                **payload,
             )
         current = execute_tool(tool, params, context.weld_context)
         if trace is not None:
@@ -706,6 +708,42 @@ def _continue_collect_resource_tool(
             reason=str(current.get("reason") or ""),
         )
     return current
+
+
+def _continuation_params(
+    tool: RegisteredTool,
+    current: JsonObject,
+    metrics: dict[str, object],
+    initial_params: JsonObject,
+) -> JsonObject | None:
+    if tool.name == "collect_resource":
+        if not _should_continue_collect(current, metrics):
+            return None
+        item = str(metrics.get("requested_item") or metrics.get("item") or "")
+        target_count = int(metrics.get("target_count") or 0)
+        after_count = int(metrics.get("after_count") or 0)
+        if not item or target_count <= 0 or after_count <= 0:
+            return None
+        return {
+            "item": item,
+            "count": max(1, target_count - after_count),
+            "constraints": _continuation_constraints(metrics),
+        }
+    if tool.name == "ensure_tool_for":
+        if str(metrics.get("resume_hint") or "") != "reinvoke_ensure":
+            return None
+        if not bool(current.get("canRetry", False)):
+            return None
+        if bool(current.get("success")) and str(current.get("reason") or "") in {"ensured", "already_satisfied"}:
+            return None
+        return dict(initial_params)
+    return None
+
+
+def _continuation_reason(tool_name: str, metrics: dict[str, object]) -> str:
+    if tool_name == "collect_resource":
+        return "collect_partial_progress"
+    return str(metrics.get("resume_hint") or "composition_resume")
 
 
 def _recent_session_messages(context: AgentContext, *, limit: int = 3) -> list[JsonObject]:
@@ -1146,7 +1184,7 @@ class AgentRuntime:
                 trace=self.trace,
                 runtime=self,
             )
-            result = _continue_collect_resource_tool(tool, result, driver_context, tool_call_id=tool_call_id)
+            result = _continue_composition_tool(tool, result, driver_context, tool_call_id=tool_call_id, initial_params=params)
         except ProgressAbort as exc:
             return self._yield_from_progress_abort(exc)
         except BodyRecoveryRequired as exc:
