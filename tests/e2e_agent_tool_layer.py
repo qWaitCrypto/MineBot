@@ -86,7 +86,15 @@ async def run_probe(body: ScarpetBody) -> dict[str, object]:
         trace=parts.runtime.trace,
     )
     tools = {tool.name: tool for tool in parts.runtime.agent.tools}
-    required = {"read_state", "read_inventory", "move_to", "search_for_block", "mine_block_collect", "collect_resource"}
+    required = {
+        "read_state",
+        "read_inventory",
+        "move_to",
+        "search_for_block",
+        "mine_block_collect",
+        "collect_resource",
+        "craft_item",
+    }
     missing = sorted(required - set(tools))
     if missing:
         raise AssertionError(f"formal tool layer missing tools: {missing}")
@@ -111,6 +119,27 @@ async def run_probe(body: ScarpetBody) -> dict[str, object]:
     dist = distance(final_pos, target)
     if not move_result.get("success") or dist > 1.0:
         raise AssertionError(f"move_to failed: result={move_result} final={final_pos} dist={dist:.3f}")
+
+    _clear_inventory(body)
+    _set_inventory_slot(body, 0, "minecraft:oak_planks", 4)
+    before_craft = _inventory_counts(body)
+    craft_result = await invoke(tools["craft_item"], context, {"item": "minecraft:crafting_table", "count": 1})
+    after_craft = _inventory_counts(body)
+    if not craft_result.get("success") or craft_result.get("reason") != "completed":
+        raise AssertionError(f"craft_item failed: {craft_result}")
+    if int(after_craft.get("crafting_table", 0)) - int(before_craft.get("crafting_table", 0)) != 1:
+        raise AssertionError(f"craft_item did not produce one crafting table: before={before_craft} after={after_craft}")
+    if int(before_craft.get("oak_planks", 0)) - int(after_craft.get("oak_planks", 0)) != 4:
+        raise AssertionError(f"craft_item did not consume four planks: before={before_craft} after={after_craft}")
+
+    _clear_inventory(body)
+    before_missing = _inventory_counts(body)
+    missing_result = await invoke(tools["craft_item"], context, {"item": "minecraft:crafting_table", "count": 1})
+    after_missing = _inventory_counts(body)
+    if missing_result.get("success") is not False or missing_result.get("reason") != "craft_plan_not_available":
+        raise AssertionError(f"craft_item missing-material inverse returned wrong result: {missing_result}")
+    if after_missing != before_missing:
+        raise AssertionError(f"craft_item missing-material inverse changed inventory: before={before_missing} after={after_missing}")
 
     trace = parts.runtime.trace.snapshot()
     manifest = next((event for event in trace if event.get("event") == "tool_manifest"), None)
@@ -138,8 +167,44 @@ async def run_probe(body: ScarpetBody) -> dict[str, object]:
         "static_pos": static_pos,
         "final_pos": final_pos,
         "dist": round(dist, 3),
+        "craft_delta": {
+            item: int(after_craft.get(item, 0)) - int(before_craft.get(item, 0))
+            for item in sorted(set(before_craft) | set(after_craft))
+        },
+        "missing_craft_reason": missing_result.get("reason"),
         "events": [event.get("event") for event in trace],
     }
+
+
+def _set_inventory_slot(body: ScarpetBody, slot: int, item: str | None, count: int = 1) -> None:
+    if item is None:
+        body.transport.request(f"script in minebot run inventory_set('{body.bot_name}', {slot}, 0)")
+        return
+    body.transport.request(f"script in minebot run inventory_set('{body.bot_name}', {slot}, {count}, '{item}')")
+
+
+def _clear_inventory(body: ScarpetBody) -> None:
+    body.transport.request(f"clear {body.bot_name}")
+    for slot in range(46):
+        _set_inventory_slot(body, slot, None)
+
+
+def _inventory_counts(body: ScarpetBody) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    start: int | None = 0
+    while start is not None:
+        perception = body.perceive("inventory", {"start": start, "limit": 12})
+        if not perception.ok:
+            raise AssertionError(f"inventory perception failed: {perception}")
+        for row in perception.data.get("slots") or []:
+            if not isinstance(row, dict) or row.get("empty"):
+                continue
+            item = str(row.get("item") or "").removeprefix("minecraft:")
+            if item:
+                counts[item] = counts.get(item, 0) + int(row.get("count") or 0)
+        next_start = perception.data.get("nextStart")
+        start = int(next_start) if next_start is not None else None
+    return counts
 
 
 def main() -> None:

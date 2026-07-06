@@ -345,6 +345,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertIn("go_to_surface", registry.names())
         self.assertIn("search_for_block", registry.names())
         self.assertIn("mine_block_collect", registry.names())
+        self.assertIn("craft_item", registry.names())
 
         manifest = tool_manifest(registry)
         by_name = {row["name"]: row for row in manifest}
@@ -355,6 +356,54 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(by_name["read_state"]["source"], "body.perception")
         self.assertEqual(by_name["search_for_block"]["tool_type"], "perception")
         self.assertEqual(by_name["mine_block_collect"]["tool_type"], "work")
+        self.assertEqual(by_name["craft_item"]["source"], "body.inventory")
+        self.assertEqual(by_name["craft_item"]["tool_type"], "inventory")
+        self.assertEqual(by_name["craft_item"]["permission"], "craft")
+        self.assertTrue(by_name["craft_item"]["mutating"])
+        self.assertEqual(by_name["craft_item"]["body_scope"], ["inventory", "blocks"])
+        self.assertEqual(by_name["craft_item"]["terminal_truth"], ["inventory", "ToolResult"])
+
+    def test_phase1_craft_item_reports_missing_materials_honestly(self):
+        body = CraftToolBody(
+            inventory_pages=[
+                _inventory_page([_slot(0), _slot(41), _slot(42), _slot(43), _slot(44)]),
+                _inventory_page([_slot(0), _slot(41), _slot(42), _slot(43), _slot(44)]),
+            ],
+            recipe_data={
+                "minecraft:oak_planks": '[[[[oak_planks, 4, {count:4,id:"minecraft:oak_planks"}]], [[oak_log, oak_wood]], [shapeless]]]'
+            },
+        )
+        registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=Region("test", (0, 0, 0), (16, 128, 16))))
+
+        result = registry.get("craft_item").callable({"item": "minecraft:oak_planks", "count": 4})
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "craft_plan_not_available")
+        self.assertIn("variant_failures", result.metrics)
+        self.assertEqual(body.actions, [])
+
+    def test_phase1_craft_item_invokes_inventory_transaction_for_non_table_recipe(self):
+        body = CraftToolBody(
+            inventory_pages=[
+                _inventory_page([_slot(0), _slot(1), _slot(41), _slot(42), _slot(43), _slot(44)]),
+                _inventory_page([_slot(0, "minecraft:oak_log", 1), _slot(1), _slot(41), _slot(42), _slot(43), _slot(44)]),
+                _inventory_page([_slot(0, "minecraft:oak_log", 1), _slot(1)]),
+                _inventory_page([_slot(0), _slot(1, "minecraft:oak_planks", 4)]),
+                _inventory_page([_slot(0), _slot(1, "minecraft:oak_planks", 4), _slot(41), _slot(42), _slot(43), _slot(44)]),
+            ],
+            recipe_data={
+                "minecraft:oak_planks": '[[[[oak_planks, 4, {count:4,id:"minecraft:oak_planks"}]], [[oak_log, oak_wood]], [shapeless]]]'
+            },
+        )
+        registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=Region("test", (0, 0, 0), (16, 128, 16))))
+
+        result = registry.get("craft_item").callable({"item": "minecraft:oak_planks", "count": 4})
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual([action.name for action in body.actions], ["craftItem"])
+        self.assertEqual(body.actions[0].params["inputs"], [{"slot": 0, "item": "minecraft:oak_log", "count": 1}])
+        self.assertEqual(body.actions[0].params["output"], {"slot": 1, "item": "minecraft:oak_planks", "count": 4})
 
     def test_phase1_registry_uses_server_side_navigation_factory(self):
         from minebot.body.navigation import NavigationTransactions
@@ -924,6 +973,76 @@ class HarnessBody:
 
     def get_inventory(self):
         return []
+
+
+class CraftToolBody(HarnessBody):
+    def __init__(self, *, inventory_pages, recipe_data):
+        self.inventory_pages = list(inventory_pages)
+        self.recipe_data = dict(recipe_data)
+        self.actions = []
+        self.perceptions = []
+
+    def perceive(self, scope, params):
+        self.perceptions.append((scope, dict(params)))
+        if scope == "inventory":
+            if not self.inventory_pages:
+                raise AssertionError("inventory page exhausted")
+            return self.inventory_pages.pop(0)
+        if scope == "recipeData":
+            item = str(params.get("item"))
+            recipe_raw = self.recipe_data.get(item)
+            return PerceptionResult(
+                self.bot_name,
+                scope,
+                "perception",
+                recipe_raw is not None,
+                True,
+                {"item": item, "recipe_raw": recipe_raw} if recipe_raw is not None else {},
+                error=None if recipe_raw is not None else "recipe_not_found",
+            )
+        return super().perceive(scope, params)
+
+    def execute(self, action):
+        self.actions.append(action)
+        return Result(action.id, self.bot_name, "result", True, True, True, {"action": action.name}, None)
+
+    def await_action_terminal(self, action_id, timeout_s=15.0):
+        action = next(action for action in self.actions if action.id == action_id)
+        if action.name == "craftItem":
+            return Event(
+                seq=len(self.actions),
+                tick=20,
+                bot=self.bot_name,
+                name="craftDone",
+                data={
+                    "action_id": action_id,
+                    "success": True,
+                    "item": action.params["output"]["item"],
+                    "count": action.params["output"]["count"],
+                    "output_slot": action.params["output"]["slot"],
+                    "stopped_reason": "completed",
+                    "inputs_after": [
+                        {"slot": entry["slot"], "empty": True, "item": None, "count": 0}
+                        for entry in action.params["inputs"]
+                    ],
+                },
+            )
+        return super().await_action_terminal(action_id, timeout_s=timeout_s)
+
+
+def _inventory_page(slots):
+    return PerceptionResult(
+        "Bot",
+        "inventory",
+        "perception",
+        True,
+        True,
+        {"slots": slots},
+    )
+
+
+def _slot(index, item=None, count=0):
+    return {"slot": index, "empty": item is None or count <= 0, "item": item, "count": count}
 
 
 class ReplacedGoalSession:

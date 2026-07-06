@@ -14,7 +14,7 @@ from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.runner import AgentRuntime, RecoveryOutcome, RuntimeTrace
 from minebot.app.runner import sdk_tool_for
 from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
-from minebot.body import BlockWork, LifecycleTransactions, NavigationRunConfig, NavigationTransactions
+from minebot.body import BlockWork, InventoryTransactions, LifecycleTransactions, NavigationRunConfig, NavigationTransactions
 from minebot.body.combat import CombatTransactions, find_hostiles
 from minebot.body.world_read import read_block_facts
 from minebot.brain.composition import (
@@ -417,6 +417,7 @@ def build_phase1_registry(
     progress = authority or ProgressAuthority()
     navigator = NavigationTransactions.server_side(body, policy, progress=progress)
     work = BlockWork(body, policy, navigator=navigator)
+    inventory_txn = InventoryTransactions(body, navigator=navigator, governance=policy, work=work)
     registry = ToolRegistry()
     registry.register(_read_state_tool(body))
     register_inventory_tools(registry, body)
@@ -428,6 +429,7 @@ def build_phase1_registry(
     registry.register(_find_hostiles_tool(body))
     registry.register(_search_tool(work))
     registry.register(_mine_collect_tool(work))
+    registry.register(_craft_tool(inventory_txn))
     return registry
 
 
@@ -653,6 +655,41 @@ def _find_hostiles_tool(body: Body) -> RegisteredTool:
             permission="read_world",
             body_scope=("nearby_entities",),
             timeout_s=15.0,
+        ),
+    )
+
+
+def _craft_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "craft_item",
+        "Craft an item from materials already in inventory. Handles recipe lookup, nearby/temporary crafting table lifecycle, and residue cleanup. Fails honestly with missing materials if ingredients are absent; it does not gather them.",
+        {
+            "type": "object",
+            "properties": {
+                "item": {
+                    "type": "string",
+                    "description": "Output item to craft, e.g. 'stone_pickaxe'.",
+                },
+                "count": {"type": "integer", "minimum": 1, "default": 1},
+                "auto_equip": {"type": "boolean", "default": False},
+            },
+            "required": ["item"],
+            "additionalProperties": False,
+        },
+        lambda params: inventory_txn.craft_recipe(
+            item=str(params["item"]),
+            count=int(params.get("count") or 1),
+            auto_equip=bool(params.get("auto_equip", False)),
+        ),
+        ToolSidecar(
+            "craft_item",
+            mutating=True,
+            source="body.inventory",
+            tool_type="inventory",
+            permission="craft",
+            body_scope=("inventory", "blocks"),
+            terminal_truth=("inventory", "ToolResult"),
+            timeout_s=45.0,
         ),
     )
 
