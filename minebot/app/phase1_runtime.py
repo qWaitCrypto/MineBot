@@ -430,6 +430,7 @@ def build_phase1_registry(
     registry.register(_search_tool(work))
     registry.register(_mine_collect_tool(work))
     registry.register(_craft_tool(inventory_txn))
+    registry.register(_equip_tool(inventory_txn))
     return registry
 
 
@@ -690,6 +691,40 @@ def _craft_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:
             body_scope=("inventory", "blocks"),
             terminal_truth=("inventory", "ToolResult"),
             timeout_s=45.0,
+        ),
+    )
+
+
+def _equip_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "equip_item",
+        "Equip an owned item into the appropriate equipment slot or the requested slot, then verify the inventory/equipment delta. It fails honestly if the item is not in inventory.",
+        {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string"},
+                "target": {
+                    "type": "string",
+                    "enum": ["auto", "mainhand", "offhand", "head", "chest", "legs", "feet"],
+                    "default": "auto",
+                },
+            },
+            "required": ["item"],
+            "additionalProperties": False,
+        },
+        lambda params: inventory_txn.equip_item(
+            item=str(params["item"]),
+            target=str(params.get("target") or "auto"),
+        ),
+        ToolSidecar(
+            "equip_item",
+            mutating=True,
+            source="body.inventory",
+            tool_type="inventory",
+            permission="equip",
+            body_scope=("inventory",),
+            terminal_truth=("inventory", "ToolResult"),
+            timeout_s=10.0,
         ),
     )
 

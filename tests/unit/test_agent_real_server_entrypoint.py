@@ -346,6 +346,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertIn("search_for_block", registry.names())
         self.assertIn("mine_block_collect", registry.names())
         self.assertIn("craft_item", registry.names())
+        self.assertIn("equip_item", registry.names())
 
         manifest = tool_manifest(registry)
         by_name = {row["name"]: row for row in manifest}
@@ -362,6 +363,12 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertTrue(by_name["craft_item"]["mutating"])
         self.assertEqual(by_name["craft_item"]["body_scope"], ["inventory", "blocks"])
         self.assertEqual(by_name["craft_item"]["terminal_truth"], ["inventory", "ToolResult"])
+        self.assertEqual(by_name["equip_item"]["source"], "body.inventory")
+        self.assertEqual(by_name["equip_item"]["tool_type"], "inventory")
+        self.assertEqual(by_name["equip_item"]["permission"], "equip")
+        self.assertTrue(by_name["equip_item"]["mutating"])
+        self.assertEqual(by_name["equip_item"]["body_scope"], ["inventory"])
+        self.assertEqual(by_name["equip_item"]["terminal_truth"], ["inventory", "ToolResult"])
 
     def test_phase1_craft_item_reports_missing_materials_honestly(self):
         body = CraftToolBody(
@@ -404,6 +411,36 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual([action.name for action in body.actions], ["craftItem"])
         self.assertEqual(body.actions[0].params["inputs"], [{"slot": 0, "item": "minecraft:oak_log", "count": 1}])
         self.assertEqual(body.actions[0].params["output"], {"slot": 1, "item": "minecraft:oak_planks", "count": 4})
+
+    def test_phase1_equip_item_reports_missing_item_honestly(self):
+        body = CraftToolBody(
+            inventory_pages=[_inventory_page([_slot(0), _slot(36), _slot(37), _slot(38), _slot(39), _slot(40)])],
+            recipe_data={},
+        )
+        registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=Region("test", (0, 0, 0), (16, 128, 16))))
+
+        result = registry.get("equip_item").callable({"item": "minecraft:iron_pickaxe"})
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "item_not_available")
+        self.assertEqual([action.name for action in body.actions], ["selectItem"])
+
+    def test_phase1_equip_item_invokes_inventory_transaction(self):
+        body = CraftToolBody(
+            inventory_pages=[
+                _inventory_page([_slot(0, "minecraft:iron_pickaxe", 1), _slot(36)]),
+                _inventory_page([_slot(0), _slot(36, "minecraft:iron_pickaxe", 1)]),
+            ],
+            recipe_data={},
+        )
+        registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=Region("test", (0, 0, 0), (16, 128, 16))))
+
+        result = registry.get("equip_item").callable({"item": "minecraft:iron_pickaxe", "target": "mainhand"})
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual([action.name for action in body.actions], ["selectItem"])
+        self.assertEqual(body.actions[0].params["item"], "minecraft:iron_pickaxe")
 
     def test_phase1_registry_uses_server_side_navigation_factory(self):
         from minebot.body.navigation import NavigationTransactions
@@ -978,6 +1015,7 @@ class HarnessBody:
 class CraftToolBody(HarnessBody):
     def __init__(self, *, inventory_pages, recipe_data):
         self.inventory_pages = list(inventory_pages)
+        self._all_inventory_pages = list(inventory_pages)
         self.recipe_data = dict(recipe_data)
         self.actions = []
         self.perceptions = []
@@ -1025,6 +1063,42 @@ class CraftToolBody(HarnessBody):
                         {"slot": entry["slot"], "empty": True, "item": None, "count": 0}
                         for entry in action.params["inputs"]
                     ],
+                },
+            )
+        if action.name == "moveItem":
+            return Event(
+                seq=len(self.actions),
+                tick=20,
+                bot=self.bot_name,
+                name="moveItemDone",
+                data={
+                    "action_id": action_id,
+                    "success": True,
+                    "stopped_reason": "completed",
+                    "count": action.params.get("count", 1),
+                },
+            )
+        if action.name == "selectItem":
+            item = str(action.params["item"])
+            present = any(
+                isinstance(row, dict)
+                and not row.get("empty")
+                and str(row.get("item") or "") == item
+                for page in self._all_inventory_pages
+                for row in (page.data.get("slots") or [])
+            )
+            return Event(
+                seq=len(self.actions),
+                tick=20,
+                bot=self.bot_name,
+                name="selectItemDone",
+                data={
+                    "action_id": action_id,
+                    "success": present,
+                    "item": item,
+                    "slot": 0 if present else -1,
+                    "count": 1 if present else 0,
+                    "stopped_reason": "completed" if present else "not_in_inventory",
                 },
             )
         return super().await_action_terminal(action_id, timeout_s=timeout_s)

@@ -94,6 +94,7 @@ async def run_probe(body: ScarpetBody) -> dict[str, object]:
         "mine_block_collect",
         "collect_resource",
         "craft_item",
+        "equip_item",
     }
     missing = sorted(required - set(tools))
     if missing:
@@ -141,6 +142,35 @@ async def run_probe(body: ScarpetBody) -> dict[str, object]:
     if after_missing != before_missing:
         raise AssertionError(f"craft_item missing-material inverse changed inventory: before={before_missing} after={after_missing}")
 
+    _clear_inventory(body)
+    _set_inventory_slot(body, 9, "minecraft:iron_pickaxe", 1)
+    before_equip = _inventory_counts(body)
+    equip_result = await invoke(tools["equip_item"], context, {"item": "minecraft:iron_pickaxe", "target": "mainhand"})
+    after_equip = _inventory_counts(body)
+    if not equip_result.get("success") or equip_result.get("reason") != "completed":
+        raise AssertionError(f"equip_item failed: {equip_result}")
+    inventory_slots = {slot.slot: slot for slot in body.get_inventory()}
+    if not any(
+        index in inventory_slots
+        and not inventory_slots[index].empty
+        and str(inventory_slots[index].item).removeprefix("minecraft:") == "iron_pickaxe"
+        for index in range(9)
+    ):
+        raise AssertionError(f"equip_item did not stage iron_pickaxe into the hotbar: slots={inventory_slots} result={equip_result}")
+    if int(after_equip.get("iron_pickaxe", 0)) != int(before_equip.get("iron_pickaxe", 0)):
+        raise AssertionError(f"equip_item changed item count: before={before_equip} after={after_equip}")
+
+    _clear_inventory(body)
+    before_missing_equip = _inventory_counts(body)
+    missing_equip = await invoke(tools["equip_item"], context, {"item": "minecraft:iron_pickaxe", "target": "mainhand"})
+    after_missing_equip = _inventory_counts(body)
+    if missing_equip.get("success") is not False or missing_equip.get("reason") != "item_not_available":
+        raise AssertionError(f"equip_item missing-material inverse returned wrong result: {missing_equip}")
+    if after_missing_equip != before_missing_equip:
+        raise AssertionError(
+            f"equip_item missing-material inverse changed inventory: before={before_missing_equip} after={after_missing_equip}"
+        )
+
     trace = parts.runtime.trace.snapshot()
     manifest = next((event for event in trace if event.get("event") == "tool_manifest"), None)
     if manifest is None:
@@ -172,6 +202,8 @@ async def run_probe(body: ScarpetBody) -> dict[str, object]:
             for item in sorted(set(before_craft) | set(after_craft))
         },
         "missing_craft_reason": missing_result.get("reason"),
+        "equip_reason": equip_result.get("reason"),
+        "missing_equip_reason": missing_equip.get("reason"),
         "events": [event.get("event") for event in trace],
     }
 

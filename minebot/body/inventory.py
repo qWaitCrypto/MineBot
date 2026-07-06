@@ -239,7 +239,7 @@ class InventoryTransactions:
             )
 
         if normalized_target == "mainhand":
-            result = _dispatch(self.body, "selectItem", {"item": item}, timeout_s=timeout_s)
+            result = _dispatch_select_item(self.body, item, timeout_s=timeout_s)
             reason = result.reason
             if not result.success and reason == "not_in_inventory":
                 reason = "item_not_available"
@@ -1724,6 +1724,25 @@ def _dispatch(body: Body, name: str, params: dict[str, object], *, timeout_s: fl
         return rejected
     terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
     return terminal_event_to_tool_result(terminal)
+
+
+def _dispatch_select_item(body: Body, item: str, *, timeout_s: float) -> ToolResult:
+    action = Action.create("selectItem", {"item": item})
+    accepted = body.execute(action)
+    if accepted.ok and accepted.accepted:
+        terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+        return terminal_event_to_tool_result(terminal)
+    if accepted.ok and not accepted.accepted and (accepted.data or {}).get("action") == "selectItem":
+        try:
+            terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+        except TimeoutError:
+            pass
+        else:
+            return terminal_event_to_tool_result(terminal)
+    rejected = _body_rejected(accepted, {"action": "selectItem", "params": {"item": item}})
+    if rejected is not None:
+        return rejected
+    return ToolResult(success=False, reason="body_rejected", can_retry=True, metrics={"action": "selectItem", "item": item})
 
 
 def _body_rejected(result: Result, metrics: dict[str, object]) -> ToolResult | None:

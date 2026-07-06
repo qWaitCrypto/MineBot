@@ -15,6 +15,7 @@ class FakeInventoryBody:
         drop_delta: int | None = None,
         select_success: bool = True,
         select_reason: str = "completed",
+        select_rejected: bool = False,
         recipe_data: dict[str, str] | None = None,
     ):
         self.pages = list(pages)
@@ -22,6 +23,7 @@ class FakeInventoryBody:
         self.drop_delta = drop_delta
         self.select_success = select_success
         self.select_reason = select_reason
+        self.select_rejected = select_rejected
         self.recipe_data = recipe_data or {}
         self.actions: list[Action] = []
         self.perceptions: list[tuple[str, dict[str, object]]] = []
@@ -48,15 +50,17 @@ class FakeInventoryBody:
 
     def execute(self, action: Action) -> Result:
         self.actions.append(action)
+        ok = self.accepted
+        accepted = self.accepted and not (action.name == "selectItem" and self.select_rejected)
         return Result(
             id=action.id,
             bot="Bot1",
             type="result",
-            ok=self.accepted,
-            accepted=self.accepted,
+            ok=ok,
+            accepted=accepted,
             complete=True,
             data={"action": action.name},
-            error=None if self.accepted else "rejected",
+            error=None if ok else "rejected",
         )
 
     def await_action_terminal(self, action_id: str, timeout_s: float = 15.0) -> Event:
@@ -385,6 +389,21 @@ class InventoryRuntimeTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "item_not_available")
+
+    def test_equip_mainhand_reads_select_terminal_after_sync_rejection(self):
+        body = FakeInventoryBody(
+            [perception([slot(0), slot(12, "minecraft:dirt", 1)])],
+            select_success=False,
+            select_reason="not_in_inventory",
+            select_rejected=True,
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.equip_item(item="minecraft:diamond_sword", target="mainhand")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "item_not_available")
+        self.assertEqual(result.metrics["select"]["stopped_reason"], "not_in_inventory")
 
     def test_equip_offhand_moves_item_into_slot_40(self):
         body = FakeInventoryBody(
