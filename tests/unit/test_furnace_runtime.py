@@ -914,6 +914,50 @@ class FurnaceRuntimeTests(unittest.TestCase):
         self.assertEqual(result.metrics["fuel"]["count"], 2)
         self.assertEqual(result.metrics["fuel"]["seconds_available"], 10.0)
 
+    def test_smelt_once_auto_budgets_wood_planks_and_logs_as_fuel(self):
+        fuels = (
+            "oak_planks",
+            "spruce_planks",
+            "birch_planks",
+            "jungle_planks",
+            "acacia_planks",
+            "dark_oak_planks",
+            "oak_log",
+            "spruce_log",
+            "birch_log",
+            "jungle_log",
+            "acacia_log",
+            "dark_oak_log",
+        )
+        for fuel in fuels:
+            with self.subTest(fuel=fuel):
+                body = FakeFurnaceBody(
+                    perception("container", [slot(0), slot(1), slot(2)]),
+                    perception("inventory", [slot(0, "minecraft:iron_ore", 1), slot(1, f"minecraft:{fuel}", 1), slot(2)]),
+                    mutable=True,
+                    auto_smelt_output=("minecraft:iron_ingot", 1),
+                    auto_smelt_after_reads=6,
+                )
+                runtime = FurnaceTransactions(body)
+
+                result = runtime.smelt_once(
+                    (1, 59, 0),
+                    input_item="minecraft:iron_ore",
+                    input_count=1,
+                    fuel_item=f"minecraft:{fuel}",
+                    output_item="minecraft:iron_ingot",
+                    output_count=1,
+                    poll_interval_s=0.0,
+                    smelt_timeout_s=1.0,
+                )
+
+                self.assertTrue(result.success, result.to_payload())
+                self.assertEqual(body.actions[1].params["furnace_slot"], "fuel")
+                self.assertEqual(body.actions[1].params["count"], 1)
+                self.assertTrue(result.metrics["fuel"]["auto"])
+                self.assertEqual(result.metrics["fuel"]["count"], 1)
+                self.assertEqual(result.metrics["fuel"]["seconds_available"], 15.0)
+
     def test_smelt_once_auto_fuel_refuses_insufficient_budget_before_mutation(self):
         body = FakeFurnaceBody(
             perception("container", [slot(0), slot(1), slot(2)]),
