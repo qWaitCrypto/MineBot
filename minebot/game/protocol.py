@@ -43,6 +43,10 @@ def build_say_call(bot: str, text: str, app: str = SCARPET_APP) -> str:
     return f"script in {app} run minebot_say({_scarpet_arg(bot)}, {_scarpet_string_arg(text)})"
 
 
+def build_watch_call(bot: str, app: str = SCARPET_APP) -> str:
+    return _script_call(app, "watch_bot", bot)
+
+
 def build_spawn_call(
     bot: str,
     pos: tuple[int, int, int] | None = None,

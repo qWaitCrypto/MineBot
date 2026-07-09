@@ -8,6 +8,7 @@ from minebot.game.protocol import (
     build_chat_drain_call,
     build_perceive_call,
     build_say_call,
+    build_watch_call,
     parse_events,
     parse_events_page,
     parse_perception,
@@ -46,6 +47,10 @@ class ProtocolTests(unittest.TestCase):
 
         self.assertEqual(command, "script in minebot run minebot_say('Bot1', '你好 Bob\\'s base')")
 
+    def test_build_watch_call_subscribes_chat_target(self):
+        command = build_watch_call("Bot1")
+
+        self.assertEqual(command, "script in minebot run watch_bot('Bot1')")
 
     def test_parse_result_requires_complete_envelope(self):
         raw = json.dumps(

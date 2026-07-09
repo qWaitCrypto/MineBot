@@ -28,7 +28,7 @@ from minebot.brain.composition import resource_plan_for
 from minebot.contract import Body, Region
 from minebot.game import RconClient, ScarpetBody
 from minebot.game.errors import EnvelopeError, RconError
-from minebot.game.protocol import build_state_call, parse_state
+from minebot.game.protocol import build_state_call, build_watch_call, parse_state
 from minebot.game.rcon import RconConfig
 
 
@@ -239,6 +239,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
     with rcon:
         try:
             _ensure_scarpet_global_app(rcon, config.bot_name)
+            _watch_interactive_chat(rcon, config.bot_name)
         except (EnvelopeError, RconError) as exc:
             print(
                 f"Real-server Scarpet app unavailable at {config.rcon.host}:{config.rcon.port}: "
@@ -315,6 +316,10 @@ def _ensure_scarpet_global_app(rcon: RconClient, bot_name: str) -> None:
     rcon.request("script load minebot global")
     command = build_state_call(bot_name)
     parse_state(rcon.request(command))
+
+
+def _watch_interactive_chat(rcon: RconClient, bot_name: str) -> None:
+    rcon.request(build_watch_call(bot_name))
 
 
 def _interactive_speech_sink(body: object):

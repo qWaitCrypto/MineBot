@@ -1125,6 +1125,8 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertIsNone(captured_configs[0].speech_sink)
         self.assertIsNotNone(captured_configs[1].speech_sink)
         self.assertFalse(any("minebot_say" in command for command in rcon_instances[0].commands))
+        self.assertFalse(any("watch_bot" in command for command in rcon_instances[0].commands))
+        self.assertIn("script in minebot run watch_bot('Bot1')", rcon_instances[1].commands)
 
     def test_phase1_recovery_facts_include_inventory_recount_delta(self):
         body = RecoveringInventoryBody(
