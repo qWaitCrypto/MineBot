@@ -4112,6 +4112,7 @@ engage_replan(name, target_pos) -> (
   rt = target_entity_uuid_near(name, e:13, e:10);
   if(rt != null && is_ranged_hostile(rt), cover = target_pos);
   engage_max_expand = if(cover != null && max_expand > 120, 120, max_expand);
+  move_arrival_radius = 0.45;
   plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, engage_max_expand, 8, 8, cover, 1, attack_range);
   plan_status = plan_result:1;
   plan_expanded = plan_result:2;
@@ -4120,7 +4121,7 @@ engage_replan(name, target_pos) -> (
   direct_wp = l(gx + 0.5, gy, gz + 0.5);
   if(plan_status == 'no_path' || plan_status == 'budget_exceeded' || length(plan_path) == 0,
     start_move_to(name, action_id, direct_wp:0, direct_wp:1, direct_wp:2,
-      {'waypoints' -> l(direct_wp), 'arrival_radius' -> attack_range, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+      {'waypoints' -> l(direct_wp), 'arrival_radius' -> move_arrival_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
   ,
     waypoints = l();
     loop(length(plan_path),
@@ -4129,11 +4130,11 @@ engage_replan(name, target_pos) -> (
     );
     if(length(waypoints) == 0,
       start_move_to(name, action_id, direct_wp:0, direct_wp:1, direct_wp:2,
-        {'waypoints' -> l(direct_wp), 'arrival_radius' -> attack_range, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+        {'waypoints' -> l(direct_wp), 'arrival_radius' -> move_arrival_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
     ,
       last_wp = waypoints:(length(waypoints) - 1);
       start_move_to(name, action_id, last_wp:0, last_wp:1, last_wp:2,
-        {'waypoints' -> waypoints, 'arrival_radius' -> attack_range, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+        {'waypoints' -> waypoints, 'arrival_radius' -> move_arrival_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
     )
   )
 );
