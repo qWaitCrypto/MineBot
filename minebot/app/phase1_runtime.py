@@ -7,6 +7,7 @@ not silently expose only a resource-only registry.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import time
 from dataclasses import dataclass
 
@@ -40,6 +41,7 @@ class Phase1RuntimeConfig:
     budget: CompositionBudget = CompositionBudget(max_candidates=96, max_mutating_calls=96, max_wall_s=900.0)
     recovery_respawn_pos: Position | None = None
     recovery_gamemode: str | None = None
+    speech_sink: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,7 @@ def build_phase1_agent_runtime(
         trace=trace,
         recovery_handler=_phase1_recovery_handler(body, config),
         authority=authority,
+        speech_sink=config.speech_sink,
     )
     context = CompositionContext(
         registry=registry,

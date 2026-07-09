@@ -13,8 +13,11 @@ from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import ToolRegistry
 from minebot.app.real_server_session import (
     RealServerConfigError,
+    TerminalTruth,
     _goal_driver,
     _ensure_scarpet_global_app,
+    _announce_interactive_terminal,
+    _interactive_speech_sink,
     _poll_chat_commands,
     _run_interactive_loop,
     evaluate_terminal_truth,
@@ -23,6 +26,8 @@ from minebot.app.real_server_session import (
     parse_goal_target,
     parse_session_command,
     real_server_config_from_env,
+    run_real_server_goal,
+    run_real_server_interactive,
 )
 from minebot.app.resource_runtime import ResourceRuntimeConfig
 from minebot.app.session import SessionCommandKind
@@ -844,6 +849,121 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(final.lifecycle, LifecycleState.YIELDED)
         self.assertEqual(session.step_count, 3)
 
+    def test_interactive_speech_sink_deduplicates_consecutive_replies(self):
+        body = HarnessBody()
+        sink = _interactive_speech_sink(body)
+
+        sink("hello")
+        sink("hello")
+        sink("next")
+
+        self.assertEqual(body.spoken, ["hello", "next"])
+
+    def test_interactive_terminal_announcement_uses_short_public_summary(self):
+        body = HarnessBody()
+        truth = evaluate_terminal_truth(body, "collect 3 logs", SessionStep("completed_turn", LifecycleState.ACTIVE))
+        truth = type(truth)(
+            goal=truth.goal,
+            target=truth.target,
+            inventory_count=3,
+            satisfied=True,
+            status=truth.status,
+            lifecycle=truth.lifecycle,
+            exit_code=0,
+        )
+
+        self.assertTrue(_announce_interactive_terminal(body, truth))
+        self.assertEqual(body.spoken, ["done: logs 3/3"])
+
+    def test_interactive_terminal_announcement_ignores_plain_waiting(self):
+        body = HarnessBody()
+        truth = TerminalTruth("hello", None, None, False, "waiting", "idle", 7)
+
+        self.assertFalse(_announce_interactive_terminal(body, truth))
+        self.assertEqual(body.spoken, [])
+
+    def test_real_server_interactive_passes_speech_sink_but_goal_mode_does_not(self):
+        captured_configs = []
+        rcon_instances = []
+
+        class FakeProvider:
+            default = "primary"
+
+            def trace_configs(self):
+                return []
+
+            async def aclose(self):
+                pass
+
+        class FakeRcon:
+            def __init__(self, _config):
+                self.commands = []
+                rcon_instances.append(self)
+
+            def connect(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                pass
+
+            def request(self, command):
+                self.commands.append(command)
+                if "minebot_state" in command:
+                    return _state_envelope("Bot1")
+                return "loaded"
+
+        def fake_build_runtime(**kwargs):
+            captured_configs.append(kwargs["config"])
+
+            class Runtime:
+                trace = type("Trace", (), {"emit": lambda *_args, **_kwargs: None, "close": lambda *_args, **_kwargs: None})()
+
+            return type("Parts", (), {"runtime": Runtime()})()
+
+        class FakeSession:
+            parts = None
+            current_goal = "collect 1 dirt"
+
+            def __init__(self, make_parts, goal_driver=None):
+                self.parts = make_parts("collect 1 dirt")
+
+            def submit(self, _command):
+                pass
+
+            async def run_until_waiting(self, **_kwargs):
+                return SessionStep("waiting", LifecycleState.YIELDED)
+
+        async def fake_loop(session, **_kwargs):
+            return SessionStep("waiting", LifecycleState.YIELDED)
+
+        cfg = real_server_config_from_env(
+            {
+                "MINEBOT_REAL_RCON_HOST": "example.invalid",
+                "MINEBOT_REAL_RCON_PORT": "25576",
+                "MINEBOT_REAL_RCON_PASSWORD": "secret",
+                "MINEBOT_REAL_BOT": "Bot1",
+                "MINEBOT_AGENT_LOG_PATH": "logs/test.jsonl",
+            }
+        )
+
+        with (
+            patch("minebot.app.real_server_session.provider_registry_from_env", return_value=FakeProvider()),
+            patch("minebot.app.real_server_session.RconClient", FakeRcon),
+            patch("minebot.app.real_server_session.build_phase1_agent_runtime", side_effect=fake_build_runtime),
+            patch("minebot.app.real_server_session.AgentSession", FakeSession),
+            patch("minebot.app.real_server_session._run_interactive_loop", side_effect=fake_loop),
+            patch("minebot.app.real_server_session.safe_evaluate_terminal_truth", return_value=TerminalTruth("collect 1 dirt", None, None, False, "waiting", "yielded", 5)),
+        ):
+            asyncio.run(run_real_server_goal(cfg, "collect 1 dirt", max_steps=1))
+            asyncio.run(run_real_server_interactive(cfg, "collect 1 dirt", max_steps=1))
+
+        self.assertIsNone(captured_configs[0].speech_sink)
+        self.assertIsNotNone(captured_configs[1].speech_sink)
+        self.assertFalse(any("minebot_say" in command for command in rcon_instances[0].commands))
+
     def test_phase1_recovery_facts_include_inventory_recount_delta(self):
         body = RecoveringInventoryBody(
             before_counts={"oak_log": 8, "bread": 2},
@@ -1199,6 +1319,9 @@ class AdjustedSpawnRecoveryBody:
 class HarnessBody:
     bot_name = "Bot"
 
+    def __init__(self):
+        self.spoken = []
+
     def spawn(self, *args, **kwargs):
         return Result(None, self.bot_name, "result", True, True, True)
 
@@ -1246,6 +1369,10 @@ class HarnessBody:
 
     def get_inventory(self):
         return []
+
+    def say(self, text):
+        self.spoken.append(text)
+        return True
 
 
 class CraftToolBody(HarnessBody):

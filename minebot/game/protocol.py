@@ -39,6 +39,10 @@ def build_chat_drain_call(bot: str, app: str = SCARPET_APP, *, since_seq: int | 
     return _script_call(app, "minebot_chat_since", bot, since_seq)
 
 
+def build_say_call(bot: str, text: str, app: str = SCARPET_APP) -> str:
+    return f"script in {app} run minebot_say({_scarpet_arg(bot)}, {_scarpet_string_arg(text)})"
+
+
 def build_spawn_call(
     bot: str,
     pos: tuple[int, int, int] | None = None,
@@ -158,6 +162,13 @@ def _scarpet_arg(value: Any) -> str:
         text = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
     if not text.isascii() or any(ord(ch) < 32 or ord(ch) > 126 for ch in text):
         raise ValueError("Scarpet RCON arguments must be ASCII printable after JSON encoding")
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _scarpet_string_arg(value: str) -> str:
+    text = value.replace("\r", " ").replace("\n", " ")
+    if any(ord(ch) < 32 for ch in text):
+        raise ValueError("Scarpet string arguments must not contain control characters")
     return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 

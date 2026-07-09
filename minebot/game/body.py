@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import re
 from typing import Any
 
 from minebot.contract import Action, BodyState, Event, InventorySlot, PerceptionResult, Result, perception_next_cursor
@@ -14,6 +15,7 @@ from minebot.game.protocol import (
     build_drain_call,
     build_interrupt_call,
     build_perceive_call,
+    build_say_call,
     build_spawn_call,
     build_state_call,
     parse_events,
@@ -59,6 +61,8 @@ GLOBAL_TERMINAL_EVENTS = {
     "interrupted",
 }
 MAX_MINECRAFT_USERNAME_LENGTH = 16
+CHAT_TEXT_LIMIT = 220
+_MINECRAFT_FORMATTING_RE = re.compile(r"§.")
 
 
 class ScarpetBody:
@@ -297,6 +301,21 @@ class ScarpetBody:
 
     def despawn(self) -> Result:
         return parse_result(self._timed_request(build_despawn_call(self.bot_name, self.app), kind="despawn"))
+
+    def say(self, text: str) -> bool:
+        cleaned = _sanitize_chat_text(text)
+        if not cleaned:
+            return True
+        try:
+            result = parse_result(
+                self._timed_request(
+                    build_say_call(self.bot_name, cleaned, self.app),
+                    kind="say",
+                )
+            )
+        except Exception:
+            return False
+        return bool(result.ok and result.accepted and result.data.get("said") is True)
 
     def get_state(self) -> BodyState:
         return parse_state(self._timed_request(build_state_call(self.bot_name, self.app), kind="state"))
@@ -711,6 +730,14 @@ def _transport_snapshot(transport: BodyTransport) -> dict[str, object]:
     if isinstance(value, dict):
         return {"transport_stats": dict(value)}
     return {}
+
+
+def _sanitize_chat_text(text: str) -> str:
+    cleaned = str(text).replace("\r", " ").replace("\n", " ")
+    cleaned = _MINECRAFT_FORMATTING_RE.sub("", cleaned)
+    cleaned = "".join(ch for ch in cleaned if ch == "\t" or ord(ch) >= 32)
+    cleaned = " ".join(cleaned.strip().split())
+    return cleaned[:CHAT_TEXT_LIMIT]
 
 
 def _next_start(perception) -> object | None:

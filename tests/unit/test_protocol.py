@@ -7,6 +7,7 @@ from minebot.game.protocol import (
     build_action_call,
     build_chat_drain_call,
     build_perceive_call,
+    build_say_call,
     parse_events,
     parse_events_page,
     parse_perception,
@@ -39,6 +40,11 @@ class ProtocolTests(unittest.TestCase):
 
         self.assertTrue(command.startswith("script in minebot run minebot_drain_chat("))
         self.assertIn("'Bot1'", command)
+
+    def test_build_say_call_allows_unicode_and_escapes_quotes(self):
+        command = build_say_call("Bot1", "你好 Bob's base")
+
+        self.assertEqual(command, "script in minebot run minebot_say('Bot1', '你好 Bob\\'s base')")
 
 
     def test_parse_result_requires_complete_envelope(self):

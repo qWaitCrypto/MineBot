@@ -810,6 +810,7 @@ class AgentRuntime:
         tool_facts: dict[str, dict[str, object]] | None = None,
         trace: RuntimeTrace | None = None,
         recovery_handler: RecoveryHandler | None = None,
+        speech_sink: Callable[[str], None] | None = None,
     ) -> None:
         self.body = body
         self.registry = registry
@@ -823,6 +824,7 @@ class AgentRuntime:
         self.tool_facts: dict[str, dict[str, object]] = tool_facts or {}
         self.trace = trace or RuntimeTrace()
         self.recovery_handler = recovery_handler
+        self.speech_sink = speech_sink
         self.hooks = RuntimeHooks()
         self.weld_context = WeldContext(
             body=body,
@@ -969,12 +971,19 @@ class AgentRuntime:
 
     def _record_run_result(self, result: Any) -> None:
         extracted = extract_run_observations(result)
+        speech_sent = False
         for event in extracted:
             self.trace.emit(**event)
             if event.get("event") in {"assistant_message", "assistant_final_output"}:
                 content = event.get("content")
                 if isinstance(content, str) and content.strip():
                     self.agent_context.observe_assistant_message(content)
+                    if self.speech_sink is not None and not speech_sent:
+                        speech_sent = True
+                        try:
+                            self.speech_sink(content)
+                        except Exception as exc:
+                            self.trace.emit("speech_sink_failed", error_type=type(exc).__name__)
         has_content = any(
             event.get("event") in {"assistant_message", "assistant_final_output"} and event.get("content")
             for event in extracted

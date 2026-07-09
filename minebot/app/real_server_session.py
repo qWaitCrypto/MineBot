@@ -249,6 +249,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
             return 4
         body = ScarpetBody(config.bot_name, rcon)
         sink = JsonlObservationSink(config.log_path)
+        speech_sink = _interactive_speech_sink(body)
 
         def make_parts(goal_text: str):
             trace = RuntimeTrace(session_id=config.bot_name, sink=sink)
@@ -266,6 +267,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
                     natural_region=config.natural_region,
                     recovery_respawn_pos=config.recovery_respawn_pos,
                     recovery_gamemode="survival",
+                    speech_sink=speech_sink,
                 ),
                 agent_name="MineBotRealServer",
                 language=config.language,
@@ -289,6 +291,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
             if truth.satisfied:
                 final = session.complete_current_goal("terminal_truth_satisfied")
                 truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
+            _announce_interactive_terminal(body, truth)
             if session.parts is not None:
                 session.parts.runtime.trace.emit(
                     "session_terminal",
@@ -314,6 +317,43 @@ def _ensure_scarpet_global_app(rcon: RconClient, bot_name: str) -> None:
     rcon.request("script load minebot global")
     command = build_state_call(bot_name)
     parse_state(rcon.request(command))
+
+
+def _interactive_speech_sink(body: object):
+    last_text = {"value": None}
+    say = getattr(body, "say", None)
+
+    def sink(text: str) -> None:
+        if not callable(say):
+            return
+        if text == last_text["value"]:
+            return
+        last_text["value"] = text
+        say(text)
+
+    return sink
+
+
+def _announce_interactive_terminal(body: object, truth: TerminalTruth) -> bool:
+    say = getattr(body, "say", None)
+    if not callable(say):
+        return False
+    announcement = _terminal_announcement(truth)
+    if not announcement:
+        return False
+    return bool(say(announcement))
+
+
+def _terminal_announcement(truth: TerminalTruth) -> str | None:
+    if truth.satisfied:
+        if truth.target is not None and truth.inventory_count is not None:
+            return f"done: {truth.target.item} {truth.inventory_count}/{truth.target.count}"
+        return "done"
+    if truth.status == "yielded" or truth.lifecycle == "yielded":
+        return "yielded: waiting for direction"
+    if truth.status == "failed":
+        return "failed: needs attention"
+    return None
 
 
 async def _run_interactive_loop(

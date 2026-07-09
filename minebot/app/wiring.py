@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from minebot.app.model_provider import ModelProviderRegistry
@@ -37,6 +38,7 @@ def build_agent_runtime(
     trace: RuntimeTrace | None = None,
     recovery_handler: RecoveryHandler | None = None,
     authority: ProgressAuthority | None = None,
+    speech_sink: Callable[[str], None] | None = None,
 ) -> AgentRuntimeParts:
     context = AgentContext(
         system_prompt=prompt_with_language(system_prompt, language=language),
@@ -57,6 +59,7 @@ def build_agent_runtime(
         agent_name=agent_name,
         trace=trace,
         recovery_handler=recovery_handler,
+        speech_sink=speech_sink,
     )
     return AgentRuntimeParts(
         runtime=runtime,

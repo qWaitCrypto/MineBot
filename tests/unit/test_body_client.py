@@ -222,6 +222,72 @@ class BodyClientTests(unittest.TestCase):
         self.assertIn("minebot_perceive", entry["command_head"])
         self.assertNotIn("command", entry)
 
+    def test_say_sanitizes_unicode_text_and_parses_result(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "result",
+                        "id": None,
+                        "bot": "Bot1",
+                        "ok": True,
+                        "accepted": True,
+                        "complete": True,
+                        "data": {"action": "say", "said": True},
+                        "error": None,
+                    }
+                )
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        result = body.say("  §a你好\nBob's base  ")
+
+        self.assertTrue(result)
+        self.assertEqual(transport.commands, ["script in minebot run minebot_say('Bot1', '你好 Bob\\'s base')"])
+        self.assertEqual(body.request_history[-1]["kind"], "say")
+
+    def test_say_empty_text_is_noop(self):
+        transport = FakeTransport([])
+        body = ScarpetBody("Bot1", transport)
+
+        self.assertTrue(body.say(" \n §a "))
+        self.assertEqual(transport.commands, [])
+
+    def test_say_clamps_before_transport(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "result",
+                        "id": None,
+                        "bot": "Bot1",
+                        "ok": True,
+                        "accepted": True,
+                        "complete": True,
+                        "data": {"action": "say", "said": True},
+                        "error": None,
+                    }
+                )
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        self.assertTrue(body.say("x" * 260))
+
+        command = transport.commands[0]
+        self.assertEqual(command.count("x"), 220)
+
+    def test_say_transport_failure_is_non_fatal(self):
+        class FailingTransport:
+            def request(self, command: str) -> str:
+                raise OSError("socket closed")
+
+        body = ScarpetBody("Bot1", FailingTransport())
+
+        self.assertFalse(body.say("hello"))
+        self.assertEqual(body.request_history[-1]["kind"], "say")
+        self.assertFalse(body.request_history[-1]["ok"])
 
     def test_poll_events_inserts_desync_fact_on_gap(self):
         transport = FakeTransport(
