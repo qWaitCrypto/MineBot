@@ -259,9 +259,18 @@ class AgentSession:
 
     async def _apply_command(self, command: SessionCommand) -> list[AgentSignal]:
         if command.kind is SessionCommandKind.START:
+            had_parts = self.parts is not None
             self.parts = self.parts_factory(command.text)
             self._goal_driver_keys.clear()
             self.parts.context.observe_user_message(command.text)
+            if not had_parts and command.reason in {"chat_goal_promoted", "chat_session_started"}:
+                self._trace(
+                    "chat_message",
+                    sender="",
+                    command=command.kind.value,
+                    content=command.text,
+                    reason=command.reason,
+                )
             self._trace("user_message", command="start", content=command.text)
             if command.reason == "chat_goal_promoted":
                 self._trace("chat_goal_promoted", goal=command.text)

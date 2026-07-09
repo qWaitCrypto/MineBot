@@ -37,26 +37,30 @@ class ProgressTests(unittest.TestCase):
         self.assertNotEqual(d, a)
 
 
-    def test_stagnation_trips_on_same_action_same_fingerprint_at_limit(self):
+    def test_successful_tool_result_resets_stagnation_even_with_same_fingerprint(self):
         progress = ProgressAuthority()
         fp = progress.fingerprint(state())
 
         for _ in range(STAGNATION_LIMIT + 1):
             progress.note_step(("move_to", 1, 2, 3), success=True, fingerprint=fp)
 
-        self.assertEqual(progress.stagnant_steps, STAGNATION_LIMIT)
-        self.assertTrue(progress.should_yield())
+        self.assertEqual(progress.stagnant_steps, 0)
+        self.assertEqual(progress.stalled_steps, 0)
+        self.assertEqual(progress.failure_steps, 0)
+        self.assertFalse(progress.should_yield())
 
 
-    def test_stall_trips_on_varied_actions_same_fingerprint_at_limit(self):
+    def test_successful_varied_tool_results_reset_stall_even_with_same_fingerprint(self):
         progress = ProgressAuthority()
         fp = progress.fingerprint(state())
 
         for i in range(STALL_LIMIT + 1):
             progress.note_step(("action", i), success=True, fingerprint=fp)
 
-        self.assertEqual(progress.stalled_steps, STALL_LIMIT)
-        self.assertTrue(progress.should_yield())
+        self.assertEqual(progress.stalled_steps, 0)
+        self.assertEqual(progress.stagnant_steps, 0)
+        self.assertEqual(progress.failure_steps, 0)
+        self.assertFalse(progress.should_yield())
 
 
     def test_failure_storm_trips_at_limit(self):

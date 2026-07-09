@@ -103,12 +103,17 @@ class LocalProgressController:
         if neutral:
             self.current_fingerprint = fingerprint
             return
+        if success:
+            self.current_fingerprint = fingerprint
+            self.stagnant_steps = 0
+            self.stalled_steps = 0
+            self.failure_steps = 0
+            self.last_action = action_key
+            self.last_fingerprint = fingerprint
+            return
         self.observe_step(action_key, fingerprint)
 
-        if success:
-            self.failure_steps = 0
-        else:
-            self.failure_steps += 1
+        self.failure_steps += 1
 
         self.last_action = action_key
         self.last_fingerprint = fingerprint

@@ -278,6 +278,58 @@ class BodyClientTests(unittest.TestCase):
         command = transport.commands[0]
         self.assertEqual(command.count("x"), 220)
 
+    def test_say_redacts_coordinate_triples(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "result",
+                        "id": None,
+                        "bot": "Bot1",
+                        "ok": True,
+                        "accepted": True,
+                        "complete": True,
+                        "data": {"action": "say", "said": True},
+                        "error": None,
+                    }
+                )
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        self.assertTrue(body.say("I am at (44.5, 70.0, 44.5) with 3 logs."))
+
+        self.assertEqual(
+            transport.commands,
+            ["script in minebot run minebot_say('Bot1', 'I am at [position] with 3 logs.')"],
+        )
+
+    def test_say_redacts_labeled_bare_coordinate_triples(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "result",
+                        "id": None,
+                        "bot": "Bot1",
+                        "ok": True,
+                        "accepted": True,
+                        "complete": True,
+                        "data": {"action": "say", "said": True},
+                        "error": None,
+                    }
+                )
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        self.assertTrue(body.say("坐标 44, 70, 44，背包里有 3 logs."))
+
+        self.assertEqual(
+            transport.commands,
+            ["script in minebot run minebot_say('Bot1', '[position]，背包里有 3 logs.')"],
+        )
+
     def test_say_transport_failure_is_non_fatal(self):
         class FailingTransport:
             def request(self, command: str) -> str:

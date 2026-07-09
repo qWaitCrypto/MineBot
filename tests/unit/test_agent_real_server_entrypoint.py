@@ -819,6 +819,27 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(session.submitted[0].reason, "chat_session_started")
         self.assertEqual(session.submitted[0].text, "hello")
 
+    def test_chat_events_start_new_session_when_previous_goal_is_idle(self):
+        session = IdleRecordingSession()
+        chat = ChatSource(
+            [
+                Event(
+                    seq=1,
+                    tick=10,
+                    bot="Bot1",
+                    name="agentChat",
+                    data={"sender": "Steve", "message": "attack the husk"},
+                )
+            ]
+        )
+
+        count = _poll_chat_commands(session, chat)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(session.submitted[0].kind, SessionCommandKind.START)
+        self.assertEqual(session.submitted[0].reason, "chat_session_started")
+        self.assertEqual(session.submitted[0].text, "attack the husk")
+
     def test_chat_events_promote_canonical_goal_as_replace_when_active(self):
         session = RecordingSession()
         chat = ChatSource(
@@ -1657,6 +1678,12 @@ class RecordingSession:
 
     def submit(self, command):
         self.submitted.append(command)
+
+
+class IdleRecordingSession(RecordingSession):
+    @property
+    def lifecycle_state(self):
+        return LifecycleState.IDLE
 
 
 class TraceParts:

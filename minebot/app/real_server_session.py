@@ -413,7 +413,7 @@ def _poll_chat_commands(session: AgentSession, chat_source: object | None) -> in
             promoted = parse_canonical_goal_command(message, has_active_goal=getattr(session, "parts", None) is not None)
             if promoted is not None:
                 command = promoted
-            elif getattr(session, "parts", None) is None:
+            elif getattr(session, "parts", None) is None or _session_accepts_idle_start(session):
                 command = SessionCommand.start(message, reason="chat_session_started")
         if command is None:
             continue
@@ -433,6 +433,13 @@ def _poll_chat_commands(session: AgentSession, chat_source: object | None) -> in
 
 def _session_goal(session: AgentSession, fallback: str | None) -> str:
     return getattr(session, "current_goal", None) or fallback or ""
+
+
+def _session_accepts_idle_start(session: AgentSession) -> bool:
+    lifecycle = getattr(session, "lifecycle_state", None)
+    if lifecycle is None:
+        return False
+    return lifecycle is LifecycleState.IDLE and not getattr(session, "pending", None)
 
 
 def _goal_driver(parts: AgentRuntimeParts, signals: list[AgentSignal]) -> SessionStep | None:

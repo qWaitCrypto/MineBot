@@ -63,6 +63,13 @@ GLOBAL_TERMINAL_EVENTS = {
 MAX_MINECRAFT_USERNAME_LENGTH = 16
 CHAT_TEXT_LIMIT = 220
 _MINECRAFT_FORMATTING_RE = re.compile(r"§.")
+_COORDINATE_TRIPLE_RE = re.compile(
+    r"(?<![\w.-])[\[(]\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*[\])]"
+)
+_LABELED_COORDINATE_TRIPLE_RE = re.compile(
+    r"(?i)\b(?:coordinates?|coords?|position|pos|at)\s*[:=]?\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?|"
+    r"(?:坐标|位置)\s*[:：]?\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?"
+)
 
 
 class ScarpetBody:
@@ -735,6 +742,8 @@ def _transport_snapshot(transport: BodyTransport) -> dict[str, object]:
 def _sanitize_chat_text(text: str) -> str:
     cleaned = str(text).replace("\r", " ").replace("\n", " ")
     cleaned = _MINECRAFT_FORMATTING_RE.sub("", cleaned)
+    cleaned = _COORDINATE_TRIPLE_RE.sub("[position]", cleaned)
+    cleaned = _LABELED_COORDINATE_TRIPLE_RE.sub("[position]", cleaned)
     cleaned = "".join(ch for ch in cleaned if ch == "\t" or ord(ch) >= 32)
     cleaned = " ".join(cleaned.strip().split())
     return cleaned[:CHAT_TEXT_LIMIT]
