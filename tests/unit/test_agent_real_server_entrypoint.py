@@ -22,6 +22,7 @@ from minebot.app.real_server_session import (
     _run_interactive_loop,
     evaluate_terminal_truth,
     main,
+    parse_canonical_goal_command,
     parse_collect_target,
     parse_goal_target,
     parse_session_command,
@@ -179,9 +180,13 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             if not key.startswith("MINEBOT_REAL_")
         }
         with patch.dict(os.environ, clean_env, clear=True):
-            code = main(["collect 64 logs", "--interactive", "--max-steps", "1"])
+            code = main(["--interactive", "--max-steps", "1"])
 
         self.assertEqual(code, 2)
+
+    def test_one_shot_still_requires_goal_argument(self):
+        with self.assertRaises(SystemExit):
+            main(["--max-steps", "1"])
 
     def test_parse_interactive_session_commands(self):
         cases = [
@@ -189,6 +194,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             ("/continue now go left", SessionCommandKind.CONTINUE, "now go left", "user_continue"),
             ("/goal collect 64 sand", SessionCommandKind.REPLACE_GOAL, "collect 64 sand", "goal_replaced"),
             ("/cancel done", SessionCommandKind.CANCEL, "", "done"),
+            ("/quit bye", SessionCommandKind.QUIT, "", "bye"),
             ("你现在先看一下背包", SessionCommandKind.MESSAGE, "你现在先看一下背包", "user_message"),
         ]
 
@@ -738,8 +744,8 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(final.status, "completed_turn")
-        self.assertEqual(session.step_count, 2)
+        self.assertEqual(final.status, "completed")
+        self.assertEqual(session.step_count, 5)
 
     def test_chat_events_submit_existing_session_commands(self):
         session = RecordingSession()
@@ -769,6 +775,78 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(session.submitted[0].reason, "wait")
         self.assertEqual(session.submitted[1].text, "继续收集木头")
         self.assertTrue(any(event["event"] == "chat_message" for event in session.parts.runtime.trace.snapshot()))
+
+    def test_chat_events_promote_canonical_goal_when_idle(self):
+        session = RecordingSession()
+        session.parts = None
+        chat = ChatSource(
+            [
+                Event(
+                    seq=1,
+                    tick=10,
+                    bot="Bot1",
+                    name="agentChat",
+                    data={"sender": "Steve", "message": "collect 3 oak_log"},
+                )
+            ]
+        )
+
+        count = _poll_chat_commands(session, chat)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(session.submitted[0].kind, SessionCommandKind.START)
+        self.assertEqual(session.submitted[0].reason, "chat_goal_promoted")
+
+    def test_chat_events_start_idle_session_for_plain_message(self):
+        session = RecordingSession()
+        session.parts = None
+        chat = ChatSource(
+            [
+                Event(
+                    seq=1,
+                    tick=10,
+                    bot="Bot1",
+                    name="agentChat",
+                    data={"sender": "Steve", "message": "hello"},
+                )
+            ]
+        )
+
+        count = _poll_chat_commands(session, chat)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(session.submitted[0].kind, SessionCommandKind.START)
+        self.assertEqual(session.submitted[0].reason, "chat_session_started")
+        self.assertEqual(session.submitted[0].text, "hello")
+
+    def test_chat_events_promote_canonical_goal_as_replace_when_active(self):
+        session = RecordingSession()
+        chat = ChatSource(
+            [
+                Event(
+                    seq=1,
+                    tick=10,
+                    bot="Bot1",
+                    name="agentChat",
+                    data={"sender": "Steve", "message": "collect 3 oak_log"},
+                )
+            ]
+        )
+
+        count = _poll_chat_commands(session, chat)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(session.submitted[0].kind, SessionCommandKind.REPLACE_GOAL)
+        self.assertEqual(session.submitted[0].reason, "chat_goal_promoted")
+        self.assertTrue(any(event["event"] == "chat_message" and event["reason"] == "chat_goal_promoted" for event in session.parts.runtime.trace.snapshot()))
+
+    def test_canonical_goal_promotion_rejects_embedded_chat(self):
+        self.assertIsNone(parse_canonical_goal_command("I collected 3 diamonds yesterday"))
+        self.assertIsNone(parse_canonical_goal_command("can you collect stuff later"))
+        self.assertIsNone(parse_canonical_goal_command("please collect 3 oak_log"))
+        promoted = parse_canonical_goal_command("collect 3 oak_log")
+        self.assertIsNotNone(promoted)
+        self.assertEqual(promoted.kind, SessionCommandKind.START)
 
     def test_interactive_loop_polls_chat_before_each_session_step(self):
         session = ReplacedGoalSession(
@@ -801,8 +879,71 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(final.status, "completed_turn")
+        self.assertEqual(final.status, "completed")
         self.assertEqual([command.kind for command in session.submitted], [SessionCommandKind.REPLACE_GOAL])
+
+    def test_interactive_loop_keeps_idle_session_alive_until_quit(self):
+        class IdleThenQuitSession:
+            def __init__(self):
+                self.pending = []
+                self.parts = None
+                self.step_count = 0
+
+            async def step(self):
+                self.step_count += 1
+                if self.step_count >= 2:
+                    return SessionStep("quit", LifecycleState.IDLE, "user_quit")
+                return SessionStep("idle", LifecycleState.IDLE, "no active goal")
+
+        session = IdleThenQuitSession()
+        body = InventoryBody({})
+
+        final = asyncio.run(
+            _run_interactive_loop(
+                session,
+                fallback_goal=None,
+                body=body,
+                max_steps=3,
+            )
+        )
+
+        self.assertEqual(final.status, "quit")
+        self.assertEqual(session.step_count, 2)
+
+    def test_interactive_loop_completes_goal_and_returns_to_idle_without_exiting(self):
+        class CompletingSession:
+            def __init__(self):
+                self.pending = []
+                self.parts = TraceParts()
+                self.current_goal = "collect 3 logs"
+                self.step_count = 0
+                self.completed = []
+
+            async def step(self):
+                self.step_count += 1
+                if self.step_count == 1:
+                    return SessionStep("completed_turn", LifecycleState.ACTIVE)
+                return SessionStep("quit", LifecycleState.IDLE, "user_quit")
+
+            def complete_current_goal(self, reason):
+                self.completed.append(reason)
+                return SessionStep("completed", LifecycleState.IDLE, reason)
+
+        session = CompletingSession()
+        body = InventoryBody({"oak_log": 3})
+
+        final = asyncio.run(
+            _run_interactive_loop(
+                session,
+                fallback_goal="collect 3 logs",
+                body=body,
+                max_steps=4,
+            )
+        )
+
+        self.assertEqual(final.status, "quit")
+        self.assertEqual(session.completed, ["terminal_truth_satisfied"])
+        self.assertEqual(session.step_count, 2)
 
     def test_interactive_loop_terminal_truth_failure_does_not_crash(self):
         session = ReplacedGoalSession(
@@ -1502,6 +1643,9 @@ class ReplacedGoalSession:
 
     def submit(self, command):
         self.submitted.append(command)
+
+    def complete_current_goal(self, reason):
+        return SessionStep("completed", LifecycleState.IDLE, reason)
 
 
 class RecordingSession:

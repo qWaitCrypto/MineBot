@@ -28,6 +28,7 @@ class SessionCommandKind(Enum):
     CANCEL = "cancel"
     REPLACE_GOAL = "replace_goal"
     MESSAGE = "message"
+    QUIT = "quit"
 
 
 @dataclass(frozen=True)
@@ -37,8 +38,8 @@ class SessionCommand:
     reason: str = ""
 
     @classmethod
-    def start(cls, goal: str) -> "SessionCommand":
-        return cls(SessionCommandKind.START, text=goal, reason="goal_started")
+    def start(cls, goal: str, reason: str = "goal_started") -> "SessionCommand":
+        return cls(SessionCommandKind.START, text=goal, reason=reason)
 
     @classmethod
     def pause(cls, reason: str = "user_pause") -> "SessionCommand":
@@ -53,12 +54,16 @@ class SessionCommand:
         return cls(SessionCommandKind.CANCEL, reason=reason)
 
     @classmethod
-    def replace_goal(cls, goal: str) -> "SessionCommand":
-        return cls(SessionCommandKind.REPLACE_GOAL, text=goal, reason="goal_replaced")
+    def replace_goal(cls, goal: str, reason: str = "goal_replaced") -> "SessionCommand":
+        return cls(SessionCommandKind.REPLACE_GOAL, text=goal, reason=reason)
 
     @classmethod
     def message(cls, text: str) -> "SessionCommand":
         return cls(SessionCommandKind.MESSAGE, text=text, reason="user_message")
+
+    @classmethod
+    def quit(cls, reason: str = "user_quit") -> "SessionCommand":
+        return cls(SessionCommandKind.QUIT, reason=reason)
 
 
 @dataclass(frozen=True)
@@ -87,7 +92,7 @@ class AgentSession:
 
     def submit(self, command: SessionCommand) -> None:
         self.pending.append(command)
-        if self.parts is not None and command.kind in {SessionCommandKind.PAUSE, SessionCommandKind.CANCEL}:
+        if self.parts is not None and command.kind in {SessionCommandKind.PAUSE, SessionCommandKind.CANCEL, SessionCommandKind.QUIT}:
             self._body_interrupt(command.reason)
 
     @property
@@ -106,11 +111,18 @@ class AgentSession:
         """Drain queued user commands, then advance active work by one SDK run."""
         signals: list[AgentSignal] = []
         suppress_run = False
+        quit_requested = False
         while self.pending:
             command = self.pending.popleft()
+            if command.kind is SessionCommandKind.QUIT:
+                quit_requested = True
             signals.extend(await self._apply_command(command))
             if command.kind is SessionCommandKind.CANCEL:
                 suppress_run = True
+
+        if quit_requested:
+            lifecycle = self.parts.lifecycle.state if self.parts is not None else LifecycleState.IDLE
+            return SessionStep("quit", lifecycle, "user_quit")
 
         if self.parts is None:
             return SessionStep("idle", LifecycleState.IDLE, "no active goal")
@@ -251,7 +263,16 @@ class AgentSession:
             self._goal_driver_keys.clear()
             self.parts.context.observe_user_message(command.text)
             self._trace("user_message", command="start", content=command.text)
+            if command.reason == "chat_goal_promoted":
+                self._trace("chat_goal_promoted", goal=command.text)
             return [AgentSignal.goal_started(command.text)]
+
+        if command.kind is SessionCommandKind.QUIT:
+            if self.parts is not None:
+                self.parts.context.observe_user_message(command.reason)
+                self._trace("user_message", command="quit", reason=command.reason)
+                self._stand_down()
+            return []
 
         if self.parts is None:
             return []
@@ -268,6 +289,8 @@ class AgentSession:
             self.parts.authority.invalidate_generation("goal_replaced")
             self._goal_driver_keys.clear()
             self._trace("user_message", command="replace_goal", content=command.text)
+            if command.reason == "chat_goal_promoted":
+                self._trace("chat_goal_promoted", goal=command.text)
             return [AgentSignal.goal_started(command.text)]
 
         if command.kind is SessionCommandKind.PAUSE:

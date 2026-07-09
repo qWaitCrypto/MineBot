@@ -170,6 +170,20 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(session.lifecycle_state, LifecycleState.IDLE)
         self.assertEqual(bodies[0].interrupt_reasons, ["stop_now"])
 
+    def test_quit_interrupts_and_returns_quit_step(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+
+        session.submit(SessionCommand.quit("user_quit"))
+        self.assertEqual(bodies[0].interrupt_reasons, ["user_quit"])
+        quit_step = asyncio.run(session.step())
+
+        self.assertEqual(quit_step.status, "quit")
+        self.assertEqual(quit_step.lifecycle, LifecycleState.IDLE)
+
     def test_complete_current_goal_stands_down_from_active(self):
         calls: list[str] = []
         bodies: list[FakeBody] = []

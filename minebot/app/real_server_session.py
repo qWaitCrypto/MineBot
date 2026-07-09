@@ -21,7 +21,7 @@ from minebot.app.observability import JsonlObservationSink
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime, inventory_count
 from minebot.app.runner import RuntimeTrace
 from minebot.app.wiring import AgentRuntimeParts
-from minebot.app.session import DEFAULT_RUNAWAY_STEP_LIMIT, AgentSession, SessionCommand, SessionStep
+from minebot.app.session import DEFAULT_RUNAWAY_STEP_LIMIT, AgentSession, SessionCommand, SessionCommandKind, SessionStep
 from minebot.brain.lifecycle import LifecycleState
 from minebot.brain.modes import AgentSignal
 from minebot.brain.composition import resource_plan_for
@@ -221,7 +221,7 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
             await provider.aclose()
 
 
-async def run_real_server_interactive(config: RealServerConfig, goal: str, *, max_steps: int | None) -> int:
+async def run_real_server_interactive(config: RealServerConfig, goal: str | None, *, max_steps: int | None) -> int:
     """Run one persistent real-server session with stdin as the user channel."""
     provider = provider_registry_from_env()
     rcon = RconClient(config.rcon)
@@ -276,7 +276,8 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
             return parts
 
         session = AgentSession(make_parts, goal_driver=_goal_driver)
-        session.submit(SessionCommand.start(goal))
+        if goal:
+            session.submit(SessionCommand.start(goal))
         reader = asyncio.create_task(_stdin_command_reader(session))
         try:
             final = await _run_interactive_loop(
@@ -288,9 +289,6 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str, *, ma
             )
             terminal_goal = _session_goal(session, goal)
             truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
-            if truth.satisfied:
-                final = session.complete_current_goal("terminal_truth_satisfied")
-                truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
             _announce_interactive_terminal(body, truth)
             if session.parts is not None:
                 session.parts.runtime.trace.emit(
@@ -359,7 +357,7 @@ def _terminal_announcement(truth: TerminalTruth) -> str | None:
 async def _run_interactive_loop(
     session: AgentSession,
     *,
-    fallback_goal: str,
+    fallback_goal: str | None,
     body: Body,
     max_steps: int | None,
     chat_source: object | None = None,
@@ -369,15 +367,22 @@ async def _run_interactive_loop(
     while remaining is None or remaining > 0:
         _poll_chat_commands(session, chat_source)
         last = await session.step()
-        if safe_evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last, session=session).satisfied:
+        if last.status == "quit":
             return last
-        if last.lifecycle.value == "idle" and not session.pending:
-            return last
+        truth = safe_evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last, session=session)
+        if truth.satisfied:
+            completed = session.complete_current_goal("terminal_truth_satisfied")
+            completed_truth = safe_evaluate_terminal_truth(body, truth.goal, completed, session=session)
+            _announce_interactive_terminal(body, completed_truth)
+            last = completed
         if last.lifecycle not in {LifecycleState.ACTIVE, LifecycleState.RECOVERING, LifecycleState.RESUMING} and not session.pending:
-            return last
+            await asyncio.sleep(0.25)
+            if remaining is not None:
+                remaining -= 1
+            continue
         if remaining is not None:
             remaining -= 1
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.25 if last.lifecycle.value == "idle" else 0)
     assert last is not None
     return last
 
@@ -404,6 +409,12 @@ def _poll_chat_commands(session: AgentSession, chat_source: object | None) -> in
         if not message:
             continue
         command = parse_session_command(message)
+        if command is not None and command.kind is SessionCommandKind.MESSAGE:
+            promoted = parse_canonical_goal_command(message, has_active_goal=getattr(session, "parts", None) is not None)
+            if promoted is not None:
+                command = promoted
+            elif getattr(session, "parts", None) is None:
+                command = SessionCommand.start(message, reason="chat_session_started")
         if command is None:
             continue
         parts = getattr(session, "parts", None)
@@ -420,8 +431,8 @@ def _poll_chat_commands(session: AgentSession, chat_source: object | None) -> in
     return count
 
 
-def _session_goal(session: AgentSession, fallback: str) -> str:
-    return session.current_goal or fallback
+def _session_goal(session: AgentSession, fallback: str | None) -> str:
+    return getattr(session, "current_goal", None) or fallback or ""
 
 
 def _goal_driver(parts: AgentRuntimeParts, signals: list[AgentSignal]) -> SessionStep | None:
@@ -461,6 +472,9 @@ def parse_session_command(line: str) -> SessionCommand | None:
     if not text:
         return None
     lowered = text.lower()
+    if lowered in {"/quit", "quit", "/exit", "exit"} or lowered.startswith(("/quit ", "/exit ")):
+        tail = _command_tail(text, "/quit") if lowered.startswith("/quit") else _command_tail(text, "/exit")
+        return SessionCommand.quit(tail or "user_quit")
     if lowered in {"/pause", "pause"} or lowered.startswith("/pause "):
         return SessionCommand.pause(_command_tail(text, "/pause") or "user_pause")
     if lowered in {"/continue", "continue"} or lowered.startswith("/continue "):
@@ -472,6 +486,46 @@ def parse_session_command(line: str) -> SessionCommand | None:
         tail = _command_tail(text, "/goal") if lowered.startswith("/goal ") else _command_tail(text, "/replace")
         return SessionCommand.replace_goal(tail)
     return SessionCommand.message(text)
+
+
+def parse_canonical_goal_command(line: str, *, has_active_goal: bool = False) -> SessionCommand | None:
+    text = line.strip()
+    if not text:
+        return None
+    if not _looks_like_strict_goal_command(text):
+        return None
+    target = parse_goal_target(text)
+    if target is None:
+        return None
+    if not _canonical_goal_fully_matches(text, target):
+        return None
+    if has_active_goal:
+        return SessionCommand.replace_goal(text, reason="chat_goal_promoted")
+    return SessionCommand.start(text, reason="chat_goal_promoted")
+
+
+def _looks_like_strict_goal_command(text: str) -> bool:
+    lowered = text.strip().lower().replace("minecraft:", "")
+    return bool(
+        re.fullmatch(r"(?:collect|get|gather|mine)\s+(?:\d+\s+[a-z_]+|[a-z_]+\s+\d+)", lowered)
+        or re.fullmatch(r"(?:craft|make|build)\s+(?:(?:\d+|a|an)\s+)?[a-z_]+(?:\s+[a-z_]+)*", lowered)
+        or re.fullmatch(r"get\s+(?:an?\s+)?[a-z_]+", lowered)
+    )
+
+
+def _canonical_goal_fully_matches(text: str, target: GoalTarget) -> bool:
+    lowered = text.strip().lower().replace("minecraft:", "")
+    item_pattern = re.escape(target.item).replace("_", r"[_\s-]")
+    count = str(target.count)
+    if target.kind == "collect":
+        return bool(
+            re.fullmatch(rf"(?:collect|get|gather|mine)\s+{count}\s+{item_pattern}", lowered)
+            or re.fullmatch(rf"(?:collect|get|gather|mine)\s+{item_pattern}\s+{count}", lowered)
+        )
+    return bool(
+        re.fullmatch(rf"(?:craft|make|build)\s+(?:{count}\s+|a\s+|an\s+)?{item_pattern}", lowered)
+        or (target.count == 1 and re.fullmatch(rf"get\s+(?:an?\s+)?{item_pattern}", lowered))
+    )
 
 
 def _command_tail(text: str, command: str) -> str:
@@ -603,7 +657,7 @@ def _normalize_goal_item(item: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run MineBot Agent against an explicitly configured real Minecraft server.")
-    parser.add_argument("goal", help="Natural-language user goal, e.g. 'collect 64 logs'.")
+    parser.add_argument("goal", nargs="?", help="Natural-language user goal, e.g. 'collect 64 logs'.")
     parser.add_argument(
         "--max-steps",
         type=int,
@@ -616,6 +670,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Keep the same real-server Agent session alive and read user messages from stdin.",
     )
     args = parser.parse_args(argv)
+    if not args.interactive and not args.goal:
+        parser.error("goal is required unless --interactive is set")
     try:
         config = real_server_config_from_env()
     except (RealServerConfigError, AppConfigError, ValueError) as exc:
