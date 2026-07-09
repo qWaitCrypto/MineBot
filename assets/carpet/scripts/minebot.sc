@@ -4338,6 +4338,16 @@ minebot_despawn(name) -> (
   result_json(null, name, true, true, '{"action":"despawn"}', null)
 );
 
+minebot_say(name, text) -> (
+  safe_text = str('%.240s', replace(str('%s', text), '\n', ' '));
+  if(length(safe_text) == 0,
+    result_json(null, name, true, true, '{"action":"say","said":false}', null)
+  ,
+    run(str('execute as %s run say %s', name, safe_text));
+    result_json(null, name, true, true, '{"action":"say","said":true}', null)
+  )
+);
+
 minebot_state(name) -> state_json(name);
 
 minebot_perceive(name, scope, payload) -> (

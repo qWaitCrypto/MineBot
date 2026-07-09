@@ -12,6 +12,28 @@ class ScarpetSourceTests(unittest.TestCase):
     def test_test_server_and_deployable_minebot_scripts_stay_in_sync(self):
         self.assertEqual(MINEBOT_SC.read_text(), ASSET_MINEBOT_SC.read_text())
 
+    def test_source_remains_comment_free_for_scarpet_loader(self):
+        for path in (MINEBOT_SC, ASSET_MINEBOT_SC):
+            source = path.read_text()
+            self.assertNotRegex(source, r"(?m)^\s*#")
+
+    def test_minebot_say_is_synchronous_outbound_chat_primitive(self):
+        source = MINEBOT_SC.read_text()
+        match = re.search(r"minebot_say\(name, text\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(match, "minebot_say function not found")
+        body = match.group(1)
+        action = re.search(r"minebot_action\(name, payload\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(action, "minebot_action function not found")
+
+        self.assertIn("replace(str('%s', text), '\\n', ' ')", body)
+        self.assertIn("str('%.240s'", body)
+        self.assertIn("execute as %s run say %s", body)
+        self.assertIn('"action":"say","said":true', body)
+        self.assertIn('"action":"say","said":false', body)
+        self.assertNotIn("minebot_say", action.group(1))
+        self.assertNotIn("global_owners", body)
+        self.assertNotIn("emit(", body)
+
     def test_minebot_action_uses_decode_json_not_regex_payload_parser(self):
         source = MINEBOT_SC.read_text()
         match = re.search(r"minebot_action\(name, payload\) -> \((.*?)\n\);", source, re.S)
