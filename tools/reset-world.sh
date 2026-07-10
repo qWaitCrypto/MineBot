@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER_DIR="$ROOT/test-server"
 WORLD="$SERVER_DIR/world"
 GOLDEN="$SERVER_DIR/world-golden"
+SCRIPT_ASSETS="$ROOT/assets/carpet/scripts"
 LOG="$SERVER_DIR/logs/minebot-reset-world.log"
 RCON_HOST="${MINEBOT_REAL_RCON_HOST:-127.0.0.1}"
 RCON_PORT="${MINEBOT_REAL_RCON_PORT:-25576}"
@@ -36,6 +37,10 @@ server_running() {
 
 if [[ ! -d "$GOLDEN" ]]; then
   echo "missing golden world: $GOLDEN" >&2
+  exit 2
+fi
+if [[ ! -d "$SCRIPT_ASSETS" ]]; then
+  echo "missing Scarpet assets: $SCRIPT_ASSETS" >&2
   exit 2
 fi
 
@@ -89,6 +94,8 @@ fi
 
 rm -rf "$WORLD"
 cp -a "$GOLDEN" "$WORLD"
+mkdir -p "$WORLD/scripts"
+cp -a "$SCRIPT_ASSETS/." "$WORLD/scripts/"
 
 mkdir -p "$(dirname "$LOG")"
 : > "$LOG"
@@ -165,6 +172,9 @@ with RconClient(RconConfig(host=host, port=port, password=password, timeout_s=3,
     reset = r.command("script in minebot run minebot_reset()")
     if "true" not in reset.lower():
         raise RuntimeError(reset)
+    event_head = r.command("script in minebot run minebot_event_head('ResetProbe', 'reset-world')")
+    if '"type":"result"' not in event_head or '"ok":true' not in event_head:
+        raise RuntimeError(event_head)
     difficulty = r.command("difficulty").lower()
     spawn_mobs = r.command("gamerule spawn_mobs").lower()
     advance_time = r.command("gamerule advance_time").lower()
