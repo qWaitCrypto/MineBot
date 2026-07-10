@@ -44,6 +44,7 @@ EXECUTION_LANE_POLL_S = 0.01
 EXECUTION_LANE_CANCEL_TIMEOUT_S = 30.0
 BODY_WATCH_POLL_S = 0.25
 STREAM_CANCEL_DRAIN_TIMEOUT_S = EXECUTION_LANE_CANCEL_TIMEOUT_S + 5.0
+MODEL_COUNT_MAP_LIMIT = 48
 
 
 class SerialExecutionLane:
@@ -645,6 +646,17 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
     for key in allowed_keys:
         if key in metrics:
             summary[key] = _bounded_summary_value(metrics[key])
+    if isinstance(metrics.get("counts"), dict):
+        count_items = sorted(metrics["counts"].items(), key=lambda item: str(item[0]))
+        visible_items = count_items[:MODEL_COUNT_MAP_LIMIT]
+        summary["counts"] = {
+            str(key): _bounded_summary_value(value)
+            for key, value in visible_items
+        }
+        summary["distinct_item_count"] = len(count_items)
+        summary["counts_complete"] = len(visible_items) == len(count_items)
+        if len(visible_items) < len(count_items):
+            summary["omitted_item_count"] = len(count_items) - len(visible_items)
     if "skipped" in metrics and isinstance(metrics["skipped"], list):
         skipped = metrics["skipped"]
         summary["skipped_count"] = len(skipped)

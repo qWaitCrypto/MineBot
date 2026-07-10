@@ -710,6 +710,40 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertIn("model_result", result_event)
         self.assertIn("attempts", result_event["full_result"]["metrics"])
 
+    def test_model_tool_payload_preserves_authoritative_inventory_counts(self):
+        result = ToolResult(
+            True,
+            "inventory_counted",
+            False,
+            metrics={"counts": {"rotten_flesh": 2, "oak_log": 4}},
+        ).to_payload()
+
+        payload = _model_tool_payload("read_inventory", result, trace_ref="inventory-trace")
+
+        self.assertEqual(payload["summary"]["counts"], {"oak_log": 4, "rotten_flesh": 2})
+        self.assertEqual(payload["summary"]["distinct_item_count"], 2)
+        self.assertTrue(payload["summary"]["counts_complete"])
+        self.assertNotIn("omitted_item_count", payload["summary"])
+        self.assertNotIn("metrics", payload)
+
+    def test_model_tool_payload_marks_inventory_count_projection_truncation(self):
+        counts = {f"item_{index:02d}": index for index in range(50)}
+        result = ToolResult(
+            True,
+            "inventory_counted",
+            False,
+            metrics={"counts": counts},
+        ).to_payload()
+
+        payload = _model_tool_payload("read_inventory", result, trace_ref="inventory-trace")
+
+        self.assertEqual(len(payload["summary"]["counts"]), 48)
+        self.assertEqual(payload["summary"]["distinct_item_count"], 50)
+        self.assertFalse(payload["summary"]["counts_complete"])
+        self.assertEqual(payload["summary"]["omitted_item_count"], 2)
+        self.assertIn("item_00", payload["summary"]["counts"])
+        self.assertNotIn("item_49", payload["summary"]["counts"])
+
     def test_sdk_tool_records_tool_decision_context(self):
         def callable_(_params):
             return ToolResult(
