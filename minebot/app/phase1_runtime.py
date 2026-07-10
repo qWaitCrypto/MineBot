@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from agents import Session
 
+from minebot.app.body_capability_tools import register_body_capability_tools
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.conversation_tools import register_conversation_archive_tools
 from minebot.app.runner import AgentRuntime, RecoveryOutcome, RuntimeTrace
@@ -25,11 +26,14 @@ from minebot.app.tasks import TaskWorkspace, register_task_tools
 from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
 from minebot.body import (
     BlockWork,
+    ContainerTransactions,
     FurnaceTransactions,
+    InteractionTransactions,
     InventoryTransactions,
     LifecycleTransactions,
     NavigationRunConfig,
     NavigationTransactions,
+    UseTransactions,
 )
 from minebot.body.combat import CombatTransactions, find_hostiles
 from minebot.body.furnace import DEFAULT_SMELT_SECONDS_PER_ITEM, resolve_smelt_output, select_fuel
@@ -487,6 +491,16 @@ def build_phase1_registry(
     work = BlockWork(body, policy, navigator=navigator)
     inventory_txn = InventoryTransactions(body, navigator=navigator, governance=policy, work=work)
     furnace_txn = FurnaceTransactions(body, navigator=navigator, governance=policy, work=work)
+    use_txn = UseTransactions(body, navigator=navigator, inventory=inventory_txn)
+    interaction_txn = InteractionTransactions(
+        body,
+        navigator=navigator,
+        inventory=inventory_txn,
+        use=use_txn,
+        work=work,
+        governance=policy,
+    )
+    container_txn = ContainerTransactions(body, navigator=navigator, governance=policy)
     registry = ToolRegistry()
     registry.register(_read_state_tool(body))
     register_inventory_tools(registry, body)
@@ -501,6 +515,17 @@ def build_phase1_registry(
     registry.register(_craft_tool(inventory_txn))
     registry.register(_equip_tool(inventory_txn))
     registry.register(_smelt_tool(body, furnace_txn))
+    register_body_capability_tools(
+        registry,
+        body=body,
+        navigator=navigator,
+        work=work,
+        inventory=inventory_txn,
+        furnace=furnace_txn,
+        container=container_txn,
+        interaction=interaction_txn,
+        use=use_txn,
+    )
     return registry
 
 
