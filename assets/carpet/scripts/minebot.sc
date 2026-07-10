@@ -3909,6 +3909,7 @@ follow_replan(name, target_pos) -> (
   keep_radius = f:2;
   grid_radius = f:8;
   max_expand = f:9;
+  move_arrival_radius = 0.45;
   p = bot_pos(name);
   sx = floor(p:0);
   sy = floor(p:1);
@@ -3924,7 +3925,7 @@ follow_replan(name, target_pos) -> (
   direct_wp = l(gx + 0.5, gy, gz + 0.5);
   if(plan_status == 'no_path' || plan_status == 'budget_exceeded' || length(plan_path) == 0,
     start_move_to(name, action_id, direct_wp:0, direct_wp:1, direct_wp:2,
-      {'waypoints' -> l(direct_wp), 'arrival_radius' -> keep_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+      {'waypoints' -> l(direct_wp), 'arrival_radius' -> move_arrival_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
   ,
     waypoints = l();
     loop(length(plan_path),
@@ -3933,11 +3934,11 @@ follow_replan(name, target_pos) -> (
     );
     if(length(waypoints) == 0,
       start_move_to(name, action_id, direct_wp:0, direct_wp:1, direct_wp:2,
-        {'waypoints' -> l(direct_wp), 'arrival_radius' -> keep_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+        {'waypoints' -> l(direct_wp), 'arrival_radius' -> move_arrival_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
     ,
       last_wp = waypoints:(length(waypoints) - 1);
       start_move_to(name, action_id, last_wp:0, last_wp:1, last_wp:2,
-        {'waypoints' -> waypoints, 'arrival_radius' -> keep_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+        {'waypoints' -> waypoints, 'arrival_radius' -> move_arrival_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
     )
   )
 );

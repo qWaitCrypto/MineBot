@@ -292,6 +292,16 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("finish_move(name, 'follow_hold', false)", body)
         self.assertIn("finish_follow(name, 'arrived')", body)
 
+    def test_follow_replan_uses_tight_waypoint_arrival_not_keep_radius(self):
+        source = MINEBOT_SC.read_text()
+        match = re.search(r"follow_replan\(name, target_pos\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(match, "follow_replan function not found")
+        body = match.group(1)
+
+        self.assertIn("move_arrival_radius = 0.45", body)
+        self.assertIn("'arrival_radius' -> move_arrival_radius", body)
+        self.assertNotIn("'arrival_radius' -> keep_radius", body)
+
     def test_engage_replan_uses_tight_waypoint_arrival_not_attack_range(self):
         source = MINEBOT_SC.read_text()
         match = re.search(r"engage_replan\(name, target_pos\) -> \((.*?)\n\);", source, re.S)
