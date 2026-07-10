@@ -21,6 +21,7 @@ from agents.tool import FunctionTool
 
 from minebot.app.conversation import WindowedConversationSession, bounded_session_input
 from minebot.app.model_provider import ModelProviderRegistry
+from minebot.app.observation_artifacts import ToolObservationArchive
 from minebot.app.observability import ObservationSink, sanitize_observation
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleError, LifecycleState
@@ -253,10 +254,10 @@ def tool_is_enabled(
 def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
     async def on_invoke_tool(ctx: RunContextWrapper[RuntimeRunContext], input_json: str) -> JsonObject:
         trace = ctx.context.trace
+        runtime = getattr(ctx.context, "runtime", None)
         tool_call_id = f"tool-{uuid4()}-{tool.name}"
         arguments_summary = _tool_arguments_summary_from_json(input_json)
         if trace is not None:
-            runtime = getattr(ctx.context, "runtime", None)
             trace.emit(
                 "tool_decision_context",
                 tool_call_id=tool_call_id,
@@ -298,6 +299,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 result=result,
                 trace=trace,
                 tool_call_id=tool_call_id,
+                runtime=runtime,
             )
         if not isinstance(params, dict):
             result = {
@@ -312,8 +314,8 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 result=result,
                 trace=trace,
                 tool_call_id=tool_call_id,
+                runtime=runtime,
             )
-        runtime = getattr(ctx.context, "runtime", None)
         try:
             if runtime is None:
                 result = _execute_tool_with_continuation(
@@ -364,6 +366,12 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 if runtime is not None:
                     runtime.record_transport_error(tool.name, result, tool_call_id=tool_call_id)
         if _requires_body_recovery(result):
+            _persist_tool_observation(
+                runtime,
+                tool_name=tool.name,
+                tool_call_id=tool_call_id,
+                result=result,
+            )
             if trace is not None:
                 trace.emit(
                     "tool_body_recovery_preempt",
@@ -371,7 +379,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                     tool=tool.name,
                     reason=str(result.get("reason") or "body_recovery_required"),
                     full_result=result,
-            )
+                )
             facts = _recovery_facts_from_tool(tool.name, result)
             raise BodyRecoveryRequired(_recovery_reason_from_tool_result(result, facts), facts=facts)
 
@@ -383,6 +391,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             result=result,
             trace=trace,
             tool_call_id=tool_call_id,
+            runtime=runtime,
         )
 
     def is_enabled(ctx: RunContextWrapper[RuntimeRunContext], agent: Any) -> bool:
@@ -436,8 +445,20 @@ def _finalize_tool_payload(
     result: JsonObject,
     trace: RuntimeTrace | None,
     tool_call_id: str,
+    runtime: "AgentRuntime | None" = None,
 ) -> JsonObject:
-    model_result = _model_tool_payload(tool.name, result, trace_ref=tool_call_id)
+    observation_handle = _persist_tool_observation(
+        runtime,
+        tool_name=tool.name,
+        tool_call_id=tool_call_id,
+        result=result,
+    )
+    model_result = _model_tool_payload(
+        tool.name,
+        result,
+        trace_ref=tool_call_id,
+        observation_handle=observation_handle,
+    )
     if trace is not None:
         trace.emit(
             "tool_result",
@@ -447,8 +468,37 @@ def _finalize_tool_payload(
             success=bool(result.get("success")),
             full_result=result,
             model_result=model_result,
+            observation_handle=observation_handle,
+            projection_complete=model_result["projection"]["complete"],
+            omitted_field_count=model_result["projection"]["omittedFieldCount"],
         )
     return model_result
+
+
+def _persist_tool_observation(
+    runtime: "AgentRuntime | None",
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    result: JsonObject,
+) -> str | None:
+    if runtime is None or runtime.observation_archive is None:
+        return None
+    try:
+        return runtime.observation_archive.store(
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            result=result,
+            complete=_result_complete(result),
+        )
+    except Exception as exc:
+        runtime.trace.emit(
+            "tool_observation_archive_failed",
+            tool=tool_name,
+            tool_call_id=tool_call_id,
+            error_type=type(exc).__name__,
+        )
+        return None
 
 
 def _tool_exception_payload(exc: Exception) -> JsonObject:
@@ -568,7 +618,13 @@ def _first_body_recovery_reason(value: object) -> str | None:
     return None
 
 
-def _model_tool_payload(tool_name: str, result: JsonObject, *, trace_ref: str) -> JsonObject:
+def _model_tool_payload(
+    tool_name: str,
+    result: JsonObject,
+    *,
+    trace_ref: str,
+    observation_handle: str | None = None,
+) -> JsonObject:
     reason = str(result.get("reason") or "")
     success = bool(result.get("success"))
     metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
@@ -583,7 +639,73 @@ def _model_tool_payload(tool_name: str, result: JsonObject, *, trace_ref: str) -
     summary = _metrics_summary(tool_name, reason, metrics)
     if summary:
         payload["summary"] = summary
+    if observation_handle is not None:
+        payload["observationHandle"] = observation_handle
+    payload["projection"] = _projection_metadata(
+        metrics,
+        summary,
+        observation_handle=observation_handle,
+    )
     return payload
+
+
+def _projection_metadata(
+    metrics: dict[str, object],
+    summary: JsonObject,
+    *,
+    observation_handle: str | None,
+) -> JsonObject:
+    omitted: list[str] = []
+    omitted_counts: JsonObject = {}
+    for key, value in metrics.items():
+        projected = summary.get(str(key), _MISSING_PROJECTION_VALUE)
+        if projected is not _MISSING_PROJECTION_VALUE and _projection_values_equal(value, projected):
+            continue
+        path = f"metrics.{key}"
+        omitted.append(path)
+        count = _projection_value_count(value, projected)
+        if count is not None:
+            omitted_counts[path] = count
+    visible_omissions = omitted[:32]
+    projection: JsonObject = {
+        "complete": not omitted,
+        "queryable": observation_handle is not None,
+        "omittedFieldCount": len(omitted),
+        "omittedFields": visible_omissions,
+    }
+    if len(visible_omissions) < len(omitted):
+        projection["omittedFieldsComplete"] = False
+    else:
+        projection["omittedFieldsComplete"] = True
+    if omitted_counts:
+        projection["omittedValueCounts"] = omitted_counts
+    return projection
+
+
+_MISSING_PROJECTION_VALUE = object()
+
+
+def _projection_values_equal(source: object, projected: object) -> bool:
+    try:
+        return sanitize_observation(source) == sanitize_observation(projected)
+    except Exception:
+        return False
+
+
+def _projection_value_count(source: object, projected: object) -> int | None:
+    if isinstance(source, (list, tuple)):
+        if isinstance(projected, list):
+            return max(0, len(source) - len(projected))
+        if isinstance(projected, dict) and isinstance(projected.get("sample"), list):
+            return max(0, len(source) - len(projected["sample"]))
+        return len(source)
+    if isinstance(source, dict):
+        if isinstance(projected, dict):
+            return max(0, len(source) - len(projected))
+        return len(source)
+    if isinstance(source, str) and isinstance(projected, str):
+        return max(0, len(source) - len(projected))
+    return None
 
 
 def _result_complete(result: JsonObject) -> bool | None:
@@ -643,6 +765,16 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
         "reflex_handoff",
     )
     summary: JsonObject = {}
+    if tool_name in {"read_task", "update_plan", "checkpoint_task"}:
+        summary["task_artifact"] = _task_artifact_summary(metrics)
+    elif tool_name == "query_conversation_archive":
+        summary.update(_conversation_archive_query_summary(metrics))
+    elif tool_name == "read_conversation_archive":
+        summary.update(_conversation_archive_turn_summary(metrics))
+    elif tool_name == "query_tool_observations":
+        summary.update(_tool_observation_query_summary(metrics))
+    elif tool_name == "read_tool_observation":
+        summary.update(_tool_observation_read_summary(metrics))
     for key in allowed_keys:
         if key in metrics:
             summary[key] = _bounded_summary_value(metrics[key])
@@ -703,8 +835,267 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
             ),
             "legality_reason": legality.get("reason"),
         }
+    _include_generic_small_metric_facts(summary, metrics)
     if not summary and reason:
         summary["tool"] = tool_name
+    return summary
+
+
+def _include_generic_small_metric_facts(
+    summary: JsonObject,
+    metrics: dict[str, object],
+) -> None:
+    for raw_key, value in metrics.items():
+        key = str(raw_key)
+        if key in summary:
+            continue
+        safe_mapping = sanitize_observation({key: value})
+        if not isinstance(safe_mapping, dict):
+            continue
+        safe_value = safe_mapping.get(key)
+        if safe_value == "<redacted>":
+            continue
+        projected = _bounded_summary_value(safe_value)
+        if not _projection_values_equal(safe_value, projected):
+            continue
+        encoded = json.dumps(projected, ensure_ascii=False, sort_keys=True, default=str)
+        if len(encoded) <= 1200:
+            summary[key] = projected
+
+
+def _conversation_archive_query_summary(metrics: dict[str, object]) -> JsonObject:
+    summary: JsonObject = {
+        key: _bounded_summary_value(metrics[key])
+        for key in (
+            "query",
+            "start",
+            "limit",
+            "total_matches",
+            "next_start",
+            "complete",
+        )
+        if key in metrics
+    }
+    results = metrics.get("results")
+    if not isinstance(results, list):
+        return summary
+    visible = [
+        {
+            key: _bounded_summary_value(result[key])
+            for key in (
+                "handle",
+                "turn",
+                "user",
+                "assistant",
+                "tools",
+                "tool_reasons",
+                "item_count",
+            )
+            if key in result
+        }
+        for result in results[:10]
+        if isinstance(result, dict)
+    ]
+    summary["results"] = visible
+    summary["results_complete"] = len(visible) == len(results)
+    if len(visible) < len(results):
+        summary["omitted_result_count"] = len(results) - len(visible)
+    return summary
+
+
+def _conversation_archive_turn_summary(metrics: dict[str, object]) -> JsonObject:
+    summary: JsonObject = {
+        key: _bounded_summary_value(metrics[key])
+        for key in (
+            "handle",
+            "turn",
+            "start",
+            "limit",
+            "item_count",
+            "next_start",
+            "complete",
+        )
+        if key in metrics
+    }
+    items = metrics.get("items")
+    if not isinstance(items, list):
+        return summary
+    visible = [_conversation_item_summary(item) for item in items[:8]]
+    summary["items"] = visible
+    summary["items_complete"] = len(visible) == len(items)
+    if len(visible) < len(items):
+        summary["omitted_page_item_count"] = len(items) - len(visible)
+    return summary
+
+
+def _conversation_item_summary(item: object) -> object:
+    if not isinstance(item, dict):
+        return _bounded_summary_value(item)
+    return {
+        key: _bounded_summary_value(item[key])
+        for key in ("type", "role", "call_id", "id", "name", "content", "output")
+        if key in item
+    }
+
+
+def _tool_observation_query_summary(metrics: dict[str, object]) -> JsonObject:
+    summary: JsonObject = {
+        key: _bounded_summary_value(metrics[key])
+        for key in (
+            "query",
+            "tool",
+            "reason",
+            "start",
+            "limit",
+            "total_matches",
+            "next_start",
+            "complete",
+        )
+        if key in metrics
+    }
+    results = metrics.get("results")
+    if not isinstance(results, list):
+        return summary
+    visible = [
+        {
+            key: _bounded_summary_value(result[key])
+            for key in (
+                "handle",
+                "tool",
+                "tool_call_id",
+                "success",
+                "reason",
+                "complete",
+                "payload_bytes",
+                "created_at",
+            )
+            if key in result
+        }
+        for result in results[:20]
+        if isinstance(result, dict)
+    ]
+    summary["results"] = visible
+    summary["results_complete"] = len(visible) == len(results)
+    if len(visible) < len(results):
+        summary["omitted_result_count"] = len(results) - len(visible)
+    return summary
+
+
+def _tool_observation_read_summary(metrics: dict[str, object]) -> JsonObject:
+    summary: JsonObject = {
+        key: _bounded_summary_value(metrics[key])
+        for key in (
+            "handle",
+            "tool",
+            "tool_call_id",
+            "success",
+            "reason",
+            "source_complete",
+            "payload_bytes",
+            "created_at",
+            "path",
+            "value_type",
+            "start",
+            "limit",
+            "max_chars",
+            "total_count",
+            "char_count",
+            "next_start",
+            "omitted_count",
+            "complete",
+        )
+        if key in metrics
+    }
+    if "value" in metrics:
+        value = metrics["value"]
+        if isinstance(value, str):
+            summary["value"] = _shorten(value, limit=4000)
+            summary["value_complete"] = len(summary["value"]) == len(value)
+        else:
+            summary["value"] = _bounded_summary_value(value)
+            summary["value_complete"] = _projection_values_equal(value, summary["value"])
+    items = metrics.get("items")
+    if isinstance(items, list):
+        visible = [_bounded_summary_value(item) for item in items[:12]]
+        summary["items"] = visible
+        summary["items_complete"] = len(visible) == len(items) and all(
+            _projection_values_equal(source, projected)
+            for source, projected in zip(items, visible, strict=True)
+        )
+        if len(visible) < len(items):
+            summary["omitted_page_item_count"] = len(items) - len(visible)
+    return summary
+
+
+def _task_artifact_summary(metrics: dict[str, object]) -> JsonObject:
+    current = metrics.get("current")
+    source = current if isinstance(current, dict) else metrics
+    summary: JsonObject = {}
+    if "active" in source:
+        summary["active"] = bool(source.get("active"))
+    if source.get("scope_key") is not None:
+        summary["scope_key"] = str(source.get("scope_key"))
+
+    task = metrics.get("task")
+    if not isinstance(task, dict):
+        task = source.get("task")
+    if isinstance(task, dict):
+        summary["task"] = {
+            key: _bounded_summary_value(task[key])
+            for key in (
+                "task_id",
+                "revision",
+                "goal",
+                "status",
+                "completion_authority",
+                "active_plan_id",
+                "latest_checkpoint_id",
+            )
+            if key in task
+        }
+
+    plan = metrics.get("plan")
+    if not isinstance(plan, dict):
+        plan = source.get("plan")
+    if isinstance(plan, dict):
+        plan_summary: JsonObject = {
+            key: _bounded_summary_value(plan[key])
+            for key in ("plan_id", "revision", "summary")
+            if key in plan
+        }
+        steps = plan.get("steps")
+        if isinstance(steps, list):
+            plan_summary["steps"] = [
+                {
+                    key: _bounded_summary_value(step[key])
+                    for key in ("step_id", "ordinal", "title", "status", "blocker")
+                    if key in step
+                }
+                for step in steps[:16]
+                if isinstance(step, dict)
+            ]
+            plan_summary["step_count"] = len(steps)
+            plan_summary["steps_complete"] = len(steps) <= 16
+        summary["plan"] = plan_summary
+
+    checkpoint = metrics.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        checkpoint = source.get("checkpoint")
+    if isinstance(checkpoint, dict):
+        summary["checkpoint"] = {
+            key: _bounded_summary_value(checkpoint[key])
+            for key in (
+                "checkpoint_id",
+                "revision",
+                "disposition",
+                "summary",
+                "next_step",
+                "wait_for",
+            )
+            if key in checkpoint
+        }
+    if metrics.get("error") is not None:
+        summary["error"] = _bounded_summary_value(metrics["error"])
     return summary
 
 
@@ -927,6 +1318,7 @@ class AgentRuntime:
         recovery_handler: RecoveryHandler | None = None,
         speech_sink: Callable[[str], None] | None = None,
         conversation_session: Session | None = None,
+        observation_archive: ToolObservationArchive | None = None,
     ) -> None:
         self.body = body
         self.registry = registry
@@ -947,6 +1339,7 @@ class AgentRuntime:
             if conversation_session is not None
             else WindowedConversationSession(session_id=f"{agent_name}-{uuid4()}")
         )
+        self.observation_archive = observation_archive
         self.hooks = RuntimeHooks()
         self.weld_context = WeldContext(
             body=body,
@@ -983,6 +1376,24 @@ class AgentRuntime:
         )
         instruction_preamble = self.agent_context.turn_preamble(
             include_session_messages=False
+        )
+        context_budget = self.agent_context.budget_facts()
+        new_turn_frame_chars = (
+            len(input_text)
+            + len(self.agent_context.system_prompt)
+            + len(instruction_preamble)
+        )
+        self.trace.emit(
+            "context_budget",
+            input_chars=len(input_text),
+            instruction_chars=len(self.agent_context.system_prompt) + len(instruction_preamble),
+            new_turn_frame_chars=new_turn_frame_chars,
+            estimated_context_chars=(
+                new_turn_frame_chars
+                + int(context_budget.get("conversation_live_item_chars") or 0)
+            ),
+            live_window_turns=getattr(self.conversation_session, "max_turns", None),
+            **context_budget,
         )
 
         run_context = RuntimeRunContext(
@@ -1409,102 +1820,6 @@ class AgentRuntime:
             profile=yielded_profile,
             yielded_facts=facts,
             message=message,
-        )
-
-    def drive_tool_once(
-        self,
-        tool_name: str,
-        params: JsonObject,
-        *,
-        reason: str = "goal_driver",
-        extra_signals: list[AgentSignal] | None = None,
-    ) -> AgentTurnOutcome:
-        prepared = self._prepare_turn(extra_signals=extra_signals)
-        if isinstance(prepared, AgentTurnOutcome):
-            return prepared
-        profile = prepared
-        tool = self.registry.get(tool_name)
-        tool_call_id = f"goal-{uuid4()}-{tool.name}"
-        arguments_summary = _summarize_tool_arguments(json.dumps(params, sort_keys=True, default=str))
-        self.trace.emit(
-            "goal_driver_start",
-            tool=tool.name,
-            reason=reason,
-            tool_call_id=tool_call_id,
-            arguments_summary=arguments_summary,
-        )
-        self.trace.emit(
-            "tool_invoke",
-            tool_call_id=tool_call_id,
-            tool=tool.name,
-            source=tool.sidecar.source,
-            tool_type=tool.sidecar.tool_type,
-            mutating=tool.sidecar.mutating,
-            permission=tool.sidecar.permission,
-            body_scope=list(tool.sidecar.body_scope),
-            terminal_truth=list(tool.sidecar.terminal_truth),
-            situational=profile.situational,
-            lifecycle=profile.lifecycle,
-            arguments_summary=arguments_summary,
-            driver=reason,
-        )
-        try:
-            result = execute_tool(tool, params, self.weld_context)
-            driver_context = RuntimeRunContext(
-                agent_context=self.agent_context,
-                weld_context=self.weld_context,
-                profile=profile,
-                tool_facts={name: dict(facts) for name, facts in self.tool_facts.items()},
-                trace=self.trace,
-                runtime=self,
-            )
-            result = _continue_composition_tool(tool, result, driver_context, tool_call_id=tool_call_id, initial_params=params)
-        except ProgressAbort as exc:
-            return self._yield_from_progress_abort(exc)
-        except BodyRecoveryRequired as exc:
-            return self._enter_recovery_from_body_fact(exc.reason, exc.facts)
-        except Exception as exc:
-            result = _tool_exception_payload(exc)
-            self.trace.emit(
-                "tool_exception",
-                tool_call_id=tool_call_id,
-                tool=tool.name,
-                error_type=type(exc).__name__,
-                reason=result["reason"],
-                message=str(exc),
-                await_diagnostics=result.get("metrics", {}).get("await_diagnostics"),
-                driver=reason,
-            )
-            if result.get("reason") == "transport_error":
-                self.weld_context.authority.invalidate_generation(f"transport_error:{tool.name}")
-                self.record_transport_error(tool.name, result, tool_call_id=tool_call_id)
-
-        if _requires_body_recovery(result):
-            facts = _recovery_facts_from_tool(tool.name, result)
-            return self._enter_recovery_from_body_fact(_recovery_reason_from_tool_result(result, facts), facts)
-
-        self.remember_tool_result(tool.name, result)
-        self.remember_tool_body_facts(result)
-        model_result = _finalize_tool_payload(
-            tool=tool,
-            result=result,
-            trace=self.trace,
-            tool_call_id=tool_call_id,
-        )
-        self.trace.emit(
-            "goal_driver_result",
-            tool=tool.name,
-            reason=str(result.get("reason") or ""),
-            success=bool(result.get("success")),
-            complete=model_result.get("complete"),
-            tool_call_id=tool_call_id,
-        )
-        self._reset_transport_errors()
-        return AgentTurnOutcome(
-            status="completed_turn",
-            lifecycle=self.lifecycle.state,
-            profile=profile,
-            result=result,
         )
 
     def _prepare_turn(self, extra_signals: list[AgentSignal] | None = None) -> RuntimeProfile | AgentTurnOutcome:

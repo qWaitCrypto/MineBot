@@ -11,18 +11,29 @@ import asyncio
 import contextlib
 import inspect
 import json
-import threading
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from uuid import uuid4
 
 from minebot.app.wiring import AgentRuntimeParts
 from minebot.app.runner import RecoveryOutcome
+from minebot.app.runtime_state import CheckpointDisposition, CompletionAuthority, TaskStatus
+from minebot.app.tasks import TaskWorkspace
+from minebot.app.work_queue import (
+    MemoryWorkIntentQueue,
+    WorkIntent,
+    WorkIntentKind,
+    WorkIntentQueue,
+    WorkIntentState,
+    superseded_kinds_for,
+)
 from minebot.brain.lifecycle import LifecycleError, LifecycleState
-from minebot.brain.modes import AgentSignal
+from minebot.brain.modes import AgentSignal, signalize_events
+from minebot.contract import Event
 
 DEFAULT_RUNAWAY_STEP_LIMIT = 100_000
+DEFAULT_TASK_CONTINUATION_LIMIT = 64
 
 
 class SessionCommandKind(Enum):
@@ -80,7 +91,6 @@ class SessionStep:
 
 PartsFactory = Callable[[str], AgentRuntimeParts]
 ShouldStop = Callable[[SessionStep], bool]
-GoalDriver = Callable[[AgentRuntimeParts, list[AgentSignal]], SessionStep | None]
 _WORK_PREEMPTED = object()
 
 
@@ -89,34 +99,69 @@ class AgentSession:
     """Persistent outer session around one AgentRuntimeParts instance."""
 
     parts_factory: PartsFactory
-    goal_driver: GoalDriver | None = None
+    task_workspace: TaskWorkspace | None = None
+    work_queue: WorkIntentQueue | None = None
     parts: AgentRuntimeParts | None = None
-    pending: deque[SessionCommand] = field(default_factory=deque)
     max_recovery_attempts: int = 3
+    max_task_continuations: int = DEFAULT_TASK_CONTINUATION_LIMIT
     _recovery_attempts: int = 0
-    _goal_driver_keys: set[str] = field(default_factory=set)
     _goal_active: bool = False
     _turn_pending: bool = False
     _active_turn_request: tuple[str, str] | None = None
     _suspended_turn_request: tuple[str, str] | None = None
     _work_in_flight: bool = False
     _execution_quarantined: bool = False
-    _pending_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    _command_available: threading.Event = field(default_factory=threading.Event, repr=False)
+    _scheduler_id: str = field(default_factory=lambda: f"session-{uuid4().hex}")
 
-    def submit(self, command: SessionCommand) -> None:
-        with self._pending_lock:
-            self.pending.append(command)
-            self._command_available.set()
+    def __post_init__(self) -> None:
+        if self.work_queue is None:
+            self.work_queue = MemoryWorkIntentQueue()
+
+    def submit(
+        self,
+        command: SessionCommand,
+        *,
+        dedupe_key: str | None = None,
+    ) -> WorkIntent:
         always_interrupt = command.kind in {
             SessionCommandKind.PAUSE,
             SessionCommandKind.CANCEL,
             SessionCommandKind.REPLACE_GOAL,
             SessionCommandKind.QUIT,
         }
+        assert self.work_queue is not None
+        if dedupe_key is not None:
+            existing = self.work_queue.get_by_dedupe(dedupe_key)
+            if existing is not None:
+                return existing
+        intent_kind = WorkIntentKind(command.kind.value)
         if self.parts is not None and (self._work_in_flight or always_interrupt):
             self.parts.authority.invalidate_generation(f"session_command:{command.kind.value}")
             self._body_interrupt(command.reason)
+        superseded = superseded_kinds_for(intent_kind)
+        if superseded:
+            self.work_queue.supersede(
+                superseded,
+                reason=f"superseded_by:{command.kind.value}",
+            )
+        task = self.task_workspace.current_task if self.task_workspace is not None else None
+        generation = (
+            None
+            if self.parts is None
+            else self.parts.authority.current_generation()
+        )
+        return self.work_queue.enqueue(
+            intent_kind,
+            source=command.reason or command.kind.value,
+            payload={
+                "text": command.text,
+                "reason": command.reason,
+                "sender": command.sender,
+            },
+            dedupe_key=dedupe_key,
+            task_id=None if task is None else task.task_id,
+            generation=generation,
+        )
 
     @property
     def lifecycle_state(self) -> LifecycleState | None:
@@ -126,82 +171,127 @@ class AgentSession:
 
     @property
     def current_goal(self) -> str | None:
+        if self.task_workspace is not None:
+            task = self.task_workspace.current_task
+            if task is not None:
+                return task.goal_text
         if self.parts is None or not self._goal_active:
             return None
         return self.parts.context.goal_text
 
     @property
     def has_active_goal(self) -> bool:
+        if self.task_workspace is not None:
+            return self.task_workspace.current_task is not None
         return self.parts is not None and self._goal_active
 
     @property
     def has_pending_work(self) -> bool:
-        if self._command_available.is_set() or self._turn_pending:
+        assert self.work_queue is not None
+        if self.work_queue.available.is_set():
             return True
-        return self.parts is not None and self.parts.lifecycle.state in {
-            LifecycleState.RECOVERING,
-            LifecycleState.RESUMING,
-        }
+        return self.parts is not None and self.parts.lifecycle.state is LifecycleState.RECOVERING
 
     async def step(self) -> SessionStep:
-        """Drain queued user commands, then advance active work by one SDK run."""
-        signals: list[AgentSignal] = []
-        suppress_run = False
-        quit_requested = False
-        for command in self._drain_commands():
-            if command.kind is SessionCommandKind.QUIT:
-                quit_requested = True
-            signals.extend(await self._apply_command(command))
-            if command.kind is SessionCommandKind.CANCEL:
-                suppress_run = True
+        """Admit one queued intent, then advance at most one SDK run."""
+        assert self.work_queue is not None
+        if self.parts is not None:
+            quarantine = await self._guard_execution_quarantine()
+            if quarantine is not None:
+                return quarantine
+        self._queue_recovery_if_required()
+        intent = self.work_queue.lease_next()
+        try:
+            if intent is None:
+                if self.parts is None:
+                    return SessionStep("idle", LifecycleState.IDLE, "no pending intent")
+                status = "waiting" if self.has_active_goal else "idle"
+                return SessionStep(status, self.parts.lifecycle.state, "no pending intent")
+            admission_version = self.work_queue.notification_version
+            self._work_in_flight = True
+            try:
+                result = await self._execute_intent(
+                    intent,
+                    admission_version=admission_version,
+                )
+            finally:
+                self._work_in_flight = False
+        except Exception as exc:
+            self.work_queue.fail(
+                intent,
+                {"error_type": type(exc).__name__, "message": str(exc)},
+            )
+            raise
+        if result.status == "preempted":
+            self.work_queue.supersede_active(intent, reason=result.message or "work_preempted")
+        elif result.status == "failed":
+            self.work_queue.fail(intent, {"reason": result.message or "runtime_failed"})
+        else:
+            self.work_queue.complete(intent)
+        return result
 
-        if quit_requested:
+    async def _execute_intent(
+        self,
+        intent: WorkIntent,
+        *,
+        admission_version: int,
+    ) -> SessionStep:
+        checkpoint_before = self._latest_checkpoint_id()
+        command = _command_from_intent(intent) if _is_command_intent(intent) else None
+        signals = (
+            await self._apply_command(command)
+            if command is not None
+            else await self._apply_runtime_intent(intent)
+        )
+        runtime_terminal = self._runtime_intent_terminal_step(intent)
+        if runtime_terminal is not None:
+            return runtime_terminal
+        if command is not None and command.kind is SessionCommandKind.QUIT:
             lifecycle = self.parts.lifecycle.state if self.parts is not None else LifecycleState.IDLE
             return SessionStep("quit", lifecycle, "user_quit")
-
         if self.parts is None:
-            return SessionStep("idle", LifecycleState.IDLE, "no active goal")
+            return SessionStep("idle", LifecycleState.IDLE, "no active work")
 
-        quarantine = await self._guard_execution_quarantine()
-        if quarantine is not None:
-            return quarantine
-
-        if suppress_run:
+        self._sync_task_context()
+        start_fingerprint = self._current_body_fingerprint()
+        if command is not None and command.kind is SessionCommandKind.CANCEL:
             return SessionStep("waiting", self.parts.lifecycle.state)
-
-        if not self._turn_pending and self.parts.lifecycle.state not in {
-            LifecycleState.RECOVERING,
-            LifecycleState.RESUMING,
-        }:
-            status = "waiting" if self._goal_active else "idle"
-            return SessionStep(status, self.parts.lifecycle.state, "no pending turn")
+        if not self._turn_pending and self.parts.lifecycle.state is not LifecycleState.RECOVERING:
+            status = "waiting" if self.has_active_goal else "idle"
+            return SessionStep(status, self.parts.lifecycle.state, "intent handled without model turn")
 
         if self.parts.lifecycle.state is LifecycleState.RECOVERING:
-            recovered = await self._run_supervised(self._drive_recovery(), work_kind="recovery")
+            recovered = await self._run_supervised(
+                self._drive_recovery(),
+                work_kind="recovery",
+                admission_version=admission_version,
+            )
             if recovered is _WORK_PREEMPTED:
-                return SessionStep("preempted", self.parts.lifecycle.state, "user_input")
-            return self._finish_step(recovered)
+                return SessionStep("preempted", self.parts.lifecycle.state, "superseded_during_recovery")
+            return self._finish_step(
+                recovered,
+                intent=intent,
+                checkpoint_before=checkpoint_before,
+                start_fingerprint=start_fingerprint,
+            )
 
-        runnable_states = {LifecycleState.INIT, LifecycleState.IDLE, LifecycleState.ACTIVE, LifecycleState.RESUMING}
+        runnable_states = {
+            LifecycleState.INIT,
+            LifecycleState.IDLE,
+            LifecycleState.ACTIVE,
+            LifecycleState.RESUMING,
+        }
         if self.parts.lifecycle.state not in runnable_states:
             return SessionStep("waiting", self.parts.lifecycle.state)
-
-        driven = await self._run_supervised(
-            self._drive_goal_once_if_available(signals),
-            work_kind="goal_driver",
-        )
-        if driven is _WORK_PREEMPTED:
-            return SessionStep("preempted", self.parts.lifecycle.state, "user_input")
-        if driven is not None:
-            return driven
 
         try:
             outcome = await self._run_supervised(
                 self.parts.runtime.run_turn(extra_signals=signals),
                 work_kind="agent_turn",
+                admission_version=admission_version,
             )
             if outcome is _WORK_PREEMPTED:
-                return SessionStep("preempted", self.parts.lifecycle.state, "user_input")
+                return SessionStep("preempted", self.parts.lifecycle.state, "superseded_during_agent_turn")
         except Exception as exc:
             self._trace(
                 "session_step_failed",
@@ -214,7 +304,12 @@ class AgentSession:
             self._stand_down()
             self._turn_pending = False
             return SessionStep("failed", self.parts.lifecycle.state, f"runtime_error:{type(exc).__name__}")
-        return self._finish_step(SessionStep(outcome.status, outcome.lifecycle, outcome.message))
+        return self._finish_step(
+            SessionStep(outcome.status, outcome.lifecycle, outcome.message),
+            intent=intent,
+            checkpoint_before=checkpoint_before,
+            start_fingerprint=start_fingerprint,
+        )
 
     async def _drive_recovery(self) -> SessionStep:
         assert self.parts is not None
@@ -264,9 +359,6 @@ class AgentSession:
 
         self._recovery_attempts = 0
         signals = [AgentSignal.recovery_completed(outcome.reason, **outcome.facts)]
-        driven = await self._drive_goal_once_if_available(signals)
-        if driven is not None:
-            return driven
         recovered = await self.parts.runtime.run_turn(extra_signals=signals)
         return SessionStep(recovered.status, recovered.lifecycle, recovered.message)
 
@@ -314,12 +406,19 @@ class AgentSession:
                 remaining -= 1
         return last
 
-    def complete_current_goal(self, reason: str = "goal_completed") -> SessionStep:
+    def complete_current_goal(
+        self,
+        reason: str = "goal_completed",
+        *,
+        authority: CompletionAuthority = CompletionAuthority.BODY_TRUTH,
+    ) -> SessionStep:
         """Stand down after authoritative terminal truth has completed a goal."""
         if self.parts is None:
             return SessionStep("idle", LifecycleState.IDLE, "no active goal")
         completed_goal = self.parts.context.goal_text
         self._trace("session_goal_completed", goal=completed_goal, reason=reason)
+        if self.task_workspace is not None:
+            self.task_workspace.complete(authority=authority)
         self.parts.context.discard_pending_turn_input()
         self.parts.context.observe_system_message(
             f"Goal completed: {completed_goal}. Terminal reason: {reason}."
@@ -328,10 +427,10 @@ class AgentSession:
         self._turn_pending = False
         self._active_turn_request = None
         self._suspended_turn_request = None
-        self._goal_driver_keys.clear()
         self._stand_down()
         self.parts.context.set_goal("")
         self.parts.runtime.weld_context.goal_text = ""
+        self._sync_task_context()
         return SessionStep("completed", self.parts.lifecycle.state, reason)
 
     async def _apply_command(self, command: SessionCommand) -> list[AgentSignal]:
@@ -344,7 +443,14 @@ class AgentSession:
                 self.parts.runtime.weld_context.goal_text = command.text
                 self.parts.authority.invalidate_generation("goal_started")
                 self._resume_if_waiting()
-            self._goal_driver_keys.clear()
+            if self.task_workspace is not None:
+                task = self.task_workspace.start(
+                    command.text,
+                    source=command.reason or "user_start",
+                    requested_by=command.sender,
+                )
+                self.parts.context.set_goal(task.goal_text)
+                self.parts.runtime.weld_context.goal_text = task.goal_text
             self._goal_active = True
             self._turn_pending = True
             self._active_turn_request = None
@@ -361,6 +467,7 @@ class AgentSession:
             self._trace("user_message", command="start", content=command.text, sender=command.sender)
             if command.reason == "chat_goal_promoted":
                 self._trace("chat_goal_promoted", goal=command.text)
+            self._sync_task_context()
             return [AgentSignal.goal_started(command.text)]
 
         if command.kind is SessionCommandKind.QUIT:
@@ -377,8 +484,13 @@ class AgentSession:
         if command.kind is SessionCommandKind.MESSAGE:
             had_parts = self.parts is not None
             if self.parts is None:
-                self.parts = self.parts_factory("")
-            if not self._goal_active:
+                task = self.task_workspace.current_task if self.task_workspace is not None else None
+                if task is None:
+                    self.parts = self.parts_factory("")
+                else:
+                    self._ensure_parts_for_runtime_intent()
+                    self._goal_active = True
+            if not self.has_active_goal:
                 self.parts.context.set_goal("")
                 self.parts.runtime.weld_context.goal_text = ""
                 self._resume_if_waiting()
@@ -406,8 +518,15 @@ class AgentSession:
                 self.parts.runtime.weld_context.goal_text = command.text
                 self.parts.authority.invalidate_generation("goal_replaced")
                 self._resume_if_waiting()
+            if self.task_workspace is not None:
+                task = self.task_workspace.replace(
+                    command.text,
+                    source=command.reason or "user_replace",
+                    requested_by=command.sender,
+                )
+                self.parts.context.set_goal(task.goal_text)
+                self.parts.runtime.weld_context.goal_text = task.goal_text
             self.parts.context.observe_user_message(command.text, sender=command.sender or None)
-            self._goal_driver_keys.clear()
             self._goal_active = True
             self._turn_pending = True
             self._active_turn_request = None
@@ -423,10 +542,29 @@ class AgentSession:
                         reason=command.reason,
                     )
                 self._trace("chat_goal_promoted", goal=command.text)
+            self._sync_task_context()
             return [AgentSignal.goal_started(command.text)]
 
         if self.parts is None:
-            return []
+            if command.kind is SessionCommandKind.PAUSE:
+                if self.task_workspace is not None:
+                    self.task_workspace.pause()
+                self._turn_pending = False
+                return []
+            if command.kind is SessionCommandKind.CANCEL:
+                if self.task_workspace is not None:
+                    self.task_workspace.cancel()
+                self._goal_active = False
+                self._turn_pending = False
+                return []
+            if (
+                command.kind is SessionCommandKind.CONTINUE
+                and self.task_workspace is not None
+                and self.task_workspace.current_task is not None
+            ):
+                self._ensure_parts_for_runtime_intent()
+            else:
+                return []
 
         if command.kind is SessionCommandKind.PAUSE:
             if not self._goal_active and self._active_turn_request is not None:
@@ -434,12 +572,18 @@ class AgentSession:
             self.parts.context.observe_user_message(command.reason, sender=command.sender or None)
             self._trace("user_message", command="pause", reason=command.reason, sender=command.sender)
             self._turn_pending = True
+            if self.task_workspace is not None:
+                self.task_workspace.pause()
+                self._sync_task_context()
             return [AgentSignal.user_interrupt(command.reason)]
 
         if command.kind is SessionCommandKind.CONTINUE:
             if command.text:
                 self.parts.context.observe_user_message(command.text, sender=command.sender or None)
             self._trace("user_message", command="continue", content=command.text, sender=command.sender)
+            if self.task_workspace is not None and self.task_workspace.current_task is not None:
+                self.task_workspace.resume()
+                self._sync_task_context()
             if self._suspended_turn_request is not None:
                 request_text, request_sender = self._suspended_turn_request
                 request_payload = json.dumps(
@@ -476,11 +620,210 @@ class AgentSession:
             self._turn_pending = False
             self._active_turn_request = None
             self._suspended_turn_request = None
-            self._goal_driver_keys.clear()
+            if self.task_workspace is not None:
+                self.task_workspace.cancel()
+                self._sync_task_context()
             self._stand_down()
             return []
 
         return []
+
+    async def _apply_runtime_intent(self, intent: WorkIntent) -> list[AgentSignal]:
+        if intent.kind is WorkIntentKind.BODY_EVENT:
+            task = self.task_workspace.current_task if self.task_workspace is not None else None
+            if intent.task_id is not None and (
+                task is None or task.task_id != intent.task_id
+            ):
+                self._turn_pending = False
+                self._trace(
+                    "body_event_intent_dropped",
+                    reason="task_generation_changed",
+                    intent_task_id=intent.task_id,
+                    current_task_id=None if task is None else task.task_id,
+                )
+                return []
+            if (
+                intent.generation is not None
+                and self.parts is not None
+                and not self.parts.authority.generation_current(intent.generation)
+            ):
+                self._turn_pending = False
+                self._trace(
+                    "body_event_intent_dropped",
+                    reason="runtime_generation_changed",
+                    intent_generation=intent.generation,
+                    current_generation=self.parts.authority.current_generation(),
+                )
+                return []
+            raw = intent.payload.get("event")
+            if not isinstance(raw, dict):
+                raise ValueError("body_event intent is missing event payload")
+            data = raw.get("data")
+            if not isinstance(data, dict):
+                data = {}
+            event = Event(
+                seq=int(raw.get("seq") or 0),
+                tick=int(raw.get("tick") or 0),
+                bot=str(raw.get("bot") or ""),
+                name=str(raw.get("name") or ""),
+                data=dict(data),
+            )
+            if not event.name:
+                raise ValueError("body_event intent has no event name")
+            self._ensure_parts_for_runtime_intent()
+            assert self.parts is not None
+            payload = json.dumps(
+                {
+                    "seq": event.seq,
+                    "tick": event.tick,
+                    "bot": event.bot,
+                    "name": event.name,
+                    "data": event.data,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            self.parts.context.observe_system_message(f"BODY_EVENT: {payload}")
+            self._turn_pending = True
+            self._resume_if_waiting()
+            self._trace(
+                "body_event_wake",
+                name=event.name,
+                seq=event.seq,
+                tick=event.tick,
+                task_id=intent.task_id,
+            )
+            return signalize_events([event])
+
+        if intent.kind in {
+            WorkIntentKind.TASK_CONTINUE,
+            WorkIntentKind.RECOVERY_RECONCILE,
+        }:
+            self._ensure_parts_for_runtime_intent()
+            assert self.parts is not None
+            task = self.task_workspace.current_task if self.task_workspace is not None else None
+            if intent.kind is WorkIntentKind.TASK_CONTINUE and task is None:
+                self._turn_pending = False
+                self._trace("task_continue_dropped", reason="no_active_task")
+                return []
+            if intent.kind is WorkIntentKind.TASK_CONTINUE:
+                if intent.task_id != task.task_id or task.status is not TaskStatus.RUNNING:
+                    self._turn_pending = False
+                    self._trace(
+                        "task_continue_dropped",
+                        reason="task_changed",
+                        intent_task_id=intent.task_id,
+                        current_task_id=task.task_id,
+                        task_status=task.status.value,
+                    )
+                    return []
+                if intent.source != "recovery_completed":
+                    checkpoint = self.task_workspace.store.get_latest_checkpoint(task.task_id)
+                    expected_checkpoint = str(intent.payload.get("checkpoint_id") or "")
+                    if (
+                        checkpoint is None
+                        or checkpoint.checkpoint_id != expected_checkpoint
+                        or checkpoint.disposition is not CheckpointDisposition.CONTINUE
+                    ):
+                        self._turn_pending = False
+                        self._trace(
+                            "task_continue_dropped",
+                            reason="checkpoint_changed",
+                            expected_checkpoint=expected_checkpoint,
+                            current_checkpoint=None if checkpoint is None else checkpoint.checkpoint_id,
+                        )
+                        return []
+            if task is not None:
+                self._goal_active = True
+                self.parts.context.set_goal(task.goal_text)
+                self.parts.runtime.weld_context.goal_text = task.goal_text
+            frame = json.dumps(intent.payload, ensure_ascii=False, sort_keys=True)
+            self.parts.context.observe_system_message(
+                f"{intent.kind.value.upper()}: {frame}"
+            )
+            decision = str(intent.payload.get("decision") or "resume")
+            if (
+                intent.kind is WorkIntentKind.RECOVERY_RECONCILE
+                and decision == "resume"
+                and task is not None
+                and task.status is TaskStatus.WAITING_EVENT
+            ):
+                task = self.task_workspace.resume()
+                self._sync_task_context()
+            self._turn_pending = not (
+                intent.kind is WorkIntentKind.RECOVERY_RECONCILE
+                and decision in {"idle", "park", "complete"}
+            )
+            if self._turn_pending:
+                self._resume_if_waiting()
+            self._trace(
+                "runtime_intent_wake",
+                kind=intent.kind.value,
+                task_id=None if task is None else task.task_id,
+                decision=decision,
+            )
+            return []
+
+        if intent.kind is WorkIntentKind.MAINTENANCE:
+            self._trace("maintenance_intent_deferred", payload=intent.payload)
+            return []
+        raise ValueError(f"unsupported runtime intent: {intent.kind.value}")
+
+    def _runtime_intent_terminal_step(self, intent: WorkIntent) -> SessionStep | None:
+        if intent.kind is not WorkIntentKind.RECOVERY_RECONCILE:
+            return None
+        decision = str(intent.payload.get("decision") or "resume")
+        if decision == "complete":
+            return self.complete_current_goal(
+                "startup_terminal_truth_satisfied",
+                authority=CompletionAuthority.BODY_TRUTH,
+            )
+        if decision in {"idle", "park"}:
+            assert self.parts is not None
+            self._turn_pending = False
+            self._stand_down()
+            status = "idle" if decision == "idle" else "waiting"
+            return SessionStep(status, self.parts.lifecycle.state, f"startup_{decision}")
+        return None
+
+    def _ensure_parts_for_runtime_intent(self) -> None:
+        if self.parts is not None:
+            return
+        task = self.task_workspace.current_task if self.task_workspace is not None else None
+        goal = "" if task is None else task.goal_text
+        self.parts = self.parts_factory(goal)
+        if task is not None:
+            self._goal_active = True
+            self.parts.context.set_goal(task.goal_text)
+            self.parts.runtime.weld_context.goal_text = task.goal_text
+        self._sync_task_context()
+
+    def _queue_recovery_if_required(self) -> None:
+        if self.parts is None or self.parts.lifecycle.state is not LifecycleState.RECOVERING:
+            return
+        assert self.work_queue is not None
+        task = self.task_workspace.current_task if self.task_workspace is not None else None
+        intent = self.work_queue.enqueue(
+            WorkIntentKind.RECOVERY_RECONCILE,
+            source="lifecycle_recovery",
+            payload={
+                "reason": "lifecycle_recovering",
+                "attempt": self._recovery_attempts + 1,
+            },
+            dedupe_key=(
+                f"{self._scheduler_id}:recovery:"
+                f"{self.parts.authority.current_generation()}:"
+                f"{self._recovery_attempts}"
+            ),
+            task_id=None if task is None else task.task_id,
+            generation=self.parts.authority.current_generation(),
+        )
+        self._trace(
+            "recovery_intent_queued",
+            intent_id=intent.intent_id,
+            task_id=None if task is None else task.task_id,
+            attempt=self._recovery_attempts + 1,
+        )
 
     def _resume_if_waiting(self) -> None:
         assert self.parts is not None
@@ -515,21 +858,27 @@ class AgentSession:
         if self.parts is not None:
             self.parts.runtime.trace.emit(event, **fields)
 
-    async def _drive_goal_once_if_available(self, signals: list[AgentSignal]) -> SessionStep | None:
-        if self.goal_driver is None or self.parts is None or not self._goal_active:
-            return None
-        goal = self.parts.context.goal_text
-        if goal in self._goal_driver_keys:
-            return None
-        driven = await self.parts.runtime.run_sync(self.goal_driver, self.parts, signals)
-        if driven is None:
-            self._goal_driver_keys.add(goal)
-            return None
-        if driven.status != "stopped" and driven.lifecycle not in {LifecycleState.RECOVERING, LifecycleState.RESUMING}:
-            self._goal_driver_keys.add(goal)
-        return driven
+    def _sync_task_context(self) -> None:
+        if self.parts is None:
+            return
+        if self.task_workspace is not None:
+            self.task_workspace.sync_context(self.parts.context)
+        summary_payload = getattr(
+            self.parts.runtime.conversation_session,
+            "summary_payload",
+            None,
+        )
+        if callable(summary_payload):
+            self.parts.context.observe_conversation_summary(summary_payload())
 
-    def _finish_step(self, step: SessionStep) -> SessionStep:
+    def _finish_step(
+        self,
+        step: SessionStep,
+        *,
+        intent: WorkIntent,
+        checkpoint_before: str | None,
+        start_fingerprint: dict[str, object] | None,
+    ) -> SessionStep:
         if self.parts is None:
             return step
         if step.status == "completed_turn":
@@ -537,12 +886,206 @@ class AgentSession:
             self._active_turn_request = None
             self._suspended_turn_request = None
             self._trace("session_turn_completed", reason="assistant_final_output")
-            if not self._goal_active:
+            self._apply_task_checkpoint_lifecycle(
+                intent=intent,
+                checkpoint_before=checkpoint_before,
+                start_fingerprint=start_fingerprint,
+            )
+            task = self.task_workspace.current_task if self.task_workspace is not None else None
+            if task is not None and task.status in {
+                TaskStatus.WAITING_EVENT,
+                TaskStatus.PAUSED,
+            }:
                 self._stand_down()
+            elif not self._goal_active:
+                self._stand_down()
+            self._sync_task_context()
             return SessionStep(step.status, self.parts.lifecycle.state, step.message)
-        if step.lifecycle not in {LifecycleState.RECOVERING, LifecycleState.RESUMING}:
-            self._turn_pending = False
+        self._turn_pending = False
+        if step.lifecycle is LifecycleState.RESUMING:
+            self._queue_resume_successor_if_required()
+        self._sync_task_context()
         return step
+
+    def _queue_resume_successor_if_required(self) -> None:
+        assert self.parts is not None
+        assert self.work_queue is not None
+        if self.work_queue.pending_count() > 0:
+            return
+        task = self.task_workspace.current_task if self.task_workspace is not None else None
+        if task is not None:
+            if task.status is not TaskStatus.RUNNING:
+                self._stand_down()
+                return
+            kind = WorkIntentKind.TASK_CONTINUE
+            task_id = task.task_id
+        elif self._goal_active:
+            kind = WorkIntentKind.CONTINUE
+            task_id = None
+        else:
+            self._stand_down()
+            return
+        intent = self.work_queue.enqueue(
+            kind,
+            source="recovery_completed",
+            payload={"reason": "recovery_completed", "text": "", "sender": ""},
+            dedupe_key=(
+                f"{self._scheduler_id}:resume:"
+                f"{self.parts.authority.current_generation()}:"
+                f"{self._recovery_attempts}"
+            ),
+            task_id=task_id,
+            generation=self.parts.authority.current_generation(),
+        )
+        self._trace(
+            "recovery_successor_queued",
+            intent_id=intent.intent_id,
+            kind=kind.value,
+            task_id=task_id,
+        )
+
+    def _apply_task_checkpoint_lifecycle(
+        self,
+        *,
+        intent: WorkIntent,
+        checkpoint_before: str | None,
+        start_fingerprint: dict[str, object] | None,
+    ) -> None:
+        if self.parts is None or self.task_workspace is None:
+            return
+        task = self.task_workspace.current_task
+        if task is None:
+            return
+        checkpoint = self.task_workspace.store.get_latest_checkpoint(task.task_id)
+        if checkpoint is None or checkpoint.checkpoint_id == checkpoint_before:
+            if intent.kind in {
+                WorkIntentKind.START,
+                WorkIntentKind.REPLACE_GOAL,
+                WorkIntentKind.CONTINUE,
+                WorkIntentKind.BODY_EVENT,
+                WorkIntentKind.RECOVERY_RECONCILE,
+                WorkIntentKind.TASK_CONTINUE,
+            }:
+                final_fingerprint = self._current_body_fingerprint()
+                parked = self.task_workspace.park_without_continuation(
+                    body_fingerprint=final_fingerprint,
+                )
+                if parked is not None:
+                    self._trace(
+                        "task_parked_without_continuation",
+                        task_id=parked[0].task_id,
+                        checkpoint_id=parked[1].checkpoint_id,
+                    )
+                    self._stand_down()
+            return
+        if checkpoint.disposition is CheckpointDisposition.CONTINUE:
+            final_fingerprint = self._current_body_fingerprint()
+            start_value = None if start_fingerprint is None else start_fingerprint.get("fingerprint")
+            final_value = None if final_fingerprint is None else final_fingerprint.get("fingerprint")
+            continuation_count = self.work_queue.count_for_task(
+                WorkIntentKind.TASK_CONTINUE,
+                task.task_id,
+            )
+            rejection_reason = None
+            if not start_value or not final_value or start_value == final_value:
+                rejection_reason = "task_continue_without_world_progress"
+            elif continuation_count >= self.max_task_continuations:
+                rejection_reason = "task_continuation_budget_exhausted"
+            if rejection_reason is not None:
+                rejected = self.task_workspace.reject_continuation(
+                    reason=rejection_reason,
+                    evidence=(
+                        f"checkpoint={checkpoint.checkpoint_id}",
+                        f"continuations={continuation_count}",
+                    ),
+                    body_fingerprint=final_fingerprint,
+                )
+                self._trace(
+                    "task_continue_rejected",
+                    reason=rejection_reason,
+                    task_id=task.task_id,
+                    checkpoint_id=checkpoint.checkpoint_id,
+                    continuation_count=continuation_count,
+                )
+                if rejected is not None and self.parts.lifecycle.state is LifecycleState.ACTIVE:
+                    self.parts.lifecycle.yield_()
+                else:
+                    self._stand_down()
+                return
+            successor = self.work_queue.enqueue(
+                WorkIntentKind.TASK_CONTINUE,
+                source="task_checkpoint_continue",
+                payload={
+                    "checkpoint_id": checkpoint.checkpoint_id,
+                    "checkpoint_revision": checkpoint.revision,
+                    "next_step": checkpoint.next_step,
+                    "summary": checkpoint.summary,
+                },
+                dedupe_key=f"task_continue:{checkpoint.checkpoint_id}",
+                task_id=task.task_id,
+                generation=self.parts.authority.current_generation(),
+            )
+            self._trace(
+                "task_continue_queued",
+                intent_id=successor.intent_id,
+                task_id=task.task_id,
+                checkpoint_id=checkpoint.checkpoint_id,
+                continuation_count=continuation_count + 1,
+                queued=successor.state is WorkIntentState.QUEUED,
+            )
+            if successor.state is not WorkIntentState.QUEUED:
+                self.task_workspace.reject_continuation(
+                    reason="task_continue_duplicate_checkpoint",
+                    evidence=(f"checkpoint={checkpoint.checkpoint_id}",),
+                    body_fingerprint=final_fingerprint,
+                )
+                if self.parts.lifecycle.state is LifecycleState.ACTIVE:
+                    self.parts.lifecycle.yield_()
+                else:
+                    self._stand_down()
+            return
+        if checkpoint.disposition is CheckpointDisposition.YIELD:
+            if self.parts.lifecycle.state is LifecycleState.ACTIVE:
+                self.parts.lifecycle.yield_()
+            return
+        if checkpoint.disposition in {
+            CheckpointDisposition.WAIT_EVENT,
+            CheckpointDisposition.COMPLETE,
+        }:
+            self._stand_down()
+
+    def _latest_checkpoint_id(self) -> str | None:
+        if self.task_workspace is None:
+            return None
+        task = self.task_workspace.current_task
+        if task is None:
+            return None
+        checkpoint = self.task_workspace.store.get_latest_checkpoint(task.task_id)
+        return None if checkpoint is None else checkpoint.checkpoint_id
+
+    def _current_body_fingerprint(self) -> dict[str, object] | None:
+        if self.parts is None:
+            return None
+        try:
+            state = self.parts.runtime.body.get_state()
+            fingerprint = self.parts.authority.fingerprint(state)
+        except Exception as exc:
+            self._trace(
+                "task_fingerprint_failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            return None
+        return {
+            "fingerprint": fingerprint,
+            "pos": list(state.pos),
+            "health": state.health,
+            "food": state.food,
+            "oxygen": state.oxygen,
+            "inventory_hash": state.inventory_hash,
+            "dimension": state.dimension,
+            "missing": state.missing,
+        }
 
     def _body_interrupt(self, reason: str) -> None:
         assert self.parts is not None
@@ -554,20 +1097,21 @@ class AgentSession:
     def close(self) -> None:
         if self.parts is not None:
             self.parts.runtime.close()
+        if self.work_queue is not None:
+            self.work_queue.close()
 
-    def _drain_commands(self) -> list[SessionCommand]:
-        with self._pending_lock:
-            commands = list(self.pending)
-            self.pending.clear()
-            self._command_available.clear()
-        return commands
-
-    async def _run_supervised(self, work, *, work_kind: str):
+    async def _run_supervised(
+        self,
+        work,
+        *,
+        work_kind: str,
+        admission_version: int,
+    ):
         task = asyncio.create_task(work)
-        self._work_in_flight = True
+        assert self.work_queue is not None
         try:
             while not task.done():
-                if self._command_available.is_set():
+                if self.work_queue.notification_version != admission_version:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
@@ -579,7 +1123,7 @@ class AgentSession:
                             "session_work_preempted",
                             work_kind=work_kind,
                             execution_idle=idle,
-                            pending_count=len(self.pending),
+                            pending_count=self.work_queue.pending_count(),
                         )
                     return _WORK_PREEMPTED
                 await asyncio.sleep(0.01)
@@ -589,8 +1133,6 @@ class AgentSession:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
             raise
-        finally:
-            self._work_in_flight = False
 
     async def _guard_execution_quarantine(self) -> SessionStep | None:
         if not self._execution_quarantined or self.parts is None:
@@ -616,6 +1158,23 @@ class AgentSession:
             "execution_not_idle_after_preempt",
         )
 
+
+def _command_from_intent(intent: WorkIntent) -> SessionCommand:
+    payload = intent.payload
+    try:
+        kind = SessionCommandKind(intent.kind.value)
+    except ValueError as exc:
+        raise ValueError(f"work intent is not a session command: {intent.kind.value}") from exc
+    return SessionCommand(
+        kind=kind,
+        text=str(payload.get("text") or ""),
+        reason=str(payload.get("reason") or intent.source),
+        sender=str(payload.get("sender") or ""),
+    )
+
+
+def _is_command_intent(intent: WorkIntent) -> bool:
+    return intent.kind.value in {kind.value for kind in SessionCommandKind}
 
 __all__ = [
     "AgentSession",

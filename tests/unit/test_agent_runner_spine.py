@@ -744,6 +744,141 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertIn("item_00", payload["summary"]["counts"])
         self.assertNotIn("item_49", payload["summary"]["counts"])
 
+    def test_model_tool_payload_preserves_unknown_small_terminal_facts_generically(self):
+        result = ToolResult(
+            True,
+            "action_terminal",
+            False,
+            metrics={
+                "owner": "navigateTo",
+                "action_id": "action-17",
+                "stopped_reason": "arrived",
+                "terminal_tick": 8123,
+            },
+        ).to_payload()
+
+        payload = _model_tool_payload("future_safe_capability", result, trace_ref="future-trace")
+
+        self.assertEqual(payload["summary"]["owner"], "navigateTo")
+        self.assertEqual(payload["summary"]["action_id"], "action-17")
+        self.assertEqual(payload["summary"]["stopped_reason"], "arrived")
+        self.assertEqual(payload["summary"]["terminal_tick"], 8123)
+        self.assertTrue(payload["projection"]["complete"])
+
+    def test_model_tool_payload_preserves_task_revisions_and_step_statuses(self):
+        result = ToolResult(
+            True,
+            "task_plan_updated",
+            False,
+            metrics={
+                "plan": {
+                    "plan_id": "plan-1",
+                    "revision": 4,
+                    "summary": "Acquire supplies",
+                    "steps": [
+                        {
+                            "step_id": "step-1",
+                            "ordinal": 0,
+                            "title": "Acquire iron",
+                            "status": "in_progress",
+                            "evidence": ["inventory iron=3"],
+                            "blocker": None,
+                        }
+                    ],
+                },
+                "current": {
+                    "active": True,
+                    "task": {
+                        "task_id": "task-1",
+                        "revision": 7,
+                        "goal": "prepare for the End",
+                        "status": "running",
+                    },
+                },
+            },
+        ).to_payload()
+
+        payload = _model_tool_payload("update_plan", result, trace_ref="task-trace")
+        artifact = payload["summary"]["task_artifact"]
+
+        self.assertEqual(artifact["task"]["revision"], 7)
+        self.assertEqual(artifact["plan"]["revision"], 4)
+        self.assertEqual(artifact["plan"]["steps"][0]["status"], "in_progress")
+        self.assertTrue(artifact["plan"]["steps_complete"])
+        self.assertNotIn("metrics", payload)
+
+    def test_model_tool_payload_exposes_conversation_archive_handles(self):
+        result = ToolResult(
+            True,
+            "conversation_archive_query",
+            False,
+            metrics={
+                "query": "diamond",
+                "start": 0,
+                "limit": 5,
+                "total_matches": 1,
+                "results": [
+                    {
+                        "handle": "conversation:scope:turn:7",
+                        "turn": 7,
+                        "user": "Where was the diamond vein?",
+                        "assistant": "Near the ravine.",
+                        "tools": ["read_state"],
+                        "tool_reasons": ["state_read"],
+                        "item_count": 4,
+                    }
+                ],
+                "next_start": None,
+                "complete": True,
+            },
+        ).to_payload()
+
+        payload = _model_tool_payload(
+            "query_conversation_archive",
+            result,
+            trace_ref="archive-query",
+        )
+
+        self.assertEqual(
+            payload["summary"]["results"][0]["handle"],
+            "conversation:scope:turn:7",
+        )
+        self.assertTrue(payload["summary"]["results_complete"])
+        self.assertTrue(payload["summary"]["complete"])
+
+    def test_model_tool_payload_exposes_bounded_conversation_turn_items(self):
+        items = [
+            {"role": "user", "content": "question"},
+            {"type": "function_call", "call_id": "call-1", "name": "read_state"},
+            {"type": "function_call_output", "call_id": "call-1", "output": "{}"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        result = ToolResult(
+            True,
+            "conversation_archive_read",
+            False,
+            metrics={
+                "handle": "conversation:scope:turn:2",
+                "turn": 2,
+                "start": 0,
+                "limit": 20,
+                "item_count": 4,
+                "items": items,
+                "next_start": None,
+                "complete": True,
+            },
+        ).to_payload()
+
+        payload = _model_tool_payload(
+            "read_conversation_archive",
+            result,
+            trace_ref="archive-read",
+        )
+
+        self.assertEqual(payload["summary"]["handle"], "conversation:scope:turn:2")
+        self.assertEqual(payload["summary"]["items"], items)
+        self.assertTrue(payload["summary"]["items_complete"])
+
     def test_sdk_tool_records_tool_decision_context(self):
         def callable_(_params):
             return ToolResult(
@@ -1259,58 +1394,6 @@ class AgentRunnerSpineTests(unittest.TestCase):
         continuation = next(event for event in events if event["event"] == "tool_continuation")
         self.assertEqual(continuation["tool"], "ensure_tool_for")
         self.assertEqual(continuation["reason"], "reinvoke_ensure")
-
-    def test_goal_driver_auto_continues_ensure_by_resume_hint(self):
-        body = FakeBody()
-        registry = ToolRegistry()
-        ensure_calls = []
-
-        def ensure_callable(params):
-            ensure_calls.append(dict(params))
-            if len(ensure_calls) == 1:
-                return ToolResult(
-                    False,
-                    "partial_budget_exhausted",
-                    True,
-                    metrics={
-                        "item": "iron_pickaxe",
-                        "target_count": 1,
-                        "plan": [],
-                        "completed_steps": [],
-                        "resume_hint": "reinvoke_ensure",
-                    },
-                )
-            return ToolResult(
-                True,
-                "ensured",
-                False,
-                metrics={"item": "iron_pickaxe", "target_count": 1, "current_count": 1, "resume_hint": "complete"},
-            )
-
-        registry.register(
-            RegisteredTool(
-                name="ensure_tool_for",
-                description="Ensure",
-                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-                callable=ensure_callable,
-                sidecar=ToolSidecar(progress_key="ensure_tool_for", mutating=False, tool_type="resource"),
-            )
-        )
-        runtime = AgentRuntime(
-            body=body,
-            registry=registry,
-            agent_context=AgentContext(system_prompt="sys", goal_text="craft an iron pickaxe"),
-            lifecycle=LifecycleController(),
-            mode_runtime=ModeRuntime(),
-            authority=ProgressAuthority(),
-        )
-
-        outcome = runtime.drive_tool_once("ensure_tool_for", {"resource": "iron_pickaxe"}, reason="canonical_acquire_goal")
-
-        self.assertEqual(outcome.status, "completed_turn")
-        self.assertEqual(outcome.result["reason"], "ensured")
-        self.assertEqual(ensure_calls, [{"resource": "iron_pickaxe"}, {"resource": "iron_pickaxe"}])
-        self.assertTrue(any(event["event"] == "tool_continuation" and event["tool"] == "ensure_tool_for" for event in runtime.trace.snapshot()))
 
     def test_sdk_tool_converts_transport_exception_to_tool_result(self):
         def callable_(_params):

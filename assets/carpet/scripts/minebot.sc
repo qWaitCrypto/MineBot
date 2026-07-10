@@ -1,6 +1,7 @@
 global_events = [];
 global_seq = 0;
 global_tick = 0;
+global_event_epoch = null;
 global_moves = {};
 global_move_cancels = {};
 global_navigations = {};
@@ -4351,6 +4352,14 @@ minebot_say(name, text) -> (
 );
 
 minebot_state(name) -> state_json(name);
+
+minebot_event_head(name, proposed_epoch) -> (
+  if(global_event_epoch == null, global_event_epoch = str('%s', proposed_epoch));
+  owner = owner_of(name);
+  owner_name = if(owner == null, null, owner:0);
+  data = str('{"eventSeq":%d,"chatSeq":%d,"tick":%d,"epoch":%s,"owner":%s}', global_seq, global_agent_chat_seq, global_tick, json_string(global_event_epoch), json_string(owner_name));
+  result_json(null, name, true, true, data, null)
+);
 
 minebot_perceive(name, scope, payload) -> (
   params = if(length(payload) == 0, {}, decode_json(payload));

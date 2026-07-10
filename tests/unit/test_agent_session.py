@@ -1,11 +1,16 @@
 import asyncio
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 
 from agents.exceptions import MaxTurnsExceeded
 
 from minebot.app.runner import AgentRuntime, RecoveryOutcome
-from minebot.app.session import AgentSession, SessionCommand, SessionStep
+from minebot.app.runtime_state import CheckpointDisposition, RuntimeScope, RuntimeStateStore, TaskStatus
+from minebot.app.session import AgentSession, SessionCommand
+from minebot.app.tasks import TaskWorkspace
+from minebot.app.work_queue import WorkIntentKind, WorkIntentState
 from minebot.app.wiring import AgentRuntimeParts
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleState
@@ -49,6 +54,201 @@ def build_parts(goal: str, calls: list[str], bodies: list[FakeBody]) -> AgentRun
 
 
 class AgentSessionTests(unittest.TestCase):
+    def test_intent_remains_leased_until_the_sdk_run_finishes(self):
+        bodies: list[FakeBody] = []
+        observed_states: list[WorkIntentState] = []
+        session: AgentSession
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], bodies)
+
+            async def runner(_agent, _input_text, **_kwargs):
+                record = next(iter(session.work_queue._records.values()))
+                observed_states.append(record.state)
+                return {"ok": True}
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.message("hello"))
+
+        result = asyncio.run(session.step())
+
+        self.assertEqual(result.status, "completed_turn")
+        self.assertEqual(observed_states, [WorkIntentState.LEASED])
+        record = next(iter(session.work_queue._records.values()))
+        self.assertEqual(record.state, WorkIntentState.COMPLETED)
+
+    def test_checkpoint_continue_enqueues_one_successor_after_world_progress(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        bodies: list[FakeBody] = []
+        calls: list[int] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], bodies)
+
+            async def runner(_agent, _input_text, **_kwargs):
+                calls.append(len(calls) + 1)
+                task = workspace.current_task
+                if len(calls) == 1:
+                    parts.runtime.body.x += 1.0
+                    workspace.checkpoint(
+                        expected_task_revision=task.revision,
+                        disposition=CheckpointDisposition.CONTINUE,
+                        summary="made progress",
+                        next_step="continue the task",
+                    )
+                else:
+                    workspace.checkpoint(
+                        expected_task_revision=task.revision,
+                        disposition=CheckpointDisposition.WAIT_EVENT,
+                        summary="wait",
+                    )
+                return {"ok": True}
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory, task_workspace=workspace)
+        session.submit(SessionCommand.start("prepare for the End"))
+
+        first = asyncio.run(session.step())
+        self.assertEqual(first.status, "completed_turn")
+        self.assertEqual(session.work_queue.pending_count(), 1)
+        self.assertEqual(
+            session.work_queue.count_for_task(
+                WorkIntentKind.TASK_CONTINUE,
+                workspace.current_task.task_id,
+            ),
+            1,
+        )
+
+        second = asyncio.run(session.step())
+        self.assertEqual(second.status, "completed_turn")
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual(session.work_queue.pending_count(), 0)
+        self.assertEqual(workspace.current_task.status, TaskStatus.WAITING_EVENT)
+        session.close()
+        store.close()
+
+    def test_checkpoint_continue_without_world_progress_yields_instead_of_looping(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        bodies: list[FakeBody] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], bodies)
+
+            async def runner(_agent, _input_text, **_kwargs):
+                task = workspace.current_task
+                workspace.checkpoint(
+                    expected_task_revision=task.revision,
+                    disposition=CheckpointDisposition.CONTINUE,
+                    summary="continue without changing the world",
+                )
+                return {"ok": True}
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory, task_workspace=workspace)
+        session.submit(SessionCommand.start("prepare for the End"))
+
+        result = asyncio.run(session.step())
+
+        self.assertEqual(result.status, "completed_turn")
+        self.assertEqual(result.lifecycle, LifecycleState.YIELDED)
+        self.assertEqual(workspace.current_task.status, TaskStatus.YIELDED)
+        self.assertEqual(session.work_queue.pending_count(), 0)
+        latest = store.get_latest_checkpoint(workspace.current_task.task_id)
+        self.assertEqual(latest.disposition, CheckpointDisposition.YIELD)
+        self.assertEqual(latest.summary, "task_continue_without_world_progress")
+        session.close()
+        store.close()
+
+    def test_persistent_task_is_separate_from_plain_chat_and_reaches_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RuntimeStateStore(Path(tmp) / "state.sqlite3")
+            workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+            calls: list[str] = []
+            bodies: list[FakeBody] = []
+            session = AgentSession(
+                lambda goal: build_parts(goal, calls, bodies),
+                task_workspace=workspace,
+            )
+
+            session.submit(SessionCommand.message("hello"))
+            asyncio.run(session.step())
+            self.assertIsNone(workspace.current_task)
+
+            session.submit(SessionCommand.start("prepare for the End", sender="Steve"))
+            asyncio.run(session.step())
+
+            task = workspace.current_task
+            self.assertIsNotNone(task)
+            self.assertEqual(task.goal_text, "prepare for the End")
+            self.assertEqual(task.requested_by, "Steve")
+            self.assertIn("TASK_ARTIFACT:", calls[-1])
+            self.assertIn(task.task_id, calls[-1])
+            session.close()
+            store.close()
+
+    def test_checkpoint_wait_event_stands_down_without_completing_task(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        bodies: list[FakeBody] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], bodies)
+
+            async def runner(_agent, _input_text, **_kwargs):
+                task = workspace.current_task
+                workspace.checkpoint(
+                    expected_task_revision=task.revision,
+                    disposition=CheckpointDisposition.WAIT_EVENT,
+                    summary="Waiting for a factual event",
+                    wait_for=["furnace output available"],
+                )
+                return {"ok": True}
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory, task_workspace=workspace)
+        session.submit(SessionCommand.start("smelt iron"))
+
+        result = asyncio.run(session.step())
+
+        self.assertEqual(result.status, "completed_turn")
+        self.assertEqual(result.lifecycle, LifecycleState.IDLE)
+        self.assertEqual(workspace.current_task.status, TaskStatus.WAITING_EVENT)
+        self.assertTrue(session.has_active_goal)
+        session.close()
+        store.close()
+
+    def test_cancel_transitions_persisted_task_instead_of_hiding_it(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(
+            lambda goal: build_parts(goal, calls, bodies),
+            task_workspace=workspace,
+        )
+        session.submit(SessionCommand.start("long task"))
+        asyncio.run(session.step())
+        task_id = workspace.current_task.task_id
+
+        session.submit(SessionCommand.cancel())
+        asyncio.run(session.step())
+
+        self.assertIsNone(workspace.current_task)
+        self.assertEqual(store.get_task(task_id).status, TaskStatus.CANCELLED)
+        session.close()
+        store.close()
+
     def test_plain_message_is_one_agent_turn_without_creating_goal(self):
         calls: list[str] = []
         bodies: list[FakeBody] = []
@@ -71,6 +271,86 @@ class AgentSessionTests(unittest.TestCase):
         self.assertNotIn("GOAL:", calls[0])
         self.assertIn("INPUT: hello", calls[0])
 
+    def test_replace_supersedes_queued_plain_message_before_model_admission(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+
+        session.submit(SessionCommand.message("obsolete question"))
+        session.submit(SessionCommand.replace_goal("collect 3 oak_log"))
+        result = asyncio.run(session.step())
+
+        self.assertEqual(result.status, "completed_turn")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("GOAL: collect 3 oak_log", calls[0])
+        self.assertNotIn("obsolete question", calls[0])
+
+    def test_material_body_event_wakes_one_agent_turn_without_inventing_goal(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+        session.work_queue.enqueue(
+            WorkIntentKind.BODY_EVENT,
+            source="body_event",
+            payload={
+                "event": {
+                    "seq": 11,
+                    "tick": 220,
+                    "bot": "Bot",
+                    "name": "underAttack",
+                    "data": {"health": 12},
+                }
+            },
+            dedupe_key="body:app-1:11",
+        )
+
+        result = asyncio.run(session.step())
+
+        self.assertEqual(result.status, "completed_turn")
+        self.assertEqual(result.lifecycle, LifecycleState.IDLE)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("BODY_EVENT:", calls[0])
+        self.assertIn("underAttack", calls[0])
+        self.assertNotIn("GOAL:", calls[0])
+        self.assertTrue(
+            any(event["event"] == "body_event_wake" for event in session.parts.runtime.trace.snapshot())
+        )
+
+    def test_body_event_from_superseded_generation_is_completed_without_model_turn(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+        session.submit(SessionCommand.message("hello"))
+        asyncio.run(session.step())
+        generation = session.parts.authority.current_generation()
+        session.work_queue.enqueue(
+            WorkIntentKind.BODY_EVENT,
+            source="body_event",
+            payload={
+                "event": {
+                    "seq": 12,
+                    "tick": 221,
+                    "bot": "Bot",
+                    "name": "underAttack",
+                    "data": {"health": 10},
+                }
+            },
+            generation=generation,
+        )
+        session.parts.authority.invalidate_generation("replacement")
+
+        dropped = asyncio.run(session.step())
+
+        self.assertEqual(dropped.status, "idle")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(
+            any(
+                event["event"] == "body_event_intent_dropped"
+                and event["reason"] == "runtime_generation_changed"
+                for event in session.parts.runtime.trace.snapshot()
+            )
+        )
+
     def test_plain_messages_reuse_conversation_runtime_across_turns(self):
         calls: list[str] = []
         bodies: list[FakeBody] = []
@@ -87,6 +367,60 @@ class AgentSessionTests(unittest.TestCase):
         self.assertNotIn("INPUT: hello", calls[1])
         self.assertIn("INPUT: who are you", calls[1])
         self.assertIn(("user", "hello"), session.parts.context.session_messages())
+
+    def test_two_queued_plain_messages_are_two_distinct_sdk_turns(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+
+        session.submit(SessionCommand.message("first"))
+        session.submit(SessionCommand.message("second"))
+
+        first = asyncio.run(session.step())
+        second = asyncio.run(session.step())
+
+        self.assertEqual(first.status, "completed_turn")
+        self.assertEqual(second.status, "completed_turn")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("INPUT: first", calls[0])
+        self.assertNotIn("second", calls[0])
+        self.assertIn("INPUT: second", calls[1])
+
+    def test_replayed_chat_event_dedupe_key_produces_one_sdk_turn(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+
+        first = session.submit(
+            SessionCommand.message("hello", sender="Steve"),
+            dedupe_key="chat:app-1:7",
+        )
+        replay = session.submit(
+            SessionCommand.message("hello", sender="Steve"),
+            dedupe_key="chat:app-1:7",
+        )
+        result = asyncio.run(session.step())
+
+        self.assertEqual(first.intent_id, replay.intent_id)
+        self.assertEqual(result.status, "completed_turn")
+        self.assertEqual(len(calls), 1)
+
+    def test_cancel_supersedes_queued_replacement_instead_of_reviving_task(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+
+        session.submit(SessionCommand.replace_goal("collect 64 sand"))
+        session.submit(SessionCommand.cancel("stop_now"))
+        cancelled = asyncio.run(session.step())
+        after = asyncio.run(session.step())
+
+        self.assertEqual(cancelled.status, "waiting")
+        self.assertEqual(after.status, "idle")
+        self.assertIsNone(session.current_goal)
+        self.assertFalse(session.has_pending_work)
 
     def test_plain_minecraft_message_preserves_sender_in_input_and_trace(self):
         calls: list[str] = []
@@ -307,58 +641,6 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertIn("HARNESS_FACT: Resume the interrupted user request represented by this JSON:", calls[1])
         self.assertIn('{"message": "follow me", "sender": "Steve"}', calls[1])
-
-    def test_goal_driver_can_handle_collect_goal_before_model_tool_choice(self):
-        calls: list[str] = []
-        bodies: list[FakeBody] = []
-        driven_goals: list[str] = []
-
-        def driver(parts: AgentRuntimeParts, _signals) -> SessionStep | None:
-            driven_goals.append(parts.context.goal_text)
-            return SessionStep("completed_turn", parts.lifecycle.state, "driver_handled")
-
-        session = AgentSession(lambda goal: build_parts(goal, calls, bodies), goal_driver=driver)
-        session.submit(SessionCommand.start("collect 64 logs"))
-
-        first = asyncio.run(session.step())
-        second = asyncio.run(session.step())
-
-        self.assertEqual(first.status, "completed_turn")
-        self.assertEqual(first.message, "driver_handled")
-        self.assertEqual(driven_goals, ["collect 64 logs"])
-        self.assertEqual(len(calls), 1)
-        self.assertIn("GOAL: collect 64 logs", calls[0])
-        self.assertEqual(second.status, "completed_turn")
-
-    def test_goal_driver_does_not_block_supervisor_command_submission(self):
-        calls: list[str] = []
-        bodies: list[FakeBody] = []
-        driver_started = threading.Event()
-        release_driver = threading.Event()
-
-        def driver(parts: AgentRuntimeParts, _signals) -> SessionStep:
-            driver_started.set()
-            release_driver.wait(timeout=2)
-            return SessionStep("completed_turn", parts.lifecycle.state, "driver_handled")
-
-        session = AgentSession(lambda goal: build_parts(goal, calls, bodies), goal_driver=driver)
-        session.submit(SessionCommand.start("collect 64 logs"))
-
-        async def scenario():
-            step_task = asyncio.create_task(session.step())
-            for _ in range(100):
-                if driver_started.is_set():
-                    break
-                await asyncio.sleep(0.01)
-            session.submit(SessionCommand.quit("user_quit"))
-            release_driver.set()
-            await step_task
-            return await session.step()
-
-        quit_step = asyncio.run(scenario())
-
-        self.assertEqual(quit_step.status, "quit")
-        self.assertEqual(bodies[0].interrupt_reasons, ["user_quit"])
 
     def test_pause_while_active_interrupts_body_and_yields_lifecycle(self):
         calls: list[str] = []
@@ -655,76 +937,6 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(active_step.lifecycle, LifecycleState.ACTIVE)
         self.assertEqual(len(calls), 2)
         self.assertTrue(any(event["event"] == "session_recovery_result" for event in session.parts.runtime.trace.snapshot()))
-
-    def test_goal_driver_retries_after_preflight_recovery(self):
-        driver_calls: list[tuple[str, str]] = []
-        model_calls: list[str] = []
-
-        def parts_factory(goal: str) -> AgentRuntimeParts:
-            body = FakeBody()
-
-            async def fake_runner(agent, input_text, *, context=None, **kwargs):
-                model_calls.append(input_text)
-                return {"ok": True}
-
-            def recover(_runtime: AgentRuntime) -> RecoveryOutcome:
-                return RecoveryOutcome(True, "respawned", facts={"state_after_pos": [1, 64, 0]})
-
-            context = AgentContext(system_prompt="sys", goal_text=goal)
-            lifecycle = LifecycleController()
-            modes = ModeRuntime()
-            authority = ProgressAuthority()
-            runtime = AgentRuntime(
-                body=body,
-                registry=ToolRegistry(),
-                agent_context=context,
-                lifecycle=lifecycle,
-                mode_runtime=modes,
-                authority=authority,
-                runner_run=fake_runner,
-                recovery_handler=recover,
-            )
-            return AgentRuntimeParts(
-                runtime=runtime,
-                registry=runtime.registry,
-                context=context,
-                lifecycle=lifecycle,
-                modes=modes,
-                authority=authority,
-            )
-
-        def driver(parts: AgentRuntimeParts, signals) -> SessionStep | None:
-            driver_calls.append((parts.context.goal_text, parts.lifecycle.state.value))
-            if len(driver_calls) == 1:
-                parts.lifecycle.ready()
-                parts.lifecycle.start()
-                parts.lifecycle.enter_recovery()
-                return SessionStep("stopped", parts.lifecycle.state, "death_detected")
-            if parts.lifecycle.state is LifecycleState.RECOVERING:
-                parts.lifecycle.resume()
-                return SessionStep("stopped", parts.lifecycle.state, "respawned")
-            if parts.lifecycle.state is LifecycleState.RESUMING:
-                parts.lifecycle.reenter_active()
-            return SessionStep("completed_turn", parts.lifecycle.state, "driver_handled")
-
-        session = AgentSession(parts_factory, goal_driver=driver)
-        session.submit(SessionCommand.start("collect 64 logs"))
-
-        first = asyncio.run(session.step())
-        second = asyncio.run(session.step())
-        third = asyncio.run(session.step())
-        fourth = asyncio.run(session.step())
-
-        self.assertEqual(first.lifecycle, LifecycleState.RECOVERING)
-        self.assertEqual(second.lifecycle, LifecycleState.RESUMING)
-        self.assertEqual(third.message, "driver_handled")
-        self.assertEqual(third.lifecycle, LifecycleState.ACTIVE)
-        self.assertEqual(fourth.status, "completed_turn")
-        self.assertEqual(
-            driver_calls,
-            [("collect 64 logs", "init"), ("collect 64 logs", "recovering"), ("collect 64 logs", "resuming")],
-        )
-        self.assertEqual(len(model_calls), 1)
 
     def test_recovering_session_yields_on_recovery_failure(self):
         def parts_factory(goal: str) -> AgentRuntimeParts:

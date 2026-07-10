@@ -11,11 +11,26 @@ from collections.abc import Callable
 import time
 from dataclasses import dataclass
 
+from agents import Session
+
 from minebot.app.model_provider import ModelProviderRegistry
+from minebot.app.conversation_tools import register_conversation_archive_tools
 from minebot.app.runner import AgentRuntime, RecoveryOutcome, RuntimeTrace
 from minebot.app.runner import sdk_tool_for
+from minebot.app.observation_artifacts import (
+    ToolObservationArchive,
+    register_tool_observation_tools,
+)
+from minebot.app.tasks import TaskWorkspace, register_task_tools
 from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
-from minebot.body import BlockWork, FurnaceTransactions, InventoryTransactions, LifecycleTransactions, NavigationRunConfig, NavigationTransactions
+from minebot.body import (
+    BlockWork,
+    FurnaceTransactions,
+    InventoryTransactions,
+    LifecycleTransactions,
+    NavigationRunConfig,
+    NavigationTransactions,
+)
 from minebot.body.combat import CombatTransactions, find_hostiles
 from minebot.body.furnace import DEFAULT_SMELT_SECONDS_PER_ITEM, resolve_smelt_output, select_fuel
 from minebot.body.inventory import _parse_recipe_variants
@@ -42,6 +57,9 @@ class Phase1RuntimeConfig:
     recovery_respawn_pos: Position | None = None
     recovery_gamemode: str | None = None
     speech_sink: Callable[[str], None] | None = None
+    conversation_session: Session | None = None
+    task_workspace: TaskWorkspace | None = None
+    observation_archive: ToolObservationArchive | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +95,8 @@ def build_phase1_agent_runtime(
         recovery_handler=_phase1_recovery_handler(body, config),
         authority=authority,
         speech_sink=config.speech_sink,
+        conversation_session=config.conversation_session,
+        observation_archive=config.observation_archive,
     )
     context = CompositionContext(
         registry=registry,
@@ -88,6 +108,20 @@ def build_phase1_agent_runtime(
     )
     register_collect_resource_tool(registry, context)
     register_ensure_tool_for_tool(registry, context, _recipe_lookup(body))
+    if config.task_workspace is not None:
+        register_task_tools(
+            registry,
+            config.task_workspace,
+            body_fingerprint=lambda: _task_body_fingerprint(body, authority),
+        )
+    if (
+        config.conversation_session is not None
+        and callable(getattr(config.conversation_session, "query_archive", None))
+        and callable(getattr(config.conversation_session, "read_archive_turn", None))
+    ):
+        register_conversation_archive_tools(registry, config.conversation_session)
+    if config.observation_archive is not None:
+        register_tool_observation_tools(registry, config.observation_archive)
     parts.runtime.registry = registry
     parts.runtime.agent = parts.runtime.agent.clone(tools=[sdk_tool_for(registry.get(name)) for name in registry.names()])
     parts.runtime.trace.emit("tool_manifest", tools=tool_manifest(registry))
@@ -360,14 +394,40 @@ def _safe_inventory_counts(body: Body, *, source: str = "body_recount") -> dict[
         return {"ok": False, "source": source, "error": str(exc), "error_type": type(exc).__name__}
 
 
+def _task_body_fingerprint(body: Body, authority: ProgressAuthority) -> dict[str, object]:
+    try:
+        state = body.get_state()
+    except Exception as exc:
+        raise ValueError(
+            f"task checkpoint body fingerprint failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    return {
+        "fingerprint": authority.fingerprint(state),
+        "pos": list(state.pos),
+        "health": state.health,
+        "food": state.food,
+        "oxygen": state.oxygen,
+        "inventory_hash": state.inventory_hash,
+        "dimension": state.dimension,
+        "missing": state.missing,
+    }
+
+
 def _inventory_counts_snapshot(body: Body, *, page_size: int = 12) -> dict[str, int]:
     counts: dict[str, int] = {}
     start: int | None = 0
     saw_page = False
+    seen_starts: set[int] = set()
     while start is not None:
+        if start in seen_starts:
+            raise ValueError(
+                f"inventory perception failed during recovery recount: repeated cursor {start}"
+            )
+        seen_starts.add(start)
         perception = body.perceive("inventory", {"start": start, "limit": page_size})
         saw_page = True
-        if not perception.ok or not perception.complete:
+        next_start = _next_start(perception)
+        if not perception.ok or (not perception.complete and next_start is None):
             raise ValueError(
                 "inventory perception failed during recovery recount: "
                 f"ok={perception.ok} complete={perception.complete} error={perception.error}"
@@ -380,7 +440,6 @@ def _inventory_counts_snapshot(body: Body, *, page_size: int = 12) -> dict[str, 
                 continue
             item = str(slot.item).removeprefix("minecraft:")
             counts[item] = counts.get(item, 0) + slot.count
-        next_start = _next_start(perception)
         start = int(next_start) if next_start is not None else None
     if not saw_page:
         raise ValueError("inventory perception failed during recovery recount: no pages read")

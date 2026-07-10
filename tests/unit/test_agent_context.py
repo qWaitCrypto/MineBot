@@ -105,6 +105,55 @@ class AgentContextTests(unittest.TestCase):
         self.assertIn('"message": "follow me"', turn_input)
         self.assertEqual(ctx.session_messages(), [("user", "Steve: follow me")])
 
+    def test_persisted_task_artifact_is_injected_separately_from_conversation(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="prepare for the End")
+        ctx.observe_task(
+            {
+                "active": True,
+                "task": {"task_id": "task-1", "revision": 3, "status": "running"},
+                "plan": {"revision": 2, "steps": [{"title": "get iron", "status": "in_progress"}]},
+            }
+        )
+
+        ctx.begin_turn()
+        preamble = ctx.turn_preamble()
+
+        self.assertIn("TASK_ARTIFACT:", preamble)
+        self.assertIn('"task_id": "task-1"', preamble)
+        self.assertNotIn("TASK_ARTIFACT", ctx.pending_turn_input(fallback="new input")[0])
+
+    def test_compacted_conversation_summary_is_injected_without_replacing_task_facts(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="prepare for the End")
+        ctx.observe_task(
+            {
+                "active": True,
+                "task": {"task_id": "task-1", "revision": 3, "status": "running"},
+            }
+        )
+        ctx.observe_conversation_summary(
+            {
+                "archive_revision": 9,
+                "total_closed_turns": 18,
+                "live_turns": 12,
+                "compacted_turns": 6,
+                "covered_turn_handles": ["conversation:scope:turn:1"],
+                "complete": True,
+            }
+        )
+
+        ctx.begin_turn()
+        preamble = ctx.turn_preamble()
+
+        self.assertIn("TASK_ARTIFACT:", preamble)
+        self.assertIn("CONVERSATION_SUMMARY:", preamble)
+        self.assertIn('"archive_revision": 9', preamble)
+        self.assertIn('"task_id": "task-1"', preamble)
+        budget = ctx.budget_facts()
+        self.assertTrue(budget["task_artifact_present"])
+        self.assertTrue(budget["conversation_summary_complete"])
+        self.assertEqual(budget["conversation_archive_revision"], 9)
+        self.assertEqual(budget["conversation_compacted_turns"], 6)
+
     def test_sdk_session_window_drops_only_complete_old_turns(self):
         history = []
         for turn in range(CONVERSATION_WINDOW_TURNS + 2):
@@ -146,6 +195,26 @@ class AgentContextTests(unittest.TestCase):
         self.assertEqual(items[0]["content"], "turn-1")
         self.assertEqual(items[-1]["content"], "done-2")
         self.assertEqual(len(items), 8)
+
+    def test_windowed_sdk_session_item_limit_never_splits_latest_tool_turn(self):
+        session = WindowedConversationSession(max_turns=2)
+
+        async def scenario():
+            await session.add_items(
+                [
+                    {"role": "user", "content": "question"},
+                    {"type": "function_call", "call_id": "call-1"},
+                    {"type": "function_call_output", "call_id": "call-1"},
+                    {"role": "assistant", "content": "answer"},
+                ]
+            )
+            return await session.get_items(limit=2)
+
+        items = asyncio.run(scenario())
+
+        self.assertEqual(len(items), 4)
+        self.assertEqual(items[0]["role"], "user")
+        self.assertEqual(items[-1]["role"], "assistant")
 
 
 def build_parts(goal: str, calls: list[str]) -> AgentRuntimeParts:
@@ -227,6 +296,15 @@ class AgentContextRuntimeTests(unittest.TestCase):
 
         context = AgentContext(system_prompt="sys", goal_text="collect 64 logs")
         context.observe_user_message("start collecting")
+        context.observe_task({"active": True, "task": {"task_id": "task-1", "revision": 2}})
+        context.observe_conversation_summary(
+            {
+                "archive_revision": 4,
+                "total_closed_turns": 15,
+                "compacted_turns": 3,
+                "complete": True,
+            }
+        )
         runtime = AgentRuntime(
             body=body,
             registry=ToolRegistry(),
@@ -247,6 +325,16 @@ class AgentContextRuntimeTests(unittest.TestCase):
         self.assertNotIn("SESSION_MESSAGES:", calls[0][1])
         self.assertIs(calls[0][2], calls[1][2])
         self.assertIs(calls[0][2], runtime.conversation_session)
+        budgets = [
+            event for event in runtime.trace.snapshot() if event["event"] == "context_budget"
+        ]
+        self.assertEqual(len(budgets), 2)
+        self.assertTrue(budgets[0]["task_artifact_present"])
+        self.assertTrue(budgets[0]["conversation_summary_complete"])
+        self.assertEqual(budgets[0]["conversation_archive_revision"], 4)
+        self.assertEqual(budgets[0]["conversation_compacted_turns"], 3)
+        self.assertGreater(budgets[0]["estimated_context_chars"], 0)
+        runtime.close()
 
     def test_runner_advances_context_turn_once_per_outer_turn(self):
         calls: list[str] = []

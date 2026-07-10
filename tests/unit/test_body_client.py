@@ -73,6 +73,44 @@ class ActionThenEventTransport:
 
 
 class BodyClientTests(unittest.TestCase):
+    def test_event_head_reads_epoch_and_both_cursors(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "result",
+                        "id": None,
+                        "bot": "Bot1",
+                        "ok": True,
+                        "accepted": True,
+                        "complete": True,
+                        "data": {
+                            "eventSeq": 17,
+                            "chatSeq": 4,
+                            "tick": 900,
+                            "epoch": "app-epoch",
+                        },
+                        "error": None,
+                    }
+                )
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        head = body.event_head("candidate")
+
+        self.assertEqual(
+            head,
+            {
+                "event_seq": 17,
+                "chat_seq": 4,
+                "tick": 900,
+                "epoch": "app-epoch",
+                "owner": None,
+            },
+        )
+        self.assertIn("minebot_event_head", transport.commands[0])
+
     def test_spawn_rejects_overlong_bot_name_before_transport(self):
         transport = FakeTransport([])
         body = ScarpetBody("E2EContainerViewBot", transport)

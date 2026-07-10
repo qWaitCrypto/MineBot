@@ -6,6 +6,7 @@ from minebot.contract import Action
 from minebot.game.protocol import (
     build_action_call,
     build_chat_drain_call,
+    build_event_head_call,
     build_perceive_call,
     build_say_call,
     build_watch_call,
@@ -41,6 +42,14 @@ class ProtocolTests(unittest.TestCase):
 
         self.assertTrue(command.startswith("script in minebot run minebot_drain_chat("))
         self.assertIn("'Bot1'", command)
+
+    def test_build_event_head_call_carries_candidate_epoch(self):
+        command = build_event_head_call("Bot1", "app-123")
+
+        self.assertEqual(
+            command,
+            "script in minebot run minebot_event_head('Bot1', 'app-123')",
+        )
 
     def test_build_say_call_allows_unicode_and_escapes_quotes(self):
         command = build_say_call("Bot1", "你好 Bob's base")

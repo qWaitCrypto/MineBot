@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env  # noqa: E402
 from minebot.app.observability import JsonlObservationSink  # noqa: E402
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime  # noqa: E402
-from minebot.app.real_server_session import _goal_driver, safe_evaluate_terminal_truth  # noqa: E402
+from minebot.app.real_server_session import safe_evaluate_terminal_truth  # noqa: E402
 from minebot.app.runner import RuntimeTrace  # noqa: E402
 from minebot.app.session import AgentSession, SessionCommand  # noqa: E402
 from minebot.contract import Region  # noqa: E402
@@ -101,7 +101,7 @@ class ServerSpec:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="G3 natural-terrain observation runner.")
-    parser.add_argument("--mode", choices=("driver", "llm", "both"), default="both")
+    parser.add_argument("--mode", choices=("llm",), default="llm")
     parser.add_argument("--workdir", type=Path, default=Path("/tmp") / f"minebot-g3-natural-{int(time.time())}")
     parser.add_argument("--server-port", type=int, default=_free_port(25666))
     parser.add_argument("--rcon-port", type=int, default=_free_port(25676))
@@ -118,7 +118,7 @@ def main() -> int:
         rcon_port=args.rcon_port,
         password=args.password,
     )
-    modes = ("driver", "llm") if args.mode == "both" else (args.mode,)
+    modes = (args.mode,)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     started: subprocess.Popen[str] | None = None
     summary: dict[str, object] = {
@@ -354,7 +354,7 @@ def restore_world(spec: ServerSpec) -> None:
 
 
 async def run_observation(spec: ServerSpec, *, mode: str, log_path: Path, max_steps: int) -> dict[str, object]:
-    provider = None if mode == "driver" else provider_registry_from_env()
+    provider = provider_registry_from_env()
     with RconClient(spec.rcon) as rcon:
         load_app(rcon)
         body = ScarpetBody(BOT, rcon)
@@ -385,11 +385,11 @@ async def run_observation(spec: ServerSpec, *, mode: str, log_path: Path, max_st
                 trace=trace,
             )
 
-        session = AgentSession(make_parts, goal_driver=_goal_driver if mode == "driver" else None)
+        session = AgentSession(make_parts)
         session.submit(SessionCommand.start(GOAL))
         try:
             final = await session.run_until_waiting(
-                max_steps=1 if mode == "driver" else max_steps,
+                max_steps=max_steps,
                 should_stop=lambda step: safe_evaluate_terminal_truth(body, GOAL, step, session=session).satisfied,
             )
             truth = safe_evaluate_terminal_truth(body, GOAL, final, session=session)
@@ -470,7 +470,7 @@ def tool_sequence(events: list[dict[str, object]]) -> list[str]:
     sequence: list[str] = []
     for event in events:
         name = str(event.get("event") or "")
-        if name in {"goal_driver_start", "tool_invoke", "tool_result", "composition_tool_result", "goal_driver_result"}:
+        if name in {"tool_invoke", "tool_result", "composition_tool_result"}:
             tool = event.get("tool")
             reason = event.get("reason")
             if reason:

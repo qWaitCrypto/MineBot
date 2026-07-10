@@ -13,6 +13,7 @@ from minebot.game.protocol import (
     build_chat_drain_call,
     build_despawn_call,
     build_drain_call,
+    build_event_head_call,
     build_interrupt_call,
     build_perceive_call,
     build_say_call,
@@ -654,6 +655,24 @@ class ScarpetBody:
             self.last_seq = max(self.last_seq, event.seq)
         self.event_log.extend(normalized)
         return normalized
+
+    def event_head(self, proposed_epoch: str) -> dict[str, object]:
+        result = parse_result(
+            self._timed_request(
+                build_event_head_call(self.bot_name, proposed_epoch, self.app),
+                kind="event_head",
+            )
+        )
+        epoch = str(result.data.get("epoch") or "")
+        if not epoch:
+            raise ValueError("event head is missing epoch")
+        return {
+            "event_seq": int(result.data.get("eventSeq") or 0),
+            "chat_seq": int(result.data.get("chatSeq") or 0),
+            "tick": int(result.data.get("tick") or 0),
+            "epoch": epoch,
+            "owner": None if result.data.get("owner") is None else str(result.data["owner"]),
+        }
 
     def _poll_events_pages(self, *, kind: str, since_seq: int, chat: bool = False) -> list[Event]:
         events: list[Event] = []

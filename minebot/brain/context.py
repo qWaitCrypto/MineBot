@@ -45,6 +45,8 @@ class AgentContext:
     _last_state: BodyState | None = field(default=None, repr=False)
     _last_profile: RuntimeProfile | None = field(default=None, repr=False)
     _resume_facts: dict[str, object] | None = field(default=None, repr=False)
+    _task_artifact: dict[str, object] | None = field(default=None, repr=False)
+    _conversation_summary: dict[str, object] | None = field(default=None, repr=False)
     _session_messages: list[tuple[str, str]] = field(default_factory=list, repr=False)
     _pending_turn_messages: list[tuple[str, str, str | None]] = field(default_factory=list, repr=False)
 
@@ -88,8 +90,85 @@ class AgentContext:
         """Inject one resume frame after a situational interruption."""
         self._resume_facts = dict(facts)
 
+    def observe_task(self, artifact: dict[str, object] | None) -> None:
+        """Inject the current persisted task artifact without owning its state."""
+        if artifact is None:
+            self._task_artifact = None
+            return
+        self._task_artifact = json.loads(
+            json.dumps(artifact, ensure_ascii=False, sort_keys=True)
+        )
+
+    def observe_conversation_summary(self, summary: dict[str, object] | None) -> None:
+        self._conversation_summary = (
+            None
+            if summary is None
+            else json.loads(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        )
+
     def session_messages(self) -> list[tuple[str, str]]:
         return list(self._session_messages)
+
+    def budget_facts(self) -> dict[str, object]:
+        task_chars = 0
+        if self._task_artifact is not None:
+            task_chars = len(
+                json.dumps(self._task_artifact, ensure_ascii=False, sort_keys=True)
+            )
+        summary_chars = 0
+        if self._conversation_summary is not None:
+            summary_chars = len(
+                json.dumps(self._conversation_summary, ensure_ascii=False, sort_keys=True)
+            )
+        return {
+            "goal_chars": len(self.goal_text),
+            "task_artifact_present": self._task_artifact is not None,
+            "task_artifact_chars": task_chars,
+            "conversation_summary_present": self._conversation_summary is not None,
+            "conversation_summary_chars": summary_chars,
+            "conversation_summary_complete": (
+                None
+                if self._conversation_summary is None
+                else self._conversation_summary.get("complete") is True
+            ),
+            "conversation_archive_revision": (
+                None
+                if self._conversation_summary is None
+                else self._conversation_summary.get("archive_revision")
+            ),
+            "conversation_archive_item_count": (
+                0
+                if self._conversation_summary is None
+                else int(self._conversation_summary.get("archive_item_count") or 0)
+            ),
+            "conversation_live_item_count": (
+                0
+                if self._conversation_summary is None
+                else int(self._conversation_summary.get("live_item_count") or 0)
+            ),
+            "conversation_live_item_chars": (
+                0
+                if self._conversation_summary is None
+                else int(self._conversation_summary.get("live_item_chars") or 0)
+            ),
+            "conversation_archive_item_chars": (
+                0
+                if self._conversation_summary is None
+                else int(self._conversation_summary.get("archive_item_chars") or 0)
+            ),
+            "conversation_total_closed_turns": (
+                0
+                if self._conversation_summary is None
+                else int(self._conversation_summary.get("total_closed_turns") or 0)
+            ),
+            "conversation_compacted_turns": (
+                0
+                if self._conversation_summary is None
+                else int(self._conversation_summary.get("compacted_turns") or 0)
+            ),
+            "session_message_count": len(self._session_messages),
+            "pending_input_count": len(self._pending_turn_messages),
+        }
 
     def pending_turn_input(self, *, fallback: str) -> tuple[str, int]:
         """Return only facts not yet presented as a new SDK-session turn.
@@ -150,6 +229,16 @@ class AgentContext:
         parts.append(f"SESSION: turn={self._turn} language={self.language}")
         if include_session_messages and self._session_messages:
             parts.append(self._session_window_line())
+        if self._task_artifact is not None:
+            parts.append(
+                "TASK_ARTIFACT: "
+                + json.dumps(self._task_artifact, ensure_ascii=False, sort_keys=True)
+            )
+        if self._conversation_summary is not None and self._conversation_summary.get("compacted_turns", 0):
+            parts.append(
+                "CONVERSATION_SUMMARY: "
+                + json.dumps(self._conversation_summary, ensure_ascii=False, sort_keys=True)
+            )
         if self._last_state is not None:
             parts.append(self._state_line(self._last_state))
         if self._last_profile is not None:

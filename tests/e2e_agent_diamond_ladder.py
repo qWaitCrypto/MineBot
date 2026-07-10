@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""G2 deterministic driver proof: empty inventory -> collect 3 diamond."""
+"""Historical deterministic Body-transaction proof: empty inventory -> 3 diamond.
+
+This is not an agentic-runtime gate. It invokes the registered Body transaction
+directly to preserve historical physical-chain coverage; production sessions
+require model-owned tool selection.
+"""
 
 from __future__ import annotations
 
@@ -15,9 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from minebot.app.observability import JsonlObservationSink  # noqa: E402
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime, inventory_count  # noqa: E402
-from minebot.app.real_server_session import _goal_driver, safe_evaluate_terminal_truth  # noqa: E402
-from minebot.app.runner import RuntimeTrace  # noqa: E402
-from minebot.app.session import AgentSession, SessionCommand  # noqa: E402
+from minebot.app.runner import RuntimeRunContext, RuntimeTrace, sdk_tool_for  # noqa: E402
+from minebot.brain.lifecycle import LifecycleState  # noqa: E402
 from minebot.contract import Region  # noqa: E402
 from minebot.game import RconClient, ScarpetBody  # noqa: E402
 from minebot.game.errors import RconError  # noqa: E402
@@ -102,54 +106,57 @@ async def run_goal_once(run_id: str, log_path: Path) -> dict[str, object]:
                 trace=trace,
             )
 
-        session = AgentSession(make_parts, goal_driver=_goal_driver)
-        session.submit(SessionCommand.start(GOAL))
-        final = await session.run_until_waiting(
-            max_steps=1,
-            should_stop=lambda step: safe_evaluate_terminal_truth(body, GOAL, step, session=session).satisfied,
+        parts = make_parts(GOAL)
+        profile = parts.modes.profile_for(LifecycleState.ACTIVE)
+        runtime_context = RuntimeRunContext(
+            agent_context=parts.context,
+            weld_context=parts.runtime.weld_context,
+            profile=profile,
+            trace=parts.runtime.trace,
+            runtime=parts.runtime,
         )
-        truth = safe_evaluate_terminal_truth(body, GOAL, final, session=session)
-        if truth.satisfied:
-            final = session.complete_current_goal("terminal_truth_satisfied")
-            truth = safe_evaluate_terminal_truth(body, GOAL, final, session=session)
-        if session.parts is None:
-            raise AssertionError("session did not create runtime parts")
-        session.parts.runtime.trace.emit(
-            "session_terminal",
-            status=final.status,
-            lifecycle=final.lifecycle.value,
-            terminal_truth=truth.to_trace(),
+        wrapper = type("ProbeRunContext", (), {"context": runtime_context})()
+        tool = sdk_tool_for(parts.registry.get("collect_resource"))
+        result = await tool.on_invoke_tool(
+            wrapper,
+            json.dumps({"item": "diamond", "count": 3}, sort_keys=True),
         )
-        session.parts.runtime.trace.close()
+        diamond_count = inventory_count(body, "diamond")
+        parts.runtime.trace.emit(
+            "body_transaction_probe_terminal",
+            tool="collect_resource",
+            success=bool(result.get("success")),
+            reason=str(result.get("reason") or ""),
+            inventory_count=diamond_count,
+        )
+        parts.runtime.trace.close()
+        parts.runtime.close()
 
     events = _read_jsonl(log_path)
     tools = _tool_sequence(events)
     model_events = [event for event in events if _is_model_event(event)]
-    diamond_count = int(truth.inventory_count or 0)
     if model_events:
         raise AssertionError(f"{run_id}: expected zero model events, got {[event.get('event') for event in model_events]}")
-    if truth.exit_code != 0 or not truth.satisfied or diamond_count < 3:
+    if not result.get("success") or diamond_count < 3:
         raise AssertionError(
-            f"{run_id}: goal not satisfied exit={truth.exit_code} count={diamond_count} final={final} tools={tools} log={log_path}"
+            f"{run_id}: Body transaction failed count={diamond_count} result={result} tools={tools} log={log_path}"
         )
-    if "goal_driver_start:collect_resource" not in tools:
-        raise AssertionError(f"{run_id}: missing goal_driver_start collect_resource in {tools}")
     for required in (
         "tool_invoke:collect_resource",
         "tool_invoke:craft_item",
         "tool_invoke:smelt_item",
         "tool_invoke:equip_item",
-        "goal_driver_result:collect_resource",
+        "body_transaction_probe_terminal:collect_resource",
     ):
         if required not in tools:
             raise AssertionError(f"{run_id}: missing {required}; tools={tools}")
     if not any(
-        event.get("event") == "goal_driver_result"
+        event.get("event") == "body_transaction_probe_terminal"
         and event.get("tool") == "collect_resource"
         and event.get("success") is True
         for event in events
     ):
-        raise AssertionError(f"{run_id}: missing successful goal_driver_result in {log_path}")
+        raise AssertionError(f"{run_id}: missing successful Body transaction terminal in {log_path}")
     return {
         "run_id": run_id,
         "log": str(log_path),
@@ -173,14 +180,12 @@ def _tool_sequence(events: list[dict[str, object]]) -> list[str]:
     sequence: list[str] = []
     for event in events:
         name = str(event.get("event") or "")
-        if name == "goal_driver_start":
-            sequence.append(f"goal_driver_start:{event.get('tool')}")
-        elif name == "tool_invoke":
+        if name == "tool_invoke":
             sequence.append(f"tool_invoke:{event.get('tool')}")
         elif name == "tool_continuation":
             sequence.append(f"tool_continuation:{event.get('tool')}")
-        elif name == "goal_driver_result":
-            sequence.append(f"goal_driver_result:{event.get('tool')}")
+        elif name == "body_transaction_probe_terminal":
+            sequence.append(f"body_transaction_probe_terminal:{event.get('tool')}")
     return sequence
 
 

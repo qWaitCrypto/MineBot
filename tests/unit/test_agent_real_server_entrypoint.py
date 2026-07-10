@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from minebot.app.observation_artifacts import PersistentToolObservationArchive
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, _phase1_recovery_handler, _recipe_lookup, _run_smelt_tool, build_phase1_agent_runtime, build_phase1_registry, tool_manifest
 from minebot.app.runner import AgentRuntime
 from minebot.brain.context import AgentContext
@@ -16,7 +17,6 @@ from minebot.brain.registry import ToolRegistry
 from minebot.app.real_server_session import (
     RealServerConfigError,
     TerminalTruth,
-    _goal_driver,
     _ensure_scarpet_global_app,
     _announce_interactive_terminal,
     _chat_command_reader,
@@ -34,8 +34,16 @@ from minebot.app.real_server_session import (
     run_real_server_interactive,
 )
 from minebot.app.resource_runtime import ResourceRuntimeConfig
+from minebot.app.runtime_state import (
+    CheckpointDisposition,
+    CompletionAuthority,
+    RuntimeScope,
+    RuntimeStateStore,
+    TaskStatus,
+)
 from minebot.app.session import SessionCommandKind
 from minebot.app.session import SessionStep
+from minebot.app.tasks import TaskWorkspace
 from minebot.brain.lifecycle import LifecycleState
 from minebot.contract import BodyState, InventorySlot, PerceptionResult, Region, Result, ToolResult
 from minebot.contract import Event
@@ -60,6 +68,9 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
                 "MINEBOT_REAL_RECOVERY_RESPAWN_POS": "7,80,9",
                 "MINEBOT_AGENT_LOG_PATH": "logs/custom.jsonl",
                 "MINEBOT_AGENT_LANGUAGE": "Chinese",
+                "MINEBOT_REAL_SERVER_ID": "server-alpha",
+                "MINEBOT_REAL_WORLD_ID": "world-fixture",
+                "MINEBOT_AGENT_STATE_DB": "var/test-state.sqlite3",
             }
         )
 
@@ -72,6 +83,23 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(cfg.recovery_respawn_pos, (7, 80, 9))
         self.assertEqual(cfg.log_path, Path("logs/custom.jsonl"))
         self.assertEqual(cfg.language, "Chinese")
+        self.assertEqual(cfg.server_id, "server-alpha")
+        self.assertEqual(cfg.world_id_override, "world-fixture")
+        self.assertEqual(cfg.state_db_path, Path("var/test-state.sqlite3"))
+
+    def test_config_defaults_scope_without_using_credentials(self):
+        cfg = real_server_config_from_env(
+            {
+                "MINEBOT_REAL_RCON_HOST": "example.invalid",
+                "MINEBOT_REAL_RCON_PORT": "25576",
+                "MINEBOT_REAL_RCON_PASSWORD": "do-not-use-in-id",
+                "MINEBOT_REAL_BOT": "MineBot",
+            }
+        )
+
+        self.assertEqual(cfg.server_id, "example.invalid:25576")
+        self.assertIsNone(cfg.world_id_override)
+        self.assertNotIn("do-not-use-in-id", cfg.server_id)
 
     def test_config_rejects_bad_recovery_respawn_pos(self):
         with self.assertRaises(RealServerConfigError) as ctx:
@@ -138,37 +166,41 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         self.assertEqual(code, 2)
 
-    def test_real_server_entrypoint_loads_scarpet_app_global_before_state_probe(self):
+    def test_real_server_entrypoint_preserves_loaded_app_before_reconciliation(self):
         rcon = ScriptLoadRcon(
             [
-                "minebot app reloaded",
                 _state_envelope("MineBotReal"),
             ]
         )
 
-        _ensure_scarpet_global_app(rcon, "MineBotReal")
+        reloaded = _ensure_scarpet_global_app(rcon, "MineBotReal")
 
+        self.assertFalse(reloaded)
         self.assertEqual(
             rcon.commands,
             [
-                "script load minebot global",
                 "script in minebot run minebot_state('MineBotReal')",
             ],
         )
 
-    def test_real_server_entrypoint_global_load_does_not_reset_or_seed_world(self):
+    def test_missing_app_stops_player_before_fallback_global_load(self):
         rcon = ScriptLoadRcon(
             [
+                "unknown function minebot_state",
+                "stopped",
                 "minebot app reloaded",
                 _state_envelope("MineBotReal"),
             ]
         )
 
-        _ensure_scarpet_global_app(rcon, "MineBotReal")
+        reloaded = _ensure_scarpet_global_app(rcon, "MineBotReal")
 
+        self.assertTrue(reloaded)
         self.assertEqual(
             rcon.commands,
             [
+                "script in minebot run minebot_state('MineBotReal')",
+                "player MineBotReal stop",
                 "script load minebot global",
                 "script in minebot run minebot_state('MineBotReal')",
             ],
@@ -233,132 +265,6 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(target.kind, "acquire")
         self.assertEqual(target.item, "chests")
         self.assertEqual(target.count, 2)
-
-    def test_goal_driver_routes_collect_goal_through_canonical_transaction(self):
-        body = HarnessBody()
-        context = AgentContext(system_prompt="sys", goal_text="collect 64 logs")
-        lifecycle = LifecycleController()
-        modes = ModeRuntime()
-        authority = ProgressAuthority()
-        runtime = AgentRuntime(
-            body=body,
-            registry=ToolRegistry(),
-            agent_context=context,
-            lifecycle=lifecycle,
-            mode_runtime=modes,
-            authority=authority,
-        )
-        calls = []
-
-        def drive_tool_once(tool_name, params, *, reason, extra_signals=None):
-            calls.append((tool_name, params, reason, extra_signals))
-            lifecycle.ready()
-            lifecycle.start()
-            return type(
-                "Outcome",
-                (),
-                {"status": "completed_turn", "lifecycle": lifecycle.state, "message": "driven"},
-            )()
-
-        runtime.drive_tool_once = drive_tool_once  # type: ignore[method-assign]
-        parts = type(
-            "Parts",
-            (),
-            {
-                "runtime": runtime,
-                "registry": ToolRegistry(),
-                "context": context,
-                "lifecycle": lifecycle,
-                "modes": modes,
-                "authority": authority,
-            },
-        )()
-
-        signal = AgentSignal.goal_started("collect 64 logs")
-        step = _goal_driver(parts, [signal])
-
-        self.assertIsNotNone(step)
-        self.assertEqual(step.status, "completed_turn")
-        self.assertEqual(
-            calls,
-            [("collect_resource", {"item": "logs", "count": 64}, "canonical_collect_goal", [signal])],
-        )
-
-    def test_goal_driver_routes_acquire_goal_through_ensure_tool_for(self):
-        body = HarnessBody()
-        context = AgentContext(system_prompt="sys", goal_text="craft an iron pickaxe")
-        lifecycle = LifecycleController()
-        modes = ModeRuntime()
-        authority = ProgressAuthority()
-        runtime = AgentRuntime(
-            body=body,
-            registry=ToolRegistry(),
-            agent_context=context,
-            lifecycle=lifecycle,
-            mode_runtime=modes,
-            authority=authority,
-        )
-        calls = []
-
-        def drive_tool_once(tool_name, params, *, reason, extra_signals=None):
-            calls.append((tool_name, params, reason, extra_signals))
-            lifecycle.ready()
-            lifecycle.start()
-            return type(
-                "Outcome",
-                (),
-                {"status": "completed_turn", "lifecycle": lifecycle.state, "message": "driven"},
-            )()
-
-        runtime.drive_tool_once = drive_tool_once  # type: ignore[method-assign]
-        parts = type(
-            "Parts",
-            (),
-            {
-                "runtime": runtime,
-                "registry": ToolRegistry(),
-                "context": context,
-                "lifecycle": lifecycle,
-                "modes": modes,
-                "authority": authority,
-            },
-        )()
-
-        signal = AgentSignal.goal_started("craft an iron pickaxe")
-        step = _goal_driver(parts, [signal])
-
-        self.assertIsNotNone(step)
-        self.assertEqual(
-            calls,
-            [("ensure_tool_for", {"resource": "iron_pickaxe"}, "canonical_acquire_goal", [signal])],
-        )
-
-    def test_goal_driver_ignores_unsupported_goal(self):
-        body = HarnessBody()
-        context = AgentContext(system_prompt="sys", goal_text="come here")
-        runtime = AgentRuntime(
-            body=body,
-            registry=ToolRegistry(),
-            agent_context=context,
-            lifecycle=LifecycleController(),
-            mode_runtime=ModeRuntime(),
-            authority=ProgressAuthority(),
-        )
-        parts = type(
-            "Parts",
-            (),
-            {
-                "runtime": runtime,
-                "registry": ToolRegistry(),
-                "context": context,
-                "lifecycle": runtime.lifecycle,
-                "modes": runtime.mode_runtime,
-                "authority": runtime.authority,
-            },
-        )()
-
-        self.assertIsNone(_goal_driver(parts, []))
-        self.assertTrue(any(event["event"] == "goal_driver_skipped" for event in runtime.trace.snapshot()))
 
     def test_terminal_truth_succeeds_only_on_authoritative_inventory(self):
         body = InventoryBody({"spruce_log": 32, "birch_log": 32})
@@ -506,6 +412,35 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertFalse(by_name["ensure_tool_for"]["mutating"])
         self.assertEqual(by_name["ensure_tool_for"]["body_scope"], ["composition"])
         self.assertEqual(by_name["ensure_tool_for"]["terminal_truth"], ["inventory", "ToolResult"])
+
+    def test_phase1_runtime_registers_persistent_observation_query_tools(self):
+        body = HarnessBody()
+        store = RuntimeStateStore(":memory:")
+        archive = PersistentToolObservationArchive(
+            store,
+            RuntimeScope("server", "world", "Bot1"),
+        )
+        parts = build_phase1_agent_runtime(
+            body=body,
+            goal_text="inspect the area",
+            model_provider=None,
+            config=Phase1RuntimeConfig(
+                natural_region=Region("test", (0, 0, 0), (16, 128, 16)),
+                observation_archive=archive,
+            ),
+        )
+
+        self.assertIn("query_tool_observations", parts.registry.names())
+        self.assertIn("read_tool_observation", parts.registry.names())
+        self.assertIs(parts.runtime.observation_archive, archive)
+        manifest = {row["name"]: row for row in tool_manifest(parts.registry)}
+        self.assertEqual(
+            manifest["query_tool_observations"]["permission"],
+            "read_tool_observations",
+        )
+        self.assertFalse(manifest["read_tool_observation"]["mutating"])
+        parts.runtime.close()
+        store.close()
 
     def test_phase1_recipe_lookup_adapts_runtime_recipe_data_for_acquisition(self):
         body = CraftToolBody(
@@ -1010,6 +945,99 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(final.status, "quit")
         self.assertEqual(session.step_count, 2)
 
+    def test_interactive_loop_accepts_model_completion_only_for_open_task(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        task = workspace.start("prepare safely for the End", source="user")
+        workspace.checkpoint(
+            expected_task_revision=task.revision,
+            disposition=CheckpointDisposition.COMPLETE,
+            summary="Preparation verified",
+            evidence=["equipment inspected"],
+        )
+
+        class ModelCompleteSession:
+            parts = None
+            current_goal = "prepare safely for the End"
+            has_pending_work = True
+            task_workspace = workspace
+
+            def __init__(self):
+                self.steps = 0
+
+            async def step(self):
+                self.steps += 1
+                if self.steps == 1:
+                    return SessionStep("completed_turn", LifecycleState.ACTIVE)
+                return SessionStep("quit", LifecycleState.IDLE, "user_quit")
+
+            def complete_current_goal(self, reason, *, authority):
+                self.task_workspace.complete(authority=authority)
+                return SessionStep("completed", LifecycleState.IDLE, reason)
+
+        session = ModelCompleteSession()
+
+        final = asyncio.run(
+            _run_interactive_loop(
+                session,
+                fallback_goal=None,
+                body=InventoryBody({}),
+                max_steps=3,
+            )
+        )
+
+        completed = store.get_task(task.task_id)
+        self.assertEqual(final.status, "quit")
+        self.assertEqual(completed.status, TaskStatus.COMPLETED)
+        self.assertEqual(completed.completion_authority, CompletionAuthority.MODEL)
+        store.close()
+
+    def test_model_checkpoint_cannot_complete_canonical_task_without_body_truth(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        task = workspace.start("collect 5 dirt", source="user")
+        workspace.checkpoint(
+            expected_task_revision=task.revision,
+            disposition=CheckpointDisposition.COMPLETE,
+            summary="I think it is done",
+        )
+
+        class CanonicalSession:
+            parts = None
+            current_goal = "collect 5 dirt"
+            has_pending_work = True
+            task_workspace = workspace
+
+            def __init__(self):
+                self.steps = 0
+                self.completions = 0
+
+            async def step(self):
+                self.steps += 1
+                if self.steps == 1:
+                    return SessionStep("completed_turn", LifecycleState.ACTIVE)
+                return SessionStep("quit", LifecycleState.IDLE, "user_quit")
+
+            def complete_current_goal(self, *_args, **_kwargs):
+                self.completions += 1
+                raise AssertionError("canonical completion must require inventory truth")
+
+        session = CanonicalSession()
+
+        final = asyncio.run(
+            _run_interactive_loop(
+                session,
+                fallback_goal=None,
+                body=InventoryBody({}),
+                max_steps=3,
+            )
+        )
+
+        self.assertEqual(final.status, "quit")
+        self.assertEqual(session.completions, 0)
+        self.assertEqual(store.get_task(task.task_id).status, TaskStatus.WAITING_EVENT)
+        store.close()
+
     def test_interactive_loop_completes_goal_and_returns_to_idle_without_exiting(self):
         class CompletingSession:
             def __init__(self):
@@ -1154,6 +1182,13 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
                 self.commands.append(command)
                 if "minebot_state" in command:
                     return _state_envelope("Bot1")
+                if "minebot_event_head" in command:
+                    return (
+                        '{"type":"result","id":null,"bot":"Bot1",'
+                        '"ok":true,"accepted":true,"complete":true,'
+                        '"data":{"eventSeq":0,"chatSeq":0,"tick":0,"epoch":"unit-app"},'
+                        '"error":null}'
+                    )
                 return "loaded"
 
         def fake_build_runtime(**kwargs):
@@ -1168,7 +1203,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             parts = None
             current_goal = "collect 1 dirt"
 
-            def __init__(self, make_parts, goal_driver=None):
+            def __init__(self, make_parts, **_kwargs):
                 self.parts = make_parts("collect 1 dirt")
 
             def submit(self, _command):
@@ -1180,6 +1215,19 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         async def fake_loop(session, **_kwargs):
             return SessionStep("waiting", LifecycleState.YIELDED)
 
+        fake_reconciliation = type(
+            "FakeReconciliation",
+            (),
+            {
+                "intent": type("Intent", (), {"intent_id": "reconcile-1"})(),
+                "decision": type("Decision", (), {"value": "idle"})(),
+                "events": (),
+                "orphaned_intents": (),
+                "inventory_counts": {},
+                "state": type("State", (), {"missing": False, "pos": (0.0, 64.0, 0.0)})(),
+            },
+        )()
+
         cfg = real_server_config_from_env(
             {
                 "MINEBOT_REAL_RCON_HOST": "example.invalid",
@@ -1187,6 +1235,8 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
                 "MINEBOT_REAL_RCON_PASSWORD": "secret",
                 "MINEBOT_REAL_BOT": "Bot1",
                 "MINEBOT_AGENT_LOG_PATH": "logs/test.jsonl",
+                "MINEBOT_REAL_WORLD_ID": "unit-world",
+                "MINEBOT_AGENT_STATE_DB": ":memory:",
             }
         )
 
@@ -1195,6 +1245,10 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             patch("minebot.app.real_server_session.RconClient", FakeRcon),
             patch("minebot.app.real_server_session.build_phase1_agent_runtime", side_effect=fake_build_runtime),
             patch("minebot.app.real_server_session.AgentSession", FakeSession),
+            patch(
+                "minebot.app.real_server_session.enqueue_startup_reconciliation",
+                return_value=fake_reconciliation,
+            ),
             patch("minebot.app.real_server_session._run_interactive_loop", side_effect=fake_loop),
             patch("minebot.app.real_server_session.safe_evaluate_terminal_truth", return_value=TerminalTruth("collect 1 dirt", None, None, False, "waiting", "yielded", 5)),
             patch("builtins.print") as print_mock,
@@ -1204,6 +1258,11 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         self.assertIsNone(captured_configs[0].speech_sink)
         self.assertIsNotNone(captured_configs[1].speech_sink)
+        self.assertIsNone(captured_configs[0].observation_archive)
+        self.assertIsInstance(
+            captured_configs[1].observation_archive,
+            PersistentToolObservationArchive,
+        )
         self.assertFalse(any("minebot_say" in command for command in rcon_instances[0].commands))
         self.assertFalse(any("watch_bot" in command for command in rcon_instances[0].commands))
         self.assertIn("script in minebot run watch_bot('Bot1')", rcon_instances[1].commands)

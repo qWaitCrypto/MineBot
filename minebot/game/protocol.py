@@ -39,6 +39,10 @@ def build_chat_drain_call(bot: str, app: str = SCARPET_APP, *, since_seq: int | 
     return _script_call(app, "minebot_chat_since", bot, since_seq)
 
 
+def build_event_head_call(bot: str, proposed_epoch: str, app: str = SCARPET_APP) -> str:
+    return _script_call(app, "minebot_event_head", bot, proposed_epoch)
+
+
 def build_say_call(bot: str, text: str, app: str = SCARPET_APP) -> str:
     return f"script in {app} run minebot_say({_scarpet_arg(bot)}, {_scarpet_string_arg(text)})"
 

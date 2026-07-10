@@ -21,7 +21,6 @@ from minebot.app.observability import JsonlObservationSink  # noqa: E402
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime, inventory_count  # noqa: E402
 from minebot.app.real_server_session import (  # noqa: E402
     _announce_interactive_terminal,
-    _goal_driver,
     _interactive_speech_sink,
     _poll_chat_commands,
     safe_evaluate_terminal_truth,
@@ -49,6 +48,7 @@ COORDINATE_TRIPLE_RE = re.compile(
     r"(?<![\w.-])[\[(]\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*[\])]|\b(?:coordinates?|coords?|position|pos|at)\s*[:=]?\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?|(?:坐标|位置)\s*[:：]?\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?",
     re.IGNORECASE,
 )
+COLLECT_CAPABILITY_TOOLS = {"collect_resource", "mine_block_collect"}
 
 
 @dataclass
@@ -163,7 +163,7 @@ async def run_once(
             trace=trace,
         )
 
-    session = AgentSession(make_parts, goal_driver=_goal_driver)
+    session = AgentSession(make_parts)
     results: dict[str, object] = {"run_id": run_id, "log": str(log_path)}
     try:
         await stage_hello(rcon, body, session, log_path, server_log_start=server_log_start, timeout_s=timeout_s)
@@ -239,7 +239,17 @@ async def stage_collect(
         events = read_jsonl(log_path)[before:]
         return (
             any(event.get("event") == "chat_goal_promoted" for event in events)
-            and any(event.get("event") == "goal_driver_result" and event.get("tool") == "collect_resource" for event in events)
+            and any(
+                event.get("event") == "model_tool_call"
+                and event.get("tool") in COLLECT_CAPABILITY_TOOLS
+                for event in events
+            )
+            and any(
+                event.get("event") == "tool_result"
+                and event.get("tool") in COLLECT_CAPABILITY_TOOLS
+                and event.get("success") is True
+                for event in events
+            )
             and inventory_count(body, "oak_log") >= 3
         )
 
@@ -252,8 +262,15 @@ async def stage_collect(
 
     events = read_jsonl(log_path)[before:]
     require(any(event.get("event") == "chat_goal_promoted" for event in events), "collect chat was not promoted")
-    require(any(event.get("event") == "goal_driver_start" and event.get("tool") == "collect_resource" for event in events), "collect did not start goal_driver")
-    require(not any(is_model_event(event) for event in events), "collect promoted segment used a model event")
+    require(
+        any(
+            event.get("event") == "model_tool_call"
+            and event.get("tool") in COLLECT_CAPABILITY_TOOLS
+            for event in events
+        ),
+        "collect did not select a governed collection capability through the model loop",
+    )
+    require(any(is_model_event(event) for event in events), "collect did not execute a model turn")
     require(truth.satisfied and int(truth.inventory_count or 0) >= 3, f"collect terminal truth not satisfied: {truth}")
     trace(session, "wg1_stage_result", stage="collect", passed=True, terminal_truth=truth.to_trace())
 
@@ -464,7 +481,7 @@ def tool_sequence(events: list[dict[str, object]]) -> list[str]:
     sequence: list[str] = []
     for event in events:
         name = str(event.get("event") or "")
-        if name in {"goal_driver_start", "tool_invoke", "tool_result", "composition_tool_result", "goal_driver_result"}:
+        if name in {"tool_invoke", "tool_result", "composition_tool_result"}:
             tool = event.get("tool")
             reason = event.get("reason")
             sequence.append(f"{name}:{tool}:{reason}" if reason else f"{name}:{tool}")

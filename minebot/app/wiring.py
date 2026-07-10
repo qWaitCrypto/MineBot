@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from agents import Session
+
 from minebot.app.model_provider import ModelProviderRegistry
+from minebot.app.observation_artifacts import ToolObservationArchive
 from minebot.app.runner import AgentRuntime, RecoveryHandler, RuntimeTrace
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController
@@ -39,6 +42,8 @@ def build_agent_runtime(
     recovery_handler: RecoveryHandler | None = None,
     authority: ProgressAuthority | None = None,
     speech_sink: Callable[[str], None] | None = None,
+    conversation_session: Session | None = None,
+    observation_archive: ToolObservationArchive | None = None,
 ) -> AgentRuntimeParts:
     context = AgentContext(
         system_prompt=prompt_with_language(system_prompt, language=language),
@@ -60,6 +65,8 @@ def build_agent_runtime(
         trace=trace,
         recovery_handler=recovery_handler,
         speech_sink=speech_sink,
+        conversation_session=conversation_session,
+        observation_archive=observation_archive,
     )
     return AgentRuntimeParts(
         runtime=runtime,

@@ -15,7 +15,7 @@ import time
 
 from openai import APIStatusError
 from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
-from minebot.app.session import DEFAULT_RUNAWAY_STEP_LIMIT
+from minebot.app.session import AgentSession, DEFAULT_RUNAWAY_STEP_LIMIT, SessionCommand
 from minebot.app.resource_runtime import ResourceRuntimeConfig, build_resource_agent_runtime, inventory_count
 from minebot.brain.lifecycle import LifecycleState
 from minebot.game import RconClient, Region, ScarpetBody
@@ -78,20 +78,28 @@ def seed_resource_scene(rcon: RconClient) -> None:
 async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int, sdk_max_turns: int | None, language: str) -> None:
     provider = provider_registry_from_env()
     collect_target = parse_collect_goal(goal_text)
-    parts = build_resource_agent_runtime(
-        body=body,
-        goal_text=goal_text,
-        model_provider=provider,
-        config=ResourceRuntimeConfig(natural_region=DEFAULT_REGION),
-        agent_name="MineBotConsole",
-        language=language,
-    )
-    parts.runtime.max_turns = sdk_max_turns
+
+    def make_parts(goal: str):
+        parts = build_resource_agent_runtime(
+            body=body,
+            goal_text=goal,
+            model_provider=provider,
+            config=ResourceRuntimeConfig(natural_region=DEFAULT_REGION),
+            agent_name="MineBotConsole",
+            language=language,
+        )
+        parts.runtime.max_turns = sdk_max_turns
+        return parts
+
+    session = AgentSession(make_parts)
+    session.submit(SessionCommand.start(goal_text))
     try:
         printed_events = 0
         for index in range(max_turns):
-            outcome = await parts.runtime.run_turn()
-            profile = outcome.profile
+            outcome = await session.step()
+            parts = session.parts
+            assert parts is not None
+            profile = parts.modes.profile_for(outcome.lifecycle)
             print(
                 f"[turn {index + 1}] status={outcome.status} "
                 f"lifecycle={outcome.lifecycle.value} situational={profile.situational}"
@@ -107,8 +115,12 @@ async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int, sdk_max
             if _goal_completed(body, trace, collect_target):
                 print("completed: authoritative inventory satisfies goal")
                 return
+            if not session.has_pending_work:
+                print("waiting: no pending work intent")
+                return
         print(f"stopped after runaway guard max_turns={max_turns}; goal may still be in progress")
     finally:
+        session.close()
         await provider.aclose()
 
 

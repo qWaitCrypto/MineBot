@@ -370,6 +370,15 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertNotIn("global_seq = 0;", body)
         self.assertNotIn("global_agent_chat_seq = 0;", body)
 
+    def test_event_head_exposes_reload_epoch_and_both_monotonic_cursors(self):
+        source = MINEBOT_SC.read_text()
+
+        self.assertIn("global_event_epoch = null;", source)
+        self.assertIn("minebot_event_head(name, proposed_epoch) -> (", source)
+        self.assertIn("if(global_event_epoch == null", source)
+        self.assertIn('"eventSeq":%d,"chatSeq":%d,"tick":%d,"epoch":%s', source)
+        self.assertIn("owner_name = if(owner == null, null, owner:0);", source)
+
     def test_event_drains_are_char_budgeted_and_pageable(self):
         source = MINEBOT_SC.read_text()
 

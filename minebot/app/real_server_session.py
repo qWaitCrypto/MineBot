@@ -19,13 +19,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
+from minebot.app.body_events import BodyEventPump
+from minebot.app.conversation import PersistentWindowedConversationSession
+from minebot.app.observation_artifacts import PersistentToolObservationArchive
 from minebot.app.observability import JsonlObservationSink
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime, inventory_count
+from minebot.app.reconciliation import StartupReconciliationError, enqueue_startup_reconciliation
+from minebot.app.runtime_identity import RuntimeIdentityError, resolve_runtime_scope
+from minebot.app.runtime_state import DEFAULT_RUNTIME_STATE_DB, RuntimeStateError, RuntimeStateStore
+from minebot.app.runtime_state import CompletionAuthority, TaskStatus
+from minebot.app.tasks import TaskWorkspace
+from minebot.app.work_queue import PersistentWorkIntentQueue
 from minebot.app.runner import RuntimeTrace
-from minebot.app.wiring import AgentRuntimeParts
 from minebot.app.session import DEFAULT_RUNAWAY_STEP_LIMIT, AgentSession, SessionCommand, SessionCommandKind, SessionStep
 from minebot.brain.lifecycle import LifecycleState
-from minebot.brain.modes import AgentSignal
 from minebot.brain.composition import resource_plan_for
 from minebot.contract import Body, Region
 from minebot.game import RconClient, ScarpetBody
@@ -42,6 +49,9 @@ class RealServerConfig:
     recovery_respawn_pos: tuple[int, int, int] | None
     log_path: Path
     language: str
+    server_id: str
+    world_id_override: str | None
+    state_db_path: Path
 
 
 class RealServerConfigError(RuntimeError):
@@ -111,6 +121,9 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
     recovery_respawn_pos = _position_from_env(env, "MINEBOT_REAL_RECOVERY_RESPAWN_POS")
     log_path = Path(env.get("MINEBOT_AGENT_LOG_PATH") or "logs/agent-session.jsonl")
     language = agent_language_from_env(env)
+    server_id = (env.get("MINEBOT_REAL_SERVER_ID") or f"{host}:{port}").strip()
+    world_id_override = (env.get("MINEBOT_REAL_WORLD_ID") or "").strip() or None
+    state_db_path = Path(env.get("MINEBOT_AGENT_STATE_DB") or DEFAULT_RUNTIME_STATE_DB)
     return RealServerConfig(
         rcon=RconConfig(host=host, port=port, password=password, timeout_s=timeout_s),
         bot_name=bot_name,
@@ -118,6 +131,9 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
         recovery_respawn_pos=recovery_respawn_pos,
         log_path=log_path,
         language=language,
+        server_id=server_id,
+        world_id_override=world_id_override,
+        state_db_path=state_db_path,
     )
 
 
@@ -192,7 +208,7 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
             )
             return parts
 
-        session = AgentSession(make_parts, goal_driver=_goal_driver)
+        session = AgentSession(make_parts)
         session.submit(SessionCommand.start(goal))
         try:
             final = await session.run_until_waiting(
@@ -242,18 +258,67 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
         return 3
 
     with rcon:
+        state_store: RuntimeStateStore | None = None
+        conversation_session: PersistentWindowedConversationSession | None = None
+        work_queue: PersistentWorkIntentQueue | None = None
+        body = ScarpetBody(config.bot_name, rcon)
         try:
-            _ensure_scarpet_global_app(rcon, config.bot_name)
+            app_reloaded = _ensure_scarpet_global_app(rcon, config.bot_name)
             _watch_interactive_chat(rcon, config.bot_name)
-        except (EnvelopeError, RconError) as exc:
+            scope = resolve_runtime_scope(
+                rcon,
+                server_id=config.server_id,
+                bot_id=config.bot_name,
+                world_id_override=config.world_id_override,
+            )
+            state_store = RuntimeStateStore(config.state_db_path)
+            state_store.register_scope(scope)
+            task_workspace = TaskWorkspace(state_store, scope)
+            work_queue = PersistentWorkIntentQueue(state_store, scope)
+            observation_archive = PersistentToolObservationArchive(state_store, scope)
+            conversation_session = PersistentWindowedConversationSession(
+                scope.conversation_session_id,
+                config.state_db_path,
+                archive_store=state_store,
+                scope=scope,
+            )
+            await conversation_session.sync_archive()
+            body_event_pump = BodyEventPump(
+                body,
+                work_queue,
+                state_store,
+                scope,
+            )
+            startup_reconciliation = enqueue_startup_reconciliation(
+                body=body,
+                event_pump=body_event_pump,
+                queue=work_queue,
+                workspace=task_workspace,
+                orphaned_intents=work_queue.orphaned_intents,
+                app_reloaded=app_reloaded,
+                terminal_probe=_startup_terminal_probe,
+            )
+        except (
+            EnvelopeError,
+            RconError,
+            RuntimeIdentityError,
+            RuntimeStateError,
+            StartupReconciliationError,
+            ValueError,
+        ) as exc:
+            if work_queue is not None:
+                work_queue.close()
+            if conversation_session is not None:
+                conversation_session.close()
+            if state_store is not None:
+                state_store.close()
             print(
-                f"Real-server Scarpet app unavailable at {config.rcon.host}:{config.rcon.port}: "
+                f"Real-server runtime unavailable at {config.rcon.host}:{config.rcon.port}: "
                 f"{type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
             await provider.aclose()
             return 4
-        body = ScarpetBody(config.bot_name, rcon)
         sink = JsonlObservationSink(config.log_path)
         speech_sink = _interactive_speech_sink(body)
 
@@ -274,18 +339,45 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
                     recovery_respawn_pos=config.recovery_respawn_pos,
                     recovery_gamemode="survival",
                     speech_sink=speech_sink,
+                    conversation_session=conversation_session,
+                    task_workspace=task_workspace,
+                    observation_archive=observation_archive,
                 ),
                 agent_name="MineBotRealServer",
                 language=config.language,
                 trace=trace,
             )
+            trace.emit("runtime_scope", **scope.to_payload(), scope_key=scope.key)
+            trace.emit(
+                "startup_reconciliation",
+                intent_id=startup_reconciliation.intent.intent_id,
+                decision=startup_reconciliation.decision.value,
+                event_count=len(startup_reconciliation.events),
+                orphaned_intent_count=len(startup_reconciliation.orphaned_intents),
+                inventory_counts=startup_reconciliation.inventory_counts,
+                state_missing=startup_reconciliation.state.missing,
+                state_pos=list(startup_reconciliation.state.pos),
+                app_reloaded=app_reloaded,
+            )
             return parts
 
-        session = AgentSession(make_parts, goal_driver=_goal_driver)
+        session = AgentSession(
+            make_parts,
+            task_workspace=task_workspace,
+            work_queue=work_queue,
+        )
         if goal:
-            session.submit(SessionCommand.start(goal))
+            if task_workspace.current_task is None:
+                session.submit(SessionCommand.start(goal))
+            else:
+                session.submit(
+                    SessionCommand.replace_goal(
+                        goal,
+                        reason="startup_goal_replaced_persisted_task",
+                    )
+                )
         reader = asyncio.create_task(_stdin_command_reader(session))
-        chat_reader = asyncio.create_task(_chat_command_reader(session, body))
+        chat_reader = asyncio.create_task(_chat_command_reader(session, body_event_pump))
         print(
             f"interactive_ready bot={config.bot_name} "
             f"server={config.rcon.host}:{config.rcon.port}",
@@ -297,6 +389,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
                 fallback_goal=goal,
                 body=body,
                 max_steps=max_steps,
+                body_event_pump=body_event_pump,
             )
             terminal_goal = _session_goal(session, goal)
             truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
@@ -327,13 +420,44 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
             close = getattr(session, "close", None)
             if callable(close):
                 close()
+            if session.parts is None:
+                conversation_session.close()
+            state_store.close()
             await provider.aclose()
 
 
-def _ensure_scarpet_global_app(rcon: RconClient, bot_name: str) -> None:
-    rcon.request("script load minebot global")
+def _ensure_scarpet_global_app(rcon: RconClient, bot_name: str) -> bool:
     command = build_state_call(bot_name)
-    parse_state(rcon.request(command))
+    try:
+        parse_state(rcon.request(command))
+        return False
+    except EnvelopeError:
+        if re.fullmatch(r"[A-Za-z0-9_]{1,16}", bot_name) is None:
+            raise ValueError("invalid Minecraft bot name")
+        rcon.request(f"player {bot_name} stop")
+        rcon.request("script load minebot global")
+        parse_state(rcon.request(command))
+        return True
+
+
+def _startup_terminal_probe(task, counts: dict[str, int]) -> dict[str, object]:
+    target = parse_goal_target(task.goal_text)
+    if target is None:
+        return {"satisfied": False, "target": None}
+    observed = sum(
+        counts.get(item.removeprefix("minecraft:"), 0)
+        for item in target.inventory_items
+    )
+    return {
+        "satisfied": observed >= target.count,
+        "inventory_count": observed,
+        "target": {
+            "kind": target.kind,
+            "item": target.item,
+            "count": target.count,
+            "inventory_items": list(target.inventory_items),
+        },
+    }
 
 
 def _watch_interactive_chat(rcon: RconClient, bot_name: str) -> None:
@@ -384,13 +508,41 @@ async def _run_interactive_loop(
     body: Body,
     max_steps: int | None,
     chat_source: object | None = None,
+    body_event_pump: BodyEventPump | None = None,
 ) -> SessionStep:
     last = None
     remaining = max_steps
     while remaining is None or remaining > 0:
         _poll_chat_commands(session, chat_source)
         if not getattr(session, "has_pending_work", True):
-            await asyncio.sleep(0.05)
+            if body_event_pump is not None:
+                try:
+                    task_workspace = getattr(session, "task_workspace", None)
+                    task = None if task_workspace is None else task_workspace.current_task
+                    task_waiting = task is not None and task.status is TaskStatus.WAITING_EVENT
+                    checkpoint = (
+                        None
+                        if task is None or not task_waiting
+                        else task_workspace.store.get_latest_checkpoint(task.task_id)
+                    )
+                    parts = getattr(session, "parts", None)
+                    generation = (
+                        None
+                        if parts is None
+                        else parts.authority.current_generation()
+                    )
+                    poll_result = await asyncio.to_thread(
+                        body_event_pump.poll_once,
+                        task_id=None if task is None else task.task_id,
+                        generation=generation,
+                        task_waiting=task_waiting,
+                        wait_for=() if checkpoint is None else checkpoint.wait_for,
+                    )
+                except Exception as exc:
+                    _trace_body_event_poll_failure(session, exc)
+                else:
+                    _trace_body_event_poll(session, poll_result)
+            await asyncio.sleep(0.25 if body_event_pump is not None else 0.05)
             continue
         last = await session.step()
         if last.status == "quit":
@@ -401,6 +553,27 @@ async def _run_interactive_loop(
             completed_truth = safe_evaluate_terminal_truth(body, truth.goal, completed, session=session)
             _announce_interactive_terminal(body, completed_truth)
             last = completed
+        elif (
+            truth.target is None
+            and getattr(session, "task_workspace", None) is not None
+            and session.task_workspace.completion_requested
+        ):
+            last = session.complete_current_goal(
+                "model_checkpoint_complete",
+                authority=CompletionAuthority.MODEL,
+            )
+            _announce_interactive_terminal(
+                body,
+                TerminalTruth(
+                    goal=truth.goal,
+                    target=None,
+                    inventory_count=None,
+                    satisfied=True,
+                    status=last.status,
+                    lifecycle=last.lifecycle.value,
+                    exit_code=0,
+                ),
+            )
         if remaining is not None:
             remaining -= 1
         await asyncio.sleep(0)
@@ -419,10 +592,23 @@ def _poll_chat_commands(session: AgentSession, chat_source: object | None) -> in
     except Exception as exc:
         _trace_chat_poll_failure(session, exc)
         return 0
-    return _submit_chat_events(session, events)
+    count = _submit_chat_events(
+        session,
+        events,
+        event_epoch=str(getattr(chat_source, "epoch", "") or "") or None,
+    )
+    acknowledge = getattr(chat_source, "acknowledge_cursor", None)
+    if callable(acknowledge):
+        acknowledge()
+    return count
 
 
-def _submit_chat_events(session: AgentSession, events: object) -> int:
+def _submit_chat_events(
+    session: AgentSession,
+    events: object,
+    *,
+    event_epoch: str | None = None,
+) -> int:
     count = 0
     for event in events:
         if getattr(event, "name", None) != "agentChat":
@@ -459,7 +645,16 @@ def _submit_chat_events(session: AgentSession, events: object) -> int:
                 content=command.text,
                 reason=command.reason,
             )
-        session.submit(command)
+        seq = int(getattr(event, "seq", 0) or 0)
+        dedupe_key = (
+            None
+            if event_epoch is None or seq <= 0
+            else f"chat:{event_epoch}:{seq}"
+        )
+        if dedupe_key is None:
+            session.submit(command)
+        else:
+            session.submit(command, dedupe_key=dedupe_key)
         count += 1
     return count
 
@@ -470,6 +665,31 @@ def _trace_chat_poll_failure(session: AgentSession, exc: Exception) -> None:
         parts.runtime.trace.emit("chat_poll_failed", error_type=type(exc).__name__)
 
 
+def _trace_body_event_poll(session: AgentSession, result: object) -> None:
+    if int(getattr(result, "observed", 0) or 0) <= 0:
+        return
+    parts = getattr(session, "parts", None)
+    if parts is not None:
+        parts.runtime.trace.emit(
+            "idle_body_events_polled",
+            observed=getattr(result, "observed", 0),
+            material=getattr(result, "material", 0),
+            enqueued=getattr(result, "enqueued", 0),
+            last_seq=getattr(result, "last_seq", 0),
+            epoch=getattr(result, "epoch", ""),
+        )
+
+
+def _trace_body_event_poll_failure(session: AgentSession, exc: Exception) -> None:
+    parts = getattr(session, "parts", None)
+    if parts is not None:
+        parts.runtime.trace.emit(
+            "idle_body_event_poll_failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+
+
 def _session_goal(session: AgentSession, fallback: str | None) -> str:
     current = getattr(session, "current_goal", None)
     if current:
@@ -477,28 +697,6 @@ def _session_goal(session: AgentSession, fallback: str | None) -> str:
     if getattr(session, "parts", None) is not None:
         return ""
     return fallback or ""
-
-
-def _goal_driver(parts: AgentRuntimeParts, signals: list[AgentSignal]) -> SessionStep | None:
-    target = parse_goal_target(parts.context.goal_text)
-    if target is None:
-        parts.runtime.trace.emit("goal_driver_skipped", reason="no_supported_goal_target", goal=parts.context.goal_text)
-        return None
-    if target.kind == "collect":
-        outcome = parts.runtime.drive_tool_once(
-            "collect_resource",
-            {"item": target.item, "count": target.count},
-            reason="canonical_collect_goal",
-            extra_signals=signals,
-        )
-        return SessionStep(outcome.status, outcome.lifecycle, outcome.message)
-    outcome = parts.runtime.drive_tool_once(
-        "ensure_tool_for",
-        {"resource": target.item},
-        reason="canonical_acquire_goal",
-        extra_signals=signals,
-    )
-    return SessionStep(outcome.status, outcome.lifecycle, outcome.message)
 
 
 async def _stdin_command_reader(session: AgentSession) -> None:
@@ -531,7 +729,15 @@ async def _chat_command_reader(session: AgentSession, chat_source: object, *, po
         except Exception as exc:
             _trace_chat_poll_failure(session, exc)
         else:
-            await asyncio.to_thread(_submit_chat_events, session, events)
+            await asyncio.to_thread(
+                _submit_chat_events,
+                session,
+                events,
+                event_epoch=str(getattr(chat_source, "epoch", "") or "") or None,
+            )
+            acknowledge = getattr(chat_source, "acknowledge_cursor", None)
+            if callable(acknowledge):
+                await asyncio.to_thread(acknowledge)
         await asyncio.sleep(poll_interval_s)
 
 
