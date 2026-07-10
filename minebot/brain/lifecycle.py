@@ -68,6 +68,7 @@ _TRANSITIONS: dict[LifecycleState, frozenset[LifecycleState]] = {
     }),
     LifecycleState.RESUMING: frozenset({
         LifecycleState.ACTIVE,        # the second (and only other) door into ACTIVE
+        LifecycleState.IDLE,          # user cancelled while the resume handoff was pending
     }),
 }
 
@@ -138,7 +139,7 @@ class LifecycleController:
         self.transition(LifecycleState.ACTIVE)
 
     def stand_down(self) -> None:
-        """Any non-active stopped state → IDLE (goal abandoned / unrecoverable)."""
+        """Cleanly stop active or stopped work and return to IDLE."""
         self.transition(LifecycleState.IDLE)
 
 

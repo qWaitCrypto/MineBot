@@ -48,6 +48,7 @@ def runtime_for(body, calls):
         calls.append(
             {
                 "input": input_text,
+                "instructions": context.instruction_preamble,
                 "situational": context.profile.situational,
                 "focus": context.profile.tool_focus,
                 "model": getattr(agent, "model", None),
@@ -77,8 +78,8 @@ class AgentStateRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(outcome.profile.situational, "survival")
         self.assertIn("survival", outcome.profile.tool_focus)
         self.assertEqual(outcome.profile.model_route, "fast")
-        self.assertIn("PROFILE: relationship=autonomous.user_request situational=survival", calls[0]["input"])
-        self.assertIn("Do not initiate combat as a food strategy", calls[0]["input"])
+        self.assertIn("PROFILE: relationship=autonomous.user_request situational=survival", calls[0]["instructions"])
+        self.assertIn("Do not initiate combat as a food strategy", calls[0]["instructions"])
         self.assertTrue(
             any(
                 event["event"] == "turn_profile"
@@ -105,7 +106,7 @@ class AgentStateRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(outcome.lifecycle, LifecycleState.ACTIVE)
         self.assertEqual(outcome.profile.situational, "mobility")
         self.assertIn("navigation", outcome.profile.tool_focus)
-        self.assertIn("frame=Mobility/reachability issue", calls[0]["input"])
+        self.assertIn("frame=Mobility/reachability issue", calls[0]["instructions"])
 
     def test_death_signal_requests_recovery_and_resume_injects_suspend_context(self):
         calls = []
@@ -123,7 +124,7 @@ class AgentStateRuntimeIntegrationTests(unittest.TestCase):
         resumed = asyncio.run(runtime.run_turn())
         self.assertEqual(resumed.status, "completed_turn")
         self.assertEqual(resumed.lifecycle, LifecycleState.ACTIVE)
-        self.assertIn("RESUME: reason=death", calls[0]["input"])
+        self.assertIn("RESUME: reason=death", calls[0]["instructions"])
         self.assertTrue(any(event["event"] == "resume_context" for event in runtime.trace.snapshot()))
 
 

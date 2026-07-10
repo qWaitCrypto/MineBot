@@ -190,6 +190,7 @@ async def run_once(
                 observability=body.observability_snapshot(max_events=64, max_traces=32, max_requests=32),
             )
             session.parts.runtime.trace.close()
+        session.close()
         cleanup_subjects(rcon)
 
 

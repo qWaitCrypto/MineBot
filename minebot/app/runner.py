@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import threading
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from agents import Agent, RunConfig, RunContextWrapper, Runner, RunHooks
+from agents import Agent, RunConfig, RunContextWrapper, Runner, RunHooks, Session
 from agents.exceptions import MaxTurnsExceeded, UserError
 from agents.items import ItemHelpers, MessageOutputItem, ToolCallItem, ToolCallOutputItem
 from agents.tool import FunctionTool
 
+from minebot.app.conversation import WindowedConversationSession, bounded_session_input
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.observability import ObservationSink, sanitize_observation
 from minebot.brain.context import AgentContext
@@ -32,8 +37,62 @@ from minebot.contract import Body, JsonObject, ProgressAbort, ProgressFacts
 from minebot.game.errors import BodyProtocolError
 
 RunnerCallable = Callable[..., Awaitable[Any]]
+StreamingRunnerCallable = Callable[..., Any]
 RecoveryHandler = Callable[["AgentRuntime"], Any]
 BODY_TRANSPORT_RECOVERY_LIMIT = 3
+EXECUTION_LANE_POLL_S = 0.01
+EXECUTION_LANE_CANCEL_TIMEOUT_S = 30.0
+BODY_WATCH_POLL_S = 0.25
+STREAM_CANCEL_DRAIN_TIMEOUT_S = EXECUTION_LANE_CANCEL_TIMEOUT_S + 5.0
+
+
+class SerialExecutionLane:
+    """Run synchronous Body work off-loop and serialize it per runtime."""
+
+    def __init__(self, *, thread_name: str = "minebot-body") -> None:
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=thread_name)
+        self._futures: set[Future[Any]] = set()
+        self._lock = threading.Lock()
+        self._closed = False
+
+    async def run(self, callback: Callable[..., Any], *args: object) -> Any:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("execution lane is closed")
+            future = self._executor.submit(callback, *args)
+            self._futures.add(future)
+        future.add_done_callback(self._discard)
+        try:
+            while not future.done():
+                await asyncio.sleep(EXECUTION_LANE_POLL_S)
+            return future.result()
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
+
+    async def wait_idle(self, *, timeout_s: float = EXECUTION_LANE_CANCEL_TIMEOUT_S) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while self.active_count:
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(EXECUTION_LANE_POLL_S)
+        return True
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return sum(not future.done() for future in self._futures)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def _discard(self, future: Future[Any]) -> None:
+        with self._lock:
+            self._futures.discard(future)
 
 
 class BodyRecoveryRequired(RuntimeError):
@@ -53,6 +112,7 @@ class RuntimeRunContext:
     tool_facts: dict[str, dict[str, object]] = field(default_factory=dict)
     trace: "RuntimeTrace | None" = None
     runtime: "AgentRuntime | None" = None
+    instruction_preamble: str = ""
 
     def facts_for_tool(self, tool_name: str) -> dict[str, object]:
         return dict(self.tool_facts.get(tool_name, {}))
@@ -86,28 +146,37 @@ class RuntimeTrace:
     sink: ObservationSink | None = None
     events: list[dict[str, object]] = field(default_factory=list)
     _seq: int = 0
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def emit(self, event: str, **fields: object) -> None:
-        self._seq += 1
-        record = sanitize_observation(
-            {
-                "seq": self._seq,
-                "ts": time.time(),
-                "session_id": self.session_id,
-                "event": event,
-                **fields,
-            }
-        )
-        self.events.append(record)
-        if self.sink is not None:
-            self.sink.write(record)
+        with self._lock:
+            self._seq += 1
+            record = sanitize_observation(
+                {
+                    "seq": self._seq,
+                    "ts": time.time(),
+                    "session_id": self.session_id,
+                    "event": event,
+                    **fields,
+                }
+            )
+            self.events.append(record)
+            if self.sink is not None:
+                self.sink.write(record)
 
     def snapshot(self) -> list[dict[str, object]]:
-        return [dict(event) for event in self.events]
+        with self._lock:
+            return [dict(event) for event in self.events]
+
+    @property
+    def last_seq(self) -> int:
+        with self._lock:
+            return self._seq
 
     def close(self) -> None:
-        if self.sink is not None:
-            self.sink.close()
+        with self._lock:
+            if self.sink is not None:
+                self.sink.close()
 
 
 class RuntimeHooks(RunHooks[RuntimeRunContext]):
@@ -243,9 +312,27 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 trace=trace,
                 tool_call_id=tool_call_id,
             )
+        runtime = getattr(ctx.context, "runtime", None)
         try:
-            result = execute_tool(tool, params, ctx.context.weld_context)
-            result = _continue_composition_tool(tool, result, ctx.context, tool_call_id=tool_call_id, initial_params=params)
+            if runtime is None:
+                result = _execute_tool_with_continuation(
+                    tool,
+                    params,
+                    ctx.context,
+                    tool_call_id,
+                )
+            else:
+                result = await runtime.run_sync(
+                    _execute_tool_with_continuation,
+                    tool,
+                    params,
+                    ctx.context,
+                    tool_call_id,
+                )
+        except asyncio.CancelledError:
+            if runtime is not None:
+                await runtime.cancel_active_execution(f"tool_cancelled:{tool.name}")
+            raise
         except ProgressAbort:
             raise
         except BodyRecoveryRequired:
@@ -287,7 +374,6 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             facts = _recovery_facts_from_tool(tool.name, result)
             raise BodyRecoveryRequired(_recovery_reason_from_tool_result(result, facts), facts=facts)
 
-        runtime = getattr(ctx.context, "runtime", None)
         if runtime is not None:
             runtime.remember_tool_result(tool.name, result)
             runtime.remember_tool_body_facts(result)
@@ -324,6 +410,22 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
         timeout_seconds=tool.sidecar.timeout_s,
         _failure_error_function=None,
         _use_default_failure_error_function=False,
+    )
+
+
+def _execute_tool_with_continuation(
+    tool: RegisteredTool,
+    params: JsonObject,
+    context: RuntimeRunContext,
+    tool_call_id: str,
+) -> JsonObject:
+    result = execute_tool(tool, params, context.weld_context)
+    return _continue_composition_tool(
+        tool,
+        result,
+        context,
+        tool_call_id=tool_call_id,
+        initial_params=params,
     )
 
 
@@ -805,12 +907,14 @@ class AgentRuntime:
         authority: ProgressAuthority,
         model_provider: ModelProviderRegistry | None = None,
         runner_run: RunnerCallable | None = None,
+        runner_run_streamed: StreamingRunnerCallable | None = None,
         agent_name: str = "MineBot",
         max_turns: int | None = None,
         tool_facts: dict[str, dict[str, object]] | None = None,
         trace: RuntimeTrace | None = None,
         recovery_handler: RecoveryHandler | None = None,
         speech_sink: Callable[[str], None] | None = None,
+        conversation_session: Session | None = None,
     ) -> None:
         self.body = body
         self.registry = registry
@@ -820,11 +924,17 @@ class AgentRuntime:
         self.authority = authority
         self.model_provider = model_provider
         self.runner_run: RunnerCallable = runner_run or Runner.run
+        self.runner_run_streamed = runner_run_streamed if runner_run is not None else (runner_run_streamed or Runner.run_streamed)
         self.max_turns = max_turns
         self.tool_facts: dict[str, dict[str, object]] = tool_facts or {}
         self.trace = trace or RuntimeTrace()
         self.recovery_handler = recovery_handler
         self.speech_sink = speech_sink
+        self.conversation_session = (
+            conversation_session
+            if conversation_session is not None
+            else WindowedConversationSession(session_id=f"{agent_name}-{uuid4()}")
+        )
         self.hooks = RuntimeHooks()
         self.weld_context = WeldContext(
             body=body,
@@ -840,15 +950,28 @@ class AgentRuntime:
         self.last_tool_results: list[dict[str, Any]] = []
         self.last_known_body_state: dict[str, object] | None = None
         self.consecutive_transport_errors = 0
+        self.execution_lane = SerialExecutionLane(thread_name=f"minebot-{agent_name}")
 
     def set_tool_facts(self, tool_name: str, facts: dict[str, object]) -> None:
         self.tool_facts[tool_name] = dict(facts)
 
     async def run_turn(self, extra_signals: list[AgentSignal] | None = None) -> AgentTurnOutcome:
-        prepared = self._prepare_turn(extra_signals=extra_signals)
+        prepared = await self.run_sync(self._prepare_turn, extra_signals)
         if isinstance(prepared, AgentTurnOutcome):
             return prepared
         profile = prepared
+
+        fallback_input = (
+            "Continue the current goal from the latest authoritative state."
+            if self.agent_context.goal_text.strip()
+            else "Respond to the latest user message."
+        )
+        input_text, pending_input_count = self.agent_context.pending_turn_input(
+            fallback=fallback_input
+        )
+        instruction_preamble = self.agent_context.turn_preamble(
+            include_session_messages=False
+        )
 
         run_context = RuntimeRunContext(
             agent_context=self.agent_context,
@@ -857,19 +980,33 @@ class AgentRuntime:
             tool_facts={name: dict(facts) for name, facts in self.tool_facts.items()},
             trace=self.trace,
             runtime=self,
+            instruction_preamble=instruction_preamble,
         )
         run_config = self._run_config(profile)
         turn_agent = self._agent_for_profile(profile)
+        turn_trace_start = self.trace.last_seq
 
+        runner_kwargs = {
+            "context": run_context,
+            "max_turns": self.max_turns,
+            "run_config": run_config,
+            "hooks": self.hooks,
+            "session": self.conversation_session,
+        }
+        self.agent_context.acknowledge_turn_input(pending_input_count)
         try:
-            result = await self.runner_run(
-                turn_agent,
-                self.agent_context.turn_preamble() or "Continue the current goal.",
-                context=run_context,
-                max_turns=self.max_turns,
-                run_config=run_config,
-                hooks=self.hooks,
-            )
+            if self.runner_run_streamed is not None:
+                streamed = self.runner_run_streamed(turn_agent, input_text, **runner_kwargs)
+                streamed_result = await self._supervise_streamed_run(streamed)
+                if isinstance(streamed_result, AgentTurnOutcome):
+                    return streamed_result
+                result = streamed_result
+            else:
+                result = await self.runner_run(turn_agent, input_text, **runner_kwargs)
+        except asyncio.CancelledError:
+            self.authority.invalidate_generation("turn_cancelled")
+            self.trace.emit("turn_cancelled", lifecycle=self.lifecycle.state.value)
+            raise
         except ProgressAbort as exc:
             return self._yield_from_progress_abort(exc)
         except BodyRecoveryRequired as exc:
@@ -887,7 +1024,7 @@ class AgentRuntime:
 
         self.trace.emit("turn_completed", lifecycle=self.lifecycle.state.value, situational=profile.situational)
         self._reset_transport_errors()
-        self._record_run_result(result)
+        self._record_run_result(result, trace_after_seq=turn_trace_start)
         return AgentTurnOutcome(
             status="completed_turn",
             lifecycle=self.lifecycle.state,
@@ -895,13 +1032,115 @@ class AgentRuntime:
             result=result,
         )
 
+    async def run_sync(self, callback: Callable[..., Any], *args: object) -> Any:
+        return await self.execution_lane.run(callback, *args)
+
+    async def wait_for_execution_idle(self, *, timeout_s: float = EXECUTION_LANE_CANCEL_TIMEOUT_S) -> bool:
+        return await self.execution_lane.wait_idle(timeout_s=timeout_s)
+
+    async def cancel_active_execution(self, reason: str) -> bool:
+        self.authority.invalidate_generation(reason)
+        try:
+            await asyncio.to_thread(self.body.interrupt, reason)
+        except Exception as exc:
+            self.trace.emit("body_interrupt_failed", reason=reason, error_type=type(exc).__name__)
+        idle = await self.wait_for_execution_idle()
+        self.trace.emit(
+            "execution_cancelled",
+            reason=reason,
+            idle=idle,
+            active_count=self.execution_lane.active_count,
+        )
+        return idle
+
+    def close(self) -> None:
+        self.execution_lane.close()
+        close_session = getattr(self.conversation_session, "close", None)
+        if callable(close_session):
+            close_session()
+
+    async def _supervise_streamed_run(self, streamed: Any) -> Any | AgentTurnOutcome:
+        stream_task = asyncio.create_task(self._drain_stream(streamed))
+        body_task = asyncio.create_task(self._wait_for_critical_body_fact())
+        try:
+            done, _ = await asyncio.wait({stream_task, body_task}, return_when=asyncio.FIRST_COMPLETED)
+            if body_task in done:
+                reason, facts = body_task.result()
+                self.authority.invalidate_generation(f"body_critical:{reason}")
+                try:
+                    await asyncio.to_thread(self.body.interrupt, reason)
+                except Exception as exc:
+                    self.trace.emit("body_interrupt_failed", reason=reason, error_type=type(exc).__name__)
+                streamed.cancel(mode="immediate")
+                await self._finish_stream_cancellation(stream_task)
+                idle = await self.wait_for_execution_idle()
+                self.trace.emit("turn_body_preempted", reason=reason, facts=facts, execution_idle=idle)
+                return self._enter_recovery_from_body_fact(reason, facts)
+            return stream_task.result()
+        except asyncio.CancelledError:
+            streamed.cancel(mode="immediate")
+            await self._finish_stream_cancellation(stream_task)
+            idle = await self.wait_for_execution_idle()
+            self.trace.emit("stream_cancelled", execution_idle=idle, active_count=self.execution_lane.active_count)
+            raise
+        finally:
+            body_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await body_task
+
+    @staticmethod
+    async def _drain_stream(streamed: Any) -> Any:
+        async for _event in streamed.stream_events():
+            pass
+        return streamed
+
+    async def _finish_stream_cancellation(self, stream_task: asyncio.Task[Any]) -> None:
+        try:
+            await asyncio.wait_for(stream_task, timeout=STREAM_CANCEL_DRAIN_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            stream_task.cancel()
+            self.trace.emit("stream_cancel_drain_timeout", timeout_s=STREAM_CANCEL_DRAIN_TIMEOUT_S)
+            with contextlib.suppress(asyncio.CancelledError):
+                await stream_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            self.trace.emit("stream_cancel_drain_failed", error_type=type(exc).__name__)
+
+    async def _wait_for_critical_body_fact(self) -> tuple[str, dict[str, object]]:
+        failures = 0
+        while True:
+            await asyncio.sleep(BODY_WATCH_POLL_S)
+            try:
+                state = await asyncio.to_thread(self.body.get_state)
+            except Exception as exc:
+                failures += 1
+                self.trace.emit(
+                    "body_watch_failed",
+                    error_type=type(exc).__name__,
+                    count=failures,
+                    threshold=BODY_TRANSPORT_RECOVERY_LIMIT,
+                )
+                if failures >= BODY_TRANSPORT_RECOVERY_LIMIT:
+                    return (
+                        "body_transport_unstable",
+                        {"error_type": type(exc).__name__, "consecutive_failures": failures},
+                    )
+                continue
+            failures = 0
+            if state.missing or state.health <= 0:
+                return (
+                    "missing_body" if state.missing else "death_detected",
+                    {"missing": state.missing, "health": state.health, "pos": list(state.pos)},
+                )
+
     def _instructions(
         self,
         ctx: RunContextWrapper[RuntimeRunContext],
         agent: Agent[RuntimeRunContext],
     ) -> str:
         context = ctx.context.agent_context
-        preamble = context.turn_preamble()
+        preamble = ctx.context.instruction_preamble
         if preamble:
             return f"{context.system_prompt}\n\n{preamble}"
         return context.system_prompt
@@ -944,10 +1183,11 @@ class AgentRuntime:
 
     def _run_config(self, profile: RuntimeProfile) -> RunConfig:
         if self.model_provider is None:
-            return RunConfig()
+            return RunConfig(session_input_callback=bounded_session_input)
         return RunConfig(
             model_provider=self.model_provider,
             model_settings=self.model_provider.model_settings_for(profile.model_route),
+            session_input_callback=bounded_session_input,
         )
 
     def _inject_resume_context(self) -> None:
@@ -969,21 +1209,28 @@ class AgentRuntime:
             composition_id=slot.composition_id,
         )
 
-    def _record_run_result(self, result: Any) -> None:
+    def _record_run_result(self, result: Any, *, trace_after_seq: int = 0) -> None:
         extracted = extract_run_observations(result)
-        speech_sent = False
+        existing = {
+            key
+            for event in self.trace.snapshot()
+            if int(event.get("seq") or 0) > trace_after_seq
+            if (key := _run_observation_key(event)) is not None
+        }
         for event in extracted:
-            self.trace.emit(**event)
-            if event.get("event") in {"assistant_message", "assistant_final_output"}:
-                content = event.get("content")
-                if isinstance(content, str) and content.strip():
-                    self.agent_context.observe_assistant_message(content)
-                    if self.speech_sink is not None and not speech_sent:
-                        speech_sent = True
-                        try:
-                            self.speech_sink(content)
-                        except Exception as exc:
-                            self.trace.emit("speech_sink_failed", error_type=type(exc).__name__)
+            key = _run_observation_key(event)
+            if key is None or key not in existing:
+                self.trace.emit(**event)
+                if key is not None:
+                    existing.add(key)
+        final_text = _final_assistant_text(result, extracted)
+        if final_text:
+            self.agent_context.observe_assistant_message(final_text)
+            if self.speech_sink is not None:
+                try:
+                    self.speech_sink(final_text)
+                except Exception as exc:
+                    self.trace.emit("speech_sink_failed", error_type=type(exc).__name__)
         has_content = any(
             event.get("event") in {"assistant_message", "assistant_final_output"} and event.get("content")
             for event in extracted
@@ -1248,7 +1495,7 @@ class AgentRuntime:
             result=result,
         )
 
-    def _prepare_turn(self, *, extra_signals: list[AgentSignal] | None = None) -> RuntimeProfile | AgentTurnOutcome:
+    def _prepare_turn(self, extra_signals: list[AgentSignal] | None = None) -> RuntimeProfile | AgentTurnOutcome:
         self._ensure_active()
         self.agent_context.begin_turn()
 
@@ -1431,6 +1678,31 @@ def extract_run_observations(result: Any) -> list[dict[str, object]]:
         if final_text not in assistant_texts:
             events.append({"event": "assistant_final_output", "content": final_text})
     return events
+
+
+def _run_observation_key(event: dict[str, object]) -> tuple[object, ...] | None:
+    name = event.get("event")
+    if name in {"assistant_message", "assistant_final_output"}:
+        return (name, event.get("content"))
+    if name == "model_tool_call":
+        return (name, event.get("tool"), event.get("arguments_summary"))
+    if name == "model_tool_output":
+        return (name, event.get("summary"))
+    return None
+
+
+def _final_assistant_text(result: Any, extracted: list[dict[str, object]]) -> str | None:
+    final_output = getattr(result, "final_output", None)
+    if final_output not in {None, ""}:
+        text = _shorten(_public_text(final_output), limit=2000).strip()
+        return text or None
+    for event in reversed(extracted):
+        if event.get("event") not in {"assistant_final_output", "assistant_message"}:
+            continue
+        content = event.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    return None
 
 
 def extract_model_response_observations(response: Any) -> list[dict[str, object]]:

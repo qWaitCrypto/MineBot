@@ -45,6 +45,7 @@ class AgentContext:
     _last_profile: RuntimeProfile | None = field(default=None, repr=False)
     _resume_facts: dict[str, object] | None = field(default=None, repr=False)
     _session_messages: list[tuple[str, str]] = field(default_factory=list, repr=False)
+    _pending_turn_messages: list[tuple[str, str]] = field(default_factory=list, repr=False)
 
     # -- goal ownership -------------------------------------------------------
 
@@ -56,11 +57,19 @@ class AgentContext:
 
     def observe_user_message(self, text: str) -> None:
         """Record user-visible session text for the context window."""
-        self._append_session_message("user", text)
+        clean = self._append_session_message("user", text)
+        if clean:
+            self._append_pending_turn_message("user", clean)
 
     def observe_assistant_message(self, text: str) -> None:
         """Record assistant-visible speech for the context window."""
         self._append_session_message("assistant", text)
+
+    def observe_system_message(self, text: str) -> None:
+        """Record a harness fact that must remain visible across turns."""
+        clean = self._append_session_message("system", text)
+        if clean:
+            self._append_pending_turn_message("system", clean)
 
     def observe_state(self, state: BodyState) -> None:
         """Record the latest authoritative Body state for per-turn injection."""
@@ -77,6 +86,34 @@ class AgentContext:
     def session_messages(self) -> list[tuple[str, str]]:
         return list(self._session_messages)
 
+    def pending_turn_input(self, *, fallback: str) -> tuple[str, int]:
+        """Return only facts not yet presented as a new SDK-session turn.
+
+        The SDK Session owns detailed model/tool conversation history. This
+        queue therefore carries only newly arrived user text and harness facts;
+        live goal/state/profile framing remains in dynamic instructions.
+        """
+        pending = list(self._pending_turn_messages)
+        if not pending:
+            return fallback, 0
+        if len(pending) == 1 and pending[0][0] == "user":
+            return pending[0][1], 1
+        lines = [
+            f"HARNESS_FACT: {text}" if role == "system" else f"USER_MESSAGE: {text}"
+            for role, text in pending
+        ]
+        return "\n".join(lines), len(pending)
+
+    def acknowledge_turn_input(self, count: int) -> None:
+        """Consume the exact input snapshot accepted by a completed SDK run."""
+        if count <= 0:
+            return
+        del self._pending_turn_messages[:count]
+
+    def discard_pending_turn_input(self) -> None:
+        """Drop obsolete pending input after authoritative goal termination."""
+        self._pending_turn_messages.clear()
+
     # -- per-turn assembly ----------------------------------------------------
 
     def begin_turn(self) -> int:
@@ -87,7 +124,12 @@ class AgentContext:
         """True on the first turn and every Nth turn thereafter."""
         return self._turn <= 1 or (self._turn - 1) % self.goal_reinject_every == 0
 
-    def turn_preamble(self, *, include_goal: bool = True) -> str:
+    def turn_preamble(
+        self,
+        *,
+        include_goal: bool = True,
+        include_session_messages: bool = True,
+    ) -> str:
         """The text prepended to a model turn: current goal + live session facts.
 
         The goal line is always available in Phase 1. Cadence remains available
@@ -95,10 +137,10 @@ class AgentContext:
         callback cadence must never hide the goal from the model.
         """
         parts: list[str] = []
-        if include_goal:
+        if include_goal and self.goal_text.strip():
             parts.append(f"GOAL: {self.goal_text}")
         parts.append(f"SESSION: turn={self._turn} language={self.language}")
-        if self._session_messages:
+        if include_session_messages and self._session_messages:
             parts.append(self._session_window_line())
         if self._last_state is not None:
             parts.append(self._state_line(self._last_state))
@@ -134,13 +176,17 @@ class AgentContext:
         progress = facts.get("last_progress") or {}
         return f"RESUME: reason={reason} goal={goal} last_progress={progress}"
 
-    def _append_session_message(self, role: str, text: str) -> None:
+    def _append_session_message(self, role: str, text: str) -> str:
         clean = " ".join(text.strip().split())
         if not clean:
-            return
+            return ""
         self._session_messages.append((role, clean))
         if len(self._session_messages) > self.max_session_messages:
             del self._session_messages[: len(self._session_messages) - self.max_session_messages]
+        return clean
+
+    def _append_pending_turn_message(self, role: str, text: str) -> None:
+        self._pending_turn_messages.append((role, text))
 
     def _session_window_line(self) -> str:
         chunks = [f"{role}: {text}" for role, text in self._session_messages]

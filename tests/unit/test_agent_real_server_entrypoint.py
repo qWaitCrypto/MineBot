@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import os
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +19,7 @@ from minebot.app.real_server_session import (
     _goal_driver,
     _ensure_scarpet_global_app,
     _announce_interactive_terminal,
+    _chat_command_reader,
     _interactive_speech_sink,
     _poll_chat_commands,
     _run_interactive_loop,
@@ -426,6 +429,16 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertFalse(truth.satisfied)
         self.assertEqual(truth.exit_code, 8)
 
+    def test_user_quit_is_a_clean_interactive_exit(self):
+        truth = evaluate_terminal_truth(
+            InventoryBody({}),
+            "",
+            SessionStep("quit", LifecycleState.IDLE, "user_quit"),
+        )
+
+        self.assertFalse(truth.satisfied)
+        self.assertEqual(truth.exit_code, 0)
+
     def test_default_resource_runtime_budget_can_attempt_sixty_four_collection(self):
         cfg = ResourceRuntimeConfig(natural_region=Region("test", (0, 0, 0), (1, 1, 1)))
 
@@ -797,7 +810,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(session.submitted[0].kind, SessionCommandKind.START)
         self.assertEqual(session.submitted[0].reason, "chat_goal_promoted")
 
-    def test_chat_events_start_idle_session_for_plain_message(self):
+    def test_chat_events_start_idle_turn_for_plain_message(self):
         session = RecordingSession()
         session.parts = None
         chat = ChatSource(
@@ -815,11 +828,11 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         count = _poll_chat_commands(session, chat)
 
         self.assertEqual(count, 1)
-        self.assertEqual(session.submitted[0].kind, SessionCommandKind.START)
+        self.assertEqual(session.submitted[0].kind, SessionCommandKind.MESSAGE)
         self.assertEqual(session.submitted[0].reason, "chat_session_started")
         self.assertEqual(session.submitted[0].text, "hello")
 
-    def test_chat_events_start_new_session_when_previous_goal_is_idle(self):
+    def test_chat_events_reuse_idle_session_for_plain_message(self):
         session = IdleRecordingSession()
         chat = ChatSource(
             [
@@ -836,12 +849,13 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         count = _poll_chat_commands(session, chat)
 
         self.assertEqual(count, 1)
-        self.assertEqual(session.submitted[0].kind, SessionCommandKind.START)
-        self.assertEqual(session.submitted[0].reason, "chat_session_started")
+        self.assertEqual(session.submitted[0].kind, SessionCommandKind.MESSAGE)
+        self.assertEqual(session.submitted[0].reason, "user_message")
         self.assertEqual(session.submitted[0].text, "attack the husk")
 
     def test_chat_events_promote_canonical_goal_as_replace_when_active(self):
         session = RecordingSession()
+        session.has_active_goal = True
         chat = ChatSource(
             [
                 Event(
@@ -902,6 +916,67 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         self.assertEqual(final.status, "completed")
         self.assertEqual([command.kind for command in session.submitted], [SessionCommandKind.REPLACE_GOAL])
+
+    def test_chat_command_reader_submits_commands_outside_step_boundaries(self):
+        session = RecordingSession()
+        chat = ChatSource(
+            [
+                Event(
+                    seq=1,
+                    tick=10,
+                    bot="Bot1",
+                    name="agentChat",
+                    data={"sender": "Steve", "message": "/quit"},
+                )
+            ]
+        )
+
+        async def scenario():
+            reader = asyncio.create_task(_chat_command_reader(session, chat, poll_interval_s=0.01))
+            try:
+                for _ in range(20):
+                    if session.submitted:
+                        return
+                    await asyncio.sleep(0.01)
+            finally:
+                reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reader
+
+        asyncio.run(scenario())
+
+        self.assertEqual([command.kind for command in session.submitted], [SessionCommandKind.QUIT])
+
+    def test_chat_command_reader_does_not_block_event_loop_during_rcon_poll(self):
+        session = RecordingSession()
+        started = threading.Event()
+        release = threading.Event()
+
+        class SlowChatSource:
+            def poll_chat_events(self):
+                started.set()
+                release.wait(timeout=2)
+                return []
+
+        async def scenario():
+            fallback = threading.Timer(1.0, release.set)
+            fallback.start()
+            reader = asyncio.create_task(
+                _chat_command_reader(session, SlowChatSource(), poll_interval_s=0.01)
+            )
+            try:
+                while not started.is_set():
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)
+                return not release.is_set()
+            finally:
+                release.set()
+                reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reader
+                fallback.cancel()
+
+        self.assertTrue(asyncio.run(scenario()))
 
     def test_interactive_loop_keeps_idle_session_alive_until_quit(self):
         class IdleThenQuitSession:

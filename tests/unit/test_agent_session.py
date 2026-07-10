@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import unittest
 
 from agents.exceptions import MaxTurnsExceeded
@@ -20,7 +21,7 @@ def build_parts(goal: str, calls: list[str], bodies: list[FakeBody]) -> AgentRun
     bodies.append(body)
 
     async def fake_runner(agent, input_text, *, context=None, **kwargs):
-        calls.append(input_text)
+        calls.append(f"{context.instruction_preamble}\nINPUT: {input_text}")
         return {"ok": True}
 
     registry = ToolRegistry()
@@ -48,7 +49,76 @@ def build_parts(goal: str, calls: list[str], bodies: list[FakeBody]) -> AgentRun
 
 
 class AgentSessionTests(unittest.TestCase):
-    def test_start_persists_runtime_across_steps_and_records_user_message(self):
+    def test_plain_message_is_one_agent_turn_without_creating_goal(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+
+        session.submit(SessionCommand.message("hello", reason="chat_session_started"))
+        first = asyncio.run(session.step())
+        second = asyncio.run(session.step())
+
+        self.assertEqual(first.status, "completed_turn")
+        self.assertEqual(first.lifecycle, LifecycleState.IDLE)
+        self.assertEqual(second.status, "idle")
+        self.assertIsNone(session.current_goal)
+        self.assertFalse(session.has_active_goal)
+        self.assertEqual(
+            [state.value for state in session.parts.lifecycle.history],
+            ["init", "idle", "active", "idle"],
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("GOAL:", calls[0])
+        self.assertIn("INPUT: hello", calls[0])
+
+    def test_plain_messages_reuse_conversation_runtime_across_turns(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+
+        session.submit(SessionCommand.message("hello"))
+        asyncio.run(session.step())
+        session.submit(SessionCommand.message("who are you"))
+        second = asyncio.run(session.step())
+
+        self.assertEqual(second.lifecycle, LifecycleState.IDLE)
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("INPUT: hello", calls[1])
+        self.assertIn("INPUT: who are you", calls[1])
+        self.assertIn(("user", "hello"), session.parts.context.session_messages())
+
+    def test_start_on_existing_conversation_reuses_runtime_and_sdk_session(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+        session.submit(SessionCommand.message("hello"))
+        asyncio.run(session.step())
+        runtime = session.parts.runtime
+        conversation_session = runtime.conversation_session
+
+        session.submit(SessionCommand.start("collect 3 oak_log"))
+        started = asyncio.run(session.step())
+
+        self.assertEqual(started.status, "completed_turn")
+        self.assertEqual(len(bodies), 1)
+        self.assertIs(session.parts.runtime, runtime)
+        self.assertIs(session.parts.runtime.conversation_session, conversation_session)
+        self.assertEqual(session.current_goal, "collect 3 oak_log")
+
+    def test_replace_goal_can_start_a_fresh_session(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+
+        session.submit(SessionCommand.replace_goal("collect 3 oak_log"))
+        started = asyncio.run(session.step())
+
+        self.assertEqual(started.status, "completed_turn")
+        self.assertEqual(session.current_goal, "collect 3 oak_log")
+        self.assertEqual(len(bodies), 1)
+
+    def test_active_goal_final_output_parks_without_implicit_reprompt(self):
         calls: list[str] = []
         bodies: list[FakeBody] = []
         session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
@@ -58,24 +128,116 @@ class AgentSessionTests(unittest.TestCase):
         second = asyncio.run(session.step())
 
         self.assertEqual(first.status, "completed_turn")
-        self.assertEqual(second.status, "completed_turn")
+        self.assertEqual(second.status, "waiting")
         self.assertEqual(len(bodies), 1)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(session.current_goal, "collect 64 logs")
         self.assertEqual(session.lifecycle_state, LifecycleState.ACTIVE)
         self.assertEqual([state.value for state in session.parts.lifecycle.history], ["init", "idle", "active"])
         self.assertTrue(any(event["event"] == "user_message" and event["command"] == "start" for event in session.parts.runtime.trace.snapshot()))
         self.assertTrue(any("GOAL: collect 64 logs" in call for call in calls))
 
-    def test_run_until_waiting_stops_when_terminal_truth_predicate_passes(self):
+    def test_run_until_waiting_does_not_manufacture_second_turn(self):
         calls: list[str] = []
         bodies: list[FakeBody] = []
         session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
         session.submit(SessionCommand.start("collect 64 logs"))
 
-        final = asyncio.run(session.run_until_waiting(max_steps=10, should_stop=lambda _step: len(calls) >= 2))
+        final = asyncio.run(session.run_until_waiting(max_steps=10, should_stop=lambda _step: False))
 
         self.assertEqual(final.status, "completed_turn")
+        self.assertEqual(len(calls), 1)
+
+    def test_new_message_preempts_in_flight_turn_and_starts_one_fresh_turn(self):
+        bodies: list[FakeBody] = []
+        started = threading.Event()
+        cancelled = threading.Event()
+        calls: list[str] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], bodies)
+
+            async def runner(_agent, input_text, **_kwargs):
+                calls.append(input_text)
+                if len(calls) == 1:
+                    started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        raise
+                return {"ok": True}
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.message("hello"))
+
+        async def scenario():
+            first = asyncio.create_task(session.step())
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            session.submit(SessionCommand.message("actually, who are you?"))
+            preempted = await first
+            completed = await session.step()
+            return preempted, completed
+
+        preempted, completed = asyncio.run(scenario())
+
+        self.assertEqual(preempted.status, "preempted")
+        self.assertEqual(completed.status, "completed_turn")
+        self.assertTrue(cancelled.is_set())
         self.assertEqual(len(calls), 2)
+        self.assertNotEqual(calls[1], "hello")
+        self.assertEqual(calls[1], "actually, who are you?")
+        self.assertIn(("user", "hello"), session.parts.context.session_messages())
+        self.assertEqual(bodies[0].interrupt_reasons, ["user_message"])
+
+    def test_preempt_timeout_quarantines_lane_instead_of_starting_new_work(self):
+        bodies: list[FakeBody] = []
+        started = threading.Event()
+        calls: list[str] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], bodies)
+
+            async def runner(_agent, input_text, **_kwargs):
+                calls.append(input_text)
+                started.set()
+                await asyncio.Event().wait()
+
+            async def never_idle(*, timeout_s=30.0):
+                return False
+
+            parts.runtime.runner_run = runner
+            parts.runtime.wait_for_execution_idle = never_idle
+            return parts
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.message("hello"))
+
+        async def scenario():
+            first = asyncio.create_task(session.step())
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            session.submit(SessionCommand.message("new instruction"))
+            preempted = await first
+            quarantined = await session.step()
+            return preempted, quarantined
+
+        preempted, quarantined = asyncio.run(scenario())
+
+        self.assertEqual(preempted.status, "preempted")
+        self.assertEqual(quarantined.status, "yielded")
+        self.assertEqual(quarantined.message, "execution_not_idle_after_preempt")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(
+            any(
+                event["event"] == "session_execution_quarantined"
+                for event in session.parts.runtime.trace.snapshot()
+            )
+        )
 
     def test_goal_driver_can_handle_collect_goal_before_model_tool_choice(self):
         calls: list[str] = []
@@ -98,6 +260,36 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("GOAL: collect 64 logs", calls[0])
         self.assertEqual(second.status, "completed_turn")
+
+    def test_goal_driver_does_not_block_supervisor_command_submission(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        driver_started = threading.Event()
+        release_driver = threading.Event()
+
+        def driver(parts: AgentRuntimeParts, _signals) -> SessionStep:
+            driver_started.set()
+            release_driver.wait(timeout=2)
+            return SessionStep("completed_turn", parts.lifecycle.state, "driver_handled")
+
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies), goal_driver=driver)
+        session.submit(SessionCommand.start("collect 64 logs"))
+
+        async def scenario():
+            step_task = asyncio.create_task(session.step())
+            for _ in range(100):
+                if driver_started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            session.submit(SessionCommand.quit("user_quit"))
+            release_driver.set()
+            await step_task
+            return await session.step()
+
+        quit_step = asyncio.run(scenario())
+
+        self.assertEqual(quit_step.status, "quit")
+        self.assertEqual(bodies[0].interrupt_reasons, ["user_quit"])
 
     def test_pause_while_active_interrupts_body_and_yields_lifecycle(self):
         calls: list[str] = []
@@ -136,6 +328,22 @@ class AgentSessionTests(unittest.TestCase):
             ["init", "idle", "active", "yielded", "resuming", "active"],
         )
 
+    def test_continue_without_active_goal_returns_idle_without_model_turn(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+        session.submit(SessionCommand.message("hello"))
+        asyncio.run(session.step())
+        session.submit(SessionCommand.pause("user_pause"))
+        asyncio.run(session.step())
+
+        session.submit(SessionCommand.continue_())
+        resumed = asyncio.run(session.step())
+
+        self.assertEqual(resumed.status, "idle")
+        self.assertEqual(resumed.lifecycle, LifecycleState.IDLE)
+        self.assertEqual(len(calls), 1)
+
     def test_replace_goal_updates_context_and_invalidates_generation_without_rebuilding(self):
         calls: list[str] = []
         bodies: list[FakeBody] = []
@@ -145,6 +353,7 @@ class AgentSessionTests(unittest.TestCase):
         before_generation = session.parts.authority._generation
 
         session.submit(SessionCommand.replace_goal("collect 64 sand"))
+        self.assertEqual(bodies[0].interrupt_reasons, ["goal_replaced"])
         replaced = asyncio.run(session.step())
 
         self.assertEqual(replaced.status, "completed_turn")
@@ -169,6 +378,23 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(cancelled.lifecycle, LifecycleState.IDLE)
         self.assertEqual(session.lifecycle_state, LifecycleState.IDLE)
         self.assertEqual(bodies[0].interrupt_reasons, ["stop_now"])
+
+    def test_cancel_can_stand_down_while_resume_handoff_is_pending(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+        session.parts.lifecycle.yield_()
+        session.parts.lifecycle.resume()
+
+        session.submit(SessionCommand.cancel("cancel_during_resume"))
+        cancelled = asyncio.run(session.step())
+
+        self.assertEqual(cancelled.status, "waiting")
+        self.assertEqual(cancelled.lifecycle, LifecycleState.IDLE)
+        self.assertEqual(session.lifecycle_state, LifecycleState.IDLE)
+        self.assertEqual(bodies[0].interrupt_reasons, ["cancel_during_resume"])
 
     def test_quit_interrupts_and_returns_quit_step(self):
         calls: list[str] = []
@@ -196,6 +422,10 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(completed.status, "completed")
         self.assertEqual(completed.lifecycle, LifecycleState.IDLE)
         self.assertEqual(session.lifecycle_state, LifecycleState.IDLE)
+        self.assertIn(
+            ("system", "Goal completed: collect 64 logs. Terminal reason: terminal_truth_satisfied."),
+            session.parts.context.session_messages(),
+        )
         self.assertTrue(
             any(event["event"] == "session_goal_completed" for event in session.parts.runtime.trace.snapshot())
         )

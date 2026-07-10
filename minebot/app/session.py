@@ -7,7 +7,10 @@ future conversation entrypoints; it must not live in `brain/`.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import inspect
+import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -58,8 +61,8 @@ class SessionCommand:
         return cls(SessionCommandKind.REPLACE_GOAL, text=goal, reason=reason)
 
     @classmethod
-    def message(cls, text: str) -> "SessionCommand":
-        return cls(SessionCommandKind.MESSAGE, text=text, reason="user_message")
+    def message(cls, text: str, reason: str = "user_message") -> "SessionCommand":
+        return cls(SessionCommandKind.MESSAGE, text=text, reason=reason)
 
     @classmethod
     def quit(cls, reason: str = "user_quit") -> "SessionCommand":
@@ -76,6 +79,7 @@ class SessionStep:
 PartsFactory = Callable[[str], AgentRuntimeParts]
 ShouldStop = Callable[[SessionStep], bool]
 GoalDriver = Callable[[AgentRuntimeParts, list[AgentSignal]], SessionStep | None]
+_WORK_PREEMPTED = object()
 
 
 @dataclass
@@ -89,10 +93,25 @@ class AgentSession:
     max_recovery_attempts: int = 3
     _recovery_attempts: int = 0
     _goal_driver_keys: set[str] = field(default_factory=set)
+    _goal_active: bool = False
+    _turn_pending: bool = False
+    _work_in_flight: bool = False
+    _execution_quarantined: bool = False
+    _pending_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _command_available: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def submit(self, command: SessionCommand) -> None:
-        self.pending.append(command)
-        if self.parts is not None and command.kind in {SessionCommandKind.PAUSE, SessionCommandKind.CANCEL, SessionCommandKind.QUIT}:
+        with self._pending_lock:
+            self.pending.append(command)
+            self._command_available.set()
+        always_interrupt = command.kind in {
+            SessionCommandKind.PAUSE,
+            SessionCommandKind.CANCEL,
+            SessionCommandKind.REPLACE_GOAL,
+            SessionCommandKind.QUIT,
+        }
+        if self.parts is not None and (self._work_in_flight or always_interrupt):
+            self.parts.authority.invalidate_generation(f"session_command:{command.kind.value}")
             self._body_interrupt(command.reason)
 
     @property
@@ -103,17 +122,29 @@ class AgentSession:
 
     @property
     def current_goal(self) -> str | None:
-        if self.parts is None:
+        if self.parts is None or not self._goal_active:
             return None
         return self.parts.context.goal_text
+
+    @property
+    def has_active_goal(self) -> bool:
+        return self.parts is not None and self._goal_active
+
+    @property
+    def has_pending_work(self) -> bool:
+        if self._command_available.is_set() or self._turn_pending:
+            return True
+        return self.parts is not None and self.parts.lifecycle.state in {
+            LifecycleState.RECOVERING,
+            LifecycleState.RESUMING,
+        }
 
     async def step(self) -> SessionStep:
         """Drain queued user commands, then advance active work by one SDK run."""
         signals: list[AgentSignal] = []
         suppress_run = False
         quit_requested = False
-        while self.pending:
-            command = self.pending.popleft()
+        for command in self._drain_commands():
             if command.kind is SessionCommandKind.QUIT:
                 quit_requested = True
             signals.extend(await self._apply_command(command))
@@ -127,22 +158,46 @@ class AgentSession:
         if self.parts is None:
             return SessionStep("idle", LifecycleState.IDLE, "no active goal")
 
+        quarantine = await self._guard_execution_quarantine()
+        if quarantine is not None:
+            return quarantine
+
         if suppress_run:
             return SessionStep("waiting", self.parts.lifecycle.state)
 
+        if not self._turn_pending and self.parts.lifecycle.state not in {
+            LifecycleState.RECOVERING,
+            LifecycleState.RESUMING,
+        }:
+            status = "waiting" if self._goal_active else "idle"
+            return SessionStep(status, self.parts.lifecycle.state, "no pending turn")
+
         if self.parts.lifecycle.state is LifecycleState.RECOVERING:
-            return await self._drive_recovery()
+            recovered = await self._run_supervised(self._drive_recovery(), work_kind="recovery")
+            if recovered is _WORK_PREEMPTED:
+                return SessionStep("preempted", self.parts.lifecycle.state, "user_input")
+            return self._finish_step(recovered)
 
         runnable_states = {LifecycleState.INIT, LifecycleState.IDLE, LifecycleState.ACTIVE, LifecycleState.RESUMING}
         if self.parts.lifecycle.state not in runnable_states:
             return SessionStep("waiting", self.parts.lifecycle.state)
 
-        driven = self._drive_goal_once_if_available(signals)
+        driven = await self._run_supervised(
+            self._drive_goal_once_if_available(signals),
+            work_kind="goal_driver",
+        )
+        if driven is _WORK_PREEMPTED:
+            return SessionStep("preempted", self.parts.lifecycle.state, "user_input")
         if driven is not None:
             return driven
 
         try:
-            outcome = await self.parts.runtime.run_turn(extra_signals=signals)
+            outcome = await self._run_supervised(
+                self.parts.runtime.run_turn(extra_signals=signals),
+                work_kind="agent_turn",
+            )
+            if outcome is _WORK_PREEMPTED:
+                return SessionStep("preempted", self.parts.lifecycle.state, "user_input")
         except Exception as exc:
             self._trace(
                 "session_step_failed",
@@ -153,8 +208,9 @@ class AgentSession:
                 lifecycle=self.parts.lifecycle.state.value,
             )
             self._stand_down()
+            self._turn_pending = False
             return SessionStep("failed", self.parts.lifecycle.state, f"runtime_error:{type(exc).__name__}")
-        return SessionStep(outcome.status, outcome.lifecycle, outcome.message)
+        return self._finish_step(SessionStep(outcome.status, outcome.lifecycle, outcome.message))
 
     async def _drive_recovery(self) -> SessionStep:
         assert self.parts is not None
@@ -164,9 +220,12 @@ class AgentSession:
             return self._yield_recovery_failure("recovery_driver_missing", {})
         self._recovery_attempts += 1
         try:
-            outcome = handler(self.parts.runtime)
-            if inspect.isawaitable(outcome):
-                outcome = await outcome
+            if inspect.iscoroutinefunction(handler):
+                outcome = await handler(self.parts.runtime)
+            else:
+                outcome = await self.parts.runtime.run_sync(handler, self.parts.runtime)
+                if inspect.isawaitable(outcome):
+                    outcome = await outcome
         except Exception as exc:
             self._trace(
                 "session_recovery_failed",
@@ -201,7 +260,7 @@ class AgentSession:
 
         self._recovery_attempts = 0
         signals = [AgentSignal.recovery_completed(outcome.reason, **outcome.facts)]
-        driven = self._drive_goal_once_if_available(signals)
+        driven = await self._drive_goal_once_if_available(signals)
         if driven is not None:
             return driven
         recovered = await self.parts.runtime.run_turn(extra_signals=signals)
@@ -240,6 +299,8 @@ class AgentSession:
             return last
         remaining = None if max_steps is None else max(0, max_steps - 1)
         while remaining is None or remaining > 0:
+            if not self.has_pending_work:
+                return last
             if last.lifecycle not in {LifecycleState.ACTIVE, LifecycleState.RECOVERING, LifecycleState.RESUMING}:
                 return last
             last = await self.step()
@@ -253,17 +314,35 @@ class AgentSession:
         """Stand down after authoritative terminal truth has completed a goal."""
         if self.parts is None:
             return SessionStep("idle", LifecycleState.IDLE, "no active goal")
-        self._trace("session_goal_completed", goal=self.parts.context.goal_text, reason=reason)
+        completed_goal = self.parts.context.goal_text
+        self._trace("session_goal_completed", goal=completed_goal, reason=reason)
+        self.parts.context.discard_pending_turn_input()
+        self.parts.context.observe_system_message(
+            f"Goal completed: {completed_goal}. Terminal reason: {reason}."
+        )
+        self._goal_active = False
+        self._turn_pending = False
+        self._goal_driver_keys.clear()
         self._stand_down()
+        self.parts.context.set_goal("")
+        self.parts.runtime.weld_context.goal_text = ""
         return SessionStep("completed", self.parts.lifecycle.state, reason)
 
     async def _apply_command(self, command: SessionCommand) -> list[AgentSignal]:
         if command.kind is SessionCommandKind.START:
             had_parts = self.parts is not None
-            self.parts = self.parts_factory(command.text)
+            if self.parts is None:
+                self.parts = self.parts_factory(command.text)
+            else:
+                self.parts.context.set_goal(command.text)
+                self.parts.runtime.weld_context.goal_text = command.text
+                self.parts.authority.invalidate_generation("goal_started")
+                self._resume_if_waiting()
             self._goal_driver_keys.clear()
+            self._goal_active = True
+            self._turn_pending = True
             self.parts.context.observe_user_message(command.text)
-            if not had_parts and command.reason in {"chat_goal_promoted", "chat_session_started"}:
+            if not had_parts and command.reason == "chat_goal_promoted":
                 self._trace(
                     "chat_message",
                     sender="",
@@ -280,48 +359,89 @@ class AgentSession:
             if self.parts is not None:
                 self.parts.context.observe_user_message(command.reason)
                 self._trace("user_message", command="quit", reason=command.reason)
+                self._goal_active = False
+                self._turn_pending = False
                 self._stand_down()
             return []
 
-        if self.parts is None:
-            return []
-
         if command.kind is SessionCommandKind.MESSAGE:
+            had_parts = self.parts is not None
+            if self.parts is None:
+                self.parts = self.parts_factory("")
+            if not self._goal_active:
+                self.parts.context.set_goal("")
+                self.parts.runtime.weld_context.goal_text = ""
+                self._resume_if_waiting()
+            self._turn_pending = True
             self.parts.context.observe_user_message(command.text)
+            if not had_parts and command.reason == "chat_session_started":
+                self._trace(
+                    "chat_message",
+                    sender="",
+                    command=command.kind.value,
+                    content=command.text,
+                    reason=command.reason,
+                )
             self._trace("user_message", command="message", content=command.text)
             return []
 
         if command.kind is SessionCommandKind.REPLACE_GOAL:
-            self.parts.context.set_goal(command.text)
+            had_parts = self.parts is not None
+            if self.parts is None:
+                self.parts = self.parts_factory(command.text)
+            else:
+                self.parts.context.set_goal(command.text)
+                self.parts.runtime.weld_context.goal_text = command.text
+                self.parts.authority.invalidate_generation("goal_replaced")
+                self._resume_if_waiting()
             self.parts.context.observe_user_message(command.text)
-            self.parts.runtime.weld_context.goal_text = command.text
-            self.parts.authority.invalidate_generation("goal_replaced")
             self._goal_driver_keys.clear()
+            self._goal_active = True
+            self._turn_pending = True
             self._trace("user_message", command="replace_goal", content=command.text)
             if command.reason == "chat_goal_promoted":
+                if not had_parts:
+                    self._trace(
+                        "chat_message",
+                        sender="",
+                        command=command.kind.value,
+                        content=command.text,
+                        reason=command.reason,
+                    )
                 self._trace("chat_goal_promoted", goal=command.text)
             return [AgentSignal.goal_started(command.text)]
+
+        if self.parts is None:
+            return []
 
         if command.kind is SessionCommandKind.PAUSE:
             self.parts.context.observe_user_message(command.reason)
             self._trace("user_message", command="pause", reason=command.reason)
+            self._turn_pending = True
             return [AgentSignal.user_interrupt(command.reason)]
 
         if command.kind is SessionCommandKind.CONTINUE:
             if command.text:
                 self.parts.context.observe_user_message(command.text)
             self._trace("user_message", command="continue", content=command.text)
-            self._resume_if_waiting()
             if command.text:
                 self.parts.context.set_goal(command.text)
                 self.parts.runtime.weld_context.goal_text = command.text
                 self._goal_driver_keys.clear()
+                self._goal_active = True
+                self._turn_pending = True
+                self._resume_if_waiting()
                 return [AgentSignal.goal_started(command.text)]
+            self._turn_pending = self._goal_active
+            self._resume_if_waiting()
             return []
 
         if command.kind is SessionCommandKind.CANCEL:
             self.parts.context.observe_user_message(command.reason)
             self._trace("user_message", command="cancel", reason=command.reason)
+            self._goal_active = False
+            self._turn_pending = False
+            self._goal_driver_keys.clear()
             self._stand_down()
             return []
 
@@ -334,7 +454,10 @@ class AgentSession:
             self._trace("session_continue_deferred_during_recovery", lifecycle=state.value)
             return
         if state in {LifecycleState.YIELDED, LifecycleState.INTERRUPTED}:
-            self.parts.lifecycle.resume()
+            if self._goal_active or self._turn_pending:
+                self.parts.lifecycle.resume()
+            else:
+                self.parts.lifecycle.stand_down()
 
     def _stand_down(self) -> None:
         assert self.parts is not None
@@ -342,9 +465,13 @@ class AgentSession:
         try:
             if state is LifecycleState.INIT:
                 self.parts.lifecycle.ready()
-            if self.parts.lifecycle.state is LifecycleState.ACTIVE:
-                self.parts.lifecycle.yield_()
-            if self.parts.lifecycle.state in {LifecycleState.YIELDED, LifecycleState.INTERRUPTED, LifecycleState.RECOVERING}:
+            elif state in {
+                LifecycleState.ACTIVE,
+                LifecycleState.YIELDED,
+                LifecycleState.INTERRUPTED,
+                LifecycleState.RECOVERING,
+                LifecycleState.RESUMING,
+            }:
                 self.parts.lifecycle.stand_down()
         except LifecycleError:
             self._trace("session_lifecycle_error", action="stand_down", state=self.parts.lifecycle.state.value)
@@ -353,13 +480,13 @@ class AgentSession:
         if self.parts is not None:
             self.parts.runtime.trace.emit(event, **fields)
 
-    def _drive_goal_once_if_available(self, signals: list[AgentSignal]) -> SessionStep | None:
-        if self.goal_driver is None or self.parts is None:
+    async def _drive_goal_once_if_available(self, signals: list[AgentSignal]) -> SessionStep | None:
+        if self.goal_driver is None or self.parts is None or not self._goal_active:
             return None
         goal = self.parts.context.goal_text
         if goal in self._goal_driver_keys:
             return None
-        driven = self.goal_driver(self.parts, signals)
+        driven = await self.parts.runtime.run_sync(self.goal_driver, self.parts, signals)
         if driven is None:
             self._goal_driver_keys.add(goal)
             return None
@@ -367,12 +494,90 @@ class AgentSession:
             self._goal_driver_keys.add(goal)
         return driven
 
+    def _finish_step(self, step: SessionStep) -> SessionStep:
+        if self.parts is None:
+            return step
+        if step.status == "completed_turn":
+            self._turn_pending = False
+            self._trace("session_turn_completed", reason="assistant_final_output")
+            if not self._goal_active:
+                self._stand_down()
+            return SessionStep(step.status, self.parts.lifecycle.state, step.message)
+        if step.lifecycle not in {LifecycleState.RECOVERING, LifecycleState.RESUMING}:
+            self._turn_pending = False
+        return step
+
     def _body_interrupt(self, reason: str) -> None:
         assert self.parts is not None
         try:
             self.parts.runtime.body.interrupt(reason)
         except Exception as exc:  # pragma: no cover - interruption must not hide command receipt
             self.parts.runtime.trace.emit("body_interrupt_failed", reason=reason, error_type=type(exc).__name__)
+
+    def close(self) -> None:
+        if self.parts is not None:
+            self.parts.runtime.close()
+
+    def _drain_commands(self) -> list[SessionCommand]:
+        with self._pending_lock:
+            commands = list(self.pending)
+            self.pending.clear()
+            self._command_available.clear()
+        return commands
+
+    async def _run_supervised(self, work, *, work_kind: str):
+        task = asyncio.create_task(work)
+        self._work_in_flight = True
+        try:
+            while not task.done():
+                if self._command_available.is_set():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                    idle = True
+                    if self.parts is not None:
+                        idle = await self.parts.runtime.wait_for_execution_idle()
+                        self._execution_quarantined = not idle
+                        self._trace(
+                            "session_work_preempted",
+                            work_kind=work_kind,
+                            execution_idle=idle,
+                            pending_count=len(self.pending),
+                        )
+                    return _WORK_PREEMPTED
+                await asyncio.sleep(0.01)
+            return task.result()
+        except asyncio.CancelledError:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            raise
+        finally:
+            self._work_in_flight = False
+
+    async def _guard_execution_quarantine(self) -> SessionStep | None:
+        if not self._execution_quarantined or self.parts is None:
+            return None
+        idle = await self.parts.runtime.wait_for_execution_idle(timeout_s=0.0)
+        if idle:
+            self._execution_quarantined = False
+            self._trace("session_execution_quarantine_cleared")
+            return None
+        self._turn_pending = False
+        self._trace(
+            "session_execution_quarantined",
+            reason="execution_not_idle_after_preempt",
+            active_count=self.parts.runtime.execution_lane.active_count,
+        )
+        if self.parts.lifecycle.state is LifecycleState.ACTIVE:
+            self.parts.lifecycle.yield_()
+        else:
+            self._stand_down()
+        return SessionStep(
+            "yielded",
+            self.parts.lifecycle.state,
+            "execution_not_idle_after_preempt",
+        )
 
 
 __all__ = [

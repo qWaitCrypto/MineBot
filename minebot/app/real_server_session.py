@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import os
 import re
 import sys
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,6 +220,9 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
             )
             return truth.exit_code
         finally:
+            close = getattr(session, "close", None)
+            if callable(close):
+                close()
             await provider.aclose()
 
 
@@ -280,12 +285,12 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
         if goal:
             session.submit(SessionCommand.start(goal))
         reader = asyncio.create_task(_stdin_command_reader(session))
+        chat_reader = asyncio.create_task(_chat_command_reader(session, body))
         try:
             final = await _run_interactive_loop(
                 session,
                 fallback_goal=goal,
                 body=body,
-                chat_source=body,
                 max_steps=max_steps,
             )
             terminal_goal = _session_goal(session, goal)
@@ -309,6 +314,14 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
             return truth.exit_code
         finally:
             reader.cancel()
+            chat_reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader
+            with contextlib.suppress(asyncio.CancelledError):
+                await chat_reader
+            close = getattr(session, "close", None)
+            if callable(close):
+                close()
             await provider.aclose()
 
 
@@ -371,6 +384,9 @@ async def _run_interactive_loop(
     remaining = max_steps
     while remaining is None or remaining > 0:
         _poll_chat_commands(session, chat_source)
+        if not getattr(session, "has_pending_work", True):
+            await asyncio.sleep(0.05)
+            continue
         last = await session.step()
         if last.status == "quit":
             return last
@@ -380,14 +396,9 @@ async def _run_interactive_loop(
             completed_truth = safe_evaluate_terminal_truth(body, truth.goal, completed, session=session)
             _announce_interactive_terminal(body, completed_truth)
             last = completed
-        if last.lifecycle not in {LifecycleState.ACTIVE, LifecycleState.RECOVERING, LifecycleState.RESUMING} and not session.pending:
-            await asyncio.sleep(0.25)
-            if remaining is not None:
-                remaining -= 1
-            continue
         if remaining is not None:
             remaining -= 1
-        await asyncio.sleep(0.25 if last.lifecycle.value == "idle" else 0)
+        await asyncio.sleep(0)
     assert last is not None
     return last
 
@@ -401,10 +412,12 @@ def _poll_chat_commands(session: AgentSession, chat_source: object | None) -> in
     try:
         events = poll()
     except Exception as exc:
-        parts = getattr(session, "parts", None)
-        if parts is not None:
-            parts.runtime.trace.emit("chat_poll_failed", error_type=type(exc).__name__)
+        _trace_chat_poll_failure(session, exc)
         return 0
+    return _submit_chat_events(session, events)
+
+
+def _submit_chat_events(session: AgentSession, events: object) -> int:
     count = 0
     for event in events:
         if getattr(event, "name", None) != "agentChat":
@@ -415,11 +428,14 @@ def _poll_chat_commands(session: AgentSession, chat_source: object | None) -> in
             continue
         command = parse_session_command(message)
         if command is not None and command.kind is SessionCommandKind.MESSAGE:
-            promoted = parse_canonical_goal_command(message, has_active_goal=getattr(session, "parts", None) is not None)
+            promoted = parse_canonical_goal_command(
+                message,
+                has_active_goal=bool(getattr(session, "has_active_goal", False)),
+            )
             if promoted is not None:
                 command = promoted
-            elif getattr(session, "parts", None) is None or _session_accepts_idle_start(session):
-                command = SessionCommand.start(message, reason="chat_session_started")
+            elif getattr(session, "parts", None) is None:
+                command = SessionCommand.message(message, reason="chat_session_started")
         if command is None:
             continue
         parts = getattr(session, "parts", None)
@@ -436,15 +452,19 @@ def _poll_chat_commands(session: AgentSession, chat_source: object | None) -> in
     return count
 
 
+def _trace_chat_poll_failure(session: AgentSession, exc: Exception) -> None:
+    parts = getattr(session, "parts", None)
+    if parts is not None:
+        parts.runtime.trace.emit("chat_poll_failed", error_type=type(exc).__name__)
+
+
 def _session_goal(session: AgentSession, fallback: str | None) -> str:
-    return getattr(session, "current_goal", None) or fallback or ""
-
-
-def _session_accepts_idle_start(session: AgentSession) -> bool:
-    lifecycle = getattr(session, "lifecycle_state", None)
-    if lifecycle is None:
-        return False
-    return lifecycle is LifecycleState.IDLE and not getattr(session, "pending", None)
+    current = getattr(session, "current_goal", None)
+    if current:
+        return current
+    if getattr(session, "parts", None) is not None:
+        return ""
+    return fallback or ""
 
 
 def _goal_driver(parts: AgentRuntimeParts, signals: list[AgentSignal]) -> SessionStep | None:
@@ -470,13 +490,37 @@ def _goal_driver(parts: AgentRuntimeParts, signals: list[AgentSignal]) -> Sessio
 
 
 async def _stdin_command_reader(session: AgentSession) -> None:
+    stopped = threading.Event()
+
+    def read() -> None:
+        while not stopped.is_set():
+            line = sys.stdin.readline()
+            if line == "":
+                return
+            command = parse_session_command(line)
+            if command is not None:
+                session.submit(command)
+
+    threading.Thread(target=read, name="minebot-stdin", daemon=True).start()
+    try:
+        while True:
+            await asyncio.sleep(0.25)
+    finally:
+        stopped.set()
+
+
+async def _chat_command_reader(session: AgentSession, chat_source: object, *, poll_interval_s: float = 0.25) -> None:
+    poll = getattr(chat_source, "poll_chat_events", None)
+    if not callable(poll):
+        return
     while True:
-        line = await asyncio.to_thread(sys.stdin.readline)
-        if line == "":
-            return
-        command = parse_session_command(line)
-        if command is not None:
-            session.submit(command)
+        try:
+            events = await asyncio.to_thread(poll)
+        except Exception as exc:
+            _trace_chat_poll_failure(session, exc)
+        else:
+            await asyncio.to_thread(_submit_chat_events, session, events)
+        await asyncio.sleep(poll_interval_s)
 
 
 def parse_session_command(line: str) -> SessionCommand | None:
@@ -597,6 +641,8 @@ def safe_evaluate_terminal_truth(
 
 
 def _exit_code_for(final: SessionStep, *, satisfied: bool, has_target: bool) -> int:
+    if final.status == "quit":
+        return 0
     if satisfied:
         return 0
     if final.status == "failed":

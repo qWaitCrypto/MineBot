@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 import unittest
 
 from agents.exceptions import MaxTurnsExceeded, UserError
@@ -322,8 +323,8 @@ class AgentRunnerSpineTests(unittest.TestCase):
 
         asyncio.run(runtime.run_turn())
 
-        self.assertIn(("assistant", "I am starting with nearby logs."), context.session_messages())
         self.assertIn(("assistant", "I found the first tree."), context.session_messages())
+        self.assertNotIn(("assistant", "I am starting with nearby logs."), context.session_messages())
 
     def test_visible_assistant_output_is_sent_to_optional_speech_sink_once_per_turn(self):
         class SpeechRunResult:
@@ -349,7 +350,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
 
         asyncio.run(runtime.run_turn())
 
-        self.assertEqual(spoken, ["I am starting with nearby logs."])
+        self.assertEqual(spoken, ["I found the first tree."])
 
     def test_tool_only_turn_does_not_trigger_speech_sink(self):
         class ToolOnlyRunResult:
@@ -402,6 +403,260 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertIsNone(runtime_context.weld_context.writer.holder)
         self.assertIsNone(sdk_tool._failure_error_function)
         self.assertFalse(sdk_tool._use_default_failure_error_function)
+
+    def test_sdk_tool_body_work_does_not_block_event_loop(self):
+        body = FakeBody()
+        started = threading.Event()
+        release = threading.Event()
+
+        def callable_(_params):
+            started.set()
+            release.wait(timeout=2)
+            body.x += 1
+            return ToolResult(True, "completed", False, metrics={"x": body.x})
+
+        tool = RegisteredTool(
+            name="blocking_step",
+            description="Blocking body step",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="blocking_step", mutating=True),
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="test"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=lambda *_args, **_kwargs: None,
+        )
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            runtime=runtime,
+        )
+        sdk_tool = sdk_tool_for(tool)
+
+        class Wrapper:
+            context = runtime_context
+
+        async def scenario():
+            fallback = threading.Timer(1.0, release.set)
+            fallback.start()
+            task = asyncio.create_task(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            responsive = not task.done()
+            release.set()
+            result = await task
+            fallback.cancel()
+            return responsive, result
+
+        responsive, result = asyncio.run(scenario())
+        runtime.close()
+
+        self.assertTrue(responsive)
+        self.assertTrue(result["success"])
+        self.assertEqual(body.x, 1.0)
+
+    def test_turn_preflight_body_read_does_not_block_event_loop(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class SlowStateBody(FakeBody):
+            def get_state(self):
+                started.set()
+                release.wait(timeout=2)
+                return super().get_state()
+
+        async def fake_runner(*_args, **_kwargs):
+            return {"ok": True}
+
+        runtime = AgentRuntime(
+            body=SlowStateBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="talk"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=fake_runner,
+        )
+
+        async def scenario():
+            fallback = threading.Timer(1.0, release.set)
+            fallback.start()
+            task = asyncio.create_task(runtime.run_turn())
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            responsive = not task.done() and not release.is_set()
+            release.set()
+            outcome = await task
+            fallback.cancel()
+            return responsive, outcome
+
+        responsive, outcome = asyncio.run(scenario())
+        runtime.close()
+
+        self.assertTrue(responsive)
+        self.assertEqual(outcome.status, "completed_turn")
+
+    def test_streamed_turn_cancel_uses_sdk_cancel_and_drains_stream(self):
+        class FakeStream:
+            final_output = None
+            new_items = []
+
+            def __init__(self):
+                self.started = threading.Event()
+                self.cancelled = threading.Event()
+                self.cancel_modes = []
+                self.drained = False
+
+            def cancel(self, mode="immediate"):
+                self.cancel_modes.append(mode)
+                self.cancelled.set()
+
+            async def stream_events(self):
+                self.started.set()
+                while not self.cancelled.is_set():
+                    await asyncio.sleep(0.01)
+                self.drained = True
+                if False:
+                    yield None
+
+        stream = FakeStream()
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="talk"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run_streamed=lambda *_args, **_kwargs: stream,
+        )
+
+        async def scenario():
+            task = asyncio.create_task(runtime.run_turn())
+            while not stream.started.is_set():
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+        runtime.close()
+
+        self.assertEqual(stream.cancel_modes, ["immediate"])
+        self.assertTrue(stream.drained)
+        self.assertTrue(any(event["event"] == "stream_cancelled" for event in runtime.trace.snapshot()))
+
+    def test_cancelled_sdk_tool_interrupts_body_and_leaves_no_lane_orphan(self):
+        release = threading.Event()
+
+        class InterruptibleBody(FakeBody):
+            def interrupt(self, reason=None):
+                release.set()
+                return super().interrupt(reason)
+
+        body = InterruptibleBody()
+        started = threading.Event()
+
+        def callable_(_params):
+            started.set()
+            release.wait(timeout=2)
+            return ToolResult(False, "preempted", True)
+
+        tool = RegisteredTool(
+            name="long_action",
+            description="Long action",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="long_action", mutating=True),
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="test"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=lambda *_args, **_kwargs: None,
+        )
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            runtime=runtime,
+        )
+        sdk_tool = sdk_tool_for(tool)
+
+        class Wrapper:
+            context = runtime_context
+
+        async def scenario():
+            task = asyncio.create_task(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            return await runtime.wait_for_execution_idle(timeout_s=1.0)
+
+        idle = asyncio.run(scenario())
+        runtime.close()
+
+        self.assertTrue(idle)
+        self.assertEqual(runtime.execution_lane.active_count, 0)
+        self.assertEqual(body.interrupt_reasons, ["tool_cancelled:long_action"])
+
+    def test_streamed_turn_body_death_preempts_into_recovery(self):
+        class FakeStream:
+            final_output = None
+            new_items = []
+
+            def __init__(self):
+                self.cancelled = threading.Event()
+                self.drained = False
+
+            def cancel(self, mode="immediate"):
+                self.cancelled.set()
+
+            async def stream_events(self):
+                while not self.cancelled.is_set():
+                    await asyncio.sleep(0.01)
+                self.drained = True
+                if False:
+                    yield None
+
+        body = FakeBody()
+        state_calls = {"count": 0}
+
+        def state():
+            state_calls["count"] += 1
+            return body_state() if state_calls["count"] == 1 else missing_body_state()
+
+        body.get_state = state  # type: ignore[method-assign]
+        stream = FakeStream()
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run_streamed=lambda *_args, **_kwargs: stream,
+        )
+
+        outcome = asyncio.run(runtime.run_turn())
+        runtime.close()
+
+        self.assertEqual(outcome.status, "stopped")
+        self.assertEqual(outcome.lifecycle, LifecycleState.RECOVERING)
+        self.assertTrue(stream.drained)
+        self.assertIn("missing_body", body.interrupt_reasons)
 
     def test_sdk_tool_returns_compact_model_payload_and_traces_full_result(self):
         def callable_(_params):
@@ -1377,7 +1632,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         calls = []
 
         async def fake_runner(agent, input_text, *, context=None, max_turns=None, run_config=None, **kwargs):
-            calls.append((input_text, context.profile.situational, max_turns, run_config))
+            calls.append((context.instruction_preamble, context.profile.situational, max_turns, run_config))
             return {"ok": True}
 
         runtime = AgentRuntime(
@@ -1683,7 +1938,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         calls = []
 
         async def fake_runner(agent, input_text, *, context=None, **kwargs):
-            calls.append(input_text)
+            calls.append(context.instruction_preamble)
             return {"ok": True}
 
         modes = ModeRuntime()
