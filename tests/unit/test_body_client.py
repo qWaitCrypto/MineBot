@@ -327,7 +327,77 @@ class BodyClientTests(unittest.TestCase):
 
         self.assertEqual(
             transport.commands,
-            ["script in minebot run minebot_say('Bot1', '[position]，背包里有 3 logs.')"],
+            ["script in minebot run minebot_say('Bot1', '坐标 [position]，背包里有 3 logs.')"],
+        )
+
+    def test_say_redacts_qualified_chinese_coordinate_triples(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "result",
+                        "id": None,
+                        "bot": "Bot1",
+                        "ok": True,
+                        "accepted": True,
+                        "complete": True,
+                        "data": {"action": "say", "said": True},
+                        "error": None,
+                    }
+                )
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        self.assertTrue(body.say("击杀完成，坐标约 49，70，45。3 + 4 = 7 不应被改写。"))
+
+        self.assertEqual(
+            transport.commands,
+            [
+                "script in minebot run minebot_say('Bot1', "
+                "'击杀完成，坐标约 [position]。3 + 4 = 7 不应被改写。')"
+            ],
+        )
+
+    def test_say_redacts_axis_and_labeled_space_coordinate_triples(self):
+        responses = [
+            envelope(
+                {
+                    "type": "result",
+                    "id": None,
+                    "bot": "Bot1",
+                    "ok": True,
+                    "accepted": True,
+                    "complete": True,
+                    "data": {"action": "say", "said": True},
+                    "error": None,
+                }
+            ),
+            envelope(
+                {
+                    "type": "result",
+                    "id": None,
+                    "bot": "Bot1",
+                    "ok": True,
+                    "accepted": True,
+                    "complete": True,
+                    "data": {"action": "say", "said": True},
+                    "error": None,
+                }
+            ),
+        ]
+        transport = FakeTransport(responses)
+        body = ScarpetBody("Bot1", transport)
+
+        self.assertTrue(body.say("Target is at x=49, y=70, z=45."))
+        self.assertTrue(body.say("Target position is 49 70 45."))
+
+        self.assertEqual(
+            transport.commands,
+            [
+                "script in minebot run minebot_say('Bot1', 'Target is at [position].')",
+                "script in minebot run minebot_say('Bot1', 'Target [position].')",
+            ],
         )
 
     def test_say_transport_failure_is_non_fatal(self):
