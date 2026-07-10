@@ -279,7 +279,13 @@ def run_resource_ladder(rcon: RconClient, body: ScarpetBody) -> dict[str, object
             tool="diamond_pickaxe",
         ),
     }
-    missing_rare = run_not_found(rcon, body, item="diamond", target_absent_block="diamond_ore")
+    missing_rare = run_not_found(
+        rcon,
+        body,
+        item="diamond",
+        target_absent_block="diamond_ore",
+        tool="iron_pickaxe",
+    )
     protected_log = run_illegal(
         rcon,
         body,
@@ -306,7 +312,7 @@ def run_interrupt_resume(rcon: RconClient, body: ScarpetBody) -> dict[str, objec
         {"item": "dirt", "count": 3, "constraints": {"radius": 12, "max_candidates": 1, "max_mutating_calls": 1}},
         ctx.weld_context,
     )
-    if partial.get("success") or partial.get("reason") != "partial_budget_exhausted":
+    if partial.get("success") is not True or partial.get("reason") != "partial_budget_exhausted":
         raise AssertionError(f"expected bounded partial before interruption: {partial}")
     if partial["metrics"]["after_count"] != 1:
         raise AssertionError(f"partial collection did not leave one authoritative dirt: {partial}")
@@ -346,12 +352,16 @@ def run_not_found(
     *,
     item: str = "gravel",
     target_absent_block: str = "gravel",
+    tool: str | None = None,
 ) -> dict[str, object]:
     reset_subject(rcon, item="dirt")
     if item != target_absent_block:
         command(rcon, f"clear {BOT} {item}")
     command(rcon, "fill -10 70 -10 16 78 10 air")
     command(rcon, "fill -10 69 -10 16 69 10 stone")
+    if tool is not None:
+        command(rcon, f"item replace entity {BOT} weapon.mainhand with {tool}")
+        command(rcon, "script in minebot run minebot_reset()")
     registry, ctx = make_registry(body)
     result = execute_tool(
         registry.get("collect_resource"),
