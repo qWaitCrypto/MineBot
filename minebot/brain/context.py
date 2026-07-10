@@ -17,6 +17,7 @@ Framework-agnostic: imports only ``minebot.contract``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 
 from minebot.brain.modes import RuntimeProfile
 from minebot.contract import BodyState
@@ -45,7 +46,7 @@ class AgentContext:
     _last_profile: RuntimeProfile | None = field(default=None, repr=False)
     _resume_facts: dict[str, object] | None = field(default=None, repr=False)
     _session_messages: list[tuple[str, str]] = field(default_factory=list, repr=False)
-    _pending_turn_messages: list[tuple[str, str]] = field(default_factory=list, repr=False)
+    _pending_turn_messages: list[tuple[str, str, str | None]] = field(default_factory=list, repr=False)
 
     # -- goal ownership -------------------------------------------------------
 
@@ -55,11 +56,15 @@ class AgentContext:
         self.goal_text = goal_text
         self._turn = 0
 
-    def observe_user_message(self, text: str) -> None:
+    def observe_user_message(self, text: str, *, sender: str | None = None) -> None:
         """Record user-visible session text for the context window."""
-        clean = self._append_session_message("user", text)
-        if clean:
-            self._append_pending_turn_message("user", clean)
+        clean = self._clean_text(text)
+        if not clean:
+            return
+        clean_sender = self._clean_sender(sender)
+        visible = f"{clean_sender}: {clean}" if clean_sender else clean
+        self._append_session_message("user", visible)
+        self._append_pending_turn_message("user", clean, clean_sender)
 
     def observe_assistant_message(self, text: str) -> None:
         """Record assistant-visible speech for the context window."""
@@ -69,7 +74,7 @@ class AgentContext:
         """Record a harness fact that must remain visible across turns."""
         clean = self._append_session_message("system", text)
         if clean:
-            self._append_pending_turn_message("system", clean)
+            self._append_pending_turn_message("system", clean, None)
 
     def observe_state(self, state: BodyState) -> None:
         """Record the latest authoritative Body state for per-turn injection."""
@@ -97,10 +102,13 @@ class AgentContext:
         if not pending:
             return fallback, 0
         if len(pending) == 1 and pending[0][0] == "user":
-            return pending[0][1], 1
+            role, text, sender = pending[0]
+            return self._user_input_line(text, sender=sender, prefixed=False), 1
         lines = [
-            f"HARNESS_FACT: {text}" if role == "system" else f"USER_MESSAGE: {text}"
-            for role, text in pending
+            f"HARNESS_FACT: {text}"
+            if role == "system"
+            else self._user_input_line(text, sender=sender, prefixed=True)
+            for role, text, sender in pending
         ]
         return "\n".join(lines), len(pending)
 
@@ -185,8 +193,28 @@ class AgentContext:
             del self._session_messages[: len(self._session_messages) - self.max_session_messages]
         return clean
 
-    def _append_pending_turn_message(self, role: str, text: str) -> None:
-        self._pending_turn_messages.append((role, text))
+    def _append_pending_turn_message(self, role: str, text: str, sender: str | None) -> None:
+        self._pending_turn_messages.append((role, text, sender))
+
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        return " ".join(text.strip().split())
+
+    @staticmethod
+    def _clean_sender(sender: str | None) -> str | None:
+        clean = " ".join(str(sender or "").strip().split())[:64]
+        return clean or None
+
+    @staticmethod
+    def _user_input_line(text: str, *, sender: str | None, prefixed: bool) -> str:
+        if sender:
+            payload = json.dumps(
+                {"sender": sender, "message": text},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            return f"MINECRAFT_CHAT: {payload}"
+        return f"USER_MESSAGE: {text}" if prefixed else text
 
     def _session_window_line(self) -> str:
         chunks = [f"{role}: {text}" for role, text in self._session_messages]

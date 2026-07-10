@@ -88,6 +88,31 @@ class AgentSessionTests(unittest.TestCase):
         self.assertIn("INPUT: who are you", calls[1])
         self.assertIn(("user", "hello"), session.parts.context.session_messages())
 
+    def test_plain_minecraft_message_preserves_sender_in_input_and_trace(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+
+        session.submit(
+            SessionCommand.message(
+                "hello",
+                reason="chat_session_started",
+                sender="Steve",
+            )
+        )
+        completed = asyncio.run(session.step())
+
+        self.assertEqual(completed.status, "completed_turn")
+        self.assertIn('MINECRAFT_CHAT: {"message": "hello", "sender": "Steve"}', calls[0])
+        self.assertIn(("user", "Steve: hello"), session.parts.context.session_messages())
+        events = session.parts.runtime.trace.snapshot()
+        self.assertTrue(
+            any(event["event"] == "chat_message" and event["sender"] == "Steve" for event in events)
+        )
+        self.assertTrue(
+            any(event["event"] == "user_message" and event["sender"] == "Steve" for event in events)
+        )
+
     def test_start_on_existing_conversation_reuses_runtime_and_sdk_session(self):
         calls: list[str] = []
         bodies: list[FakeBody] = []
@@ -239,6 +264,50 @@ class AgentSessionTests(unittest.TestCase):
             )
         )
 
+    def test_pause_continue_resumes_inflight_plain_turn_without_creating_goal(self):
+        bodies: list[FakeBody] = []
+        started = threading.Event()
+        calls: list[str] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], bodies)
+
+            async def runner(_agent, input_text, **_kwargs):
+                calls.append(input_text)
+                if len(calls) == 1:
+                    started.set()
+                    await asyncio.Event().wait()
+                return {"ok": True}
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.message("follow me", sender="Steve"))
+
+        async def scenario():
+            first = asyncio.create_task(session.step())
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            session.submit(SessionCommand.pause("user_pause", sender="Steve"))
+            preempted = await first
+            paused = await session.step()
+            session.submit(SessionCommand.continue_(sender="Steve"))
+            resumed = await session.step()
+            return preempted, paused, resumed
+
+        preempted, paused, resumed = asyncio.run(scenario())
+
+        self.assertEqual(preempted.status, "preempted")
+        self.assertEqual(paused.status, "stopped")
+        self.assertEqual(paused.lifecycle, LifecycleState.YIELDED)
+        self.assertEqual(resumed.status, "completed_turn")
+        self.assertEqual(resumed.lifecycle, LifecycleState.IDLE)
+        self.assertIsNone(session.current_goal)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("HARNESS_FACT: Resume the interrupted user request represented by this JSON:", calls[1])
+        self.assertIn('{"message": "follow me", "sender": "Steve"}', calls[1])
+
     def test_goal_driver_can_handle_collect_goal_before_model_tool_choice(self):
         calls: list[str] = []
         bodies: list[FakeBody] = []
@@ -327,6 +396,24 @@ class AgentSessionTests(unittest.TestCase):
             [state.value for state in session.parts.lifecycle.history],
             ["init", "idle", "active", "yielded", "resuming", "active"],
         )
+
+    def test_continue_guidance_does_not_replace_active_goal(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+        session.submit(SessionCommand.pause("user_pause"))
+        asyncio.run(session.step())
+
+        session.submit(SessionCommand.continue_("try the other side", sender="Steve"))
+        resumed = asyncio.run(session.step())
+
+        self.assertEqual(resumed.status, "completed_turn")
+        self.assertEqual(session.current_goal, "collect 64 logs")
+        self.assertIn("GOAL: collect 64 logs", calls[-1])
+        self.assertNotIn("GOAL: try the other side", calls[-1])
+        self.assertIn('"message": "try the other side"', calls[-1])
 
     def test_continue_without_active_goal_returns_idle_without_model_turn(self):
         calls: list[str] = []

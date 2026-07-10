@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import json
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -39,34 +40,35 @@ class SessionCommand:
     kind: SessionCommandKind
     text: str = ""
     reason: str = ""
+    sender: str = ""
 
     @classmethod
-    def start(cls, goal: str, reason: str = "goal_started") -> "SessionCommand":
-        return cls(SessionCommandKind.START, text=goal, reason=reason)
+    def start(cls, goal: str, reason: str = "goal_started", *, sender: str = "") -> "SessionCommand":
+        return cls(SessionCommandKind.START, text=goal, reason=reason, sender=sender)
 
     @classmethod
-    def pause(cls, reason: str = "user_pause") -> "SessionCommand":
-        return cls(SessionCommandKind.PAUSE, reason=reason)
+    def pause(cls, reason: str = "user_pause", *, sender: str = "") -> "SessionCommand":
+        return cls(SessionCommandKind.PAUSE, reason=reason, sender=sender)
 
     @classmethod
-    def continue_(cls, text: str = "") -> "SessionCommand":
-        return cls(SessionCommandKind.CONTINUE, text=text, reason="user_continue")
+    def continue_(cls, text: str = "", *, sender: str = "") -> "SessionCommand":
+        return cls(SessionCommandKind.CONTINUE, text=text, reason="user_continue", sender=sender)
 
     @classmethod
-    def cancel(cls, reason: str = "user_cancel") -> "SessionCommand":
-        return cls(SessionCommandKind.CANCEL, reason=reason)
+    def cancel(cls, reason: str = "user_cancel", *, sender: str = "") -> "SessionCommand":
+        return cls(SessionCommandKind.CANCEL, reason=reason, sender=sender)
 
     @classmethod
-    def replace_goal(cls, goal: str, reason: str = "goal_replaced") -> "SessionCommand":
-        return cls(SessionCommandKind.REPLACE_GOAL, text=goal, reason=reason)
+    def replace_goal(cls, goal: str, reason: str = "goal_replaced", *, sender: str = "") -> "SessionCommand":
+        return cls(SessionCommandKind.REPLACE_GOAL, text=goal, reason=reason, sender=sender)
 
     @classmethod
-    def message(cls, text: str, reason: str = "user_message") -> "SessionCommand":
-        return cls(SessionCommandKind.MESSAGE, text=text, reason=reason)
+    def message(cls, text: str, reason: str = "user_message", *, sender: str = "") -> "SessionCommand":
+        return cls(SessionCommandKind.MESSAGE, text=text, reason=reason, sender=sender)
 
     @classmethod
-    def quit(cls, reason: str = "user_quit") -> "SessionCommand":
-        return cls(SessionCommandKind.QUIT, reason=reason)
+    def quit(cls, reason: str = "user_quit", *, sender: str = "") -> "SessionCommand":
+        return cls(SessionCommandKind.QUIT, reason=reason, sender=sender)
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,8 @@ class AgentSession:
     _goal_driver_keys: set[str] = field(default_factory=set)
     _goal_active: bool = False
     _turn_pending: bool = False
+    _active_turn_request: tuple[str, str] | None = None
+    _suspended_turn_request: tuple[str, str] | None = None
     _work_in_flight: bool = False
     _execution_quarantined: bool = False
     _pending_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -322,6 +326,8 @@ class AgentSession:
         )
         self._goal_active = False
         self._turn_pending = False
+        self._active_turn_request = None
+        self._suspended_turn_request = None
         self._goal_driver_keys.clear()
         self._stand_down()
         self.parts.context.set_goal("")
@@ -341,26 +347,30 @@ class AgentSession:
             self._goal_driver_keys.clear()
             self._goal_active = True
             self._turn_pending = True
-            self.parts.context.observe_user_message(command.text)
+            self._active_turn_request = None
+            self._suspended_turn_request = None
+            self.parts.context.observe_user_message(command.text, sender=command.sender or None)
             if not had_parts and command.reason == "chat_goal_promoted":
                 self._trace(
                     "chat_message",
-                    sender="",
+                    sender=command.sender,
                     command=command.kind.value,
                     content=command.text,
                     reason=command.reason,
                 )
-            self._trace("user_message", command="start", content=command.text)
+            self._trace("user_message", command="start", content=command.text, sender=command.sender)
             if command.reason == "chat_goal_promoted":
                 self._trace("chat_goal_promoted", goal=command.text)
             return [AgentSignal.goal_started(command.text)]
 
         if command.kind is SessionCommandKind.QUIT:
             if self.parts is not None:
-                self.parts.context.observe_user_message(command.reason)
-                self._trace("user_message", command="quit", reason=command.reason)
+                self.parts.context.observe_user_message(command.reason, sender=command.sender or None)
+                self._trace("user_message", command="quit", reason=command.reason, sender=command.sender)
                 self._goal_active = False
                 self._turn_pending = False
+                self._active_turn_request = None
+                self._suspended_turn_request = None
                 self._stand_down()
             return []
 
@@ -373,16 +383,18 @@ class AgentSession:
                 self.parts.runtime.weld_context.goal_text = ""
                 self._resume_if_waiting()
             self._turn_pending = True
-            self.parts.context.observe_user_message(command.text)
+            self._active_turn_request = (command.text, command.sender)
+            self._suspended_turn_request = None
+            self.parts.context.observe_user_message(command.text, sender=command.sender or None)
             if not had_parts and command.reason == "chat_session_started":
                 self._trace(
                     "chat_message",
-                    sender="",
+                    sender=command.sender,
                     command=command.kind.value,
                     content=command.text,
                     reason=command.reason,
                 )
-            self._trace("user_message", command="message", content=command.text)
+            self._trace("user_message", command="message", content=command.text, sender=command.sender)
             return []
 
         if command.kind is SessionCommandKind.REPLACE_GOAL:
@@ -394,16 +406,18 @@ class AgentSession:
                 self.parts.runtime.weld_context.goal_text = command.text
                 self.parts.authority.invalidate_generation("goal_replaced")
                 self._resume_if_waiting()
-            self.parts.context.observe_user_message(command.text)
+            self.parts.context.observe_user_message(command.text, sender=command.sender or None)
             self._goal_driver_keys.clear()
             self._goal_active = True
             self._turn_pending = True
-            self._trace("user_message", command="replace_goal", content=command.text)
+            self._active_turn_request = None
+            self._suspended_turn_request = None
+            self._trace("user_message", command="replace_goal", content=command.text, sender=command.sender)
             if command.reason == "chat_goal_promoted":
                 if not had_parts:
                     self._trace(
                         "chat_message",
-                        sender="",
+                        sender=command.sender,
                         command=command.kind.value,
                         content=command.text,
                         reason=command.reason,
@@ -415,32 +429,53 @@ class AgentSession:
             return []
 
         if command.kind is SessionCommandKind.PAUSE:
-            self.parts.context.observe_user_message(command.reason)
-            self._trace("user_message", command="pause", reason=command.reason)
+            if not self._goal_active and self._active_turn_request is not None:
+                self._suspended_turn_request = self._active_turn_request
+            self.parts.context.observe_user_message(command.reason, sender=command.sender or None)
+            self._trace("user_message", command="pause", reason=command.reason, sender=command.sender)
             self._turn_pending = True
             return [AgentSignal.user_interrupt(command.reason)]
 
         if command.kind is SessionCommandKind.CONTINUE:
             if command.text:
-                self.parts.context.observe_user_message(command.text)
-            self._trace("user_message", command="continue", content=command.text)
-            if command.text:
-                self.parts.context.set_goal(command.text)
-                self.parts.runtime.weld_context.goal_text = command.text
-                self._goal_driver_keys.clear()
-                self._goal_active = True
+                self.parts.context.observe_user_message(command.text, sender=command.sender or None)
+            self._trace("user_message", command="continue", content=command.text, sender=command.sender)
+            if self._suspended_turn_request is not None:
+                request_text, request_sender = self._suspended_turn_request
+                request_payload = json.dumps(
+                    {
+                        "sender": request_sender or None,
+                        "message": request_text,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                self.parts.context.observe_system_message(
+                    f"Resume the interrupted user request represented by this JSON: {request_payload}"
+                )
                 self._turn_pending = True
                 self._resume_if_waiting()
-                return [AgentSignal.goal_started(command.text)]
-            self._turn_pending = self._goal_active
+                return []
+            if self._goal_active:
+                self._turn_pending = True
+                self._resume_if_waiting()
+                return []
+            if command.text:
+                self._active_turn_request = (command.text, command.sender)
+                self._turn_pending = True
+                self._resume_if_waiting()
+                return []
+            self._turn_pending = False
             self._resume_if_waiting()
             return []
 
         if command.kind is SessionCommandKind.CANCEL:
-            self.parts.context.observe_user_message(command.reason)
-            self._trace("user_message", command="cancel", reason=command.reason)
+            self.parts.context.observe_user_message(command.reason, sender=command.sender or None)
+            self._trace("user_message", command="cancel", reason=command.reason, sender=command.sender)
             self._goal_active = False
             self._turn_pending = False
+            self._active_turn_request = None
+            self._suspended_turn_request = None
             self._goal_driver_keys.clear()
             self._stand_down()
             return []
@@ -499,6 +534,8 @@ class AgentSession:
             return step
         if step.status == "completed_turn":
             self._turn_pending = False
+            self._active_turn_request = None
+            self._suspended_turn_request = None
             self._trace("session_turn_completed", reason="assistant_final_output")
             if not self._goal_active:
                 self._stand_down()

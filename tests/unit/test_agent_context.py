@@ -93,6 +93,18 @@ class AgentContextTests(unittest.TestCase):
             [("user", "message-3"), ("user", "message-4")],
         )
 
+    def test_minecraft_sender_is_preserved_as_structured_sdk_input(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="")
+
+        ctx.observe_user_message("  follow me  ", sender=" Steve\n ")
+        turn_input, count = ctx.pending_turn_input(fallback="fallback")
+
+        self.assertEqual(count, 1)
+        self.assertTrue(turn_input.startswith("MINECRAFT_CHAT: "))
+        self.assertIn('"sender": "Steve"', turn_input)
+        self.assertIn('"message": "follow me"', turn_input)
+        self.assertEqual(ctx.session_messages(), [("user", "Steve: follow me")])
+
     def test_sdk_session_window_drops_only_complete_old_turns(self):
         history = []
         for turn in range(CONVERSATION_WINDOW_TURNS + 2):

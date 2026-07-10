@@ -286,6 +286,11 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
             session.submit(SessionCommand.start(goal))
         reader = asyncio.create_task(_stdin_command_reader(session))
         chat_reader = asyncio.create_task(_chat_command_reader(session, body))
+        print(
+            f"interactive_ready bot={config.bot_name} "
+            f"server={config.rcon.host}:{config.rcon.port}",
+            flush=True,
+        )
         try:
             final = await _run_interactive_loop(
                 session,
@@ -438,11 +443,18 @@ def _submit_chat_events(session: AgentSession, events: object) -> int:
                 command = SessionCommand.message(message, reason="chat_session_started")
         if command is None:
             continue
+        sender = str(data.get("sender") or "")
+        command = SessionCommand(
+            kind=command.kind,
+            text=command.text,
+            reason=command.reason,
+            sender=sender,
+        )
         parts = getattr(session, "parts", None)
         if parts is not None:
             parts.runtime.trace.emit(
                 "chat_message",
-                sender=str(data.get("sender") or ""),
+                sender=sender,
                 command=command.kind.value,
                 content=command.text,
                 reason=command.reason,

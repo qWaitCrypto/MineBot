@@ -809,6 +809,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(session.submitted[0].kind, SessionCommandKind.START)
         self.assertEqual(session.submitted[0].reason, "chat_goal_promoted")
+        self.assertEqual(session.submitted[0].sender, "Steve")
 
     def test_chat_events_start_idle_turn_for_plain_message(self):
         session = RecordingSession()
@@ -831,6 +832,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(session.submitted[0].kind, SessionCommandKind.MESSAGE)
         self.assertEqual(session.submitted[0].reason, "chat_session_started")
         self.assertEqual(session.submitted[0].text, "hello")
+        self.assertEqual(session.submitted[0].sender, "Steve")
 
     def test_chat_events_reuse_idle_session_for_plain_message(self):
         session = IdleRecordingSession()
@@ -852,6 +854,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(session.submitted[0].kind, SessionCommandKind.MESSAGE)
         self.assertEqual(session.submitted[0].reason, "user_message")
         self.assertEqual(session.submitted[0].text, "attack the husk")
+        self.assertEqual(session.submitted[0].sender, "Steve")
 
     def test_chat_events_promote_canonical_goal_as_replace_when_active(self):
         session = RecordingSession()
@@ -873,6 +876,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(session.submitted[0].kind, SessionCommandKind.REPLACE_GOAL)
         self.assertEqual(session.submitted[0].reason, "chat_goal_promoted")
+        self.assertEqual(session.submitted[0].sender, "Steve")
         self.assertTrue(any(event["event"] == "chat_message" and event["reason"] == "chat_goal_promoted" for event in session.parts.runtime.trace.snapshot()))
 
     def test_canonical_goal_promotion_rejects_embedded_chat(self):
@@ -1193,6 +1197,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             patch("minebot.app.real_server_session.AgentSession", FakeSession),
             patch("minebot.app.real_server_session._run_interactive_loop", side_effect=fake_loop),
             patch("minebot.app.real_server_session.safe_evaluate_terminal_truth", return_value=TerminalTruth("collect 1 dirt", None, None, False, "waiting", "yielded", 5)),
+            patch("builtins.print") as print_mock,
         ):
             asyncio.run(run_real_server_goal(cfg, "collect 1 dirt", max_steps=1))
             asyncio.run(run_real_server_interactive(cfg, "collect 1 dirt", max_steps=1))
@@ -1202,6 +1207,12 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertFalse(any("minebot_say" in command for command in rcon_instances[0].commands))
         self.assertFalse(any("watch_bot" in command for command in rcon_instances[0].commands))
         self.assertIn("script in minebot run watch_bot('Bot1')", rcon_instances[1].commands)
+        self.assertTrue(
+            any(
+                call.args and str(call.args[0]).startswith("interactive_ready bot=Bot1 server=example.invalid:25576")
+                for call in print_mock.call_args_list
+            )
+        )
 
     def test_phase1_recovery_facts_include_inventory_recount_delta(self):
         body = RecoveringInventoryBody(
