@@ -10,9 +10,13 @@ dependencies = [
     "openai-agents==0.17.6",
 ]
 
+[project.scripts]
+minebot-camera = "camera.cli.main:main"
+
 [project.optional-dependencies]
 # kind="litellm" providers (Anthropic, Gemini, …) need this beta extra.
 litellm = ["openai-agents[litellm]==0.17.6"]
+camera = ["websockets==16.0"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

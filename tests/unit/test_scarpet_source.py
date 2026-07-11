@@ -119,6 +119,37 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("perception_json(name, 'inventory', true, complete", source)
         self.assertIn("perception_json(name, 'container', true, complete", source)
 
+    def test_camera_observer_is_absent_from_agent_semantics(self):
+        source = MINEBOT_SC.read_text()
+
+        player_lookup = re.search(r"player_entity\(name\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(player_lookup, "player_entity function not found")
+        self.assertIn("tag=!minebot.camera.observer", player_lookup.group(1))
+
+        nearby = re.search(r"perceive_nearby_entities\(name, params\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(nearby, "nearbyEntities function not found")
+        self.assertIn("tag=!minebot.camera.observer", nearby.group(1))
+
+        hostiles = re.search(r"perceive_hostiles\(name, params\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(hostiles, "nearbyHostiles function not found")
+        self.assertIn("tag=!minebot.camera.observer", hostiles.group(1))
+
+        for function_name in (
+            "target_entity_near",
+            "target_entity_named_near",
+            "target_entity_uuid_near",
+            "nearest_hostile_near",
+        ):
+            start = source.index("\n" + function_name + "(") + 1
+            body = source[start : source.index("\n);", start)]
+            self.assertIn("tag=!minebot.camera.observer", body)
+
+        chat = re.search(r"__on_player_message\(player, message\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(chat, "player message handler not found")
+        self.assertIn("if(!is_camera_observer(player)", chat.group(1))
+        self.assertIn("if(is_camera_observer(player), true, emit_watched('itemPickup'", source)
+        self.assertIn("tag=minebot.camera.observer", source)
+
     def test_state_json_emits_compact_inventory_hash_not_full_inventory_raw(self):
         source = MINEBOT_SC.read_text()
 
@@ -317,7 +348,7 @@ class ScarpetSourceTests(unittest.TestCase):
 
         for expected in (
             "entity_selector(selector)",
-            "@e[x=%d,y=%d,z=%d,distance=..%d,limit=%d,sort=nearest]",
+            "@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,limit=%d,sort=nearest]",
             "if(radius > 32, radius = 32)",
             "if(limit > 128, limit = 128)",
             "entity_fact_json",
@@ -562,7 +593,7 @@ class ScarpetSourceTests(unittest.TestCase):
             "target_entity_named_near",
             "target_entity_uuid_near",
             "entity_matches_type",
-            "@e[x=%d,y=%d,z=%d,distance=..%d,limit=32,sort=nearest]",
+            "@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,limit=32,sort=nearest]",
             "attack_range",
             "dist > a:7",
             "move forward",

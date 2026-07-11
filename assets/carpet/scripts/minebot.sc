@@ -400,8 +400,14 @@ priority_value(priority) -> (
 );
 
 player_entity(name) -> (
-  found = entity_selector(str('@a[name=%s,limit=1]', name));
+  found = entity_selector(str('@a[name=%s,tag=!minebot.camera.observer,limit=1]', name));
   if(length(found) == 0, null, found:0)
+);
+
+is_camera_observer(e) -> (
+  name = query(e, 'name');
+  found = if(name == null, l(), entity_selector(str('@a[name=%s,tag=minebot.camera.observer,limit=1]', name)));
+  length(found) > 0 && found:0 == e
 );
 
 bot_pos(name) -> (
@@ -820,7 +826,7 @@ perceive_nearby_entities(name, params) -> (
     if(params:'limit' != null, limit = floor(number(params:'limit')));
     if(limit < 1, limit = 1);
     if(limit > 128, limit = 128);
-    selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,limit=%d,sort=nearest]',
+    selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,limit=%d,sort=nearest]',
       floor(number(p:0)), floor(number(p:1)), floor(number(p:2)), radius, limit + 1);
     found = entity_selector(selector);
     out = '';
@@ -857,7 +863,7 @@ perceive_hostiles(name, params) -> (
     if(params:'limit' != null, limit = floor(number(params:'limit')));
     if(limit < 1, limit = 1);
     if(limit > 128, limit = 128);
-    selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,limit=128,sort=nearest]',
+    selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,limit=128,sort=nearest]',
       floor(number(p:0)), floor(number(p:1)), floor(number(p:2)), radius);
     found = entity_selector(selector);
     out = '';
@@ -1958,7 +1964,7 @@ finish_use(name, reason) -> (
 
 target_entity_near(name, target_type, radius) -> (
   p = bot_pos(name);
-  selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,limit=32,sort=nearest]',
+  selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,limit=32,sort=nearest]',
     floor(number(p:0)), floor(number(p:1)), floor(number(p:2)), radius);
   found = entity_selector(selector);
   result = null;
@@ -1973,7 +1979,7 @@ target_entity_near(name, target_type, radius) -> (
 
 target_entity_named_near(name, target_name, radius) -> (
   p = bot_pos(name);
-  selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,limit=32,sort=nearest]',
+  selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,limit=32,sort=nearest]',
     floor(number(p:0)), floor(number(p:1)), floor(number(p:2)), radius);
   found = entity_selector(selector);
   result = null;
@@ -1988,7 +1994,7 @@ target_entity_named_near(name, target_name, radius) -> (
 
 target_entity_uuid_near(name, target_uuid, radius) -> (
   p = bot_pos(name);
-  selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,limit=32,sort=nearest]',
+  selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,limit=32,sort=nearest]',
     floor(number(p:0)), floor(number(p:1)), floor(number(p:2)), radius);
   found = entity_selector(selector);
   result = null;
@@ -3516,15 +3522,17 @@ __on_tick() -> (
 );
 
 __on_player_picks_up_item(player, item_tuple) -> (
-  emit_watched('itemPickup', l(query(player, 'name'), item_tuple))
+  if(is_camera_observer(player), true, emit_watched('itemPickup', l(query(player, 'name'), item_tuple)))
 );
 
 __on_player_dies(player) -> (
-  name = query(player, 'name');
-  if(global_watched:name != null,
-    inv = inventory_get(name);
-    raw = str('%s', inv);
-    emit('death', name, l(query(player, 'pos'), raw, hash_code(raw), inventory_counts_json(name)))
+  if(!is_camera_observer(player),
+    name = query(player, 'name');
+    if(global_watched:name != null,
+      inv = inventory_get(name);
+      raw = str('%s', inv);
+      emit('death', name, l(query(player, 'pos'), raw, hash_code(raw), inventory_counts_json(name)))
+    )
   )
 );
 
@@ -3537,11 +3545,13 @@ __on_player_connects(player) -> (
 );
 
 __on_player_message(player, message) -> (
-  sender = query(player, 'name');
-  names = keys(global_watched);
-  loop(length(names),
-    if(sender != names:_,
-      emit_agent_chat(names:_, sender, message)
+  if(!is_camera_observer(player),
+    sender = query(player, 'name');
+    names = keys(global_watched);
+    loop(length(names),
+      if(sender != names:_,
+        emit_agent_chat(names:_, sender, message)
+      )
     )
   );
   true
@@ -4085,7 +4095,7 @@ nearest_hostile_near(name, radius) -> (
   if(p == null,
     null
   ,
-    selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,limit=32,sort=nearest]',
+    selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,limit=32,sort=nearest]',
       floor(number(p:0)), floor(number(p:1)), floor(number(p:2)), radius);
     found = entity_selector(selector);
     result = null;

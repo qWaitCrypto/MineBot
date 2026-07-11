@@ -1,16 +1,19 @@
 {
   "schemaVersion": 1,
-  "id": "minebot-body",
+  "id": "minebot-bridge",
   "version": "${version}",
-  "name": "MineBot Body POC",
-  "description": "Server-side Fabric Body layer proof of concept for MineBot.",
+  "name": "MineBot Bridge",
+  "description": "Least-privilege server bridge for MineBot observer features.",
   "authors": ["MineBot"],
   "environment": "server",
   "entrypoints": {
     "server": [
-      "dev.minebot.body.MineBotBodyMod"
+      "dev.minebot.bridge.MineBotBridgeMod"
     ]
   },
+  "mixins": [
+    "minebot-bridge.mixins.json"
+  ],
   "depends": {
     "fabricloader": ">=0.19.3",
     "minecraft": "26.1.2",

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "minebot-camera-client",
+  "version": "${version}",
+  "name": "MineBot Camera Client",
+  "description": "Observer-only Camera directive adapter for MineBot.",
+  "authors": ["MineBot"],
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "dev.minebot.camera.client.MineBotCameraClient"
+    ]
+  },
+  "mixins": [
+    "minebot-camera-client.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "26.1.2",
+    "fabric-api": "*",
+    "freecam": "=1.4.0+mc26.1.2"
+  }
+}

@@ -7,7 +7,7 @@ version = "0.1.0"
 group = "dev.minebot"
 
 base {
-    archivesName = "minebot-bridge"
+    archivesName = "minebot-camera-client"
 }
 
 java {
@@ -23,16 +23,16 @@ sourceSets {
     }
 }
 
-loom {
-    splitEnvironmentSourceSets()
+repositories {
+    maven { url = "https://api.modrinth.com/maven" }
 }
 
 dependencies {
     minecraft "com.mojang:minecraft:26.1.2"
     implementation "net.fabricmc:fabric-loader:0.19.3"
     implementation "net.fabricmc.fabric-api:fabric-api:0.152.1+26.1.2"
-    implementation "org.java-websocket:Java-WebSocket:1.6.0"
-    include "org.java-websocket:Java-WebSocket:1.6.0"
+    implementation "maven.modrinth:freecam:dvyNrVvc"
+    implementation "maven.modrinth:sodium:vf7UgZpC"
 
     testImplementation platform("org.junit:junit-bom:5.12.2")
     testImplementation "org.junit.jupiter:junit-jupiter"
