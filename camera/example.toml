@@ -1,0 +1,51 @@
+[camera]
+enabled = false
+target = "Bot1"
+startup_timeout_s = 45
+shutdown_timeout_s = 10
+
+[camera.follow]
+distance = 5.0
+azimuth_deg = 180.0
+elevation_deg = 25.0
+height_offset = 1.6
+stiffness = 0.2
+fov_deg = 70.0
+collision_margin = 0.25
+
+[observer]
+id = "00000000-0000-0000-0000-000000000000"
+generation = 1
+expected_mc_version = "26.1.2"
+launcher_command = ["prismlauncher", "--launch", "MineBotCamera"]
+launcher_profile = "/external/operator-managed/MineBotCamera"
+display = ":91"
+
+[bridge]
+endpoint = "ws://127.0.0.1:8766"
+heartbeat_s = 2
+
+[capture]
+ffmpeg_command = "ffmpeg"
+input_args = [
+  "-f", "x11grab",
+  "-draw_mouse", "0",
+  "-framerate", "30",
+  "-video_size", "1280x720",
+  "-i", ":91.0",
+]
+fps = 30
+encoder = "libx264"
+preset = "veryfast"
+
+[output.record]
+enabled = true
+directory = "../recordings"
+segment_s = 600
+
+[output.live]
+enabled = true
+publish_url_env = "MINEBOT_CAMERA_PUBLISH_URL"
+format = "rtsp"
+# Optional. Omit this when MediaMTX is managed outside MineBot.
+relay_command = ["mediamtx", "/external/operator-managed/mediamtx.yml"]

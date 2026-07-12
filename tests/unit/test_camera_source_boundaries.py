@@ -83,6 +83,7 @@ def test_observer_control_has_narrow_version_adapter_and_exact_request_surface()
     assert "leaseExpiresAtTick" in source
     assert 'value.addProperty("loaded_chunks"' in source
     assert 'value.addProperty("online_players"' in source
+    assert 'response.addProperty("last_generation", lastGeneration)' in source
     assert "configuredObserverId" in source
     assert "requireCurrentSession" in source
     assert "requireSuccessorSession" in source

@@ -249,6 +249,7 @@ public final class ObserverControlChannel implements BridgeChannel {
         JsonObject response = baseResponse(request, "STATUS_ACK");
         response.add("observer", observerJson(access.observerState(server, configuredObserverId)));
         response.add("server", serverJson(server));
+        response.addProperty("last_generation", lastGeneration);
         Session active = session;
         if (active == null) {
             response.addProperty("state", "detached");

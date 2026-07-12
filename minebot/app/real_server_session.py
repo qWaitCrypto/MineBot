@@ -945,6 +945,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Keep the same real-server Agent session alive and read user messages from stdin.",
     )
+    parser.add_argument(
+        "--camera",
+        action="store_true",
+        help="Start the optional third-person Camera sidecar for this run.",
+    )
+    parser.add_argument(
+        "--camera-config",
+        type=Path,
+        default=Path(os.environ.get("MINEBOT_CAMERA_CONFIG", "camera.toml")),
+        help="Camera TOML path; used only with --camera.",
+    )
     args = parser.parse_args(argv)
     if not args.interactive and not args.goal:
         parser.error("goal is required unless --interactive is set")
@@ -953,13 +964,39 @@ def main(argv: list[str] | None = None) -> int:
     except (RealServerConfigError, AppConfigError, ValueError) as exc:
         print(f"Real-server agent config error: {exc}", file=sys.stderr)
         return 2
+    camera_started = False
     try:
-        if args.interactive:
-            return asyncio.run(run_real_server_interactive(config, args.goal, max_steps=args.max_steps))
-        return asyncio.run(run_real_server_goal(config, args.goal, max_steps=args.max_steps))
-    except AppConfigError as exc:
-        print(f"Provider not configured: {exc}", file=sys.stderr)
-        return 2
+        if args.camera:
+            from camera.config import CameraConfigError
+            from camera.service import CameraServiceError, start_service
+
+            try:
+                state = start_service(args.camera_config, force=True)
+                camera_started = state.get("started") is True
+                print(
+                    "Camera ready:"
+                    f" target={state.get('target')}"
+                    f" record={'on' if state.get('recording') else 'off'}"
+                    f" live={'on' if state.get('live') else 'off'}"
+                )
+            except (CameraConfigError, CameraServiceError) as exc:
+                print(f"Camera unavailable; continuing without it: {exc}", file=sys.stderr)
+        try:
+            if args.interactive:
+                return asyncio.run(run_real_server_interactive(config, args.goal, max_steps=args.max_steps))
+            return asyncio.run(run_real_server_goal(config, args.goal, max_steps=args.max_steps))
+        except AppConfigError as exc:
+            print(f"Provider not configured: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        if camera_started:
+            from camera.config import CameraConfigError
+            from camera.service import CameraServiceError, stop_service
+
+            try:
+                stop_service(args.camera_config)
+            except (CameraConfigError, CameraServiceError) as exc:
+                print(f"Camera cleanup warning: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
