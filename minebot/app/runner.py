@@ -22,6 +22,7 @@ from agents.tool import FunctionTool
 from minebot.app.conversation import WindowedConversationSession, bounded_session_input
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.observation_artifacts import ToolObservationArchive
+from minebot.app.skills import SkillOperationError
 from minebot.app.observability import ObservationSink, sanitize_observation
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleError, LifecycleState
@@ -814,7 +815,14 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
         "delete_memory",
     }:
         summary.update(_memory_tool_summary(tool_name, metrics))
-    elif tool_name in {"list_skills", "load_skill"}:
+    elif tool_name in {
+        "list_skills",
+        "read_skill",
+        "load_skill",
+        "create_skill",
+        "update_skill",
+        "delete_skill",
+    }:
         summary.update(_skill_tool_summary(tool_name, metrics))
     elif tool_name in {"wiki_search", "wiki_read"}:
         summary.update(_wiki_tool_summary(tool_name, metrics))
@@ -1158,7 +1166,30 @@ def _memory_record_summary(
 def _skill_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObject:
     summary: JsonObject = {
         key: _bounded_summary_value(metrics[key])
-        for key in ("name", "description", "version", "count", "complete", "error")
+        for key in (
+            "name",
+            "description",
+            "version",
+            "head_version",
+            "revision",
+            "origin",
+            "status",
+            "tools",
+            "loadable",
+            "missing_tools",
+            "derived_from",
+            "count",
+            "total_matches",
+            "start",
+            "limit",
+            "next_start",
+            "complete",
+            "error",
+            "retired_at",
+            "reason",
+            "evidence_refs",
+            "change_reason",
+        )
         if key in metrics
     }
     skills = metrics.get("skills")
@@ -1166,7 +1197,16 @@ def _skill_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObjec
         visible = [
             {
                 key: _bounded_summary_value(item[key])
-                for key in ("name", "description", "version")
+                for key in (
+                    "name",
+                    "description",
+                    "version",
+                    "head_version",
+                    "revision",
+                    "origin",
+                    "loadable",
+                    "missing_tools",
+                )
                 if key in item
             }
             for item in skills[:10]
@@ -1176,7 +1216,7 @@ def _skill_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObjec
         summary["skills_complete"] = len(visible) == len(skills)
         if len(visible) < len(skills):
             summary["omitted_skill_count"] = len(skills) - len(visible)
-    if tool_name == "load_skill" and isinstance(metrics.get("instructions"), str):
+    if tool_name in {"read_skill", "load_skill"} and isinstance(metrics.get("instructions"), str):
         instructions = str(metrics["instructions"])
         summary["instructions"] = _shorten(instructions, limit=8000)
         summary["instructions_complete"] = len(summary["instructions"]) == len(instructions)
@@ -1187,9 +1227,13 @@ def _skill_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObjec
             for key in (
                 "activation_id",
                 "task_id",
+                "owner_kind",
+                "owner_id",
+                "skill_id",
                 "skill_name",
                 "skill_version",
                 "activated_at",
+                "ended_at",
             )
             if key in activation
         }
@@ -1574,9 +1618,13 @@ class AgentRuntime:
         self.last_known_body_state: dict[str, object] | None = None
         self.consecutive_transport_errors = 0
         self.execution_lane = SerialExecutionLane(thread_name=f"minebot-{agent_name}")
+        self.context_refreshers: list[Callable[[AgentContext], None]] = []
 
     def set_tool_facts(self, tool_name: str, facts: dict[str, object]) -> None:
         self.tool_facts[tool_name] = dict(facts)
+
+    def add_context_refresher(self, refresher: Callable[[AgentContext], None]) -> None:
+        self.context_refreshers.append(refresher)
 
     async def run_turn(
         self,
@@ -1588,6 +1636,10 @@ class AgentRuntime:
         if isinstance(prepared, AgentTurnOutcome):
             return prepared
         profile = prepared
+        try:
+            self._refresh_dynamic_context()
+        except SkillOperationError as exc:
+            return self._yield_from_skill_context_error(exc, profile)
 
         fallback_input = (
             "Continue the current goal from the latest authoritative state."
@@ -1600,16 +1652,22 @@ class AgentRuntime:
         instruction_preamble = self.agent_context.turn_preamble(
             include_session_messages=False
         )
+        skill_preamble = self.agent_context.skill_preamble()
         context_budget = self.agent_context.budget_facts()
         new_turn_frame_chars = (
             len(input_text)
             + len(self.agent_context.system_prompt)
             + len(instruction_preamble)
+            + len(skill_preamble)
         )
         self.trace.emit(
             "context_budget",
             input_chars=len(input_text),
-            instruction_chars=len(self.agent_context.system_prompt) + len(instruction_preamble),
+            instruction_chars=(
+                len(self.agent_context.system_prompt)
+                + len(instruction_preamble)
+                + len(skill_preamble)
+            ),
             new_turn_frame_chars=new_turn_frame_chars,
             estimated_context_chars=(
                 new_turn_frame_chars
@@ -1668,6 +1726,8 @@ class AgentRuntime:
                     return self._enter_recovery_from_body_fact(recovery_required.reason, recovery_required.facts)
                 raise
             return self._yield_from_progress_abort(progress_abort)
+        except SkillOperationError as exc:
+            return self._yield_from_skill_context_error(exc, profile)
 
         self.trace.emit("turn_completed", lifecycle=self.lifecycle.state.value, situational=profile.situational)
         self._reset_transport_errors()
@@ -1787,10 +1847,41 @@ class AgentRuntime:
         agent: Agent[RuntimeRunContext],
     ) -> str:
         context = ctx.context.agent_context
+        self._refresh_dynamic_context()
         preamble = ctx.context.instruction_preamble
+        skill_preamble = context.skill_preamble()
+        parts = [context.system_prompt]
         if preamble:
-            return f"{context.system_prompt}\n\n{preamble}"
-        return context.system_prompt
+            parts.append(preamble)
+        if skill_preamble:
+            parts.append(skill_preamble)
+        return "\n\n".join(parts)
+
+    def _refresh_dynamic_context(self) -> None:
+        for refresher in self.context_refreshers:
+            refresher(self.agent_context)
+
+    def _yield_from_skill_context_error(
+        self,
+        exc: SkillOperationError,
+        profile: RuntimeProfile,
+    ) -> AgentTurnOutcome:
+        if self.lifecycle.state is LifecycleState.ACTIVE:
+            self.lifecycle.yield_()
+        yielded_profile = self.mode_runtime.profile_for(self.lifecycle.state)
+        self.agent_context.observe_profile(yielded_profile)
+        self.trace.emit(
+            "skill_context_recovery_required",
+            reason=exc.code,
+            error=str(exc),
+            lifecycle=self.lifecycle.state.value,
+        )
+        return AgentTurnOutcome(
+            status="yielded",
+            lifecycle=self.lifecycle.state,
+            profile=yielded_profile if self.lifecycle.state is LifecycleState.YIELDED else profile,
+            message=exc.code,
+        )
 
     def _ensure_active(self) -> None:
         if self.lifecycle.state is LifecycleState.INIT:

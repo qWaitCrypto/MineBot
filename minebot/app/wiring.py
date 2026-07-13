@@ -9,6 +9,7 @@ from agents import Session
 
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.observation_artifacts import ToolObservationArchive
+from minebot.app.skills import SkillWorkspace
 from minebot.app.runner import AgentRuntime, RecoveryHandler, RuntimeTrace
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController
@@ -27,6 +28,7 @@ class AgentRuntimeParts:
     lifecycle: LifecycleController
     modes: ModeRuntime
     authority: ProgressAuthority
+    skill_workspace: SkillWorkspace | None = None
 
 
 def build_agent_runtime(

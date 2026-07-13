@@ -20,6 +20,7 @@ from uuid import uuid4
 from minebot.app.wiring import AgentRuntimeParts
 from minebot.app.runner import RecoveryOutcome
 from minebot.app.runtime_state import CheckpointDisposition, CompletionAuthority, TaskStatus
+from minebot.app.skills import SkillWorkspace
 from minebot.app.tasks import TaskWorkspace
 from minebot.app.work_queue import (
     MemoryWorkIntentQueue,
@@ -101,6 +102,7 @@ class AgentSession:
 
     parts_factory: PartsFactory
     task_workspace: TaskWorkspace | None = None
+    skill_workspace: SkillWorkspace | None = None
     work_queue: WorkIntentQueue | None = None
     parts: AgentRuntimeParts | None = None
     max_recovery_attempts: int = 3
@@ -217,6 +219,7 @@ class AgentSession:
                 )
             finally:
                 self._work_in_flight = False
+                self._end_transient_skill_owner(intent)
         except Exception as exc:
             self.work_queue.fail(
                 intent,
@@ -244,6 +247,7 @@ class AgentSession:
             if command is not None
             else await self._apply_runtime_intent(intent)
         )
+        self._begin_skill_owner(intent)
         runtime_terminal = self._runtime_intent_terminal_step(intent)
         if runtime_terminal is not None:
             return runtime_terminal
@@ -429,6 +433,9 @@ class AgentSession:
         self._trace("session_goal_completed", goal=completed_goal, reason=reason)
         if self.task_workspace is not None:
             self.task_workspace.complete(authority=authority)
+        skills = self._skill_runtime()
+        if skills is not None and completed_task is not None:
+            skills.end_task(completed_task.task_id)
         self.parts.context.discard_pending_turn_input()
         self.parts.context.observe_system_message(
             f"Goal completed: {completed_goal}. Terminal reason: {reason}."
@@ -531,6 +538,9 @@ class AgentSession:
             return []
 
         if command.kind is SessionCommandKind.REPLACE_GOAL:
+            replaced_task = (
+                None if self.task_workspace is None else self.task_workspace.current_task
+            )
             had_parts = self.parts is not None
             if self.parts is None:
                 self.parts = self.parts_factory(command.text)
@@ -547,6 +557,9 @@ class AgentSession:
                 )
                 self.parts.context.set_goal(task.goal_text)
                 self.parts.runtime.weld_context.goal_text = task.goal_text
+                skills = self._skill_runtime()
+                if skills is not None and replaced_task is not None:
+                    skills.end_task(replaced_task.task_id)
             self.parts.context.observe_user_message(command.text, sender=command.sender or None)
             self._goal_active = True
             self._turn_pending = True
@@ -573,8 +586,14 @@ class AgentSession:
                 self._turn_pending = False
                 return []
             if command.kind is SessionCommandKind.CANCEL:
+                cancelled_task = (
+                    None if self.task_workspace is None else self.task_workspace.current_task
+                )
                 if self.task_workspace is not None:
                     self.task_workspace.cancel()
+                skills = self._skill_runtime()
+                if skills is not None and cancelled_task is not None:
+                    skills.end_task(cancelled_task.task_id)
                 self._goal_active = False
                 self._turn_pending = False
                 return []
@@ -635,6 +654,9 @@ class AgentSession:
             return []
 
         if command.kind is SessionCommandKind.CANCEL:
+            cancelled_task = (
+                None if self.task_workspace is None else self.task_workspace.current_task
+            )
             self.parts.context.observe_user_message(command.reason, sender=command.sender or None)
             self._trace("user_message", command="cancel", reason=command.reason, sender=command.sender)
             self._goal_active = False
@@ -644,6 +666,9 @@ class AgentSession:
             if self.task_workspace is not None:
                 self.task_workspace.cancel()
                 self._sync_task_context()
+            skills = self._skill_runtime()
+            if skills is not None and cancelled_task is not None:
+                skills.end_task(cancelled_task.task_id)
             self._stand_down()
             return []
 
@@ -796,10 +821,12 @@ class AgentSession:
             self.parts.context.observe_system_message(
                 "REFLECTION_MAINTENANCE: Review the bounded completed-task facts "
                 "below and, only when useful, query recent archives or existing "
-                "memory. Decide agentically whether to write, update, consolidate, "
-                "or delete durable memory. Keep stable facts and reusable experience; "
-                "do not copy routine logs, do not perform Body actions, and do not "
-                "start or continue a gameplay objective. Finish after the reflection "
+                "Memory and Skills. Decide agentically whether the evidence warrants "
+                "no durable change, Memory CRUD, or Skill CRUD. Load skill-authoring "
+                "before changing reusable methodology when its format or judgment is "
+                "uncertain. Keep stable facts in Memory and reusable procedures in "
+                "Skills; do not copy routine logs, do not perform Body actions, and "
+                "do not start or continue a gameplay objective. Finish after the reflection "
                 f"decision. FACTS: {frame}"
             )
             self._turn_pending = True
@@ -944,6 +971,53 @@ class AgentSession:
         )
         if callable(summary_payload):
             self.parts.context.observe_conversation_summary(summary_payload())
+
+    def _begin_skill_owner(self, intent: WorkIntent) -> None:
+        skills = self._skill_runtime()
+        if skills is None:
+            return
+        task = None if self.task_workspace is None else self.task_workspace.current_task
+        if intent.kind is WorkIntentKind.MAINTENANCE:
+            skills.set_activation_owner(
+                owner_kind="maintenance",
+                owner_id=intent.intent_id,
+                task_id=None if task is None else task.task_id,
+            )
+        elif task is not None:
+            skills.set_activation_owner(
+                owner_kind="task",
+                owner_id=task.task_id,
+                task_id=task.task_id,
+            )
+        else:
+            skills.set_activation_owner(
+                owner_kind="turn",
+                owner_id=intent.intent_id,
+            )
+
+    def _end_transient_skill_owner(self, intent: WorkIntent) -> None:
+        skills = self._skill_runtime()
+        if skills is None:
+            return
+        if intent.kind is WorkIntentKind.MAINTENANCE:
+            skills.end_activation_owner(
+                owner_kind="maintenance",
+                owner_id=intent.intent_id,
+            )
+            return
+        task = None if self.task_workspace is None else self.task_workspace.current_task
+        if task is None:
+            skills.end_activation_owner(
+                owner_kind="turn",
+                owner_id=intent.intent_id,
+            )
+
+    def _skill_runtime(self) -> SkillWorkspace | None:
+        if self.skill_workspace is not None:
+            return self.skill_workspace
+        if self.parts is None:
+            return None
+        return self.parts.skill_workspace
 
     def _finish_step(
         self,

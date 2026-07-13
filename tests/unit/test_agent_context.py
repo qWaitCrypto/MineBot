@@ -154,6 +154,42 @@ class AgentContextTests(unittest.TestCase):
         self.assertEqual(budget["conversation_archive_revision"], 9)
         self.assertEqual(budget["conversation_compacted_turns"], 6)
 
+    def test_skill_descriptors_and_active_bodies_have_separate_dynamic_context_slots(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="prepare tools")
+        ctx.observe_skills(
+            catalog_revision="sha256:catalog",
+            descriptors=[
+                {
+                    "name": "resource-progression",
+                    "description": "Acquire prerequisites when a goal needs materials.",
+                    "origin": "builtin",
+                    "version": "sha256:resource",
+                }
+            ],
+            available_rendered=(
+                "AVAILABLE_SKILLS catalog_revision=sha256:catalog complete=true\n"
+                "- resource-progression [builtin sha256:resource] loadable=true: "
+                "Acquire prerequisites when a goal needs materials."
+            ),
+            active=[
+                {
+                    "name": "resource-progression",
+                    "version": "sha256:resource",
+                    "instructions": "# Resource Progression\n\n## Method\nUse live truth.",
+                }
+            ],
+        )
+
+        preamble = ctx.skill_preamble()
+        budget = ctx.budget_facts()
+
+        self.assertIn("AVAILABLE_SKILLS", preamble)
+        self.assertIn("ACTIVE_SKILLS", preamble)
+        self.assertIn("BEGIN_SKILL name=resource-progression", preamble)
+        self.assertEqual(budget["skill_catalog_revision"], "sha256:catalog")
+        self.assertEqual(budget["skill_descriptor_count"], 1)
+        self.assertEqual(budget["active_skill_count"], 1)
+
     def test_sdk_session_window_drops_only_complete_old_turns(self):
         history = []
         for turn in range(CONVERSATION_WINDOW_TURNS + 2):

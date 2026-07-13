@@ -8,13 +8,14 @@ dependencies = [
     # Pinned: the SDK adds surfaces fast and LitellmModel is beta
     # (agent-layer-architecture.md §6, §12 watch-item).
     "openai-agents==0.17.6",
+    "PyYAML>=6.0.2,<7",
 ]
 
 [project.scripts]
 minebot-camera = "minebot.camera.cli.main:main"
 
 [tool.setuptools.package-data]
-"minebot.skills" = ["catalog/*.json", "catalog/*.md"]
+"minebot.skills" = ["catalog/*/SKILL.md"]
 
 [tool.setuptools.packages.find]
 include = ["minebot*"]

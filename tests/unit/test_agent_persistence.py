@@ -106,6 +106,8 @@ class RuntimeStateStoreTests(unittest.TestCase):
                     "memory_entries",
                     "memory_fts_terms",
                     "memory_fts_trigrams",
+                    "skill_heads",
+                    "skill_versions",
                     "skill_activations",
                     "wiki_cache",
                 }.issubset(table_names)
@@ -159,6 +161,52 @@ class RuntimeStateStoreTests(unittest.TestCase):
 
             self.assertEqual(migrated.schema_version, RUNTIME_SCHEMA_VERSION)
             self.assertIsNotNone(table)
+            migrated.close()
+
+    def test_store_migrates_v10_skill_activations_without_permanent_scope_leak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.sqlite3"
+            scope = RuntimeScope("server", "world", "Bot1")
+            first = RuntimeStateStore(path)
+            first.register_scope(scope)
+            task = TaskWorkspace(first, scope).start("continue mining", source="test")
+            first._connection.execute("DROP INDEX IF EXISTS idx_skill_activation_owner_version")
+            first._connection.execute("DROP INDEX IF EXISTS idx_skill_activations_task_active")
+            first._connection.execute("DROP TABLE skill_activations")
+            first._connection.execute(
+                """
+                CREATE TABLE skill_activations (
+                    activation_id TEXT PRIMARY KEY,
+                    scope_key TEXT NOT NULL,
+                    task_id TEXT,
+                    skill_name TEXT NOT NULL,
+                    skill_version TEXT NOT NULL,
+                    activated_at TEXT NOT NULL
+                )
+                """
+            )
+            first._connection.executemany(
+                "INSERT INTO skill_activations VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    ("activation-task", scope.key, task.task_id, "resource-progression", "sha256:task", "2026-01-01T00:00:00Z"),
+                    ("activation-scope", scope.key, None, "recovery-and-continuation", "sha256:scope", "2026-01-01T00:00:00Z"),
+                ),
+            )
+            first._connection.execute("UPDATE minebot_schema SET version = 10 WHERE singleton = 1")
+            first._connection.commit()
+            first.close()
+
+            migrated = RuntimeStateStore(path)
+            active = migrated.list_skill_activations(scope, include_ended=False)
+            history = migrated.list_skill_activations(scope, include_ended=True)
+
+            self.assertEqual(migrated.schema_version, RUNTIME_SCHEMA_VERSION)
+            self.assertEqual([item.activation_id for item in active], ["activation-task"])
+            self.assertEqual(active[0].owner_kind, "task")
+            self.assertEqual(active[0].owner_id, task.task_id)
+            legacy = next(item for item in history if item.activation_id == "activation-scope")
+            self.assertEqual(legacy.owner_kind, "legacy_scope")
+            self.assertIsNotNone(legacy.ended_at)
             migrated.close()
 
 

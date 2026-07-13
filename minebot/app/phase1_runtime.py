@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from agents import Session
 
@@ -138,10 +138,14 @@ def build_phase1_agent_runtime(
         register_skill_tools(registry, config.skill_workspace)
     if config.wiki_knowledge is not None:
         register_wiki_tools(registry, config.wiki_knowledge)
+    if config.skill_workspace is not None:
+        config.skill_workspace.bind_registry(registry)
+        config.skill_workspace.sync_context(parts.context)
+        parts.runtime.add_context_refresher(config.skill_workspace.sync_context)
     parts.runtime.registry = registry
     parts.runtime.agent = parts.runtime.agent.clone(tools=[sdk_tool_for(registry.get(name)) for name in registry.names()])
     parts.runtime.trace.emit("tool_manifest", tools=tool_manifest(registry))
-    return parts
+    return replace(parts, skill_workspace=config.skill_workspace)
 
 
 def _phase1_recovery_handler(body: ScarpetBody, config: Phase1RuntimeConfig):

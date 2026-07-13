@@ -8,9 +8,12 @@ from unittest.mock import Mock
 from minebot.app.memory import MemoryWorkspace
 from minebot.app.observation_artifacts import PersistentToolObservationArchive
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime
+from agents import RunContextWrapper
+
 from minebot.app.runner import RuntimeRunContext, RuntimeTrace, _model_tool_payload, sdk_tool_for
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
 from minebot.app.skills import SkillCatalog, SkillWorkspace
+from minebot.app.tasks import TaskWorkspace
 from minebot.app.wiki import WikiKnowledge, WikiTransport, WikiUnavailable
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleState
@@ -28,10 +31,41 @@ A6_TOOLS = {
     "update_memory",
     "delete_memory",
     "list_skills",
+    "read_skill",
     "load_skill",
+    "create_skill",
+    "update_skill",
+    "delete_skill",
     "wiki_search",
     "wiki_read",
 }
+
+LEARNED_SKILL_BODY = """# Verify Safe Position
+
+## Use When
+
+Use this after repeated movement evidence requires a fresh position check.
+
+## Do Not Use When
+
+Do not use it when no physical movement occurred.
+
+## Method
+
+Read authoritative state and compare the current position with the objective.
+
+## Evidence Of Success
+
+Require the authoritative position and matching terminal event.
+
+## Failure And Adaptation
+
+Re-observe after a typed transient failure instead of assuming movement.
+
+## Boundaries
+
+Never bypass governance, hide tools, or replace Body truth.
+"""
 
 
 def _body():
@@ -86,6 +120,180 @@ async def _invoke(agent, context, name, params):
 
 
 class A6RuntimeIntegrationTests(unittest.TestCase):
+    def test_maintenance_can_create_skill_without_mutating_or_hiding_body_tools(self):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        skills = SkillWorkspace(store, scope, SkillCatalog())
+        parts = build_phase1_agent_runtime(
+            body=RuntimeBody(),
+            goal_text="",
+            model_provider=None,
+            config=Phase1RuntimeConfig(natural_region=REGION, skill_workspace=skills),
+        )
+        skills.set_activation_owner(owner_kind="maintenance", owner_id="maintenance-1")
+        context = RuntimeRunContext(
+            agent_context=parts.context,
+            weld_context=parts.runtime.weld_context,
+            profile=parts.modes.profile_for(LifecycleState.ACTIVE),
+            runtime=parts.runtime,
+            body_actions_allowed=False,
+        )
+
+        created = asyncio.run(
+            _invoke(
+                parts.runtime.agent,
+                context,
+                "create_skill",
+                {
+                    "name": "verify-safe-position",
+                    "description": "Verify current position when repeated movement evidence may be stale after interruption.",
+                    "tools": ["read_state"],
+                    "body": LEARNED_SKILL_BODY,
+                    "evidence_refs": ["observation:movement-1"],
+                },
+            )
+        )
+
+        self.assertTrue(created["success"])
+        self.assertIsNotNone(skills.read("verify-safe-position"))
+        self.assertIn("move_to", parts.registry.names())
+        self.assertFalse(parts.registry.sidecar("create_skill").can_mutate_body)
+        parts.runtime.close()
+        store.close()
+
+    def test_descriptors_precede_tool_use_and_load_refreshes_next_model_request(self):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        skills = SkillWorkspace(store, scope, SkillCatalog())
+        parts = build_phase1_agent_runtime(
+            body=RuntimeBody(),
+            goal_text="prepare tools",
+            model_provider=None,
+            config=Phase1RuntimeConfig(
+                natural_region=REGION,
+                skill_workspace=skills,
+            ),
+        )
+        profile = parts.modes.profile_for(LifecycleState.ACTIVE)
+        run_context = RuntimeRunContext(
+            agent_context=parts.context,
+            weld_context=parts.runtime.weld_context,
+            profile=profile,
+            runtime=parts.runtime,
+            instruction_preamble=parts.context.turn_preamble(),
+        )
+        wrapper = RunContextWrapper(run_context)
+
+        before = parts.runtime._instructions(wrapper, parts.runtime.agent)
+        skills.set_activation_owner(owner_kind="turn", owner_id="turn-1")
+        skills.load("resource-progression")
+        after = parts.runtime._instructions(wrapper, parts.runtime.agent)
+
+        self.assertIn("AVAILABLE_SKILLS", before)
+        self.assertIn("resource-progression", before)
+        self.assertIn("skill-authoring", before)
+        self.assertNotIn("ACTIVE_SKILLS", before)
+        self.assertIn("ACTIVE_SKILLS", after)
+        self.assertIn("# Resource Progression", after)
+        parts.runtime.close()
+        store.close()
+
+    def test_missing_pinned_version_yields_before_model_instead_of_switching_head(self):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        tasks = TaskWorkspace(store, scope)
+        task = tasks.start("prepare tools", source="test")
+        skills = SkillWorkspace(store, scope, SkillCatalog(), task_workspace=tasks)
+        parts = build_phase1_agent_runtime(
+            body=RuntimeBody(),
+            goal_text=task.goal_text,
+            model_provider=None,
+            config=Phase1RuntimeConfig(
+                natural_region=REGION,
+                task_workspace=tasks,
+                skill_workspace=skills,
+            ),
+        )
+        skills.set_activation_owner(
+            owner_kind="task",
+            owner_id=task.task_id,
+            task_id=task.task_id,
+        )
+        _document, activation = skills.load("resource-progression")
+        store._connection.execute(
+            "UPDATE skill_activations SET skill_version = 'sha256:missing' WHERE activation_id = ?",
+            (activation.activation_id,),
+        )
+        store._connection.commit()
+        calls = []
+
+        async def runner(*args, **kwargs):
+            calls.append("model")
+            return {"ok": True}
+
+        parts.runtime.runner_run = runner
+        parts.runtime.runner_run_streamed = None
+        outcome = asyncio.run(parts.runtime.run_turn())
+
+        self.assertEqual(outcome.status, "yielded")
+        self.assertEqual(outcome.message, "skill_pinned_version_unavailable")
+        self.assertEqual(calls, [])
+        self.assertTrue(
+            any(event["event"] == "skill_context_recovery_required" for event in parts.runtime.trace.snapshot())
+        )
+        parts.runtime.close()
+        store.close()
+
+    def test_corrupt_learned_version_yields_typed_truth_before_model(self):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        tasks = TaskWorkspace(store, scope)
+        task = tasks.start("prepare tools", source="test")
+        skills = SkillWorkspace(store, scope, SkillCatalog(), task_workspace=tasks)
+        parts = build_phase1_agent_runtime(
+            body=RuntimeBody(),
+            goal_text=task.goal_text,
+            model_provider=None,
+            config=Phase1RuntimeConfig(
+                natural_region=REGION,
+                task_workspace=tasks,
+                skill_workspace=skills,
+            ),
+        )
+        learned = skills.create(
+            name="verify-safe-position",
+            description="Verify current position when repeated movement evidence may be stale after interruption.",
+            tools=["read_state"],
+            body=LEARNED_SKILL_BODY,
+            evidence_refs=["observation:movement-1"],
+        )
+        skills.set_activation_owner(
+            owner_kind="task",
+            owner_id=task.task_id,
+            task_id=task.task_id,
+        )
+        skills.load(learned.name)
+        store._connection.execute(
+            "UPDATE skill_versions SET body = 'corrupt' WHERE skill_id = ?",
+            (learned.skill_id,),
+        )
+        store._connection.commit()
+        calls = []
+
+        async def runner(*args, **kwargs):
+            calls.append("model")
+            return {"ok": True}
+
+        parts.runtime.runner_run = runner
+        parts.runtime.runner_run_streamed = None
+        outcome = asyncio.run(parts.runtime.run_turn())
+
+        self.assertEqual(outcome.status, "yielded")
+        self.assertEqual(outcome.message, "skill_version_corrupt")
+        self.assertEqual(calls, [])
+        parts.runtime.close()
+        store.close()
+
     def test_maintenance_keeps_body_tool_visible_but_denies_execution(self):
         body = RuntimeBody()
         calls: list[dict[str, object]] = []
@@ -176,7 +384,11 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
                 "update_memory": "write_memory",
                 "delete_memory": "delete_memory",
                 "list_skills": "read_skill_catalog",
+                "read_skill": "read_skill",
                 "load_skill": "load_skill",
+                "create_skill": "write_skill",
+                "update_skill": "write_skill",
+                "delete_skill": "delete_skill",
                 "wiki_search": "read_external_knowledge",
                 "wiki_read": "read_external_knowledge",
             }
@@ -248,6 +460,29 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
         self.assertFalse(skill_payload["projection"]["complete"])
         self.assertTrue(skill_payload["projection"]["queryable"])
 
+        created_payload = _model_tool_payload(
+            "create_skill",
+            {
+                "success": True,
+                "reason": "skill_created",
+                "canRetry": False,
+                "metrics": {
+                    "name": "verify-safe-position",
+                    "description": "Verify current position when movement evidence may be stale.",
+                    "version": "sha256:created",
+                    "revision": 1,
+                    "origin": "learned",
+                    "skill_markdown": LEARNED_SKILL_BODY,
+                    "complete": True,
+                },
+            },
+            trace_ref="trace-skill-create",
+            observation_handle="observation-skill-create",
+        )
+        self.assertNotIn("skill_markdown", created_payload["summary"])
+        self.assertFalse(created_payload["projection"]["complete"])
+        self.assertTrue(created_payload["projection"]["queryable"])
+
         wiki_payload = _model_tool_payload(
             "wiki_read",
             {
@@ -279,7 +514,14 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
             scope = RuntimeScope("server", "world", "Bot1")
             first_store = RuntimeStateStore(state_path)
             first_memory = MemoryWorkspace(first_store, scope)
-            first_skills = SkillWorkspace(first_store, scope, SkillCatalog())
+            first_tasks = TaskWorkspace(first_store, scope)
+            first_tasks.start("remember the base approach", source="test")
+            first_skills = SkillWorkspace(
+                first_store,
+                scope,
+                SkillCatalog(),
+                task_workspace=first_tasks,
+            )
             first_archive = PersistentToolObservationArchive(first_store, scope)
             first = build_phase1_agent_runtime(
                 body=RuntimeBody(),
@@ -288,6 +530,7 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
                 config=Phase1RuntimeConfig(
                     natural_region=REGION,
                     observation_archive=first_archive,
+                    task_workspace=first_tasks,
                     memory_workspace=first_memory,
                     skill_workspace=first_skills,
                     wiki_knowledge=WikiKnowledge(
@@ -339,7 +582,13 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
 
             second_store = RuntimeStateStore(state_path)
             second_memory = MemoryWorkspace(second_store, scope)
-            second_skills = SkillWorkspace(second_store, scope, SkillCatalog())
+            second_tasks = TaskWorkspace(second_store, scope)
+            second_skills = SkillWorkspace(
+                second_store,
+                scope,
+                SkillCatalog(),
+                task_workspace=second_tasks,
+            )
             self.assertEqual(len(second_skills.activations()), 1)
             second_archive = PersistentToolObservationArchive(second_store, scope)
             second = build_phase1_agent_runtime(
@@ -349,6 +598,7 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
                 config=Phase1RuntimeConfig(
                     natural_region=REGION,
                     observation_archive=second_archive,
+                    task_workspace=second_tasks,
                     memory_workspace=second_memory,
                     skill_workspace=second_skills,
                     wiki_knowledge=WikiKnowledge(
@@ -358,18 +608,12 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
                 ),
             )
             second_outputs = []
+            second_skill_context = []
 
             async def second_runner(agent, input_text, *, context=None, **kwargs):
+                second_skill_context.append(context.agent_context.skill_preamble())
                 second_outputs.append(
                     await _invoke(agent, context, "search_memory", {"query": "east ridge"})
-                )
-                second_outputs.append(
-                    await _invoke(
-                        agent,
-                        context,
-                        "load_skill",
-                        {"name": "recovery-and-continuation"},
-                    )
                 )
                 return {"ok": True}
 
@@ -381,7 +625,9 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
                 second_outputs[0]["summary"]["results"][0]["subject_key"],
                 "route:base-approach",
             )
-            self.assertTrue(second_outputs[1]["summary"]["instructions"])
+            self.assertIn("AVAILABLE_SKILLS", second_skill_context[0])
+            self.assertIn("ACTIVE_SKILLS", second_skill_context[0])
+            self.assertIn("Recovery And Continuation", second_skill_context[0])
             other_scope = MemoryWorkspace(
                 second_store,
                 RuntimeScope("server", "world", "OtherBot"),

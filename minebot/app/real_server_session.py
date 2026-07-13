@@ -25,7 +25,12 @@ from minebot.app.observation_artifacts import PersistentToolObservationArchive
 from minebot.app.observability import JsonlObservationSink
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime, inventory_count
 from minebot.app.memory import MemoryWorkspace
-from minebot.app.skills import SkillCatalog, SkillWorkspace
+from minebot.app.skills import (
+    SkillCatalog,
+    SkillCatalogError,
+    SkillOperationError,
+    SkillWorkspace,
+)
 from minebot.app.wiki import WikiKnowledge
 from minebot.app.reconciliation import StartupReconciliationError, enqueue_startup_reconciliation
 from minebot.app.runtime_identity import RuntimeIdentityError, resolve_runtime_scope
@@ -314,6 +319,8 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
             RconError,
             RuntimeIdentityError,
             RuntimeStateError,
+            SkillCatalogError,
+            SkillOperationError,
             StartupReconciliationError,
             ValueError,
         ) as exc:
@@ -378,6 +385,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
         session = AgentSession(
             make_parts,
             task_workspace=task_workspace,
+            skill_workspace=skill_workspace,
             work_queue=work_queue,
         )
         if goal:

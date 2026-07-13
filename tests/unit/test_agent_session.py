@@ -10,6 +10,7 @@ from minebot.app.runner import AgentRuntime, RecoveryOutcome
 from minebot.app.memory import MemoryWorkspace, register_memory_tools
 from minebot.app.runtime_state import CheckpointDisposition, RuntimeScope, RuntimeStateStore, TaskStatus
 from minebot.app.session import AgentSession, SessionCommand
+from minebot.app.skills import SkillCatalog, SkillWorkspace, register_skill_tools
 from minebot.app.tasks import TaskWorkspace
 from minebot.app.work_queue import WorkIntentKind, WorkIntentState
 from minebot.app.wiring import AgentRuntimeParts
@@ -17,7 +18,8 @@ from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleState
 from minebot.brain.modes import ModeRuntime
 from minebot.brain.progress import ProgressAuthority
-from minebot.brain.registry import ToolRegistry
+from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
+from minebot.contract import ToolResult
 
 from tests.unit.test_agent_runner_spine import FakeBody
 
@@ -54,7 +56,106 @@ def build_parts(goal: str, calls: list[str], bodies: list[FakeBody]) -> AgentRun
     )
 
 
+def build_skill_parts(
+    goal: str,
+    workspace: SkillWorkspace,
+    loads: list[str],
+) -> AgentRuntimeParts:
+    body = FakeBody()
+    registry = ToolRegistry()
+    register_skill_tools(registry, workspace)
+    required = {
+        tool
+        for name in workspace.catalog.names
+        for tool in workspace.catalog.load(name).tools
+    }
+    for name in sorted(required):
+        if name in registry:
+            continue
+        registry.register(
+            RegisteredTool(
+                name,
+                f"test tool {name}",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+                lambda _params: ToolResult(True, "ok", False),
+                ToolSidecar(name, False, "test", "test", name, (), ("test",)),
+            )
+        )
+    workspace.bind_registry(registry)
+
+    async def fake_runner(agent, input_text, *, context=None, **kwargs):
+        loaded, _activation = workspace.load("skill-authoring")
+        loads.append(loaded.version)
+        return {"ok": True}
+
+    context = AgentContext(system_prompt="sys", goal_text=goal)
+    lifecycle = LifecycleController()
+    modes = ModeRuntime()
+    authority = ProgressAuthority()
+    runtime = AgentRuntime(
+        body=body,
+        registry=registry,
+        agent_context=context,
+        lifecycle=lifecycle,
+        mode_runtime=modes,
+        authority=authority,
+        runner_run=fake_runner,
+    )
+    runtime.add_context_refresher(workspace.sync_context)
+    workspace.sync_context(context)
+    return AgentRuntimeParts(
+        runtime,
+        registry,
+        context,
+        lifecycle,
+        modes,
+        authority,
+        skill_workspace=workspace,
+    )
+
+
 class AgentSessionTests(unittest.TestCase):
+    def test_skill_activation_lifetime_is_owned_by_turn_or_durable_task(self):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        task_workspace = TaskWorkspace(store, scope)
+        skill_workspace = SkillWorkspace(
+            store,
+            scope,
+            SkillCatalog(),
+            task_workspace=task_workspace,
+        )
+        loads: list[str] = []
+        session = AgentSession(
+            lambda goal: build_skill_parts(goal, skill_workspace, loads),
+            task_workspace=task_workspace,
+        )
+
+        session.submit(SessionCommand.message("hello"))
+        chat = asyncio.run(session.step())
+        chat_history = skill_workspace.activations(include_ended=True)
+
+        self.assertEqual(chat.status, "completed_turn")
+        self.assertEqual(skill_workspace.active_documents(), ())
+        self.assertEqual(chat_history[0].owner_kind, "turn")
+        self.assertIsNotNone(chat_history[0].ended_at)
+
+        session.submit(SessionCommand.start("prepare tools"))
+        task_turn = asyncio.run(session.step())
+        task = task_workspace.current_task
+
+        self.assertEqual(task_turn.status, "completed_turn")
+        self.assertEqual(len(skill_workspace.active_documents()), 1)
+        active = next(item for item in skill_workspace.activations() if item.ended_at is None)
+        self.assertEqual(active.owner_kind, "task")
+        self.assertEqual(active.owner_id, task.task_id)
+
+        session.complete_current_goal()
+        self.assertEqual(skill_workspace.active_documents(), ())
+        self.assertEqual(len(loads), 2)
+        session.close()
+        store.close()
+
     def test_intent_remains_leased_until_the_sdk_run_finishes(self):
         bodies: list[FakeBody] = []
         observed_states: list[WorkIntentState] = []

@@ -47,6 +47,10 @@ class AgentContext:
     _resume_facts: dict[str, object] | None = field(default=None, repr=False)
     _task_artifact: dict[str, object] | None = field(default=None, repr=False)
     _conversation_summary: dict[str, object] | None = field(default=None, repr=False)
+    _skill_catalog_revision: str | None = field(default=None, repr=False)
+    _skill_descriptors: list[dict[str, object]] = field(default_factory=list, repr=False)
+    _available_skills_rendered: str = field(default="", repr=False)
+    _active_skills: list[dict[str, object]] = field(default_factory=list, repr=False)
     _session_messages: list[tuple[str, str]] = field(default_factory=list, repr=False)
     _pending_turn_messages: list[tuple[str, str, str | None]] = field(default_factory=list, repr=False)
 
@@ -105,6 +109,47 @@ class AgentContext:
             if summary is None
             else json.loads(json.dumps(summary, ensure_ascii=False, sort_keys=True))
         )
+
+    def observe_skills(
+        self,
+        *,
+        catalog_revision: str,
+        descriptors: list[dict[str, object]],
+        available_rendered: str,
+        active: list[dict[str, object]],
+    ) -> None:
+        """Replace the complete dynamic Skill snapshot atomically."""
+
+        self._skill_catalog_revision = str(catalog_revision)
+        self._skill_descriptors = json.loads(
+            json.dumps(descriptors, ensure_ascii=False, sort_keys=True)
+        )
+        self._available_skills_rendered = str(available_rendered).strip()
+        self._active_skills = json.loads(
+            json.dumps(active, ensure_ascii=False, sort_keys=True)
+        )
+
+    def skill_preamble(self) -> str:
+        parts: list[str] = []
+        if self._available_skills_rendered:
+            parts.append(self._available_skills_rendered)
+        if self._active_skills:
+            parts.append("ACTIVE_SKILLS complete=true")
+            for skill in sorted(
+                self._active_skills,
+                key=lambda item: (str(item.get("name") or ""), str(item.get("version") or "")),
+            ):
+                name = str(skill.get("name") or "")
+                version = str(skill.get("version") or "")
+                instructions = str(skill.get("instructions") or "").strip()
+                parts.extend(
+                    (
+                        f"BEGIN_SKILL name={name} version={version}",
+                        instructions,
+                        f"END_SKILL name={name}",
+                    )
+                )
+        return "\n".join(parts)
 
     def session_messages(self) -> list[tuple[str, str]]:
         return list(self._session_messages)
@@ -168,6 +213,13 @@ class AgentContext:
             ),
             "session_message_count": len(self._session_messages),
             "pending_input_count": len(self._pending_turn_messages),
+            "skill_catalog_revision": self._skill_catalog_revision,
+            "skill_descriptor_count": len(self._skill_descriptors),
+            "skill_descriptor_chars": len(self._available_skills_rendered),
+            "active_skill_count": len(self._active_skills),
+            "active_skill_chars": sum(
+                len(str(item.get("instructions") or "")) for item in self._active_skills
+            ),
         }
 
     def pending_turn_input(self, *, fallback: str) -> tuple[str, int]:

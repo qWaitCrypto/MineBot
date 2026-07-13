@@ -15,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-RUNTIME_SCHEMA_VERSION = 10
+RUNTIME_SCHEMA_VERSION = 11
 DEFAULT_RUNTIME_STATE_DB = Path("var/minebot/agent-state.sqlite3")
 _MAX_SCOPE_COMPONENT_LENGTH = 256
 
@@ -159,9 +159,44 @@ class SkillActivationRecord:
     activation_id: str
     scope_key: str
     task_id: str | None
+    owner_kind: str
+    owner_id: str
+    skill_id: str
     skill_name: str
     skill_version: str
     activated_at: str
+    ended_at: str | None
+
+
+@dataclass(frozen=True)
+class SkillHeadRecord:
+    skill_id: str
+    server_id: str
+    bot_id: str
+    name: str
+    head_revision: int
+    head_version: str
+    status: str
+    origin: str
+    derived_from: str
+    retired_at: str | None
+    retirement_evidence_refs: tuple[str, ...]
+    retirement_reason: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class SkillVersionRecord:
+    skill_id: str
+    revision: int
+    version_digest: str
+    description: str
+    tools: tuple[str, ...]
+    body: str
+    evidence_refs: tuple[str, ...]
+    change_reason: str
+    created_at: str
 
 
 @dataclass(frozen=True)
@@ -1511,17 +1546,299 @@ class RuntimeStateStore:
             "lanes": {name: len(records) for name, records in lanes.items()},
         }
 
+    def create_skill_head(
+        self,
+        scope: RuntimeScope,
+        *,
+        name: str,
+        version_digest: str,
+        description: str,
+        tools: tuple[str, ...],
+        body: str,
+        evidence_refs: tuple[str, ...],
+        change_reason: str,
+        derived_from: str = "",
+    ) -> tuple[SkillHeadRecord, SkillVersionRecord]:
+        clean_name = _strict_required_text("skill_name", name, max_length=64)
+        clean_version = _strict_required_text("version_digest", version_digest, max_length=128)
+        clean_description = _strict_required_text("description", description, max_length=320)
+        clean_body = _strict_required_text("body", body, max_length=8_000)
+        clean_reason = _strict_required_text("change_reason", change_reason, max_length=1_000)
+        clean_derived = _strict_optional_text("derived_from", derived_from, max_length=256)
+        clean_tools = _validated_string_tuple("tools", tools, max_items=64, max_length=128)
+        clean_evidence = _validated_string_tuple(
+            "evidence_refs", evidence_refs, max_items=32, max_length=1_000
+        )
+        self.register_scope(scope)
+        skill_id = f"skill-{uuid4().hex}"
+        now = _utc_now()
+        try:
+            with self._lock, self._connection:
+                self._require_open()
+                self._connection.execute(
+                    """
+                    INSERT INTO skill_heads (
+                        skill_id, server_id, bot_id, name, head_revision,
+                        head_version, status, origin, derived_from,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 1, ?, 'active', 'learned', ?, ?, ?)
+                    """,
+                    (
+                        skill_id,
+                        scope.server_id,
+                        scope.bot_id,
+                        clean_name,
+                        clean_version,
+                        clean_derived,
+                        now,
+                        now,
+                    ),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO skill_versions (
+                        skill_id, revision, version_digest, description,
+                        tools_json, body, evidence_refs_json, change_reason,
+                        created_at
+                    ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        skill_id,
+                        clean_version,
+                        clean_description,
+                        _json_dump(list(clean_tools)),
+                        clean_body,
+                        _json_dump(list(clean_evidence)),
+                        clean_reason,
+                        now,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise RuntimeStateConflict(f"Skill name or version already exists: {clean_name}") from exc
+        head = self.get_skill_head(scope, clean_name, include_retired=True)
+        version = self.get_skill_version(skill_id, version_digest=clean_version)
+        if head is None or version is None:
+            raise RuntimeStateError("Skill create did not produce a complete record")
+        return head, version
+
+    def update_skill_head(
+        self,
+        scope: RuntimeScope,
+        *,
+        name: str,
+        expected_revision: int,
+        version_digest: str,
+        description: str,
+        tools: tuple[str, ...],
+        body: str,
+        evidence_refs: tuple[str, ...],
+        change_reason: str,
+    ) -> tuple[SkillHeadRecord, SkillVersionRecord]:
+        head = self.get_skill_head(scope, name, include_retired=True)
+        if head is None:
+            raise RuntimeStateConflict(f"Skill does not exist: {name}")
+        if head.status != "active":
+            raise RuntimeStateConflict(f"Skill is retired: {name}")
+        if head.head_revision != int(expected_revision):
+            raise RuntimeStateConflict(
+                f"Skill revision conflict: name={name} expected={expected_revision} "
+                f"actual={head.head_revision}"
+            )
+        clean_version = _strict_required_text("version_digest", version_digest, max_length=128)
+        clean_description = _strict_required_text("description", description, max_length=320)
+        clean_body = _strict_required_text("body", body, max_length=8_000)
+        clean_reason = _strict_required_text("change_reason", change_reason, max_length=1_000)
+        clean_tools = _validated_string_tuple("tools", tools, max_items=64, max_length=128)
+        clean_evidence = _validated_string_tuple(
+            "evidence_refs", evidence_refs, max_items=32, max_length=1_000
+        )
+        revision = head.head_revision + 1
+        now = _utc_now()
+        try:
+            with self._lock, self._connection:
+                self._require_open()
+                cursor = self._connection.execute(
+                    """
+                    UPDATE skill_heads
+                    SET head_revision = ?, head_version = ?, updated_at = ?
+                    WHERE skill_id = ? AND status = 'active' AND head_revision = ?
+                    """,
+                    (revision, clean_version, now, head.skill_id, int(expected_revision)),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeStateConflict(f"Skill revision changed concurrently: {name}")
+                self._connection.execute(
+                    """
+                    INSERT INTO skill_versions (
+                        skill_id, revision, version_digest, description,
+                        tools_json, body, evidence_refs_json, change_reason,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        head.skill_id,
+                        revision,
+                        clean_version,
+                        clean_description,
+                        _json_dump(list(clean_tools)),
+                        clean_body,
+                        _json_dump(list(clean_evidence)),
+                        clean_reason,
+                        now,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise RuntimeStateConflict(f"Skill version already exists: {clean_version}") from exc
+        updated = self.get_skill_head(scope, name, include_retired=True)
+        version = self.get_skill_version(head.skill_id, revision=revision)
+        if updated is None or version is None:
+            raise RuntimeStateError("Skill update did not produce a complete record")
+        return updated, version
+
+    def retire_skill_head(
+        self,
+        scope: RuntimeScope,
+        *,
+        name: str,
+        expected_revision: int,
+        evidence_refs: tuple[str, ...],
+        reason: str,
+    ) -> SkillHeadRecord:
+        now = _utc_now()
+        clean_evidence = _validated_string_tuple(
+            "evidence_refs", evidence_refs, max_items=32, max_length=1_000
+        )
+        clean_reason = _strict_required_text("reason", reason, max_length=1_000)
+        with self._lock, self._connection:
+            self._require_open()
+            cursor = self._connection.execute(
+                """
+                UPDATE skill_heads
+                SET status = 'retired', retired_at = ?,
+                    retirement_evidence_refs_json = ?, retirement_reason = ?,
+                    updated_at = ?
+                WHERE server_id = ? AND bot_id = ? AND name = ?
+                  AND status = 'active' AND head_revision = ?
+                """,
+                (
+                    now,
+                    _json_dump(list(clean_evidence)),
+                    clean_reason,
+                    now,
+                    scope.server_id,
+                    scope.bot_id,
+                    name,
+                    int(expected_revision),
+                ),
+            )
+            if cursor.rowcount != 1:
+                current = self._connection.execute(
+                    """
+                    SELECT status, head_revision FROM skill_heads
+                    WHERE server_id = ? AND bot_id = ? AND name = ?
+                    """,
+                    (scope.server_id, scope.bot_id, name),
+                ).fetchone()
+                if current is None:
+                    raise RuntimeStateConflict(f"Skill does not exist: {name}")
+                raise RuntimeStateConflict(
+                    f"Skill retire conflict: name={name} expected={expected_revision} "
+                    f"actual={current['head_revision']} status={current['status']}"
+                )
+        record = self.get_skill_head(scope, name, include_retired=True)
+        if record is None:
+            raise RuntimeStateError("Skill retire lost the head record")
+        return record
+
+    def get_skill_head(
+        self,
+        scope: RuntimeScope,
+        name: str,
+        *,
+        include_retired: bool = False,
+    ) -> SkillHeadRecord | None:
+        clauses = ["server_id = ?", "bot_id = ?", "name = ?"]
+        params: list[object] = [scope.server_id, scope.bot_id, str(name)]
+        if not include_retired:
+            clauses.append("status = 'active'")
+        with self._lock:
+            self._require_open()
+            row = self._connection.execute(
+                f"SELECT * FROM skill_heads WHERE {' AND '.join(clauses)}",
+                params,
+            ).fetchone()
+        return None if row is None else _skill_head_from_row(row)
+
+    def list_skill_heads(
+        self,
+        scope: RuntimeScope,
+        *,
+        include_retired: bool = False,
+    ) -> tuple[SkillHeadRecord, ...]:
+        clauses = ["server_id = ?", "bot_id = ?"]
+        params: list[object] = [scope.server_id, scope.bot_id]
+        if not include_retired:
+            clauses.append("status = 'active'")
+        with self._lock:
+            self._require_open()
+            rows = self._connection.execute(
+                f"""
+                SELECT * FROM skill_heads
+                WHERE {' AND '.join(clauses)}
+                ORDER BY name, skill_id
+                """,
+                params,
+            ).fetchall()
+        return tuple(_skill_head_from_row(row) for row in rows)
+
+    def get_skill_version(
+        self,
+        skill_id: str,
+        *,
+        revision: int | None = None,
+        version_digest: str | None = None,
+    ) -> SkillVersionRecord | None:
+        clauses = ["skill_id = ?"]
+        params: list[object] = [str(skill_id)]
+        if revision is not None:
+            clauses.append("revision = ?")
+            params.append(int(revision))
+        if version_digest is not None:
+            clauses.append("version_digest = ?")
+            params.append(str(version_digest))
+        with self._lock:
+            self._require_open()
+            row = self._connection.execute(
+                f"SELECT * FROM skill_versions WHERE {' AND '.join(clauses)} ORDER BY revision DESC LIMIT 1",
+                params,
+            ).fetchone()
+        return None if row is None else _skill_version_from_row(row)
+
     def record_skill_activation(
         self,
         scope: RuntimeScope,
         *,
         skill_name: str,
         skill_version: str,
+        skill_id: str | None = None,
+        owner_kind: str | None = None,
+        owner_id: str | None = None,
         task_id: str | None = None,
     ) -> SkillActivationRecord:
         clean_name = _required_text("skill_name", skill_name, max_length=128)
         clean_version = _required_text("skill_version", skill_version, max_length=128)
         clean_task_id = None if task_id is None else _required_text("task_id", task_id, max_length=128)
+        clean_kind = str(owner_kind or ("task" if clean_task_id else "turn"))
+        if clean_kind not in {"turn", "task", "maintenance", "legacy_scope"}:
+            raise ValueError(f"invalid Skill activation owner kind: {clean_kind}")
+        clean_owner = _required_text(
+            "owner_id",
+            owner_id or clean_task_id or f"turn-{uuid4().hex}",
+            max_length=256,
+        )
+        clean_skill_id = _required_text(
+            "skill_id", skill_id or f"builtin:{clean_name}", max_length=256
+        )
         self.register_scope(scope)
         if clean_task_id is not None:
             with self._lock:
@@ -1540,14 +1857,17 @@ class RuntimeStateStore:
             self._connection.execute(
                 """
                 INSERT OR IGNORE INTO skill_activations (
-                    activation_id, scope_key, task_id, skill_name,
-                    skill_version, activated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    activation_id, scope_key, task_id, owner_kind, owner_id,
+                    skill_id, skill_name, skill_version, activated_at, ended_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     activation_id,
                     scope.key,
                     clean_task_id,
+                    clean_kind,
+                    clean_owner,
+                    clean_skill_id,
                     clean_name,
                     clean_version,
                     now,
@@ -1556,10 +1876,10 @@ class RuntimeStateStore:
             row = self._connection.execute(
                 """
                 SELECT * FROM skill_activations
-                WHERE scope_key = ? AND ifnull(task_id, '') = ifnull(?, '')
-                  AND skill_name = ? AND skill_version = ?
+                WHERE scope_key = ? AND owner_kind = ? AND owner_id = ?
+                  AND skill_name = ? AND skill_version = ? AND ended_at IS NULL
                 """,
-                (scope.key, clean_task_id, clean_name, clean_version),
+                (scope.key, clean_kind, clean_owner, clean_name, clean_version),
             ).fetchone()
         if row is None:
             raise RuntimeStateError("skill activation insert did not produce a record")
@@ -1571,17 +1891,28 @@ class RuntimeStateStore:
         *,
         task_id: str | None = None,
         include_scope_activations: bool = True,
+        include_ended: bool = False,
+        owner_kind: str | None = None,
+        owner_id: str | None = None,
     ) -> tuple[SkillActivationRecord, ...]:
         clauses = ["scope_key = ?"]
         params: list[object] = [scope.key]
+        if not include_ended:
+            clauses.append("ended_at IS NULL")
         if task_id is not None:
             if include_scope_activations:
-                clauses.append("(task_id = ? OR task_id IS NULL)")
+                clauses.append("(task_id = ? OR owner_kind = 'legacy_scope')")
             else:
                 clauses.append("task_id = ?")
             params.append(str(task_id))
         elif not include_scope_activations:
             clauses.append("task_id IS NOT NULL")
+        if owner_kind is not None:
+            clauses.append("owner_kind = ?")
+            params.append(str(owner_kind))
+        if owner_id is not None:
+            clauses.append("owner_id = ?")
+            params.append(str(owner_id))
         with self._lock:
             self._require_open()
             rows = self._connection.execute(
@@ -1593,6 +1924,98 @@ class RuntimeStateStore:
                 params,
             ).fetchall()
         return tuple(_skill_activation_from_row(row) for row in rows)
+
+    def end_skill_activation_owner(
+        self,
+        scope: RuntimeScope,
+        *,
+        owner_kind: str,
+        owner_id: str,
+    ) -> int:
+        now = _utc_now()
+        with self._lock, self._connection:
+            self._require_open()
+            cursor = self._connection.execute(
+                """
+                UPDATE skill_activations SET ended_at = ?
+                WHERE scope_key = ? AND owner_kind = ? AND owner_id = ?
+                  AND ended_at IS NULL
+                """,
+                (now, scope.key, str(owner_kind), str(owner_id)),
+            )
+        return int(cursor.rowcount)
+
+    def end_skill_activations_for_name(
+        self,
+        scope: RuntimeScope,
+        *,
+        owner_kind: str,
+        owner_id: str,
+        skill_name: str,
+        except_version: str | None = None,
+    ) -> int:
+        clauses = [
+            "scope_key = ?",
+            "owner_kind = ?",
+            "owner_id = ?",
+            "skill_name = ?",
+            "ended_at IS NULL",
+        ]
+        params: list[object] = [
+            scope.key,
+            str(owner_kind),
+            str(owner_id),
+            str(skill_name),
+        ]
+        if except_version is not None:
+            clauses.append("skill_version != ?")
+            params.append(str(except_version))
+        now = _utc_now()
+        with self._lock, self._connection:
+            self._require_open()
+            cursor = self._connection.execute(
+                f"UPDATE skill_activations SET ended_at = ? WHERE {' AND '.join(clauses)}",
+                [now, *params],
+            )
+        return int(cursor.rowcount)
+
+    def end_task_skill_activations(self, scope: RuntimeScope, task_id: str) -> int:
+        return self.end_skill_activation_owner(
+            scope,
+            owner_kind="task",
+            owner_id=str(task_id),
+        )
+
+    def end_transient_skill_activations(self, scope: RuntimeScope) -> int:
+        now = _utc_now()
+        with self._lock, self._connection:
+            self._require_open()
+            cursor = self._connection.execute(
+                """
+                UPDATE skill_activations SET ended_at = ?
+                WHERE scope_key = ? AND owner_kind IN ('turn', 'maintenance')
+                  AND ended_at IS NULL
+                """,
+                (now, scope.key),
+            )
+        return int(cursor.rowcount)
+
+    def end_terminal_task_skill_activations(self, scope: RuntimeScope) -> int:
+        now = _utc_now()
+        with self._lock, self._connection:
+            self._require_open()
+            cursor = self._connection.execute(
+                """
+                UPDATE skill_activations SET ended_at = ?
+                WHERE scope_key = ? AND owner_kind = 'task' AND ended_at IS NULL
+                  AND task_id IN (
+                      SELECT task_id FROM tasks
+                      WHERE status IN ('completed', 'cancelled', 'failed')
+                  )
+                """,
+                (now, scope.key),
+            )
+        return int(cursor.rowcount)
 
     def get_wiki_cache(self, cache_key: str) -> WikiCacheRecord | None:
         with self._lock:
@@ -1901,25 +2324,53 @@ class RuntimeStateStore:
                     VALUES (new.rowid, new.title, new.content, new.subject_key);
                 END;
 
+                CREATE TABLE IF NOT EXISTS skill_heads (
+                    skill_id TEXT PRIMARY KEY,
+                    server_id TEXT NOT NULL,
+                    bot_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    head_revision INTEGER NOT NULL,
+                    head_version TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('active', 'retired')),
+                    origin TEXT NOT NULL CHECK(origin = 'learned'),
+                    derived_from TEXT NOT NULL DEFAULT '',
+                    retired_at TEXT,
+                    retirement_evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+                    retirement_reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(server_id, bot_id, name)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_skill_heads_owner_status
+                ON skill_heads(server_id, bot_id, status, name);
+
+                CREATE TABLE IF NOT EXISTS skill_versions (
+                    skill_id TEXT NOT NULL REFERENCES skill_heads(skill_id) ON DELETE RESTRICT,
+                    revision INTEGER NOT NULL,
+                    version_digest TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    tools_json TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    evidence_refs_json TEXT NOT NULL,
+                    change_reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(skill_id, revision),
+                    UNIQUE(skill_id, version_digest)
+                );
+
                 CREATE TABLE IF NOT EXISTS skill_activations (
                     activation_id TEXT PRIMARY KEY,
                     scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
                     task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
+                    owner_kind TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    skill_id TEXT NOT NULL,
                     skill_name TEXT NOT NULL,
                     skill_version TEXT NOT NULL,
-                    activated_at TEXT NOT NULL
+                    activated_at TEXT NOT NULL,
+                    ended_at TEXT
                 );
-
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_activation_version
-                ON skill_activations(
-                    scope_key,
-                    ifnull(task_id, ''),
-                    skill_name,
-                    skill_version
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_skill_activations_task
-                ON skill_activations(scope_key, task_id, activated_at);
 
                 CREATE TABLE IF NOT EXISTS wiki_cache (
                     cache_key TEXT PRIMARY KEY,
@@ -1952,6 +2403,7 @@ class RuntimeStateStore:
                 )
             elif int(row["version"]) < RUNTIME_SCHEMA_VERSION:
                 self._migrate_schema(int(row["version"]))
+            self._ensure_current_skill_indexes()
 
     def _migrate_schema(self, version: int) -> None:
         current = version
@@ -2012,6 +2464,51 @@ class RuntimeStateStore:
                 current = 9
             elif current == 9:
                 current = 10
+            elif current == 10:
+                columns = {
+                    str(row["name"])
+                    for row in self._connection.execute(
+                        "PRAGMA table_info(skill_activations)"
+                    ).fetchall()
+                }
+                for name, declaration in (
+                    ("owner_kind", "TEXT"),
+                    ("owner_id", "TEXT"),
+                    ("skill_id", "TEXT"),
+                    ("ended_at", "TEXT"),
+                ):
+                    if name not in columns:
+                        self._connection.execute(
+                            f"ALTER TABLE skill_activations ADD COLUMN {name} {declaration}"
+                        )
+                self._connection.execute(
+                    """
+                    UPDATE skill_activations
+                    SET owner_kind = CASE WHEN task_id IS NULL THEN 'legacy_scope' ELSE 'task' END,
+                        owner_id = CASE WHEN task_id IS NULL THEN scope_key ELSE task_id END,
+                        skill_id = 'legacy:' || skill_name
+                    WHERE owner_kind IS NULL OR owner_id IS NULL OR skill_id IS NULL
+                    """
+                )
+                self._connection.execute(
+                    """
+                    UPDATE skill_activations
+                    SET ended_at = activated_at
+                    WHERE ended_at IS NULL AND owner_kind = 'legacy_scope'
+                    """
+                )
+                self._connection.execute(
+                    """
+                    UPDATE skill_activations
+                    SET ended_at = activated_at
+                    WHERE ended_at IS NULL AND owner_kind = 'task'
+                      AND task_id IN (
+                          SELECT task_id FROM tasks
+                          WHERE status IN ('completed', 'cancelled', 'failed')
+                      )
+                    """
+                )
+                current = 11
             else:
                 raise RuntimeStateError(
                     f"no runtime schema migration from version {current}"
@@ -2020,6 +2517,24 @@ class RuntimeStateStore:
                 "UPDATE minebot_schema SET version = ? WHERE singleton = 1",
                 (current,),
             )
+
+    def _ensure_current_skill_indexes(self) -> None:
+        self._connection.execute("DROP INDEX IF EXISTS idx_skill_activation_version")
+        self._connection.execute("DROP INDEX IF EXISTS idx_skill_activations_task")
+        self._connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_activation_owner_version
+            ON skill_activations(
+                scope_key, owner_kind, owner_id, skill_name, skill_version
+            ) WHERE ended_at IS NULL
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_skill_activations_task_active
+            ON skill_activations(scope_key, task_id, ended_at, activated_at)
+            """
+        )
 
     def _require_open(self) -> None:
         if self._closed:
@@ -2437,9 +2952,13 @@ def _skill_activation_from_row(row: sqlite3.Row) -> SkillActivationRecord:
         activation_id=str(row["activation_id"]),
         scope_key=str(row["scope_key"]),
         task_id=None if row["task_id"] is None else str(row["task_id"]),
+        owner_kind=str(row["owner_kind"]),
+        owner_id=str(row["owner_id"]),
+        skill_id=str(row["skill_id"]),
         skill_name=str(row["skill_name"]),
         skill_version=str(row["skill_version"]),
         activated_at=str(row["activated_at"]),
+        ended_at=None if row["ended_at"] is None else str(row["ended_at"]),
     )
 
 
@@ -2447,10 +2966,49 @@ def skill_activation_payload(record: SkillActivationRecord) -> dict[str, object]
     return {
         "activation_id": record.activation_id,
         "task_id": record.task_id,
+        "owner_kind": record.owner_kind,
+        "owner_id": record.owner_id,
+        "skill_id": record.skill_id,
         "skill_name": record.skill_name,
         "skill_version": record.skill_version,
         "activated_at": record.activated_at,
+        "ended_at": record.ended_at,
     }
+
+
+def _skill_head_from_row(row: sqlite3.Row) -> SkillHeadRecord:
+    return SkillHeadRecord(
+        skill_id=str(row["skill_id"]),
+        server_id=str(row["server_id"]),
+        bot_id=str(row["bot_id"]),
+        name=str(row["name"]),
+        head_revision=int(row["head_revision"]),
+        head_version=str(row["head_version"]),
+        status=str(row["status"]),
+        origin=str(row["origin"]),
+        derived_from=str(row["derived_from"]),
+        retired_at=None if row["retired_at"] is None else str(row["retired_at"]),
+        retirement_evidence_refs=tuple(
+            _json_string_list(row["retirement_evidence_refs_json"])
+        ),
+        retirement_reason=str(row["retirement_reason"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+def _skill_version_from_row(row: sqlite3.Row) -> SkillVersionRecord:
+    return SkillVersionRecord(
+        skill_id=str(row["skill_id"]),
+        revision=int(row["revision"]),
+        version_digest=str(row["version_digest"]),
+        description=str(row["description"]),
+        tools=tuple(_json_string_list(row["tools_json"])),
+        body=str(row["body"]),
+        evidence_refs=tuple(_json_string_list(row["evidence_refs_json"])),
+        change_reason=str(row["change_reason"]),
+        created_at=str(row["created_at"]),
+    )
 
 
 def _wiki_cache_from_row(row: sqlite3.Row) -> WikiCacheRecord:
@@ -2644,6 +3202,48 @@ def _required_text(field_name: str, value: object, *, max_length: int) -> str:
     return clean
 
 
+def _strict_required_text(field_name: str, value: object, *, max_length: int) -> str:
+    clean = str(value or "").strip()
+    if not clean:
+        raise ValueError(f"{field_name} must not be empty")
+    if len(clean) > max_length:
+        raise ValueError(f"{field_name} exceeds {max_length} characters")
+    return clean
+
+
+def _strict_optional_text(field_name: str, value: object, *, max_length: int) -> str:
+    clean = str(value or "").strip()
+    if len(clean) > max_length:
+        raise ValueError(f"{field_name} exceeds {max_length} characters")
+    return clean
+
+
+def _validated_string_tuple(
+    field_name: str,
+    values: object,
+    *,
+    max_items: int,
+    max_length: int,
+) -> tuple[str, ...]:
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(f"{field_name} must be a list of strings")
+    if len(values) > max_items:
+        raise ValueError(f"{field_name} exceeds {max_items} items")
+    clean: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError(f"{field_name} must contain only strings")
+        item = value.strip()
+        if not item:
+            raise ValueError(f"{field_name} contains an empty item")
+        if len(item) > max_length:
+            raise ValueError(f"{field_name} item exceeds {max_length} characters")
+        clean.append(item)
+    if len(set(clean)) != len(clean):
+        raise ValueError(f"{field_name} contains duplicate items")
+    return tuple(clean)
+
+
 def _bounded_text(value: object, *, max_length: int) -> str:
     return " ".join(str(value or "").strip().split())[:max_length]
 
@@ -2715,6 +3315,8 @@ __all__ = [
     "RuntimeStateError",
     "RuntimeStateStore",
     "SkillActivationRecord",
+    "SkillHeadRecord",
+    "SkillVersionRecord",
     "TaskCheckpointRecord",
     "TaskPlanRecord",
     "TaskRecord",
