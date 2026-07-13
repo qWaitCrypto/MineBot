@@ -1,32 +1,116 @@
+<div align="center">
+
 # MineBot
 
-Ender Dragon, I will kill you.
+**Ender Dragon, I will kill you.**
 
-First we teach the body to walk, work, fight, and survive.
+*A Minecraft agent with a mind that can improvise and a body that can be trusted.*
 
-Then we settle the bill in the End.
+<img src="assets/readme/hero.webp" alt="MineBot beginning a journey from a forest workshop through mining and crafting toward the End" width="100%">
 
-## Real Model E2E
+</div>
 
-Run the local Carpet/RCON test server first, then provide a provider config via
-environment variables:
+Tell MineBot what you want in ordinary language. The model chooses a strategy,
+the harness keeps the thread, and a server-authoritative body does the physical
+work.
 
-```bash
-export MINEBOT_LLM_MODEL=<model>
-export MINEBOT_LLM_API_KEY=<key>
-# optional for OpenAI-compatible endpoints:
-export MINEBOT_LLM_BASE_URL=<https://.../v1>
-python3 tests/e2e_agent_real_model_collect.py
+> **You:** Collect 64 logs.<br>
+> **MineBot:** reasons, acts, observes, recovers, and keeps going.
+
+## Not A Script Wearing A Chatbot
+
+MineBot puts deterministic machinery where language models are weak: physics,
+precise state, long-running execution, ownership, and reflexes. It leaves goals,
+trade-offs, and adaptation to the model.
+
+The model chooses from one shared capability pool. The harness preserves task
+continuity. The Body handles the grind inside one physical objective. Every
+result comes back as structured world truth.
+
+## Built To Finish
+
+**Navigate. Gather. Craft. Smelt. Equip. Fight. Recover. Continue.**
+
+The current baseline has passed real-server gates for collecting 64 logs,
+tool-gated acquisition through diamond, navigation over real terrain, following,
+combat, survival preemption, death recovery, restart reconciliation, and idle
+wake-up. Success is measured by authoritative world and inventory changes, not
+by a tool claiming it succeeded.
+
+## One Mind. One Body. One Source Of Truth.
+
+<img src="assets/readme/architecture.webp" alt="MineBot architecture from the Python brain and persistent runtime through governed Body transactions and RCON to Scarpet controllers and the Carpet FakePlayer" width="100%">
+
+`openai-agents-python` runs the inner model/tool loop. MineBot owns the persistent
+control plane around it: tasks, context, lifecycle, progress, and governed tools.
+Python Body transactions complete physical objectives through JSON over RCON;
+Scarpet reads authoritative server state and runs planning, controllers, events,
+and reflexes; Carpet supplies the physical FakePlayer body.
+
+The Brain decides **what**. The Body resolves **how**. Player-made blocks remain
+protected across both planning and execution.
+
+```text
+minebot/
+  brain/      context, lifecycle, progress, capability registry
+  app/        persistent runtime and the single composition root
+  body/       navigation, work, inventory, crafting, combat, recovery
+  game/       protocol, transport, governance, server-backed Body client
+  contract/   shared facts and result schemas
+  camera/     optional observer supervisor and recording/live fan-out
+
+minecraft/
+  server/     Scarpet controllers and the optional Fabric bridge
+  camera/     observer client and shared Java protocol
+
+tests/        unit, live Body, and real-agent gates
 ```
 
-Without the key/model env vars, the test exits with SKIP 77.
+## The Road Gets Stranger
 
-For the actual playable loop, use the console entrypoint:
+<img src="assets/readme/roadmap.webp" alt="MineBot roadmap from the playable agent through an observer, memory and Skills, deeper platform work, and the Ender Dragon and autonomous building north stars" width="100%">
+
+The reliable Body and persistent agent are the foundation, not the finish line.
+Next comes a real observer; then memory, Minecraft knowledge, and loadable Skills;
+farther out are Vision, richer providers and transport, and many-bot worlds. The
+two north stars are deliberately unreasonable: beat the Ender Dragon from
+nothing, then learn to design and build in an open world.
+
+## Wake It Up
+
+MineBot currently targets Python 3.13 and a Minecraft 26.1.2 Fabric server with
+Carpet, the MineBot Scarpet app, and local RCON enabled.
 
 ```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e .
+
+export MINEBOT_LLM_MODEL=<model>
+export MINEBOT_LLM_API_KEY=<key>
+# Optional for an OpenAI-compatible endpoint:
+export MINEBOT_LLM_BASE_URL=<https://host/v1>
+
 python3 -m minebot.app.console
 ```
 
-Then type a natural-language goal, for example `collect 3 dirt`. MineBot injects
-that as the active goal, lets the real model choose tools, switches runtime
-profile through the state machine, and drives the local server body.
+Then talk to it:
+
+```text
+minebot> collect 3 dirt
+minebot> follow me
+minebot> what happened while I was away?
+```
+
+The current console is a developer preview and expects the local Carpet/RCON
+server to be ready before launch.
+
+Run the unit suite with:
+
+```bash
+python3 -m pytest tests/unit -q
+```
+
+MineBot is released under the [MIT License](LICENSE). Minecraft is a trademark
+of Microsoft. MineBot is independent and is not affiliated with Mojang Studios
+or Microsoft.
