@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from camera.config import CameraConfigError, load_dependency_config
+from minebot.camera.config import CameraConfigError, load_dependency_config
 
 
 def test_dependency_config_loads_reference_camera_shape(tmp_path: Path) -> None:

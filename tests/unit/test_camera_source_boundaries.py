@@ -6,12 +6,12 @@ import re
 from pathlib import Path
 
 
-CAMERA_ROOT = Path("camera")
-BRIDGE_ROOT = Path("body-mod/src/main/java/dev/minebot/bridge")
-JAVA_ROOT = Path("body-mod/src/main/java")
-FABRIC_MOD = Path("body-mod/src/main/resources/fabric.mod.json")
-CLIENT_ROOT = Path("camera-client-mod/src/main/java/dev/minebot/camera/client")
-CLIENT_MOD = Path("camera-client-mod/src/main/resources/fabric.mod.json")
+CAMERA_ROOT = Path("minebot/camera")
+BRIDGE_ROOT = Path("minecraft/server/bridge/src/main/java/dev/minebot/bridge")
+JAVA_ROOT = Path("minecraft/server/bridge/src/main/java")
+FABRIC_MOD = Path("minecraft/server/bridge/src/main/resources/fabric.mod.json")
+CLIENT_ROOT = Path("minecraft/camera/client/src/main/java/dev/minebot/camera/client")
+CLIENT_MOD = Path("minecraft/camera/client/src/main/resources/fabric.mod.json")
 
 
 def test_camera_package_is_independent_of_agent_brain_body_and_game() -> None:
@@ -190,14 +190,14 @@ def test_camera_client_is_client_only_and_receives_directives_without_gameplay_o
 
 
 def test_camera_client_pins_selected_community_mod_versions() -> None:
-    build = Path("camera-client-mod/build.gradle").read_text(encoding="utf-8")
+    build = Path("minecraft/camera/client/build.gradle").read_text(encoding="utf-8")
     assert 'maven.modrinth:freecam:dvyNrVvc' in build
     assert 'maven.modrinth:sodium:vf7UgZpC' in build
 
 
 def test_observer_interactions_are_denied_server_side() -> None:
     source = Path(
-        "body-mod/src/main/java/dev/minebot/bridge/observercontrol/ObserverInteractionPolicy.java"
+        "minecraft/server/bridge/src/main/java/dev/minebot/bridge/observercontrol/ObserverInteractionPolicy.java"
     ).read_text(encoding="utf-8")
 
     assert "ServerPlayConnectionEvents.JOIN.register" in source
@@ -218,7 +218,7 @@ def test_observer_interactions_are_denied_server_side() -> None:
     assert "CommandManager" not in source
 
     packet_policy = Path(
-        "body-mod/src/main/java/dev/minebot/bridge/mixin/ObserverPacketPolicyMixin.java"
+        "minecraft/server/bridge/src/main/java/dev/minebot/bridge/mixin/ObserverPacketPolicyMixin.java"
     ).read_text(encoding="utf-8")
     for handler in (
         "handleMovePlayer",
@@ -238,7 +238,7 @@ def test_observer_interactions_are_denied_server_side() -> None:
 
 def test_explicit_detach_keeps_online_observer_semantically_hidden() -> None:
     source = Path(
-        "body-mod/src/main/java/dev/minebot/bridge/version/Mojmap2612ObserverAccess.java"
+        "minecraft/server/bridge/src/main/java/dev/minebot/bridge/version/Mojmap2612ObserverAccess.java"
     ).read_text(encoding="utf-8")
     detach = source[source.index("public void detach(") : source.index("private static ServerPlayer", source.index("public void detach("))]
 

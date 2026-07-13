@@ -6,9 +6,9 @@ import sys
 from pathlib import Path
 from collections.abc import Sequence
 
-from camera.cli.check_deps import run_doctor
-from camera.config import CameraConfigError
-from camera.service import CameraServiceError, service_status, start_service, stop_service
+from minebot.camera.cli.check_deps import run_doctor
+from minebot.camera.config import CameraConfigError
+from minebot.camera.service import CameraServiceError, service_status, start_service, stop_service
 
 
 def main(argv: Sequence[str] | None = None) -> int:

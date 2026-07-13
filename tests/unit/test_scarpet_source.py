@@ -5,7 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MINEBOT_SC = ROOT / "test-server" / "world" / "scripts" / "minebot.sc"
-ASSET_MINEBOT_SC = ROOT / "assets" / "carpet" / "scripts" / "minebot.sc"
+ASSET_MINEBOT_SC = ROOT / "minecraft" / "server" / "scarpet" / "minebot.sc"
 
 
 class ScarpetSourceTests(unittest.TestCase):

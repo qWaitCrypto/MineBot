@@ -13,7 +13,7 @@ class ResetWorldScriptTests(unittest.TestCase):
         golden_copy = source.index('cp -a "$GOLDEN" "$WORLD"')
         asset_copy = source.index('cp -a "$SCRIPT_ASSETS/." "$WORLD/scripts/"')
         self.assertGreater(asset_copy, golden_copy)
-        self.assertIn('SCRIPT_ASSETS="$ROOT/assets/carpet/scripts"', source)
+        self.assertIn('SCRIPT_ASSETS="$ROOT/minecraft/server/scarpet"', source)
 
     def test_reset_load_check_requires_current_event_head_protocol(self):
         source = RESET_SCRIPT.read_text(encoding="utf-8")

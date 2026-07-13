@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from camera.config import CameraConfigError, load_dependency_config
-from camera.dependencies import check_dependencies
+from minebot.camera.config import CameraConfigError, load_dependency_config
+from minebot.camera.dependencies import check_dependencies
 
 
 def run_doctor(config_path: Path, *, json_output: bool) -> int:

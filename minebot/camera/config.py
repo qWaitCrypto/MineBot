@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from camera.control.follow import FollowConfig
-from camera.dependencies import CameraDependencyConfig, DependencyArtifact
+from minebot.camera.control.follow import FollowConfig
+from minebot.camera.dependencies import CameraDependencyConfig, DependencyArtifact
 
 
 class CameraConfigError(ValueError):

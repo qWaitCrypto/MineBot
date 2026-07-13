@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-minebot-camera = "camera.cli.main:main"
+minebot-camera = "minebot.camera.cli.main:main"
 
 [project.optional-dependencies]
 # kind="litellm" providers (Anthropic, Gemini, …) need this beta extra.

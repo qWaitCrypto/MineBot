@@ -14,9 +14,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from camera.config import CameraServiceConfig, load_camera_config
-from camera.dependencies import check_dependencies
-from camera.output.ffmpeg import CameraOutputError, build_ffmpeg_command, resolve_live_publish_url
+from minebot.camera.config import CameraServiceConfig, load_camera_config
+from minebot.camera.dependencies import check_dependencies
+from minebot.camera.output.ffmpeg import CameraOutputError, build_ffmpeg_command, resolve_live_publish_url
 
 
 class CameraServiceError(RuntimeError):
@@ -48,7 +48,7 @@ def start_service(config_path: Path, *, force: bool = False) -> dict[str, Any]:
 
     with service.log_path.open("ab", buffering=0) as log:
         process = subprocess.Popen(
-            [sys.executable, "-m", "camera.service", "run", "--config", str(config_path)],
+            [sys.executable, "-m", "minebot.camera.service", "run", "--config", str(config_path)],
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=log,
@@ -237,7 +237,7 @@ async def _connect_observer(
     children: Mapping[str, subprocess.Popen[bytes]],
     stop_event: asyncio.Event,
 ) -> Any:
-    from camera.control.observer import ObserverControlClient
+    from minebot.camera.control.observer import ObserverControlClient
 
     deadline = time.monotonic() + service.startup_timeout_s
     last_error: BaseException | None = None

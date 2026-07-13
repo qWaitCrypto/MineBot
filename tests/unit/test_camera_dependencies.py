@@ -6,7 +6,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from camera.dependencies import (
+from minebot.camera.dependencies import (
     CameraDependencyConfig,
     DependencyArtifact,
     check_dependencies,
@@ -14,8 +14,8 @@ from camera.dependencies import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEPENDENCY_LOCK = ROOT / "camera" / "dependencies.lock.json"
-CLIENT_BUILD = ROOT / "camera-client-mod" / "build.gradle"
+DEPENDENCY_LOCK = ROOT / "minebot" / "camera" / "dependencies.lock.json"
+CLIENT_BUILD = ROOT / "minecraft" / "camera" / "client" / "build.gradle"
 
 
 class FakeRunner:

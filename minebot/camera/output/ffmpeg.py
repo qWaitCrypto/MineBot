@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from camera.config import CameraServiceConfig
+from minebot.camera.config import CameraServiceConfig
 
 
 class CameraOutputError(RuntimeError):

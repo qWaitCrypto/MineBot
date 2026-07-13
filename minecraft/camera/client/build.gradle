@@ -1,5 +1,5 @@
 plugins {
-    id "net.fabricmc.fabric-loom" version "1.17.12"
+    id "net.fabricmc.fabric-loom"
     id "maven-publish"
 }
 
@@ -17,12 +17,6 @@ java {
     withSourcesJar()
 }
 
-sourceSets {
-    main {
-        java.srcDir("../camera-protocol/src/main/java")
-    }
-}
-
 repositories {
     maven { url = "https://api.modrinth.com/maven" }
 }
@@ -33,6 +27,8 @@ dependencies {
     implementation "net.fabricmc.fabric-api:fabric-api:0.152.1+26.1.2"
     implementation "maven.modrinth:freecam:dvyNrVvc"
     implementation "maven.modrinth:sodium:vf7UgZpC"
+    implementation project(":camera:protocol")
+    include project(":camera:protocol")
 
     testImplementation platform("org.junit:junit-bom:5.12.2")
     testImplementation "org.junit.jupiter:junit-jupiter"

@@ -192,7 +192,7 @@ def prepare_server_dir(spec: ServerSpec, *, seed: str) -> None:
     (spec.root / "logs").mkdir(exist_ok=True)
     world_scripts = spec.world / "scripts"
     world_scripts.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ROOT / "assets" / "carpet" / "scripts" / "minebot.sc", world_scripts / "minebot.sc")
+    shutil.copy2(ROOT / "minecraft" / "server" / "scarpet" / "minebot.sc", world_scripts / "minebot.sc")
     (spec.root / "server.properties").write_text(server_properties(spec, seed=seed), encoding="utf-8")
 
 

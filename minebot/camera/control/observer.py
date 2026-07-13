@@ -6,7 +6,7 @@ import secrets
 from collections.abc import Mapping
 from typing import Any
 
-from camera.control.follow import FollowConfig
+from minebot.camera.control.follow import FollowConfig
 
 
 CHANNEL = "observer-control"

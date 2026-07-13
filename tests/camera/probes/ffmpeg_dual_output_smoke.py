@@ -8,9 +8,9 @@ import subprocess
 import time
 from pathlib import Path
 
-from camera.config import CameraServiceConfig
-from camera.control.follow import FollowConfig
-from camera.output.ffmpeg import build_ffmpeg_command
+from minebot.camera.config import CameraServiceConfig
+from minebot.camera.control.follow import FollowConfig
+from minebot.camera.output.ffmpeg import build_ffmpeg_command
 
 
 def main() -> int:

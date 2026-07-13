@@ -40,7 +40,7 @@ preset = "veryfast"
 
 [output.record]
 enabled = true
-directory = "../recordings"
+directory = "../../recordings"
 segment_s = 600
 
 [output.live]

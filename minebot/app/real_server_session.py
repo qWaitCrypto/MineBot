@@ -967,8 +967,8 @@ def main(argv: list[str] | None = None) -> int:
     camera_started = False
     try:
         if args.camera:
-            from camera.config import CameraConfigError
-            from camera.service import CameraServiceError, start_service
+            from minebot.camera.config import CameraConfigError
+            from minebot.camera.service import CameraServiceError, start_service
 
             try:
                 state = start_service(args.camera_config, force=True)
@@ -990,8 +990,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     finally:
         if camera_started:
-            from camera.config import CameraConfigError
-            from camera.service import CameraServiceError, stop_service
+            from minebot.camera.config import CameraConfigError
+            from minebot.camera.service import CameraServiceError, stop_service
 
             try:
                 stop_service(args.camera_config)

@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from camera.control.follow import CameraPose, FollowConfig, FollowController
-from camera.control.sequence import SequenceGapError, SequenceTracker
+from minebot.camera.control.follow import CameraPose, FollowConfig, FollowController
+from minebot.camera.control.sequence import SequenceGapError, SequenceTracker
 
 
 def _transform(

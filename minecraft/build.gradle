@@ -1,0 +1,8 @@
+plugins {
+    id "net.fabricmc.fabric-loom" version "1.17.12" apply false
+}
+
+allprojects {
+    version = "0.1.0"
+    group = "dev.minebot"
+}

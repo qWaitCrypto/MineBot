@@ -11,10 +11,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from camera.config import CameraConfigError, load_camera_config
-from camera.control.observer import ObserverControlClient
-from camera.output.ffmpeg import CameraOutputError, build_ffmpeg_command, resolve_live_publish_url
-from camera.service import _process_start_token, _stop_children, _write_state, service_status, start_service
+from minebot.camera.config import CameraConfigError, load_camera_config
+from minebot.camera.control.observer import ObserverControlClient
+from minebot.camera.output.ffmpeg import CameraOutputError, build_ffmpeg_command, resolve_live_publish_url
+from minebot.camera.service import _process_start_token, _stop_children, _write_state, service_status, start_service
 from minebot.app.real_server_session import main as real_server_main
 
 
@@ -77,7 +77,7 @@ def test_observer_client_negotiates_generation_and_advances_on_detach(monkeypatc
     monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=connect))
 
     async def run() -> None:
-        from camera.control.follow import FollowConfig
+        from minebot.camera.control.follow import FollowConfig
 
         client = await ObserverControlClient.connect(
             "ws://127.0.0.1:8766",
@@ -156,7 +156,7 @@ def test_real_server_camera_switch_starts_and_stops_sidecar() -> None:
         patch("minebot.app.real_server_session.real_server_config_from_env", return_value=fake_config),
         patch("minebot.app.real_server_session.run_real_server_goal", new=AsyncMock(return_value=7)) as run_goal,
         patch(
-            "camera.service.start_service",
+            "minebot.camera.service.start_service",
             return_value={
                 "phase": "ready",
                 "target": "Bot1",
@@ -165,7 +165,7 @@ def test_real_server_camera_switch_starts_and_stops_sidecar() -> None:
                 "started": True,
             },
         ) as start,
-        patch("camera.service.stop_service") as stop,
+        patch("minebot.camera.service.stop_service") as stop,
     ):
         result = real_server_main(["observe", "--camera", "--camera-config", "/tmp/camera.toml"])
 
@@ -180,7 +180,7 @@ def test_real_server_does_not_stop_preexisting_camera() -> None:
         patch("minebot.app.real_server_session.real_server_config_from_env", return_value=object()),
         patch("minebot.app.real_server_session.run_real_server_goal", new=AsyncMock(return_value=0)),
         patch(
-            "camera.service.start_service",
+            "minebot.camera.service.start_service",
             return_value={
                 "phase": "ready",
                 "target": "Bot1",
@@ -189,7 +189,7 @@ def test_real_server_does_not_stop_preexisting_camera() -> None:
                 "started": False,
             },
         ),
-        patch("camera.service.stop_service") as stop,
+        patch("minebot.camera.service.stop_service") as stop,
     ):
         result = real_server_main(["observe", "--camera", "--camera-config", "/tmp/camera.toml"])
 
