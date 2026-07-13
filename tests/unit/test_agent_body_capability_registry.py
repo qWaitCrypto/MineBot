@@ -156,6 +156,14 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
             with self.subTest(situational=situational):
                 self.assertEqual(visible, expected)
 
+    def test_body_effect_metadata_covers_leaf_led_physical_tools(self):
+        registry = _registry()
+
+        self.assertTrue(registry.sidecar("search_for_block").can_mutate_body)
+        self.assertTrue(registry.sidecar("move_to").can_mutate_body)
+        self.assertFalse(registry.sidecar("read_block").can_mutate_body)
+        self.assertFalse(registry.sidecar("read_inventory").can_mutate_body)
+
     def test_registered_adapter_calls_the_existing_body_transaction(self):
         expected = ToolResult(True, "completed", False, metrics={"item_delta": 1})
         with patch.object(UseTransactions, "consume_item", return_value=expected) as consume:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import json
 from collections.abc import Callable
@@ -286,7 +287,10 @@ class AgentSession:
 
         try:
             outcome = await self._run_supervised(
-                self.parts.runtime.run_turn(extra_signals=signals),
+                self.parts.runtime.run_turn(
+                    extra_signals=signals,
+                    body_actions_allowed=intent.kind is not WorkIntentKind.MAINTENANCE,
+                ),
                 work_kind="agent_turn",
                 admission_version=admission_version,
             )
@@ -416,6 +420,12 @@ class AgentSession:
         if self.parts is None:
             return SessionStep("idle", LifecycleState.IDLE, "no active goal")
         completed_goal = self.parts.context.goal_text
+        completed_task = (
+            None if self.task_workspace is None else self.task_workspace.current_task
+        )
+        completed_artifact = (
+            None if self.task_workspace is None else self.task_workspace.payload()
+        )
         self._trace("session_goal_completed", goal=completed_goal, reason=reason)
         if self.task_workspace is not None:
             self.task_workspace.complete(authority=authority)
@@ -431,6 +441,17 @@ class AgentSession:
         self.parts.context.set_goal("")
         self.parts.runtime.weld_context.goal_text = ""
         self._sync_task_context()
+        if "write_memory" in self.parts.runtime.registry:
+            self._enqueue_reflection(
+                trigger="task_completed",
+                task_id=None if completed_task is None else completed_task.task_id,
+                facts={
+                    "goal": completed_goal,
+                    "terminal_reason": reason,
+                    "completion_authority": authority.value,
+                    "task_artifact": completed_artifact,
+                },
+            )
         return SessionStep("completed", self.parts.lifecycle.state, reason)
 
     async def _apply_command(self, command: SessionCommand) -> list[AgentSignal]:
@@ -765,7 +786,29 @@ class AgentSession:
             return []
 
         if intent.kind is WorkIntentKind.MAINTENANCE:
-            self._trace("maintenance_intent_deferred", payload=intent.payload)
+            action = str(intent.payload.get("action") or "")
+            if action != "reflection":
+                self._trace("maintenance_intent_deferred", payload=intent.payload)
+                return []
+            self._ensure_parts_for_runtime_intent()
+            assert self.parts is not None
+            frame = json.dumps(intent.payload, ensure_ascii=False, sort_keys=True)
+            self.parts.context.observe_system_message(
+                "REFLECTION_MAINTENANCE: Review the bounded completed-task facts "
+                "below and, only when useful, query recent archives or existing "
+                "memory. Decide agentically whether to write, update, consolidate, "
+                "or delete durable memory. Keep stable facts and reusable experience; "
+                "do not copy routine logs, do not perform Body actions, and do not "
+                "start or continue a gameplay objective. Finish after the reflection "
+                f"decision. FACTS: {frame}"
+            )
+            self._turn_pending = True
+            self._resume_if_waiting()
+            self._trace(
+                "reflection_maintenance_started",
+                trigger=intent.payload.get("trigger"),
+                task_id=intent.task_id,
+            )
             return []
         raise ValueError(f"unsupported runtime intent: {intent.kind.value}")
 
@@ -824,6 +867,37 @@ class AgentSession:
             task_id=None if task is None else task.task_id,
             attempt=self._recovery_attempts + 1,
         )
+
+    def _enqueue_reflection(
+        self,
+        *,
+        trigger: str,
+        task_id: str | None,
+        facts: dict[str, object],
+    ) -> WorkIntent:
+        assert self.work_queue is not None
+        dedupe_subject = task_id or hashlib.sha256(
+            json.dumps(facts, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
+        intent = self.work_queue.enqueue(
+            WorkIntentKind.MAINTENANCE,
+            source="reflection_trigger",
+            payload={"action": "reflection", "trigger": trigger, "facts": facts},
+            dedupe_key=f"reflection:{trigger}:{dedupe_subject}",
+            task_id=task_id,
+            generation=(
+                None
+                if self.parts is None
+                else self.parts.authority.current_generation()
+            ),
+        )
+        self._trace(
+            "reflection_intent_queued",
+            intent_id=intent.intent_id,
+            trigger=trigger,
+            task_id=task_id,
+        )
+        return intent
 
     def _resume_if_waiting(self) -> None:
         assert self.parts is not None

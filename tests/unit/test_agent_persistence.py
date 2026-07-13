@@ -103,6 +103,11 @@ class RuntimeStateStoreTests(unittest.TestCase):
                     "event_cursors",
                     "conversation_archives",
                     "tool_observations",
+                    "memory_entries",
+                    "memory_fts_terms",
+                    "memory_fts_trigrams",
+                    "skill_activations",
+                    "wiki_cache",
                 }.issubset(table_names)
             )
             second.close()

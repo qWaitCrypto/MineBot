@@ -57,9 +57,11 @@ class ToolSidecar:
 
     ``permission`` / ``body_scope`` / ``terminal_truth`` are carried for the
     second-net guardrail and the observability layer; the weld itself only acts
-    on ``progress_key`` and ``mutating``. ``timeout_s`` is declarative here — the
-    transaction enforces its own terminal timeout; the async runner may also wrap
-    the call in ``wait_for(timeout_s)``.
+    on ``progress_key`` and ``mutating``. ``body_mutating`` is separate because
+    a composition can be leaf-led for progress accounting while still changing
+    the physical Body. ``timeout_s`` is declarative here — the transaction
+    enforces its own terminal timeout; the async runner may also wrap the call in
+    ``wait_for(timeout_s)``.
     """
 
     progress_key: str
@@ -70,6 +72,13 @@ class ToolSidecar:
     body_scope: tuple[str, ...] = ()
     terminal_truth: tuple[str, ...] = ()
     timeout_s: float | None = None
+    body_mutating: bool | None = None
+
+    @property
+    def can_mutate_body(self) -> bool:
+        if self.body_mutating is not None:
+            return self.body_mutating
+        return self.mutating
 
 
 @dataclass(frozen=True)

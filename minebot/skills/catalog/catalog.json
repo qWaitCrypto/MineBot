@@ -1,0 +1,14 @@
+{
+  "skills": [
+    {
+      "name": "resource-progression",
+      "description": "Acquire resources through live recipe, inventory, tool-tier, crafting, smelting, and equipment truth.",
+      "file": "resource-progression.md"
+    },
+    {
+      "name": "recovery-and-continuation",
+      "description": "Recover from interrupted or failed physical work without repeating stale actions or inventing success.",
+      "file": "recovery-and-continuation.md"
+    }
+  ]
+}

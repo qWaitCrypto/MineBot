@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -13,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-RUNTIME_SCHEMA_VERSION = 7
+RUNTIME_SCHEMA_VERSION = 10
 DEFAULT_RUNTIME_STATE_DB = Path("var/minebot/agent-state.sqlite3")
 _MAX_SCOPE_COMPONENT_LENGTH = 256
 
@@ -24,6 +26,10 @@ class RuntimeStateError(RuntimeError):
 
 class RuntimeStateConflict(RuntimeStateError):
     """A revision or single-foreground-task invariant was violated."""
+
+
+class MemoryStateConflict(RuntimeStateConflict):
+    """A memory revision, subject, or source-precedence invariant was violated."""
 
 
 class TaskStatus(str, Enum):
@@ -57,6 +63,25 @@ class CheckpointDisposition(str, Enum):
     WAIT_EVENT = "wait_event"
     YIELD = "yield"
     COMPLETE = "complete"
+
+
+class MemoryKind(str, Enum):
+    SPATIAL = "spatial"
+    EPISODIC = "episodic"
+    REFLECTIVE = "reflective"
+
+
+class MemorySource(str, Enum):
+    OBSERVED = "observed"
+    PLAYER_TOLD = "player_told"
+    SELF_INFERRED = "self_inferred"
+
+
+_MEMORY_SOURCE_RANK: dict[MemorySource, int] = {
+    MemorySource.OBSERVED: 4,
+    MemorySource.PLAYER_TOLD: 3,
+    MemorySource.SELF_INFERRED: 2,
+}
 
 
 @dataclass(frozen=True)
@@ -109,6 +134,47 @@ class TaskCheckpointRecord:
     wait_for: tuple[str, ...]
     body_fingerprint: dict[str, object] | None
     created_at: str
+
+
+@dataclass(frozen=True)
+class MemoryRecord:
+    memory_id: str
+    scope_key: str
+    revision: int
+    kind: MemoryKind
+    source: MemorySource
+    subject_key: str
+    title: str
+    content: str
+    evidence_ref: str
+    dimension: str | None
+    point: tuple[float, float, float] | None
+    region: tuple[float, float, float, float, float, float] | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class SkillActivationRecord:
+    activation_id: str
+    scope_key: str
+    task_id: str | None
+    skill_name: str
+    skill_version: str
+    activated_at: str
+
+
+@dataclass(frozen=True)
+class WikiCacheRecord:
+    cache_key: str
+    endpoint: str
+    kind: str
+    request_key: str
+    payload: dict[str, object]
+    etag: str | None
+    last_modified: str | None
+    fetched_at: str
+    expires_at: str
 
 
 @dataclass(frozen=True)
@@ -1139,6 +1205,480 @@ class RuntimeStateStore:
             "complete": next_start is None,
         }
 
+    def create_memory(
+        self,
+        scope: RuntimeScope,
+        *,
+        kind: MemoryKind,
+        source: MemorySource,
+        title: str,
+        content: str,
+        subject_key: str = "",
+        evidence_ref: str = "",
+        dimension: str | None = None,
+        point: tuple[float, float, float] | None = None,
+        region: tuple[float, float, float, float, float, float] | None = None,
+    ) -> MemoryRecord:
+        values = _validated_memory_values(
+            kind=kind,
+            source=source,
+            title=title,
+            content=content,
+            subject_key=subject_key,
+            evidence_ref=evidence_ref,
+            dimension=dimension,
+            point=point,
+            region=region,
+        )
+        memory_id = f"memory-{uuid4().hex}"
+        now = _utc_now()
+        self.register_scope(scope)
+        try:
+            with self._lock, self._connection:
+                self._require_open()
+                self._connection.execute(
+                    """
+                    INSERT INTO memory_entries (
+                        memory_id, scope_key, revision, kind, source,
+                        subject_key, title, content, evidence_ref, dimension,
+                        x, y, z, min_x, min_y, min_z, max_x, max_y, max_z,
+                        created_at, updated_at
+                    ) VALUES (
+                        ?, ?, 1, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        memory_id,
+                        scope.key,
+                        values["kind"].value,
+                        values["source"].value,
+                        values["subject_key"],
+                        values["title"],
+                        values["content"],
+                        values["evidence_ref"],
+                        values["dimension"],
+                        *(_point_columns(values["point"])),
+                        *(_region_columns(values["region"])),
+                        now,
+                        now,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise MemoryStateConflict(
+                f"memory subject already exists in scope: {values['subject_key']}"
+            ) from exc
+        record = self.get_memory(scope, memory_id)
+        assert record is not None
+        return record
+
+    def get_memory(self, scope: RuntimeScope, memory_id: str) -> MemoryRecord | None:
+        with self._lock:
+            self._require_open()
+            row = self._connection.execute(
+                "SELECT * FROM memory_entries WHERE scope_key = ? AND memory_id = ?",
+                (scope.key, str(memory_id)),
+            ).fetchone()
+        return None if row is None else _memory_from_row(row)
+
+    def update_memory(
+        self,
+        scope: RuntimeScope,
+        memory_id: str,
+        *,
+        expected_revision: int,
+        kind: MemoryKind,
+        source: MemorySource,
+        title: str,
+        content: str,
+        subject_key: str = "",
+        evidence_ref: str = "",
+        dimension: str | None = None,
+        point: tuple[float, float, float] | None = None,
+        region: tuple[float, float, float, float, float, float] | None = None,
+    ) -> MemoryRecord:
+        current = self.get_memory(scope, memory_id)
+        if current is None:
+            raise MemoryStateConflict(f"memory not found in scope: {memory_id}")
+        if current.revision != int(expected_revision):
+            raise MemoryStateConflict(
+                f"memory revision conflict: memory_id={memory_id} "
+                f"expected={expected_revision} actual={current.revision}"
+            )
+        values = _validated_memory_values(
+            kind=kind,
+            source=source,
+            title=title,
+            content=content,
+            subject_key=subject_key,
+            evidence_ref=evidence_ref,
+            dimension=dimension,
+            point=point,
+            region=region,
+        )
+        if _MEMORY_SOURCE_RANK[values["source"]] < _MEMORY_SOURCE_RANK[current.source]:
+            raise MemoryStateConflict(
+                "lower-trust memory source cannot overwrite a higher-trust entry: "
+                f"{current.source.value} -> {values['source'].value}"
+            )
+        now = _utc_now()
+        try:
+            with self._lock, self._connection:
+                self._require_open()
+                cursor = self._connection.execute(
+                    """
+                    UPDATE memory_entries
+                    SET revision = revision + 1, kind = ?, source = ?,
+                        subject_key = ?, title = ?, content = ?, evidence_ref = ?,
+                        dimension = ?, x = ?, y = ?, z = ?,
+                        min_x = ?, min_y = ?, min_z = ?,
+                        max_x = ?, max_y = ?, max_z = ?, updated_at = ?
+                    WHERE scope_key = ? AND memory_id = ? AND revision = ?
+                    """,
+                    (
+                        values["kind"].value,
+                        values["source"].value,
+                        values["subject_key"],
+                        values["title"],
+                        values["content"],
+                        values["evidence_ref"],
+                        values["dimension"],
+                        *(_point_columns(values["point"])),
+                        *(_region_columns(values["region"])),
+                        now,
+                        scope.key,
+                        memory_id,
+                        expected_revision,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise MemoryStateConflict(
+                f"memory subject already exists in scope: {values['subject_key']}"
+            ) from exc
+        if cursor.rowcount != 1:
+            raise MemoryStateConflict(f"memory revision conflict: {memory_id}")
+        record = self.get_memory(scope, memory_id)
+        assert record is not None
+        return record
+
+    def delete_memory(
+        self,
+        scope: RuntimeScope,
+        memory_id: str,
+        *,
+        expected_revision: int,
+    ) -> None:
+        with self._lock, self._connection:
+            self._require_open()
+            cursor = self._connection.execute(
+                """
+                DELETE FROM memory_entries
+                WHERE scope_key = ? AND memory_id = ? AND revision = ?
+                """,
+                (scope.key, str(memory_id), int(expected_revision)),
+            )
+        if cursor.rowcount != 1:
+            raise MemoryStateConflict(f"memory revision conflict or missing: {memory_id}")
+
+    def search_memories(
+        self,
+        scope: RuntimeScope,
+        *,
+        query: str = "",
+        kinds: tuple[MemoryKind, ...] = (),
+        sources: tuple[MemorySource, ...] = (),
+        subject_key: str = "",
+        dimension: str | None = None,
+        center: tuple[float, float, float] | None = None,
+        radius: float | None = None,
+        region: tuple[float, float, float, float, float, float] | None = None,
+        start: int = 0,
+        limit: int = 10,
+    ) -> dict[str, object]:
+        query_text = _bounded_text(query, max_length=500).strip()
+        subject = _bounded_text(subject_key, max_length=256).strip()
+        clean_dimension = None if dimension is None else _bounded_text(dimension, max_length=128).strip()
+        clean_kinds = tuple(MemoryKind(value) for value in kinds)
+        clean_sources = tuple(MemorySource(value) for value in sources)
+        clean_center, clean_radius, clean_region = _validated_memory_search_geometry(
+            center=center,
+            radius=radius,
+            region=region,
+        )
+        start = max(0, int(start))
+        limit = max(1, min(50, int(limit)))
+        candidate_limit = min(500, max(100, start + limit * 8))
+        clauses, params = _memory_filter_sql(
+            scope_key=scope.key,
+            kinds=clean_kinds,
+            sources=clean_sources,
+            subject_key=subject,
+            dimension=clean_dimension,
+            center=clean_center,
+            radius=clean_radius,
+            region=clean_region,
+            alias="e",
+        )
+        where = " AND ".join(clauses)
+        lanes: dict[str, list[MemoryRecord]] = {}
+        lane_truncated: dict[str, bool] = {}
+        with self._lock:
+            self._require_open()
+            if query_text:
+                terms_query = _memory_terms_query(query_text)
+                if terms_query:
+                    rows = self._connection.execute(
+                        f"""
+                        SELECT e.*, bm25(memory_fts_terms, 2.0, 1.0, 3.0) AS rank_score
+                        FROM memory_fts_terms
+                        JOIN memory_entries e ON e.rowid = memory_fts_terms.rowid
+                        WHERE memory_fts_terms MATCH ? AND {where}
+                        ORDER BY rank_score, e.memory_id
+                        LIMIT ?
+                        """,
+                        [terms_query, *params, candidate_limit + 1],
+                    ).fetchall()
+                    lanes["terms"] = [_memory_from_row(row) for row in rows[:candidate_limit]]
+                    lane_truncated["terms"] = len(rows) > candidate_limit
+                trigram_query = _memory_trigram_query(query_text)
+                if trigram_query:
+                    rows = self._connection.execute(
+                        f"""
+                        SELECT e.*, bm25(memory_fts_trigrams, 2.0, 1.0, 3.0) AS rank_score
+                        FROM memory_fts_trigrams
+                        JOIN memory_entries e ON e.rowid = memory_fts_trigrams.rowid
+                        WHERE memory_fts_trigrams MATCH ? AND {where}
+                        ORDER BY rank_score, e.memory_id
+                        LIMIT ?
+                        """,
+                        [trigram_query, *params, candidate_limit + 1],
+                    ).fetchall()
+                    lanes["trigram"] = [_memory_from_row(row) for row in rows[:candidate_limit]]
+                    lane_truncated["trigram"] = len(rows) > candidate_limit
+                like_clauses, like_params = _memory_like_query(query_text)
+                if like_clauses:
+                    rows = self._connection.execute(
+                        f"""
+                        SELECT e.* FROM memory_entries e
+                        WHERE {where} AND ({like_clauses})
+                        ORDER BY e.memory_id
+                        LIMIT ?
+                        """,
+                        [*params, *like_params, candidate_limit + 1],
+                    ).fetchall()
+                    lanes["substring"] = [_memory_from_row(row) for row in rows[:candidate_limit]]
+                    lane_truncated["substring"] = len(rows) > candidate_limit
+            else:
+                rows = self._connection.execute(
+                    f"""
+                    SELECT e.* FROM memory_entries e
+                    WHERE {where}
+                    ORDER BY e.memory_id
+                    LIMIT ?
+                    """,
+                    [*params, candidate_limit + 1],
+                ).fetchall()
+                lanes["structured"] = [_memory_from_row(row) for row in rows[:candidate_limit]]
+                lane_truncated["structured"] = len(rows) > candidate_limit
+
+        fused = _fuse_memory_lanes(
+            lanes,
+            center=clean_center,
+            radius=clean_radius,
+            region=clean_region,
+        )
+        page = fused[start : start + limit]
+        next_start = start + len(page) if start + len(page) < len(fused) else None
+        truncated = any(lane_truncated.values())
+        return {
+            "query": query_text,
+            "filters": {
+                "kinds": [item.value for item in clean_kinds],
+                "sources": [item.value for item in clean_sources],
+                "subject_key": subject or None,
+                "dimension": clean_dimension,
+                "center": None if clean_center is None else list(clean_center),
+                "radius": clean_radius,
+                "region": None if clean_region is None else list(clean_region),
+            },
+            "start": start,
+            "limit": limit,
+            "candidate_count": len(fused),
+            "results": [item for item in page],
+            "next_start": next_start,
+            "complete": next_start is None and not truncated,
+            "candidate_truncated": truncated,
+            "lanes": {name: len(records) for name, records in lanes.items()},
+        }
+
+    def record_skill_activation(
+        self,
+        scope: RuntimeScope,
+        *,
+        skill_name: str,
+        skill_version: str,
+        task_id: str | None = None,
+    ) -> SkillActivationRecord:
+        clean_name = _required_text("skill_name", skill_name, max_length=128)
+        clean_version = _required_text("skill_version", skill_version, max_length=128)
+        clean_task_id = None if task_id is None else _required_text("task_id", task_id, max_length=128)
+        self.register_scope(scope)
+        if clean_task_id is not None:
+            with self._lock:
+                task = self._connection.execute(
+                    "SELECT scope_key FROM tasks WHERE task_id = ?",
+                    (clean_task_id,),
+                ).fetchone()
+            if task is None or str(task["scope_key"]) != scope.key:
+                raise RuntimeStateConflict(
+                    f"skill activation task is not in runtime scope: {clean_task_id}"
+                )
+        activation_id = f"skill-activation-{uuid4().hex}"
+        now = _utc_now()
+        with self._lock, self._connection:
+            self._require_open()
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO skill_activations (
+                    activation_id, scope_key, task_id, skill_name,
+                    skill_version, activated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    activation_id,
+                    scope.key,
+                    clean_task_id,
+                    clean_name,
+                    clean_version,
+                    now,
+                ),
+            )
+            row = self._connection.execute(
+                """
+                SELECT * FROM skill_activations
+                WHERE scope_key = ? AND ifnull(task_id, '') = ifnull(?, '')
+                  AND skill_name = ? AND skill_version = ?
+                """,
+                (scope.key, clean_task_id, clean_name, clean_version),
+            ).fetchone()
+        if row is None:
+            raise RuntimeStateError("skill activation insert did not produce a record")
+        return _skill_activation_from_row(row)
+
+    def list_skill_activations(
+        self,
+        scope: RuntimeScope,
+        *,
+        task_id: str | None = None,
+        include_scope_activations: bool = True,
+    ) -> tuple[SkillActivationRecord, ...]:
+        clauses = ["scope_key = ?"]
+        params: list[object] = [scope.key]
+        if task_id is not None:
+            if include_scope_activations:
+                clauses.append("(task_id = ? OR task_id IS NULL)")
+            else:
+                clauses.append("task_id = ?")
+            params.append(str(task_id))
+        elif not include_scope_activations:
+            clauses.append("task_id IS NOT NULL")
+        with self._lock:
+            self._require_open()
+            rows = self._connection.execute(
+                f"""
+                SELECT * FROM skill_activations
+                WHERE {' AND '.join(clauses)}
+                ORDER BY activated_at, activation_id
+                """,
+                params,
+            ).fetchall()
+        return tuple(_skill_activation_from_row(row) for row in rows)
+
+    def get_wiki_cache(self, cache_key: str) -> WikiCacheRecord | None:
+        with self._lock:
+            self._require_open()
+            row = self._connection.execute(
+                "SELECT * FROM wiki_cache WHERE cache_key = ?",
+                (str(cache_key),),
+            ).fetchone()
+        return None if row is None else _wiki_cache_from_row(row)
+
+    def put_wiki_cache(
+        self,
+        *,
+        cache_key: str,
+        endpoint: str,
+        kind: str,
+        request_key: str,
+        payload: dict[str, object],
+        fetched_at: str,
+        expires_at: str,
+        etag: str | None = None,
+        last_modified: str | None = None,
+    ) -> WikiCacheRecord:
+        clean_key = _required_text("cache_key", cache_key, max_length=128)
+        clean_endpoint = _required_text("endpoint", endpoint, max_length=1000)
+        clean_kind = _required_text("kind", kind, max_length=32)
+        clean_request = _required_text("request_key", request_key, max_length=1000)
+        clean_fetched = _required_text("fetched_at", fetched_at, max_length=64)
+        clean_expires = _required_text("expires_at", expires_at, max_length=64)
+        payload_json = _json_dump(payload)
+        with self._lock, self._connection:
+            self._require_open()
+            self._connection.execute(
+                """
+                INSERT INTO wiki_cache (
+                    cache_key, endpoint, kind, request_key, payload_json,
+                    etag, last_modified, fetched_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    endpoint = excluded.endpoint,
+                    kind = excluded.kind,
+                    request_key = excluded.request_key,
+                    payload_json = excluded.payload_json,
+                    etag = excluded.etag,
+                    last_modified = excluded.last_modified,
+                    fetched_at = excluded.fetched_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    clean_key,
+                    clean_endpoint,
+                    clean_kind,
+                    clean_request,
+                    payload_json,
+                    None if etag is None else _bounded_text(etag, max_length=1000),
+                    (
+                        None
+                        if last_modified is None
+                        else _bounded_text(last_modified, max_length=1000)
+                    ),
+                    clean_fetched,
+                    clean_expires,
+                ),
+            )
+        record = self.get_wiki_cache(clean_key)
+        assert record is not None
+        return record
+
+    def refresh_wiki_cache_expiry(
+        self,
+        cache_key: str,
+        *,
+        fetched_at: str,
+        expires_at: str,
+    ) -> WikiCacheRecord | None:
+        with self._lock, self._connection:
+            self._require_open()
+            self._connection.execute(
+                """
+                UPDATE wiki_cache SET fetched_at = ?, expires_at = ?
+                WHERE cache_key = ?
+                """,
+                (str(fetched_at), str(expires_at), str(cache_key)),
+            )
+        return self.get_wiki_cache(cache_key)
+
     def close(self) -> None:
         with self._lock:
             if self._closed:
@@ -1283,6 +1823,118 @@ class RuntimeStateStore:
 
                 CREATE INDEX IF NOT EXISTS idx_tool_observations_scope_created
                 ON tool_observations(scope_key, created_at DESC, observation_id DESC);
+
+                CREATE TABLE IF NOT EXISTS memory_entries (
+                    memory_id TEXT PRIMARY KEY,
+                    scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                    revision INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    subject_key TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    evidence_ref TEXT NOT NULL,
+                    dimension TEXT,
+                    x REAL,
+                    y REAL,
+                    z REAL,
+                    min_x REAL,
+                    min_y REAL,
+                    min_z REAL,
+                    max_x REAL,
+                    max_y REAL,
+                    max_z REAL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_subject
+                ON memory_entries(scope_key, subject_key)
+                WHERE subject_key <> '';
+
+                CREATE INDEX IF NOT EXISTS idx_memory_scope_kind_source
+                ON memory_entries(scope_key, kind, source, memory_id);
+
+                CREATE INDEX IF NOT EXISTS idx_memory_scope_dimension_point
+                ON memory_entries(scope_key, dimension, x, y, z);
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts_terms USING fts5(
+                    title,
+                    content,
+                    subject_key,
+                    content='memory_entries',
+                    content_rowid='rowid',
+                    tokenize='porter unicode61 remove_diacritics 2'
+                );
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts_trigrams USING fts5(
+                    title,
+                    content,
+                    subject_key,
+                    content='memory_entries',
+                    content_rowid='rowid',
+                    tokenize='trigram'
+                );
+
+                CREATE TRIGGER IF NOT EXISTS memory_entries_ai AFTER INSERT ON memory_entries BEGIN
+                    INSERT INTO memory_fts_terms(rowid, title, content, subject_key)
+                    VALUES (new.rowid, new.title, new.content, new.subject_key);
+                    INSERT INTO memory_fts_trigrams(rowid, title, content, subject_key)
+                    VALUES (new.rowid, new.title, new.content, new.subject_key);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS memory_entries_ad AFTER DELETE ON memory_entries BEGIN
+                    INSERT INTO memory_fts_terms(memory_fts_terms, rowid, title, content, subject_key)
+                    VALUES ('delete', old.rowid, old.title, old.content, old.subject_key);
+                    INSERT INTO memory_fts_trigrams(memory_fts_trigrams, rowid, title, content, subject_key)
+                    VALUES ('delete', old.rowid, old.title, old.content, old.subject_key);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS memory_entries_au AFTER UPDATE ON memory_entries BEGIN
+                    INSERT INTO memory_fts_terms(memory_fts_terms, rowid, title, content, subject_key)
+                    VALUES ('delete', old.rowid, old.title, old.content, old.subject_key);
+                    INSERT INTO memory_fts_terms(rowid, title, content, subject_key)
+                    VALUES (new.rowid, new.title, new.content, new.subject_key);
+                    INSERT INTO memory_fts_trigrams(memory_fts_trigrams, rowid, title, content, subject_key)
+                    VALUES ('delete', old.rowid, old.title, old.content, old.subject_key);
+                    INSERT INTO memory_fts_trigrams(rowid, title, content, subject_key)
+                    VALUES (new.rowid, new.title, new.content, new.subject_key);
+                END;
+
+                CREATE TABLE IF NOT EXISTS skill_activations (
+                    activation_id TEXT PRIMARY KEY,
+                    scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                    task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
+                    skill_name TEXT NOT NULL,
+                    skill_version TEXT NOT NULL,
+                    activated_at TEXT NOT NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_activation_version
+                ON skill_activations(
+                    scope_key,
+                    ifnull(task_id, ''),
+                    skill_name,
+                    skill_version
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_skill_activations_task
+                ON skill_activations(scope_key, task_id, activated_at);
+
+                CREATE TABLE IF NOT EXISTS wiki_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    endpoint TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    request_key TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    etag TEXT,
+                    last_modified TEXT,
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_wiki_cache_endpoint_kind
+                ON wiki_cache(endpoint, kind, request_key);
                 """
             )
             row = self._connection.execute(
@@ -1354,6 +2006,12 @@ class RuntimeStateStore:
                 current = 6
             elif current == 6:
                 current = 7
+            elif current == 7:
+                current = 8
+            elif current == 8:
+                current = 9
+            elif current == 9:
+                current = 10
             else:
                 raise RuntimeStateError(
                     f"no runtime schema migration from version {current}"
@@ -1377,6 +2035,439 @@ def _validated_scope_component(field_name: str, value: object) -> str:
     if any(ord(character) < 32 or ord(character) == 127 for character in clean):
         raise ValueError(f"{field_name} contains control characters")
     return clean
+
+
+def _validated_memory_values(
+    *,
+    kind: MemoryKind,
+    source: MemorySource,
+    title: str,
+    content: str,
+    subject_key: str,
+    evidence_ref: str,
+    dimension: str | None,
+    point: tuple[float, float, float] | None,
+    region: tuple[float, float, float, float, float, float] | None,
+) -> dict[str, object]:
+    clean_kind = MemoryKind(kind)
+    clean_source = MemorySource(source)
+    clean_title = _required_text("title", title, max_length=500)
+    clean_content = _required_text("content", content, max_length=12000)
+    clean_subject = _bounded_text(subject_key, max_length=256).strip()
+    clean_evidence = _bounded_text(evidence_ref, max_length=512).strip()
+    if clean_source is MemorySource.OBSERVED and not clean_evidence:
+        raise ValueError("observed memory requires an authoritative evidence_ref")
+    clean_dimension = None
+    if dimension is not None and str(dimension).strip():
+        clean_dimension = _bounded_text(dimension, max_length=128).strip()
+    clean_point = _validated_point(point, field_name="point")
+    clean_region = _validated_region(region, field_name="region")
+    if clean_point is not None and clean_region is not None:
+        raise ValueError("memory geometry must be a point or region, not both")
+    if (clean_point is not None or clean_region is not None) and clean_dimension is None:
+        raise ValueError("memory geometry requires dimension")
+    if clean_kind is MemoryKind.SPATIAL and clean_point is None and clean_region is None:
+        raise ValueError("spatial memory requires point or region geometry")
+    return {
+        "kind": clean_kind,
+        "source": clean_source,
+        "title": clean_title,
+        "content": clean_content,
+        "subject_key": clean_subject,
+        "evidence_ref": clean_evidence,
+        "dimension": clean_dimension,
+        "point": clean_point,
+        "region": clean_region,
+    }
+
+
+def _validated_memory_search_geometry(
+    *,
+    center: tuple[float, float, float] | None,
+    radius: float | None,
+    region: tuple[float, float, float, float, float, float] | None,
+) -> tuple[
+    tuple[float, float, float] | None,
+    float | None,
+    tuple[float, float, float, float, float, float] | None,
+]:
+    clean_center = _validated_point(center, field_name="center")
+    clean_region = _validated_region(region, field_name="region")
+    clean_radius = None if radius is None else float(radius)
+    if clean_radius is not None and (not math.isfinite(clean_radius) or clean_radius < 0):
+        raise ValueError("radius must be a finite non-negative number")
+    if (clean_center is None) != (clean_radius is None):
+        raise ValueError("center and radius must be supplied together")
+    if clean_center is not None and clean_region is not None:
+        raise ValueError("search geometry must use center/radius or region, not both")
+    return clean_center, clean_radius, clean_region
+
+
+def _validated_point(
+    value: tuple[float, float, float] | None,
+    *,
+    field_name: str,
+) -> tuple[float, float, float] | None:
+    if value is None:
+        return None
+    if len(value) != 3:
+        raise ValueError(f"{field_name} must contain exactly 3 coordinates")
+    clean = tuple(float(item) for item in value)
+    if not all(math.isfinite(item) for item in clean):
+        raise ValueError(f"{field_name} coordinates must be finite")
+    return clean
+
+
+def _validated_region(
+    value: tuple[float, float, float, float, float, float] | None,
+    *,
+    field_name: str,
+) -> tuple[float, float, float, float, float, float] | None:
+    if value is None:
+        return None
+    if len(value) != 6:
+        raise ValueError(f"{field_name} must contain exactly 6 bounds")
+    clean = tuple(float(item) for item in value)
+    if not all(math.isfinite(item) for item in clean):
+        raise ValueError(f"{field_name} bounds must be finite")
+    if clean[0] > clean[3] or clean[1] > clean[4] or clean[2] > clean[5]:
+        raise ValueError(f"{field_name} minimum bounds must not exceed maximum bounds")
+    return clean
+
+
+def _point_columns(point: object) -> tuple[float | None, float | None, float | None]:
+    if point is None:
+        return None, None, None
+    return tuple(point)  # type: ignore[arg-type,return-value]
+
+
+def _region_columns(
+    region: object,
+) -> tuple[float | None, float | None, float | None, float | None, float | None, float | None]:
+    if region is None:
+        return None, None, None, None, None, None
+    return tuple(region)  # type: ignore[arg-type,return-value]
+
+
+def _memory_filter_sql(
+    *,
+    scope_key: str,
+    kinds: tuple[MemoryKind, ...],
+    sources: tuple[MemorySource, ...],
+    subject_key: str,
+    dimension: str | None,
+    center: tuple[float, float, float] | None,
+    radius: float | None,
+    region: tuple[float, float, float, float, float, float] | None,
+    alias: str,
+) -> tuple[list[str], list[object]]:
+    clauses = [f"{alias}.scope_key = ?"]
+    params: list[object] = [scope_key]
+    if kinds:
+        clauses.append(f"{alias}.kind IN ({','.join('?' for _ in kinds)})")
+        params.extend(item.value for item in kinds)
+    if sources:
+        clauses.append(f"{alias}.source IN ({','.join('?' for _ in sources)})")
+        params.extend(item.value for item in sources)
+    if subject_key:
+        clauses.append(f"{alias}.subject_key = ?")
+        params.append(subject_key)
+    if dimension:
+        clauses.append(f"{alias}.dimension = ?")
+        params.append(dimension)
+    if center is not None and radius is not None:
+        cx, cy, cz = center
+        clauses.append(
+            f"""(
+                ({alias}.x IS NOT NULL AND {alias}.x BETWEEN ? AND ?
+                    AND {alias}.y BETWEEN ? AND ? AND {alias}.z BETWEEN ? AND ?)
+                OR
+                ({alias}.min_x IS NOT NULL AND {alias}.max_x >= ? AND {alias}.min_x <= ?
+                    AND {alias}.max_y >= ? AND {alias}.min_y <= ?
+                    AND {alias}.max_z >= ? AND {alias}.min_z <= ?)
+            )"""
+        )
+        params.extend(
+            (
+                cx - radius,
+                cx + radius,
+                cy - radius,
+                cy + radius,
+                cz - radius,
+                cz + radius,
+                cx - radius,
+                cx + radius,
+                cy - radius,
+                cy + radius,
+                cz - radius,
+                cz + radius,
+            )
+        )
+    elif region is not None:
+        min_x, min_y, min_z, max_x, max_y, max_z = region
+        clauses.append(
+            f"""(
+                ({alias}.x IS NOT NULL AND {alias}.x BETWEEN ? AND ?
+                    AND {alias}.y BETWEEN ? AND ? AND {alias}.z BETWEEN ? AND ?)
+                OR
+                ({alias}.min_x IS NOT NULL AND {alias}.max_x >= ? AND {alias}.min_x <= ?
+                    AND {alias}.max_y >= ? AND {alias}.min_y <= ?
+                    AND {alias}.max_z >= ? AND {alias}.min_z <= ?)
+            )"""
+        )
+        params.extend(
+            (
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+                min_z,
+                max_z,
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+                min_z,
+                max_z,
+            )
+        )
+    return clauses, params
+
+
+def _memory_terms_query(query: str) -> str:
+    tokens = re.findall(r"[\w]+", query.casefold(), flags=re.UNICODE)
+    unique = list(dict.fromkeys(token for token in tokens if token))[:24]
+    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in unique)
+
+
+def _memory_trigram_query(query: str) -> str:
+    tokens = re.findall(r"[\w]+", query.casefold(), flags=re.UNICODE)
+    unique = list(dict.fromkeys(token for token in tokens if len(token) >= 3))[:16]
+    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in unique)
+
+
+def _memory_like_query(query: str) -> tuple[str, list[object]]:
+    tokens = re.findall(r"[\w]+", query.casefold(), flags=re.UNICODE)
+    unique = list(dict.fromkeys(token for token in tokens if len(token) >= 2))[:12]
+    clauses: list[str] = []
+    params: list[object] = []
+    for token in unique:
+        escaped = token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        clauses.append(
+            "(lower(e.title) LIKE ? ESCAPE '\\' OR lower(e.content) LIKE ? ESCAPE '\\' "
+            "OR lower(e.subject_key) LIKE ? ESCAPE '\\')"
+        )
+        params.extend((pattern, pattern, pattern))
+    return " OR ".join(clauses), params
+
+
+def _memory_distance(
+    record: MemoryRecord,
+    center: tuple[float, float, float],
+) -> float | None:
+    if record.point is not None:
+        return math.dist(record.point, center)
+    if record.region is not None:
+        min_x, min_y, min_z, max_x, max_y, max_z = record.region
+        nearest = (
+            min(max(center[0], min_x), max_x),
+            min(max(center[1], min_y), max_y),
+            min(max(center[2], min_z), max_z),
+        )
+        return math.dist(nearest, center)
+    return None
+
+
+def _memory_matches_geometry(
+    record: MemoryRecord,
+    *,
+    center: tuple[float, float, float] | None,
+    radius: float | None,
+    region: tuple[float, float, float, float, float, float] | None,
+) -> bool:
+    if center is not None and radius is not None:
+        distance = _memory_distance(record, center)
+        return distance is not None and distance <= radius
+    if region is None:
+        return True
+    min_x, min_y, min_z, max_x, max_y, max_z = region
+    if record.point is not None:
+        x, y, z = record.point
+        return min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z
+    if record.region is not None:
+        rmin_x, rmin_y, rmin_z, rmax_x, rmax_y, rmax_z = record.region
+        return (
+            rmax_x >= min_x
+            and rmin_x <= max_x
+            and rmax_y >= min_y
+            and rmin_y <= max_y
+            and rmax_z >= min_z
+            and rmin_z <= max_z
+        )
+    return False
+
+
+def _fuse_memory_lanes(
+    lanes: dict[str, list[MemoryRecord]],
+    *,
+    center: tuple[float, float, float] | None,
+    radius: float | None,
+    region: tuple[float, float, float, float, float, float] | None,
+) -> list[dict[str, object]]:
+    fused: dict[str, dict[str, object]] = {}
+    for lane_name, records in lanes.items():
+        if lane_name == "structured":
+            records = sorted(
+                records,
+                key=lambda record: (
+                    -_MEMORY_SOURCE_RANK[record.source],
+                    record.title.casefold(),
+                    record.memory_id,
+                ),
+            )
+        for rank, record in enumerate(records, start=1):
+            if not _memory_matches_geometry(
+                record,
+                center=center,
+                radius=radius,
+                region=region,
+            ):
+                continue
+            item = fused.setdefault(
+                record.memory_id,
+                {"record": record, "score": 0.0, "lanes": []},
+            )
+            item["score"] = float(item["score"]) + 1.0 / (60.0 + rank)
+            item["lanes"].append(lane_name)  # type: ignore[union-attr]
+    ordered = sorted(
+        fused.values(),
+        key=lambda item: (
+            -float(item["score"]),
+            -_MEMORY_SOURCE_RANK[item["record"].source],  # type: ignore[union-attr]
+            (
+                _memory_distance(item["record"], center)  # type: ignore[arg-type]
+                if center is not None
+                else 0.0
+            ),
+            item["record"].memory_id,  # type: ignore[union-attr]
+        ),
+    )
+    return [
+        {
+            **_memory_payload(item["record"], include_content=False),  # type: ignore[arg-type]
+            "retrieval_score": round(float(item["score"]), 8),
+            "match_lanes": list(item["lanes"]),
+            "distance": (
+                None
+                if center is None
+                else _memory_distance(item["record"], center)  # type: ignore[arg-type]
+            ),
+        }
+        for item in ordered
+    ]
+
+
+def _memory_from_row(row: sqlite3.Row) -> MemoryRecord:
+    point = None
+    if row["x"] is not None:
+        point = (float(row["x"]), float(row["y"]), float(row["z"]))
+    region = None
+    if row["min_x"] is not None:
+        region = (
+            float(row["min_x"]),
+            float(row["min_y"]),
+            float(row["min_z"]),
+            float(row["max_x"]),
+            float(row["max_y"]),
+            float(row["max_z"]),
+        )
+    return MemoryRecord(
+        memory_id=str(row["memory_id"]),
+        scope_key=str(row["scope_key"]),
+        revision=int(row["revision"]),
+        kind=MemoryKind(str(row["kind"])),
+        source=MemorySource(str(row["source"])),
+        subject_key=str(row["subject_key"]),
+        title=str(row["title"]),
+        content=str(row["content"]),
+        evidence_ref=str(row["evidence_ref"]),
+        dimension=None if row["dimension"] is None else str(row["dimension"]),
+        point=point,
+        region=region,
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+def _memory_payload(record: MemoryRecord, *, include_content: bool) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "memory_id": record.memory_id,
+        "revision": record.revision,
+        "kind": record.kind.value,
+        "source": record.source.value,
+        "subject_key": record.subject_key or None,
+        "title": record.title,
+        "evidence_ref": record.evidence_ref or None,
+        "dimension": record.dimension,
+        "point": None if record.point is None else list(record.point),
+        "region": None if record.region is None else list(record.region),
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
+    if include_content:
+        payload["content"] = record.content
+        payload["complete"] = True
+    else:
+        payload["excerpt"] = record.content[:500]
+        payload["content_truncated"] = len(record.content) > 500
+    return payload
+
+
+def memory_record_payload(
+    record: MemoryRecord,
+    *,
+    include_content: bool = True,
+) -> dict[str, object]:
+    return _memory_payload(record, include_content=include_content)
+
+
+def _skill_activation_from_row(row: sqlite3.Row) -> SkillActivationRecord:
+    return SkillActivationRecord(
+        activation_id=str(row["activation_id"]),
+        scope_key=str(row["scope_key"]),
+        task_id=None if row["task_id"] is None else str(row["task_id"]),
+        skill_name=str(row["skill_name"]),
+        skill_version=str(row["skill_version"]),
+        activated_at=str(row["activated_at"]),
+    )
+
+
+def skill_activation_payload(record: SkillActivationRecord) -> dict[str, object]:
+    return {
+        "activation_id": record.activation_id,
+        "task_id": record.task_id,
+        "skill_name": record.skill_name,
+        "skill_version": record.skill_version,
+        "activated_at": record.activated_at,
+    }
+
+
+def _wiki_cache_from_row(row: sqlite3.Row) -> WikiCacheRecord:
+    payload = _json_load(row["payload_json"], default={})
+    if not isinstance(payload, dict):
+        raise RuntimeStateError("stored Wiki cache payload is not an object")
+    return WikiCacheRecord(
+        cache_key=str(row["cache_key"]),
+        endpoint=str(row["endpoint"]),
+        kind=str(row["kind"]),
+        request_key=str(row["request_key"]),
+        payload=payload,
+        etag=None if row["etag"] is None else str(row["etag"]),
+        last_modified=None if row["last_modified"] is None else str(row["last_modified"]),
+        fetched_at=str(row["fetched_at"]),
+        expires_at=str(row["expires_at"]),
+    )
 
 
 def _task_from_row(row: sqlite3.Row) -> TaskRecord:
@@ -1613,14 +2704,22 @@ __all__ = [
     "RUNTIME_SCHEMA_VERSION",
     "CheckpointDisposition",
     "CompletionAuthority",
+    "MemoryKind",
+    "MemoryRecord",
+    "MemorySource",
+    "MemoryStateConflict",
     "PlanStepRecord",
     "PlanStepStatus",
     "RuntimeScope",
     "RuntimeStateConflict",
     "RuntimeStateError",
     "RuntimeStateStore",
+    "SkillActivationRecord",
     "TaskCheckpointRecord",
     "TaskPlanRecord",
     "TaskRecord",
     "TaskStatus",
+    "WikiCacheRecord",
+    "memory_record_payload",
+    "skill_activation_payload",
 ]

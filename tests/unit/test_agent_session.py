@@ -7,6 +7,7 @@ from pathlib import Path
 from agents.exceptions import MaxTurnsExceeded
 
 from minebot.app.runner import AgentRuntime, RecoveryOutcome
+from minebot.app.memory import MemoryWorkspace, register_memory_tools
 from minebot.app.runtime_state import CheckpointDisposition, RuntimeScope, RuntimeStateStore, TaskStatus
 from minebot.app.session import AgentSession, SessionCommand
 from minebot.app.tasks import TaskWorkspace
@@ -798,6 +799,60 @@ class AgentSessionTests(unittest.TestCase):
         self.assertTrue(
             any(event["event"] == "session_goal_completed" for event in session.parts.runtime.trace.snapshot())
         )
+
+    def test_completed_task_enqueues_one_reflection_through_maintenance_intent(self):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        workspace = TaskWorkspace(store, scope)
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+
+        body_action_policies: list[bool] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, calls, bodies)
+            register_memory_tools(parts.registry, MemoryWorkspace(store, scope))
+
+            original_runner = parts.runtime.runner_run
+
+            async def runner(agent, input_text, *, context=None, **kwargs):
+                body_action_policies.append(context.body_actions_allowed)
+                return await original_runner(
+                    agent,
+                    input_text,
+                    context=context,
+                    **kwargs,
+                )
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory, task_workspace=workspace)
+        session.submit(SessionCommand.start("collect useful resources"))
+        asyncio.run(session.step())
+
+        completed = session.complete_current_goal("inventory_truth_satisfied")
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(session.work_queue.pending_count(), 1)
+        queued = session.work_queue.queued_intents(WorkIntentKind.MAINTENANCE)
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0].payload["action"], "reflection")
+
+        reflected = asyncio.run(session.step())
+
+        self.assertEqual(reflected.status, "completed_turn")
+        self.assertIn("REFLECTION_MAINTENANCE", calls[-1])
+        self.assertIn("do not perform Body actions", calls[-1])
+        self.assertEqual(body_action_policies, [True, False])
+        self.assertEqual(session.work_queue.pending_count(), 0)
+        self.assertTrue(
+            any(
+                event["event"] == "reflection_maintenance_started"
+                for event in session.parts.runtime.trace.snapshot()
+            )
+        )
+        session.close()
+        store.close()
 
     def test_runner_exception_is_reported_as_failed_session_step(self):
         bodies: list[FakeBody] = []

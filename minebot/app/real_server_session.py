@@ -24,6 +24,9 @@ from minebot.app.conversation import PersistentWindowedConversationSession
 from minebot.app.observation_artifacts import PersistentToolObservationArchive
 from minebot.app.observability import JsonlObservationSink
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime, inventory_count
+from minebot.app.memory import MemoryWorkspace
+from minebot.app.skills import SkillCatalog, SkillWorkspace
+from minebot.app.wiki import WikiKnowledge
 from minebot.app.reconciliation import StartupReconciliationError, enqueue_startup_reconciliation
 from minebot.app.runtime_identity import RuntimeIdentityError, resolve_runtime_scope
 from minebot.app.runtime_state import DEFAULT_RUNTIME_STATE_DB, RuntimeStateError, RuntimeStateStore
@@ -274,6 +277,14 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
             state_store = RuntimeStateStore(config.state_db_path)
             state_store.register_scope(scope)
             task_workspace = TaskWorkspace(state_store, scope)
+            memory_workspace = MemoryWorkspace(state_store, scope)
+            skill_workspace = SkillWorkspace(
+                state_store,
+                scope,
+                SkillCatalog(),
+                task_workspace=task_workspace,
+            )
+            wiki_knowledge = WikiKnowledge(state_store)
             work_queue = PersistentWorkIntentQueue(state_store, scope)
             observation_archive = PersistentToolObservationArchive(state_store, scope)
             conversation_session = PersistentWindowedConversationSession(
@@ -342,6 +353,9 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
                     conversation_session=conversation_session,
                     task_workspace=task_workspace,
                     observation_archive=observation_archive,
+                    memory_workspace=memory_workspace,
+                    skill_workspace=skill_workspace,
+                    wiki_knowledge=wiki_knowledge,
                 ),
                 agent_name="MineBotRealServer",
                 language=config.language,

@@ -625,6 +625,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertIn(ctx.weld_context.authority.last_action[0], {"mine_block_collect", "read_inventory"})
         self.assertNotEqual(ctx.weld_context.authority.last_action[0], "collect_resource")
         self.assertFalse(registry.get("collect_resource").sidecar.mutating)
+        self.assertTrue(registry.get("collect_resource").sidecar.can_mutate_body)
         self.assertIsNone(ctx.weld_context.writer.holder)
 
     def test_collect_resource_search_limit_covers_remaining_target_count(self):
@@ -685,6 +686,7 @@ class AgentCompositionTests(unittest.TestCase):
         tool = registry.get("ensure_tool_for")
 
         self.assertFalse(tool.sidecar.mutating)
+        self.assertTrue(tool.sidecar.can_mutate_body)
         self.assertEqual(tool.sidecar.source, "agent.composition")
         self.assertEqual(tool.sidecar.permission, "compose_ensure")
         self.assertEqual(tool.sidecar.terminal_truth, ("inventory", "ToolResult"))

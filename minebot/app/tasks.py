@@ -15,6 +15,7 @@ from minebot.app.runtime_state import (
     TaskPlanRecord,
     TaskRecord,
     TaskStatus,
+    skill_activation_payload,
 )
 from minebot.brain.context import AgentContext
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
@@ -173,11 +174,17 @@ class TaskWorkspace:
             return {"active": False, "scope_key": self.scope.key}
         plan = self.store.get_plan(task.task_id)
         checkpoint = self.store.get_latest_checkpoint(task.task_id)
+        skills = self.store.list_skill_activations(
+            self.scope,
+            task_id=task.task_id,
+            include_scope_activations=True,
+        )
         return {
             "active": True,
             "task": _task_payload(task),
             "plan": None if plan is None else _plan_payload(plan),
             "checkpoint": None if checkpoint is None else _checkpoint_payload(checkpoint),
+            "skills": [skill_activation_payload(record) for record in skills],
         }
 
     def sync_context(self, context: AgentContext) -> None:

@@ -108,6 +108,7 @@ def register_collect_resource_tool(registry: ToolRegistry, context: CompositionC
                 body_scope=("composition",),
                 terminal_truth=("inventory", "ToolResult"),
                 timeout_s=context.budget.max_wall_s,
+                body_mutating=True,
             ),
         )
     )
@@ -139,6 +140,7 @@ def register_ensure_tool_for_tool(registry: ToolRegistry, context: CompositionCo
                 body_scope=("composition",),
                 terminal_truth=("inventory", "ToolResult"),
                 timeout_s=900.0,
+                body_mutating=True,
             ),
         )
     )

@@ -1,0 +1,96 @@
+{
+  "entries": [
+    {
+      "subject_key": "place:home",
+      "kind": "spatial",
+      "source": "observed",
+      "title": "Primary home base",
+      "content": "A stone workshop beside the birch river on the north ridge.",
+      "evidence_ref": "toolobs:home",
+      "dimension": "overworld",
+      "point": [10, 64, 20]
+    },
+    {
+      "subject_key": "place:east-village",
+      "kind": "spatial",
+      "source": "observed",
+      "title": "东侧村庄",
+      "content": "主基地以东的平原村庄，有农田和铁匠铺。",
+      "evidence_ref": "toolobs:village",
+      "dimension": "overworld",
+      "region": [90, 62, -12, 124, 78, 24]
+    },
+    {
+      "subject_key": "place:nether-portal-alpha",
+      "kind": "spatial",
+      "source": "observed",
+      "title": "nether_portal_alpha",
+      "content": "The first Nether portal is below the basalt marker.",
+      "evidence_ref": "toolobs:portal",
+      "dimension": "overworld",
+      "point": [-35, 58, 71]
+    },
+    {
+      "subject_key": "method:tree-water-pit",
+      "kind": "reflective",
+      "source": "self_inferred",
+      "title": "Water-pit tree approach",
+      "content": "When leaves block a high log, approach the trunk domain and select a reachable low face instead of digging through foliage.",
+      "evidence_ref": "task:collect-logs"
+    },
+    {
+      "subject_key": "method:diamond-tool",
+      "kind": "reflective",
+      "source": "self_inferred",
+      "title": "Diamond mining readiness",
+      "content": "Before mining diamond ore, inspect the required pickaxe tier and ensure an iron pickaxe is equipped.",
+      "evidence_ref": "task:diamond-chain"
+    },
+    {
+      "subject_key": "player:steve-food",
+      "kind": "episodic",
+      "source": "player_told",
+      "title": "Steve prefers baked potatoes",
+      "content": "Steve asked MineBot to keep baked potatoes in the base food chest.",
+      "evidence_ref": "conversation:steve-42"
+    },
+    {
+      "subject_key": "event:first-husk-defense",
+      "kind": "episodic",
+      "source": "observed",
+      "title": "First successful husk defense",
+      "content": "The combat reflex preempted collection, defeated the husk, then restored the suspended task.",
+      "evidence_ref": "toolobs:husk-defense"
+    },
+    {
+      "subject_key": "place:deep-shaft",
+      "kind": "spatial",
+      "source": "observed",
+      "title": "Deep mining shaft",
+      "content": "Safe staircase entrance descending toward deepslate and iron veins.",
+      "evidence_ref": "toolobs:shaft",
+      "dimension": "overworld",
+      "region": [-8, -58, 40, 4, 64, 52]
+    }
+  ],
+  "queries": [
+    {"query": "stone workshop", "expected": "place:home"},
+    {"query": "birch river", "expected": "place:home"},
+    {"query": "primary home", "expected": "place:home"},
+    {"query": "东侧村庄", "expected": "place:east-village"},
+    {"query": "主基地以东", "expected": "place:east-village"},
+    {"query": "铁匠铺", "expected": "place:east-village"},
+    {"query": "nether_portal_alpha", "expected": "place:nether-portal-alpha"},
+    {"query": "basalt marker", "expected": "place:nether-portal-alpha"},
+    {"query": "reachable low face", "expected": "method:tree-water-pit"},
+    {"query": "trunk domain", "expected": "method:tree-water-pit"},
+    {"query": "mining diamonds pickaxe", "expected": "method:diamond-tool"},
+    {"query": "required pickaxe tier", "expected": "method:diamond-tool"},
+    {"query": "baked potatoes", "expected": "player:steve-food"},
+    {"query": "base food chest", "expected": "player:steve-food"},
+    {"query": "combat reflex preempted", "expected": "event:first-husk-defense"},
+    {"query": "restored suspended task", "expected": "event:first-husk-defense"},
+    {"query": "deep mining shaft", "expected": "place:deep-shaft"},
+    {"query": "deepslate iron veins", "expected": "place:deep-shaft"}
+  ]
+}

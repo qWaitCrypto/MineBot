@@ -16,6 +16,9 @@ from agents import Session
 from minebot.app.body_capability_tools import register_body_capability_tools
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.conversation_tools import register_conversation_archive_tools
+from minebot.app.memory import MemoryWorkspace, register_memory_tools
+from minebot.app.skills import SkillWorkspace, register_skill_tools
+from minebot.app.wiki import WikiKnowledge, register_wiki_tools
 from minebot.app.runner import AgentRuntime, RecoveryOutcome, RuntimeTrace
 from minebot.app.runner import sdk_tool_for
 from minebot.app.observation_artifacts import (
@@ -64,6 +67,9 @@ class Phase1RuntimeConfig:
     conversation_session: Session | None = None
     task_workspace: TaskWorkspace | None = None
     observation_archive: ToolObservationArchive | None = None
+    memory_workspace: MemoryWorkspace | None = None
+    skill_workspace: SkillWorkspace | None = None
+    wiki_knowledge: WikiKnowledge | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +132,12 @@ def build_phase1_agent_runtime(
         register_conversation_archive_tools(registry, config.conversation_session)
     if config.observation_archive is not None:
         register_tool_observation_tools(registry, config.observation_archive)
+    if config.memory_workspace is not None:
+        register_memory_tools(registry, config.memory_workspace)
+    if config.skill_workspace is not None:
+        register_skill_tools(registry, config.skill_workspace)
+    if config.wiki_knowledge is not None:
+        register_wiki_tools(registry, config.wiki_knowledge)
     parts.runtime.registry = registry
     parts.runtime.agent = parts.runtime.agent.clone(tools=[sdk_tool_for(registry.get(name)) for name in registry.names()])
     parts.runtime.trace.emit("tool_manifest", tools=tool_manifest(registry))
@@ -567,6 +579,7 @@ def tool_manifest(registry: ToolRegistry) -> list[dict[str, object]]:
                 "tool_type": sidecar.tool_type,
                 "permission": sidecar.permission,
                 "mutating": sidecar.mutating,
+                "body_mutating": sidecar.can_mutate_body,
                 "body_scope": list(sidecar.body_scope),
                 "terminal_truth": list(sidecar.terminal_truth),
             }
@@ -1049,6 +1062,7 @@ def _search_tool(work: BlockWork) -> RegisteredTool:
             permission="read_world",
             body_scope=("blocks",),
             timeout_s=15.0,
+            body_mutating=True,
         ),
     )
 

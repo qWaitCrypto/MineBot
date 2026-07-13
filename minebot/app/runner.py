@@ -115,6 +115,7 @@ class RuntimeRunContext:
     trace: "RuntimeTrace | None" = None
     runtime: "AgentRuntime | None" = None
     instruction_preamble: str = ""
+    body_actions_allowed: bool = True
 
     def facts_for_tool(self, tool_name: str) -> dict[str, object]:
         return dict(self.tool_facts.get(tool_name, {}))
@@ -309,6 +310,36 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 "nextSuggestion": None,
                 "metrics": {"expected": "object"},
             }
+            return _finalize_tool_payload(
+                tool=tool,
+                result=result,
+                trace=trace,
+                tool_call_id=tool_call_id,
+                runtime=runtime,
+            )
+        if not ctx.context.body_actions_allowed and tool.sidecar.can_mutate_body:
+            result = {
+                "success": False,
+                "reason": "body_action_denied_during_maintenance",
+                "canRetry": False,
+                "nextSuggestion": (
+                    "Use memory, Skill, Wiki, archive, or read-only observation tools, "
+                    "then finish the maintenance turn."
+                ),
+                "metrics": {
+                    "policy": "maintenance_read_only_body",
+                    "tool": tool.name,
+                    "body_scope": list(tool.sidecar.body_scope),
+                },
+            }
+            if trace is not None:
+                trace.emit(
+                    "tool_policy_denied",
+                    tool_call_id=tool_call_id,
+                    tool=tool.name,
+                    reason=result["reason"],
+                    policy="maintenance_read_only_body",
+                )
             return _finalize_tool_payload(
                 tool=tool,
                 result=result,
@@ -775,6 +806,18 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
         summary.update(_tool_observation_query_summary(metrics))
     elif tool_name == "read_tool_observation":
         summary.update(_tool_observation_read_summary(metrics))
+    elif tool_name in {
+        "search_memory",
+        "read_memory",
+        "write_memory",
+        "update_memory",
+        "delete_memory",
+    }:
+        summary.update(_memory_tool_summary(tool_name, metrics))
+    elif tool_name in {"list_skills", "load_skill"}:
+        summary.update(_skill_tool_summary(tool_name, metrics))
+    elif tool_name in {"wiki_search", "wiki_read"}:
+        summary.update(_wiki_tool_summary(tool_name, metrics))
     for key in allowed_keys:
         if key in metrics:
             summary[key] = _bounded_summary_value(metrics[key])
@@ -1024,6 +1067,181 @@ def _tool_observation_read_summary(metrics: dict[str, object]) -> JsonObject:
         )
         if len(visible) < len(items):
             summary["omitted_page_item_count"] = len(items) - len(visible)
+    return summary
+
+
+def _memory_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObject:
+    summary: JsonObject = {
+        key: _bounded_summary_value(metrics[key])
+        for key in (
+            "memory_id",
+            "revision",
+            "kind",
+            "source",
+            "subject_key",
+            "title",
+            "evidence_ref",
+            "dimension",
+            "point",
+            "region",
+            "query",
+            "filters",
+            "start",
+            "limit",
+            "candidate_count",
+            "next_start",
+            "complete",
+            "candidate_truncated",
+            "lanes",
+            "error",
+        )
+        if key in metrics
+    }
+    results = metrics.get("results")
+    if isinstance(results, list):
+        visible = [
+            _memory_record_summary(item, include_content=False)
+            for item in results[:8]
+            if isinstance(item, dict)
+        ]
+        summary["results"] = visible
+        summary["results_complete"] = len(visible) == len(results)
+        if len(visible) < len(results):
+            summary["omitted_result_count"] = len(results) - len(visible)
+    elif tool_name in {"read_memory", "write_memory", "update_memory"}:
+        summary.update(
+            _memory_record_summary(
+                metrics,
+                include_content=tool_name == "read_memory",
+            )
+        )
+    return summary
+
+
+def _memory_record_summary(
+    record: dict[str, object],
+    *,
+    include_content: bool,
+) -> JsonObject:
+    summary: JsonObject = {
+        key: _bounded_summary_value(record[key])
+        for key in (
+            "memory_id",
+            "revision",
+            "kind",
+            "source",
+            "subject_key",
+            "title",
+            "evidence_ref",
+            "dimension",
+            "point",
+            "region",
+            "updated_at",
+            "retrieval_score",
+            "match_lanes",
+            "distance",
+            "content_truncated",
+        )
+        if key in record
+    }
+    excerpt = record.get("excerpt")
+    if isinstance(excerpt, str):
+        summary["excerpt"] = _shorten(excerpt, limit=500)
+        summary["excerpt_complete"] = len(summary["excerpt"]) == len(excerpt)
+    if include_content and isinstance(record.get("content"), str):
+        content = str(record["content"])
+        summary["content"] = _shorten(content, limit=4000)
+        summary["content_complete"] = len(summary["content"]) == len(content)
+    return summary
+
+
+def _skill_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObject:
+    summary: JsonObject = {
+        key: _bounded_summary_value(metrics[key])
+        for key in ("name", "description", "version", "count", "complete", "error")
+        if key in metrics
+    }
+    skills = metrics.get("skills")
+    if isinstance(skills, list):
+        visible = [
+            {
+                key: _bounded_summary_value(item[key])
+                for key in ("name", "description", "version")
+                if key in item
+            }
+            for item in skills[:10]
+            if isinstance(item, dict)
+        ]
+        summary["skills"] = visible
+        summary["skills_complete"] = len(visible) == len(skills)
+        if len(visible) < len(skills):
+            summary["omitted_skill_count"] = len(skills) - len(visible)
+    if tool_name == "load_skill" and isinstance(metrics.get("instructions"), str):
+        instructions = str(metrics["instructions"])
+        summary["instructions"] = _shorten(instructions, limit=8000)
+        summary["instructions_complete"] = len(summary["instructions"]) == len(instructions)
+    activation = metrics.get("activation")
+    if isinstance(activation, dict):
+        summary["activation"] = {
+            key: _bounded_summary_value(activation[key])
+            for key in (
+                "activation_id",
+                "task_id",
+                "skill_name",
+                "skill_version",
+                "activated_at",
+            )
+            if key in activation
+        }
+    return summary
+
+
+def _wiki_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObject:
+    summary: JsonObject = {
+        key: _bounded_summary_value(metrics[key])
+        for key in (
+            "query",
+            "count",
+            "title",
+            "source",
+            "source_url",
+            "revision_id",
+            "revision_timestamp",
+            "retrieved_at",
+            "omitted_sections",
+            "complete",
+            "stale",
+            "cache_status",
+            "cache_fetched_at",
+            "refresh_error",
+            "advisory",
+            "error",
+        )
+        if key in metrics
+    }
+    results = metrics.get("results")
+    if isinstance(results, list):
+        visible = [
+            {
+                key: (
+                    _shorten(str(item[key]), limit=500)
+                    if key == "snippet"
+                    else _bounded_summary_value(item[key])
+                )
+                for key in ("title", "snippet", "page_id", "word_count")
+                if key in item
+            }
+            for item in results[:8]
+            if isinstance(item, dict)
+        ]
+        summary["results"] = visible
+        summary["results_complete"] = len(visible) == len(results)
+        if len(visible) < len(results):
+            summary["omitted_result_count"] = len(results) - len(visible)
+    if tool_name == "wiki_read" and isinstance(metrics.get("markdown"), str):
+        markdown = str(metrics["markdown"])
+        summary["markdown"] = _shorten(markdown, limit=6000)
+        summary["markdown_complete"] = len(summary["markdown"]) == len(markdown)
     return summary
 
 
@@ -1360,7 +1578,12 @@ class AgentRuntime:
     def set_tool_facts(self, tool_name: str, facts: dict[str, object]) -> None:
         self.tool_facts[tool_name] = dict(facts)
 
-    async def run_turn(self, extra_signals: list[AgentSignal] | None = None) -> AgentTurnOutcome:
+    async def run_turn(
+        self,
+        extra_signals: list[AgentSignal] | None = None,
+        *,
+        body_actions_allowed: bool = True,
+    ) -> AgentTurnOutcome:
         prepared = await self.run_sync(self._prepare_turn, extra_signals)
         if isinstance(prepared, AgentTurnOutcome):
             return prepared
@@ -1404,6 +1627,7 @@ class AgentRuntime:
             trace=self.trace,
             runtime=self,
             instruction_preamble=instruction_preamble,
+            body_actions_allowed=body_actions_allowed,
         )
         run_config = self._run_config(profile)
         turn_agent = self._agent_for_profile(profile)
