@@ -6,6 +6,11 @@
 
 *A Minecraft agent with a mind that can improvise and a body that can be trusted.*
 
+![status](https://img.shields.io/badge/status-developer%20preview-orange)
+![python](https://img.shields.io/badge/python-3.13-blue)
+![minecraft](https://img.shields.io/badge/minecraft-26.1.2%20Fabric-brightgreen)
+![license](https://img.shields.io/badge/license-MIT-green)
+
 <img src="assets/readme/hero.webp" alt="MineBot beginning a journey from a forest workshop through mining and crafting toward the End" width="100%">
 
 </div>
@@ -26,6 +31,10 @@ trade-offs, and adaptation to the model.
 The model chooses from one shared capability pool. The harness preserves task
 continuity. The Body handles the grind inside one physical objective. Every
 result comes back as structured world truth.
+
+Mindcraft and mineflayer automate through a Minecraft client; Baritone is a
+full-client pathfinder. MineBot keeps physics and fast reactions on the server,
+then accepts success only when authoritative world state confirms it.
 
 ## Built To Finish
 
@@ -81,10 +90,31 @@ nothing, then learn to design and build in an open world.
 MineBot currently targets Python 3.13 and a Minecraft 26.1.2 Fabric server with
 Carpet, the MineBot Scarpet app, and local RCON enabled.
 
+Use a disposable local world for the developer console: it spawns and resets a
+FakePlayer, changes gamerules, and can seed a tiny demo patch. Install Fabric +
+Carpet, enable local RCON in `server.properties`, and place the Scarpet app in
+the active world's scripts directory:
+
+```properties
+enable-rcon=true
+rcon.port=25576
+rcon.password=test
+```
+
+```bash
+mkdir -p /path/to/server/world/scripts
+cp minecraft/server/scarpet/minebot.sc /path/to/server/world/scripts/
+```
+
+Start the server, then prepare MineBot:
+
 ```bash
 python3.13 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -e .
+
+# Anthropic, Gemini, and other LiteLLM-backed providers:
+# python3 -m pip install -e ".[litellm]"
 
 export MINEBOT_LLM_MODEL=<model>
 export MINEBOT_LLM_API_KEY=<key>
@@ -102,8 +132,10 @@ minebot> follow me
 minebot> what happened while I was away?
 ```
 
-The current console is a developer preview and expects the local Carpet/RCON
-server to be ready before launch.
+The local console uses `127.0.0.1:25576` with password `test`; keep that RCON
+endpoint local. Existing worlds should use the non-mutating real-server
+entrypoint (`python3 -m minebot.app.real_server_session --help`) instead of this
+demo console.
 
 Run the unit suite with:
 
