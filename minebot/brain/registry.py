@@ -59,9 +59,9 @@ class ToolSidecar:
     second-net guardrail and the observability layer; the weld itself only acts
     on ``progress_key`` and ``mutating``. ``body_mutating`` is separate because
     a composition can be leaf-led for progress accounting while still changing
-    the physical Body. ``timeout_s`` is declarative here — the transaction
-    enforces its own terminal timeout; the async runner may also wrap the call in
-    ``wait_for(timeout_s)``.
+    the physical Body. ``timeout_s`` is declarative here. The transaction owns
+    its terminal timeout, while the runner enforces the outer tool budget only
+    after the call enters the serialized execution lane.
     """
 
     progress_key: str

@@ -14,6 +14,7 @@ from minebot.app.runner import (
     RecoveryOutcome,
     RuntimeRunContext,
     RuntimeTrace,
+    SerialExecutionLane,
     _model_tool_payload,
     extract_model_response_observations,
     extract_run_observations,
@@ -611,6 +612,96 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertTrue(idle)
         self.assertEqual(runtime.execution_lane.active_count, 0)
         self.assertEqual(body.interrupt_reasons, ["tool_cancelled:long_action"])
+
+    def test_execution_lane_timeout_starts_after_queued_call_begins(self):
+        lane = SerialExecutionLane(thread_name="timeout-origin-test")
+        first_started = threading.Event()
+
+        def first_call():
+            first_started.set()
+            threading.Event().wait(0.12)
+            return "first"
+
+        def second_call():
+            threading.Event().wait(0.01)
+            return "second"
+
+        async def scenario():
+            first = asyncio.create_task(lane.run(first_call, timeout_s=0.5))
+            while not first_started.is_set():
+                await asyncio.sleep(0.005)
+            queued_at = asyncio.get_running_loop().time()
+            second = asyncio.create_task(lane.run(second_call, timeout_s=0.05))
+            second_result = await second
+            elapsed = asyncio.get_running_loop().time() - queued_at
+            return await first, second_result, elapsed
+
+        try:
+            first_result, second_result, elapsed = asyncio.run(scenario())
+        finally:
+            lane.close()
+
+        self.assertEqual(first_result, "first")
+        self.assertEqual(second_result, "second")
+        self.assertGreater(elapsed, 0.05)
+
+    def test_tool_execution_timeout_interrupts_body_and_is_not_transport_error(self):
+        release = threading.Event()
+
+        class InterruptibleBody(FakeBody):
+            def interrupt(self, reason=None):
+                release.set()
+                return super().interrupt(reason)
+
+        body = InterruptibleBody()
+
+        def callable_(_params):
+            release.wait(timeout=2)
+            return ToolResult(False, "preempted", True)
+
+        tool = RegisteredTool(
+            name="timed_action",
+            description="Timed action",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(
+                progress_key="timed_action",
+                mutating=True,
+                timeout_s=0.05,
+            ),
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="test"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=lambda *_args, **_kwargs: None,
+        )
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            runtime=runtime,
+        )
+        sdk_tool = sdk_tool_for(tool)
+
+        class Wrapper:
+            context = runtime_context
+
+        try:
+            result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+        finally:
+            runtime.close()
+
+        self.assertIsNone(sdk_tool.timeout_seconds)
+        self.assertEqual(result["reason"], "tool_timeout")
+        self.assertEqual(body.interrupt_reasons, ["tool_timeout:timed_action"])
+        self.assertEqual(runtime.execution_lane.active_count, 0)
+        self.assertFalse(
+            any(event["event"] == "tool_transport_recovery_candidate" for event in runtime.trace.snapshot())
+        )
 
     def test_streamed_turn_body_death_preempts_into_recovery(self):
         class FakeStream:

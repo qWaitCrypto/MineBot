@@ -15,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-RUNTIME_SCHEMA_VERSION = 11
+RUNTIME_SCHEMA_VERSION = 12
 DEFAULT_RUNTIME_STATE_DB = Path("var/minebot/agent-state.sqlite3")
 _MAX_SCOPE_COMPONENT_LENGTH = 256
 
@@ -1166,6 +1166,153 @@ class RuntimeStateStore:
         assert record is not None
         return record
 
+    def create_progress_epoch(
+        self,
+        scope: RuntimeScope,
+        *,
+        record: dict[str, object],
+    ) -> dict[str, object]:
+        self.register_scope(scope)
+        epoch_id = _required_text("epoch_id", record.get("epoch_id"), max_length=256)
+        run_id = _required_text("run_id", record.get("run_id"), max_length=256)
+        model_turn = int(record.get("model_turn") or 0)
+        if model_turn < 1:
+            raise ValueError("model_turn must be at least 1")
+        raw_members = record.get("members")
+        if not isinstance(raw_members, list) or len(raw_members) > 128:
+            raise ValueError("progress epoch members must be a list of at most 128 items")
+        members = [dict(member) for member in raw_members if isinstance(member, dict)]
+        if len(members) != len(raw_members):
+            raise ValueError("progress epoch members must contain only objects")
+        evidence_refs = _bounded_text_list(
+            record.get("evidence_refs") or (),
+            max_items=128,
+            max_length=256,
+        )
+        epistemic_keys = _bounded_text_list(
+            record.get("epistemic_keys") or (),
+            max_items=256,
+            max_length=512,
+        )
+        now = _utc_now()
+        values = (
+            epoch_id,
+            scope.key,
+            run_id,
+            model_turn,
+            _json_dump(members),
+            _bounded_text(record.get("pre_body_fingerprint") or "", max_length=2000) or None,
+            _bounded_text(record.get("post_body_fingerprint") or "", max_length=2000) or None,
+            _json_dump(evidence_refs),
+            _json_dump(epistemic_keys),
+            _json_dump([]),
+            int(bool(record.get("material_changed"))),
+            int(bool(record.get("progress_aborted"))),
+            now,
+        )
+        try:
+            with self._lock, self._connection:
+                self._require_open()
+                insert = self._connection.execute(
+                    """
+                    INSERT INTO progress_epochs (
+                        epoch_id, scope_key, run_id, model_turn, members_json,
+                        pre_body_fingerprint, post_body_fingerprint,
+                        evidence_refs_json, epistemic_keys_json, novel_epistemic_keys_json,
+                        material_changed, progress_aborted, settled_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+                epoch_cursor = int(insert.lastrowid)
+                novel_keys: list[str] = []
+                for evidence_key in epistemic_keys:
+                    evidence_insert = self._connection.execute(
+                        """
+                        INSERT OR IGNORE INTO progress_evidence (
+                            scope_key, evidence_key, first_epoch_cursor,
+                            last_epoch_cursor, seen_count, last_observation_handle
+                        ) VALUES (?, ?, ?, ?, 1, ?)
+                        """,
+                        (
+                            scope.key,
+                            evidence_key,
+                            epoch_cursor,
+                            epoch_cursor,
+                            evidence_refs[-1] if evidence_refs else None,
+                        ),
+                    )
+                    if evidence_insert.rowcount == 1:
+                        novel_keys.append(evidence_key)
+                        continue
+                    self._connection.execute(
+                        """
+                        UPDATE progress_evidence
+                        SET last_epoch_cursor = ?, seen_count = seen_count + 1,
+                            last_observation_handle = COALESCE(?, last_observation_handle)
+                        WHERE scope_key = ? AND evidence_key = ?
+                        """,
+                        (
+                            epoch_cursor,
+                            evidence_refs[-1] if evidence_refs else None,
+                            scope.key,
+                            evidence_key,
+                        ),
+                    )
+                self._connection.execute(
+                    """
+                    UPDATE progress_epochs
+                    SET novel_epistemic_keys_json = ?
+                    WHERE cursor = ?
+                    """,
+                    (_json_dump(novel_keys), epoch_cursor),
+                )
+        except sqlite3.IntegrityError as exc:
+            existing = self.get_progress_epoch(scope, epoch_id)
+            if existing is None:
+                raise RuntimeStateConflict(f"progress epoch insert failed: {exc}") from exc
+            return existing
+        created = self.get_progress_epoch(scope, epoch_id)
+        assert created is not None
+        return created
+
+    def get_progress_epoch(
+        self,
+        scope: RuntimeScope,
+        epoch_id: str,
+    ) -> dict[str, object] | None:
+        with self._lock:
+            self._require_open()
+            row = self._connection.execute(
+                """
+                SELECT * FROM progress_epochs
+                WHERE scope_key = ? AND epoch_id = ?
+                """,
+                (scope.key, str(epoch_id)),
+            ).fetchone()
+        return None if row is None else _progress_epoch_from_row(row)
+
+    def list_progress_epochs_after(
+        self,
+        scope: RuntimeScope,
+        *,
+        cursor: int,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        bounded_limit = min(max(int(limit), 1), 500)
+        with self._lock:
+            self._require_open()
+            rows = self._connection.execute(
+                """
+                SELECT * FROM progress_epochs
+                WHERE scope_key = ? AND cursor > ?
+                ORDER BY cursor ASC
+                LIMIT ?
+                """,
+                (scope.key, max(int(cursor), 0), bounded_limit),
+            ).fetchall()
+        return [_progress_epoch_from_row(row) for row in rows]
+
     def get_tool_observation(
         self,
         scope: RuntimeScope,
@@ -2247,6 +2394,37 @@ class RuntimeStateStore:
                 CREATE INDEX IF NOT EXISTS idx_tool_observations_scope_created
                 ON tool_observations(scope_key, created_at DESC, observation_id DESC);
 
+                CREATE TABLE IF NOT EXISTS progress_epochs (
+                    cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+                    epoch_id TEXT NOT NULL UNIQUE,
+                    scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                    run_id TEXT NOT NULL,
+                    model_turn INTEGER NOT NULL,
+                    members_json TEXT NOT NULL,
+                    pre_body_fingerprint TEXT,
+                    post_body_fingerprint TEXT,
+                    evidence_refs_json TEXT NOT NULL,
+                    epistemic_keys_json TEXT NOT NULL,
+                    novel_epistemic_keys_json TEXT NOT NULL,
+                    material_changed INTEGER NOT NULL,
+                    progress_aborted INTEGER NOT NULL,
+                    settled_at TEXT NOT NULL,
+                    UNIQUE(scope_key, run_id, model_turn)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_progress_epochs_scope_cursor
+                ON progress_epochs(scope_key, cursor);
+
+                CREATE TABLE IF NOT EXISTS progress_evidence (
+                    scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                    evidence_key TEXT NOT NULL,
+                    first_epoch_cursor INTEGER NOT NULL REFERENCES progress_epochs(cursor) ON DELETE CASCADE,
+                    last_epoch_cursor INTEGER NOT NULL REFERENCES progress_epochs(cursor) ON DELETE CASCADE,
+                    seen_count INTEGER NOT NULL,
+                    last_observation_handle TEXT,
+                    PRIMARY KEY(scope_key, evidence_key)
+                );
+
                 CREATE TABLE IF NOT EXISTS memory_entries (
                     memory_id TEXT PRIMARY KEY,
                     scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
@@ -2509,6 +2687,40 @@ class RuntimeStateStore:
                     """
                 )
                 current = 11
+            elif current == 11:
+                self._connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS progress_epochs (
+                        cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+                        epoch_id TEXT NOT NULL UNIQUE,
+                        scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                        run_id TEXT NOT NULL,
+                        model_turn INTEGER NOT NULL,
+                        members_json TEXT NOT NULL,
+                        pre_body_fingerprint TEXT,
+                        post_body_fingerprint TEXT,
+                        evidence_refs_json TEXT NOT NULL,
+                        epistemic_keys_json TEXT NOT NULL,
+                        novel_epistemic_keys_json TEXT NOT NULL,
+                        material_changed INTEGER NOT NULL,
+                        progress_aborted INTEGER NOT NULL,
+                        settled_at TEXT NOT NULL,
+                        UNIQUE(scope_key, run_id, model_turn)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_progress_epochs_scope_cursor
+                    ON progress_epochs(scope_key, cursor);
+                    CREATE TABLE IF NOT EXISTS progress_evidence (
+                        scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                        evidence_key TEXT NOT NULL,
+                        first_epoch_cursor INTEGER NOT NULL REFERENCES progress_epochs(cursor) ON DELETE CASCADE,
+                        last_epoch_cursor INTEGER NOT NULL REFERENCES progress_epochs(cursor) ON DELETE CASCADE,
+                        seen_count INTEGER NOT NULL,
+                        last_observation_handle TEXT,
+                        PRIMARY KEY(scope_key, evidence_key)
+                    );
+                    """
+                )
+                current = 12
             else:
                 raise RuntimeStateError(
                     f"no runtime schema migration from version {current}"
@@ -3128,6 +3340,51 @@ def _work_intent_from_row(row: sqlite3.Row) -> dict[str, object]:
         "leased_at": None if row["leased_at"] is None else str(row["leased_at"]),
         "completed_at": None if row["completed_at"] is None else str(row["completed_at"]),
         "error": error,
+    }
+
+
+def _progress_epoch_from_row(row: sqlite3.Row) -> dict[str, object]:
+    members = _json_load(row["members_json"], default=[])
+    evidence_refs = _json_load(row["evidence_refs_json"], default=[])
+    epistemic_keys = _json_load(row["epistemic_keys_json"], default=[])
+    novel_epistemic_keys = _json_load(row["novel_epistemic_keys_json"], default=[])
+    if not isinstance(members, list) or not all(isinstance(item, dict) for item in members):
+        raise RuntimeStateError("stored progress epoch members are corrupt")
+    if not isinstance(evidence_refs, list) or not all(
+        isinstance(item, str) for item in evidence_refs
+    ):
+        raise RuntimeStateError("stored progress epoch evidence refs are corrupt")
+    if not isinstance(epistemic_keys, list) or not all(
+        isinstance(item, str) for item in epistemic_keys
+    ):
+        raise RuntimeStateError("stored progress epoch epistemic keys are corrupt")
+    if not isinstance(novel_epistemic_keys, list) or not all(
+        isinstance(item, str) for item in novel_epistemic_keys
+    ):
+        raise RuntimeStateError("stored progress epoch novel epistemic keys are corrupt")
+    return {
+        "cursor": int(row["cursor"]),
+        "epoch_id": str(row["epoch_id"]),
+        "scope_key": str(row["scope_key"]),
+        "run_id": str(row["run_id"]),
+        "model_turn": int(row["model_turn"]),
+        "members": members,
+        "pre_body_fingerprint": (
+            None
+            if row["pre_body_fingerprint"] is None
+            else str(row["pre_body_fingerprint"])
+        ),
+        "post_body_fingerprint": (
+            None
+            if row["post_body_fingerprint"] is None
+            else str(row["post_body_fingerprint"])
+        ),
+        "evidence_refs": evidence_refs,
+        "epistemic_keys": epistemic_keys,
+        "novel_epistemic_keys": novel_epistemic_keys,
+        "material_changed": bool(row["material_changed"]),
+        "progress_aborted": bool(row["progress_aborted"]),
+        "settled_at": str(row["settled_at"]),
     }
 
 

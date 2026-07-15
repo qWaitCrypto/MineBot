@@ -120,6 +120,40 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(captured, generation)
         self.assertTrue(progress.generation_current(generation))
 
+    def test_captured_steps_do_not_mutate_authority_until_committed(self):
+        progress = ProgressAuthority()
+        fp = progress.fingerprint(state())
+
+        with progress.capture_steps() as captured:
+            for index in range(FAILURE_STORM_LIMIT):
+                progress.note_step(("action", index), success=False, fingerprint=fp)
+                progress.require_can_continue("test goal")
+
+        self.assertEqual(progress.failure_steps, 0)
+        self.assertEqual(len(captured), FAILURE_STORM_LIMIT)
+
+        with self.assertRaises(ProgressAbort):
+            progress.commit_steps(captured, "test goal")
+
+        self.assertEqual(progress.failure_steps, FAILURE_STORM_LIMIT)
+
+    def test_nested_capture_contributes_steps_to_outer_epoch(self):
+        progress = ProgressAuthority()
+        fp = progress.fingerprint(state())
+
+        with progress.capture_steps() as outer:
+            progress.observe_step(("read_state", "first"), fp)
+            with progress.capture_steps() as inner:
+                progress.note_step(("move_to", 1), success=True, fingerprint=fp)
+
+        self.assertEqual(len(inner), 1)
+        self.assertEqual(len(outer), 2)
+        self.assertIsNone(progress.last_action)
+
+        progress.commit_steps(outer, "test goal")
+
+        self.assertEqual(progress.last_action, ("move_to", 1))
+
 
 if __name__ == "__main__":
     unittest.main()

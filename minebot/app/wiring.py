@@ -9,6 +9,7 @@ from agents import Session
 
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.observation_artifacts import ToolObservationArchive
+from minebot.app.progress_epochs import ProgressEpochArchive
 from minebot.app.skills import SkillWorkspace
 from minebot.app.runner import AgentRuntime, RecoveryHandler, RuntimeTrace
 from minebot.brain.context import AgentContext
@@ -46,6 +47,7 @@ def build_agent_runtime(
     speech_sink: Callable[[str], None] | None = None,
     conversation_session: Session | None = None,
     observation_archive: ToolObservationArchive | None = None,
+    progress_epoch_archive: ProgressEpochArchive | None = None,
 ) -> AgentRuntimeParts:
     context = AgentContext(
         system_prompt=prompt_with_language(system_prompt, language=language),
@@ -69,6 +71,7 @@ def build_agent_runtime(
         speech_sink=speech_sink,
         conversation_session=conversation_session,
         observation_archive=observation_archive,
+        progress_epoch_archive=progress_epoch_archive,
     )
     return AgentRuntimeParts(
         runtime=runtime,

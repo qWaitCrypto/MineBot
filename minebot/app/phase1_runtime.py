@@ -25,6 +25,7 @@ from minebot.app.observation_artifacts import (
     ToolObservationArchive,
     register_tool_observation_tools,
 )
+from minebot.app.progress_epochs import ProgressEpochArchive
 from minebot.app.tasks import TaskWorkspace, register_task_tools
 from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
 from minebot.body import (
@@ -67,6 +68,7 @@ class Phase1RuntimeConfig:
     conversation_session: Session | None = None
     task_workspace: TaskWorkspace | None = None
     observation_archive: ToolObservationArchive | None = None
+    progress_epoch_archive: ProgressEpochArchive | None = None
     memory_workspace: MemoryWorkspace | None = None
     skill_workspace: SkillWorkspace | None = None
     wiki_knowledge: WikiKnowledge | None = None
@@ -107,6 +109,7 @@ def build_phase1_agent_runtime(
         speech_sink=config.speech_sink,
         conversation_session=config.conversation_session,
         observation_archive=config.observation_archive,
+        progress_epoch_archive=config.progress_epoch_archive,
     )
     context = CompositionContext(
         registry=registry,

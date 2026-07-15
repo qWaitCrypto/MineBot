@@ -103,6 +103,8 @@ class RuntimeStateStoreTests(unittest.TestCase):
                     "event_cursors",
                     "conversation_archives",
                     "tool_observations",
+                    "progress_epochs",
+                    "progress_evidence",
                     "memory_entries",
                     "memory_fts_terms",
                     "memory_fts_trigrams",
@@ -113,6 +115,48 @@ class RuntimeStateStoreTests(unittest.TestCase):
                 }.issubset(table_names)
             )
             second.close()
+
+    def test_progress_epoch_archive_is_cursor_ordered_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RuntimeStateStore(Path(tmp) / "state.sqlite3")
+            scope = RuntimeScope("server", "world", "Bot1")
+            record = {
+                "epoch_id": "epoch-1",
+                "run_id": "run-1",
+                "model_turn": 1,
+                "members": [
+                    {
+                        "tool_call_id": "call-1",
+                        "tool": "read_state",
+                        "status": "success",
+                    }
+                ],
+                "pre_body_fingerprint": "before",
+                "post_body_fingerprint": "after",
+                "evidence_refs": ["observation:one"],
+                "epistemic_keys": ["state:overworld:0,64,0"],
+                "material_changed": True,
+                "progress_aborted": False,
+            }
+
+            first = store.create_progress_epoch(scope, record=record)
+            duplicate = store.create_progress_epoch(scope, record=record)
+            second_record = {
+                **record,
+                "epoch_id": "epoch-2",
+                "run_id": "run-2",
+            }
+            second = store.create_progress_epoch(scope, record=second_record)
+            rows = store.list_progress_epochs_after(scope, cursor=0)
+
+            self.assertEqual(first, duplicate)
+            self.assertEqual(rows, [first, second])
+            self.assertGreater(first["cursor"], 0)
+            self.assertEqual(first["evidence_refs"], ["observation:one"])
+            self.assertEqual(first["novel_epistemic_keys"], ["state:overworld:0,64,0"])
+            self.assertEqual(second["novel_epistemic_keys"], [])
+            self.assertTrue(first["material_changed"])
+            store.close()
 
     def test_store_refuses_unknown_schema_version(self):
         with tempfile.TemporaryDirectory() as tmp:

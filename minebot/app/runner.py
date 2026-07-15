@@ -22,6 +22,7 @@ from agents.tool import FunctionTool
 from minebot.app.conversation import WindowedConversationSession, bounded_session_input
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.observation_artifacts import ToolObservationArchive
+from minebot.app.progress_epochs import ProgressEpochArchive
 from minebot.app.skills import SkillOperationError
 from minebot.app.observability import ObservationSink, sanitize_observation
 from minebot.brain.context import AgentContext
@@ -33,7 +34,7 @@ from minebot.brain.modes import (
     signalize_body_state,
     signalize_events,
 )
-from minebot.brain.progress import ProgressAuthority
+from minebot.brain.progress import ProgressAuthority, ProgressStep
 from minebot.brain.registry import RegisteredTool, ToolRegistry, WeldContext, execute_tool
 from minebot.contract import Body, JsonObject, ProgressAbort, ProgressFacts
 from minebot.game.errors import BodyProtocolError
@@ -58,15 +59,39 @@ class SerialExecutionLane:
         self._lock = threading.Lock()
         self._closed = False
 
-    async def run(self, callback: Callable[..., Any], *args: object) -> Any:
+    async def run(
+        self,
+        callback: Callable[..., Any],
+        *args: object,
+        timeout_s: float | None = None,
+    ) -> Any:
+        if timeout_s is not None and timeout_s <= 0:
+            raise ValueError("execution timeout_s must be > 0")
+        submitted_at = time.monotonic()
+        started = threading.Event()
+        started_at: list[float] = []
+
+        def invoke() -> Any:
+            started_at.append(time.monotonic())
+            started.set()
+            return callback(*args)
+
         with self._lock:
             if self._closed:
                 raise RuntimeError("execution lane is closed")
-            future = self._executor.submit(callback, *args)
+            future = self._executor.submit(invoke)
             self._futures.add(future)
         future.add_done_callback(self._discard)
         try:
             while not future.done():
+                if timeout_s is not None and started.is_set():
+                    elapsed_s = time.monotonic() - started_at[0]
+                    if elapsed_s >= timeout_s:
+                        raise ToolExecutionTimeout(
+                            timeout_s=timeout_s,
+                            execution_elapsed_s=elapsed_s,
+                            queue_wait_s=started_at[0] - submitted_at,
+                        )
                 await asyncio.sleep(EXECUTION_LANE_POLL_S)
             return future.result()
         except asyncio.CancelledError:
@@ -98,6 +123,24 @@ class SerialExecutionLane:
             self._futures.discard(future)
 
 
+class ToolExecutionTimeout(TimeoutError):
+    """A tool exceeded its budget after entering the serialized execution lane."""
+
+    def __init__(
+        self,
+        *,
+        timeout_s: float,
+        execution_elapsed_s: float,
+        queue_wait_s: float,
+    ) -> None:
+        super().__init__(f"tool execution exceeded {timeout_s:.3f}s")
+        self.diagnostics = {
+            "timeout_s": timeout_s,
+            "execution_elapsed_s": execution_elapsed_s,
+            "queue_wait_s": queue_wait_s,
+        }
+
+
 class BodyRecoveryRequired(RuntimeError):
     """Raised when a Body-critical fact must preempt the model turn."""
 
@@ -117,6 +160,7 @@ class RuntimeRunContext:
     runtime: "AgentRuntime | None" = None
     instruction_preamble: str = ""
     body_actions_allowed: bool = True
+    progress_epochs: "ProgressEpochAdapter | None" = None
 
     def facts_for_tool(self, tool_name: str) -> dict[str, object]:
         return dict(self.tool_facts.get(tool_name, {}))
@@ -183,6 +227,379 @@ class RuntimeTrace:
                 self.sink.close()
 
 
+@dataclass(frozen=True)
+class _ModelFunctionCall:
+    tool_call_id: str
+    tool_name: str
+    arguments: str
+
+
+@dataclass
+class _ProgressEpochMember:
+    tool_call_id: str
+    tool_name: str
+    order: int
+    body_mutating: bool
+    arguments: str = ""
+    claimed: bool = False
+    conflict: bool = False
+    status: str = "pending"
+    success: bool | None = None
+    reason: str = ""
+    progress_steps: tuple[ProgressStep, ...] = ()
+    observation_handle: str | None = None
+    epistemic_keys: tuple[str, ...] = ()
+    pending_abort: ProgressAbort | None = None
+
+
+@dataclass
+class _ProgressEpoch:
+    epoch_id: str
+    run_id: str
+    model_turn: int
+    pre_body_fingerprint: str | None
+    members: list[_ProgressEpochMember]
+    finalized: bool = False
+
+
+class ProgressEpochAdapter:
+    """Bind one complete SDK model-response tool batch to one progress commit."""
+
+    def __init__(
+        self,
+        *,
+        runtime: "AgentRuntime",
+        run_id: str,
+        archive: ProgressEpochArchive | None = None,
+    ) -> None:
+        self.runtime = runtime
+        self.run_id = run_id
+        self.archive = archive
+        self._model_turn = 0
+        self._active: _ProgressEpoch | None = None
+        self._members: dict[str, _ProgressEpochMember] = {}
+        self._seen_epistemic_keys: set[str] = set()
+
+    async def open(self, response: Any) -> None:
+        calls = [
+            call
+            for call in _model_function_calls(response)
+            if call.tool_name in self.runtime.registry
+        ]
+        if not calls:
+            return
+        if self._active is not None and not self._active.finalized:
+            self.finalize_unsettled("next_model_response")
+        self._model_turn += 1
+        pre_fingerprint = await self.runtime.read_progress_fingerprint()
+        body_calls = [
+            call
+            for call in calls
+            if self.runtime.registry.get(call.tool_name).sidecar.can_mutate_body
+        ]
+        conflicting_ids = (
+            {call.tool_call_id for call in body_calls}
+            if len(body_calls) > 1
+            else set()
+        )
+        members = [
+            _ProgressEpochMember(
+                tool_call_id=call.tool_call_id,
+                tool_name=call.tool_name,
+                order=index,
+                body_mutating=self.runtime.registry.get(call.tool_name).sidecar.can_mutate_body,
+                arguments=call.arguments,
+                conflict=call.tool_call_id in conflicting_ids,
+            )
+            for index, call in enumerate(calls)
+        ]
+        epoch = _ProgressEpoch(
+            epoch_id=f"epoch-{uuid4().hex}",
+            run_id=self.run_id,
+            model_turn=self._model_turn,
+            pre_body_fingerprint=pre_fingerprint,
+            members=members,
+        )
+        self._active = epoch
+        self._members = {member.tool_call_id: member for member in members}
+        self.runtime.trace.emit(
+            "progress_epoch_opened",
+            epoch_id=epoch.epoch_id,
+            run_id=self.run_id,
+            model_turn=self._model_turn,
+            member_tool_call_ids=[member.tool_call_id for member in members],
+            member_tools=[member.tool_name for member in members],
+            body_mutating_count=len(body_calls),
+            body_batch_conflict=bool(conflicting_ids),
+            pre_body_fingerprint=pre_fingerprint,
+        )
+
+    def claim_member(
+        self,
+        tool_name: str,
+        input_json: str,
+        *,
+        native_tool_call_id: str | None = None,
+    ) -> _ProgressEpochMember | None:
+        member = (
+            self._members.get(native_tool_call_id)
+            if native_tool_call_id is not None
+            else None
+        )
+        if member is not None and member.tool_name != tool_name:
+            self.runtime.trace.emit(
+                "progress_epoch_member_mismatch",
+                tool_call_id=native_tool_call_id,
+                expected_tool=member.tool_name,
+                actual_tool=tool_name,
+            )
+            return None
+        if member is None:
+            candidates = [
+                candidate
+                for candidate in (self._active.members if self._active is not None else ())
+                if not candidate.claimed and candidate.tool_name == tool_name
+            ]
+            normalized_input = _canonical_tool_arguments(input_json)
+            exact = [
+                candidate
+                for candidate in candidates
+                if _canonical_tool_arguments(candidate.arguments) == normalized_input
+            ]
+            member = (exact or candidates or [None])[0]
+        if member is None or member.claimed:
+            return None
+        member.claimed = True
+        return member
+
+    def conflict_result(self, member: _ProgressEpochMember) -> JsonObject:
+        assert self._active is not None
+        conflicts = [
+            {
+                "tool_call_id": candidate.tool_call_id,
+                "tool": candidate.tool_name,
+            }
+            for candidate in self._active.members
+            if candidate.conflict
+        ]
+        return {
+            "success": False,
+            "reason": "body_batch_conflict",
+            "canRetry": True,
+            "nextSuggestion": "Issue at most one Body-mutating tool in the next model response.",
+            "metrics": {
+                "epoch_id": self._active.epoch_id,
+                "tool_call_id": member.tool_call_id,
+                "conflicts": conflicts,
+            },
+        }
+
+    def rejection_steps(
+        self,
+        member: _ProgressEpochMember,
+        *,
+        reason: str,
+    ) -> tuple[ProgressStep, ...]:
+        epoch = self._active
+        if epoch is None:
+            return ()
+        fingerprint = (
+            epoch.pre_body_fingerprint
+            or self.runtime.authority.current_fingerprint
+            or self.runtime.authority.last_fingerprint
+        )
+        if not fingerprint:
+            return ()
+        return (
+            ProgressStep(
+                "note",
+                ("epoch_rejection", reason, member.tool_name, member.tool_call_id),
+                fingerprint,
+                success=False,
+            ),
+        )
+
+    def settle(
+        self,
+        member: _ProgressEpochMember,
+        *,
+        result: JsonObject,
+        model_result: JsonObject,
+        progress_steps: tuple[ProgressStep, ...] = (),
+        status: str | None = None,
+        pending_abort: ProgressAbort | None = None,
+    ) -> ProgressAbort | None:
+        epoch = self._active
+        if epoch is None or epoch.finalized:
+            return None
+        if member.status != "pending":
+            self.runtime.trace.emit(
+                "progress_epoch_member_duplicate_settlement",
+                epoch_id=epoch.epoch_id,
+                tool_call_id=member.tool_call_id,
+                status=member.status,
+            )
+            return None
+        member.status = status or ("success" if bool(result.get("success")) else "failure")
+        member.success = bool(result.get("success"))
+        member.reason = str(result.get("reason") or "")
+        member.progress_steps = progress_steps
+        handle = model_result.get("observationHandle")
+        member.observation_handle = str(handle) if isinstance(handle, str) and handle else None
+        member.epistemic_keys = _explicit_evidence_keys(result)
+        member.pending_abort = pending_abort
+        self.runtime.trace.emit(
+            "progress_epoch_member_settled",
+            epoch_id=epoch.epoch_id,
+            tool_call_id=member.tool_call_id,
+            tool=member.tool_name,
+            status=member.status,
+            reason=member.reason,
+            progress_step_count=len(progress_steps),
+            observation_handle=member.observation_handle,
+        )
+        if any(candidate.status == "pending" for candidate in epoch.members):
+            return None
+        return self._finalize(epoch)
+
+    def cancel_member(self, member: _ProgressEpochMember, reason: str) -> ProgressAbort | None:
+        result: JsonObject = {
+            "success": False,
+            "reason": reason,
+            "canRetry": True,
+            "nextSuggestion": None,
+            "metrics": {},
+        }
+        return self.settle(
+            member,
+            result=result,
+            model_result=result,
+            status="cancelled",
+        )
+
+    def finalize_unsettled(self, reason: str) -> ProgressAbort | None:
+        epoch = self._active
+        if epoch is None or epoch.finalized:
+            return None
+        for member in epoch.members:
+            if member.status != "pending":
+                continue
+            member.status = "cancelled"
+            member.success = False
+            member.reason = reason
+            self.runtime.trace.emit(
+                "progress_epoch_member_settled",
+                epoch_id=epoch.epoch_id,
+                tool_call_id=member.tool_call_id,
+                tool=member.tool_name,
+                status="cancelled",
+                reason=reason,
+                progress_step_count=0,
+                observation_handle=None,
+            )
+        return self._finalize(epoch)
+
+    def _finalize(self, epoch: _ProgressEpoch) -> ProgressAbort | None:
+        if epoch.finalized:
+            return None
+        ordered = sorted(epoch.members, key=lambda member: member.order)
+        steps = [step for member in ordered for step in member.progress_steps]
+        progress_abort: ProgressAbort | None = None
+        try:
+            self.runtime.authority.commit_steps(steps, self.runtime.agent_context.goal_text)
+        except ProgressAbort as exc:
+            progress_abort = exc
+        if progress_abort is None:
+            progress_abort = next(
+                (
+                    member.pending_abort
+                    for member in ordered
+                    if member.pending_abort is not None
+                ),
+                None,
+            )
+        post_fingerprint = next(
+            (
+                step.fingerprint
+                for member in reversed(ordered)
+                for step in reversed(member.progress_steps)
+                if step.fingerprint
+            ),
+            self.runtime.authority.current_fingerprint or epoch.pre_body_fingerprint,
+        )
+        evidence_refs = [
+            member.observation_handle
+            for member in ordered
+            if member.observation_handle is not None
+        ]
+        epistemic_keys = list(
+            dict.fromkeys(
+                key
+                for member in ordered
+                for key in member.epistemic_keys
+            )
+        )
+        material_changed = bool(
+            epoch.pre_body_fingerprint
+            and post_fingerprint
+            and epoch.pre_body_fingerprint != post_fingerprint
+        )
+        novel_epistemic_keys = [
+            key for key in epistemic_keys if key not in self._seen_epistemic_keys
+        ]
+        self._seen_epistemic_keys.update(epistemic_keys)
+        record: dict[str, object] = {
+            "epoch_id": epoch.epoch_id,
+            "run_id": epoch.run_id,
+            "model_turn": epoch.model_turn,
+            "members": [
+                {
+                    "tool_call_id": member.tool_call_id,
+                    "tool": member.tool_name,
+                    "status": member.status,
+                    "success": member.success,
+                    "reason": member.reason,
+                    "body_mutating": member.body_mutating,
+                    "progress_step_count": len(member.progress_steps),
+                    "observation_handle": member.observation_handle,
+                }
+                for member in ordered
+            ],
+            "pre_body_fingerprint": epoch.pre_body_fingerprint,
+            "post_body_fingerprint": post_fingerprint,
+            "evidence_refs": evidence_refs,
+            "epistemic_keys": epistemic_keys,
+            "novel_epistemic_keys": novel_epistemic_keys,
+            "material_changed": material_changed,
+            "progress_aborted": progress_abort is not None,
+        }
+        cursor: int | None = None
+        if self.archive is not None:
+            try:
+                stored = self.archive.store(record)
+                cursor = int(stored.get("cursor") or 0) or None
+                stored_novel = stored.get("novel_epistemic_keys")
+                if isinstance(stored_novel, list) and all(
+                    isinstance(key, str) for key in stored_novel
+                ):
+                    record["novel_epistemic_keys"] = list(stored_novel)
+            except Exception as exc:
+                self.runtime.trace.emit(
+                    "progress_epoch_archive_failed",
+                    epoch_id=epoch.epoch_id,
+                    error_type=type(exc).__name__,
+                )
+        epoch.finalized = True
+        self.runtime.trace.emit(
+            "progress_epoch_settled",
+            **record,
+            cursor=cursor,
+        )
+        self._members = {}
+        self._active = None
+        return progress_abort
+
+
 class RuntimeHooks(RunHooks[RuntimeRunContext]):
     """SDK hook bridge into RuntimeTrace."""
 
@@ -212,6 +629,9 @@ class RuntimeHooks(RunHooks[RuntimeRunContext]):
             trace.emit("llm_end", agent=getattr(agent, "name", None), response_type=type(response).__name__)
             for event in extract_model_response_observations(response):
                 trace.emit(**event)
+        progress_epochs = getattr(getattr(context, "context", None), "progress_epochs", None)
+        if progress_epochs is not None:
+            await progress_epochs.open(response)
 
     async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
         trace = _trace_from_context(context)
@@ -257,12 +677,66 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
     async def on_invoke_tool(ctx: RunContextWrapper[RuntimeRunContext], input_json: str) -> JsonObject:
         trace = ctx.context.trace
         runtime = getattr(ctx.context, "runtime", None)
-        tool_call_id = f"tool-{uuid4()}-{tool.name}"
+        native_tool_call_id = getattr(ctx, "tool_call_id", None)
+        epoch_adapter = ctx.context.progress_epochs
+        epoch_member = (
+            None
+            if epoch_adapter is None
+            else epoch_adapter.claim_member(
+                tool.name,
+                input_json,
+                native_tool_call_id=(
+                    str(native_tool_call_id)
+                    if isinstance(native_tool_call_id, str) and native_tool_call_id
+                    else None
+                ),
+            )
+        )
+        tool_call_id = (
+            str(native_tool_call_id)
+            if isinstance(native_tool_call_id, str) and native_tool_call_id
+            else (
+                epoch_member.tool_call_id
+                if epoch_member is not None
+                else f"tool-{uuid4()}-{tool.name}"
+            )
+        )
         arguments_summary = _tool_arguments_summary_from_json(input_json)
+
+        def finalize(
+            result: JsonObject,
+            *,
+            progress_steps: tuple[ProgressStep, ...] = (),
+            status: str | None = None,
+            pending_abort: ProgressAbort | None = None,
+            raise_progress_abort: bool = True,
+        ) -> JsonObject:
+            model_result = _finalize_tool_payload(
+                tool=tool,
+                result=result,
+                trace=trace,
+                tool_call_id=tool_call_id,
+                runtime=runtime,
+            )
+            if epoch_adapter is not None and epoch_member is not None:
+                abort = epoch_adapter.settle(
+                    epoch_member,
+                    result=result,
+                    model_result=model_result,
+                    progress_steps=progress_steps,
+                    status=status,
+                    pending_abort=pending_abort,
+                )
+                if abort is not None and raise_progress_abort:
+                    raise abort
+            return model_result
+
         if trace is not None:
             trace.emit(
                 "tool_decision_context",
                 tool_call_id=tool_call_id,
+                sdk_tool_call_id_native=tool_call_id == native_tool_call_id,
+                sdk_tool_call_id_predeclared=epoch_member is not None,
                 tool=tool.name,
                 situational=ctx.context.profile.situational,
                 lifecycle=ctx.context.profile.lifecycle,
@@ -286,6 +760,24 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 lifecycle=ctx.context.profile.lifecycle,
                 arguments_summary=arguments_summary,
             )
+        if epoch_member is not None and epoch_member.conflict:
+            result = epoch_adapter.conflict_result(epoch_member)
+            if trace is not None:
+                trace.emit(
+                    "tool_policy_denied",
+                    tool_call_id=tool_call_id,
+                    tool=tool.name,
+                    reason="body_batch_conflict",
+                    policy="progress_epoch_single_body_writer",
+                )
+            return finalize(
+                result,
+                progress_steps=epoch_adapter.rejection_steps(
+                    epoch_member,
+                    reason="body_batch_conflict",
+                ),
+                status="rejected",
+            )
         try:
             params = json.loads(input_json) if input_json else {}
         except json.JSONDecodeError as exc:
@@ -296,12 +788,14 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 "nextSuggestion": None,
                 "metrics": {"error": str(exc)},
             }
-            return _finalize_tool_payload(
-                tool=tool,
-                result=result,
-                trace=trace,
-                tool_call_id=tool_call_id,
-                runtime=runtime,
+            return finalize(
+                result,
+                progress_steps=(
+                    ()
+                    if epoch_adapter is None or epoch_member is None
+                    else epoch_adapter.rejection_steps(epoch_member, reason="invalid_tool_json")
+                ),
+                status="rejected",
             )
         if not isinstance(params, dict):
             result = {
@@ -311,12 +805,14 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 "nextSuggestion": None,
                 "metrics": {"expected": "object"},
             }
-            return _finalize_tool_payload(
-                tool=tool,
-                result=result,
-                trace=trace,
-                tool_call_id=tool_call_id,
-                runtime=runtime,
+            return finalize(
+                result,
+                progress_steps=(
+                    ()
+                    if epoch_adapter is None or epoch_member is None
+                    else epoch_adapter.rejection_steps(epoch_member, reason="invalid_tool_input")
+                ),
+                status="rejected",
             )
         if not ctx.context.body_actions_allowed and tool.sidecar.can_mutate_body:
             result = {
@@ -341,15 +837,37 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                     reason=result["reason"],
                     policy="maintenance_read_only_body",
                 )
-            return _finalize_tool_payload(
-                tool=tool,
-                result=result,
-                trace=trace,
-                tool_call_id=tool_call_id,
-                runtime=runtime,
+            return finalize(
+                result,
+                progress_steps=(
+                    ()
+                    if epoch_adapter is None or epoch_member is None
+                    else epoch_adapter.rejection_steps(
+                        epoch_member,
+                        reason="body_action_denied_during_maintenance",
+                    )
+                ),
+                status="rejected",
             )
+        progress_steps: tuple[ProgressStep, ...] = ()
+        pending_abort: ProgressAbort | None = None
+        settlement_status: str | None = None
         try:
-            if runtime is None:
+            if runtime is not None and epoch_member is not None:
+                captured = await runtime.run_sync(
+                    _capture_tool_execution,
+                    tool,
+                    params,
+                    ctx.context,
+                    tool_call_id,
+                    timeout_s=tool.sidecar.timeout_s,
+                )
+                progress_steps = captured.progress_steps
+                if captured.error is not None:
+                    raise captured.error
+                assert captured.result is not None
+                result = captured.result
+            elif runtime is None:
                 result = _execute_tool_with_continuation(
                     tool,
                     params,
@@ -363,16 +881,46 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                     params,
                     ctx.context,
                     tool_call_id,
+                    timeout_s=tool.sidecar.timeout_s,
                 )
         except asyncio.CancelledError:
             if runtime is not None:
                 await runtime.cancel_active_execution(f"tool_cancelled:{tool.name}")
+            if epoch_adapter is not None and epoch_member is not None:
+                epoch_adapter.cancel_member(epoch_member, "tool_cancelled")
             raise
-        except ProgressAbort:
-            raise
-        except BodyRecoveryRequired:
+        except ProgressAbort as exc:
+            if epoch_adapter is None or epoch_member is None:
+                raise
+            pending_abort = exc
+            result = {
+                "success": False,
+                "reason": "progress_yielded",
+                "canRetry": True,
+                "nextSuggestion": None,
+                "metrics": _progress_abort_metrics(exc),
+            }
+        except BodyRecoveryRequired as exc:
+            if epoch_adapter is not None and epoch_member is not None:
+                result = {
+                    "success": False,
+                    "reason": exc.reason,
+                    "canRetry": True,
+                    "nextSuggestion": None,
+                    "metrics": dict(exc.facts),
+                }
+                finalize(
+                    result,
+                    progress_steps=progress_steps,
+                    status="body_recovery",
+                    raise_progress_abort=False,
+                )
             raise
         except Exception as exc:
+            if isinstance(exc, ToolExecutionTimeout):
+                settlement_status = "timeout"
+                if runtime is not None:
+                    await runtime.cancel_active_execution(f"tool_timeout:{tool.name}")
             result = _tool_exception_payload(exc)
             if trace is not None:
                 trace.emit(
@@ -396,14 +944,13 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 )
                 runtime = getattr(ctx.context, "runtime", None)
                 if runtime is not None:
-                    runtime.record_transport_error(tool.name, result, tool_call_id=tool_call_id)
+                    pending_abort = runtime.record_transport_error(
+                        tool.name,
+                        result,
+                        tool_call_id=tool_call_id,
+                        raise_on_limit=epoch_member is None,
+                    )
         if _requires_body_recovery(result):
-            _persist_tool_observation(
-                runtime,
-                tool_name=tool.name,
-                tool_call_id=tool_call_id,
-                result=result,
-            )
             if trace is not None:
                 trace.emit(
                     "tool_body_recovery_preempt",
@@ -413,17 +960,23 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                     full_result=result,
                 )
             facts = _recovery_facts_from_tool(tool.name, result)
+            finalize(
+                result,
+                progress_steps=progress_steps,
+                status="body_recovery",
+                pending_abort=pending_abort,
+                raise_progress_abort=False,
+            )
             raise BodyRecoveryRequired(_recovery_reason_from_tool_result(result, facts), facts=facts)
 
         if runtime is not None:
             runtime.remember_tool_result(tool.name, result)
             runtime.remember_tool_body_facts(result)
-        return _finalize_tool_payload(
-            tool=tool,
-            result=result,
-            trace=trace,
-            tool_call_id=tool_call_id,
-            runtime=runtime,
+        return finalize(
+            result,
+            progress_steps=progress_steps,
+            status=settlement_status,
+            pending_abort=pending_abort,
         )
 
     def is_enabled(ctx: RunContextWrapper[RuntimeRunContext], agent: Any) -> bool:
@@ -449,7 +1002,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
         on_invoke_tool=on_invoke_tool,
         strict_json_schema=False,
         is_enabled=is_enabled,
-        timeout_seconds=tool.sidecar.timeout_s,
+        timeout_seconds=None,
         _failure_error_function=None,
         _use_default_failure_error_function=False,
     )
@@ -469,6 +1022,32 @@ def _execute_tool_with_continuation(
         tool_call_id=tool_call_id,
         initial_params=params,
     )
+
+
+@dataclass(frozen=True)
+class _CapturedToolExecution:
+    result: JsonObject | None
+    progress_steps: tuple[ProgressStep, ...]
+    error: Exception | None = None
+
+
+def _capture_tool_execution(
+    tool: RegisteredTool,
+    params: JsonObject,
+    context: RuntimeRunContext,
+    tool_call_id: str,
+) -> _CapturedToolExecution:
+    with context.weld_context.authority.capture_steps() as captured:
+        try:
+            result = _execute_tool_with_continuation(
+                tool,
+                params,
+                context,
+                tool_call_id,
+            )
+        except Exception as exc:
+            return _CapturedToolExecution(None, tuple(captured), exc)
+    return _CapturedToolExecution(result, tuple(captured))
 
 
 def _finalize_tool_payload(
@@ -534,7 +1113,10 @@ def _persist_tool_observation(
 
 
 def _tool_exception_payload(exc: Exception) -> JsonObject:
-    reason = "transport_error" if isinstance(exc, (BodyProtocolError, OSError, TimeoutError)) else "tool_runtime_error"
+    if isinstance(exc, ToolExecutionTimeout):
+        reason = "tool_timeout"
+    else:
+        reason = "transport_error" if isinstance(exc, (BodyProtocolError, OSError, TimeoutError)) else "tool_runtime_error"
     diagnostics = getattr(exc, "diagnostics", None)
     metrics: JsonObject = {
         "error_type": type(exc).__name__,
@@ -546,8 +1128,26 @@ def _tool_exception_payload(exc: Exception) -> JsonObject:
         "success": False,
         "reason": reason,
         "canRetry": True,
-        "nextSuggestion": "retry after refreshing state; choose a different action if the same failure repeats",
+        "nextSuggestion": (
+            "Refresh state before retrying; the timed-out Body action was interrupted."
+            if reason == "tool_timeout"
+            else "retry after refreshing state; choose a different action if the same failure repeats"
+        ),
         "metrics": metrics,
+    }
+
+
+def _progress_abort_metrics(exc: ProgressAbort) -> JsonObject:
+    facts = exc.facts
+    if facts is None:
+        return {}
+    return {
+        "stagnant_steps": facts.stagnant_steps,
+        "stalled_steps": facts.stalled_steps,
+        "failure_steps": facts.failure_steps,
+        "last_fingerprint": facts.last_fingerprint,
+        "current_fingerprint": facts.current_fingerprint,
+        "recent_events": list(facts.recent_events),
     }
 
 
@@ -1581,6 +2181,7 @@ class AgentRuntime:
         speech_sink: Callable[[str], None] | None = None,
         conversation_session: Session | None = None,
         observation_archive: ToolObservationArchive | None = None,
+        progress_epoch_archive: ProgressEpochArchive | None = None,
     ) -> None:
         self.body = body
         self.registry = registry
@@ -1602,6 +2203,7 @@ class AgentRuntime:
             else WindowedConversationSession(session_id=f"{agent_name}-{uuid4()}")
         )
         self.observation_archive = observation_archive
+        self.progress_epoch_archive = progress_epoch_archive
         self.hooks = RuntimeHooks()
         self.weld_context = WeldContext(
             body=body,
@@ -1677,6 +2279,12 @@ class AgentRuntime:
             **context_budget,
         )
 
+        run_id = f"run-{uuid4().hex}"
+        progress_epochs = ProgressEpochAdapter(
+            runtime=self,
+            run_id=run_id,
+            archive=self.progress_epoch_archive,
+        )
         run_context = RuntimeRunContext(
             agent_context=self.agent_context,
             weld_context=self.weld_context,
@@ -1686,6 +2294,7 @@ class AgentRuntime:
             runtime=self,
             instruction_preamble=instruction_preamble,
             body_actions_allowed=body_actions_allowed,
+            progress_epochs=progress_epochs,
         )
         run_config = self._run_config(profile)
         turn_agent = self._agent_for_profile(profile)
@@ -1709,17 +2318,24 @@ class AgentRuntime:
             else:
                 result = await self.runner_run(turn_agent, input_text, **runner_kwargs)
         except asyncio.CancelledError:
+            progress_epochs.finalize_unsettled("turn_cancelled")
             self.authority.invalidate_generation("turn_cancelled")
             self.trace.emit("turn_cancelled", lifecycle=self.lifecycle.state.value)
             raise
         except ProgressAbort as exc:
-            return self._yield_from_progress_abort(exc)
+            deferred = progress_epochs.finalize_unsettled("progress_abort")
+            return self._yield_from_progress_abort(deferred or exc)
         except BodyRecoveryRequired as exc:
+            progress_epochs.finalize_unsettled("body_recovery")
             return self._enter_recovery_from_body_fact(exc.reason, exc.facts)
         except MaxTurnsExceeded as exc:
+            progress_epochs.finalize_unsettled("max_turns_exceeded")
             return self._yield_from_runaway_ceiling(exc)
         except UserError as exc:
+            deferred = progress_epochs.finalize_unsettled("sdk_user_error")
             progress_abort = _find_progress_abort(exc)
+            if progress_abort is None:
+                progress_abort = deferred
             if progress_abort is None:
                 recovery_required = _find_body_recovery_required(exc)
                 if recovery_required is not None:
@@ -1727,8 +2343,15 @@ class AgentRuntime:
                 raise
             return self._yield_from_progress_abort(progress_abort)
         except SkillOperationError as exc:
+            progress_epochs.finalize_unsettled("skill_operation_error")
             return self._yield_from_skill_context_error(exc, profile)
+        except Exception:
+            progress_epochs.finalize_unsettled("runner_error")
+            raise
 
+        deferred = progress_epochs.finalize_unsettled("runner_completed_with_unsettled_epoch")
+        if deferred is not None:
+            return self._yield_from_progress_abort(deferred)
         self.trace.emit("turn_completed", lifecycle=self.lifecycle.state.value, situational=profile.situational)
         self._reset_transport_errors()
         self._record_run_result(result, trace_after_seq=turn_trace_start)
@@ -1739,8 +2362,29 @@ class AgentRuntime:
             result=result,
         )
 
-    async def run_sync(self, callback: Callable[..., Any], *args: object) -> Any:
-        return await self.execution_lane.run(callback, *args)
+    async def run_sync(
+        self,
+        callback: Callable[..., Any],
+        *args: object,
+        timeout_s: float | None = None,
+    ) -> Any:
+        return await self.execution_lane.run(callback, *args, timeout_s=timeout_s)
+
+    async def read_progress_fingerprint(self) -> str | None:
+        try:
+            return await self.run_sync(self._read_progress_fingerprint)
+        except Exception as exc:
+            self.trace.emit(
+                "progress_epoch_fingerprint_failed",
+                error_type=type(exc).__name__,
+            )
+            return self.authority.current_fingerprint or self.authority.last_fingerprint or None
+
+    def _read_progress_fingerprint(self) -> str | None:
+        state = self.body.get_state()
+        if state.missing:
+            return self.authority.current_fingerprint or self.authority.last_fingerprint or None
+        return self.authority.fingerprint(state)
 
     async def wait_for_execution_idle(self, *, timeout_s: float = EXECUTION_LANE_CANCEL_TIMEOUT_S) -> bool:
         return await self.execution_lane.wait_idle(timeout_s=timeout_s)
@@ -2073,7 +2717,14 @@ class AgentRuntime:
             message=reason,
         )
 
-    def record_transport_error(self, tool_name: str, result: JsonObject, *, tool_call_id: str) -> None:
+    def record_transport_error(
+        self,
+        tool_name: str,
+        result: JsonObject,
+        *,
+        tool_call_id: str,
+        raise_on_limit: bool = True,
+    ) -> ProgressAbort | None:
         self.consecutive_transport_errors += 1
         metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
         self.trace.emit(
@@ -2095,10 +2746,14 @@ class AgentRuntime:
                 f"error_type={metrics.get('error_type')}:"
                 f"reason={str(result.get('reason') or '')}"
             )
-            raise ProgressAbort(
+            abort = ProgressAbort(
                 "body transport unstable: yielding for supervisor review",
                 facts=facts,
             )
+            if raise_on_limit:
+                raise abort
+            return abort
+        return None
 
     def _reset_transport_errors(self) -> None:
         if self.consecutive_transport_errors:
@@ -2382,6 +3037,80 @@ def extract_model_response_observations(response: Any) -> list[dict[str, object]
     ):
         events.append({"event": "assistant_no_content_tool_only"})
     return events
+
+
+def _model_function_calls(response: Any) -> list[_ModelFunctionCall]:
+    output = getattr(response, "output", None)
+    if not isinstance(output, list):
+        return []
+    calls: list[_ModelFunctionCall] = []
+    for item in output:
+        if isinstance(item, dict):
+            item_type = str(item.get("type") or "")
+            tool_name = item.get("name") or item.get("tool_name")
+            tool_call_id = item.get("call_id") or item.get("id")
+            arguments = item.get("arguments")
+        else:
+            item_type = str(getattr(item, "type", None) or "")
+            tool_name = getattr(item, "name", None) or getattr(item, "tool_name", None)
+            tool_call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+            arguments = getattr(item, "arguments", None)
+        if item_type not in {"function_call", "tool_call"}:
+            continue
+        if not isinstance(tool_name, str) or not tool_name:
+            continue
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            continue
+        calls.append(
+            _ModelFunctionCall(
+                tool_call_id,
+                tool_name,
+                arguments if isinstance(arguments, str) else "",
+            )
+        )
+    return calls
+
+
+def _canonical_tool_arguments(arguments: str) -> str:
+    if not arguments:
+        return "{}"
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return arguments.strip()
+    return json.dumps(parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _explicit_evidence_keys(result: JsonObject) -> tuple[str, ...]:
+    metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+    raw_values: list[object] = []
+    for container in (result, metrics):
+        for field_name in ("evidence_keys", "evidenceKeys"):
+            value = container.get(field_name)
+            if isinstance(value, (list, tuple)):
+                raw_values.extend(value)
+            elif value is not None:
+                raw_values.append(value)
+        evidence = container.get("evidence")
+        if isinstance(evidence, (list, tuple)):
+            raw_values.extend(evidence)
+    keys: list[str] = []
+    for value in raw_values:
+        if isinstance(value, str):
+            key = value.strip()
+        elif isinstance(value, dict):
+            raw_key = value.get("key") or value.get("id") or value.get("evidence_key")
+            kind = str(value.get("kind") or "").strip()
+            key = str(raw_key or "").strip()
+            if key and kind:
+                key = f"{kind}:{key}"
+        else:
+            key = ""
+        if key and len(key) <= 512 and key not in keys:
+            keys.append(key)
+        if len(keys) >= 256:
+            break
+    return tuple(keys)
 
 
 def _text_from_item(item: dict[str, object]) -> str:

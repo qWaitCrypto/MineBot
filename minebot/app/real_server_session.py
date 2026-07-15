@@ -22,6 +22,7 @@ from minebot.app.config import AppConfigError, agent_language_from_env, provider
 from minebot.app.body_events import BodyEventPump
 from minebot.app.conversation import PersistentWindowedConversationSession
 from minebot.app.observation_artifacts import PersistentToolObservationArchive
+from minebot.app.progress_epochs import PersistentProgressEpochArchive
 from minebot.app.observability import JsonlObservationSink
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime, inventory_count
 from minebot.app.memory import MemoryWorkspace
@@ -397,6 +398,7 @@ async def run_real_server_interactive(
             wiki_knowledge = WikiKnowledge(state_store)
             work_queue = PersistentWorkIntentQueue(state_store, scope)
             observation_archive = PersistentToolObservationArchive(state_store, scope)
+            progress_epoch_archive = PersistentProgressEpochArchive(state_store, scope)
             conversation_session = PersistentWindowedConversationSession(
                 scope.conversation_session_id,
                 config.state_db_path,
@@ -465,6 +467,7 @@ async def run_real_server_interactive(
                     conversation_session=conversation_session,
                     task_workspace=task_workspace,
                     observation_archive=observation_archive,
+                    progress_epoch_archive=progress_epoch_archive,
                     memory_workspace=memory_workspace,
                     skill_workspace=skill_workspace,
                     wiki_knowledge=wiki_knowledge,
