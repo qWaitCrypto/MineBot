@@ -15,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-RUNTIME_SCHEMA_VERSION = 14
+RUNTIME_SCHEMA_VERSION = 15
 DEFAULT_RUNTIME_STATE_DB = Path("var/minebot/agent-state.sqlite3")
 _MAX_SCOPE_COMPONENT_LENGTH = 256
 
@@ -1582,6 +1582,106 @@ class RuntimeStateStore:
             ).fetchone()
         return 0 if row is None else int(row["count"])
 
+    def append_exploration_coverage(
+        self,
+        scope: RuntimeScope,
+        *,
+        dimension: str,
+        query_signature: str,
+        region_x: int,
+        region_z: int,
+        status: str,
+        center: tuple[int, int, int],
+        reason: str,
+        observations: tuple[dict[str, object], ...] = (),
+        negative_evidence: tuple[str, ...] = (),
+        uncertainty: tuple[dict[str, object], ...] = (),
+    ) -> dict[str, object]:
+        dimension_value = _required_text("dimension", dimension, max_length=128)
+        signature_value = _required_text("query_signature", query_signature, max_length=128)
+        status_value = str(status or "").strip()
+        if status_value not in {
+            "covered",
+            "found",
+            "mobility_blocked",
+            "unloaded_boundary",
+        }:
+            raise ValueError(f"invalid exploration coverage status: {status_value!r}")
+        if not isinstance(center, (list, tuple)) or len(center) != 3:
+            raise ValueError("exploration coverage center must contain three coordinates")
+        center_value = [int(value) for value in center]
+        reason_value = _required_text("reason", reason, max_length=1000)
+        observation_values = _validated_json_objects(
+            "observations",
+            observations,
+            max_items=128,
+        )
+        uncertainty_values = _validated_json_objects(
+            "uncertainty",
+            uncertainty,
+            max_items=128,
+        )
+        negative_values = _bounded_text_list(
+            negative_evidence,
+            max_items=64,
+            max_length=256,
+        )
+        self.register_scope(scope)
+        with self._lock, self._connection:
+            self._require_open()
+            inserted = self._connection.execute(
+                """
+                INSERT INTO exploration_coverage (
+                    scope_key, dimension, query_signature, region_x, region_z,
+                    status, center_json, reason, observations_json,
+                    negative_evidence_json, uncertainty_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scope.key,
+                    dimension_value,
+                    signature_value,
+                    int(region_x),
+                    int(region_z),
+                    status_value,
+                    _json_dump(center_value),
+                    reason_value,
+                    _json_dump(observation_values),
+                    _json_dump(negative_values),
+                    _json_dump(uncertainty_values),
+                    _utc_now(),
+                ),
+            )
+            cursor = int(inserted.lastrowid)
+            row = self._connection.execute(
+                "SELECT * FROM exploration_coverage WHERE cursor = ?",
+                (cursor,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeStateError("exploration coverage insert was not readable")
+        return _exploration_coverage_from_row(row)
+
+    def list_exploration_coverage(
+        self,
+        scope: RuntimeScope,
+        *,
+        dimension: str,
+        query_signature: str,
+    ) -> list[dict[str, object]]:
+        dimension_value = _required_text("dimension", dimension, max_length=128)
+        signature_value = _required_text("query_signature", query_signature, max_length=128)
+        with self._lock:
+            self._require_open()
+            rows = self._connection.execute(
+                """
+                SELECT * FROM exploration_coverage
+                WHERE scope_key = ? AND dimension = ? AND query_signature = ?
+                ORDER BY cursor ASC
+                """,
+                (scope.key, dimension_value, signature_value),
+            ).fetchall()
+        return [_exploration_coverage_from_row(row) for row in rows]
+
     def get_tool_observation(
         self,
         scope: RuntimeScope,
@@ -2714,6 +2814,29 @@ class RuntimeStateStore:
                     PRIMARY KEY(scope_key, evidence_key)
                 );
 
+                CREATE TABLE IF NOT EXISTS exploration_coverage (
+                    cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                    dimension TEXT NOT NULL,
+                    query_signature TEXT NOT NULL,
+                    region_x INTEGER NOT NULL,
+                    region_z INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'covered', 'found', 'mobility_blocked', 'unloaded_boundary'
+                    )),
+                    center_json TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    observations_json TEXT NOT NULL,
+                    negative_evidence_json TEXT NOT NULL,
+                    uncertainty_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_exploration_coverage_scope_query
+                ON exploration_coverage(
+                    scope_key, dimension, query_signature, cursor
+                );
+
                 CREATE TABLE IF NOT EXISTS memory_entries (
                     memory_id TEXT PRIMARY KEY,
                     scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
@@ -3045,6 +3168,33 @@ class RuntimeStateStore:
                     """
                 )
                 current = 14
+            elif current == 14:
+                self._connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS exploration_coverage (
+                        cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                        dimension TEXT NOT NULL,
+                        query_signature TEXT NOT NULL,
+                        region_x INTEGER NOT NULL,
+                        region_z INTEGER NOT NULL,
+                        status TEXT NOT NULL CHECK(status IN (
+                            'covered', 'found', 'mobility_blocked', 'unloaded_boundary'
+                        )),
+                        center_json TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        observations_json TEXT NOT NULL,
+                        negative_evidence_json TEXT NOT NULL,
+                        uncertainty_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_exploration_coverage_scope_query
+                    ON exploration_coverage(
+                        scope_key, dimension, query_signature, cursor
+                    );
+                    """
+                )
+                current = 15
             else:
                 raise RuntimeStateError(
                     f"no runtime schema migration from version {current}"
@@ -3757,6 +3907,38 @@ def _progress_epoch_from_row(row: sqlite3.Row) -> dict[str, object]:
     }
 
 
+def _exploration_coverage_from_row(row: sqlite3.Row) -> dict[str, object]:
+    center = _json_load(row["center_json"], default=[])
+    observations = _json_load(row["observations_json"], default=[])
+    negative_evidence = _json_load(row["negative_evidence_json"], default=[])
+    uncertainty = _json_load(row["uncertainty_json"], default=[])
+    if not isinstance(center, list) or len(center) != 3:
+        raise RuntimeStateError("stored exploration coverage center is corrupt")
+    if not isinstance(observations, list) or not all(isinstance(item, dict) for item in observations):
+        raise RuntimeStateError("stored exploration coverage observations are corrupt")
+    if not isinstance(negative_evidence, list) or not all(
+        isinstance(item, str) for item in negative_evidence
+    ):
+        raise RuntimeStateError("stored exploration negative evidence is corrupt")
+    if not isinstance(uncertainty, list) or not all(isinstance(item, dict) for item in uncertainty):
+        raise RuntimeStateError("stored exploration uncertainty is corrupt")
+    return {
+        "cursor": int(row["cursor"]),
+        "scope_key": str(row["scope_key"]),
+        "dimension": str(row["dimension"]),
+        "query_signature": str(row["query_signature"]),
+        "region_x": int(row["region_x"]),
+        "region_z": int(row["region_z"]),
+        "status": str(row["status"]),
+        "center": [int(value) for value in center],
+        "reason": str(row["reason"]),
+        "observations": [dict(item) for item in observations],
+        "negative_evidence": list(negative_evidence),
+        "uncertainty": [dict(item) for item in uncertainty],
+        "created_at": str(row["created_at"]),
+    }
+
+
 def _tool_observation_from_row(
     row: sqlite3.Row,
     *,
@@ -3868,6 +4050,30 @@ def _validated_string_tuple(
     if len(set(clean)) != len(clean):
         raise ValueError(f"{field_name} contains duplicate items")
     return tuple(clean)
+
+
+def _validated_json_objects(
+    field_name: str,
+    values: object,
+    *,
+    max_items: int,
+) -> list[dict[str, object]]:
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(f"{field_name} must be a list of objects")
+    if len(values) > max_items:
+        raise ValueError(f"{field_name} exceeds {max_items} items")
+    normalized: list[dict[str, object]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            raise ValueError(f"{field_name} must contain only objects")
+        encoded = _json_dump(value)
+        if len(encoded.encode("utf-8")) > 16_384:
+            raise ValueError(f"{field_name} item exceeds 16384 bytes")
+        decoded = json.loads(encoded)
+        if not isinstance(decoded, dict):
+            raise ValueError(f"{field_name} must contain only objects")
+        normalized.append(decoded)
+    return normalized
 
 
 def _bounded_text(value: object, *, max_length: int) -> str:

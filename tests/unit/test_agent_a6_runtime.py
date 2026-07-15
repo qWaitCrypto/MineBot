@@ -190,6 +190,7 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
         after = parts.runtime._instructions(wrapper, parts.runtime.agent)
 
         self.assertIn("AVAILABLE_SKILLS", before)
+        self.assertIn("evidence-led-exploration", before)
         self.assertIn("resource-progression", before)
         self.assertIn("skill-authoring", before)
         self.assertNotIn("ACTIVE_SKILLS", before)

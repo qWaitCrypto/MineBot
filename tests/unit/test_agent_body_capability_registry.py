@@ -12,6 +12,7 @@ from minebot.body import (
     BlockWork,
     CombatTransactions,
     ContainerTransactions,
+    ExplorationTransactions,
     FurnaceTransactions,
     InteractionTransactions,
     InventoryTransactions,
@@ -29,6 +30,7 @@ TRANSACTION_CLASSES = (
     BlockWork,
     CombatTransactions,
     ContainerTransactions,
+    ExplorationTransactions,
     FurnaceTransactions,
     InteractionTransactions,
     InventoryTransactions,
@@ -102,6 +104,7 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
     def test_registry_exposes_the_complete_safe_capability_surface(self):
         registry = _registry()
         expected = {
+            "explore_for",
             "move_away",
             "go_to_player",
             "follow_player",
@@ -160,6 +163,7 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         registry = _registry()
 
         self.assertTrue(registry.sidecar("search_for_block").can_mutate_body)
+        self.assertTrue(registry.sidecar("explore_for").can_mutate_body)
         self.assertTrue(registry.sidecar("move_to").can_mutate_body)
         self.assertFalse(registry.sidecar("read_block").can_mutate_body)
         self.assertFalse(registry.sidecar("read_inventory").can_mutate_body)

@@ -95,6 +95,7 @@ class SkillFormatTests(unittest.TestCase):
         self.assertEqual(
             catalog.names,
             (
+                "evidence-led-exploration",
                 "recovery-and-continuation",
                 "resource-progression",
                 "skill-authoring",
@@ -105,6 +106,7 @@ class SkillFormatTests(unittest.TestCase):
         self.assertIn("authoritative inventory", loaded.content)
         self.assertNotIn("/player", loaded.content)
         self.assertIn("Create, revise, merge, or retire", catalog.load("skill-authoring").description)
+        self.assertIn("bounded multi-target coverage", catalog.load("evidence-led-exploration").description)
 
     def test_parser_rejects_alias_duplicate_unknown_field_and_raw_command(self):
         base = f"""---
@@ -276,7 +278,7 @@ class SkillActivationTests(unittest.TestCase):
         workspace = SkillWorkspace(store, scope, SkillCatalog())
         bind_workspace(workspace, extra_tools=("move_to",))
         workspace.set_activation_owner(owner_kind="turn", owner_id="turn-budget")
-        for name in workspace.catalog.names:
+        for name in workspace.catalog.names[:3]:
             workspace.load(name)
         learned = workspace.create(
             name="safe-route",

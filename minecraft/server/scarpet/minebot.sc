@@ -477,6 +477,20 @@ block_type_matches(bs, wanted) -> (
   bs == wanted || bs == 'minecraft:' + wanted || 'minecraft:' + bs == wanted
 );
 
+block_type_matches_any(bs, wanted, wanted_types) -> (
+  if(block_type_matches(bs, wanted),
+    true
+  ,
+    matched = false;
+    if(wanted_types != null,
+      loop(min(length(wanted_types), 64),
+        if(!matched && block_type_matches(bs, wanted_types:_), matched = true)
+      )
+    );
+    matched
+  )
+);
+
 perceive_block_at(name, params) -> (
   x = floor(number(params:'x'));
   y = floor(number(params:'y'));
@@ -671,6 +685,7 @@ perceive_find_blocks(name, params) -> (
     missing_body_perception(name, 'findBlocks')
   ,
     wanted = if(params:'type' == null, '', params:'type');
+    wanted_types = if(params:'types' == null, l(), params:'types');
     radius = floor(number(params:'radius'));
     if(radius < 0, radius = 0);
     if(radius > 128, radius = 128);
@@ -705,7 +720,7 @@ perceive_find_blocks(name, params) -> (
             y = cy + oy;
             z = cz + oz;
             bs = '' + block(x, y, z);
-            if(block_type_matches(bs, wanted),
+            if(block_type_matches_any(bs, wanted, wanted_types),
               matched += 1;
               dx = x + 0.5 - p:0;
               dy = y + 0.5 - p:1;

@@ -8,6 +8,7 @@ from typing import Literal
 from minebot.body import (
     BlockWork,
     ContainerTransactions,
+    ExplorationTransactions,
     FurnaceTransactions,
     InteractionTransactions,
     InventoryTransactions,
@@ -90,6 +91,9 @@ BODY_TRANSACTION_CLOSURE: dict[str, CapabilityClosure] = {
     ),
     "CombatTransactions.engage_entity": _closure(
         "tool", "engage_entity", note="Bounded target-locked melee engagement."
+    ),
+    "ExplorationTransactions.explore_for": _closure(
+        "tool", "explore_for", note="Bounded multi-target frontier exploration with persisted coverage."
     ),
     "ContainerTransactions.transfer_item": _closure(
         "tool", "transfer_container_item", note="Exact-position branch of the shared transfer tool."

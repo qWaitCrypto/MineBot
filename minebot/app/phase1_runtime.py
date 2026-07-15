@@ -31,12 +31,15 @@ from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
 from minebot.body import (
     BlockWork,
     ContainerTransactions,
+    ExplorationCoverageStore,
+    ExplorationTransactions,
     FurnaceTransactions,
     InteractionTransactions,
     InventoryTransactions,
     LifecycleTransactions,
     NavigationRunConfig,
     NavigationTransactions,
+    MemoryExplorationCoverageStore,
     UseTransactions,
 )
 from minebot.body.combat import CombatTransactions, find_hostiles
@@ -72,6 +75,7 @@ class Phase1RuntimeConfig:
     memory_workspace: MemoryWorkspace | None = None
     skill_workspace: SkillWorkspace | None = None
     wiki_knowledge: WikiKnowledge | None = None
+    exploration_coverage_store: ExplorationCoverageStore | None = None
 
 
 @dataclass(frozen=True)
@@ -509,6 +513,11 @@ def build_phase1_registry(
     policy = GovernancePolicy(natural_regions=[config.natural_region])
     progress = authority or ProgressAuthority()
     navigator = NavigationTransactions.server_side(body, policy, progress=progress)
+    exploration = ExplorationTransactions(
+        body,
+        navigator,
+        config.exploration_coverage_store or MemoryExplorationCoverageStore(),
+    )
     work = BlockWork(body, policy, navigator=navigator)
     inventory_txn = InventoryTransactions(body, navigator=navigator, governance=policy, work=work)
     furnace_txn = FurnaceTransactions(body, navigator=navigator, governance=policy, work=work)
@@ -526,6 +535,7 @@ def build_phase1_registry(
     registry.register(_read_state_tool(body))
     register_inventory_tools(registry, body)
     registry.register(_move_to_tool(navigator))
+    registry.register(_explore_for_tool(exploration))
     registry.register(_go_to_surface_tool(work))
     registry.register(_follow_tool(navigator))
     combat = CombatTransactions(body, progress=progress)
@@ -664,6 +674,70 @@ def _move_to_tool(navigator: NavigationTransactions) -> RegisteredTool:
             body_scope=("navigation",),
             terminal_truth=("navigateDone", "position"),
             timeout_s=120.0,
+        ),
+    )
+
+
+def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "explore_for",
+        "Explore safe new world frontiers for one or more block or entity target classes. Choose WHAT to find; the Body owns frontier selection, navigation, coverage, and terminal verification.",
+        {
+            "type": "object",
+            "properties": {
+                "block_targets": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "maxItems": 32,
+                },
+                "entity_targets": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "maxItems": 32,
+                },
+                "max_distance": {"type": "integer", "minimum": 16, "maximum": 512},
+                "max_regions": {"type": "integer", "minimum": 1, "maximum": 32},
+                "return_policy": {
+                    "type": "string",
+                    "enum": ["first_match", "region_budget"],
+                },
+                "scan_radius": {"type": "integer", "minimum": 4, "maximum": 32},
+                "resume_cursor": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "query_signature": {"type": "string"},
+                        "dimension": {"type": "string"},
+                        "coverage_revision": {"type": "integer", "minimum": 0},
+                    },
+                    "required": ["query_signature", "dimension", "coverage_revision"],
+                    "additionalProperties": False,
+                },
+            },
+            "additionalProperties": False,
+        },
+        lambda params: exploration.explore_for(
+            block_targets=tuple(str(item) for item in params.get("block_targets", [])),
+            entity_targets=tuple(str(item) for item in params.get("entity_targets", [])),
+            max_distance=int(params.get("max_distance") or 192),
+            max_regions=int(params.get("max_regions") or 12),
+            return_policy=str(params.get("return_policy") or "first_match"),
+            scan_radius=int(params.get("scan_radius") or 12),
+            resume_cursor=(
+                dict(params["resume_cursor"])
+                if isinstance(params.get("resume_cursor"), dict)
+                else None
+            ),
+        ),
+        ToolSidecar(
+            "explore_for",
+            mutating=True,
+            source="body.exploration",
+            tool_type="exploration",
+            permission="explore_world",
+            body_scope=("navigation", "blocks", "entities", "state"),
+            terminal_truth=("ToolResult", "position", "exploration_coverage"),
+            timeout_s=900.0,
+            body_mutating=True,
         ),
     )
 

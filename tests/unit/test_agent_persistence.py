@@ -105,6 +105,7 @@ class RuntimeStateStoreTests(unittest.TestCase):
                     "tool_observations",
                     "progress_epochs",
                     "progress_evidence",
+                    "exploration_coverage",
                     "continuation_approaches",
                     "continuation_settlements",
                     "memory_entries",
@@ -117,6 +118,26 @@ class RuntimeStateStoreTests(unittest.TestCase):
                 }.issubset(table_names)
             )
             second.close()
+
+    def test_schema_14_migrates_exploration_coverage_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.sqlite3"
+            first = RuntimeStateStore(path)
+            first._connection.execute("DROP TABLE exploration_coverage")
+            first._connection.execute(
+                "UPDATE minebot_schema SET version = 14 WHERE singleton = 1"
+            )
+            first._connection.commit()
+            first.close()
+
+            migrated = RuntimeStateStore(path)
+            table = migrated._connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'exploration_coverage'"
+            ).fetchone()
+
+            self.assertEqual(migrated.schema_version, RUNTIME_SCHEMA_VERSION)
+            self.assertIsNotNone(table)
+            migrated.close()
 
     def test_progress_epoch_archive_is_cursor_ordered_and_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:

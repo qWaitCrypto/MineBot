@@ -3,6 +3,14 @@
 from .block_work import BlockWork
 from .combat import CombatTransactions, find_hostiles
 from .container import ContainerTransactions
+from .exploration import (
+    CoverageRegion,
+    CoverageStatus,
+    ExplorationCoverageStore,
+    ExplorationTargets,
+    ExplorationTransactions,
+    MemoryExplorationCoverageStore,
+)
 from .furnace import FurnaceTransactions
 from .interaction import InteractionTransactions
 from .inventory import InventoryTransactions
@@ -15,6 +23,11 @@ __all__ = [
     "BlockWork",
     "CombatTransactions",
     "ContainerTransactions",
+    "CoverageRegion",
+    "CoverageStatus",
+    "ExplorationCoverageStore",
+    "ExplorationTargets",
+    "ExplorationTransactions",
     "FurnaceTransactions",
     "GoalAvoid",
     "GoalBlock",
@@ -25,6 +38,7 @@ __all__ = [
     "InteractionTransactions",
     "InventoryTransactions",
     "LifecycleTransactions",
+    "MemoryExplorationCoverageStore",
     "NavigationRunConfig",
     "NavigationTransactions",
     "UseTransactions",

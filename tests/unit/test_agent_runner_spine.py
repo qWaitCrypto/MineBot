@@ -835,6 +835,47 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertIn("item_00", payload["summary"]["counts"])
         self.assertNotIn("item_49", payload["summary"]["counts"])
 
+    def test_model_tool_payload_projects_actionable_exploration_truth(self):
+        blocks = [
+            {"kind": "block", "type": "oak_log", "pos": [index, 64, 0]}
+            for index in range(10)
+        ]
+        result = ToolResult(
+            True,
+            "found",
+            False,
+            metrics={
+                "targets": {
+                    "requested": {"blocks": ["#logs"], "entities": []},
+                    "expanded": {"blocks": ["oak_log", "spruce_log"], "entities": []},
+                    "query_signature": "signature",
+                },
+                "dimension": "minecraft:overworld",
+                "origin": [0, 64, 0],
+                "final_pos": [8, 64, 8],
+                "budget": {"max_regions": 4, "regions_consumed": 2},
+                "covered_regions": [[0, 0], [0, 1]],
+                "coverage_revision": 7,
+                "blocks": blocks,
+                "entities": [],
+                "candidate_failures": [{"reason": "stuck"}, {"reason": "stuck"}],
+                "evidence_keys": ["coverage:one", "block:one"],
+                "resume_cursor": None,
+                "complete": True,
+            },
+        ).to_payload()
+
+        payload = _model_tool_payload("explore_for", result, trace_ref="explore-trace")
+
+        self.assertEqual(payload["summary"]["targets"], {"blocks": ["#logs"], "entities": []})
+        self.assertEqual(payload["summary"]["block_count"], 10)
+        self.assertEqual(len(payload["summary"]["blocks"]), 8)
+        self.assertFalse(payload["summary"]["blocks_complete"])
+        self.assertEqual(payload["summary"]["candidate_failure_count"], 2)
+        self.assertEqual(payload["summary"]["candidate_failure_reasons"], ["stuck:2"])
+        self.assertEqual(payload["summary"]["evidence_key_count"], 2)
+        self.assertFalse(payload["projection"]["complete"])
+
     def test_model_tool_payload_preserves_unknown_small_terminal_facts_generically(self):
         result = ToolResult(
             True,

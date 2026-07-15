@@ -218,7 +218,11 @@ class ScarpetSourceTests(unittest.TestCase):
 
         for expected in (
             "block_type_matches",
+            "block_type_matches_any",
             "wanted = if(params:'type' == null",
+            "wanted_types = if(params:'types' == null, l(), params:'types');",
+            "loop(min(length(wanted_types), 64),",
+            "if(block_type_matches_any(bs, wanted, wanted_types),",
             "if(radius > 128, radius = 128)",
             "y_radius = if(radius > 16, 16, radius);",
             "if(params:'y_radius' != null, y_radius = floor(number(params:'y_radius')));",

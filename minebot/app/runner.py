@@ -1426,6 +1426,8 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
         summary.update(_skill_tool_summary(tool_name, metrics))
     elif tool_name in {"wiki_search", "wiki_read"}:
         summary.update(_wiki_tool_summary(tool_name, metrics))
+    elif tool_name == "explore_for":
+        summary.update(_exploration_tool_summary(metrics))
     for key in allowed_keys:
         if key in metrics:
             summary[key] = _bounded_summary_value(metrics[key])
@@ -1489,6 +1491,49 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
     _include_generic_small_metric_facts(summary, metrics)
     if not summary and reason:
         summary["tool"] = tool_name
+    return summary
+
+
+def _exploration_tool_summary(metrics: dict[str, object]) -> JsonObject:
+    summary: JsonObject = {
+        key: _bounded_summary_value(metrics[key])
+        for key in (
+            "dimension",
+            "origin",
+            "final_pos",
+            "budget",
+            "coverage_revision",
+            "resume_cursor",
+            "complete",
+        )
+        if key in metrics
+    }
+    targets = metrics.get("targets")
+    if isinstance(targets, dict):
+        summary["targets"] = _bounded_summary_value(targets.get("requested") or targets)
+    covered = metrics.get("covered_regions")
+    if isinstance(covered, list):
+        summary["covered_region_count"] = len(covered)
+        summary["covered_regions"] = [
+            _bounded_summary_value(item) for item in covered[:16]
+        ]
+        summary["covered_regions_complete"] = len(covered) <= 16
+    for field, count_field in (("blocks", "block_count"), ("entities", "entity_count")):
+        values = metrics.get(field)
+        if not isinstance(values, list):
+            continue
+        summary[count_field] = len(values)
+        summary[field] = [_bounded_summary_value(item) for item in values[:8]]
+        summary[f"{field}_complete"] = len(values) <= 8
+    failures = metrics.get("candidate_failures")
+    if isinstance(failures, list):
+        summary["candidate_failure_count"] = len(failures)
+        summary["candidate_failure_reasons"] = _top_reasons(failures)
+    evidence_keys = metrics.get("evidence_keys")
+    if isinstance(evidence_keys, list):
+        summary["evidence_key_count"] = len(evidence_keys)
+    if "source_reason" in metrics:
+        summary["source_reason"] = _bounded_summary_value(metrics["source_reason"])
     return summary
 
 

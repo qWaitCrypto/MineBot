@@ -360,6 +360,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertIn("move_to", registry.names())
         self.assertIn("go_to_surface", registry.names())
         self.assertIn("search_for_block", registry.names())
+        self.assertIn("explore_for", registry.names())
         self.assertIn("mine_block_collect", registry.names())
         self.assertIn("craft_item", registry.names())
         self.assertIn("equip_item", registry.names())
