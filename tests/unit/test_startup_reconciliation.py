@@ -66,6 +66,16 @@ class ReconcileBody:
 
     def perceive(self, scope, params):
         self.calls.append(("perceive", scope))
+        if self.state.missing:
+            return PerceptionResult(
+                "Bot1",
+                scope,
+                "perception",
+                False,
+                True,
+                {},
+                error="missing_body",
+            )
         slots = [
             {
                 "slot": index,
@@ -141,11 +151,13 @@ class StartupReconciliationTests(unittest.TestCase):
         self.assertEqual(result.intent.payload["decision"], "park")
 
     def test_missing_body_requires_recovery_even_without_task(self):
-        result = self.reconcile(
-            ReconcileBody(state=body_state(missing=True, health=0.0))
-        )
+        body = ReconcileBody(state=body_state(missing=True, health=0.0))
+
+        result = self.reconcile(body)
 
         self.assertEqual(result.decision, ReconcileDecision.RECOVER)
+        self.assertEqual(result.inventory_counts, {})
+        self.assertNotIn(("perceive", "inventory"), body.calls)
 
     def test_waiting_task_resumes_only_when_replayed_event_matches_condition(self):
         task = self.workspace.start("smelt iron", source="user")

@@ -80,7 +80,7 @@ def enqueue_startup_reconciliation(
     fresh_events = event_pump.read_events()
     events = _merge_events(carried_events, fresh_events)
     state = body.get_state()
-    inventory_counts = _inventory_counts(body)
+    inventory_counts = {} if state.missing else _inventory_counts(body)
     task = workspace.current_task
     checkpoint = (
         None
