@@ -73,6 +73,8 @@ class NavigationRunConfig:
     max_break_steps: int = 8
     allow_place: bool = True
     max_place_steps: int = 8
+    allow_pillar: bool = True
+    max_pillar_steps: int = 8
     scaffold_blocks: tuple[str, ...] = (
         "cobblestone",
         "cobbled_deepslate",
@@ -181,6 +183,8 @@ class NavigationTransactions:
             raise ValueError("max_break_steps must be >= 0")
         if cfg.max_place_steps < 0:
             raise ValueError("max_place_steps must be >= 0")
+        if cfg.max_pillar_steps < 0:
+            raise ValueError("max_pillar_steps must be >= 0")
         if timeout_s is not None:
             if timeout_s <= 0:
                 raise ValueError("timeout_s must be > 0")
@@ -206,6 +210,7 @@ class NavigationTransactions:
         denied_mutations: set[Position] = set()
         broken_steps = 0
         placed_steps = 0
+        pillar_steps = 0
 
         segment_index = 0
         partial_segments = 0
@@ -247,8 +252,17 @@ class NavigationTransactions:
                     "break_shovel": capability_snapshot["break_shovel"],
                     "allow_place": bool(capability_snapshot["allow_place"]),
                     "scaffold_item": capability_snapshot["scaffold_item"],
-                    "scaffold_count": max(0, int(capability_snapshot["scaffold_count"]) - placed_steps),
+                    "scaffold_count": max(
+                        0,
+                        int(capability_snapshot["scaffold_count"]) - placed_steps - pillar_steps,
+                    ),
                     "place_budget": max(0, cfg.max_place_steps - placed_steps),
+                    "allow_pillar": bool(
+                        cfg.allow_pillar
+                        and capability_snapshot["has_scaffold"]
+                        and cfg.max_pillar_steps > pillar_steps
+                    ),
+                    "pillar_budget": max(0, cfg.max_pillar_steps - pillar_steps),
                     "denied_mutations": [list(pos) for pos in sorted(denied_mutations)],
                 },
             )
@@ -290,11 +304,21 @@ class NavigationTransactions:
                     if bool(mutation.get("success")):
                         if mutation.get("kind") == "break":
                             broken_steps += 1
-                        if mutation.get("kind") == "place" and mutation_pos is not None:
-                            placed_steps += 1
+                        if mutation.get("kind") in {"place", "pillar"} and mutation_pos is not None:
+                            mutation_kind = str(mutation.get("kind"))
+                            purpose = "pillar" if mutation_kind == "pillar" else "bridge"
+                            if mutation_kind == "pillar":
+                                pillar_steps += 1
+                            else:
+                                placed_steps += 1
                             block_type = str(mutation.get("block_type") or capability_snapshot["scaffold_item"] or "unknown")
                             if self.governance is not None:
-                                self.governance.record_bot_placement(mutation_pos, block_type, "bridge", self.body.bot_name)
+                                self.governance.record_bot_placement(
+                                    mutation_pos,
+                                    block_type,
+                                    purpose,
+                                    self.body.bot_name,
+                                )
                     continue
                 break
             if not self.progress.generation_current(generation):
@@ -496,7 +520,7 @@ class NavigationTransactions:
                 decision = self.governance.can_break(pos, observed_type, break_context)
                 allowed = decision.allowed
                 reason = decision.reason
-        elif mutation_kind == "place" and pos is not None and self.governance is not None:
+        elif mutation_kind in {"place", "pillar"} and pos is not None and self.governance is not None:
             decision = self.governance.can_place(
                 pos,
                 block_type,
@@ -2121,6 +2145,7 @@ def _navigation_capability_snapshot(body: Body, cfg: NavigationRunConfig) -> dic
         "break_pickaxe": None,
         "break_axe": None,
         "break_shovel": None,
+        "has_scaffold": False,
         "allow_place": False,
         "scaffold_item": None,
         "scaffold_count": 0,
@@ -2128,7 +2153,8 @@ def _navigation_capability_snapshot(body: Body, cfg: NavigationRunConfig) -> dic
     }
     needs_break_inventory = cfg.allow_break and cfg.max_break_steps > 0
     needs_place_inventory = cfg.allow_place and cfg.max_place_steps > 0
-    if not needs_break_inventory and not needs_place_inventory:
+    needs_pillar_inventory = cfg.allow_pillar and cfg.max_pillar_steps > 0
+    if not needs_break_inventory and not needs_place_inventory and not needs_pillar_inventory:
         return disabled
 
     start: int | None = 0
@@ -2161,11 +2187,12 @@ def _navigation_capability_snapshot(body: Body, cfg: NavigationRunConfig) -> dic
         "break_axe": _best_navigation_tool(counts, "axe"),
         "break_shovel": _best_navigation_tool(counts, "shovel"),
     }
-    if scaffold_item is None or not needs_place_inventory:
+    if scaffold_item is None:
         return {**disabled, **break_tools, "inventory_complete": True}
     return {
         **break_tools,
-        "allow_place": True,
+        "has_scaffold": True,
+        "allow_place": needs_place_inventory,
         "scaffold_item": scaffold_item,
         "scaffold_count": counts[scaffold_item],
         "inventory_complete": True,

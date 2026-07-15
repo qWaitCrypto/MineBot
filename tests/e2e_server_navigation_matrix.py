@@ -94,6 +94,11 @@ def setup_break_lane(rcon, x: int, z: int, *, back_length: int = 8) -> None:
     command(rcon, f"fill {x - back_length} {BASE_Y} {z + 1} {x + 7} {BASE_Y + 2} {z + 1} stone_bricks")
 
 
+def setup_pillar_area(rcon, x: int, z: int, *, back_length: int = 20) -> None:
+    command(rcon, f"fill {x - back_length} {BASE_Y - 2} {z - 2} {x + 7} {BASE_Y + 6} {z + 2} air")
+    command(rcon, f"fill {x - back_length} {BASE_Y - 1} {z - 2} {x + 7} {BASE_Y - 1} {z + 2} stone")
+
+
 def inventory_count(body: ScarpetBody, item: str) -> int:
     wanted = item.removeprefix("minecraft:")
     return sum(
@@ -187,6 +192,35 @@ class BreakInterruptingBody(ScarpetBody):
             accepted = self.interrupt("matrix_mid_break")
             if not (accepted.ok and accepted.accepted):
                 raise AssertionError(f"break interrupt rejected: {accepted}")
+            self.interrupted = True
+        return result
+
+
+class PillarInterruptingBody(ScarpetBody):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.interrupted = False
+
+    def execute(self, action):
+        start_y = self.get_state().pos[1] if action.name == "navigationMutationDecision" else None
+        result = super().execute(action)
+        if (
+            not self.interrupted
+            and action.name == "navigationMutationDecision"
+            and action.params.get("kind") == "pillar"
+            and action.params.get("authorized") is True
+            and result.ok
+            and result.accepted
+            and start_y is not None
+        ):
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and self.get_state().pos[1] <= start_y + 0.15:
+                time.sleep(0.02)
+            if self.get_state().pos[1] <= start_y + 0.15:
+                raise AssertionError("pillar controller never entered airborne unsafe state")
+            accepted = self.interrupt("matrix_mid_pillar")
+            if not (accepted.ok and accepted.accepted):
+                raise AssertionError(f"pillar interrupt rejected: {accepted}")
             self.interrupted = True
         return result
 
@@ -453,6 +487,109 @@ def main() -> None:
             raise AssertionError(f"mid-break interrupt mutated target: {interrupted_break.to_payload()}")
         print(f"PASS mid_break_interrupt: reason={interrupted_break.reason} pos={interrupting_break_body.get_state().pos}")
 
+        x, z = BASE_X, BASE_Z + 80
+        setup_pillar_area(rcon, x, z)
+        teleport(rcon, (x, BASE_Y, z))
+        set_scaffold_inventory(rcon, 4)
+        pillar_policy = GovernancePolicy(
+            natural_regions=[Region("pillar-column", (x - 2, BASE_Y - 3, z - 2), (x + 2, BASE_Y + 7, z + 2))]
+        )
+        before_pillar = inventory_count(body, "cobblestone")
+        pillared = navigate(
+            body,
+            (x, BASE_Y + 2, z),
+            governance=pillar_policy,
+            config=NavigationRunConfig(
+                max_segments=6,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_place=False,
+                max_pillar_steps=3,
+            ),
+        )
+        after_pillar = inventory_count(body, "cobblestone")
+        pillar_reasons = [segment["terminal_reason"] for segment in (pillared.metrics or {}).get("segments", [])]
+        if not pillared.success or pillar_reasons.count("world_changed") < 2 or movement_total(pillared, "pillar") < 2:
+            raise AssertionError(f"pillar gate failed: {pillared.to_payload()}")
+        if before_pillar - after_pillar != 2:
+            raise AssertionError(f"pillar inventory delta wrong: {before_pillar}->{after_pillar}")
+        for pillar_pos in ((x, BASE_Y, z), (x, BASE_Y + 1, z)):
+            if block_type(body, pillar_pos) != "cobblestone" or pillar_pos not in pillar_policy.bot_placements:
+                raise AssertionError(f"pillar world/ledger truth missing at {pillar_pos}: {pillared.to_payload()}")
+        if body.get_state().pos[1] < BASE_Y + 1.8:
+            raise AssertionError(f"pillar returned before height gain: {body.get_state().pos}")
+        print(f"PASS pillar: pos={body.get_state().pos} reasons={pillar_reasons} inventory={before_pillar}->{after_pillar}")
+
+        x, z = BASE_X + 30, BASE_Z + 80
+        setup_pillar_area(rcon, x, z)
+        teleport(rcon, (x, BASE_Y, z))
+        set_scaffold_inventory(rcon, 4)
+        protected_pillar_pos = (x, BASE_Y, z)
+        denied_pillar_policy = GovernancePolicy(
+            natural_regions=[Region("pillar-any-of", (x - 20, BASE_Y - 3, z - 2), (x + 7, BASE_Y + 7, z + 2))],
+            protected_regions=[Region("player-floor", protected_pillar_pos, protected_pillar_pos)],
+        )
+        far_pillar_goal = (x - 16, BASE_Y, z)
+        before_denied_pillar = inventory_count(body, "cobblestone")
+        denied_pillar = navigate(
+            body,
+            GoalComposite((GoalNear((x, BASE_Y + 1, z), radius=0), GoalNear(far_pillar_goal, radius=0))),
+            governance=denied_pillar_policy,
+            config=NavigationRunConfig(
+                max_segments=5,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_place=False,
+                max_pillar_steps=2,
+            ),
+        )
+        after_denied_pillar = inventory_count(body, "cobblestone")
+        denied_pillar_reasons = [segment["terminal_reason"] for segment in (denied_pillar.metrics or {}).get("segments", [])]
+        if not denied_pillar.success or denied_pillar.metrics.get("selected_goal") != list(far_pillar_goal):
+            raise AssertionError(f"denied pillar did not select alternate goal: {denied_pillar.to_payload()}")
+        if "mutation_denied" not in denied_pillar_reasons:
+            raise AssertionError(f"protected pillar was not proposed and denied: {denied_pillar.to_payload()}")
+        if block_type(body, protected_pillar_pos) != "air" or before_denied_pillar != after_denied_pillar:
+            raise AssertionError(f"protected pillar mutated world/inventory: {denied_pillar.to_payload()}")
+        print(f"PASS pillar_denied_any_of: selected={far_pillar_goal} reasons={denied_pillar_reasons}")
+
+        x, z = BASE_X + 60, BASE_Z + 80
+        setup_pillar_area(rcon, x, z)
+        teleport(rcon, (x, BASE_Y, z))
+        set_scaffold_inventory(rcon, 4)
+        interrupt_pillar_policy = GovernancePolicy(
+            natural_regions=[Region("interrupt-pillar", (x - 2, BASE_Y - 3, z - 2), (x + 2, BASE_Y + 7, z + 2))]
+        )
+        interrupting_pillar_body = PillarInterruptingBody(BOT, rcon)
+        interrupting_pillar_body.last_seq = body.last_seq
+        before_interrupt_pillar = inventory_count(interrupting_pillar_body, "cobblestone")
+        interrupted_pillar = navigate(
+            interrupting_pillar_body,
+            (x, BASE_Y + 1, z),
+            governance=interrupt_pillar_policy,
+            config=NavigationRunConfig(
+                max_segments=3,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_place=False,
+                max_pillar_steps=1,
+            ),
+        )
+        after_interrupt_pillar = inventory_count(interrupting_pillar_body, "cobblestone")
+        interrupted_pillar_state = interrupting_pillar_body.get_state()
+        if interrupted_pillar.success or interrupted_pillar.reason != "interrupted":
+            raise AssertionError(f"mid-pillar interrupt terminal wrong: {interrupted_pillar.to_payload()}")
+        if block_type(interrupting_pillar_body, (x, BASE_Y, z)) != "cobblestone":
+            raise AssertionError(f"mid-pillar interrupt did not settle support: {interrupted_pillar.to_payload()}")
+        if before_interrupt_pillar - after_interrupt_pillar != 1 or (x, BASE_Y, z) not in interrupt_pillar_policy.bot_placements:
+            raise AssertionError(f"mid-pillar interrupt lost inventory/ledger truth: {interrupted_pillar.to_payload()}")
+        if interrupted_pillar_state.pos[1] < BASE_Y + 0.8:
+            raise AssertionError(f"mid-pillar interrupt returned before safe landing: {interrupted_pillar_state}")
+        print(
+            f"PASS mid_pillar_interrupt: reason={interrupted_pillar.reason} pos={interrupted_pillar_state.pos} "
+            f"inventory={before_interrupt_pillar}->{after_interrupt_pillar}"
+        )
+
         x, z = BASE_X + 70, BASE_Z + 40
         interrupted_bridge_pos = setup_bridge_lane(rcon, x, z)
         teleport(rcon, (x, BASE_Y, z))
@@ -494,7 +631,7 @@ def main() -> None:
         )
 
         command(rcon, f"player {BOT} kill")
-        print("SERVER NAVIGATION N2/N3 BRIDGE/BREAK MATRIX PASSED")
+        print("SERVER NAVIGATION N2/N3 BRIDGE/BREAK/PILLAR MATRIX PASSED")
 
 
 if __name__ == "__main__":

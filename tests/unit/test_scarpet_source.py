@@ -427,8 +427,38 @@ class ScarpetSourceTests(unittest.TestCase):
             re.S,
         )
         self.assertIsNotNone(cancel, "navigation mutation cancel function not found")
-        self.assertIn("if(mutation:'kind' == 'break',", cancel.group(1))
+        self.assertIn("if(mutation:'kind' == 'break' ||", cancel.group(1))
         self.assertIn("finish_navigation_mutation(name, false, reason)", cancel.group(1))
+
+    def test_server_navigation_pillar_uses_governed_physical_controller(self):
+        source = MINEBOT_SC.read_text()
+
+        for expected in (
+            "'allow_pillar' -> param_bool(params, 'allow_pillar', false)",
+            "'pillar_budget' -> floor(param_number(params, 'pillar_budget', 0))",
+            "'kind' -> 'pillar'",
+            "navigation_mutation_candidate(x, y + 1, z, 'pillar'",
+            "best_mutation_key = null",
+            "candidate:7 != null && h + new_g < best_mutation_score",
+            "if(best_mutation_key != null, best_mutation_key, start_key)",
+            "navigation_pillar_centered(name, mutation) -> (",
+            "start_navigation_pillar_jump(name, mutation) -> (",
+            "run_navigation_pillar_mutation_tick(name, mutation) -> (",
+            "place_aim(name, pos:0, pos:1, pos:2, 'up')",
+            "finish_navigation_mutation(name, true, 'pillared')",
+            "p:1 >= source:1 + 0.8",
+        ):
+            self.assertIn(expected, source)
+
+        pillar_tick = re.search(
+            r"run_navigation_pillar_mutation_tick\(name, mutation\) -> \((.*?)\n\);",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(pillar_tick, "navigation pillar mutation tick not found")
+        self.assertNotIn("setblock", pillar_tick.group(1))
+        self.assertNotIn("global_places:name", pillar_tick.group(1))
+        self.assertIn("navigation_mutation_safe_now(name)", pillar_tick.group(1))
 
     def test_server_navigation_freezes_capabilities_and_live_rechecks_edges(self):
         source = MINEBOT_SC.read_text()
@@ -443,6 +473,8 @@ class ScarpetSourceTests(unittest.TestCase):
             "'break_pickaxe' -> params:'break_pickaxe'",
             "'break_axe' -> params:'break_axe'",
             "'break_shovel' -> params:'break_shovel'",
+            "'allow_pillar' -> param_bool(params, 'allow_pillar', false)",
+            "'pillar_budget' -> floor(param_number(params, 'pillar_budget', 0))",
             "navigation_edge_valid(sx, sy, sz, tx, ty, tz, movement_kind, fall_depth, context)",
             "navigation_move_recheck_reason(name, m) -> (",
             "first_index + floor(number(nav:16)) - 1",
