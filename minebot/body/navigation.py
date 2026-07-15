@@ -75,6 +75,8 @@ class NavigationRunConfig:
     max_place_steps: int = 8
     allow_pillar: bool = True
     max_pillar_steps: int = 8
+    allow_downward: bool = True
+    max_downward_steps: int = 8
     scaffold_blocks: tuple[str, ...] = (
         "cobblestone",
         "cobbled_deepslate",
@@ -185,6 +187,8 @@ class NavigationTransactions:
             raise ValueError("max_place_steps must be >= 0")
         if cfg.max_pillar_steps < 0:
             raise ValueError("max_pillar_steps must be >= 0")
+        if cfg.max_downward_steps < 0:
+            raise ValueError("max_downward_steps must be >= 0")
         if timeout_s is not None:
             if timeout_s <= 0:
                 raise ValueError("timeout_s must be > 0")
@@ -211,6 +215,7 @@ class NavigationTransactions:
         broken_steps = 0
         placed_steps = 0
         pillar_steps = 0
+        downward_steps = 0
 
         segment_index = 0
         partial_segments = 0
@@ -263,6 +268,10 @@ class NavigationTransactions:
                         and cfg.max_pillar_steps > pillar_steps
                     ),
                     "pillar_budget": max(0, cfg.max_pillar_steps - pillar_steps),
+                    "allow_downward": bool(
+                        cfg.allow_downward and cfg.max_downward_steps > downward_steps
+                    ),
+                    "downward_budget": max(0, cfg.max_downward_steps - downward_steps),
                     "denied_mutations": [list(pos) for pos in sorted(denied_mutations)],
                 },
             )
@@ -304,6 +313,8 @@ class NavigationTransactions:
                     if bool(mutation.get("success")):
                         if mutation.get("kind") == "break":
                             broken_steps += 1
+                        if mutation.get("kind") == "downward":
+                            downward_steps += 1
                         if mutation.get("kind") in {"place", "pillar"} and mutation_pos is not None:
                             mutation_kind = str(mutation.get("kind"))
                             purpose = "pillar" if mutation_kind == "pillar" else "bridge"
@@ -498,7 +509,7 @@ class NavigationTransactions:
         block_type = str(proposal.get("block_type") or "unknown")
         allowed = False
         reason = "unsupported_mutation"
-        if mutation_kind == "break" and pos is not None and self.governance is not None:
+        if mutation_kind in {"break", "downward"} and pos is not None and self.governance is not None:
             try:
                 fact = self.body.perceive("blockAt", {"x": pos[0], "y": pos[1], "z": pos[2]})
             except Exception as exc:
@@ -2154,7 +2165,8 @@ def _navigation_capability_snapshot(body: Body, cfg: NavigationRunConfig) -> dic
     needs_break_inventory = cfg.allow_break and cfg.max_break_steps > 0
     needs_place_inventory = cfg.allow_place and cfg.max_place_steps > 0
     needs_pillar_inventory = cfg.allow_pillar and cfg.max_pillar_steps > 0
-    if not needs_break_inventory and not needs_place_inventory and not needs_pillar_inventory:
+    needs_downward_inventory = cfg.allow_downward and cfg.max_downward_steps > 0
+    if not needs_break_inventory and not needs_place_inventory and not needs_pillar_inventory and not needs_downward_inventory:
         return disabled
 
     start: int | None = 0

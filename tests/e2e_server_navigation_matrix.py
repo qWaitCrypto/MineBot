@@ -99,6 +99,13 @@ def setup_pillar_area(rcon, x: int, z: int, *, back_length: int = 20) -> None:
     command(rcon, f"fill {x - back_length} {BASE_Y - 1} {z - 2} {x + 7} {BASE_Y - 1} {z + 2} stone")
 
 
+def setup_downward_area(rcon, x: int, z: int, *, back_length: int = 20) -> None:
+    command(rcon, f"fill {x - back_length} {BASE_Y - 4} {z - 2} {x + 7} {BASE_Y + 4} {z + 2} air")
+    command(rcon, f"fill {x - back_length} {BASE_Y - 1} {z - 2} {x + 7} {BASE_Y - 1} {z + 2} stone")
+    command(rcon, f"setblock {x} {BASE_Y - 2} {z} stone")
+    command(rcon, f"setblock {x} {BASE_Y - 3} {z} stone")
+
+
 def inventory_count(body: ScarpetBody, item: str) -> int:
     wanted = item.removeprefix("minecraft:")
     return sum(
@@ -221,6 +228,41 @@ class PillarInterruptingBody(ScarpetBody):
             accepted = self.interrupt("matrix_mid_pillar")
             if not (accepted.ok and accepted.accepted):
                 raise AssertionError(f"pillar interrupt rejected: {accepted}")
+            self.interrupted = True
+        return result
+
+
+class DownwardInterruptingBody(ScarpetBody):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.interrupted = False
+
+    def execute(self, action):
+        start_y = self.get_state().pos[1] if action.name == "navigationMutationDecision" else None
+        result = super().execute(action)
+        if (
+            not self.interrupted
+            and action.name == "navigationMutationDecision"
+            and action.params.get("kind") == "downward"
+            and action.params.get("authorized") is True
+            and result.ok
+            and result.accepted
+            and start_y is not None
+        ):
+            deadline = time.monotonic() + 3.0
+            airborne = False
+            while time.monotonic() < deadline:
+                state = self.get_state()
+                on_ground = "0b" not in self.transport.command(f"data get entity {self.bot_name} OnGround")
+                if state.pos[1] < start_y - 0.05 and not on_ground:
+                    airborne = True
+                    break
+                time.sleep(0.01)
+            if not airborne:
+                raise AssertionError("downward controller never entered airborne unsafe state")
+            accepted = self.interrupt("matrix_mid_downward")
+            if not (accepted.ok and accepted.accepted):
+                raise AssertionError(f"downward interrupt rejected: {accepted}")
             self.interrupted = True
         return result
 
@@ -590,6 +632,132 @@ def main() -> None:
             f"inventory={before_interrupt_pillar}->{after_interrupt_pillar}"
         )
 
+        x, z = BASE_X, BASE_Z + 100
+        setup_downward_area(rcon, x, z)
+        teleport(rcon, (x, BASE_Y, z))
+        set_break_tool(rcon)
+        downward_policy = GovernancePolicy(
+            natural_regions=[Region("downward-column", (x - 2, BASE_Y - 5, z - 2), (x + 2, BASE_Y + 3, z + 2))]
+        )
+        downward = navigate(
+            body,
+            (x, BASE_Y - 2, z),
+            governance=downward_policy,
+            config=NavigationRunConfig(
+                max_segments=6,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                max_downward_steps=2,
+            ),
+        )
+        downward_reasons = [segment["terminal_reason"] for segment in (downward.metrics or {}).get("segments", [])]
+        if not downward.success or downward_reasons.count("world_changed") < 2 or movement_total(downward, "downward") < 2:
+            raise AssertionError(f"downward gate failed: {downward.to_payload()}")
+        for opened_pos in ((x, BASE_Y - 1, z), (x, BASE_Y - 2, z)):
+            if block_type(body, opened_pos) != "air":
+                raise AssertionError(f"downward did not open {opened_pos}: {downward.to_payload()}")
+        if body.get_state().pos[1] > BASE_Y - 1.8:
+            raise AssertionError(f"downward returned before landing: {body.get_state().pos}")
+        print(f"PASS downward: pos={body.get_state().pos} reasons={downward_reasons}")
+
+        x, z = BASE_X + 30, BASE_Z + 100
+        setup_downward_area(rcon, x, z)
+        teleport(rcon, (x, BASE_Y, z))
+        set_break_tool(rcon)
+        protected_downward_pos = (x, BASE_Y - 1, z)
+        denied_downward_policy = GovernancePolicy(
+            natural_regions=[Region("downward-any-of", (x - 20, BASE_Y - 5, z - 2), (x + 7, BASE_Y + 3, z + 2))],
+            protected_regions=[Region("player-floor", protected_downward_pos, protected_downward_pos)],
+        )
+        far_downward_goal = (x - 16, BASE_Y, z)
+        denied_downward = navigate(
+            body,
+            GoalComposite((GoalNear((x, BASE_Y - 1, z), radius=0), GoalNear(far_downward_goal, radius=0))),
+            governance=denied_downward_policy,
+            config=NavigationRunConfig(
+                max_segments=5,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                max_downward_steps=2,
+            ),
+        )
+        denied_downward_reasons = [
+            segment["terminal_reason"] for segment in (denied_downward.metrics or {}).get("segments", [])
+        ]
+        if not denied_downward.success or denied_downward.metrics.get("selected_goal") != list(far_downward_goal):
+            raise AssertionError(f"denied downward did not select alternate goal: {denied_downward.to_payload()}")
+        if "mutation_denied" not in denied_downward_reasons:
+            raise AssertionError(f"protected downward was not proposed and denied: {denied_downward.to_payload()}")
+        if block_type(body, protected_downward_pos) != "stone":
+            raise AssertionError(f"protected downward mutated floor: {denied_downward.to_payload()}")
+        print(f"PASS downward_denied_any_of: selected={far_downward_goal} reasons={denied_downward_reasons}")
+
+        x, z = BASE_X + 60, BASE_Z + 100
+        setup_downward_area(rcon, x, z)
+        command(rcon, f"setblock {x} {BASE_Y - 2} {z} air")
+        teleport(rcon, (x, BASE_Y, z))
+        set_break_tool(rcon)
+        unsafe_downward = navigate(
+            body,
+            (x, BASE_Y - 1, z),
+            governance=GovernancePolicy(
+                natural_regions=[Region("unsafe-downward", (x - 2, BASE_Y - 5, z - 2), (x + 2, BASE_Y + 3, z + 2))]
+            ),
+            config=NavigationRunConfig(
+                max_segments=2,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                max_downward_steps=2,
+            ),
+        )
+        if unsafe_downward.success or unsafe_downward.reason != "no_path":
+            raise AssertionError(f"unsupported downward did not return no_path: {unsafe_downward.to_payload()}")
+        if block_type(body, (x, BASE_Y - 1, z)) != "stone":
+            raise AssertionError(f"unsafe downward mutated floor: {unsafe_downward.to_payload()}")
+        print(f"PASS downward_unsafe_landing: reason={unsafe_downward.reason}")
+
+        x, z = BASE_X + 90, BASE_Z + 100
+        setup_downward_area(rcon, x, z)
+        teleport(rcon, (x, BASE_Y, z))
+        set_break_tool(rcon)
+        interrupt_downward_policy = GovernancePolicy(
+            natural_regions=[Region("interrupt-downward", (x - 2, BASE_Y - 5, z - 2), (x + 2, BASE_Y + 3, z + 2))]
+        )
+        interrupting_downward_body = DownwardInterruptingBody(BOT, rcon)
+        interrupting_downward_body.last_seq = body.last_seq
+        interrupted_downward = navigate(
+            interrupting_downward_body,
+            (x, BASE_Y - 1, z),
+            governance=interrupt_downward_policy,
+            config=NavigationRunConfig(
+                max_segments=3,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                max_downward_steps=1,
+            ),
+        )
+        interrupted_downward_state = interrupting_downward_body.get_state()
+        on_ground = "1b" in command(rcon, f"data get entity {BOT} OnGround", delay=0.0)
+        if interrupted_downward.success or interrupted_downward.reason != "interrupted":
+            raise AssertionError(f"mid-downward interrupt terminal wrong: {interrupted_downward.to_payload()}")
+        if block_type(interrupting_downward_body, (x, BASE_Y - 1, z)) != "air":
+            raise AssertionError(f"mid-downward interrupt did not finish floor break: {interrupted_downward.to_payload()}")
+        if not on_ground or interrupted_downward_state.pos[1] > BASE_Y - 0.8:
+            raise AssertionError(f"mid-downward interrupt returned before safe landing: {interrupted_downward_state}")
+        print(f"PASS mid_downward_interrupt: reason={interrupted_downward.reason} pos={interrupted_downward_state.pos}")
+
         x, z = BASE_X + 70, BASE_Z + 40
         interrupted_bridge_pos = setup_bridge_lane(rcon, x, z)
         teleport(rcon, (x, BASE_Y, z))
@@ -631,7 +799,7 @@ def main() -> None:
         )
 
         command(rcon, f"player {BOT} kill")
-        print("SERVER NAVIGATION N2/N3 BRIDGE/BREAK/PILLAR MATRIX PASSED")
+        print("SERVER NAVIGATION N2/N3 BRIDGE/BREAK/PILLAR/DOWNWARD MATRIX PASSED")
 
 
 if __name__ == "__main__":

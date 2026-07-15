@@ -460,6 +460,32 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertNotIn("global_places:name", pillar_tick.group(1))
         self.assertIn("navigation_mutation_safe_now(name)", pillar_tick.group(1))
 
+    def test_server_navigation_downward_uses_governed_land_first_controller(self):
+        source = MINEBOT_SC.read_text()
+
+        for expected in (
+            "'allow_downward' -> param_bool(params, 'allow_downward', false)",
+            "'downward_budget' -> floor(param_number(params, 'downward_budget', 0))",
+            "'kind' -> 'downward'",
+            "navigation_mutation_candidate(x, y - 1, z, 'downward'",
+            "'purpose' -> 'downward'",
+            "run_navigation_downward_mutation_tick(name, mutation) -> (",
+            "p:1 <= source:1 - 0.8 && navigation_mutation_safe_now(name)",
+            "finish_navigation_mutation(name, true, 'descended')",
+            "finish_navigation_mutation(name, false, mutation:'cancel_reason')",
+        ):
+            self.assertIn(expected, source)
+
+        downward_tick = re.search(
+            r"run_navigation_downward_mutation_tick\(name, mutation\) -> \((.*?)\n\);",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(downward_tick, "navigation downward mutation tick not found")
+        self.assertNotIn("setblock", downward_tick.group(1))
+        self.assertNotIn("global_mines:name", downward_tick.group(1))
+        self.assertIn("navigation_mutation_safe_now(name)", downward_tick.group(1))
+
     def test_server_navigation_freezes_capabilities_and_live_rechecks_edges(self):
         source = MINEBOT_SC.read_text()
 
@@ -475,6 +501,8 @@ class ScarpetSourceTests(unittest.TestCase):
             "'break_shovel' -> params:'break_shovel'",
             "'allow_pillar' -> param_bool(params, 'allow_pillar', false)",
             "'pillar_budget' -> floor(param_number(params, 'pillar_budget', 0))",
+            "'allow_downward' -> param_bool(params, 'allow_downward', false)",
+            "'downward_budget' -> floor(param_number(params, 'downward_budget', 0))",
             "navigation_edge_valid(sx, sy, sz, tx, ty, tz, movement_kind, fall_depth, context)",
             "navigation_move_recheck_reason(name, m) -> (",
             "first_index + floor(number(nav:16)) - 1",

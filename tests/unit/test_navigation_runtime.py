@@ -692,6 +692,8 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(action.params["break_timeout_ticks"], 300)
         self.assertFalse(action.params["allow_pillar"])
         self.assertEqual(action.params["pillar_budget"], 8)
+        self.assertTrue(action.params["allow_downward"])
+        self.assertEqual(action.params["downward_budget"], 8)
 
     def test_navigate_to_reads_paginated_inventory_before_enabling_bridge(self):
         body = InventoryNavigationBody(
@@ -758,7 +760,12 @@ class NavigationRuntimeTests(unittest.TestCase):
         runtime = NavigationTransactions(no_budget, FakeNavigator([]))
         result = runtime.navigate_to(
             (3, 64, 0),
-            config=NavigationRunConfig(allow_break=False, max_place_steps=0, allow_pillar=False),
+            config=NavigationRunConfig(
+                allow_break=False,
+                max_place_steps=0,
+                allow_pillar=False,
+                allow_downward=False,
+            ),
         )
 
         self.assertTrue(result.success)
@@ -785,6 +792,31 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(action.params["scaffold_item"], "cobblestone")
         self.assertEqual(action.params["scaffold_count"], 4)
         self.assertEqual(action.params["pillar_budget"], 2)
+
+    def test_navigate_to_can_enable_downward_without_other_terrain_mutations(self):
+        body = InventoryNavigationBody(
+            [state_at((0, 64, 0))],
+            [inventory_page([inventory_slot(0, "minecraft:diamond_pickaxe", 1)], complete=True)],
+        )
+        runtime = NavigationTransactions(body, FakeNavigator([]))
+
+        result = runtime.navigate_to(
+            (0, 63, 0),
+            config=NavigationRunConfig(
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                allow_downward=True,
+                max_downward_steps=2,
+            ),
+        )
+
+        self.assertTrue(result.success)
+        action = body.actions[0]
+        self.assertFalse(action.params["allow_break"])
+        self.assertTrue(action.params["allow_downward"])
+        self.assertEqual(action.params["downward_budget"], 2)
+        self.assertEqual(action.params["break_pickaxe"], "diamond_pickaxe")
 
     def test_navigate_to_authorizes_verified_bridge_and_records_placement(self):
         bridge_pos = (1, 63, 0)
@@ -970,6 +1002,70 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(placement.purpose, "pillar")
         self.assertEqual(placement.block_type, "cobblestone")
 
+    def test_navigate_to_authorizes_downward_and_decrements_its_budget(self):
+        floor_pos = (0, 63, 0)
+        body = MutationNavigationBody(
+            [state_at((0, 64, 0)), state_at((0, 63, 0))],
+            [inventory_page([inventory_slot(0, "minecraft:diamond_pickaxe", 1)], complete=True)],
+            [
+                (
+                    "navigateMutationProposed",
+                    {
+                        "proposal_id": "proposal-downward-1",
+                        "kind": "downward",
+                        "pos": list(floor_pos),
+                        "source": [0, 64, 0],
+                        "block_type": "stone",
+                        "before_type": "stone",
+                        "purpose": "downward",
+                        "tool_item": "diamond_pickaxe",
+                    },
+                ),
+                (
+                    "navigateMutationDone",
+                    {
+                        "proposal_id": "proposal-downward-1",
+                        "kind": "downward",
+                        "pos": list(floor_pos),
+                        "block_type": "stone",
+                        "success": True,
+                        "reason": "descended",
+                        "block_now": "air",
+                        "decision_reason": "allowed_natural",
+                    },
+                ),
+                ("navigateDone", {"reason": "world_changed", "nav_reason": "world_changed"}),
+                ("navigateDone", {"reason": "arrived", "nav_reason": "arrived", "arrived": True}),
+            ],
+            blocks={floor_pos: ("stone", "SOLID")},
+        )
+        policy = GovernancePolicy(
+            natural_regions=[Region("downward-column", (-2, 0, -2), (2, 100, 2))]
+        )
+        runtime = NavigationTransactions.server_side(body, policy)
+
+        result = runtime.navigate_to(
+            (0, 63, 0),
+            break_context=BreakContext.TRAVEL,
+            config=NavigationRunConfig(
+                max_segments=3,
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                max_downward_steps=2,
+            ),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        decision = body.actions[1]
+        self.assertTrue(decision.params["authorized"])
+        self.assertEqual(decision.params["kind"], "downward")
+        self.assertEqual(decision.params["reason"], "allowed_natural")
+        self.assertEqual(body.actions[0].params["downward_budget"], 2)
+        self.assertEqual(body.actions[2].params["downward_budget"], 1)
+        self.assertEqual(body.actions[2].params["break_budget"], 8)
+        self.assertIn(("blockAt", {"x": 0, "y": 63, "z": 0}), body.perceptions)
+
     def test_navigate_to_denies_protected_headroom_break_and_preserves_world_fact(self):
         break_pos = (1, 65, 0)
         body = MutationNavigationBody(
@@ -1115,6 +1211,8 @@ class NavigationRuntimeTests(unittest.TestCase):
             runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_place_steps=-1))
         with self.assertRaises(ValueError):
             runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_pillar_steps=-1))
+        with self.assertRaises(ValueError):
+            runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_downward_steps=-1))
 
     def test_navigate_to_returns_failure_on_stuck(self):
         nav = FakeNavigator([_segment("arrived", (10, 64, 0), success=True, reason="arrived")])

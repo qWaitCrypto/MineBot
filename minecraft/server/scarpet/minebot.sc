@@ -3766,6 +3766,8 @@ navigation_context_from_params(params) -> (
     'allow_place' -> param_bool(params, 'allow_place', false),
     'allow_pillar' -> param_bool(params, 'allow_pillar', false),
     'pillar_budget' -> floor(param_number(params, 'pillar_budget', 0)),
+    'allow_downward' -> param_bool(params, 'allow_downward', false),
+    'downward_budget' -> floor(param_number(params, 'downward_budget', 0)),
     'origin_y' -> 0,
     'scaffold_item' -> params:'scaffold_item',
     'scaffold_count' -> floor(param_number(params, 'scaffold_count', 0)),
@@ -3779,7 +3781,7 @@ navigation_default_context() -> (
 );
 
 navigation_context_json(context) -> (
-  str('{"allow_diagonal":%s,"allow_ascend":%s,"allow_descend":%s,"allow_swim":%s,"max_fall_depth":%d,"allow_break":%s,"break_budget":%d,"break_timeout_ticks":%d,"break_pickaxe":%s,"break_axe":%s,"break_shovel":%s,"allow_place":%s,"allow_pillar":%s,"pillar_budget":%d,"scaffold_item":%s,"scaffold_count":%d,"place_budget":%d}',
+  str('{"allow_diagonal":%s,"allow_ascend":%s,"allow_descend":%s,"allow_swim":%s,"max_fall_depth":%d,"allow_break":%s,"break_budget":%d,"break_timeout_ticks":%d,"break_pickaxe":%s,"break_axe":%s,"break_shovel":%s,"allow_place":%s,"allow_pillar":%s,"pillar_budget":%d,"allow_downward":%s,"downward_budget":%d,"scaffold_item":%s,"scaffold_count":%d,"place_budget":%d}',
     json_bool(bool(context:'allow_diagonal')),
     json_bool(bool(context:'allow_ascend')),
     json_bool(bool(context:'allow_descend')),
@@ -3794,6 +3796,8 @@ navigation_context_json(context) -> (
     json_bool(bool(context:'allow_place')),
     json_bool(bool(context:'allow_pillar')),
     floor(number(context:'pillar_budget')),
+    json_bool(bool(context:'allow_downward')),
+    floor(number(context:'downward_budget')),
     json_string(context:'scaffold_item'),
     floor(number(context:'scaffold_count')),
     floor(number(context:'place_budget')))
@@ -3965,6 +3969,20 @@ navigation_neighbors(x, y, z, context) -> (
     if(up == 'LIQUID', neighbors += navigation_candidate(x, y + 1, z, 'swim', 3.0, 0, 'surface_or_stable_water'));
     if(down == 'LIQUID', neighbors += navigation_candidate(x, y - 1, z, 'swim', 3.0, 0, 'surface_or_stable_water'))
   );
+  downward_floor_type = '' + block(x, y - 1, z);
+  downward_support_type = '' + block(x, y - 2, z);
+  if(bool(context:'allow_downward') && floor(number(context:'downward_budget')) > 0 && probe_walkability(x, y, z) == 'WALK' && block_kind(downward_floor_type) == 'SOLID' && block_kind(downward_support_type) == 'SOLID' && !is_lava_at(x, y, z) && !navigation_mutation_denied(context, x, y - 1, z),
+    mutation = {
+      'kind' -> 'downward',
+      'pos' -> l(x, y - 1, z),
+      'source' -> l(x, y, z),
+      'block_type' -> downward_floor_type,
+      'before_type' -> downward_floor_type,
+      'purpose' -> 'downward',
+      'tool_item' -> navigation_break_tool(context, downward_floor_type)
+    };
+    neighbors += navigation_mutation_candidate(x, y - 1, z, 'downward', 10.0, 'land_first', mutation)
+  );
   pillar_used = y - floor(number(context:'origin_y'));
   pillar_capacity = min(floor(number(context:'pillar_budget')), floor(number(context:'scaffold_count')));
   pillar_feet_type = '' + block(x, y, z);
@@ -4077,6 +4095,7 @@ navigation_movement_counts_json(moves) -> (
   break_count = 0;
   place = 0;
   pillar = 0;
+  downward = 0;
   loop(length(moves),
     kind = moves:_;
     if(kind == 'walk', walk += 1);
@@ -4087,9 +4106,10 @@ navigation_movement_counts_json(moves) -> (
     if(kind == 'fall', fall += 1);
     if(kind == 'break', break_count += 1);
     if(kind == 'place', place += 1);
-    if(kind == 'pillar', pillar += 1)
+    if(kind == 'pillar', pillar += 1);
+    if(kind == 'downward', downward += 1)
   );
-  str('{"walk":%d,"diagonal":%d,"ascend":%d,"descend":%d,"swim":%d,"fall":%d,"break":%d,"place":%d,"pillar":%d}', walk, diagonal, ascend, descend, swim, fall, break_count, place, pillar)
+  str('{"walk":%d,"diagonal":%d,"ascend":%d,"descend":%d,"swim":%d,"fall":%d,"break":%d,"place":%d,"pillar":%d,"downward":%d}', walk, diagonal, ascend, descend, swim, fall, break_count, place, pillar, downward)
 );
 
 navigation_cancel_profile(path) -> (
@@ -4511,7 +4531,7 @@ stage_navigation_mutation(name, nav) -> (
         'tool_item' -> mutation:'tool_item',
         'status' -> 'waiting',
         'ticks' -> 0,
-        'timeout_ticks' -> if(mutation:'kind' == 'break', floor(number(nav:14:'break_timeout_ticks')), if(mutation:'kind' == 'pillar', 100, 40)),
+        'timeout_ticks' -> if(mutation:'kind' == 'break' || mutation:'kind' == 'downward', floor(number(nav:14:'break_timeout_ticks')), if(mutation:'kind' == 'pillar', 100, 40)),
         'cancel_reason' -> null,
         'result_reason' -> null,
         'decision_reason' -> null
@@ -4555,7 +4575,7 @@ decide_navigation_mutation(name, params) -> (
           finish_navigation_mutation(name, false, 'world_changed');
           true
         ,
-          if(mutation:'kind' == 'break',
+          if(mutation:'kind' == 'break' || mutation:'kind' == 'downward',
             if(mutation:'tool_item' != null && !navigation_select_item(name, mutation:'tool_item'),
               finish_navigation_mutation(name, false, 'missing_capability');
               true
@@ -4621,6 +4641,58 @@ run_navigation_break_mutation_tick(name, mutation) -> (
       ,
         mutation:'ticks' = ticks;
         global_navigation_mutations:name = mutation
+      )
+    )
+  )
+);
+
+run_navigation_downward_mutation_tick(name, mutation) -> (
+  pos = mutation:'pos';
+  source = mutation:'source';
+  block_now = '' + block(pos:0, pos:1, pos:2);
+  p = bot_pos(name);
+  if(block_kind(block_now) == 'CLEAR',
+    if(mutation:'status' != 'settling_success',
+      stop_body(name);
+      mutation:'status' = 'settling_success';
+      mutation:'result_reason' = 'descended';
+      global_navigation_mutations:name = mutation
+    );
+    if(p != null && p:1 <= source:1 - 0.8 && navigation_mutation_safe_now(name),
+      finish_navigation_mutation(name, true, 'descended')
+    )
+  ,
+    if(block_now != mutation:'before_type',
+      stop_body(name);
+      if(navigation_mutation_safe_now(name),
+        finish_navigation_mutation(name, false, 'world_changed')
+      ,
+        mutation:'status' = 'settling_failure';
+        mutation:'result_reason' = 'world_changed';
+        global_navigation_mutations:name = mutation
+      )
+    ,
+      ticks = floor(number(mutation:'ticks')) + 1;
+      mutation:'ticks' = ticks;
+      global_navigation_mutations:name = mutation;
+      if(mutation:'cancel_reason' != null && navigation_mutation_safe_now(name),
+        stop_body(name);
+        finish_navigation_mutation(name, false, mutation:'cancel_reason')
+      ,
+        if(ticks > floor(number(mutation:'timeout_ticks')),
+          stop_body(name);
+          if(navigation_mutation_safe_now(name),
+            finish_navigation_mutation(name, false, if(mutation:'cancel_reason' != null, mutation:'cancel_reason', 'downward_timeout'))
+          ,
+            mutation:'status' = 'settling_failure';
+            mutation:'result_reason' = 'downward_timeout';
+            global_navigation_mutations:name = mutation
+          )
+        ,
+          if(mutation:'status' == 'settling_failure' && navigation_mutation_safe_now(name),
+            finish_navigation_mutation(name, false, if(mutation:'cancel_reason' != null, mutation:'cancel_reason', mutation:'result_reason'))
+          )
+        )
       )
     )
   )
@@ -4778,10 +4850,14 @@ run_navigation_mutation_tick(name, mutation) -> (
   if(mutation:'kind' == 'break',
     run_navigation_break_mutation_tick(name, mutation)
   ,
-    if(mutation:'kind' == 'pillar',
-      run_navigation_pillar_mutation_tick(name, mutation)
+    if(mutation:'kind' == 'downward',
+      run_navigation_downward_mutation_tick(name, mutation)
     ,
-      run_navigation_place_mutation_tick(name, mutation)
+      if(mutation:'kind' == 'pillar',
+        run_navigation_pillar_mutation_tick(name, mutation)
+      ,
+        run_navigation_place_mutation_tick(name, mutation)
+      )
     )
   )
 );
