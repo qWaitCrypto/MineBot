@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from minebot.body import NavigationRunConfig, NavigationTransactions  # noqa: E402
-from minebot.game import GovernancePolicy, Region, ScarpetBody  # noqa: E402
+from minebot.game import BreakContext, GovernancePolicy, Region, ScarpetBody  # noqa: E402
 from minebot.game.navigation import GoalComposite, GoalNear  # noqa: E402
 from tests.e2e_support import connect_or_skip, spawn_or_fail  # noqa: E402
 
@@ -54,10 +54,12 @@ def navigate(
     *,
     config: NavigationRunConfig | None = None,
     governance: GovernancePolicy | None = None,
+    break_context: BreakContext = BreakContext.TRAVEL,
 ):
     runtime = NavigationTransactions.server_side(body, governance or GovernancePolicy())
     return runtime.navigate_to(
         target,
+        break_context=break_context,
         config=config or NavigationRunConfig(max_segments=5, segment_timeout_s=8.0, min_partial_progress=2),
     )
 
@@ -76,6 +78,20 @@ def setup_bridge_lane(rcon, x: int, z: int, *, back_length: int = 2) -> tuple[in
 def set_scaffold_inventory(rcon, count: int) -> None:
     command(rcon, f"clear {BOT}")
     command(rcon, f"script in minebot run inventory_set('{BOT}', 0, {count}, 'minecraft:cobblestone')")
+
+
+def set_break_tool(rcon) -> None:
+    command(rcon, f"clear {BOT}")
+    command(rcon, f"script in minebot run inventory_set('{BOT}', 0, 1, 'minecraft:diamond_pickaxe')")
+    command(rcon, f"script in minebot run inventory_set('{BOT}', 1, 1, 'minecraft:apple')")
+    command(rcon, f"player {BOT} hotbar 2")
+
+
+def setup_break_lane(rcon, x: int, z: int, *, back_length: int = 8) -> None:
+    command(rcon, f"fill {x - back_length} {BASE_Y - 3} {z - 2} {x + 7} {BASE_Y + 4} {z + 2} air")
+    command(rcon, f"fill {x - back_length} {BASE_Y - 1} {z} {x + 7} {BASE_Y - 1} {z} stone")
+    command(rcon, f"fill {x - back_length} {BASE_Y} {z - 1} {x + 7} {BASE_Y + 2} {z - 1} stone_bricks")
+    command(rcon, f"fill {x - back_length} {BASE_Y} {z + 1} {x + 7} {BASE_Y + 2} {z + 1} stone_bricks")
 
 
 def inventory_count(body: ScarpetBody, item: str) -> int:
@@ -148,6 +164,29 @@ class BridgeInterruptingBody(ScarpetBody):
             accepted = self.interrupt("matrix_mid_bridge")
             if not (accepted.ok and accepted.accepted):
                 raise AssertionError(f"bridge interrupt rejected: {accepted}")
+            self.interrupted = True
+        return result
+
+
+class BreakInterruptingBody(ScarpetBody):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.interrupted = False
+
+    def execute(self, action):
+        result = super().execute(action)
+        if (
+            not self.interrupted
+            and action.name == "navigationMutationDecision"
+            and action.params.get("kind") == "break"
+            and action.params.get("authorized") is True
+            and result.ok
+            and result.accepted
+        ):
+            time.sleep(0.05)
+            accepted = self.interrupt("matrix_mid_break")
+            if not (accepted.ok and accepted.accepted):
+                raise AssertionError(f"break interrupt rejected: {accepted}")
             self.interrupted = True
         return result
 
@@ -320,6 +359,100 @@ def main() -> None:
             raise AssertionError(f"protected bridge entered ledger: {denied_policy.bot_placements}")
         print(f"PASS bridge_denied_any_of: selected={far_goal} reasons={switched_reasons} inventory={before_denied}")
 
+        x, z = BASE_X, BASE_Z + 60
+        setup_break_lane(rcon, x, z)
+        command(rcon, f"fill {x + 2} {BASE_Y} {z} {x + 2} {BASE_Y + 2} {z} deepslate")
+        teleport(rcon, (x, BASE_Y, z))
+        set_break_tool(rcon)
+        break_policy = GovernancePolicy(
+            natural_regions=[Region("break-lane", (x - 8, BASE_Y - 4, z - 2), (x + 7, BASE_Y + 5, z + 2))]
+        )
+        broken = navigate(
+            body,
+            (x + 5, BASE_Y, z),
+            governance=break_policy,
+            break_context=BreakContext.TRAVEL,
+            config=NavigationRunConfig(
+                max_segments=7,
+                segment_timeout_s=8.0,
+                min_partial_progress=2,
+                allow_place=False,
+                max_break_steps=3,
+            ),
+        )
+        break_reasons = [segment["terminal_reason"] for segment in (broken.metrics or {}).get("segments", [])]
+        if not broken.success or break_reasons.count("world_changed") < 2 or movement_total(broken, "break") < 2:
+            raise AssertionError(f"break/headroom gate failed: {broken.to_payload()}")
+        for cleared in ((x + 2, BASE_Y, z), (x + 2, BASE_Y + 1, z)):
+            if block_type(body, cleared) != "air":
+                raise AssertionError(f"governed break did not clear {cleared}: {block_type(body, cleared)}")
+        if block_type(body, (x + 2, BASE_Y + 2, z)) != "deepslate":
+            raise AssertionError("headroom gate mutated an unproposed ceiling block")
+        print(f"PASS break_headroom: pos={body.get_state().pos} reasons={break_reasons}")
+
+        x, z = BASE_X + 30, BASE_Z + 60
+        setup_break_lane(rcon, x, z, back_length=20)
+        protected_headroom = (x + 2, BASE_Y + 1, z)
+        command(rcon, f"setblock {protected_headroom[0]} {protected_headroom[1]} {protected_headroom[2]} stone")
+        teleport(rcon, (x, BASE_Y, z))
+        set_break_tool(rcon)
+        denied_break_policy = GovernancePolicy(
+            natural_regions=[Region("break-any-of", (x - 20, BASE_Y - 4, z - 2), (x + 7, BASE_Y + 5, z + 2))],
+            protected_regions=[Region("player-headroom", protected_headroom, protected_headroom)],
+        )
+        far_break_goal = (x - 16, BASE_Y, z)
+        denied_break = navigate(
+            body,
+            GoalComposite((GoalNear((x + 5, BASE_Y, z), radius=0), GoalNear(far_break_goal, radius=0))),
+            governance=denied_break_policy,
+            break_context=BreakContext.TRAVEL,
+            config=NavigationRunConfig(
+                max_segments=5,
+                segment_timeout_s=8.0,
+                min_partial_progress=2,
+                allow_place=False,
+                max_break_steps=2,
+            ),
+        )
+        denied_break_reasons = [segment["terminal_reason"] for segment in (denied_break.metrics or {}).get("segments", [])]
+        if not denied_break.success or denied_break.metrics.get("selected_goal") != list(far_break_goal):
+            raise AssertionError(f"denied break did not select alternate goal: {denied_break.to_payload()}")
+        if "mutation_denied" not in denied_break_reasons:
+            raise AssertionError(f"protected break was not proposed and denied: {denied_break.to_payload()}")
+        if block_type(body, protected_headroom) != "stone":
+            raise AssertionError(f"protected break mutated world: {denied_break.to_payload()}")
+        print(f"PASS break_denied_any_of: selected={far_break_goal} reasons={denied_break_reasons}")
+
+        x, z = BASE_X + 60, BASE_Z + 60
+        setup_break_lane(rcon, x, z)
+        interrupted_break_pos = (x + 2, BASE_Y + 1, z)
+        command(rcon, f"setblock {interrupted_break_pos[0]} {interrupted_break_pos[1]} {interrupted_break_pos[2]} obsidian")
+        teleport(rcon, (x, BASE_Y, z))
+        command(rcon, f"clear {BOT}")
+        interrupted_break_policy = GovernancePolicy(
+            natural_regions=[Region("interrupt-break", (x - 8, BASE_Y - 4, z - 2), (x + 7, BASE_Y + 5, z + 2))]
+        )
+        interrupting_break_body = BreakInterruptingBody(BOT, rcon)
+        interrupting_break_body.last_seq = body.last_seq
+        interrupted_break = navigate(
+            interrupting_break_body,
+            (x + 5, BASE_Y, z),
+            governance=interrupted_break_policy,
+            break_context=BreakContext.TRAVEL,
+            config=NavigationRunConfig(
+                max_segments=3,
+                segment_timeout_s=8.0,
+                min_partial_progress=2,
+                allow_place=False,
+                max_break_steps=1,
+            ),
+        )
+        if interrupted_break.success or interrupted_break.reason != "interrupted":
+            raise AssertionError(f"mid-break interrupt terminal wrong: {interrupted_break.to_payload()}")
+        if block_type(interrupting_break_body, interrupted_break_pos) != "obsidian":
+            raise AssertionError(f"mid-break interrupt mutated target: {interrupted_break.to_payload()}")
+        print(f"PASS mid_break_interrupt: reason={interrupted_break.reason} pos={interrupting_break_body.get_state().pos}")
+
         x, z = BASE_X + 70, BASE_Z + 40
         interrupted_bridge_pos = setup_bridge_lane(rcon, x, z)
         teleport(rcon, (x, BASE_Y, z))
@@ -361,7 +494,7 @@ def main() -> None:
         )
 
         command(rcon, f"player {BOT} kill")
-        print("SERVER NAVIGATION N2/N3 BRIDGE MATRIX PASSED")
+        print("SERVER NAVIGATION N2/N3 BRIDGE/BREAK MATRIX PASSED")
 
 
 if __name__ == "__main__":

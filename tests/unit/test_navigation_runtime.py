@@ -687,13 +687,24 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertFalse(action.params["allow_swim"])
         self.assertEqual(action.params["max_fall_depth"], 1)
         self.assertEqual(action.params["recheck_lookahead"], 2)
+        self.assertTrue(action.params["allow_break"])
+        self.assertEqual(action.params["break_budget"], 8)
+        self.assertEqual(action.params["break_timeout_ticks"], 300)
 
     def test_navigate_to_reads_paginated_inventory_before_enabling_bridge(self):
         body = InventoryNavigationBody(
             [state_at((0, 64, 0))],
             [
                 inventory_page([inventory_slot(0, "minecraft:apple", 2)], complete=False, next_start=12),
-                inventory_page([inventory_slot(12, "minecraft:cobblestone", 7)], complete=True),
+                inventory_page(
+                    [
+                        inventory_slot(12, "minecraft:cobblestone", 7),
+                        inventory_slot(13, "minecraft:diamond_pickaxe", 1),
+                        inventory_slot(14, "minecraft:iron_axe", 1),
+                        inventory_slot(15, "minecraft:stone_shovel", 1),
+                    ],
+                    complete=True,
+                ),
             ],
         )
         runtime = NavigationTransactions(body, FakeNavigator([]))
@@ -710,6 +721,9 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(action.params["scaffold_item"], "cobblestone")
         self.assertEqual(action.params["scaffold_count"], 7)
         self.assertEqual(action.params["place_budget"], 8)
+        self.assertEqual(action.params["break_pickaxe"], "diamond_pickaxe")
+        self.assertEqual(action.params["break_axe"], "iron_axe")
+        self.assertEqual(action.params["break_shovel"], "stone_shovel")
 
     def test_navigate_to_disables_bridge_for_incomplete_inventory_without_cursor(self):
         body = InventoryNavigationBody(
@@ -742,7 +756,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         runtime = NavigationTransactions(no_budget, FakeNavigator([]))
         result = runtime.navigate_to(
             (3, 64, 0),
-            config=NavigationRunConfig(max_place_steps=0),
+            config=NavigationRunConfig(allow_break=False, max_place_steps=0),
         )
 
         self.assertTrue(result.success)
@@ -815,6 +829,132 @@ class NavigationRuntimeTests(unittest.TestCase):
             [event["event"] for event in mutation_events],
             ["navigateMutationProposed", "navigateMutationDone"],
         )
+
+    def test_navigate_to_authorizes_governed_headroom_break_and_decrements_budget(self):
+        break_pos = (1, 65, 0)
+        body = MutationNavigationBody(
+            [state_at((0, 64, 0)), state_at((0, 64, 0))],
+            [inventory_page([], complete=True)],
+            [
+                (
+                    "navigateMutationProposed",
+                    {
+                        "proposal_id": "proposal-break-1",
+                        "kind": "break",
+                        "pos": list(break_pos),
+                        "source": [0, 64, 0],
+                        "block_type": "stone",
+                        "before_type": "stone",
+                        "purpose": "headroom",
+                    },
+                ),
+                (
+                    "navigateMutationDone",
+                    {
+                        "proposal_id": "proposal-break-1",
+                        "kind": "break",
+                        "pos": list(break_pos),
+                        "block_type": "stone",
+                        "success": True,
+                        "reason": "broken",
+                        "block_now": "air",
+                        "decision_reason": "allowed_natural",
+                    },
+                ),
+                ("navigateDone", {"reason": "world_changed", "nav_reason": "world_changed"}),
+                ("navigateDone", {"reason": "arrived", "nav_reason": "arrived", "arrived": True}),
+            ],
+            blocks={break_pos: ("stone", "SOLID")},
+        )
+        policy = GovernancePolicy(
+            natural_regions=[Region("natural-corridor", (-4, 0, -4), (8, 100, 4))]
+        )
+        runtime = NavigationTransactions.server_side(body, policy)
+
+        result = runtime.navigate_to(
+            (4, 64, 0),
+            break_context=BreakContext.TRAVEL,
+            config=NavigationRunConfig(max_segments=3, max_break_steps=2),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(
+            [action.name for action in body.actions],
+            ["navigateTo", "navigationMutationDecision", "navigateTo"],
+        )
+        decision = body.actions[1]
+        self.assertTrue(decision.params["authorized"])
+        self.assertEqual(decision.params["reason"], "allowed_natural")
+        self.assertEqual(decision.params["kind"], "break")
+        self.assertEqual(body.actions[0].params["break_budget"], 2)
+        self.assertEqual(body.actions[2].params["break_budget"], 1)
+        self.assertIn(("blockAt", {"x": 1, "y": 65, "z": 0}), body.perceptions)
+
+    def test_navigate_to_denies_protected_headroom_break_and_preserves_world_fact(self):
+        break_pos = (1, 65, 0)
+        body = MutationNavigationBody(
+            [state_at((0, 64, 0)), state_at((0, 64, 0))],
+            [inventory_page([], complete=True)],
+            [
+                (
+                    "navigateMutationProposed",
+                    {
+                        "proposal_id": "proposal-break-denied",
+                        "kind": "break",
+                        "pos": list(break_pos),
+                        "source": [0, 64, 0],
+                        "block_type": "stone",
+                        "before_type": "stone",
+                        "purpose": "headroom",
+                    },
+                ),
+                (
+                    "navigateMutationDone",
+                    {
+                        "proposal_id": "proposal-break-denied",
+                        "kind": "break",
+                        "pos": list(break_pos),
+                        "block_type": "stone",
+                        "success": False,
+                        "reason": "mutation_denied",
+                        "block_now": "stone",
+                        "decision_reason": "protected_region",
+                    },
+                ),
+                ("navigateDone", {"reason": "mutation_denied", "nav_reason": "mutation_denied"}),
+                (
+                    "navigateDone",
+                    {
+                        "reason": "arrived",
+                        "nav_reason": "arrived",
+                        "arrived": True,
+                        "selected_goal": [-4, 64, 0],
+                    },
+                ),
+            ],
+            blocks={break_pos: ("stone", "SOLID")},
+        )
+        policy = GovernancePolicy(
+            natural_regions=[Region("natural-corridor", (-8, 0, -4), (8, 100, 4))],
+            protected_regions=[Region("player-wall", break_pos, break_pos)],
+        )
+        runtime = NavigationTransactions.server_side(body, policy)
+        goal = GoalComposite((GoalNear((4, 64, 0), radius=0), GoalNear((-4, 64, 0), radius=0)))
+
+        result = runtime.navigate_to(
+            goal,
+            break_context=BreakContext.TRAVEL,
+            config=NavigationRunConfig(max_segments=3, max_break_steps=2),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["selected_goal"], [-4, 64, 0])
+        decision = body.actions[1]
+        self.assertFalse(decision.params["authorized"])
+        self.assertEqual(decision.params["reason"], "protected_region")
+        self.assertEqual(body.blocks[break_pos], ("stone", "SOLID"))
+        self.assertEqual(body.actions[2].params["denied_mutations"], [list(break_pos)])
+        self.assertEqual(body.actions[2].params["break_budget"], 2)
 
     def test_navigate_to_blacklists_governance_denied_bridge_and_keeps_goal_set(self):
         denied_pos = (1, 63, 0)
@@ -889,6 +1029,8 @@ class NavigationRuntimeTests(unittest.TestCase):
             runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_safe_fall_depth=4))
         with self.assertRaises(ValueError):
             runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(recheck_lookahead=-1))
+        with self.assertRaises(ValueError):
+            runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_break_steps=-1))
         with self.assertRaises(ValueError):
             runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_place_steps=-1))
 

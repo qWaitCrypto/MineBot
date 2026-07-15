@@ -389,6 +389,47 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("request_navigation_mutation_cancel(name, 'interrupted')", interrupt_body)
         self.assertNotIn("finish_navigation_mutation(name, false, 'interrupted')", interrupt_body)
 
+    def test_server_navigation_breaks_governed_headroom_inside_navigation_owner(self):
+        source = MINEBOT_SC.read_text()
+
+        for expected in (
+            "'allow_break' -> param_bool(params, 'allow_break', false)",
+            "'break_budget' -> floor(param_number(params, 'break_budget', 0))",
+            "navigation_break_tool(context, block_type) -> (",
+            "'tool_item' -> navigation_break_tool(context, head_type)",
+            "'tool_item' -> navigation_break_tool(context, feet_type)",
+            "navigation_mutation_candidate(nx, y, nz, 'break'",
+            "'purpose' -> 'headroom'",
+            "'purpose' -> 'path'",
+            "mutation:'status' = 'breaking'",
+            "navigation_select_item(name, mutation:'tool_item')",
+            "run_navigation_break_mutation_tick(name, mutation) -> (",
+            "block_kind(block_now) == 'CLEAR'",
+            "finish_navigation_mutation(name, true, 'broken')",
+            "finish_navigation_mutation(name, false, 'break_timeout')",
+            "run('player ' + name + ' attack continuous')",
+            "mutation:'decision_reason' = params:'reason'",
+        ):
+            self.assertIn(expected, source)
+
+        break_tick = re.search(
+            r"run_navigation_break_mutation_tick\(name, mutation\) -> \((.*?)\n\);",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(break_tick, "navigation break mutation tick not found")
+        self.assertNotIn("setblock", break_tick.group(1))
+        self.assertNotIn("global_mines:name", break_tick.group(1))
+
+        cancel = re.search(
+            r"request_navigation_mutation_cancel\(name, reason\) -> \((.*?)\n\);",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(cancel, "navigation mutation cancel function not found")
+        self.assertIn("if(mutation:'kind' == 'break',", cancel.group(1))
+        self.assertIn("finish_navigation_mutation(name, false, reason)", cancel.group(1))
+
     def test_server_navigation_freezes_capabilities_and_live_rechecks_edges(self):
         source = MINEBOT_SC.read_text()
 
@@ -397,6 +438,11 @@ class ScarpetSourceTests(unittest.TestCase):
             "'allow_diagonal' -> param_bool(params, 'allow_diagonal', true)",
             "'allow_swim' -> param_bool(params, 'allow_swim', true)",
             "'max_fall_depth' -> max_fall_depth",
+            "'allow_break' -> param_bool(params, 'allow_break', false)",
+            "'break_timeout_ticks' -> break_timeout_ticks",
+            "'break_pickaxe' -> params:'break_pickaxe'",
+            "'break_axe' -> params:'break_axe'",
+            "'break_shovel' -> params:'break_shovel'",
             "navigation_edge_valid(sx, sy, sz, tx, ty, tz, movement_kind, fall_depth, context)",
             "navigation_move_recheck_reason(name, m) -> (",
             "first_index + floor(number(nav:16)) - 1",

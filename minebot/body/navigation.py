@@ -69,6 +69,8 @@ class NavigationRunConfig:
     allow_descend: bool = True
     allow_swim: bool = True
     max_safe_fall_depth: int = 3
+    allow_break: bool = True
+    max_break_steps: int = 8
     allow_place: bool = True
     max_place_steps: int = 8
     scaffold_blocks: tuple[str, ...] = (
@@ -83,7 +85,6 @@ class NavigationRunConfig:
     backtrack_cost_factor: float = 0.5
     unloaded_boundary_limit: int | None = None
     partial_tail_trim: int = 1
-    max_break_steps: int | None = None
     guard_target: Position | None = None
     max_worse_distance: float | None = None
     recovery_detour_distances: tuple[int, ...] = (1,)
@@ -176,6 +177,8 @@ class NavigationTransactions:
             raise ValueError("recheck_lookahead must be >= 0")
         if cfg.max_safe_fall_depth < 0 or cfg.max_safe_fall_depth > 3:
             raise ValueError("max_safe_fall_depth must be between 0 and 3")
+        if cfg.max_break_steps < 0:
+            raise ValueError("max_break_steps must be >= 0")
         if cfg.max_place_steps < 0:
             raise ValueError("max_place_steps must be >= 0")
         if timeout_s is not None:
@@ -193,6 +196,7 @@ class NavigationTransactions:
         nav_goal = normalize_goal(goal)
         state = self.body.get_state()
         start = _block_pos(state)
+        break_policy_context = BreakContext(break_context)
         goal_anchor = nav_goal.representative(start)
         server_goals, goal_set_preserved = _server_goal_set(nav_goal, start)
         gx, gy, gz = int(goal_anchor[0]), int(goal_anchor[1]), int(goal_anchor[2])
@@ -200,6 +204,7 @@ class NavigationTransactions:
         goal_radius = int(getattr(nav_goal, "radius", 0) or 0)
         capability_snapshot = _navigation_capability_snapshot(self.body, cfg)
         denied_mutations: set[Position] = set()
+        broken_steps = 0
         placed_steps = 0
 
         segment_index = 0
@@ -234,6 +239,12 @@ class NavigationTransactions:
                     "allow_swim": cfg.allow_swim,
                     "max_fall_depth": cfg.max_safe_fall_depth,
                     "recheck_lookahead": cfg.recheck_lookahead,
+                    "allow_break": bool(cfg.allow_break and cfg.max_break_steps > broken_steps),
+                    "break_budget": max(0, cfg.max_break_steps - broken_steps),
+                    "break_timeout_ticks": max(20, int(cfg.segment_timeout_s * 20)),
+                    "break_pickaxe": capability_snapshot["break_pickaxe"],
+                    "break_axe": capability_snapshot["break_axe"],
+                    "break_shovel": capability_snapshot["break_shovel"],
                     "allow_place": bool(capability_snapshot["allow_place"]),
                     "scaffold_item": capability_snapshot["scaffold_item"],
                     "scaffold_count": max(0, int(capability_snapshot["scaffold_count"]) - placed_steps),
@@ -270,17 +281,20 @@ class NavigationTransactions:
                     proposal = dict(terminal.data)
                     mutation_events.append({"event": terminal.name, "data": proposal})
                     last_proposal_pos = _event_position(proposal.get("pos"))
-                    self._answer_navigation_mutation(action.id, proposal)
+                    self._answer_navigation_mutation(action.id, proposal, break_context=break_policy_context)
                     continue
                 if terminal.name == "navigateMutationDone":
                     mutation = dict(terminal.data)
                     mutation_events.append({"event": terminal.name, "data": mutation})
                     mutation_pos = _event_position(mutation.get("pos"))
-                    if bool(mutation.get("success")) and mutation.get("kind") == "place" and mutation_pos is not None:
-                        placed_steps += 1
-                        block_type = str(mutation.get("block_type") or capability_snapshot["scaffold_item"] or "unknown")
-                        if self.governance is not None:
-                            self.governance.record_bot_placement(mutation_pos, block_type, "bridge", self.body.bot_name)
+                    if bool(mutation.get("success")):
+                        if mutation.get("kind") == "break":
+                            broken_steps += 1
+                        if mutation.get("kind") == "place" and mutation_pos is not None:
+                            placed_steps += 1
+                            block_type = str(mutation.get("block_type") or capability_snapshot["scaffold_item"] or "unknown")
+                            if self.governance is not None:
+                                self.governance.record_bot_placement(mutation_pos, block_type, "bridge", self.body.bot_name)
                     continue
                 break
             if not self.progress.generation_current(generation):
@@ -448,13 +462,41 @@ class NavigationTransactions:
 
         return _result(False, "segment_budget_exhausted", True, goal_anchor, executed, {"navigation_goal": nav_goal.payload()})
 
-    def _answer_navigation_mutation(self, navigation_action_id: str, proposal: dict[str, object]) -> None:
+    def _answer_navigation_mutation(
+        self,
+        navigation_action_id: str,
+        proposal: dict[str, object],
+        *,
+        break_context: BreakContext,
+    ) -> None:
         mutation_kind = str(proposal.get("kind") or "unknown")
         pos = _event_position(proposal.get("pos"))
         block_type = str(proposal.get("block_type") or "unknown")
         allowed = False
         reason = "unsupported_mutation"
-        if mutation_kind == "place" and pos is not None and self.governance is not None:
+        if mutation_kind == "break" and pos is not None and self.governance is not None:
+            try:
+                fact = self.body.perceive("blockAt", {"x": pos[0], "y": pos[1], "z": pos[2]})
+            except Exception as exc:
+                fact = None
+                reason = f"world_read_failed:{type(exc).__name__}"
+            observed_type = (
+                "unknown"
+                if fact is None
+                else str(fact.data.get("type") or "unknown").removeprefix("minecraft:")
+            )
+            proposed_type = block_type.removeprefix("minecraft:")
+            if fact is None:
+                pass
+            elif not fact.ok or not fact.complete:
+                reason = "world_read_failed"
+            elif observed_type != proposed_type:
+                reason = "world_changed"
+            else:
+                decision = self.governance.can_break(pos, observed_type, break_context)
+                allowed = decision.allowed
+                reason = decision.reason
+        elif mutation_kind == "place" and pos is not None and self.governance is not None:
             decision = self.governance.can_place(
                 pos,
                 block_type,
@@ -2076,12 +2118,17 @@ def _result(
 
 def _navigation_capability_snapshot(body: Body, cfg: NavigationRunConfig) -> dict[str, object]:
     disabled = {
+        "break_pickaxe": None,
+        "break_axe": None,
+        "break_shovel": None,
         "allow_place": False,
         "scaffold_item": None,
         "scaffold_count": 0,
         "inventory_complete": False,
     }
-    if not cfg.allow_place or cfg.max_place_steps <= 0:
+    needs_break_inventory = cfg.allow_break and cfg.max_break_steps > 0
+    needs_place_inventory = cfg.allow_place and cfg.max_place_steps > 0
+    if not needs_break_inventory and not needs_place_inventory:
         return disabled
 
     start: int | None = 0
@@ -2109,14 +2156,31 @@ def _navigation_capability_snapshot(body: Body, cfg: NavigationRunConfig) -> dic
         (str(item).removeprefix("minecraft:") for item in cfg.scaffold_blocks if counts.get(str(item).removeprefix("minecraft:"), 0) > 0),
         None,
     )
-    if scaffold_item is None:
-        return {**disabled, "inventory_complete": True}
+    break_tools = {
+        "break_pickaxe": _best_navigation_tool(counts, "pickaxe"),
+        "break_axe": _best_navigation_tool(counts, "axe"),
+        "break_shovel": _best_navigation_tool(counts, "shovel"),
+    }
+    if scaffold_item is None or not needs_place_inventory:
+        return {**disabled, **break_tools, "inventory_complete": True}
     return {
+        **break_tools,
         "allow_place": True,
         "scaffold_item": scaffold_item,
         "scaffold_count": counts[scaffold_item],
         "inventory_complete": True,
     }
+
+
+def _best_navigation_tool(counts: dict[str, int], tool: str) -> str | None:
+    return next(
+        (
+            f"{material}_{tool}"
+            for material in ("netherite", "diamond", "iron", "stone", "golden", "wooden")
+            if counts.get(f"{material}_{tool}", 0) > 0
+        ),
+        None,
+    )
 
 
 def _executed_payload(segment: ExecutedSegment) -> dict[str, object]:
