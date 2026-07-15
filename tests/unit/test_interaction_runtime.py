@@ -8,6 +8,7 @@ from minebot.body.interaction_support import ensure_interaction_range
 from minebot.body.use import UseTransactions
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
 from minebot.game.governance import GovernancePolicy, Region
+from minebot.game.navigation import GoalComposite
 from tests.unit._body_batch_helper import batch_block_cells_from_blockat
 
 
@@ -495,6 +496,7 @@ class InteractionRuntimeTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "player_reached")
         self.assertEqual(len(navigator.calls), 1)
+        self.assertEqual(navigator.calls[0][1]["arrival_radius"], 0.25)
         self.assertGreaterEqual(result.metrics["final_distance"], 1.0)
         self.assertLessEqual(result.metrics["final_distance"], 4.5)
 
@@ -1720,7 +1722,10 @@ class InteractionRuntimeTests(unittest.TestCase):
             ],
         )
         inventory = FakeInventoryTransaction(discard)
-        runtime = InteractionTransactions(body, inventory=inventory)
+        navigator = FakeInteractionNavigator(
+            [ToolResult(success=True, reason="arrived", can_retry=False, metrics={"selected_goal": [3, 64, 0]})]
+        )
+        runtime = InteractionTransactions(body, navigator=navigator, inventory=inventory)
 
         result = runtime.give_player(
             receiver_name="Receiver",
@@ -1731,7 +1736,9 @@ class InteractionRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "completed")
-        self.assertEqual([action.name for action in body.actions], ["moveTo", "lookAt", "handoffItem"])
+        self.assertEqual([action.name for action in body.actions], ["lookAt", "handoffItem"])
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
         self.assertTrue(result.metrics["approach"]["navigated"])
         self.assertGreaterEqual(result.metrics["approach"]["final_distance"], 1.25)
         self.assertLessEqual(result.metrics["approach"]["final_distance"], 3.0)

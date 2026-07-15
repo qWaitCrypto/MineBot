@@ -8,11 +8,12 @@ from dataclasses import dataclass
 from math import dist, floor
 
 from minebot.body.interaction_support import (
-    DirectInteractionNavigator,
     INTERACTION_RANGE,
     InteractionNavigator,
     NearbyEntityTarget,
     _move_to_stand_center,
+    _navigation_goal_for_stands,
+    _selected_navigation_stand,
     ensure_interaction_range,
     find_block_target,
     ensure_entity_range,
@@ -212,13 +213,9 @@ class InteractionTransactions:
         if isinstance(target, ToolResult):
             return target
 
-        approach_navigator = self.navigator
-        if approach_navigator is None and target.distance <= INTERACTION_RANGE:
-            approach_navigator = DirectInteractionNavigator(self.body, arrival_radius=0.25)
-
         approach = ensure_entity_range(
             self.body,
-            approach_navigator,
+            self.navigator,
             target.pos,
             min_distance=HANDOFF_MIN_DISTANCE,
             max_distance=HANDOFF_MAX_DISTANCE,
@@ -1995,46 +1992,48 @@ def _approach_openable_target(
     preferred = _openable_stand_points(pos, block_type, properties)
     ordered: list[Position] = [stand for stand in preferred if stand in valid_stands]
     ordered.extend(stand for stand in valid_stands if stand not in ordered)
-    attempts: list[dict[str, object]] = []
-    last_failure: ToolResult | None = None
-
-    for stand in ordered:
-        nav_result = navigator.navigate_to(stand, timeout_s=timeout_s, arrival_radius=0.25)
-        attempt: dict[str, object] = {"goal": list(stand), "result": nav_result.to_payload()}
-        if not nav_result.success:
-            attempts.append(attempt)
-            last_failure = nav_result
-            continue
-        center_result = _move_to_bed_use_stance(body, stand, arrival_radius=0.25, timeout_s=timeout_s)
+    nav_result = navigator.navigate_to(
+        _navigation_goal_for_stands(ordered),
+        timeout_s=timeout_s,
+        arrival_radius=0.25,
+    )
+    selected_stand = _selected_navigation_stand(nav_result, ordered)
+    attempt: dict[str, object] = {
+        "goals": [list(stand) for stand in ordered],
+        "selected_goal": list(selected_stand),
+        "result": nav_result.to_payload(),
+    }
+    attempts = [attempt]
+    if not nav_result.success:
+        last_failure = nav_result
+    else:
+        center_result = _move_to_bed_use_stance(body, selected_stand, arrival_radius=0.25, timeout_s=timeout_s)
         attempt["center_result"] = center_result.to_payload()
-        attempts.append(attempt)
         if not center_result.success:
             last_failure = center_result
-            continue
-        final_state = body.get_state()
-        final_distance = dist(final_state.pos, (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5))
-        if final_distance <= INTERACTION_RANGE:
-            return {
-                "navigated": True,
-                "stand_target": list(stand),
-                "initial_distance": initial_distance,
-                "final_distance": final_distance,
-                "attempts": attempts,
-            }
-        last_failure = ToolResult(
-            success=False,
-            reason="target_out_of_range_after_navigation",
-            can_retry=True,
-            metrics={
-                "target": list(pos),
-                "stand_target": list(stand),
-                "initial_distance": initial_distance,
-                "final_distance": final_distance,
-            },
-        )
+        else:
+            final_state = body.get_state()
+            final_distance = dist(final_state.pos, (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5))
+            if final_distance <= INTERACTION_RANGE:
+                return {
+                    "navigated": True,
+                    "stand_target": list(selected_stand),
+                    "initial_distance": initial_distance,
+                    "final_distance": final_distance,
+                    "attempts": attempts,
+                }
+            last_failure = ToolResult(
+                success=False,
+                reason="target_out_of_range_after_navigation",
+                can_retry=True,
+                metrics={
+                    "target": list(pos),
+                    "stand_target": list(selected_stand),
+                    "initial_distance": initial_distance,
+                    "final_distance": final_distance,
+                },
+            )
 
-    if last_failure is None:
-        last_failure = ToolResult(success=False, reason="use_navigation_failed", can_retry=True, metrics={"target": list(pos)})
     return ToolResult(
         success=False,
         reason=f"use_navigation_failed:{last_failure.reason}",
@@ -2080,33 +2079,36 @@ def _approach_bed_target(
     ordered_stands = [stand for stand in preferred_stands if stand in valid_stands]
     ordered_stands.extend(stand for stand in valid_stands if stand not in ordered_stands)
 
-    attempts: list[dict[str, object]] = []
-    last_failure: ToolResult | None = None
-    for stand in ordered_stands:
-        nav_result = navigator.navigate_to(stand, timeout_s=timeout_s, arrival_radius=0.25)
-        attempt: dict[str, object] = {"goal": list(stand), "result": nav_result.to_payload()}
-        if not nav_result.success:
-            attempts.append(attempt)
-            last_failure = nav_result
-            continue
-        center_result = _move_to_bed_use_stance(body, stand, arrival_radius=0.25, timeout_s=timeout_s)
+    nav_result = navigator.navigate_to(
+        _navigation_goal_for_stands(ordered_stands),
+        timeout_s=timeout_s,
+        arrival_radius=0.25,
+    )
+    selected_stand = _selected_navigation_stand(nav_result, ordered_stands)
+    attempt: dict[str, object] = {
+        "goals": [list(stand) for stand in ordered_stands],
+        "selected_goal": list(selected_stand),
+        "result": nav_result.to_payload(),
+    }
+    attempts = [attempt]
+    if not nav_result.success:
+        last_failure = nav_result
+    else:
+        center_result = _move_to_bed_use_stance(body, selected_stand, arrival_radius=0.25, timeout_s=timeout_s)
         attempt["center_result"] = center_result.to_payload()
-        attempts.append(attempt)
         if not center_result.success:
             last_failure = center_result
-            continue
-        final_state = body.get_state()
-        final_distance = dist(final_state.pos, (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5))
-        return {
-            "navigated": True,
-            "stand_target": list(stand),
-            "initial_distance": initial_distance,
-            "final_distance": final_distance,
-            "attempts": attempts,
-        }
+        else:
+            final_state = body.get_state()
+            final_distance = dist(final_state.pos, (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5))
+            return {
+                "navigated": True,
+                "stand_target": list(selected_stand),
+                "initial_distance": initial_distance,
+                "final_distance": final_distance,
+                "attempts": attempts,
+            }
 
-    if last_failure is None:
-        last_failure = ToolResult(success=False, reason="bed_navigation_failed", can_retry=True, metrics={"target": list(pos)})
     return ToolResult(
         success=False,
         reason=f"bed_navigation_failed:{last_failure.reason}",

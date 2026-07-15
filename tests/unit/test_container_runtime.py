@@ -3,6 +3,7 @@ import unittest
 from minebot.body import ContainerTransactions
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
 from minebot.game.governance import GovernancePolicy, Region
+from minebot.game.navigation import GoalComposite
 from tests.unit._body_batch_helper import batch_block_cells_from_blockat
 
 
@@ -501,7 +502,8 @@ class ContainerRuntimeTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "container_navigation_failed:blocked")
-        self.assertEqual(len(navigator.calls), 4)
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
 
     def test_transfer_nearest_container_navigates_then_transfers(self):
         body = FakeNearestContainerBody(

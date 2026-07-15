@@ -10,6 +10,8 @@ from minebot.body.interaction_support import (
     INTERACTION_RANGE,
     InteractionNavigator,
     NearbyEntityTarget,
+    _navigation_goal_for_stands,
+    _selected_navigation_stand,
     ensure_entity_range,
     ensure_interaction_range,
     find_entity_target,
@@ -1390,38 +1392,41 @@ def _recover_line_of_sight(
             "attempts": [],
         }
 
-    attempts: list[dict[str, object]] = []
-    for stand in candidates[:max_retries]:
-        nav_kwargs: dict[str, object] = {"timeout_s": timeout_s}
-        if arrival_radius is not None:
-            nav_kwargs["arrival_radius"] = arrival_radius
-        nav_result = navigator.navigate_to(stand, **nav_kwargs)
-        attempt: dict[str, object] = {"goal": list(stand), "result": nav_result.to_payload()}
-        if nav_result.success and arrival_radius is not None and center_after_navigation:
-            center_result = _move_to_stand_center(
-                body,
-                stand,
-                arrival_radius=arrival_radius,
-                timeout_s=timeout_s,
-            )
-            attempt["center_result"] = center_result.to_payload()
-            if not center_result.success:
-                attempts.append(attempt)
-                continue
-        attempts.append(attempt)
-        if nav_result.success:
-            return {
-                "attempted": True,
-                "repositioned": True,
-                "retries_used": len(attempts),
-                "stand_target": list(stand),
-                "attempts": attempts,
-            }
+    bounded_candidates = candidates[:max_retries]
+    nav_kwargs: dict[str, object] = {"timeout_s": timeout_s}
+    if arrival_radius is not None:
+        nav_kwargs["arrival_radius"] = arrival_radius
+    nav_result = navigator.navigate_to(_navigation_goal_for_stands(bounded_candidates), **nav_kwargs)
+    selected_stand = _selected_navigation_stand(nav_result, bounded_candidates)
+    attempt: dict[str, object] = {
+        "goals": [list(stand) for stand in bounded_candidates],
+        "selected_goal": list(selected_stand),
+        "result": nav_result.to_payload(),
+    }
+    attempts = [attempt]
+    if nav_result.success and arrival_radius is not None and center_after_navigation:
+        center_result = _move_to_stand_center(
+            body,
+            selected_stand,
+            arrival_radius=arrival_radius,
+            timeout_s=timeout_s,
+        )
+        attempt["center_result"] = center_result.to_payload()
+        if not center_result.success:
+            nav_result = center_result
+    if nav_result.success:
+        return {
+            "attempted": True,
+            "repositioned": True,
+            "retries_used": 1,
+            "stand_target": list(selected_stand),
+            "attempts": attempts,
+        }
 
     return {
         "attempted": True,
         "repositioned": False,
-        "retries_used": len(attempts),
+        "retries_used": 1,
         "reason": "reposition_failed",
         "attempts": attempts,
     }

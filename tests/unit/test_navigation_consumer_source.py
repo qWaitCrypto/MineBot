@@ -5,6 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 INTERACTION = (ROOT / "minebot" / "body" / "interaction.py").read_text()
+INTERACTION_SUPPORT = (ROOT / "minebot" / "body" / "interaction_support.py").read_text()
+USE = (ROOT / "minebot" / "body" / "use.py").read_text()
 CONTAINER = (ROOT / "minebot" / "body" / "container.py").read_text()
 FURNACE = (ROOT / "minebot" / "body" / "furnace.py").read_text()
 BLOCK_WORK = (ROOT / "minebot" / "body" / "block_work.py").read_text()
@@ -12,10 +14,15 @@ BLOCK_WORK = (ROOT / "minebot" / "body" / "block_work.py").read_text()
 
 def function_body(source: str, name: str) -> str:
     marker = f"    def {name}("
+    next_marker = "\n    def "
     start = source.find(marker)
     if start == -1:
+        marker = f"def {name}("
+        next_marker = "\ndef "
+        start = source.find(marker)
+    if start == -1:
         raise AssertionError(f"function {name} not found")
-    next_def = source.find("\n    def ", start + len(marker))
+    next_def = source.find(next_marker, start + len(marker))
     if next_def == -1:
         next_def = len(source)
     block = source[start:next_def]
@@ -38,6 +45,19 @@ class NavigationConsumerSourceTests(unittest.TestCase):
         self.assertIn("ensure_interaction_range(", function_body(INTERACTION, "sow_crop"))
         self.assertIn("self.sow_crop(", function_body(INTERACTION, "harvest_and_resow"))
         self.assertNotIn('Action.create("moveTo"', INTERACTION)
+
+    def test_interaction_stand_candidates_are_submitted_as_goal_sets(self):
+        for source, name in (
+            (INTERACTION_SUPPORT, "ensure_interaction_range"),
+            (INTERACTION_SUPPORT, "ensure_entity_range"),
+            (INTERACTION, "_approach_openable_target"),
+            (INTERACTION, "_approach_bed_target"),
+            (USE, "_recover_line_of_sight"),
+        ):
+            body = function_body(source, name)
+            self.assertIn("_navigation_goal_for_stands(", body)
+            self.assertNotRegex(body, r"for stand in .*:\n\s+nav_result = .*navigate_to\(stand")
+        self.assertNotIn("class DirectInteractionNavigator", INTERACTION_SUPPORT)
 
     def test_container_and_furnace_nearest_transactions_use_shared_interaction_range(self):
         self.assertIn("ensure_interaction_range(", function_body(CONTAINER, "transfer_nearest_container"))

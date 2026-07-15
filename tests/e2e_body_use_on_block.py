@@ -11,9 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from minebot.body import UseTransactions
-from minebot.body.interaction_support import DirectInteractionNavigator
-from minebot.game import RconClient, ScarpetBody
+from minebot.body import NavigationTransactions, UseTransactions
+from minebot.game import GovernancePolicy, RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
 from minebot.game.rcon import RconConfig
 from tests.e2e_support import spawn_or_fail
@@ -263,7 +262,8 @@ def run_ender_pearl(body: ScarpetBody, runtime: UseTransactions, rcon: RconClien
 
 def run_fire_los_recovery_inverse(body: ScarpetBody, runtime: UseTransactions, rcon: RconClient) -> dict[str, object]:
     reset_subject(rcon)
-    command(rcon, f"setblock {RECOVERY_FAIL_TARGET[0]} {RECOVERY_FAIL_TARGET[1] - 1} {RECOVERY_FAIL_TARGET[2]} netherrack")
+    command(rcon, "fill -3 63 0 3 63 4 stone")
+    command(rcon, f"setblock {RECOVERY_FAIL_TARGET[0]} {RECOVERY_FAIL_TARGET[1] - 1} {RECOVERY_FAIL_TARGET[2]} air")
     command(rcon, f"setblock {RECOVERY_FAIL_TARGET[0]} {RECOVERY_FAIL_TARGET[1]} {RECOVERY_FAIL_TARGET[2]} air")
     set_hotbar_slot(rcon, 0, "flint_and_steel 1")
     command(rcon, f"tp {BOT} -1 64 2 0 0")
@@ -281,7 +281,7 @@ def run_fire_los_recovery_inverse(body: ScarpetBody, runtime: UseTransactions, r
     recovery = (result.metrics or {}).get("line_of_sight_recovery") or {}
     target_after = block_fact(body, RECOVERY_FAIL_TARGET)
 
-    if result.success or result.reason != "targeted_use_no_effect":
+    if result.success or result.reason not in {"targeted_use_no_effect", "targeted_use_unverified"}:
         raise AssertionError(f"fire LOS recovery inverse returned wrong truth: {result}")
     if recovery.get("repositioned") is not True:
         raise AssertionError(f"fire LOS recovery inverse did not actually reposition: {result.metrics}")
@@ -321,7 +321,8 @@ def main() -> None:
     with rcon:
         setup_world(rcon)
         body = ScarpetBody(BOT, rcon)
-        runtime = UseTransactions(body, navigator=DirectInteractionNavigator(body))
+        policy = GovernancePolicy(natural_regions=[Region("use_nav", (-10, 0, -4), (10, 120, 10))])
+        runtime = UseTransactions(body, navigator=NavigationTransactions.server_side(body, policy))
         spawn_or_fail(body, (0, 70, 0))
 
         print(

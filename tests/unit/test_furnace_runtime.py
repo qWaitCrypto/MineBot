@@ -4,6 +4,7 @@ from minebot.body import BlockWork, FurnaceTransactions
 from minebot.body.furnace import resolve_smelt_output, select_fuel
 from minebot.contract import Action, BodyState, BreakContext, Event, PerceptionResult, Result, ToolResult
 from minebot.game.governance import GovernancePolicy, Region
+from minebot.game.navigation import GoalComposite
 from tests.unit._body_batch_helper import batch_block_cells_from_blockat
 
 
@@ -694,7 +695,8 @@ class FurnaceRuntimeTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "furnace_navigation_failed:blocked")
-        self.assertEqual(len(navigator.calls), 4)
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
 
     def test_clear_nearest_furnace_navigates_then_clears(self):
         body = FakeFurnaceBody(

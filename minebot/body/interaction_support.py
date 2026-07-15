@@ -11,79 +11,35 @@ from typing import Protocol
 from minebot.contract import Action, Body, PerceptionResult, Position, ToolResult, perception_next_cursor
 from minebot.contract import terminal_event_to_tool_result
 from minebot.body.world_read import read_block_facts
+from minebot.game.navigation import GoalComposite, GoalLike, GoalNear
 
 
 INTERACTION_RANGE = 4.5
 STAND_OFFSETS = ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1))
 ENTITY_HANDOFF_OFFSET = 0.4
+ENTITY_STAND_ARRIVAL_RADIUS = 0.25
+
+
 class InteractionNavigator(Protocol):
-    def navigate_to(self, goal: Position, **kwargs) -> ToolResult: ...
+    def navigate_to(self, goal: GoalLike, **kwargs) -> ToolResult: ...
 
 
-class DirectInteractionNavigator:
-    """Bounded local fallback for already-vetted adjacent interaction stands."""
+def _navigation_goal_for_stands(stands: list[Position]) -> GoalComposite:
+    unique = tuple(dict.fromkeys(stands))
+    if not unique:
+        raise ValueError("stand goal set requires at least one position")
+    return GoalComposite(tuple(GoalNear(stand, radius=0) for stand in unique))
 
-    def __init__(
-        self,
-        body: Body,
-        *,
-        arrival_radius: float = 0.85,
-        timeout_ticks: int = 120,
-        no_progress_ticks: int = 40,
-        max_deviation: float = 3.0,
-    ):
-        self.body = body
-        self.arrival_radius = arrival_radius
-        self.timeout_ticks = timeout_ticks
-        self.no_progress_ticks = no_progress_ticks
-        self.max_deviation = max_deviation
 
-    def navigate_to(self, goal: Position, **kwargs) -> ToolResult:
-        timeout_s = float(kwargs.get("timeout_s") or 8.0)
-        action = Action.create(
-            "moveTo",
-            {
-                "target": list(goal),
-                "waypoints": [list(goal)],
-                "arrival_radius": self.arrival_radius,
-                "timeout_ticks": self.timeout_ticks,
-                "no_progress_ticks": self.no_progress_ticks,
-                "max_deviation": self.max_deviation,
-            },
-        )
-        accepted = self.body.execute(action)
-        if not (accepted.ok and accepted.accepted):
-            return ToolResult(
-                success=False,
-                reason="body_rejected",
-                can_retry=True,
-                metrics={
-                    "action_id": action.id,
-                    "goal": list(goal),
-                    "accepted": {
-                        "ok": accepted.ok,
-                        "accepted": accepted.accepted,
-                        "error": accepted.error,
-                        "data": accepted.data,
-                    },
-                },
-            )
-        terminal = self.body.await_action_terminal(action.id, timeout_s=timeout_s)
-        result = terminal_event_to_tool_result(terminal)
-        if result.success:
-            return ToolResult(
-                success=True,
-                reason=result.reason,
-                can_retry=False,
-                metrics={"action_id": action.id, "goal": list(goal), **dict(result.metrics or {})},
-            )
-        return ToolResult(
-            success=False,
-            reason=result.reason,
-            can_retry=result.can_retry,
-            next_suggestion=result.next_suggestion,
-            metrics={"action_id": action.id, "goal": list(goal), **dict(result.metrics or {})},
-        )
+def _selected_navigation_stand(result: ToolResult, stands: list[Position]) -> Position:
+    candidates = tuple(dict.fromkeys(stands))
+    metrics = dict(result.metrics or {})
+    raw = metrics.get("selected_goal", metrics.get("goal"))
+    if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+        selected = (int(raw[0]), int(raw[1]), int(raw[2]))
+        if selected in candidates:
+            return selected
+    return candidates[0]
 
 
 @dataclass(frozen=True)
@@ -463,55 +419,54 @@ def ensure_interaction_range(
             "already_on_stand": True,
         }
 
-    attempts: list[dict[str, object]] = []
-    last_failure: ToolResult | None = None
-    for stand in stand_candidates:
-        nav_kwargs: dict[str, object] = {"timeout_s": timeout_s}
-        if navigation_arrival_radius is not None:
-            nav_kwargs["arrival_radius"] = navigation_arrival_radius
-        nav_result = navigator.navigate_to(stand, **nav_kwargs)
-        attempt: dict[str, object] = {"goal": list(stand), "result": nav_result.to_payload()}
-        if not nav_result.success:
-            attempts.append(attempt)
-            last_failure = nav_result
-            continue
+    nav_kwargs: dict[str, object] = {"timeout_s": timeout_s}
+    if navigation_arrival_radius is not None:
+        nav_kwargs["arrival_radius"] = navigation_arrival_radius
+    nav_result = navigator.navigate_to(_navigation_goal_for_stands(stand_candidates), **nav_kwargs)
+    selected_stand = _selected_navigation_stand(nav_result, stand_candidates)
+    attempt: dict[str, object] = {
+        "goals": [list(stand) for stand in stand_candidates],
+        "selected_goal": list(selected_stand),
+        "result": nav_result.to_payload(),
+    }
+    attempts = [attempt]
+    if not nav_result.success:
+        last_failure = nav_result
+    else:
+        last_failure = None
         if navigation_arrival_radius is not None and center_after_navigation:
             center_result = _move_to_stand_center(
                 body,
-                stand,
+                selected_stand,
                 arrival_radius=navigation_arrival_radius,
                 timeout_s=timeout_s,
             )
             attempt["center_result"] = center_result.to_payload()
             if not center_result.success:
-                attempts.append(attempt)
                 last_failure = center_result
-                continue
-        attempts.append(attempt)
-        final_state = body.get_state()
-        final_distance = dist(final_state.pos, (target[0] + 0.5, target[1] + 0.5, target[2] + 0.5))
-        if final_distance <= interaction_radius:
-            return {
-                "navigated": True,
-                "stand_target": list(stand),
-                "initial_distance": initial_distance,
-                "final_distance": final_distance,
-                "attempts": attempts,
-            }
-        last_failure = ToolResult(
-            success=False,
-            reason="target_out_of_range_after_navigation",
-            can_retry=True,
-            metrics={
-                "target": list(target),
-                "stand_target": list(stand),
-                "initial_distance": initial_distance,
-                "final_distance": final_distance,
-            },
-        )
+        if last_failure is None:
+            final_state = body.get_state()
+            final_distance = dist(final_state.pos, (target[0] + 0.5, target[1] + 0.5, target[2] + 0.5))
+            if final_distance <= interaction_radius:
+                return {
+                    "navigated": True,
+                    "stand_target": list(selected_stand),
+                    "initial_distance": initial_distance,
+                    "final_distance": final_distance,
+                    "attempts": attempts,
+                }
+            last_failure = ToolResult(
+                success=False,
+                reason="target_out_of_range_after_navigation",
+                can_retry=True,
+                metrics={
+                    "target": list(target),
+                    "stand_target": list(selected_stand),
+                    "initial_distance": initial_distance,
+                    "final_distance": final_distance,
+                },
+            )
 
-    if last_failure is None:
-        last_failure = ToolResult(success=False, reason=failure_prefix, can_retry=True, metrics={"target": list(target)})
     return ToolResult(
         success=False,
         reason=f"{failure_prefix}:{last_failure.reason}",
@@ -669,21 +624,29 @@ def ensure_entity_range(
             },
         )
 
-    attempts: list[dict[str, object]] = []
-    last_failure: ToolResult | None = None
-    for stand in stand_points:
-        nav_result = navigator.navigate_to(stand, timeout_s=timeout_s)
-        attempts.append({"goal": list(stand), "result": nav_result.to_payload()})
-        if not nav_result.success:
-            last_failure = nav_result
-            continue
+    nav_result = navigator.navigate_to(
+        _navigation_goal_for_stands(stand_points),
+        timeout_s=timeout_s,
+        arrival_radius=ENTITY_STAND_ARRIVAL_RADIUS,
+    )
+    selected_stand = _selected_navigation_stand(nav_result, stand_points)
+    attempts = [
+        {
+            "goals": [list(stand) for stand in stand_points],
+            "selected_goal": list(selected_stand),
+            "result": nav_result.to_payload(),
+        }
+    ]
+    if not nav_result.success:
+        last_failure = nav_result
+    else:
         final_state = body.get_state()
         final_distance = dist(final_state.pos, target)
         final_vertical = fabs(final_state.pos[1] - target[1])
         if final_distance <= max_distance and final_distance >= min_distance and final_vertical <= vertical_tolerance:
             return {
                 "navigated": True,
-                "stand_target": list(stand),
+                "stand_target": list(selected_stand),
                 "initial_distance": initial_distance,
                 "final_distance": final_distance,
                 "initial_vertical_delta": initial_vertical,
@@ -696,7 +659,7 @@ def ensure_entity_range(
             can_retry=True,
             metrics={
                 "target": list(target),
-                "stand_target": list(stand),
+                "stand_target": list(selected_stand),
                 "initial_distance": initial_distance,
                 "final_distance": final_distance,
                 "initial_vertical_delta": initial_vertical,
@@ -704,8 +667,6 @@ def ensure_entity_range(
             },
         )
 
-    if last_failure is None:
-        last_failure = ToolResult(success=False, reason=failure_prefix, can_retry=True, metrics={"target": list(target)})
     return ToolResult(
         success=False,
         reason=f"{failure_prefix}:{last_failure.reason}",
