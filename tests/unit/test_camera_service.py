@@ -15,7 +15,7 @@ from minebot.camera.config import CameraConfigError, load_camera_config
 from minebot.camera.control.observer import ObserverControlClient
 from minebot.camera.output.ffmpeg import CameraOutputError, build_ffmpeg_command, resolve_live_publish_url
 from minebot.camera.service import _process_start_token, _stop_children, _write_state, service_status, start_service
-from minebot.app.real_server_session import main as real_server_main
+from minebot.app.real_server_session import _CameraSession, main as real_server_main
 
 
 def test_runtime_config_is_default_off_and_keeps_commands_as_argv(tmp_path: Path) -> None:
@@ -150,11 +150,27 @@ def test_child_cleanup_terminates_owned_process() -> None:
     assert process.poll() is not None
 
 
-def test_real_server_camera_switch_starts_and_stops_sidecar() -> None:
+def test_real_server_camera_switch_delegates_lifecycle_to_session() -> None:
     fake_config = object()
     with (
         patch("minebot.app.real_server_session.real_server_config_from_env", return_value=fake_config),
         patch("minebot.app.real_server_session.run_real_server_goal", new=AsyncMock(return_value=7)) as run_goal,
+    ):
+        result = real_server_main(["observe", "--camera", "--camera-config", "/tmp/camera.toml"])
+
+    assert result == 7
+    run_goal.assert_awaited_once_with(
+        fake_config,
+        "observe",
+        max_steps=100_000,
+        camera_config=Path("/tmp/camera.toml"),
+    )
+
+
+def test_camera_session_waits_for_body_and_stops_owned_sidecar() -> None:
+    body = SimpleNamespace(get_state=lambda: SimpleNamespace(missing=True))
+    camera = _CameraSession(Path("/tmp/camera.toml"))
+    with (
         patch(
             "minebot.camera.service.start_service",
             return_value={
@@ -167,18 +183,26 @@ def test_real_server_camera_switch_starts_and_stops_sidecar() -> None:
         ) as start,
         patch("minebot.camera.service.stop_service") as stop,
     ):
-        result = real_server_main(["observe", "--camera", "--camera-config", "/tmp/camera.toml"])
+        camera.maybe_start(body)
+        start.assert_not_called()
 
-    assert result == 7
-    start.assert_called_once_with(Path("/tmp/camera.toml"), force=True)
+        body.get_state = lambda: SimpleNamespace(missing=False)
+        camera.maybe_start(body)
+        camera.maybe_start(body)
+        asyncio.run(camera.close())
+
+    start.assert_called_once_with(
+        Path("/tmp/camera.toml"),
+        force=True,
+        wait_for_ready=False,
+    )
     stop.assert_called_once_with(Path("/tmp/camera.toml"))
-    run_goal.assert_awaited_once()
 
 
-def test_real_server_does_not_stop_preexisting_camera() -> None:
+def test_camera_session_does_not_stop_preexisting_camera() -> None:
+    camera = _CameraSession(Path("/tmp/camera.toml"))
+    body = SimpleNamespace(get_state=lambda: SimpleNamespace(missing=False))
     with (
-        patch("minebot.app.real_server_session.real_server_config_from_env", return_value=object()),
-        patch("minebot.app.real_server_session.run_real_server_goal", new=AsyncMock(return_value=0)),
         patch(
             "minebot.camera.service.start_service",
             return_value={
@@ -191,9 +215,9 @@ def test_real_server_does_not_stop_preexisting_camera() -> None:
         ),
         patch("minebot.camera.service.stop_service") as stop,
     ):
-        result = real_server_main(["observe", "--camera", "--camera-config", "/tmp/camera.toml"])
+        camera.maybe_start(body)
+        asyncio.run(camera.close())
 
-    assert result == 0
     stop.assert_not_called()
 
 

@@ -14,7 +14,7 @@ import os
 import re
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,6 +64,91 @@ class RealServerConfig:
 
 class RealServerConfigError(RuntimeError):
     pass
+
+
+@dataclass
+class _CameraSession:
+    config_path: Path | None
+    launched: bool = False
+    owned: bool = False
+    monitor_task: asyncio.Task[None] | None = None
+
+    def maybe_start(self, body: Body) -> None:
+        if self.config_path is None or self.launched:
+            return
+        try:
+            state = body.get_state()
+        except (EnvelopeError, RconError, ValueError):
+            return
+        if state.missing:
+            return
+
+        self.launched = True
+        from minebot.camera.config import CameraConfigError
+        from minebot.camera.service import CameraServiceError, start_service
+
+        try:
+            camera_state = start_service(
+                self.config_path,
+                force=True,
+                wait_for_ready=False,
+            )
+        except (CameraConfigError, CameraServiceError) as exc:
+            print(f"Camera unavailable; continuing without it: {exc}", file=sys.stderr)
+            return
+
+        self.owned = camera_state.get("started") is True
+        if camera_state.get("phase") == "ready":
+            _print_camera_ready(camera_state)
+            return
+        print(f"Camera starting: target={camera_state.get('target')}", flush=True)
+        self.monitor_task = asyncio.create_task(self._monitor())
+
+    async def _monitor(self) -> None:
+        assert self.config_path is not None
+        from minebot.camera.config import CameraConfigError
+        from minebot.camera.service import CameraServiceError, service_status
+
+        while True:
+            try:
+                state = service_status(self.config_path)
+            except (CameraConfigError, CameraServiceError) as exc:
+                print(f"Camera unavailable; continuing without it: {exc}", file=sys.stderr)
+                return
+            phase = state.get("phase")
+            if phase == "ready":
+                _print_camera_ready(state)
+                return
+            if phase in {"failed", "stopped"}:
+                detail = state.get("error") or f"Camera entered {phase}"
+                print(f"Camera unavailable; continuing without it: {detail}", file=sys.stderr)
+                return
+            await asyncio.sleep(0.25)
+
+    async def close(self) -> None:
+        if self.monitor_task is not None:
+            self.monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.monitor_task
+        if not self.owned or self.config_path is None:
+            return
+        from minebot.camera.config import CameraConfigError
+        from minebot.camera.service import CameraServiceError, stop_service
+
+        try:
+            stop_service(self.config_path)
+        except (CameraConfigError, CameraServiceError) as exc:
+            print(f"Camera cleanup warning: {exc}", file=sys.stderr)
+
+
+def _print_camera_ready(state: Mapping[str, object]) -> None:
+    print(
+        "Camera ready:"
+        f" target={state.get('target')}"
+        f" record={'on' if state.get('recording') else 'off'}"
+        f" live={'on' if state.get('live') else 'off'}",
+        flush=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -165,7 +250,13 @@ def _position_from_env(env: Mapping[str, str], name: str) -> tuple[int, int, int
     return tuple(parts)
 
 
-async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps: int | None) -> int:
+async def run_real_server_goal(
+    config: RealServerConfig,
+    goal: str,
+    *,
+    max_steps: int | None,
+    camera_config: Path | None = None,
+) -> int:
     provider = provider_registry_from_env()
     rcon = RconClient(config.rcon)
     try:
@@ -180,6 +271,7 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
         return 3
 
     with rcon:
+        camera = _CameraSession(camera_config)
         try:
             _ensure_scarpet_global_app(rcon, config.bot_name)
         except (EnvelopeError, RconError) as exc:
@@ -191,6 +283,7 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
             await provider.aclose()
             return 4
         body = ScarpetBody(config.bot_name, rcon)
+        camera.maybe_start(body)
         sink = JsonlObservationSink(config.log_path)
 
         def make_parts(goal_text: str):
@@ -219,9 +312,13 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
         session = AgentSession(make_parts)
         session.submit(SessionCommand.start(goal))
         try:
+            def should_stop(step: SessionStep) -> bool:
+                camera.maybe_start(body)
+                return safe_evaluate_terminal_truth(body, goal, step, session=session).satisfied
+
             final = await session.run_until_waiting(
                 max_steps=max_steps,
-                should_stop=lambda step: safe_evaluate_terminal_truth(body, goal, step, session=session).satisfied,
+                should_stop=should_stop,
             )
             terminal_goal = _session_goal(session, goal)
             truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
@@ -247,10 +344,17 @@ async def run_real_server_goal(config: RealServerConfig, goal: str, *, max_steps
             close = getattr(session, "close", None)
             if callable(close):
                 close()
+            await camera.close()
             await provider.aclose()
 
 
-async def run_real_server_interactive(config: RealServerConfig, goal: str | None, *, max_steps: int | None) -> int:
+async def run_real_server_interactive(
+    config: RealServerConfig,
+    goal: str | None,
+    *,
+    max_steps: int | None,
+    camera_config: Path | None = None,
+) -> int:
     """Run one persistent real-server session with stdin as the user channel."""
     provider = provider_registry_from_env()
     rcon = RconClient(config.rcon)
@@ -266,6 +370,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
         return 3
 
     with rcon:
+        camera = _CameraSession(camera_config)
         state_store: RuntimeStateStore | None = None
         conversation_session: PersistentWindowedConversationSession | None = None
         work_queue: PersistentWorkIntentQueue | None = None
@@ -412,6 +517,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
                 body=body,
                 max_steps=max_steps,
                 body_event_pump=body_event_pump,
+                iteration_hook=lambda: camera.maybe_start(body),
             )
             terminal_goal = _session_goal(session, goal)
             truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
@@ -445,6 +551,7 @@ async def run_real_server_interactive(config: RealServerConfig, goal: str | None
             if session.parts is None:
                 conversation_session.close()
             state_store.close()
+            await camera.close()
             await provider.aclose()
 
 
@@ -531,10 +638,13 @@ async def _run_interactive_loop(
     max_steps: int | None,
     chat_source: object | None = None,
     body_event_pump: BodyEventPump | None = None,
+    iteration_hook: Callable[[], None] | None = None,
 ) -> SessionStep:
     last = None
     remaining = max_steps
     while remaining is None or remaining > 0:
+        if iteration_hook is not None:
+            iteration_hook()
         _poll_chat_commands(session, chat_source)
         if not getattr(session, "has_pending_work", True):
             if body_event_pump is not None:
@@ -986,39 +1096,28 @@ def main(argv: list[str] | None = None) -> int:
     except (RealServerConfigError, AppConfigError, ValueError) as exc:
         print(f"Real-server agent config error: {exc}", file=sys.stderr)
         return 2
-    camera_started = False
+    camera_config = args.camera_config if args.camera else None
     try:
-        if args.camera:
-            from minebot.camera.config import CameraConfigError
-            from minebot.camera.service import CameraServiceError, start_service
-
-            try:
-                state = start_service(args.camera_config, force=True)
-                camera_started = state.get("started") is True
-                print(
-                    "Camera ready:"
-                    f" target={state.get('target')}"
-                    f" record={'on' if state.get('recording') else 'off'}"
-                    f" live={'on' if state.get('live') else 'off'}"
+        if args.interactive:
+            return asyncio.run(
+                run_real_server_interactive(
+                    config,
+                    args.goal,
+                    max_steps=args.max_steps,
+                    camera_config=camera_config,
                 )
-            except (CameraConfigError, CameraServiceError) as exc:
-                print(f"Camera unavailable; continuing without it: {exc}", file=sys.stderr)
-        try:
-            if args.interactive:
-                return asyncio.run(run_real_server_interactive(config, args.goal, max_steps=args.max_steps))
-            return asyncio.run(run_real_server_goal(config, args.goal, max_steps=args.max_steps))
-        except AppConfigError as exc:
-            print(f"Provider not configured: {exc}", file=sys.stderr)
-            return 2
-    finally:
-        if camera_started:
-            from minebot.camera.config import CameraConfigError
-            from minebot.camera.service import CameraServiceError, stop_service
-
-            try:
-                stop_service(args.camera_config)
-            except (CameraConfigError, CameraServiceError) as exc:
-                print(f"Camera cleanup warning: {exc}", file=sys.stderr)
+            )
+        return asyncio.run(
+            run_real_server_goal(
+                config,
+                args.goal,
+                max_steps=args.max_steps,
+                camera_config=camera_config,
+            )
+        )
+    except AppConfigError as exc:
+        print(f"Provider not configured: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

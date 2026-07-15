@@ -26,7 +26,12 @@ class CameraServiceError(RuntimeError):
 _RUNNING_PHASES = {"starting", "connecting", "ready", "stopping"}
 
 
-def start_service(config_path: Path, *, force: bool = False) -> dict[str, Any]:
+def start_service(
+    config_path: Path,
+    *,
+    force: bool = False,
+    wait_for_ready: bool = True,
+) -> dict[str, Any]:
     config_path = config_path.expanduser().resolve()
     config = load_camera_config(config_path)
     service = config.service
@@ -38,7 +43,9 @@ def start_service(config_path: Path, *, force: bool = False) -> dict[str, Any]:
     existing = service_status(config_path)
     if _state_process_alive(existing):
         if existing.get("phase") in _RUNNING_PHASES:
-            return _wait_until_ready(config_path, service, started=False)
+            if wait_for_ready:
+                return _wait_until_ready(config_path, service, started=False)
+            return {**existing, "started": False}
         raise CameraServiceError(str(existing.get("error") or "Camera supervisor is still shutting down"))
 
     report = check_dependencies(config.dependencies)
@@ -65,6 +72,8 @@ def start_service(config_path: Path, *, force: bool = False) -> dict[str, Any]:
         error=None,
     )
 
+    if not wait_for_ready:
+        return {**service_status(config_path), "started": True}
     return _wait_until_ready(config_path, service, started=True, process=process)
 
 

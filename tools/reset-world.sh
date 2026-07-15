@@ -7,6 +7,7 @@ WORLD="$SERVER_DIR/world"
 GOLDEN="$SERVER_DIR/world-golden"
 SCRIPT_ASSETS="$ROOT/minecraft/server/scarpet"
 LOG="$SERVER_DIR/logs/minebot-reset-world.log"
+CAMERA_CONFIG="${MINEBOT_CAMERA_CONFIG:-}"
 RCON_HOST="${MINEBOT_REAL_RCON_HOST:-127.0.0.1}"
 RCON_PORT="${MINEBOT_REAL_RCON_PORT:-25576}"
 RCON_PASSWORD="${MINEBOT_REAL_RCON_PASSWORD:-test}"
@@ -42,6 +43,28 @@ fi
 if [[ ! -d "$SCRIPT_ASSETS" ]]; then
   echo "missing Scarpet assets: $SCRIPT_ASSETS" >&2
   exit 2
+fi
+
+SERVER_JAVA_ARGS=(-Xmx2G)
+if [[ -n "$CAMERA_CONFIG" ]]; then
+  camera_jvm_output="$(python3 - "$CAMERA_CONFIG" <<'PY'
+import sys
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from minebot.camera.config import load_camera_config
+
+config = load_camera_config(Path(sys.argv[1])).service
+endpoint = urlsplit(config.bridge_endpoint)
+if endpoint.hostname is None or endpoint.port is None:
+    raise SystemExit("camera bridge endpoint must include host and port")
+print(f"-Dminebot.bridge.host={endpoint.hostname}")
+print(f"-Dminebot.bridge.port={endpoint.port}")
+print(f"-Dminebot.camera.observerUuid={config.observer_id}")
+PY
+)"
+  readarray -t camera_jvm_args <<< "$camera_jvm_output"
+  SERVER_JAVA_ARGS+=("${camera_jvm_args[@]}")
 fi
 
 python3 - "$RCON_HOST" "$RCON_PORT" "$RCON_PASSWORD" <<'PY' || true
@@ -126,7 +149,9 @@ path.write_text("\n".join(out) + "\n", encoding="utf-8")
 PY
 (
   cd "$SERVER_DIR"
-  setsid -f bash -c 'tail -f /dev/null | exec java -Xmx2G -jar fabric-server-launch.jar nogui' >> "$LOG" 2>&1 < /dev/null
+  setsid -f bash -c 'tail -f /dev/null | exec "$@"' _ \
+    java "${SERVER_JAVA_ARGS[@]}" -jar fabric-server-launch.jar nogui \
+    >> "$LOG" 2>&1 < /dev/null
   : > "$SERVER_DIR/minebot-server.pid"
 )
 
