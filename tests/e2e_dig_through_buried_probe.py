@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Live collect-approach probe: prove collect can reach a BURIED dirt block.
-
-Sets up a dirt block fully encased in stone (no pre-existing air pocket beside
-it), then drives collect_resource. The lightweight bare-moveTo approach cannot
-reach it; the approach must clear the selected stand point under
-COLLECT_APPROACH governance, then delegate movement to the navigator. No API
-key needed.
-"""
+"""Live gate: one goal-set navigation process collects a buried dirt block."""
 
 from __future__ import annotations
 
@@ -117,52 +110,73 @@ def main() -> None:
             "elapsed_s": round(dt, 1),
         }
         print(summary)
-        # Look for collect-approach clearance evidence in the attempts' mine metrics.
-        dig_through_seen = _dig_through_in_attempts(metrics)
-        print({"dig_through_observed": dig_through_seen})
+        navigation_evidence = _goal_set_navigation_evidence(metrics)
+        print({"goal_set_navigation": navigation_evidence})
 
-        # Ground truth independent of the (pickup-timing-sensitive) inventory
-        # delta: did the buried block actually get mined, and did the bot gain
-        # the item? mineBlock can complete + drop get picked up after the
-        # collect's pickup window, so payload.success may be False even
-        # when collect-approach clearance physically worked. This check is the real proof
-        # for #15.
         time.sleep(0.5)
-        block_gone = "dirt" not in command(rcon, f"execute if block {buried[0]} {buried[1]} {buried[2]} dirt", 0)
-        final_state = body.get_state()
-        gained = "dirt" in (final_state.inventory_raw or "")
-        ground_truth = {"buried_block_gone": block_gone, "bot_has_dirt": gained}
+        buried_fact = body.perceive(
+            "blockAt",
+            {"x": buried[0], "y": buried[1], "z": buried[2]},
+        )
+        block_gone = bool(
+            buried_fact.ok
+            and buried_fact.complete
+            and str(buried_fact.data.get("state") or "").upper() == "CLEAR"
+        )
+        dirt_count = sum(
+            int(slot.count)
+            for slot in body.get_inventory()
+            if str(slot.item or "").removeprefix("minecraft:") == "dirt"
+        )
+        gained = dirt_count >= 1
+        ground_truth = {
+            "buried_block_gone": block_gone,
+            "buried_block": dict(buried_fact.data),
+            "bot_has_dirt": gained,
+            "dirt_count": dirt_count,
+        }
         print({"ground_truth": ground_truth})
 
-        if payload.get("success"):
-            print("RESULT: collected a BURIED block -- collect-approach clearance works on real terrain")
-        elif block_gone and dig_through_seen:
-            # Collect-approach clearance physically worked: it reached the buried block and
-            # mineBlock destroyed it. Whether the drop was picked up is a
-            # separate pickup-timing issue (collect_no_inventory_delta), not a
-            # collect-approach regression.
-            print("RESULT: collect-approach clearance WORKED (buried block mined via COLLECT_APPROACH path); pickup delta is a separate issue")
-        elif payload.get("reason") == "transport_error":
-            print("RESULT: transient transport_error (rerun) -- not a collect-approach regression")
-        else:
-            print(f"RESULT: did not collect buried block (reason={payload.get('reason')}); inspect attempts/skipped")
+        if not payload.get("success") or payload.get("reason") != "collected":
+            raise AssertionError(f"buried collect did not complete: {payload}")
+        if int(metrics.get("after_count") or 0) < 1 or not gained:
+            raise AssertionError(f"buried collect lacked inventory truth: payload={payload} ground_truth={ground_truth}")
+        if not block_gone:
+            raise AssertionError(f"buried target remained in world: {ground_truth}")
+        if not navigation_evidence["goal_set_preserved"] or not navigation_evidence["governed_terrain_step"]:
+            raise AssertionError(f"buried collect bypassed unified terrain navigation: {navigation_evidence}")
+        print("RESULT: buried collect used one governed goal-set navigation process and gained the item")
 
 
-def _dig_through_in_attempts(metrics: dict) -> bool:
-    for attempt in metrics.get("attempts") or []:
-        mine = attempt.get("mine") if isinstance(attempt, dict) else None
-        mmetrics = mine.get("metrics") if isinstance(mine, dict) else None
-        if not isinstance(mmetrics, dict):
-            continue
-        # Success path: collect-approach metrics folded into mine_approach sub-field.
-        approach = mmetrics.get("mine_approach")
-        if isinstance(approach, dict) and approach.get("dig_through"):
-            return True
-        # Failure path: collect-approach ran but could not reach; metrics carry
-        # dig_through at the top level of mine.metrics.
-        if mmetrics.get("dig_through"):
-            return True
-    return False
+def _goal_set_navigation_evidence(metrics: dict) -> dict[str, object]:
+    goal_set_preserved = False
+    governed_terrain_step = False
+    movement_counts: dict[str, int] = {}
+
+    def visit(value: object) -> None:
+        nonlocal goal_set_preserved, governed_terrain_step
+        if isinstance(value, dict):
+            goal = value.get("navigation_goal")
+            if isinstance(goal, dict) and goal.get("kind") == "composite" and goal.get("mode") == "any":
+                goal_set_preserved = True
+            counts = value.get("movement_counts")
+            if isinstance(counts, dict):
+                for kind, count in counts.items():
+                    movement_counts[str(kind)] = max(movement_counts.get(str(kind), 0), int(count or 0))
+                if int(counts.get("break") or 0) > 0 or int(counts.get("downward") or 0) > 0:
+                    governed_terrain_step = True
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested)
+
+    visit(metrics)
+    return {
+        "goal_set_preserved": goal_set_preserved,
+        "governed_terrain_step": governed_terrain_step,
+        "movement_counts": movement_counts,
+    }
 
 
 if __name__ == "__main__":

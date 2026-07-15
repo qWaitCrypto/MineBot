@@ -3,6 +3,7 @@ import unittest
 from minebot.body import BlockWork
 from minebot.game.governance import BreakContext, GovernancePolicy, PlaceContext, Region
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
+from minebot.game.navigation import GoalComposite, NavigationGoal
 from tests.unit._body_batch_helper import batch_block_cells_from_blockat
 
 
@@ -31,6 +32,14 @@ def inv_page_with_pickaxe(
     next_start: int | None = None,
 ) -> PerceptionResult:
     return inventory_page([slot(0, pickaxe, 1), *slots], next_start=next_start)
+
+
+def goal_position(goal) -> tuple[int, int, int]:
+    if isinstance(goal, GoalComposite):
+        return goal.goals[0].representative((0, 0, 0))
+    if isinstance(goal, NavigationGoal):
+        return goal.representative((0, 0, 0))
+    return (int(goal[0]), int(goal[1]), int(goal[2]))
 
 
 class FakeBody:
@@ -304,18 +313,19 @@ class FakeNavigator:
     def __init__(self, result: bool = True, reason: str = "arrived") -> None:
         self.result = result
         self.reason = reason
-        self.calls: list[tuple[tuple[int, int, int], dict[str, object]]] = []
+        self.calls: list[tuple[object, dict[str, object]]] = []
         self.body: FakeBody | None = None
 
     def navigate_to(self, goal, **kwargs):
         self.calls.append((goal, kwargs))
+        selected = goal_position(goal)
         if self.result and self.body is not None:
-            self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+            self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
         return ToolResult(
             success=self.result,
             reason=self.reason,
             can_retry=not self.result,
-            metrics={"goal": list(goal), "kwargs": kwargs},
+            metrics={"goal": list(selected), "selected_goal": list(selected), "kwargs": kwargs},
         )
 
 
@@ -408,17 +418,21 @@ class BlockWorkTests(unittest.TestCase):
         }
         body = FakeBody(blocks=blocks)
         body.state_pos = (4.5, 65.0, 0.5)
+        navigator = FakeNavigator()
+        navigator.body = body
         work = BlockWork(
             body,
             GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))]),
+            navigator=navigator,
         )
 
         result = work.mine_block((0, 64, 0), context=BreakContext.TRAVEL)
 
         self.assertTrue(result.success, result.to_payload())
-        move_actions = [action for action in body.actions if action.name == "moveTo"]
-        self.assertTrue(move_actions)
-        self.assertEqual(move_actions[0].params["target"][1], 65.0)
+        self.assertEqual([action.name for action in body.actions], ["mineBlock"])
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
+        self.assertEqual(result.metrics["mine_approach"]["selected_goal"][1], 65)
 
     def test_search_for_block_requires_filter(self):
         body = FakeBody()
@@ -575,7 +589,8 @@ class BlockWorkTests(unittest.TestCase):
                 if goal[0] <= 5:
                     return ToolResult(success=False, reason="navigation_blocked:no_path", can_retry=True)
                 if self.body is not None:
-                    self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                    selected = goal_position(goal)
+                    self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return ToolResult(success=True, reason="arrived", can_retry=False, metrics={"goal": list(goal)})
 
         navigator = FirstCandidateFailsNavigator()
@@ -615,7 +630,7 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 self.calls.append((goal, kwargs))
-                return ToolResult(False, "stuck", True, metrics={"goal": list(goal)})
+                return ToolResult(False, "stuck", True, metrics={"goal": list(goal_position(goal))})
 
         navigator = AlwaysStuckNavigator()
         work = BlockWork(
@@ -689,7 +704,8 @@ class BlockWorkTests(unittest.TestCase):
                 if goal[0] <= 5:
                     return ToolResult(success=False, reason="navigation_blocked:no_path", can_retry=True)
                 if self.body is not None:
-                    self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                    selected = goal_position(goal)
+                    self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return ToolResult(success=True, reason="arrived", can_retry=False, metrics={"goal": list(goal)})
 
         navigator = FirstCandidateFailsNavigator()
@@ -860,40 +876,23 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(body.actions[0].params["legality"]["reason"], "allowed_natural")
 
     def test_mine_block_approaches_target_before_mining_when_out_of_reach(self):
-        class ApproachingBody(FakeBody):
-            def execute(self, action: Action) -> Result:
-                result = super().execute(action)
-                if action.name == "moveTo":
-                    target = tuple(action.params["target"])
-                    self.state_pos = (float(target[0]), float(target[1]), float(target[2]))
-                    self.terminal = Event(
-                        seq=self.terminal.seq,
-                        tick=self.terminal.tick,
-                        bot=self.terminal.bot,
-                        name="moveDone",
-                        data={
-                            "action_id": action.id,
-                            "arrived": True,
-                            "final_pos": list(self.state_pos),
-                            "target": list(target),
-                            "stopped_reason": "arrived",
-                        },
-                    )
-                return result
-
-        body = ApproachingBody(
+        body = FakeBody(
             blocks={(0, 64, 6): ("stone", "SOLID")},
         )
         body.state_pos = (0.5, 65.0, 0.5)
         settled: list[float] = []
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
-        runtime = BlockWork(body, policy, settle=settled.append)
+        navigator = FakeNavigator()
+        navigator.body = body
+        runtime = BlockWork(body, policy, navigator=navigator, settle=settled.append)
 
         result = runtime.mine_block((0, 64, 6), context=BreakContext.TRAVEL, timeout_s=1.0)
 
         self.assertTrue(result.success)
-        self.assertEqual([action.name for action in body.actions[:2]], ["moveTo", "mineBlock"])
-        self.assertEqual(body.actions[0].params["target"], [0.5, 65.0, 5.5])
+        self.assertEqual([action.name for action in body.actions], ["mineBlock"])
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
+        self.assertEqual(result.metrics["mine_approach"]["selected_goal"], [0, 65, 5])
         self.assertEqual(settled, [0.3])
 
     def test_mine_block_collect_does_not_over_approach_inside_interaction_range(self):
@@ -918,73 +917,42 @@ class BlockWorkTests(unittest.TestCase):
         self.assertNotIn("mine_approach", result.metrics["mine_result"]["metrics"])
 
     def test_mine_block_collect_classifies_unreachable_approach_as_candidate_skip(self):
-        # The live failure: collect walked underground candidates, but the approach
-        # moveTo to a stand point next to each returned `stuck`. That must surface as
-        # a candidate-skip (mine_approach_failed:stuck), NOT a generic failure, so the
-        # shared progress authority does not trip the failure storm on a collection
-        # that is healthily trying the next candidate.
         from minebot.contract import is_candidate_skip
 
-        class StuckApproachBody(FakeBody):
-            def execute(self, action: Action) -> Result:
-                result = super().execute(action)
-                if action.name == "moveTo":
-                    # The bot cannot reach the stand point: report stuck, no displacement.
-                    self.terminal = Event(
-                        seq=self.terminal.seq,
-                        tick=self.terminal.tick,
-                        bot=self.terminal.bot,
-                        name="moveDone",
-                        data={
-                            "action_id": action.id,
-                            "arrived": False,
-                            "final_pos": list(self.state_pos),
-                            "target": list(action.params["target"]),
-                            "stopped_reason": "stuck",
-                        },
-                    )
-                return result
-
-        body = StuckApproachBody(blocks={(0, 64, 5): ("dirt", "SOLID")})
+        body = FakeBody(blocks={(0, 64, 5): ("dirt", "SOLID")})
         body.state_pos = (0.5, 65.0, 0.5)
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
-        runtime = BlockWork(body, policy)
+        navigator = FakeNavigator(result=False, reason="stuck")
+        runtime = BlockWork(body, policy, navigator=navigator)
 
         result = runtime.mine_block_collect((0, 64, 5), context=BreakContext.COLLECT, timeout_s=1.0)
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "mine_approach_failed:stuck")
         self.assertTrue(is_candidate_skip(result.reason))
-        # Never issued a mineBlock on an unreachable target.
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
         self.assertNotIn("mineBlock", [action.name for action in body.actions])
 
-    def test_mine_block_collect_escalates_to_dig_through_navigator_when_bare_move_fails(self):
-        # When the lightweight bare moveTo cannot reach a stand point next to a
-        # buried target, the approach must clear the chosen natural stand cell
-        # under COLLECT_APPROACH, then delegate movement to the navigator under
-        # the same context with a bounded break budget, then mine instead of
-        # skipping the target.
-        class StuckThenNavBody(FakeBody):
-            def execute(self, action: Action) -> Result:
-                result = super().execute(action)
-                if action.name == "moveTo":
-                    # The bare moveTo to the stand cell fails (no air pocket).
-                    self.terminal = Event(
-                        seq=self.terminal.seq,
-                        tick=self.terminal.tick,
-                        bot=self.terminal.bot,
-                        name="moveDone",
-                        data={
-                            "action_id": action.id,
-                            "arrived": False,
-                            "final_pos": list(self.state_pos),
-                            "target": list(action.params["target"]),
-                            "stopped_reason": "stuck",
-                        },
-                    )
-                return result
+    def test_mine_block_collect_uses_governed_goal_set_break_edge_for_buried_stand(self):
+        class GovernedBreakNavigator(FakeNavigator):
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                selected = goal_position(goal)
+                self.body.blocks[selected] = ("air", "CLEAR")
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
+                return ToolResult(
+                    success=True,
+                    reason="arrived",
+                    can_retry=False,
+                    metrics={
+                        "goal": list(selected),
+                        "selected_goal": list(selected),
+                        "movement_counts": {"break": 1},
+                    },
+                )
 
-        body = StuckThenNavBody(
+        body = FakeBody(
             blocks={
                 (0, 64, 5): ("dirt", "SOLID"),
                 (0, 65, 4): ("stone", "SOLID"),
@@ -995,56 +963,43 @@ class BlockWorkTests(unittest.TestCase):
             ],
         )
         body.state_pos = (0.5, 65.0, 0.5)
-        navigator = FakeNavigator(result=True, reason="arrived")
+        navigator = GovernedBreakNavigator()
         navigator.body = body
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
         runtime = BlockWork(body, policy, navigator=navigator)
 
         result = runtime.mine_block_collect((0, 64, 5), context=BreakContext.COLLECT, timeout_s=1.0)
 
-        # The dig-through navigator was invoked under COLLECT_APPROACH context...
-        self.assertTrue(navigator.calls, "dig-through navigator was not called")
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
         nav_kwargs = navigator.calls[-1][1]
         self.assertEqual(nav_kwargs["break_context"], BreakContext.COLLECT_APPROACH)
-        # ...with a bounded break budget so one target can't dig a runaway tunnel.
         nav_config = nav_kwargs["config"]
-        self.assertEqual(nav_config.max_break_steps, BlockWork.DIG_THROUGH_MAX_BREAK_STEPS)
-        self.assertTrue(nav_config.allow_local_terrain_fallback)
+        self.assertEqual(nav_config.max_break_steps, BlockWork.MINE_APPROACH_MAX_BREAK_STEPS)
+        self.assertFalse(nav_config.allow_local_terrain_fallback)
         self.assertEqual(body.blocks[(0, 65, 4)], ("air", "CLEAR"))
         mine_actions = [action for action in body.actions if action.name == "mineBlock"]
-        self.assertTrue(any(action.params["target"] == [0, 65, 4] for action in mine_actions))
-        self.assertTrue(
-            any(action.params.get("context") == BreakContext.COLLECT_APPROACH.value for action in mine_actions),
-            "stand clearance must use COLLECT_APPROACH, not plain COLLECT",
-        )
+        self.assertEqual([action.params["target"] for action in mine_actions], [[0, 64, 5]])
         mine_result = result.metrics["mine_result"]["metrics"]["mine_approach"]
-        self.assertEqual(mine_result["clearance"]["reason"], "collect_approach_cleared")
-        # ...the bot reached mining range and the block was mined and collected.
+        self.assertEqual(mine_result["selected_goal"], [0, 65, 4])
+        self.assertEqual(mine_result["navigation_result"]["metrics"]["movement_counts"]["break"], 1)
         self.assertTrue(result.success, result)
         self.assertEqual(result.reason, "collected")
-        self.assertIn("mineBlock", [action.name for action in body.actions])
 
     def test_mine_block_collect_skips_leaf_blocked_stand_candidate(self):
-        class StuckThenNavBody(FakeBody):
-            def execute(self, action: Action) -> Result:
-                result = super().execute(action)
-                if action.name == "moveTo":
-                    self.terminal = Event(
-                        seq=self.terminal.seq,
-                        tick=self.terminal.tick,
-                        bot=self.terminal.bot,
-                        name="moveDone",
-                        data={
-                            "action_id": action.id,
-                            "arrived": False,
-                            "final_pos": list(self.state_pos),
-                            "target": list(action.params["target"]),
-                            "stopped_reason": "stuck",
-                        },
-                    )
-                return result
+        class AlternateStandNavigator(FakeNavigator):
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                selected = (-1, 65, 5)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
+                return ToolResult(
+                    success=True,
+                    reason="arrived",
+                    can_retry=False,
+                    metrics={"goal": list(selected), "selected_goal": list(selected)},
+                )
 
-        body = StuckThenNavBody(
+        body = FakeBody(
             blocks={
                 (0, 64, 5): ("dirt", "SOLID"),
                 (0, 65, 4): ("spruce_leaves", "SOLID"),
@@ -1066,7 +1021,7 @@ class BlockWorkTests(unittest.TestCase):
             ],
         )
         body.state_pos = (0.5, 65.0, 0.5)
-        navigator = FakeNavigator(result=True, reason="arrived")
+        navigator = AlternateStandNavigator()
         navigator.body = body
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
         runtime = BlockWork(body, policy, navigator=navigator)
@@ -1075,24 +1030,21 @@ class BlockWorkTests(unittest.TestCase):
 
         self.assertTrue(result.success, result)
         approach = result.metrics["mine_result"]["metrics"]["mine_approach"]
-        failures = approach["stand_candidate_failures"]
-        self.assertEqual(failures[0]["stand_block"], [0, 65, 4])
-        self.assertEqual(
-            failures[0]["reason"],
-            "mine_approach_failed:dig_through:break_denied:not_natural_breakable",
-        )
-        self.assertEqual(approach["stand_block"], [-1, 65, 5])
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
+        goals = [child.pos for child in navigator.calls[0][0].goals]
+        self.assertIn((0, 65, 4), goals)
+        self.assertIn((-1, 65, 5), goals)
+        self.assertEqual(approach["selected_goal"], [-1, 65, 5])
         self.assertEqual(body.blocks[(0, 65, 4)], ("spruce_leaves", "SOLID"))
-        self.assertEqual(body.blocks[(-1, 65, 5)], ("air", "CLEAR"))
         cleared_targets = [
             action.params["target"]
             for action in body.actions
             if action.name == "mineBlock" and action.params.get("context") == BreakContext.COLLECT_APPROACH.value
         ]
-        self.assertNotIn([0, 65, 4], cleared_targets)
-        self.assertIn([-1, 65, 5], cleared_targets)
+        self.assertEqual(cleared_targets, [])
 
-    def test_mine_block_collect_disables_local_terrain_fallback_for_logs(self):
+    def test_mine_block_collect_disables_local_terrain_fallback_for_goal_set_navigation(self):
         class StuckThenNavBody(FakeBody):
             def execute(self, action: Action) -> Result:
                 result = super().execute(action)
@@ -1131,11 +1083,11 @@ class BlockWorkTests(unittest.TestCase):
         result = runtime.mine_block_collect((0, 64, 5), context=BreakContext.COLLECT, timeout_s=1.0)
 
         self.assertFalse(result.success)
-        self.assertEqual(result.reason, "mine_approach_failed:dig_through:no_path")
+        self.assertEqual(result.reason, "mine_approach_failed:no_path")
         self.assertTrue(navigator.calls)
         nav_config = navigator.calls[-1][1]["config"]
         self.assertFalse(nav_config.allow_local_terrain_fallback)
-        self.assertTrue(nav_config.progress_neutral_failures)
+        self.assertFalse(nav_config.progress_neutral_failures)
 
     def test_mine_block_collect_retargets_local_tree_log_after_unreachable_canopy_log(self):
         class HighMoveStuckBody(FakeBody):
@@ -1199,7 +1151,7 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.metrics["original_target"], [4, 72, 0])
         tree = result.metrics["tree_domain_retarget"]
         self.assertEqual(tree["original_target"], [4, 72, 0])
-        self.assertEqual(tree["original_failure"]["reason"], "mine_approach_failed:dig_through:no_path")
+        self.assertEqual(tree["original_failure"]["reason"], "mine_approach_failed:no_path")
         self.assertEqual(tree["attempts"][0]["target"], [1, 64, 0])
         self.assertEqual(result.metrics["deltas"], {"oak_log": 1})
         mine_targets = [action.params["target"] for action in body.actions if action.name == "mineBlock"]
@@ -1260,106 +1212,35 @@ class BlockWorkTests(unittest.TestCase):
         )
 
         self.assertFalse(result.success)
-        self.assertEqual(result.reason, "mine_approach_failed:dig_through:no_path")
+        self.assertEqual(result.reason, "mine_approach_failed:no_path")
         collect = result.metrics["collect"]
         self.assertEqual(collect["target"], [4, 72, 0])
         tree = collect["tree_domain_retarget"]
         self.assertEqual(tree["candidate_count"], 1)
         self.assertEqual(tree["attempts"][0]["target"], [5, 72, 0])
-        self.assertEqual(tree["attempts"][0]["mine_result"]["reason"], "mine_approach_failed:dig_through:no_path")
+        self.assertEqual(tree["attempts"][0]["mine_result"]["reason"], "mine_approach_failed:no_path")
 
-    def test_mine_block_collect_dig_through_candidate_navigation_is_progress_neutral(self):
-        from minebot.brain.progress import FAILURE_STORM_LIMIT, ProgressAuthority
-        from minebot.body.navigation import NavigationRunConfig
-
-        class StuckThenNavBody(FakeBody):
-            def execute(self, action: Action) -> Result:
-                result = super().execute(action)
-                if action.name == "moveTo":
-                    self.terminal = Event(
-                        seq=self.terminal.seq,
-                        tick=self.terminal.tick,
-                        bot=self.terminal.bot,
-                        name="moveDone",
-                        data={
-                            "action_id": action.id,
-                            "arrived": False,
-                            "final_pos": list(self.state_pos),
-                            "target": list(action.params["target"]),
-                            "stopped_reason": "stuck",
-                        },
-                    )
-                return result
-
-        class ProgressRecordingNavigator(FakeNavigator):
-            def __init__(self, progress: ProgressAuthority, body: FakeBody) -> None:
-                super().__init__(result=False, reason="stuck")
-                self.progress = progress
-                self.body = body
-
-            def navigate_to(self, goal, **kwargs):
-                self.calls.append((goal, kwargs))
-                cfg = kwargs.get("config")
-                if isinstance(cfg, NavigationRunConfig):
-                    self.progress.note_step(
-                        ("collect_approach_probe", goal),
-                        success=False,
-                        fingerprint=self.progress.fingerprint(self.body.get_state()),
-                        neutral=cfg.progress_neutral_failures,
-                    )
-                    self.progress.require_can_continue("collect approach candidate probe")
-                return ToolResult(False, "stuck", True, metrics={"goal": list(goal)})
-
-        body = StuckThenNavBody(
+    def test_mine_block_collect_goal_set_failure_is_not_progress_neutral(self):
+        body = FakeBody(
             blocks={
                 (0, 64, 5): ("dirt", "SOLID"),
                 (0, 65, 4): ("air", "CLEAR"),
             },
-            inventory_pages=[inventory_page([]) for _ in range(FAILURE_STORM_LIMIT + 1)],
         )
         body.state_pos = (0.5, 65.0, 0.5)
-        progress = ProgressAuthority()
-        navigator = ProgressRecordingNavigator(progress, body)
+        navigator = FakeNavigator(result=False, reason="stuck")
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
         runtime = BlockWork(body, policy, navigator=navigator)
 
-        for _ in range(FAILURE_STORM_LIMIT):
-            body.blocks[(0, 64, 5)] = ("dirt", "SOLID")
-            result = runtime.mine_block_collect((0, 64, 5), context=BreakContext.COLLECT, timeout_s=1.0)
-            self.assertFalse(result.success)
-            self.assertIn(result.reason, {"mine_approach_failed:dig_through:stuck", "collect_no_inventory_delta"})
+        result = runtime.mine_block_collect((0, 64, 5), context=BreakContext.COLLECT, timeout_s=1.0)
 
-        self.assertEqual(progress.failure_steps, 0)
-        collect_probe_calls = [
-            call for call in navigator.calls if isinstance(call[1].get("config"), NavigationRunConfig)
-        ]
-        self.assertTrue(collect_probe_calls)
-        self.assertTrue(all(call[1]["config"].progress_neutral_failures for call in collect_probe_calls))
-        progress.require_can_continue("next collect candidate")
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "mine_approach_failed:stuck")
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertFalse(navigator.calls[0][1]["config"].progress_neutral_failures)
 
     def test_mine_block_approach_uses_feet_level_stand_for_headroom_target(self):
-        class ApproachingBody(FakeBody):
-            def execute(self, action: Action) -> Result:
-                result = super().execute(action)
-                if action.name == "moveTo":
-                    target = tuple(action.params["target"])
-                    self.state_pos = (float(target[0]), float(target[1]), float(target[2]))
-                    self.terminal = Event(
-                        seq=self.terminal.seq,
-                        tick=self.terminal.tick,
-                        bot=self.terminal.bot,
-                        name="moveDone",
-                        data={
-                            "action_id": action.id,
-                            "arrived": True,
-                            "final_pos": list(self.state_pos),
-                            "target": list(target),
-                            "stopped_reason": "arrived",
-                        },
-                    )
-                return result
-
-        body = ApproachingBody(
+        body = FakeBody(
             blocks={
                 (2, 65, 0): ("dirt", "SOLID"),
                 (2, 64, -1): ("air", "CLEAR"),
@@ -1369,13 +1250,15 @@ class BlockWorkTests(unittest.TestCase):
         )
         body.state_pos = (0.5, 64.0, 0.5)
         policy = GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))])
-        runtime = BlockWork(body, policy)
+        navigator = FakeNavigator()
+        navigator.body = body
+        runtime = BlockWork(body, policy, navigator=navigator)
 
         result = runtime.mine_block((2, 65, 0), context=BreakContext.DIRECT)
 
         self.assertTrue(result.success)
-        self.assertEqual(body.actions[0].params["target"], [2.5, 64.0, -0.5])
-        self.assertEqual(result.metrics["mine_approach"]["stand_block"], [2, 64, -1])
+        self.assertEqual([action.name for action in body.actions], ["mineBlock"])
+        self.assertEqual(result.metrics["mine_approach"]["selected_goal"], [2, 64, -1])
 
     def test_mine_block_does_not_execute_when_perception_incomplete(self):
         body = FakeBody(
@@ -1733,12 +1616,26 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 self.calls.append((goal, kwargs))
+                selected = goal_position(goal)
+                if isinstance(goal, GoalComposite):
+                    self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
+                    return ToolResult(
+                        success=True,
+                        reason="arrived",
+                        can_retry=False,
+                        metrics={"goal": list(selected), "selected_goal": list(selected)},
+                    )
                 # Walking onto the drop brings it into the pickup box; the next
                 # inventory read reflects the pickup.
                 self.body.inventory_pages.append(
                     inventory_page([slot(9, "minecraft:dirt", 1)])
                 )
-                return ToolResult(success=True, reason="arrived", can_retry=False, metrics={"goal": list(goal)})
+                return ToolResult(
+                    success=True,
+                    reason="arrived",
+                    can_retry=False,
+                    metrics={"goal": list(selected), "selected_goal": list(selected)},
+                )
 
         body = FakeBody(
             blocks={(0, 64, 5): ("dirt", "SOLID")},
@@ -1761,7 +1658,7 @@ class BlockWorkTests(unittest.TestCase):
         # Walked into the drop cell center, not pos-1 (the solid floor), with a
         # tight arrival radius so pickup range is actually reached.
         self.assertTrue(navigator.calls, "pickup-assist walk did not fire")
-        goal, nav_kwargs = navigator.calls[0]
+        goal, nav_kwargs = next(call for call in navigator.calls if not isinstance(call[0], GoalComposite))
         self.assertEqual(tuple(goal), (0.5, 64, 5.5))
         self.assertEqual(nav_kwargs["break_context"], BreakContext.TRAVEL)
         self.assertEqual(nav_kwargs["arrival_radius"], 0.25)
@@ -1803,11 +1700,25 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 self.calls.append((goal, kwargs))
+                selected = goal_position(goal)
+                if isinstance(goal, GoalComposite):
+                    self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
+                    return ToolResult(
+                        success=True,
+                        reason="arrived",
+                        can_retry=False,
+                        metrics={"goal": list(selected), "selected_goal": list(selected)},
+                    )
                 # Arriving at the drop entity puts it in the pickup box.
                 self.body.inventory_pages.append(
                     inventory_page([slot(9, "minecraft:dirt", 1)])
                 )
-                return ToolResult(success=True, reason="arrived", can_retry=False, metrics={"goal": list(goal)})
+                return ToolResult(
+                    success=True,
+                    reason="arrived",
+                    can_retry=False,
+                    metrics={"goal": list(selected), "selected_goal": list(selected)},
+                )
 
         # Mined cell at (0,64,5); the drop fell to (2,64,5) — a different cell.
         body = DropEntityBody(
@@ -1830,7 +1741,7 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.metrics["deltas"], {"dirt": 1})
         # Walked to the drop ENTITY's position, not the mined cell.
         self.assertTrue(navigator.calls, "pickup-assist walk did not fire")
-        goal, nav_kwargs = navigator.calls[0]
+        goal, nav_kwargs = next(call for call in navigator.calls if not isinstance(call[0], GoalComposite))
         self.assertEqual(tuple(goal), (2, 64, 5))
         self.assertNotEqual(tuple(goal), (0, 64, 5))
         self.assertEqual(nav_kwargs["break_context"], BreakContext.TRAVEL)
@@ -2492,7 +2403,8 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 result = super().navigate_to(goal, **kwargs)
-                self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return result
 
         blocks = {
@@ -2533,7 +2445,8 @@ class BlockWorkTests(unittest.TestCase):
                 if len(self.calls) == 1:
                     self.body.state_pos = (0.5, 65.0, 0.5)
                 else:
-                    self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                    selected = goal_position(goal)
+                    self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return ToolResult(success=True, reason="arrived", can_retry=False, metrics={"goal": list(goal), "kwargs": kwargs})
 
         blocks = {
@@ -2572,7 +2485,8 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 result = super().navigate_to(goal, **kwargs)
-                self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return result
 
         blocks = {
@@ -2629,7 +2543,8 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 result = super().navigate_to(goal, **kwargs)
-                self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return result
 
         blocks = {
@@ -2691,7 +2606,8 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 result = super().navigate_to(goal, **kwargs)
-                self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return result
 
         blocks = {
@@ -2733,7 +2649,8 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 result = super().navigate_to(goal, **kwargs)
-                self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return result
 
         blocks = {
@@ -2782,7 +2699,8 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 result = super().navigate_to(goal, **kwargs)
-                self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return result
 
         blocks = {
@@ -3239,7 +3157,8 @@ class BlockWorkTests(unittest.TestCase):
                 if len(self.calls) == 1:
                     self.body.state_pos = (0.5, 64.0, 0.5)
                 else:
-                    self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                    selected = goal_position(goal)
+                    self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return ToolResult(success=True, reason="arrived", can_retry=False, metrics={"goal": list(goal), "kwargs": kwargs})
 
         body = FakeBody(
@@ -3282,7 +3201,8 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 result = super().navigate_to(goal, **kwargs)
-                self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return result
 
         body = FakeBody(
@@ -3307,9 +3227,9 @@ class BlockWorkTests(unittest.TestCase):
         result = runtime.place_here("minecraft:cobblestone", radius=1, context=PlaceContext.WORK)
 
         self.assertTrue(result.success)
-        self.assertEqual(body.actions[0].name, "moveTo")
-        self.assertEqual(body.actions[1].name, "mineBlock")
-        self.assertEqual(body.actions[1].params["target"], [2, 65, 0])
+        self.assertEqual([action.name for action in body.actions], ["mineBlock", "placeBlock"])
+        self.assertEqual(body.actions[0].params["target"], [2, 65, 0])
+        self.assertTrue(any(isinstance(goal, GoalComposite) for goal, _kwargs in navigator.calls))
         self.assertIn(
             ((2, 64, 0), {"timeout_s": 30.0, "break_context": BreakContext.TRAVEL, "arrival_radius": 0.25}),
             navigator.calls,
@@ -3325,7 +3245,8 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 result = super().navigate_to(goal, **kwargs)
-                self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return result
 
         body = FakeBody(
@@ -3420,7 +3341,8 @@ class BlockWorkTests(unittest.TestCase):
 
             def navigate_to(self, goal, **kwargs):
                 result = super().navigate_to(goal, **kwargs)
-                self.body.state_pos = (float(goal[0]), float(goal[1]), float(goal[2]))
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return result
 
         body = FakeBody(
@@ -3452,10 +3374,10 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(place_here["headroom_recovery"]["head_pos"], [2, 65, 0])
         self.assertEqual(body.actions[0].name, "mineBlock")
         self.assertEqual(body.actions[0].params["target"], [2, 64, 0])
-        self.assertEqual(body.actions[1].name, "moveTo")
-        self.assertEqual(body.actions[2].name, "mineBlock")
-        self.assertEqual(body.actions[2].params["target"], [2, 65, 0])
+        self.assertEqual(body.actions[1].name, "mineBlock")
+        self.assertEqual(body.actions[1].params["target"], [2, 65, 0])
         self.assertEqual(body.actions[-1].name, "placeBlock")
+        self.assertTrue(any(isinstance(goal, GoalComposite) for goal, _kwargs in navigator.calls))
         self.assertIn(
             ((2, 64, 0), {"timeout_s": 30.0, "break_context": BreakContext.TRAVEL, "arrival_radius": 0.25}),
             navigator.calls,

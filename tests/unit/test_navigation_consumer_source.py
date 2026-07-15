@@ -76,6 +76,17 @@ class NavigationConsumerSourceTests(unittest.TestCase):
         self.assertIn("_approach_surface_column(", function_body(BLOCK_WORK, "go_to_surface"))
         self.assertIn("self.dig_up_to_y(", function_body(BLOCK_WORK, "go_to_surface"))
 
+    def test_mining_stands_are_one_governed_goal_set(self):
+        approach = function_body(BLOCK_WORK, "_approach_mining_target")
+        self.assertIn("GoalComposite(", approach)
+        self.assertEqual(approach.count("self.navigator.navigate_to("), 1)
+        self.assertIn("break_context=BreakContext.COLLECT_APPROACH", approach)
+        self.assertIn("allow_local_terrain_fallback=False", approach)
+        self.assertNotIn("progress_neutral_failures=True", approach)
+        self.assertNotIn("self.body.execute(", approach)
+        self.assertNotIn("_clear_collect_approach_stand", BLOCK_WORK)
+        self.assertNotIn('Action.create("moveTo"', BLOCK_WORK)
+
 
 if __name__ == "__main__":
     unittest.main()
