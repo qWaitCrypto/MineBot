@@ -4488,10 +4488,21 @@ start_navigation_bridge_motion(name, mutation) -> (
   run('player ' + name + ' jump once')
 );
 
-navigation_pillar_centered(name, mutation) -> (
+navigation_mutation_centered(name, mutation) -> (
   p = bot_pos(name);
   source = mutation:'source';
   p != null && abs(p:0 - (source:0 + 0.5)) <= 0.17 && abs(p:2 - (source:2 + 0.5)) <= 0.17
+);
+
+navigation_mutation_horizontally_stable(name) -> (
+  pe = player_entity(name);
+  if(pe == null,
+    false
+  ,
+    nbt = query(pe, 'nbt');
+    motion = if(nbt == null, null, nbt:'Motion');
+    motion != null && abs(number(motion:0)) <= 0.03 && abs(number(motion:2)) <= 0.03
+  )
 );
 
 start_navigation_pillar_jump(name, mutation) -> (
@@ -4500,6 +4511,15 @@ start_navigation_pillar_jump(name, mutation) -> (
   mutation:'status' = 'jumping';
   global_navigation_mutations:name = mutation;
   run('player ' + name + ' jump once')
+);
+
+start_navigation_downward_break(name, mutation) -> (
+  pos = mutation:'pos';
+  stop_body(name);
+  mutation:'status' = 'breaking';
+  global_navigation_mutations:name = mutation;
+  run(str('player %s look at %.3f %.3f %.3f', name, pos:0 + 0.5, pos:1 + 0.5, pos:2 + 0.5));
+  run('player ' + name + ' attack continuous')
 );
 
 navigation_mutation_safe_now(name) -> (
@@ -4521,7 +4541,7 @@ request_navigation_mutation_cancel(name, reason) -> (
     if(mutation:'status' == 'waiting',
       finish_navigation_mutation(name, false, reason)
     ,
-      if(mutation:'kind' == 'break' || (mutation:'kind' == 'pillar' && mutation:'status' == 'centering'),
+      if(mutation:'kind' == 'break' || ((mutation:'kind' == 'pillar' || mutation:'kind' == 'downward') && mutation:'status' == 'centering'),
         stop_body(name);
         finish_navigation_mutation(name, false, reason)
       ,
@@ -4626,12 +4646,14 @@ decide_navigation_mutation(name, params) -> (
               finish_navigation_mutation(name, false, 'missing_capability');
               true
             ,
-              mutation:'status' = 'breaking';
+              mutation:'status' = if(mutation:'kind' == 'downward', 'centering', 'breaking');
               mutation:'ticks' = 0;
               global_navigation_mutations:name = mutation;
               stop_body(name);
-              run(str('player %s look at %.3f %.3f %.3f', name, pos:0 + 0.5, pos:1 + 0.5, pos:2 + 0.5));
-              run('player ' + name + ' attack continuous');
+              if(mutation:'kind' == 'break',
+                run(str('player %s look at %.3f %.3f %.3f', name, pos:0 + 0.5, pos:1 + 0.5, pos:2 + 0.5));
+                run('player ' + name + ' attack continuous')
+              );
               true
             )
           ,
@@ -4741,8 +4763,32 @@ run_navigation_downward_mutation_tick(name, mutation) -> (
       mutation:'result_reason' = 'descended';
       global_navigation_mutations:name = mutation
     );
+    ticks = floor(number(mutation:'ticks')) + 1;
+    mutation:'ticks' = ticks;
+    global_navigation_mutations:name = mutation;
     if(p != null && p:1 <= source:1 - 0.8 && navigation_mutation_safe_now(name),
       finish_navigation_mutation(name, true, 'descended')
+    ,
+      if(p == null,
+        finish_navigation_mutation(name, false, 'missing_body')
+      ,
+        if(mutation:'cancel_reason' != null && navigation_mutation_safe_now(name),
+          stop_body(name);
+          finish_navigation_mutation(name, false, mutation:'cancel_reason')
+        ,
+          if(ticks > floor(number(mutation:'timeout_ticks')) && navigation_mutation_safe_now(name),
+            stop_body(name);
+            finish_navigation_mutation(name, false, 'downward_timeout')
+          ,
+            if(navigation_mutation_centered(name, mutation),
+              stop_body(name)
+            ,
+              run(str('player %s look at %.3f %.3f %.3f', name, source:0 + 0.5, source:1 + 1.0, source:2 + 0.5));
+              run('player ' + name + ' move forward')
+            )
+          )
+        )
+      )
     )
   ,
     if(block_now != mutation:'before_type',
@@ -4756,6 +4802,7 @@ run_navigation_downward_mutation_tick(name, mutation) -> (
       )
     ,
       ticks = floor(number(mutation:'ticks')) + 1;
+      status = mutation:'status';
       mutation:'ticks' = ticks;
       global_navigation_mutations:name = mutation;
       if(mutation:'cancel_reason' != null && navigation_mutation_safe_now(name),
@@ -4772,8 +4819,24 @@ run_navigation_downward_mutation_tick(name, mutation) -> (
             global_navigation_mutations:name = mutation
           )
         ,
-          if(mutation:'status' == 'settling_failure' && navigation_mutation_safe_now(name),
-            finish_navigation_mutation(name, false, if(mutation:'cancel_reason' != null, mutation:'cancel_reason', mutation:'result_reason'))
+          if(status == 'centering',
+            if(p == null,
+              finish_navigation_mutation(name, false, 'missing_body')
+            ,
+              if(navigation_mutation_centered(name, mutation),
+                stop_body(name);
+                if(navigation_mutation_horizontally_stable(name) && navigation_mutation_safe_now(name),
+                  start_navigation_downward_break(name, mutation)
+                )
+              ,
+                run(str('player %s look at %.3f %.3f %.3f', name, source:0 + 0.5, source:1 + 1.0, source:2 + 0.5));
+                run('player ' + name + ' move forward')
+              )
+            )
+          ,
+            if(status == 'settling_failure' && navigation_mutation_safe_now(name),
+              finish_navigation_mutation(name, false, if(mutation:'cancel_reason' != null, mutation:'cancel_reason', mutation:'result_reason'))
+            )
           )
         )
       )
@@ -4829,7 +4892,7 @@ run_navigation_pillar_mutation_tick(name, mutation) -> (
             if(p == null,
               finish_navigation_mutation(name, false, 'missing_body')
             ,
-              if(navigation_pillar_centered(name, mutation) && navigation_mutation_safe_now(name),
+              if(navigation_mutation_centered(name, mutation) && navigation_mutation_safe_now(name),
                 start_navigation_pillar_jump(name, mutation)
               ,
                 run(str('player %s look at %.3f %.3f %.3f', name, source:0 + 0.5, source:1 + 1.0, source:2 + 0.5));
@@ -4993,7 +5056,6 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
       selected_goal = plan_result:4;
       partial_coefficient = plan_result:5;
       partial_distance = plan_result:6;
-      execution_arrival_radius = if(plan_status == 'partial', min(arrival_radius, 0.45), arrival_radius);
       movement_kinds = l();
       fall_depths = l();
       cancel_policies = l();
@@ -5009,6 +5071,8 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
           mutation_index = _
         )
       );
+      mutation_kind = if(mutation_step == null, null, mutation_step:6:'kind');
+      execution_arrival_radius = if(mutation_kind == 'downward', min(arrival_radius, 0.15), if(plan_status == 'partial', min(arrival_radius, 0.45), arrival_radius));
       movement_counts = navigation_movement_counts_json(movement_kinds);
       emit('navigateStartTrace', name, l(action_id, plan_status, selected_goal, plan_expanded, length(plan_path), goal_count, movement_counts, partial_coefficient, partial_distance, context_json));
       if(plan_status == 'no_path' || plan_status == 'budget_exceeded' || length(plan_path) == 0,

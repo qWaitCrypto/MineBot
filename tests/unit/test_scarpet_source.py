@@ -326,6 +326,10 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("plan_result = navigate_to_goals_plan", body)
         self.assertNotIn("plan_result = navigate_to_plan", body)
         self.assertIn("selected_goal = plan_result:4", body)
+        self.assertIn(
+            "execution_arrival_radius = if(mutation_kind == 'downward', min(arrival_radius, 0.15)",
+            body,
+        )
         self.assertIn('"selected_goal":%s,"goal_count":%d', source)
         self.assertIn("json_pos(data:17), data:18", source)
 
@@ -441,7 +445,7 @@ class ScarpetSourceTests(unittest.TestCase):
             "best_mutation_key = null",
             "candidate:7 != null && h + new_g < best_mutation_score",
             "if(best_mutation_key != null, best_mutation_key, start_key)",
-            "navigation_pillar_centered(name, mutation) -> (",
+            "navigation_mutation_centered(name, mutation) -> (",
             "start_navigation_pillar_jump(name, mutation) -> (",
             "run_navigation_pillar_mutation_tick(name, mutation) -> (",
             "place_aim(name, pos:0, pos:1, pos:2, 'up')",
@@ -469,7 +473,13 @@ class ScarpetSourceTests(unittest.TestCase):
             "'kind' -> 'downward'",
             "navigation_mutation_candidate(x, y - 1, z, 'downward'",
             "'purpose' -> 'downward'",
+            "mutation:'status' = if(mutation:'kind' == 'downward', 'centering', 'breaking')",
+            "start_navigation_downward_break(name, mutation) -> (",
+            "navigation_mutation_horizontally_stable(name) -> (",
+            "if(navigation_mutation_centered(name, mutation)",
+            "navigation_mutation_horizontally_stable(name) && navigation_mutation_safe_now(name)",
             "run_navigation_downward_mutation_tick(name, mutation) -> (",
+            "if(navigation_mutation_centered(name, mutation)",
             "p:1 <= source:1 - 0.8 && navigation_mutation_safe_now(name)",
             "finish_navigation_mutation(name, true, 'descended')",
             "finish_navigation_mutation(name, false, mutation:'cancel_reason')",
@@ -1082,8 +1092,9 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("finish_move(name, 'deviated', false)", source)
         self.assertIn("finish_move(name, 'timeout', false)", source)
         self.assertRegex(source, r"global_moves:name = l\(action_id, x, y, z, arrival_radius")
+        self.assertIn("mutation_kind = if(mutation_step == null, null, mutation_step:6:'kind')", source)
         self.assertIn(
-            "execution_arrival_radius = if(plan_status == 'partial', min(arrival_radius, 0.45), arrival_radius)",
+            "execution_arrival_radius = if(mutation_kind == 'downward', min(arrival_radius, 0.15), if(plan_status == 'partial', min(arrival_radius, 0.45), arrival_radius))",
             source,
         )
         self.assertIn("'arrival_radius' -> execution_arrival_radius", source)
