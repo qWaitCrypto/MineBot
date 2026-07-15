@@ -124,6 +124,21 @@ def main() -> None:
         skipped = metrics.get("skipped") or []
         for entry in skipped[:8]:
             print("  skip:", {k: entry.get(k) for k in ("pos", "reason", "phase", "skip")})
+        body_process = metrics.get("body_process") or {}
+        body_metrics = body_process.get("metrics") if isinstance(body_process, dict) else {}
+        for index, attempt in enumerate((body_metrics or {}).get("attempts") or []):
+            navigation = attempt.get("navigation") or {}
+            mined = attempt.get("mine") or {}
+            print(
+                "  attempt:",
+                {
+                    "index": index,
+                    "selected_goal": attempt.get("selected_goal"),
+                    "target": attempt.get("target"),
+                    "navigation": navigation.get("reason"),
+                    "mine": mined.get("reason"),
+                },
+            )
 
         # The core proof: collect did NOT abort on the first underground candidate.
         # Either it collected, or it honestly exhausted after trying multiple

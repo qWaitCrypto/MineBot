@@ -16,6 +16,7 @@ from .interaction import InteractionTransactions
 from .inventory import InventoryTransactions
 from .lifecycle import LifecycleTransactions
 from .navigation import NavigationRunConfig, NavigationTransactions
+from .resource_collection import ResourceCollectionConfig, ResourceCollectionTransactions
 from .use import UseTransactions
 from minebot.game.navigation import GoalAvoid, GoalBlock, GoalComposite, GoalNear, GoalXZ, GoalYLevel
 
@@ -41,6 +42,8 @@ __all__ = [
     "MemoryExplorationCoverageStore",
     "NavigationRunConfig",
     "NavigationTransactions",
+    "ResourceCollectionConfig",
+    "ResourceCollectionTransactions",
     "UseTransactions",
     "find_hostiles",
 ]

@@ -18,6 +18,7 @@ from minebot.body import (
     InventoryTransactions,
     LifecycleTransactions,
     NavigationTransactions,
+    ResourceCollectionTransactions,
     UseTransactions,
 )
 from minebot.brain.lifecycle import LifecycleState
@@ -36,6 +37,7 @@ TRANSACTION_CLASSES = (
     InventoryTransactions,
     LifecycleTransactions,
     NavigationTransactions,
+    ResourceCollectionTransactions,
     UseTransactions,
 )
 

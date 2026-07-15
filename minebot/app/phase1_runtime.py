@@ -40,6 +40,7 @@ from minebot.body import (
     NavigationRunConfig,
     NavigationTransactions,
     MemoryExplorationCoverageStore,
+    ResourceCollectionTransactions,
     UseTransactions,
 )
 from minebot.body.combat import CombatTransactions, find_hostiles
@@ -519,6 +520,7 @@ def build_phase1_registry(
         config.exploration_coverage_store or MemoryExplorationCoverageStore(),
     )
     work = BlockWork(body, policy, navigator=navigator)
+    resource_collection = ResourceCollectionTransactions(body, navigator, work)
     inventory_txn = InventoryTransactions(body, navigator=navigator, governance=policy, work=work)
     furnace_txn = FurnaceTransactions(body, navigator=navigator, governance=policy, work=work)
     use_txn = UseTransactions(body, navigator=navigator, inventory=inventory_txn)
@@ -555,6 +557,7 @@ def build_phase1_registry(
         furnace=furnace_txn,
         container=container_txn,
         interaction=interaction_txn,
+        resource_collection=resource_collection,
         use=use_txn,
     )
     return registry

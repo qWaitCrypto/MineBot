@@ -10,6 +10,8 @@ USE = (ROOT / "minebot" / "body" / "use.py").read_text()
 CONTAINER = (ROOT / "minebot" / "body" / "container.py").read_text()
 FURNACE = (ROOT / "minebot" / "body" / "furnace.py").read_text()
 BLOCK_WORK = (ROOT / "minebot" / "body" / "block_work.py").read_text()
+RESOURCE_COLLECTION = (ROOT / "minebot" / "body" / "resource_collection.py").read_text()
+COMPOSITION = (ROOT / "minebot" / "brain" / "composition.py").read_text()
 
 
 def function_body(source: str, name: str) -> str:
@@ -86,6 +88,30 @@ class NavigationConsumerSourceTests(unittest.TestCase):
         self.assertNotIn("self.body.execute(", approach)
         self.assertNotIn("_clear_collect_approach_stand", BLOCK_WORK)
         self.assertNotIn('Action.create("moveTo"', BLOCK_WORK)
+
+    def test_resource_candidate_and_stand_choice_is_body_owned(self):
+        collect = function_body(COMPOSITION, "collect_resource")
+        self.assertIn('context.registry.get("collect_block_domain")', collect)
+        self.assertNotIn('context.registry.get("search_for_block")', collect)
+        self.assertNotIn('context.registry.get("mine_block_collect")', collect)
+        self.assertNotIn("tried_positions", collect)
+        self.assertNotIn("blocked_log_patches", collect)
+        for retired_brain_selector in (
+            "_execute_candidate_probe_tool",
+            "_first_untried_target",
+            "_sort_log_targets",
+            "_diversify_targets",
+            "_mark_log_patch_blocked",
+        ):
+            self.assertNotIn(retired_brain_selector, COMPOSITION)
+
+        body_process = function_body(RESOURCE_COLLECTION, "collect_block_domain")
+        self.assertIn("find_nearby_block_search(", body_process)
+        self.assertIn("_build_stand_domain(", body_process)
+        self.assertIn("GoalComposite(", body_process)
+        self.assertIn("self.navigator.navigate_to(", body_process)
+        self.assertIn("candidate_blacklist", body_process)
+        self.assertIn("prepositioned=True", body_process)
 
 
 if __name__ == "__main__":

@@ -13,9 +13,8 @@ from typing import Any, Callable
 
 from minebot.brain.acquisition import AcquisitionError, AcquisitionStep, RecipeLookup, RecipeVariant, resolve_acquisition
 from minebot.brain.modes import RuntimeProfile
-from minebot.brain.progress import ProgressAbort
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
-from minebot.contract import Body, InventorySlot, JsonObject, ToolResult, is_candidate_skip, perception_next_cursor
+from minebot.contract import Body, InventorySlot, JsonObject, ToolResult, perception_next_cursor
 from minebot.contract.harvest import PICKAXE_BY_TIER, best_owned_pickaxe, required_pickaxe_tier, tier_satisfies
 
 
@@ -158,7 +157,6 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     constraints = constraints if isinstance(constraints, dict) else {}
     budget = _budget_from_constraints(context.budget, constraints)
     allow_dry = bool(constraints.get("allow_dry", False))
-    started = time.monotonic()
     requested_count = count
     requested_plan = _resource_plan(item)
     goal_target = _goal_collect_target(context.weld_context.goal_text)
@@ -246,306 +244,78 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                     goal_target_count=goal_target_count,
                 )
 
-    attempts: list[dict[str, object]] = []
-    skipped: list[dict[str, object]] = []
-    tried_positions: set[tuple[int, int, int]] = set()
-    blocked_log_patches: list[list[int]] = []
-    mutating_calls = 0
-    last_failure: dict[str, object] | None = None
-    targets: list[list[int]] = []
-    search: JsonObject | None = None
-    search_ok = False
-    search_reason = "search_not_run"
-    all_skips = True
+    remaining_count = max(1, count - current_count)
+    find_limit = min(
+        12,
+        max(6, remaining_count + 2, min(budget.max_candidates, radius // 2 if radius > 1 else 1)),
+    )
+    max_pages = _search_max_pages_for_budget(budget, find_limit)
+    body_process = _execute_composition_phase(
+        context,
+        "collect_domain",
+        context.registry.get("collect_block_domain"),
+        {
+            "block_types": list(plan.block_types),
+            "expected_drops": list(plan.expected_drops),
+            "remaining_count": remaining_count,
+            "search_radius": radius,
+            "candidate_budget": budget.max_candidates,
+            "mutation_budget": budget.max_mutating_calls,
+            "max_wall_s": budget.max_wall_s,
+            "find_limit": find_limit,
+            "max_pages": max_pages,
+            "segment_timeout_s": float(constraints.get("segment_timeout_s") or 15.0),
+            "dry": allow_dry,
+        },
+    )
+    _emit_trace(
+        context,
+        "composition_collect_domain",
+        {
+            "item": plan.requested_item,
+            "block_types": list(plan.block_types),
+            "remaining_count": remaining_count,
+            "success": bool(body_process.get("success")),
+            "reason": str(body_process.get("reason") or ""),
+        },
+    )
 
-    while len(attempts) < budget.max_candidates and mutating_calls < budget.max_mutating_calls:
-        if time.monotonic() - started > budget.max_wall_s:
-            partial_success = _collect_partial_success(before_count, current_count)
-            _emit_collect_summary(
-                context,
-                reason="partial_budget_exhausted",
-                success=partial_success,
-                plan=plan,
-                target_count=count,
-                before_count=before_count,
-                current_count=current_count,
-                attempts=attempts,
-                skipped=skipped,
-                last_failure=last_failure,
-            )
-            return _collect_result(
-                partial_success,
-                "partial_budget_exhausted",
-                True,
-                plan,
-                count,
-                before_count,
-                current_count,
-                attempts,
-                skipped,
-                "reselect_candidates",
-                last_failure=last_failure,
-                budget=budget,
-                requested_count=requested_count,
-                goal_target_count=goal_target_count,
-            )
+    after_result = _read_count(context, plan.inventory_items)
+    if not after_result.success:
+        return after_result
+    current_count = int((after_result.metrics or {}).get("count") or 0)
+    body_metrics = body_process.get("metrics")
+    body_metrics = body_metrics if isinstance(body_metrics, dict) else {}
+    attempts = [
+        dict(attempt)
+        for attempt in body_metrics.get("attempts") or []
+        if isinstance(attempt, dict)
+    ]
+    skipped = _resource_process_skips(body_metrics)
+    body_reason = str(body_process.get("reason") or "resource_process_failed")
+    complete = current_count >= count
 
-        target = _first_untried_target(
-            targets,
-            tried_positions,
-            blocked_log_patches=blocked_log_patches if _is_log_plan(plan) else None,
-        )
-        if target is None:
-            remaining_needed = max(1, count - current_count)
-            find_limit = min(
-                12,
-                max(6, remaining_needed + 2, min(budget.max_candidates, radius // 2 if radius > 1 else 1)),
-            )
-            max_pages = _search_max_pages_for_budget(budget, find_limit)
-            search = _execute_composition_phase(
-                context,
-                "search",
-                context.registry.get("search_for_block"),
-                {
-                    "block_types": list(plan.block_types),
-                    "search_radius": radius,
-                    "find_limit": find_limit,
-                    "max_pages": max_pages,
-                },
-            )
-            _emit_trace(
-                context,
-                "composition_search",
-                {
-                    "item": plan.requested_item,
-                    "radius": radius,
-                    "find_limit": find_limit,
-                    "max_pages": max_pages,
-                    "success": bool(search.get("success")),
-                    "reason": str(search.get("reason") or ""),
-                },
-            )
-            targets = _targets_from_search(search, plan=plan)
-            target = _first_untried_target(
-                targets,
-                tried_positions,
-                blocked_log_patches=blocked_log_patches if _is_log_plan(plan) else None,
-            )
-            search_ok = bool(search.get("success"))
-            search_reason = str(search.get("reason") or "search_failed")
-        if search is None:
-            search = {}
-        target = _first_untried_target(
-            targets,
-            tried_positions,
-            blocked_log_patches=blocked_log_patches if _is_log_plan(plan) else None,
-        )
-        # A search that navigated to its own nearest pick and could not stand there
-        # (no_stand_point / out_of_range / target_lost / navigation_blocked) is a
-        # CANDIDATE skip, not a search failure: the candidate list it returned is
-        # still real (Scarpet sorts by dist2), so fall through and try the next
-        # untried candidate via mine's own approach. Only abort when there is no
-        # untried candidate left, or the search failed for a non-skip reason
-        # (perception_failed, owner_busy, transport) that means the candidate list
-        # itself is untrustworthy.
-        search_is_candidate_skip = is_candidate_skip(search_reason)
-        if target is None or (not search_ok and not search_is_candidate_skip):
-            failure_reason = "candidate_targets_exhausted" if target is None and targets else search_reason
-            last_failure = {"phase": "search", "reason": failure_reason, "result": search}
-            result_reason = _search_failure_reason(
-                failure_reason,
-                bool(targets),
-                before_count=before_count,
-                current_count=current_count,
-            )
-            partial_success = _collect_partial_success(before_count, current_count)
-            _emit_collect_summary(
-                context,
-                reason=result_reason,
-                success=partial_success,
-                plan=plan,
-                target_count=count,
-                before_count=before_count,
-                current_count=current_count,
-                attempts=attempts,
-                skipped=skipped,
-                last_failure=last_failure,
-            )
-            return _collect_result(
-                partial_success,
-                result_reason,
-                True,
-                plan,
-                count,
-                before_count,
-                current_count,
-                attempts,
-                skipped,
-                "reselect_candidates",
-                last_failure=last_failure,
-                budget=budget,
-                requested_count=requested_count,
-                goal_target_count=goal_target_count,
-            )
-        if not search_ok:
-            # Candidate-skip search outcome: record it, keep the candidate list, and
-            # try the next untried target instead of treating it as a task failure.
-            skipped.append({"pos": list(target), "reason": search_reason, "skip": True, "phase": "search"})
-            _emit_trace(
-                context,
-                "composition_search_skip",
-                {"item": plan.requested_item, "reason": search_reason, "next_target": list(target)},
-            )
-
-        mutating_calls += 1
-        tried_positions.add(tuple(target))
-        mined = _execute_candidate_probe_tool(
-            context,
-            context.registry.get("mine_block_collect"),
-            {
-                "pos": target,
-                "expected_drops": list(plan.expected_drops),
-                "target_block_types": list(plan.block_types),
-                "dry": allow_dry,
-            },
-        )
-        _emit_trace(
-            context,
-            "composition_mine_attempt",
-            {
-                "item": plan.requested_item,
-                "target": list(target),
-                "success": bool(mined.get("success")),
-                "reason": str(mined.get("reason") or ""),
-                "diagnostics": _mine_attempt_diagnostics(mined),
-            },
-        )
-        attempt = {"target": target, "search": search, "mine": mined}
-        attempts.append(attempt)
-
-        after_result = _read_count(context, plan.inventory_items)
-        if not after_result.success:
-            return after_result
-        current_count = int((after_result.metrics or {}).get("count") or 0)
-        if current_count >= count:
-            _emit_collect_summary(
-                context,
-                reason="collected",
-                success=True,
-                plan=plan,
-                target_count=count,
-                before_count=before_count,
-                current_count=current_count,
-                attempts=attempts,
-                skipped=skipped,
-                last_failure=last_failure,
-            )
-            return _collect_result(
-                True,
-                "collected",
-                False,
-                plan,
-                count,
-                before_count,
-                current_count,
-                attempts,
-                skipped,
-                "complete",
-                budget=budget,
-                requested_count=requested_count,
-                goal_target_count=goal_target_count,
-            )
-
-        if not mined.get("success"):
-            reason = str(mined.get("reason") or "mine_failed")
-            if reason == "missing_required_tool":
-                skipped.append({"pos": target, "reason": reason, "skip": False})
-                last_failure = {"phase": "mine", "target": target, "reason": reason, "result": mined}
-                _emit_collect_summary(
-                    context,
-                    reason=reason,
-                    success=False,
-                    plan=plan,
-                    target_count=count,
-                    before_count=before_count,
-                    current_count=current_count,
-                    attempts=attempts,
-                    skipped=skipped,
-                    last_failure=last_failure,
-                )
-                return _collect_result(
-                    False,
-                    reason,
-                    False,
-                    plan,
-                    count,
-                    before_count,
-                    current_count,
-                    attempts,
-                    skipped,
-                    "missing_required_tool",
-                    last_failure=last_failure,
-                    budget=budget,
-                    requested_count=requested_count,
-                    goal_target_count=goal_target_count,
-                )
-            skip = _is_collect_candidate_rejection(reason, mined)
-            skipped.append({"pos": target, "reason": reason, "skip": skip})
-            last_failure = {"phase": "mine", "target": target, "reason": mined.get("reason"), "result": mined}
-            if skip and _is_log_plan(plan) and _is_log_patch_blocker(reason, mined):
-                _mark_log_patch_blocked(blocked_log_patches, target)
-            if _is_collect_control_yield(reason, mined):
-                partial_success = _collect_partial_success(before_count, current_count)
-                _emit_collect_summary(
-                    context,
-                    reason=reason,
-                    success=partial_success,
-                    plan=plan,
-                    target_count=count,
-                    before_count=before_count,
-                    current_count=current_count,
-                    attempts=attempts,
-                    skipped=skipped,
-                    last_failure=last_failure,
-                )
-                return _collect_result(
-                    partial_success,
-                    reason,
-                    True,
-                    plan,
-                    count,
-                    before_count,
-                    current_count,
-                    attempts,
-                    skipped,
-                    "resume_after_body_control",
-                    last_failure=last_failure,
-                    budget=budget,
-                    requested_count=requested_count,
-                    goal_target_count=goal_target_count,
-                )
-            if not skip:
-                all_skips = False
-            # A candidate-skip (unreachable / protected / no observed pickup) is not
-            # a task failure: exclude this target and try the next one. The shared
-            # progress authority still trips the failure storm on genuine repeated
-            # failures (those are NOT neutral in the weld), and budget/tried_positions
-            # bound the loop, so we deliberately do not stop here on a bad candidate.
-        else:
-            all_skips = False
-            if _is_log_plan(plan):
-                _unmark_log_patch_blocked(blocked_log_patches, target)
-
-    candidate_budget_hit = len(attempts) >= budget.max_candidates
-    if attempts and candidate_budget_hit and all_skips:
-        reason = "candidate_targets_exhausted"
+    if complete:
+        result_reason = "collected"
+        result_success = True
+        can_retry = False
+        resume_hint = "complete"
+        last_failure = None
     else:
-        reason = "partial_budget_exhausted"
-    partial_success = _collect_partial_success(before_count, current_count)
+        result_reason = _resource_process_reason(body_reason, before_count=before_count, current_count=current_count)
+        result_success = _collect_partial_success(before_count, current_count)
+        can_retry = bool(body_process.get("canRetry", True))
+        resume_hint = "reselect_candidates" if can_retry else "body_terminal"
+        last_failure = {
+            "phase": "collect_domain",
+            "reason": body_reason,
+            "result": body_process,
+        }
+
     _emit_collect_summary(
         context,
-        reason=reason,
-        success=partial_success,
+        reason=result_reason,
+        success=result_success,
         plan=plan,
         target_count=count,
         before_count=before_count,
@@ -554,24 +324,31 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         skipped=skipped,
         last_failure=last_failure,
     )
-    return _collect_result(
-        partial_success,
-        reason,
-        True,
+    result = _collect_result(
+        result_success,
+        result_reason,
+        can_retry,
         plan,
         count,
         before_count,
         current_count,
         attempts,
         skipped,
-        "reselect_candidates",
+        resume_hint,
         last_failure=last_failure,
         budget=budget,
         requested_count=requested_count,
         goal_target_count=goal_target_count,
     )
-
-
+    metrics = dict(result.metrics or {})
+    metrics["body_process"] = body_process
+    return ToolResult(
+        result.success,
+        result.reason,
+        result.can_retry,
+        result.next_suggestion,
+        metrics=metrics,
+    )
 def ensure_tool_for(params: JsonObject, context: CompositionContext, recipe_lookup: RecipeLookup) -> ToolResult:
     resource = _normalize_item(str(params.get("resource") or ""))
     if not resource:
@@ -945,153 +722,6 @@ def _compact_reclaim_entries(entries: list[object]) -> dict[str, object]:
     return {"count": len(entries), "tail": tail}
 
 
-def _execute_candidate_probe_tool(context: CompositionContext, tool: RegisteredTool, tool_input: JsonObject) -> JsonObject:
-    authority = context.weld_context.authority
-    progress_snapshot = _progress_authority_snapshot(authority)
-    before_failures = authority.failure_steps
-    try:
-        result = _execute_composition_phase(context, "mine", tool, tool_input)
-    except TimeoutError as exc:
-        if not _is_body_action_timeout(exc):
-            raise
-        _restore_progress_authority(authority, progress_snapshot)
-        return ToolResult(
-            False,
-            "mine_approach_failed:body_action_timeout",
-            True,
-            metrics={
-                "target": tool_input.get("pos"),
-                "await_diagnostics": dict(getattr(exc, "diagnostics", {}) or {}),
-                **_interrupt_orphan_action(context, "candidate_action_timeout"),
-            },
-        ).to_payload()
-    except ProgressAbort as exc:
-        _restore_progress_authority(authority, progress_snapshot)
-        if _is_candidate_navigation_progress_yield_facts(exc.facts.last_action):
-            return ToolResult(
-                False,
-                "mine_approach_failed:dig_through:no_path",
-                True,
-                metrics={
-                    "target": tool_input.get("pos"),
-                    "progress_facts": _progress_facts_payload(exc),
-                },
-            ).to_payload()
-        return ToolResult(
-            False,
-            "mine_progress_yielded",
-            True,
-            metrics={
-                "target": tool_input.get("pos"),
-                "progress_facts": _progress_facts_payload(exc),
-            },
-        ).to_payload()
-    if not result.get("success") and _is_collect_candidate_rejection(str(result.get("reason") or ""), result):
-        authority.failure_steps = before_failures
-    return result
-
-
-def _is_body_action_timeout(exc: TimeoutError) -> bool:
-    diagnostics = getattr(exc, "diagnostics", None)
-    if not isinstance(diagnostics, dict):
-        return False
-    return bool(
-        diagnostics.get("action_id")
-        and "terminal_events" in diagnostics
-        and "poll_count" in diagnostics
-    )
-
-
-def _interrupt_orphan_action(context: CompositionContext, reason: str) -> dict[str, object]:
-    try:
-        result = context.weld_context.body.interrupt(reason)
-    except Exception as exc:
-        return {
-            "interrupt_error": {
-                "type": type(exc).__name__,
-                "message": str(exc),
-            }
-        }
-    return {
-        "interrupt_result": {
-            "ok": bool(result.ok),
-            "accepted": bool(result.accepted),
-            "complete": bool(result.complete),
-            "error": result.error,
-        }
-    }
-
-
-def _is_collect_candidate_rejection(reason: str, result: JsonObject | None = None) -> bool:
-    if is_candidate_skip(reason):
-        return True
-    if reason == "body_rejected" and _is_mining_stand_body_rejection(result):
-        return True
-    if reason == "mine_progress_yielded" and _is_candidate_navigation_progress_yield(result):
-        return True
-    return reason == "mine_progress_yielded"
-
-
-def _is_collect_control_yield(reason: str, result: JsonObject | None = None) -> bool:
-    if reason == "body_rejected" and _is_mining_stand_body_rejection(result):
-        return False
-    if reason == "mine_progress_yielded" and _is_candidate_navigation_progress_yield(result):
-        return False
-    return reason in {"body_rejected", "mine_progress_yielded"} or reason.endswith(":preempted")
-
-
-def _is_mining_stand_body_rejection(result: JsonObject | None) -> bool:
-    if not isinstance(result, dict):
-        return False
-    metrics = result.get("metrics")
-    if not isinstance(metrics, dict):
-        return False
-    failures = metrics.get("stand_candidate_failures")
-    if not isinstance(failures, list) or not failures:
-        return False
-    if not isinstance(metrics.get("mine_approach"), dict):
-        return False
-    for failure in failures:
-        if not isinstance(failure, dict):
-            return False
-        if str(failure.get("reason") or "") != "body_rejected":
-            return False
-        nested = failure.get("result")
-        if not isinstance(nested, dict):
-            return False
-        nested_metrics = nested.get("metrics")
-        if not isinstance(nested_metrics, dict):
-            return False
-        if str(nested_metrics.get("action") or "") != "moveTo":
-            return False
-        if not isinstance(nested_metrics.get("mine_approach"), dict):
-            return False
-    return True
-
-
-def _is_candidate_navigation_progress_yield(result: JsonObject | None) -> bool:
-    if not isinstance(result, dict):
-        return False
-    metrics = result.get("metrics")
-    if not isinstance(metrics, dict):
-        return False
-    facts = metrics.get("progress_facts")
-    if not isinstance(facts, dict):
-        return False
-    last_action = facts.get("last_action")
-    if not isinstance(last_action, list) or not last_action:
-        return False
-    return _is_candidate_navigation_progress_yield_facts(last_action)
-
-
-def _is_candidate_navigation_progress_yield_facts(last_action: object) -> bool:
-    if not isinstance(last_action, (list, tuple)) or not last_action:
-        return False
-    if str(last_action[0]) != "navigate.segment":
-        return False
-    return any(str(part) == "no_path" for part in last_action)
-
-
 def _recent_body_requests(body: Body, *, limit: int = 6) -> list[dict[str, object]]:
     history = getattr(body, "request_history", None)
     if not isinstance(history, list):
@@ -1118,47 +748,6 @@ def _recent_body_requests(body: Body, *, limit: int = 6) -> list[dict[str, objec
             }
         )
     return out
-
-
-def _progress_authority_snapshot(authority) -> dict[str, object]:
-    return {
-        "stagnant_steps": authority.stagnant_steps,
-        "stalled_steps": authority.stalled_steps,
-        "failure_steps": authority.failure_steps,
-        "last_action": authority.last_action,
-        "last_fingerprint": authority.last_fingerprint,
-        "current_fingerprint": authority.current_fingerprint,
-    }
-
-
-def _restore_progress_authority(authority, snapshot: dict[str, object]) -> None:
-    authority.stagnant_steps = int(snapshot["stagnant_steps"])
-    authority.stalled_steps = int(snapshot["stalled_steps"])
-    authority.failure_steps = int(snapshot["failure_steps"])
-    authority.last_action = snapshot["last_action"]
-    authority.last_fingerprint = str(snapshot["last_fingerprint"])
-    authority.current_fingerprint = str(snapshot["current_fingerprint"])
-
-
-def _progress_facts_payload(exc: ProgressAbort) -> dict[str, object]:
-    return {
-        "stagnant_steps": exc.facts.stagnant_steps,
-        "stalled_steps": exc.facts.stalled_steps,
-        "failure_steps": exc.facts.failure_steps,
-        "last_action": list(exc.facts.last_action) if exc.facts.last_action is not None else None,
-    }
-
-
-def _candidate_distance_for_target(payload: JsonObject, target: list[int]) -> float | None:
-    metrics = payload.get("metrics")
-    if not isinstance(metrics, dict):
-        return None
-    for candidate in _iter_search_candidates(metrics):
-        pos = candidate.get("pos") if isinstance(candidate, dict) else None
-        parsed = _parse_pos(pos)
-        if parsed == target:
-            return _candidate_distance(candidate)
-    return None
 
 
 def _resolve_search_radius(plan: ResourcePlan, constraints: dict[str, object]) -> int:
@@ -1286,72 +875,6 @@ def _read_inventory_counts(body: Body, *, page_size: int = 12) -> ToolResult:
         item = _normalize_item(slot.item)
         counts[item] = counts.get(item, 0) + slot.count
     return ToolResult(True, "inventory_counted", False, metrics={"counts": counts})
-
-
-def _mine_attempt_diagnostics(result: dict[str, Any]) -> dict[str, object]:
-    metrics = result.get("metrics")
-    if not isinstance(metrics, dict):
-        return {}
-    diagnostics: dict[str, object] = {}
-    for key in (
-        "target",
-        "block_type",
-        "required_tier",
-        "best_owned",
-        "selected_item",
-        "stand_block",
-        "move_target",
-        "state_after",
-        "reach_distance",
-        "error",
-        "accepted",
-        "data",
-    ):
-        if key in metrics:
-            diagnostics[key] = metrics[key]
-    clearance = metrics.get("clearance")
-    if isinstance(clearance, dict):
-        diagnostics["clearance"] = _clearance_diagnostics(clearance)
-    dig = metrics.get("dig_through_result")
-    if isinstance(dig, dict):
-        diagnostics["dig_through_result"] = _tool_result_diagnostics(dig)
-    return diagnostics
-
-
-def _clearance_diagnostics(clearance: dict[str, Any]) -> dict[str, object]:
-    out = _tool_result_diagnostics(clearance)
-    metrics = clearance.get("metrics")
-    if isinstance(metrics, dict):
-        for key in ("stand_block", "target", "block_type"):
-            if key in metrics:
-                out[key] = metrics[key]
-        legality = metrics.get("legality")
-        if isinstance(legality, dict):
-            out["legality"] = {
-                key: legality[key]
-                for key in ("reason", "allowed", "block_type", "pos", "context")
-                if key in legality
-            }
-        cleared = metrics.get("cleared")
-        if isinstance(cleared, list):
-            out["cleared"] = [
-                _cleared_block_diagnostics(item)
-                for item in cleared[:4]
-                if isinstance(item, dict)
-            ]
-            out["cleared_count"] = len(cleared)
-    return out
-
-
-def _cleared_block_diagnostics(item: dict[str, Any]) -> dict[str, object]:
-    out: dict[str, object] = {}
-    for key in ("pos", "block_type"):
-        if key in item:
-            out[key] = item[key]
-    result = item.get("result")
-    if isinstance(result, dict):
-        out["result"] = _tool_result_diagnostics(result)
-    return out
 
 
 def _emit_collect_summary(
@@ -1540,129 +1063,10 @@ def _segment_diagnostics(segment: dict[str, Any]) -> dict[str, object]:
     return out
 
 
-def _targets_from_search(payload: JsonObject, *, plan: ResourcePlan | None = None) -> list[list[int]]:
-    metrics = payload.get("metrics")
-    if not isinstance(metrics, dict):
-        return []
-    targets: list[tuple[list[int], float | None]] = []
-    seen_targets: set[tuple[int, int, int]] = set()
-    for candidate in _iter_search_candidates(metrics):
-        pos = candidate.get("pos") if isinstance(candidate, dict) else None
-        parsed = _parse_pos(pos)
-        if parsed is not None and tuple(parsed) not in seen_targets:
-            targets.append((parsed, _candidate_distance(candidate)))
-            seen_targets.add(tuple(parsed))
-    if plan is not None and _is_log_plan(plan):
-        return _sort_log_targets(targets)
-    return _diversify_targets([target for target, _distance in targets])
-
-
-def _iter_search_candidates(metrics: dict[str, object]) -> list[dict[str, object]]:
-    out: list[dict[str, object]] = []
-    target = metrics.get("target")
-    if isinstance(target, dict):
-        out.append(target)
-    candidates = metrics.get("candidates")
-    if isinstance(candidates, list):
-        out.extend(candidate for candidate in candidates if isinstance(candidate, dict))
-    return out
-
-
 def _is_log_plan(plan: ResourcePlan) -> bool:
     return plan.requested_item in {"log", "logs"} or any(
         _normalize_item(block_type).endswith("_log") for block_type in plan.block_types
     )
-
-
-def _candidate_distance(candidate: object) -> float | None:
-    if not isinstance(candidate, dict):
-        return None
-    value = candidate.get("distance")
-    if isinstance(value, (int, float)):
-        return float(value)
-    return None
-
-
-def _sort_log_targets(targets: list[tuple[list[int], float | None]]) -> list[list[int]]:
-    if len(targets) < 3:
-        return [target for target, _distance in sorted(targets, key=_log_target_sort_key)]
-
-    columns: list[list[tuple[list[int], float | None]]] = []
-    for item in sorted(targets, key=_log_target_sort_key):
-        column = _find_log_column(columns, item[0])
-        if column is None:
-            columns.append([item])
-        else:
-            column.append(item)
-
-    diversified: list[list[int]] = []
-    pending = True
-    while pending:
-        pending = False
-        for column in columns:
-            if not column:
-                continue
-            diversified.append(column.pop(0)[0])
-            pending = True
-    return diversified
-
-
-def _log_target_sort_key(item: tuple[list[int], float | None]) -> tuple[int, float, int, int]:
-    target, distance = item
-    return (
-        target[1],
-        distance if distance is not None else 1_000_000.0,
-        target[0],
-        target[2],
-    )
-
-
-def _find_log_column(
-    columns: list[list[tuple[list[int], float | None]]],
-    target: list[int],
-) -> list[tuple[list[int], float | None]] | None:
-    for column in columns:
-        if column and _targets_share_log_column(column[0][0], target):
-            return column
-    return None
-
-
-def _targets_share_log_column(left: list[int], right: list[int]) -> bool:
-    return _targets_share_patch(left, right)
-
-
-def _diversify_targets(targets: list[list[int]]) -> list[list[int]]:
-    if len(targets) < 3:
-        return targets
-    clusters: list[list[list[int]]] = []
-    for target in targets:
-        cluster = _find_target_cluster(clusters, target)
-        if cluster is None:
-            clusters.append([target])
-        else:
-            cluster.append(target)
-
-    diversified: list[list[int]] = []
-    pending = True
-    while pending:
-        pending = False
-        for cluster in clusters:
-            if not cluster:
-                continue
-            diversified.append(cluster.pop(0))
-            pending = True
-    return diversified
-
-
-def _find_target_cluster(clusters: list[list[list[int]]], target: list[int]) -> list[list[int]] | None:
-    for cluster in clusters:
-        if any(_targets_share_patch(candidate, target) for candidate in cluster):
-            return cluster
-    return None
-
-
-def _targets_share_patch(left: list[int], right: list[int]) -> bool:
-    return abs(left[0] - right[0]) <= 2 and abs(left[2] - right[2]) <= 2 and abs(left[1] - right[1]) <= 6
 
 
 def _parse_pos(value: object) -> list[int] | None:
@@ -1671,50 +1075,51 @@ def _parse_pos(value: object) -> list[int] | None:
     return [int(value[0]), int(value[1]), int(value[2])]
 
 
-def _first_untried_target(
-    targets: list[list[int]],
-    tried_positions: set[tuple[int, int, int]],
-    *,
-    blocked_log_patches: list[list[int]] | None = None,
-) -> list[int] | None:
-    for target in targets:
-        if tuple(target) not in tried_positions:
-            if blocked_log_patches is not None and _target_in_blocked_log_patch(target, blocked_log_patches):
+def _resource_process_reason(reason: str, *, before_count: int, current_count: int) -> str:
+    if reason == "resource_candidates_not_found":
+        return "partial_candidate_targets_exhausted" if current_count > before_count else "target_not_found"
+    if reason in {"resource_candidate_domain_exhausted", "resource_domain_partial_exhausted"}:
+        return "partial_candidate_targets_exhausted" if current_count > before_count else "candidate_targets_exhausted"
+    if reason == "resource_domain_budget_exhausted":
+        return "partial_budget_exhausted"
+    if reason == "resource_domain_collected":
+        return "collect_inventory_target_not_met"
+    return reason
+
+
+def _resource_process_skips(metrics: dict[str, object]) -> list[dict[str, object]]:
+    skipped: list[dict[str, object]] = []
+    seen: set[tuple[int, int, int]] = set()
+    attempts = metrics.get("attempts")
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
                 continue
-            return target
-    return None
+            target = _parse_pos(attempt.get("target"))
+            mined = attempt.get("mine")
+            navigation = attempt.get("navigation")
+            reason = None
+            if isinstance(mined, dict) and mined.get("success") is not True:
+                reason = str(mined.get("reason") or "resource_candidate_rejected")
+            elif isinstance(navigation, dict) and navigation.get("success") is not True:
+                reason = f"resource_navigation_{navigation.get('reason') or 'failed'}"
+            if target is None or reason is None:
+                continue
+            key = tuple(target)
+            if key in seen:
+                continue
+            seen.add(key)
+            skipped.append({"pos": target, "reason": reason, "skip": True})
 
-
-def _is_log_patch_blocker(reason: str, result: JsonObject | None = None) -> bool:
-    if "break_denied:not_natural_breakable" in reason:
-        return True
-    if reason == "mine_approach_failed:dig_through:no_path":
-        metrics = result.get("metrics") if isinstance(result, dict) else None
-        if isinstance(metrics, dict) and isinstance(metrics.get("progress_facts"), dict):
-            return False
-        return True
-    return False
-
-
-def _target_in_blocked_log_patch(target: list[int], blocked_log_patches: list[list[int]]) -> bool:
-    return any(_targets_share_patch(target, blocked) for blocked in blocked_log_patches)
-
-
-def _mark_log_patch_blocked(blocked_log_patches: list[list[int]], target: list[int]) -> None:
-    if not _target_in_blocked_log_patch(target, blocked_log_patches):
-        blocked_log_patches.append(list(target))
-
-
-def _unmark_log_patch_blocked(blocked_log_patches: list[list[int]], target: list[int]) -> None:
-    blocked_log_patches[:] = [blocked for blocked in blocked_log_patches if not _targets_share_patch(target, blocked)]
-
-
-def _search_failure_reason(reason: str, had_candidates: bool, *, before_count: int, current_count: int) -> str:
-    if current_count > before_count:
-        return "partial_candidate_targets_exhausted"
-    if had_candidates:
-        return "candidate_targets_exhausted"
-    return "target_not_found" if reason == "search_block_not_found" else f"search_failed:{reason}"
+    blacklisted = metrics.get("candidate_blacklist")
+    if isinstance(blacklisted, list):
+        for raw in blacklisted:
+            pos = _parse_pos(raw)
+            if pos is None or tuple(pos) in seen:
+                continue
+            seen.add(tuple(pos))
+            skipped.append({"pos": pos, "reason": "body_candidate_blacklist", "skip": True})
+    return skipped
 
 
 def _collect_partial_success(before_count: int, current_count: int) -> bool:

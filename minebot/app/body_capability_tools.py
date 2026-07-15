@@ -13,6 +13,8 @@ from minebot.body import (
     InteractionTransactions,
     InventoryTransactions,
     NavigationTransactions,
+    ResourceCollectionConfig,
+    ResourceCollectionTransactions,
     UseTransactions,
 )
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
@@ -78,7 +80,7 @@ BODY_TRANSACTION_CLOSURE: dict[str, CapabilityClosure] = {
         "tool", "go_to_surface", note="Verified natural-surface escape capability."
     ),
     "BlockWork.search_for_block": _closure(
-        "tool", "search_for_block", note="Search plus approach transaction."
+        "tool", "search_for_block", note="Read-only bounded resource/block candidate perception."
     ),
     "BlockWork.sky_exposed": _closure(
         "owned", "go_to_surface", note="Batched sky probe is internal evidence for surface search."
@@ -191,6 +193,11 @@ BODY_TRANSACTION_CLOSURE: dict[str, CapabilityClosure] = {
     ),
     "NavigationTransactions.move_away": _closure(
         "tool", "move_away", note="Shared avoid-goal hazard-spacing transaction."
+    ),
+    "ResourceCollectionTransactions.collect_block_domain": _closure(
+        "tool",
+        "collect_block_domain",
+        note="Body-owned bounded resource candidate, route, exact mine, and pickup process.",
     ),
     "UseTransactions.consume_item": _closure(
         "tool", "consume_item", note="Verified food/potion/milk consumption."
@@ -309,6 +316,7 @@ def register_body_capability_tools(
     furnace: FurnaceTransactions,
     container: ContainerTransactions,
     interaction: InteractionTransactions,
+    resource_collection: ResourceCollectionTransactions,
     use: UseTransactions,
 ) -> None:
     tools = (
@@ -335,6 +343,7 @@ def register_body_capability_tools(
         _place_here_tool(work),
         _dig_down_tool(work),
         _dig_up_tool(work),
+        _collect_block_domain_tool(resource_collection),
         _read_block_tool(body),
         _read_nearby_blocks_tool(body),
         _read_nearby_entities_tool(body),
@@ -1191,6 +1200,51 @@ def _dig_up_tool(work: BlockWork) -> RegisteredTool:
         body_scope=("mine", "place", "navigation", "blocks", "inventory"),
         terminal_truth=("mineDone", "placeDone", "position", "ToolResult"),
         timeout_s=240.0,
+    )
+
+
+def _collect_block_domain_tool(resource: ResourceCollectionTransactions) -> RegisteredTool:
+    return _tool(
+        "collect_block_domain",
+        "Collect a bounded physical domain of explicit block types. The Body discovers candidates, submits their stand points as one planner goal set, blacklists failed candidates, replans, mines, and verifies pickup inventory truth.",
+        _object_schema(
+            {
+                "block_types": STRING_LIST_SCHEMA,
+                "expected_drops": STRING_LIST_SCHEMA,
+                "remaining_count": {"type": "integer", "minimum": 1},
+                "search_radius": {"type": "integer", "minimum": 1, "maximum": 64},
+                "candidate_budget": {"type": "integer", "minimum": 1, "maximum": 128},
+                "mutation_budget": {"type": "integer", "minimum": 1, "maximum": 128},
+                "max_wall_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 900},
+                "find_limit": {"type": "integer", "minimum": 1, "maximum": 64},
+                "max_pages": {"type": "integer", "minimum": 1, "maximum": 8},
+                "segment_timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 60},
+                "dry": {"type": "boolean"},
+            },
+            required=("block_types", "expected_drops", "remaining_count"),
+        ),
+        lambda params: resource.collect_block_domain(
+            block_types=_strings(params["block_types"]),
+            expected_drops=_strings(params["expected_drops"]),
+            remaining_count=int(params["remaining_count"]),
+            dry=bool(params.get("dry", False)),
+            config=ResourceCollectionConfig(
+                search_radius=int(params.get("search_radius") or 16),
+                candidate_budget=int(params.get("candidate_budget") or 8),
+                mutation_budget=int(params.get("mutation_budget") or 8),
+                max_wall_s=float(params.get("max_wall_s") or 60.0),
+                find_limit=int(params.get("find_limit") or 12),
+                max_pages=int(params.get("max_pages") or 1),
+                segment_timeout_s=float(params.get("segment_timeout_s") or 15.0),
+            ),
+        ),
+        mutating=True,
+        source="body.resource_collection",
+        tool_type="resource",
+        permission="collect_natural_resource",
+        body_scope=("search", "navigation", "mine", "pickup", "inventory"),
+        terminal_truth=("findBlocks", "navigateDone", "mineDone", "blockAt", "inventory"),
+        timeout_s=960.0,
     )
 
 

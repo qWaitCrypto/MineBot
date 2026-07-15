@@ -10,7 +10,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from minebot.body import BlockWork, NavigationTransactions  # noqa: E402
+from minebot.body import (  # noqa: E402
+    BlockWork,
+    NavigationTransactions,
+    ResourceCollectionConfig,
+    ResourceCollectionTransactions,
+)
 from minebot.brain.composition import (  # noqa: E402
     CompositionBudget,
     CompositionContext,
@@ -114,8 +119,39 @@ def make_registry(
     )
     navigator = NavigationTransactions.server_side(body, policy)
     work = BlockWork(body, policy, navigator=navigator)
+    resource = ResourceCollectionTransactions(body, navigator, work)
     registry = ToolRegistry()
     register_inventory_tools(registry, body)
+    registry.register(
+        RegisteredTool(
+            "collect_block_domain",
+            "Collect one bounded physical resource domain.",
+            {"type": "object"},
+            lambda params: resource.collect_block_domain(
+                block_types=tuple(str(item) for item in params.get("block_types", [])),
+                expected_drops=tuple(str(item) for item in params.get("expected_drops", [])),
+                remaining_count=int(params.get("remaining_count") or 1),
+                dry=bool(params.get("dry", False)),
+                config=ResourceCollectionConfig(
+                    search_radius=int(params.get("search_radius") or 16),
+                    candidate_budget=int(params.get("candidate_budget") or 8),
+                    mutation_budget=int(params.get("mutation_budget") or 8),
+                    max_wall_s=float(params.get("max_wall_s") or 45.0),
+                    find_limit=int(params.get("find_limit") or 8),
+                    max_pages=int(params.get("max_pages") or 1),
+                    segment_timeout_s=float(params.get("segment_timeout_s") or 15.0),
+                ),
+            ),
+            ToolSidecar(
+                "collect_block_domain",
+                mutating=True,
+                source="body.resource_collection",
+                permission="collect_natural_resource",
+                body_scope=("search", "navigation", "mine", "pickup", "inventory"),
+                terminal_truth=("findBlocks", "navigateDone", "mineDone", "inventory"),
+            ),
+        )
+    )
     registry.register(
         RegisteredTool(
             "search_for_block",
@@ -231,7 +267,7 @@ def run_happy(
     metrics = result["metrics"]
     if metrics["after_count"] < count or metrics["candidates_tried"] < count:
         raise AssertionError(f"collect {item} did not prove inventory/candidate truth: {result}")
-    if ctx.weld_context.authority.last_action is None or ctx.weld_context.authority.last_action[0] != "mine_block_collect":
+    if ctx.weld_context.authority.last_action is None or ctx.weld_context.authority.last_action[0] != "collect_block_domain":
         raise AssertionError(f"collect {item} did not route leaf mutation through progress weld: {result}")
     return {
         "item": item,
@@ -388,6 +424,8 @@ def run_illegal(
     item: str = "dirt",
     blocks: list[tuple[int, int, int, str]] | None = None,
 ) -> dict[str, object]:
+    if blocks is None:
+        blocks = [(3, 70, 0, item), (4, 70, 0, item)]
     reset_subject(rcon, item=item, blocks=blocks)
     registry, ctx = make_registry(body, protected=True)
     result = execute_tool(
