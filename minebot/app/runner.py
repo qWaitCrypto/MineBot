@@ -2204,6 +2204,7 @@ class AgentRuntime:
         )
         self.observation_archive = observation_archive
         self.progress_epoch_archive = progress_epoch_archive
+        self._run_evidence_cursor = 0
         self.hooks = RuntimeHooks()
         self.weld_context = WeldContext(
             body=body,
@@ -2279,6 +2280,7 @@ class AgentRuntime:
             **context_budget,
         )
 
+        self._run_evidence_cursor = self.latest_progress_evidence_cursor()
         run_id = f"run-{uuid4().hex}"
         progress_epochs = ProgressEpochAdapter(
             runtime=self,
@@ -2369,6 +2371,24 @@ class AgentRuntime:
         timeout_s: float | None = None,
     ) -> Any:
         return await self.execution_lane.run(callback, *args, timeout_s=timeout_s)
+
+    def latest_progress_evidence_cursor(self) -> int:
+        if self.progress_epoch_archive is None:
+            return 0
+        latest_cursor = getattr(self.progress_epoch_archive, "latest_cursor", None)
+        if not callable(latest_cursor):
+            return 0
+        try:
+            return max(0, int(latest_cursor()))
+        except Exception as exc:
+            self.trace.emit(
+                "progress_epoch_cursor_failed",
+                error_type=type(exc).__name__,
+            )
+            return 0
+
+    def current_run_evidence_cursor(self) -> int:
+        return self._run_evidence_cursor
 
     async def read_progress_fingerprint(self) -> str | None:
         try:

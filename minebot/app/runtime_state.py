@@ -15,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-RUNTIME_SCHEMA_VERSION = 12
+RUNTIME_SCHEMA_VERSION = 14
 DEFAULT_RUNTIME_STATE_DB = Path("var/minebot/agent-state.sqlite3")
 _MAX_SCOPE_COMPONENT_LENGTH = 256
 
@@ -63,6 +63,12 @@ class CheckpointDisposition(str, Enum):
     WAIT_EVENT = "wait_event"
     YIELD = "yield"
     COMPLETE = "complete"
+
+
+class ContinuationOperationClass(str, Enum):
+    EPISTEMIC = "epistemic"
+    MATERIAL = "material"
+    MIXED = "mixed"
 
 
 class MemoryKind(str, Enum):
@@ -133,7 +139,20 @@ class TaskCheckpointRecord:
     evidence: tuple[str, ...]
     wait_for: tuple[str, ...]
     body_fingerprint: dict[str, object] | None
+    continuation: "ContinuationContract | None"
     created_at: str
+
+
+@dataclass(frozen=True)
+class ContinuationContract:
+    objective: str
+    operation_class: ContinuationOperationClass
+    target_descriptor: dict[str, object]
+    expected_evidence: tuple[str, ...]
+    bounded_epoch_budget: int
+    approach_key: str
+    evidence_cursor: int
+    generation: int
 
 
 @dataclass(frozen=True)
@@ -598,6 +617,7 @@ class RuntimeStateStore:
         evidence: list[str] | tuple[str, ...] = (),
         wait_for: list[str] | tuple[str, ...] = (),
         body_fingerprint: dict[str, object] | None = None,
+        continuation: ContinuationContract | None = None,
     ) -> tuple[TaskRecord, TaskCheckpointRecord]:
         checkpoint_id = f"checkpoint-{uuid4().hex}"
         now = _utc_now()
@@ -636,8 +656,8 @@ class RuntimeStateStore:
                 INSERT INTO task_checkpoints (
                     checkpoint_id, task_id, revision, disposition, summary,
                     next_step, evidence_json, wait_for_json,
-                    body_fingerprint_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    body_fingerprint_json, continuation_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     checkpoint_id,
@@ -649,6 +669,7 @@ class RuntimeStateStore:
                     _json_dump(evidence_items),
                     _json_dump(wait_items),
                     None if body_fingerprint is None else _json_dump(body_fingerprint),
+                    None if continuation is None else _json_dump(_continuation_payload(continuation)),
                     now,
                 ),
             )
@@ -678,6 +699,120 @@ class RuntimeStateStore:
                 (task_id,),
             ).fetchone()
         return None if row is None else _checkpoint_from_row(row)
+
+    def list_task_checkpoints(self, task_id: str) -> list[TaskCheckpointRecord]:
+        with self._lock:
+            self._require_open()
+            rows = self._connection.execute(
+                """
+                SELECT * FROM task_checkpoints
+                WHERE task_id = ?
+                ORDER BY revision ASC, created_at ASC
+                """,
+                (task_id,),
+            ).fetchall()
+        return [_checkpoint_from_row(row) for row in rows]
+
+    def continuation_approach_remaining(
+        self,
+        scope: RuntimeScope,
+        *,
+        task_id: str,
+        approach_key: str,
+        requested_budget: int,
+    ) -> int:
+        with self._lock:
+            self._require_open()
+            row = self._connection.execute(
+                """
+                SELECT budget_limit, consumed_epochs
+                FROM continuation_approaches
+                WHERE scope_key = ? AND task_id = ? AND approach_key = ?
+                """,
+                (scope.key, task_id, approach_key),
+            ).fetchone()
+        if row is None:
+            return max(0, int(requested_budget))
+        remaining = max(0, int(row["budget_limit"]) - int(row["consumed_epochs"]))
+        return min(max(0, int(requested_budget)), remaining)
+
+    def settle_continuation_approach(
+        self,
+        scope: RuntimeScope,
+        *,
+        checkpoint_id: str,
+        task_id: str,
+        approach_key: str,
+        budget_limit: int,
+        consumed_epochs: int,
+    ) -> dict[str, int] | None:
+        now = _utc_now()
+        consumed = max(0, int(consumed_epochs))
+        with self._lock, self._connection:
+            self._require_open()
+            checkpoint = self._connection.execute(
+                """
+                SELECT c.continuation_json, t.latest_checkpoint_id
+                FROM task_checkpoints c
+                JOIN tasks t ON t.task_id = c.task_id
+                WHERE c.checkpoint_id = ? AND c.task_id = ? AND t.scope_key = ?
+                """,
+                (checkpoint_id, task_id, scope.key),
+            ).fetchone()
+            if checkpoint is None or str(checkpoint["latest_checkpoint_id"] or "") != checkpoint_id:
+                return None
+            contract = _continuation_from_json(checkpoint["continuation_json"])
+            if contract is None or contract.approach_key != approach_key:
+                return None
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO continuation_approaches (
+                    scope_key, task_id, approach_key, budget_limit,
+                    consumed_epochs, updated_at
+                ) VALUES (?, ?, ?, ?, 0, ?)
+                """,
+                (
+                    scope.key,
+                    task_id,
+                    _required_text("approach_key", approach_key, max_length=256),
+                    max(1, int(budget_limit)),
+                    now,
+                ),
+            )
+            settlement = self._connection.execute(
+                """
+                INSERT OR IGNORE INTO continuation_settlements (
+                    checkpoint_id, scope_key, task_id, approach_key,
+                    consumed_epochs, settled_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (checkpoint_id, scope.key, task_id, approach_key, consumed, now),
+            )
+            if settlement.rowcount == 1:
+                self._connection.execute(
+                    """
+                    UPDATE continuation_approaches
+                    SET consumed_epochs = consumed_epochs + ?, updated_at = ?
+                    WHERE scope_key = ? AND task_id = ? AND approach_key = ?
+                    """,
+                    (consumed, now, scope.key, task_id, approach_key),
+                )
+            row = self._connection.execute(
+                """
+                SELECT budget_limit, consumed_epochs
+                FROM continuation_approaches
+                WHERE scope_key = ? AND task_id = ? AND approach_key = ?
+                """,
+                (scope.key, task_id, approach_key),
+            ).fetchone()
+            assert row is not None
+            limit = int(row["budget_limit"])
+            total = int(row["consumed_epochs"])
+            return {
+                "budget_limit": limit,
+                "consumed_epochs": total,
+                "remaining_epochs": max(0, limit - total),
+            }
 
     def enqueue_work_intent(
         self,
@@ -734,6 +869,122 @@ class RuntimeStateStore:
         record = self.get_work_intent(intent_id)
         assert record is not None
         return record
+
+    def issue_checkpoint_continuation(
+        self,
+        scope: RuntimeScope,
+        *,
+        checkpoint_id: str,
+        checkpoint_revision: int,
+        task_id: str,
+        generation: int,
+        kind: str,
+        source: str,
+        priority: int,
+        payload: dict[str, object],
+        dedupe_key: str,
+    ) -> dict[str, object] | None:
+        self.register_scope(scope)
+        normalized_dedupe = _required_text("dedupe_key", dedupe_key, max_length=500)
+        intent_id = f"intent-{uuid4().hex}"
+        now = _utc_now()
+        with self._lock, self._connection:
+            self._require_open()
+            row = self._connection.execute(
+                """
+                SELECT c.*, t.status AS task_status, t.latest_checkpoint_id, t.scope_key
+                FROM task_checkpoints c
+                JOIN tasks t ON t.task_id = c.task_id
+                WHERE c.checkpoint_id = ? AND c.task_id = ? AND t.scope_key = ?
+                """,
+                (checkpoint_id, task_id, scope.key),
+            ).fetchone()
+            if (
+                row is None
+                or int(row["revision"]) != int(checkpoint_revision)
+                or str(row["latest_checkpoint_id"] or "") != checkpoint_id
+                or str(row["disposition"]) != CheckpointDisposition.CONTINUE.value
+                or str(row["task_status"]) != TaskStatus.RUNNING.value
+            ):
+                return None
+            contract = _continuation_from_json(row["continuation_json"])
+            if contract is None or contract.generation != int(generation):
+                return None
+            settlement = self._connection.execute(
+                """
+                SELECT consumed_epochs FROM continuation_settlements
+                WHERE checkpoint_id = ? AND scope_key = ? AND task_id = ?
+                  AND approach_key = ?
+                """,
+                (checkpoint_id, scope.key, task_id, contract.approach_key),
+            ).fetchone()
+            if (
+                settlement is None
+                or int(settlement["consumed_epochs"]) >= contract.bounded_epoch_budget
+            ):
+                return None
+            approach = self._connection.execute(
+                """
+                SELECT budget_limit, consumed_epochs
+                FROM continuation_approaches
+                WHERE scope_key = ? AND task_id = ? AND approach_key = ?
+                """,
+                (scope.key, task_id, contract.approach_key),
+            ).fetchone()
+            if (
+                approach is None
+                or int(approach["consumed_epochs"]) >= int(approach["budget_limit"])
+            ):
+                return None
+            existing = self._connection.execute(
+                """
+                SELECT * FROM work_intents
+                WHERE scope_key = ? AND dedupe_key = ?
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (scope.key, normalized_dedupe),
+            ).fetchone()
+            if existing is not None:
+                return _work_intent_from_row(existing)
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO work_intents (
+                        intent_id, scope_key, revision, kind, source, priority,
+                        payload_json, dedupe_key, task_id, generation, state,
+                        available_at, created_at, lease_owner, lease_expires_at,
+                        attempt_count, leased_at, completed_at, error_json
+                    ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, NULL, NULL, 0, NULL, NULL, NULL)
+                    """,
+                    (
+                        intent_id,
+                        scope.key,
+                        _required_text("kind", kind, max_length=128),
+                        _required_text("source", source, max_length=128),
+                        int(priority),
+                        _json_dump(payload),
+                        normalized_dedupe,
+                        task_id,
+                        int(generation),
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                existing = self._connection.execute(
+                    "SELECT * FROM work_intents WHERE scope_key = ? AND dedupe_key = ?",
+                    (scope.key, normalized_dedupe),
+                ).fetchone()
+                if existing is None:
+                    raise
+                return _work_intent_from_row(existing)
+            created = self._connection.execute(
+                "SELECT * FROM work_intents WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchone()
+            assert created is not None
+            return _work_intent_from_row(created)
 
     def get_work_intent(self, intent_id: str) -> dict[str, object] | None:
         with self._lock:
@@ -1312,6 +1563,24 @@ class RuntimeStateStore:
                 (scope.key, max(int(cursor), 0), bounded_limit),
             ).fetchall()
         return [_progress_epoch_from_row(row) for row in rows]
+
+    def latest_progress_epoch_cursor(self, scope: RuntimeScope) -> int:
+        with self._lock:
+            self._require_open()
+            row = self._connection.execute(
+                "SELECT COALESCE(MAX(cursor), 0) AS cursor FROM progress_epochs WHERE scope_key = ?",
+                (scope.key,),
+            ).fetchone()
+        return 0 if row is None else int(row["cursor"])
+
+    def progress_epoch_count_after(self, scope: RuntimeScope, *, cursor: int) -> int:
+        with self._lock:
+            self._require_open()
+            row = self._connection.execute(
+                "SELECT COUNT(*) AS count FROM progress_epochs WHERE scope_key = ? AND cursor > ?",
+                (scope.key, max(int(cursor), 0)),
+            ).fetchone()
+        return 0 if row is None else int(row["count"])
 
     def get_tool_observation(
         self,
@@ -2328,6 +2597,7 @@ class RuntimeStateStore:
                     evidence_json TEXT NOT NULL,
                     wait_for_json TEXT NOT NULL,
                     body_fingerprint_json TEXT,
+                    continuation_json TEXT,
                     created_at TEXT NOT NULL
                 );
 
@@ -2359,6 +2629,25 @@ class RuntimeStateStore:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_work_intents_live_dedupe
                 ON work_intents(scope_key, dedupe_key)
                 WHERE dedupe_key IS NOT NULL;
+
+                CREATE TABLE IF NOT EXISTS continuation_approaches (
+                    scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                    approach_key TEXT NOT NULL,
+                    budget_limit INTEGER NOT NULL,
+                    consumed_epochs INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(scope_key, task_id, approach_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS continuation_settlements (
+                    checkpoint_id TEXT PRIMARY KEY REFERENCES task_checkpoints(checkpoint_id) ON DELETE CASCADE,
+                    scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                    approach_key TEXT NOT NULL,
+                    consumed_epochs INTEGER NOT NULL,
+                    settled_at TEXT NOT NULL
+                );
 
                 CREATE TABLE IF NOT EXISTS event_cursors (
                     scope_key TEXT PRIMARY KEY REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
@@ -2721,6 +3010,41 @@ class RuntimeStateStore:
                     """
                 )
                 current = 12
+            elif current == 12:
+                columns = {
+                    str(row["name"])
+                    for row in self._connection.execute(
+                        "PRAGMA table_info(task_checkpoints)"
+                    ).fetchall()
+                }
+                if "continuation_json" not in columns:
+                    self._connection.execute(
+                        "ALTER TABLE task_checkpoints ADD COLUMN continuation_json TEXT"
+                    )
+                current = 13
+            elif current == 13:
+                self._connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS continuation_approaches (
+                        scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                        task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                        approach_key TEXT NOT NULL,
+                        budget_limit INTEGER NOT NULL,
+                        consumed_epochs INTEGER NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(scope_key, task_id, approach_key)
+                    );
+                    CREATE TABLE IF NOT EXISTS continuation_settlements (
+                        checkpoint_id TEXT PRIMARY KEY REFERENCES task_checkpoints(checkpoint_id) ON DELETE CASCADE,
+                        scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                        task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                        approach_key TEXT NOT NULL,
+                        consumed_epochs INTEGER NOT NULL,
+                        settled_at TEXT NOT NULL
+                    );
+                    """
+                )
+                current = 14
             else:
                 raise RuntimeStateError(
                     f"no runtime schema migration from version {current}"
@@ -3294,6 +3618,7 @@ def _checkpoint_from_row(row: sqlite3.Row) -> TaskCheckpointRecord:
             fingerprint = decoded
         else:
             raise RuntimeStateError("stored body fingerprint is not an object")
+    continuation = _continuation_from_json(row["continuation_json"])
     return TaskCheckpointRecord(
         checkpoint_id=str(row["checkpoint_id"]),
         task_id=str(row["task_id"]),
@@ -3304,8 +3629,52 @@ def _checkpoint_from_row(row: sqlite3.Row) -> TaskCheckpointRecord:
         evidence=tuple(_json_string_list(row["evidence_json"])),
         wait_for=tuple(_json_string_list(row["wait_for_json"])),
         body_fingerprint=fingerprint,
+        continuation=continuation,
         created_at=str(row["created_at"]),
     )
+
+
+def _continuation_payload(contract: ContinuationContract) -> dict[str, object]:
+    return {
+        "objective": contract.objective,
+        "operation_class": contract.operation_class.value,
+        "target_descriptor": dict(contract.target_descriptor),
+        "expected_evidence": list(contract.expected_evidence),
+        "bounded_epoch_budget": contract.bounded_epoch_budget,
+        "approach_key": contract.approach_key,
+        "evidence_cursor": contract.evidence_cursor,
+        "generation": contract.generation,
+    }
+
+
+def _continuation_from_json(raw: object) -> ContinuationContract | None:
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(str(raw))
+    except json.JSONDecodeError as exc:
+        raise RuntimeStateError("stored continuation contract JSON is corrupt") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeStateError("stored continuation contract is not an object")
+    descriptor = payload.get("target_descriptor")
+    if not isinstance(descriptor, dict):
+        raise RuntimeStateError("stored continuation target descriptor is not an object")
+    expected = payload.get("expected_evidence")
+    if not isinstance(expected, list) or not all(isinstance(item, str) for item in expected):
+        raise RuntimeStateError("stored continuation expected evidence is corrupt")
+    try:
+        return ContinuationContract(
+            objective=str(payload["objective"]),
+            operation_class=ContinuationOperationClass(str(payload["operation_class"])),
+            target_descriptor=dict(descriptor),
+            expected_evidence=tuple(expected),
+            bounded_epoch_budget=int(payload["bounded_epoch_budget"]),
+            approach_key=str(payload["approach_key"]),
+            evidence_cursor=int(payload["evidence_cursor"]),
+            generation=int(payload["generation"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeStateError("stored continuation contract fields are invalid") from exc
 
 
 def _work_intent_from_row(row: sqlite3.Row) -> dict[str, object]:

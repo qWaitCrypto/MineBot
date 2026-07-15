@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from minebot.app.runtime_state import (
     CheckpointDisposition,
     CompletionAuthority,
+    ContinuationContract,
+    ContinuationOperationClass,
     RuntimeScope,
     RuntimeStateConflict,
     RuntimeStateStore,
@@ -150,8 +154,11 @@ class TaskWorkspace:
         evidence: list[str] | tuple[str, ...] = (),
         wait_for: list[str] | tuple[str, ...] = (),
         body_fingerprint: dict[str, object] | None = None,
+        continuation: ContinuationContract | None = None,
     ) -> tuple[TaskRecord, TaskCheckpointRecord]:
         task = self._require_task()
+        if (disposition is CheckpointDisposition.CONTINUE) != (continuation is not None):
+            raise ValueError("continue checkpoints require exactly one continuation contract")
         if task.revision != expected_task_revision:
             raise RuntimeStateConflict(
                 f"task revision conflict: task_id={task.task_id} "
@@ -166,6 +173,7 @@ class TaskWorkspace:
             evidence=evidence,
             wait_for=wait_for,
             body_fingerprint=body_fingerprint,
+            continuation=continuation,
         )
 
     def payload(self) -> dict[str, object]:
@@ -213,10 +221,19 @@ def register_task_tools(
     workspace: TaskWorkspace,
     *,
     body_fingerprint: Callable[[], dict[str, object]] | None = None,
+    evidence_cursor: Callable[[], int] | None = None,
+    generation: Callable[[], int] | None = None,
 ) -> None:
     registry.register(_read_task_tool(workspace))
     registry.register(_update_plan_tool(workspace))
-    registry.register(_checkpoint_task_tool(workspace, body_fingerprint=body_fingerprint))
+    registry.register(
+        _checkpoint_task_tool(
+            workspace,
+            body_fingerprint=body_fingerprint,
+            evidence_cursor=evidence_cursor,
+            generation=generation,
+        )
+    )
 
 
 def _read_task_tool(workspace: TaskWorkspace) -> RegisteredTool:
@@ -315,11 +332,20 @@ def _checkpoint_task_tool(
     workspace: TaskWorkspace,
     *,
     body_fingerprint: Callable[[], dict[str, object]] | None,
+    evidence_cursor: Callable[[], int] | None,
+    generation: Callable[[], int] | None,
 ) -> RegisteredTool:
     def checkpoint(params: dict[str, object]) -> ToolResult:
         try:
             disposition = CheckpointDisposition(str(params.get("disposition") or ""))
             fingerprint = None if body_fingerprint is None else body_fingerprint()
+            continuation = _continuation_contract(
+                workspace,
+                disposition=disposition,
+                raw=params.get("continuation"),
+                evidence_cursor=0 if evidence_cursor is None else evidence_cursor(),
+                generation=0 if generation is None else generation(),
+            )
             task, record = workspace.checkpoint(
                 expected_task_revision=int(params.get("expected_task_revision") or 0),
                 disposition=disposition,
@@ -328,6 +354,7 @@ def _checkpoint_task_tool(
                 evidence=list(params.get("evidence") or []),
                 wait_for=list(params.get("wait_for") or []),
                 body_fingerprint=fingerprint,
+                continuation=continuation,
             )
         except (RuntimeStateConflict, ValueError) as exc:
             return ToolResult(
@@ -369,6 +396,53 @@ def _checkpoint_task_tool(
                     "maxItems": 16,
                     "description": "Material wake conditions. Use event:<eventName>, action:<action_id>, or entity:<uuid-or-name>. Free text is retained as evidence but does not automatically wake the model.",
                     "items": {"type": "string", "maxLength": 500},
+                },
+                "continuation": {
+                    "type": "object",
+                    "description": "Required only for disposition=continue. Describes the next WHAT, never a route or coordinates.",
+                    "properties": {
+                        "objective": {"type": "string", "maxLength": 2000},
+                        "operation_class": {
+                            "type": "string",
+                            "enum": ["epistemic", "material", "mixed"],
+                        },
+                        "target_descriptor": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["resource", "entity", "place", "state"],
+                                },
+                                "identifier": {"type": "string", "maxLength": 256},
+                                "traits": {
+                                    "type": "array",
+                                    "maxItems": 16,
+                                    "items": {"type": "string", "maxLength": 128},
+                                },
+                            },
+                            "required": ["kind", "identifier"],
+                            "additionalProperties": False,
+                        },
+                        "expected_evidence": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 16,
+                            "items": {"type": "string", "maxLength": 256},
+                        },
+                        "bounded_epoch_budget": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 32,
+                        },
+                    },
+                    "required": [
+                        "objective",
+                        "operation_class",
+                        "target_descriptor",
+                        "expected_evidence",
+                        "bounded_epoch_budget",
+                    ],
+                    "additionalProperties": False,
                 },
             },
             "required": ["expected_task_revision", "disposition", "summary"],
@@ -432,8 +506,118 @@ def _checkpoint_payload(checkpoint: TaskCheckpointRecord) -> dict[str, object]:
         "evidence": list(checkpoint.evidence),
         "wait_for": list(checkpoint.wait_for),
         "body_fingerprint": checkpoint.body_fingerprint,
+        "continuation": (
+            None
+            if checkpoint.continuation is None
+            else {
+                "objective": checkpoint.continuation.objective,
+                "operation_class": checkpoint.continuation.operation_class.value,
+                "target_descriptor": dict(checkpoint.continuation.target_descriptor),
+                "expected_evidence": list(checkpoint.continuation.expected_evidence),
+                "bounded_epoch_budget": checkpoint.continuation.bounded_epoch_budget,
+                "approach_key": checkpoint.continuation.approach_key,
+                "evidence_cursor": checkpoint.continuation.evidence_cursor,
+                "generation": checkpoint.continuation.generation,
+            }
+        ),
         "created_at": checkpoint.created_at,
     }
+
+
+def _continuation_contract(
+    workspace: TaskWorkspace,
+    *,
+    disposition: CheckpointDisposition,
+    raw: object,
+    evidence_cursor: int,
+    generation: int,
+) -> ContinuationContract | None:
+    if disposition is not CheckpointDisposition.CONTINUE:
+        if raw is not None:
+            raise ValueError("continuation is allowed only when disposition=continue")
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("disposition=continue requires a continuation contract")
+    objective = str(raw.get("objective") or "").strip()
+    if not objective or len(objective) > 2000:
+        raise ValueError("continuation objective must be 1..2000 characters")
+    operation_class = ContinuationOperationClass(str(raw.get("operation_class") or ""))
+    descriptor = _normalize_target_descriptor(raw.get("target_descriptor"))
+    raw_expected_evidence = raw.get("expected_evidence")
+    if not isinstance(raw_expected_evidence, list):
+        raise ValueError("continuation expected_evidence must be a list")
+    expected_evidence = tuple(
+        dict.fromkeys(
+            str(item).strip()
+            for item in raw_expected_evidence
+            if str(item).strip()
+        )
+    )
+    if not expected_evidence or len(expected_evidence) > 16 or any(
+        len(item) > 256 for item in expected_evidence
+    ):
+        raise ValueError("continuation expected_evidence must contain 1..16 bounded facts")
+    requested_budget = int(raw.get("bounded_epoch_budget") or 0)
+    if requested_budget < 1 or requested_budget > 32:
+        raise ValueError("continuation bounded_epoch_budget must be between 1 and 32")
+    approach_payload = {
+        "operation_class": operation_class.value,
+        "target_descriptor": descriptor,
+    }
+    approach_key = "approach:" + hashlib.sha256(
+        json.dumps(
+            approach_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    task = workspace._require_task()
+    effective_budget = workspace.store.continuation_approach_remaining(
+        workspace.scope,
+        task_id=task.task_id,
+        approach_key=approach_key,
+        requested_budget=requested_budget,
+    )
+    if effective_budget < 1:
+        raise ValueError(f"continuation approach budget exhausted: {approach_key}")
+    return ContinuationContract(
+        objective=objective,
+        operation_class=operation_class,
+        target_descriptor=descriptor,
+        expected_evidence=expected_evidence,
+        bounded_epoch_budget=effective_budget,
+        approach_key=approach_key,
+        evidence_cursor=max(0, int(evidence_cursor)),
+        generation=max(0, int(generation)),
+    )
+
+
+def _normalize_target_descriptor(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        raise ValueError("continuation target_descriptor must be an object")
+    extra = set(raw) - {"kind", "identifier", "traits"}
+    if extra:
+        raise ValueError("continuation target_descriptor cannot contain routes or coordinates")
+    kind = str(raw.get("kind") or "").strip().casefold()
+    if kind not in {"resource", "entity", "place", "state"}:
+        raise ValueError("continuation target_descriptor kind is invalid")
+    identifier = " ".join(str(raw.get("identifier") or "").split()).casefold()
+    if not identifier or len(identifier) > 256:
+        raise ValueError("continuation target identifier must be 1..256 characters")
+    raw_traits = raw.get("traits") or []
+    if not isinstance(raw_traits, list):
+        raise ValueError("continuation target traits must be a list")
+    traits = sorted(
+        dict.fromkeys(
+            " ".join(str(item).split()).casefold()
+            for item in raw_traits
+            if str(item).strip()
+        )
+    )
+    if len(traits) > 16 or any(len(item) > 128 for item in traits):
+        raise ValueError("continuation target traits exceed their bounded schema")
+    return {"kind": kind, "identifier": identifier, "traits": traits}
 
 
 __all__ = ["TaskWorkspace", "register_task_tools"]

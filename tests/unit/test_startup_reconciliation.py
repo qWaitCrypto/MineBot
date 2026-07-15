@@ -2,7 +2,14 @@ import unittest
 
 from minebot.app.body_events import BodyEventPump
 from minebot.app.reconciliation import ReconcileDecision, enqueue_startup_reconciliation
-from minebot.app.runtime_state import CheckpointDisposition, RuntimeScope, RuntimeStateStore, TaskStatus
+from minebot.app.runtime_state import (
+    CheckpointDisposition,
+    ContinuationContract,
+    ContinuationOperationClass,
+    RuntimeScope,
+    RuntimeStateStore,
+    TaskStatus,
+)
 from minebot.app.tasks import TaskWorkspace
 from minebot.app.work_queue import MemoryWorkIntentQueue, WorkIntentKind, WorkIntentState
 from minebot.contract import BodyState, Event, PerceptionResult, Result
@@ -249,6 +256,52 @@ class StartupReconciliationTests(unittest.TestCase):
         self.assertEqual(self.queue._records[stale_event.intent_id].state, WorkIntentState.SUPERSEDED)
         self.assertEqual(self.queue._records[stale_reconcile.intent_id].state, WorkIntentState.SUPERSEDED)
         self.assertEqual(len(self.queue.queued_intents(WorkIntentKind.RECOVERY_RECONCILE)), 1)
+
+    def test_restart_supersedes_stale_continuation_but_preserves_lease_consumption_fact(self):
+        task = self.workspace.start("collect logs", source="user")
+        _, checkpoint = self.workspace.checkpoint(
+            expected_task_revision=task.revision,
+            disposition=CheckpointDisposition.CONTINUE,
+            summary="continue collecting",
+            body_fingerprint={"dimension": "minecraft:overworld"},
+            continuation=ContinuationContract(
+                objective="find more logs",
+                operation_class=ContinuationOperationClass.MIXED,
+                target_descriptor={"kind": "resource", "identifier": "oak_log"},
+                expected_evidence=("new region", "inventory delta"),
+                bounded_epoch_budget=4,
+                approach_key="approach:logs",
+                evidence_cursor=0,
+                generation=5,
+            ),
+        )
+        stale = self.queue.issue_task_continuation(
+            checkpoint_id=checkpoint.checkpoint_id,
+            checkpoint_revision=checkpoint.revision,
+            task_id=task.task_id,
+            payload={"checkpoint_id": checkpoint.checkpoint_id},
+            dedupe_key=f"task_continue:{checkpoint.checkpoint_id}:g5",
+            generation=5,
+        )
+
+        result = self.reconcile(ReconcileBody())
+        duplicate = self.queue.issue_task_continuation(
+            checkpoint_id=checkpoint.checkpoint_id,
+            checkpoint_revision=checkpoint.revision,
+            task_id=task.task_id,
+            payload={"checkpoint_id": checkpoint.checkpoint_id},
+            dedupe_key=f"task_continue:{checkpoint.checkpoint_id}:g5",
+            generation=5,
+        )
+
+        self.assertEqual(result.decision, ReconcileDecision.RESUME)
+        self.assertEqual(self.queue._records[stale.intent_id].state, WorkIntentState.SUPERSEDED)
+        self.assertEqual(duplicate.intent_id, stale.intent_id)
+        self.assertEqual(duplicate.state, WorkIntentState.SUPERSEDED)
+        self.assertEqual(
+            result.intent.payload["checkpoint"]["continuation"]["approach_key"],
+            "approach:logs",
+        )
 
 
 if __name__ == "__main__":

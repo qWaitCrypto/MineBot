@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from uuid import uuid4
 
+from minebot.app.autonomy import AutonomyAction, AutonomyCoordinator
 from minebot.app.wiring import AgentRuntimeParts
 from minebot.app.runner import RecoveryOutcome
 from minebot.app.runtime_state import CheckpointDisposition, CompletionAuthority, TaskStatus
@@ -35,9 +36,6 @@ from minebot.brain.modes import AgentSignal, signalize_events
 from minebot.contract import Event
 
 DEFAULT_RUNAWAY_STEP_LIMIT = 100_000
-DEFAULT_TASK_CONTINUATION_LIMIT = 64
-
-
 class SessionCommandKind(Enum):
     START = "start"
     PAUSE = "pause"
@@ -104,9 +102,9 @@ class AgentSession:
     task_workspace: TaskWorkspace | None = None
     skill_workspace: SkillWorkspace | None = None
     work_queue: WorkIntentQueue | None = None
+    autonomy_coordinator: AutonomyCoordinator | None = None
     parts: AgentRuntimeParts | None = None
     max_recovery_attempts: int = 3
-    max_task_continuations: int = DEFAULT_TASK_CONTINUATION_LIMIT
     _recovery_attempts: int = 0
     _goal_active: bool = False
     _turn_pending: bool = False
@@ -258,7 +256,6 @@ class AgentSession:
             return SessionStep("idle", LifecycleState.IDLE, "no active work")
 
         self._sync_task_context()
-        start_fingerprint = self._current_body_fingerprint()
         if command is not None and command.kind is SessionCommandKind.CANCEL:
             return SessionStep("waiting", self.parts.lifecycle.state)
         if not self._turn_pending and self.parts.lifecycle.state is not LifecycleState.RECOVERING:
@@ -277,7 +274,6 @@ class AgentSession:
                 recovered,
                 intent=intent,
                 checkpoint_before=checkpoint_before,
-                start_fingerprint=start_fingerprint,
             )
 
         runnable_states = {
@@ -316,7 +312,6 @@ class AgentSession:
             SessionStep(outcome.status, outcome.lifecycle, outcome.message),
             intent=intent,
             checkpoint_before=checkpoint_before,
-            start_fingerprint=start_fingerprint,
         )
 
     async def _drive_recovery(self) -> SessionStep:
@@ -763,22 +758,26 @@ class AgentSession:
                         task_status=task.status.value,
                     )
                     return []
-                if intent.source != "recovery_completed":
-                    checkpoint = self.task_workspace.store.get_latest_checkpoint(task.task_id)
-                    expected_checkpoint = str(intent.payload.get("checkpoint_id") or "")
-                    if (
-                        checkpoint is None
-                        or checkpoint.checkpoint_id != expected_checkpoint
-                        or checkpoint.disposition is not CheckpointDisposition.CONTINUE
-                    ):
-                        self._turn_pending = False
-                        self._trace(
-                            "task_continue_dropped",
-                            reason="checkpoint_changed",
-                            expected_checkpoint=expected_checkpoint,
-                            current_checkpoint=None if checkpoint is None else checkpoint.checkpoint_id,
-                        )
-                        return []
+                checkpoint = self.task_workspace.store.get_latest_checkpoint(task.task_id)
+                expected_checkpoint = str(intent.payload.get("checkpoint_id") or "")
+                if (
+                    checkpoint is None
+                    or checkpoint.checkpoint_id != expected_checkpoint
+                    or checkpoint.disposition is not CheckpointDisposition.CONTINUE
+                    or checkpoint.continuation is None
+                    or checkpoint.continuation.generation != intent.generation
+                    or not self.parts.authority.generation_current(
+                        checkpoint.continuation.generation
+                    )
+                ):
+                    self._turn_pending = False
+                    self._trace(
+                        "task_continue_dropped",
+                        reason="checkpoint_changed",
+                        expected_checkpoint=expected_checkpoint,
+                        current_checkpoint=None if checkpoint is None else checkpoint.checkpoint_id,
+                    )
+                    return []
             if task is not None:
                 self._goal_active = True
                 self.parts.context.set_goal(task.goal_text)
@@ -1025,7 +1024,6 @@ class AgentSession:
         *,
         intent: WorkIntent,
         checkpoint_before: str | None,
-        start_fingerprint: dict[str, object] | None,
     ) -> SessionStep:
         if self.parts is None:
             return step
@@ -1037,7 +1035,6 @@ class AgentSession:
             self._apply_task_checkpoint_lifecycle(
                 intent=intent,
                 checkpoint_before=checkpoint_before,
-                start_fingerprint=start_fingerprint,
             )
             task = self.task_workspace.current_task if self.task_workspace is not None else None
             if task is not None and task.status in {
@@ -1065,18 +1062,21 @@ class AgentSession:
             if task.status is not TaskStatus.RUNNING:
                 self._stand_down()
                 return
-            kind = WorkIntentKind.TASK_CONTINUE
             task_id = task.task_id
         elif self._goal_active:
-            kind = WorkIntentKind.CONTINUE
             task_id = None
         else:
             self._stand_down()
             return
         intent = self.work_queue.enqueue(
-            kind,
+            WorkIntentKind.RECOVERY_RECONCILE,
             source="recovery_completed",
-            payload={"reason": "recovery_completed", "text": "", "sender": ""},
+            payload={
+                "decision": "resume",
+                "reason": "recovery_completed",
+                "text": "",
+                "sender": "",
+            },
             dedupe_key=(
                 f"{self._scheduler_id}:resume:"
                 f"{self.parts.authority.current_generation()}:"
@@ -1088,7 +1088,7 @@ class AgentSession:
         self._trace(
             "recovery_successor_queued",
             intent_id=intent.intent_id,
-            kind=kind.value,
+            kind=WorkIntentKind.RECOVERY_RECONCILE.value,
             task_id=task_id,
         )
 
@@ -1097,7 +1097,6 @@ class AgentSession:
         *,
         intent: WorkIntent,
         checkpoint_before: str | None,
-        start_fingerprint: dict[str, object] | None,
     ) -> None:
         if self.parts is None or self.task_workspace is None:
             return
@@ -1126,80 +1125,65 @@ class AgentSession:
                     )
                     self._stand_down()
             return
-        if checkpoint.disposition is CheckpointDisposition.CONTINUE:
-            final_fingerprint = self._current_body_fingerprint()
-            start_value = None if start_fingerprint is None else start_fingerprint.get("fingerprint")
-            final_value = None if final_fingerprint is None else final_fingerprint.get("fingerprint")
-            continuation_count = self.work_queue.count_for_task(
-                WorkIntentKind.TASK_CONTINUE,
-                task.task_id,
-            )
-            rejection_reason = None
-            if not start_value or not final_value or start_value == final_value:
-                rejection_reason = "task_continue_without_world_progress"
-            elif continuation_count >= self.max_task_continuations:
-                rejection_reason = "task_continuation_budget_exhausted"
-            if rejection_reason is not None:
-                rejected = self.task_workspace.reject_continuation(
-                    reason=rejection_reason,
-                    evidence=(
-                        f"checkpoint={checkpoint.checkpoint_id}",
-                        f"continuations={continuation_count}",
-                    ),
-                    body_fingerprint=final_fingerprint,
-                )
-                self._trace(
-                    "task_continue_rejected",
-                    reason=rejection_reason,
-                    task_id=task.task_id,
+        if self.autonomy_coordinator is None:
+            if checkpoint.disposition is CheckpointDisposition.CONTINUE:
+                self._reject_autonomy_continuation(
                     checkpoint_id=checkpoint.checkpoint_id,
-                    continuation_count=continuation_count,
+                    reason="autonomy_coordinator_unavailable",
                 )
-                if rejected is not None and self.parts.lifecycle.state is LifecycleState.ACTIVE:
-                    self.parts.lifecycle.yield_()
-                else:
-                    self._stand_down()
                 return
-            successor = self.work_queue.enqueue(
-                WorkIntentKind.TASK_CONTINUE,
-                source="task_checkpoint_continue",
-                payload={
-                    "checkpoint_id": checkpoint.checkpoint_id,
-                    "checkpoint_revision": checkpoint.revision,
-                    "next_step": checkpoint.next_step,
-                    "summary": checkpoint.summary,
-                },
-                dedupe_key=f"task_continue:{checkpoint.checkpoint_id}",
-                task_id=task.task_id,
-                generation=self.parts.authority.current_generation(),
-            )
-            self._trace(
-                "task_continue_queued",
-                intent_id=successor.intent_id,
-                task_id=task.task_id,
-                checkpoint_id=checkpoint.checkpoint_id,
-                continuation_count=continuation_count + 1,
-                queued=successor.state is WorkIntentState.QUEUED,
-            )
-            if successor.state is not WorkIntentState.QUEUED:
-                self.task_workspace.reject_continuation(
-                    reason="task_continue_duplicate_checkpoint",
-                    evidence=(f"checkpoint={checkpoint.checkpoint_id}",),
-                    body_fingerprint=final_fingerprint,
-                )
+            if checkpoint.disposition is CheckpointDisposition.YIELD:
                 if self.parts.lifecycle.state is LifecycleState.ACTIVE:
                     self.parts.lifecycle.yield_()
-                else:
-                    self._stand_down()
+                return
+            self._stand_down()
             return
-        if checkpoint.disposition is CheckpointDisposition.YIELD:
-            if self.parts.lifecycle.state is LifecycleState.ACTIVE:
+        decision = self.autonomy_coordinator.decide(
+            current_generation=self.parts.authority.current_generation(),
+            body_fingerprint=self._current_body_fingerprint(),
+            lifecycle=self.parts.lifecycle.state,
+        )
+        self._trace(
+            "autonomy_decision",
+            action=decision.action.value,
+            reason=decision.reason,
+            task_id=task.task_id,
+            checkpoint_id=checkpoint.checkpoint_id,
+            intent_id=None if decision.intent is None else decision.intent.intent_id,
+            consumed_epochs=decision.consumed_epochs,
+            remaining_epochs=decision.remaining_epochs,
+            material_changed=decision.material_changed,
+            novel_epistemic_keys=list(decision.novel_epistemic_keys),
+        )
+        if decision.action is AutonomyAction.CONTINUE:
+            return
+        if decision.action is AutonomyAction.YIELD:
+            if checkpoint.disposition is CheckpointDisposition.CONTINUE:
+                self._reject_autonomy_continuation(
+                    checkpoint_id=checkpoint.checkpoint_id,
+                    reason=decision.reason,
+                )
+            elif self.parts.lifecycle.state is LifecycleState.ACTIVE:
                 self.parts.lifecycle.yield_()
             return
-        if checkpoint.disposition in {
-            CheckpointDisposition.WAIT_EVENT,
-            CheckpointDisposition.COMPLETE,
-        }:
+        self._stand_down()
+
+    def _reject_autonomy_continuation(self, *, checkpoint_id: str, reason: str) -> None:
+        assert self.parts is not None
+        assert self.task_workspace is not None
+        rejected = self.task_workspace.reject_continuation(
+            reason=reason,
+            evidence=(f"checkpoint={checkpoint_id}",),
+            body_fingerprint=self._current_body_fingerprint(),
+        )
+        self._trace(
+            "task_continue_rejected",
+            reason=reason,
+            checkpoint_id=checkpoint_id,
+        )
+        if rejected is not None and self.parts.lifecycle.state is LifecycleState.ACTIVE:
+            self.parts.lifecycle.yield_()
+        else:
             self._stand_down()
 
     def _latest_checkpoint_id(self) -> str | None:

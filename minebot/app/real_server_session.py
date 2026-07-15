@@ -20,6 +20,7 @@ from pathlib import Path
 
 from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
 from minebot.app.body_events import BodyEventPump
+from minebot.app.autonomy import AutonomyCoordinator
 from minebot.app.conversation import PersistentWindowedConversationSession
 from minebot.app.observation_artifacts import PersistentToolObservationArchive
 from minebot.app.progress_epochs import PersistentProgressEpochArchive
@@ -495,6 +496,11 @@ async def run_real_server_interactive(
             task_workspace=task_workspace,
             skill_workspace=skill_workspace,
             work_queue=work_queue,
+            autonomy_coordinator=AutonomyCoordinator(
+                task_workspace,
+                work_queue,
+                progress_epoch_archive,
+            ),
         )
         if goal:
             if task_workspace.current_task is None:

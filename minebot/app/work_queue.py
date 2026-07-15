@@ -120,6 +120,17 @@ class WorkIntentQueue(Protocol):
 
     def get_by_dedupe(self, dedupe_key: str) -> WorkIntent | None: ...
 
+    def issue_task_continuation(
+        self,
+        *,
+        checkpoint_id: str,
+        checkpoint_revision: int,
+        task_id: str,
+        payload: dict[str, object],
+        dedupe_key: str,
+        generation: int,
+    ) -> WorkIntent | None: ...
+
     def close(self) -> None: ...
 
 
@@ -260,6 +271,26 @@ class MemoryWorkIntentQueue:
                 if record.dedupe_key == dedupe_key:
                     return record
         return None
+
+    def issue_task_continuation(
+        self,
+        *,
+        checkpoint_id: str,
+        checkpoint_revision: int,
+        task_id: str,
+        payload: dict[str, object],
+        dedupe_key: str,
+        generation: int,
+    ) -> WorkIntent | None:
+        del checkpoint_id, checkpoint_revision
+        return self.enqueue(
+            WorkIntentKind.TASK_CONTINUE,
+            source="task_checkpoint_continue",
+            payload=payload,
+            dedupe_key=dedupe_key,
+            task_id=task_id,
+            generation=generation,
+        )
 
     def close(self) -> None:
         return None
@@ -428,6 +459,38 @@ class PersistentWorkIntentQueue:
     def get_by_dedupe(self, dedupe_key: str) -> WorkIntent | None:
         row = self.store.get_work_intent_by_dedupe(self.scope, dedupe_key)
         return None if row is None else _intent_from_row(row)
+
+    def issue_task_continuation(
+        self,
+        *,
+        checkpoint_id: str,
+        checkpoint_revision: int,
+        task_id: str,
+        payload: dict[str, object],
+        dedupe_key: str,
+        generation: int,
+    ) -> WorkIntent | None:
+        existing = self.store.get_work_intent_by_dedupe(self.scope, dedupe_key)
+        row = self.store.issue_checkpoint_continuation(
+            self.scope,
+            checkpoint_id=checkpoint_id,
+            checkpoint_revision=checkpoint_revision,
+            task_id=task_id,
+            generation=generation,
+            kind=WorkIntentKind.TASK_CONTINUE.value,
+            source="task_checkpoint_continue",
+            priority=WORK_INTENT_PRIORITY[WorkIntentKind.TASK_CONTINUE],
+            payload=payload,
+            dedupe_key=dedupe_key,
+        )
+        if row is None:
+            return None
+        intent = _intent_from_row(row)
+        if existing is None and intent.state is WorkIntentState.QUEUED:
+            with self._lock:
+                self._notification_version += 1
+            self._available.set()
+        return intent
 
     def close(self) -> None:
         lock_file = self._scope_lock_file

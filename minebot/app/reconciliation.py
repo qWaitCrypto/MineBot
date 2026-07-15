@@ -132,6 +132,20 @@ def enqueue_startup_reconciliation(
             "next_step": checkpoint.next_step,
             "wait_for": list(checkpoint.wait_for),
             "body_fingerprint": checkpoint.body_fingerprint,
+            "continuation": (
+                None
+                if checkpoint.continuation is None
+                else {
+                    "objective": checkpoint.continuation.objective,
+                    "operation_class": checkpoint.continuation.operation_class.value,
+                    "target_descriptor": dict(checkpoint.continuation.target_descriptor),
+                    "expected_evidence": list(checkpoint.continuation.expected_evidence),
+                    "bounded_epoch_budget": checkpoint.continuation.bounded_epoch_budget,
+                    "approach_key": checkpoint.continuation.approach_key,
+                    "evidence_cursor": checkpoint.continuation.evidence_cursor,
+                    "generation": checkpoint.continuation.generation,
+                }
+            ),
         },
         "terminal": terminal,
     }

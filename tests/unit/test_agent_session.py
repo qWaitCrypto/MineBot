@@ -6,9 +6,18 @@ from pathlib import Path
 
 from agents.exceptions import MaxTurnsExceeded
 
+from minebot.app.autonomy import AutonomyCoordinator
+from minebot.app.progress_epochs import PersistentProgressEpochArchive
 from minebot.app.runner import AgentRuntime, RecoveryOutcome
 from minebot.app.memory import MemoryWorkspace, register_memory_tools
-from minebot.app.runtime_state import CheckpointDisposition, RuntimeScope, RuntimeStateStore, TaskStatus
+from minebot.app.runtime_state import (
+    CheckpointDisposition,
+    ContinuationContract,
+    ContinuationOperationClass,
+    RuntimeScope,
+    RuntimeStateStore,
+    TaskStatus,
+)
 from minebot.app.session import AgentSession, SessionCommand
 from minebot.app.skills import SkillCatalog, SkillWorkspace, register_skill_tools
 from minebot.app.tasks import TaskWorkspace
@@ -184,7 +193,9 @@ class AgentSessionTests(unittest.TestCase):
 
     def test_checkpoint_continue_enqueues_one_successor_after_world_progress(self):
         store = RuntimeStateStore(":memory:")
-        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        scope = RuntimeScope("server", "world", "Bot1")
+        workspace = TaskWorkspace(store, scope)
+        archive = PersistentProgressEpochArchive(store, scope)
         bodies: list[FakeBody] = []
         calls: list[int] = []
 
@@ -196,11 +207,36 @@ class AgentSessionTests(unittest.TestCase):
                 task = workspace.current_task
                 if len(calls) == 1:
                     parts.runtime.body.x += 1.0
+                    archive.store(
+                        {
+                            "epoch_id": "epoch-material",
+                            "run_id": "run-material",
+                            "model_turn": 1,
+                            "members": [],
+                            "pre_body_fingerprint": "before",
+                            "post_body_fingerprint": "after",
+                            "evidence_refs": [],
+                            "epistemic_keys": [],
+                            "material_changed": True,
+                            "progress_aborted": False,
+                        }
+                    )
                     workspace.checkpoint(
                         expected_task_revision=task.revision,
                         disposition=CheckpointDisposition.CONTINUE,
                         summary="made progress",
                         next_step="continue the task",
+                        body_fingerprint={"dimension": "overworld"},
+                        continuation=ContinuationContract(
+                            objective="continue preparing",
+                            operation_class=ContinuationOperationClass.MATERIAL,
+                            target_descriptor={"kind": "state", "identifier": "prepared"},
+                            expected_evidence=("material_change",),
+                            bounded_epoch_budget=4,
+                            approach_key="approach:prepare",
+                            evidence_cursor=0,
+                            generation=parts.authority.current_generation(),
+                        ),
                     )
                 else:
                     workspace.checkpoint(
@@ -214,6 +250,11 @@ class AgentSessionTests(unittest.TestCase):
             return parts
 
         session = AgentSession(parts_factory, task_workspace=workspace)
+        session.autonomy_coordinator = AutonomyCoordinator(
+            workspace,
+            session.work_queue,
+            archive,
+        )
         session.submit(SessionCommand.start("prepare for the End"))
 
         first = asyncio.run(session.step())
@@ -237,7 +278,9 @@ class AgentSessionTests(unittest.TestCase):
 
     def test_checkpoint_continue_without_world_progress_yields_instead_of_looping(self):
         store = RuntimeStateStore(":memory:")
-        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        scope = RuntimeScope("server", "world", "Bot1")
+        workspace = TaskWorkspace(store, scope)
+        archive = PersistentProgressEpochArchive(store, scope)
         bodies: list[FakeBody] = []
 
         def parts_factory(goal: str) -> AgentRuntimeParts:
@@ -245,10 +288,35 @@ class AgentSessionTests(unittest.TestCase):
 
             async def runner(_agent, _input_text, **_kwargs):
                 task = workspace.current_task
+                archive.store(
+                    {
+                        "epoch_id": "epoch-static",
+                        "run_id": "run-static",
+                        "model_turn": 1,
+                        "members": [],
+                        "pre_body_fingerprint": "same",
+                        "post_body_fingerprint": "same",
+                        "evidence_refs": [],
+                        "epistemic_keys": [],
+                        "material_changed": False,
+                        "progress_aborted": False,
+                    }
+                )
                 workspace.checkpoint(
                     expected_task_revision=task.revision,
                     disposition=CheckpointDisposition.CONTINUE,
                     summary="continue without changing the world",
+                    body_fingerprint={"dimension": "overworld"},
+                    continuation=ContinuationContract(
+                        objective="continue preparing",
+                        operation_class=ContinuationOperationClass.MATERIAL,
+                        target_descriptor={"kind": "state", "identifier": "prepared"},
+                        expected_evidence=("material_change",),
+                        bounded_epoch_budget=4,
+                        approach_key="approach:prepare",
+                        evidence_cursor=0,
+                        generation=parts.authority.current_generation(),
+                    ),
                 )
                 return {"ok": True}
 
@@ -256,6 +324,11 @@ class AgentSessionTests(unittest.TestCase):
             return parts
 
         session = AgentSession(parts_factory, task_workspace=workspace)
+        session.autonomy_coordinator = AutonomyCoordinator(
+            workspace,
+            session.work_queue,
+            archive,
+        )
         session.submit(SessionCommand.start("prepare for the End"))
 
         result = asyncio.run(session.step())
@@ -266,7 +339,7 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(session.work_queue.pending_count(), 0)
         latest = store.get_latest_checkpoint(workspace.current_task.task_id)
         self.assertEqual(latest.disposition, CheckpointDisposition.YIELD)
-        self.assertEqual(latest.summary, "task_continue_without_world_progress")
+        self.assertEqual(latest.summary, "continuation_without_qualifying_evidence")
         session.close()
         store.close()
 
@@ -1093,6 +1166,44 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(active_step.lifecycle, LifecycleState.ACTIVE)
         self.assertEqual(len(calls), 2)
         self.assertTrue(any(event["event"] == "session_recovery_result" for event in session.parts.runtime.trace.snapshot()))
+
+    def test_recovery_successor_reconciles_without_minting_task_continuation(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        workspace.start("collect 64 logs", source="user")
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], [])
+            parts.runtime.recovery_handler = lambda _runtime: RecoveryOutcome(
+                True,
+                "respawned",
+            )
+            return parts
+
+        session = AgentSession(parts_factory, task_workspace=workspace)
+        session.parts = parts_factory("collect 64 logs")
+        session._goal_active = True
+        session.parts.lifecycle.ready()
+        session.parts.lifecycle.start()
+        session.parts.lifecycle.enter_recovery()
+
+        recovered = asyncio.run(session.step())
+        queued = session.work_queue.queued_intents()
+
+        self.assertEqual(recovered.lifecycle, LifecycleState.RESUMING)
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0].kind, WorkIntentKind.RECOVERY_RECONCILE)
+        self.assertEqual(queued[0].payload["decision"], "resume")
+        self.assertEqual(queued[0].source, "recovery_completed")
+        self.assertEqual(
+            session.work_queue.count_for_task(
+                WorkIntentKind.TASK_CONTINUE,
+                workspace.current_task.task_id,
+            ),
+            0,
+        )
+        session.close()
+        store.close()
 
     def test_recovering_session_yields_on_recovery_failure(self):
         def parts_factory(goal: str) -> AgentRuntimeParts:

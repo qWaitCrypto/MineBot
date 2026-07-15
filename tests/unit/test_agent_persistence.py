@@ -105,6 +105,8 @@ class RuntimeStateStoreTests(unittest.TestCase):
                     "tool_observations",
                     "progress_epochs",
                     "progress_evidence",
+                    "continuation_approaches",
+                    "continuation_settlements",
                     "memory_entries",
                     "memory_fts_terms",
                     "memory_fts_trigrams",
@@ -157,6 +159,39 @@ class RuntimeStateStoreTests(unittest.TestCase):
             self.assertEqual(second["novel_epistemic_keys"], [])
             self.assertTrue(first["material_changed"])
             store.close()
+
+    def test_schema_12_migrates_continuation_contract_and_budget_tables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.sqlite3"
+            store = RuntimeStateStore(path)
+            store.close()
+            connection = sqlite3.connect(path)
+            connection.execute("DROP TABLE continuation_settlements")
+            connection.execute("DROP TABLE continuation_approaches")
+            connection.execute("ALTER TABLE task_checkpoints DROP COLUMN continuation_json")
+            connection.execute("UPDATE minebot_schema SET version = 12 WHERE singleton = 1")
+            connection.commit()
+            connection.close()
+
+            migrated = RuntimeStateStore(path)
+            columns = {
+                str(row["name"])
+                for row in migrated._connection.execute(
+                    "PRAGMA table_info(task_checkpoints)"
+                ).fetchall()
+            }
+            tables = {
+                str(row["name"])
+                for row in migrated._connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(migrated.schema_version, RUNTIME_SCHEMA_VERSION)
+            self.assertIn("continuation_json", columns)
+            self.assertIn("continuation_approaches", tables)
+            self.assertIn("continuation_settlements", tables)
+            migrated.close()
 
     def test_store_refuses_unknown_schema_version(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -373,6 +408,113 @@ class TaskWorkspaceTests(unittest.TestCase):
         self.assertEqual(stale.reason, "task_plan_update_rejected")
         self.assertTrue(read.metrics["active"])
         self.assertEqual(set(registry.names()), {"read_task", "update_plan", "checkpoint_task"})
+        store.close()
+
+    def test_continuation_contract_is_bounded_canonical_and_cannot_encode_routes(self):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        workspace = TaskWorkspace(store, scope)
+        workspace.start("find wood", source="user")
+        registry = ToolRegistry()
+        register_task_tools(
+            registry,
+            workspace,
+            evidence_cursor=lambda: store.latest_progress_epoch_cursor(scope),
+            generation=lambda: 7,
+        )
+        checkpoint = registry.get("checkpoint_task").callable
+
+        missing = checkpoint(
+            {
+                "expected_task_revision": workspace.current_task.revision,
+                "disposition": "continue",
+                "summary": "continue",
+            }
+        )
+        routed = checkpoint(
+            {
+                "expected_task_revision": workspace.current_task.revision,
+                "disposition": "continue",
+                "summary": "continue",
+                "continuation": {
+                    "objective": "search farther",
+                    "operation_class": "epistemic",
+                    "target_descriptor": {
+                        "kind": "resource",
+                        "identifier": "oak_log",
+                        "x": 100,
+                    },
+                    "expected_evidence": ["new covered region"],
+                    "bounded_epoch_budget": 8,
+                },
+            }
+        )
+        valid_payload = {
+            "expected_task_revision": workspace.current_task.revision,
+            "disposition": "continue",
+            "summary": "continue",
+            "continuation": {
+                "objective": "search farther",
+                "operation_class": "epistemic",
+                "target_descriptor": {
+                    "kind": "resource",
+                    "identifier": " Oak_Log ",
+                    "traits": ["Natural", "reachable"],
+                },
+                "expected_evidence": ["new covered region"],
+                "bounded_epoch_budget": 8,
+            },
+        }
+        first = checkpoint(valid_payload)
+        first_contract = first.metrics["checkpoint"]["continuation"]
+        for index in range(2):
+            store.create_progress_epoch(
+                scope,
+                record={
+                    "epoch_id": f"epoch-budget-{index}",
+                    "run_id": "run-budget",
+                    "model_turn": index + 1,
+                    "members": [],
+                    "evidence_refs": [],
+                    "epistemic_keys": [f"region:{index}"],
+                    "material_changed": False,
+                    "progress_aborted": False,
+                },
+            )
+        store.settle_continuation_approach(
+            scope,
+            checkpoint_id=first.metrics["checkpoint"]["checkpoint_id"],
+            task_id=workspace.current_task.task_id,
+            approach_key=first_contract["approach_key"],
+            budget_limit=first_contract["bounded_epoch_budget"],
+            consumed_epochs=2,
+        )
+        second = checkpoint(
+            {
+                **valid_payload,
+                "expected_task_revision": workspace.current_task.revision,
+                "continuation": {
+                    **valid_payload["continuation"],
+                    "objective": "look elsewhere for the same wood",
+                    "target_descriptor": {
+                        "kind": "RESOURCE",
+                        "identifier": "oak_log",
+                        "traits": ["reachable", "natural"],
+                    },
+                },
+            }
+        )
+        second_contract = second.metrics["checkpoint"]["continuation"]
+
+        self.assertFalse(missing.success)
+        self.assertFalse(routed.success)
+        self.assertTrue(first.success)
+        self.assertTrue(second.success)
+        self.assertEqual(first_contract["approach_key"], second_contract["approach_key"])
+        self.assertEqual(first_contract["bounded_epoch_budget"], 8)
+        self.assertEqual(second_contract["bounded_epoch_budget"], 6)
+        self.assertEqual(second_contract["evidence_cursor"], 2)
+        self.assertEqual(second_contract["generation"], 7)
         store.close()
 
 

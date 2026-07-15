@@ -126,6 +126,8 @@ def build_phase1_agent_runtime(
             registry,
             config.task_workspace,
             body_fingerprint=lambda: _task_body_fingerprint(body, authority),
+            evidence_cursor=parts.runtime.current_run_evidence_cursor,
+            generation=authority.current_generation,
         )
     if (
         config.conversation_session is not None

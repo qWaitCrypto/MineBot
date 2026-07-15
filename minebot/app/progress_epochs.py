@@ -12,6 +12,8 @@ class ProgressEpochArchive(Protocol):
 
     def list_after(self, cursor: int, *, limit: int = 100) -> list[dict[str, object]]: ...
 
+    def latest_cursor(self) -> int: ...
+
 
 class PersistentProgressEpochArchive:
     def __init__(self, store: RuntimeStateStore, scope: RuntimeScope) -> None:
@@ -27,6 +29,9 @@ class PersistentProgressEpochArchive:
             cursor=cursor,
             limit=limit,
         )
+
+    def latest_cursor(self) -> int:
+        return self._state_store.latest_progress_epoch_cursor(self.scope)
 
 
 __all__ = ["PersistentProgressEpochArchive", "ProgressEpochArchive"]
