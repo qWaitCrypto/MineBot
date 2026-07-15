@@ -16,6 +16,7 @@ from minebot.body.interaction_support import (
 from minebot.contract import Action, Body, InteractionContext, InventorySlot, PerceptionResult, Position, Result, ToolResult, perception_next_cursor
 from minebot.contract import terminal_event_to_tool_result
 from minebot.game.governance import GovernancePolicy
+from minebot.game.protocol import RCON_SLOT_PAGE_SIZE
 
 
 DEFAULT_CONTAINER_TYPES = ("chest", "trapped_chest", "barrel")
@@ -53,7 +54,7 @@ class ContainerTransactions:
         count: int,
         direction: str,
         total_slots: int = 27,
-        page_size: int = 27,
+        page_size: int = RCON_SLOT_PAGE_SIZE,
         timeout_s: float = 2.0,
     ) -> ToolResult:
         if count <= 0:
@@ -88,13 +89,13 @@ class ContainerTransactions:
             self.body,
             "container",
             {"pos": list(pos), "total_slots": total_slots},
-            page_size=page_size,
+            page_size=_safe_slot_page_size(page_size),
         )
         failed = _perception_failure(container)
         if failed is not None:
             return failed
 
-        inventory = _read_paged(self.body, "inventory", {}, page_size=46)
+        inventory = _read_paged(self.body, "inventory", {}, page_size=RCON_SLOT_PAGE_SIZE)
         failed = _perception_failure(inventory)
         if failed is not None:
             return failed
@@ -180,7 +181,7 @@ class ContainerTransactions:
         search_radius: int = 8,
         container_types: tuple[str, ...] = DEFAULT_CONTAINER_TYPES,
         total_slots: int = 27,
-        page_size: int = 27,
+        page_size: int = RCON_SLOT_PAGE_SIZE,
         timeout_s: float = 2.0,
         approach_timeout_s: float = 15.0,
     ) -> ToolResult:
@@ -321,6 +322,10 @@ def _read_paged(
 
 def _slots(perception: PerceptionResult) -> list[InventorySlot]:
     return [InventorySlot.from_payload(item) for item in perception.data.get("slots") or []]
+
+
+def _safe_slot_page_size(page_size: int) -> int:
+    return max(1, min(int(page_size), RCON_SLOT_PAGE_SIZE))
 
 
 def _read_target_type(body: Body, pos: Position) -> str | ToolResult:

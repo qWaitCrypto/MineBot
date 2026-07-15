@@ -9,6 +9,7 @@ from typing import Any
 from minebot.contract import Action, BodyState, Event, InventorySlot, PerceptionResult, Result, perception_next_cursor
 from minebot.game.errors import BodyActionTimeoutError
 from minebot.game.protocol import (
+    RCON_SLOT_PAGE_SIZE,
     build_action_call,
     build_chat_drain_call,
     build_despawn_call,
@@ -366,7 +367,8 @@ class ScarpetBody:
             )
         )
 
-    def get_inventory(self, page_size: int = 12) -> list[InventorySlot]:
+    def get_inventory(self, page_size: int = RCON_SLOT_PAGE_SIZE) -> list[InventorySlot]:
+        page_size = max(1, min(int(page_size), RCON_SLOT_PAGE_SIZE))
         slots: list[InventorySlot] = []
         start: int | None = 0
         while start is not None:
@@ -384,8 +386,9 @@ class ScarpetBody:
         pos: tuple[int, int, int],
         *,
         total_slots: int = 27,
-        page_size: int = 27,
+        page_size: int = RCON_SLOT_PAGE_SIZE,
     ) -> list[InventorySlot]:
+        page_size = max(1, min(int(page_size), RCON_SLOT_PAGE_SIZE))
         slots: list[InventorySlot] = []
         start: int | None = 0
         while start is not None:

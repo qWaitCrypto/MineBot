@@ -92,13 +92,13 @@ def set_container_slot(rcon: RconClient, pos: tuple[int, int, int], slot: int, i
 
 
 def inventory_count(body: ScarpetBody, item: str) -> int:
-    slots = body.get_inventory(page_size=46)
+    slots = body.get_inventory()
     wanted = {item, f"minecraft:{item}"}
     return sum(slot.count for slot in slots if slot.item in wanted)
 
 
 def inventory_by_slot(body: ScarpetBody) -> dict[int, object]:
-    return {slot.slot: slot for slot in body.get_inventory(page_size=46)}
+    return {slot.slot: slot for slot in body.get_inventory()}
 
 
 def same_item(actual: str | None, expected: str | None) -> bool:

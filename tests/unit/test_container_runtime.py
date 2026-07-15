@@ -172,6 +172,27 @@ class FakeNearestContainerBody(FakeContainerBody):
 
 
 class ContainerRuntimeTests(unittest.TestCase):
+    def test_transfer_item_reads_inventory_in_safe_pages(self):
+        body = FakeContainerBody(
+            container_pages=[perception("container", [slot(0, "minecraft:diamond", 1)])],
+            inventory_pages=[
+                perception("inventory", [slot(index) for index in range(12)], complete=False, next_start=12),
+                perception("inventory", [slot(index) for index in range(12, 46)]),
+            ],
+        )
+
+        result = ContainerTransactions(body).transfer_item(
+            (1, 59, 0),
+            item="minecraft:diamond",
+            count=1,
+            direction="container_to_bot",
+            total_slots=1,
+        )
+
+        self.assertTrue(result.success)
+        inventory_reads = [params for scope, params in body.perceptions if scope == "inventory"]
+        self.assertEqual(inventory_reads, [{"start": 0, "limit": 12}, {"start": 12, "limit": 12}])
+
     def test_transfer_from_container_selects_slots_by_item_and_count(self):
         body = FakeContainerBody(
             container_pages=[

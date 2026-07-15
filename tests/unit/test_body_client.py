@@ -1397,6 +1397,36 @@ class BodyClientTests(unittest.TestCase):
         self.assertIn('"pos":[1,59,0]', transport.commands[0])
         self.assertIn('"total_slots":2', transport.commands[0])
 
+    def test_get_container_clamps_page_size_to_rcon_safe_limit(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "perception",
+                        "bot": "Bot1",
+                        "scope": "container",
+                        "ok": True,
+                        "complete": True,
+                        "data": {
+                            "pos": [1, 59, 0],
+                            "start": 0,
+                            "limit": 12,
+                            "nextStart": None,
+                            "totalSlots": 27,
+                            "slots": [],
+                        },
+                        "uncertainty": [],
+                        "next": None,
+                        "error": None,
+                    }
+                )
+            ]
+        )
+
+        ScarpetBody("Bot1", transport).get_container((1, 59, 0), page_size=27)
+
+        self.assertIn('"limit":12', transport.commands[0])
+
 
 if __name__ == "__main__":
     unittest.main()

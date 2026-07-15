@@ -10,6 +10,7 @@ from minebot.game.errors import EnvelopeError, IncompletePayloadError, Truncated
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result
 
 RCON_TRUNCATION_LIMIT = 4096
+RCON_SLOT_PAGE_SIZE = 12
 SCARPET_APP = "minebot"
 _SCRIPT_PREFIX_RE = re.compile(r"^\s*=\s*")
 _SCARPET_TIMING_TOKEN_RE = re.compile(r"\(\d+(?:\.\d+)?[a-zµ]+\)")
