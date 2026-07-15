@@ -11,6 +11,7 @@ from minebot.body import (
     MemoryExplorationCoverageStore,
 )
 from minebot.contract import BodyState, PerceptionResult, ToolResult
+from minebot.game.navigation import GoalComposite
 
 
 def _state(pos=(0.0, 64.0, 0.0), *, health=20.0, missing=False):
@@ -168,6 +169,8 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertEqual(result.reason, "found")
         self.assertEqual(result.metrics["budget"]["regions_consumed"], 2)
         self.assertEqual(len(navigator.calls), 1)
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
+        self.assertEqual(len(navigator.calls[0][0].goals), 3)
         self.assertEqual(_region(body.state.pos), (-1, -1))
         block_cell_requests = [params for scope, params in body.perceptions if scope == "blockCells"]
         self.assertTrue(block_cell_requests)
@@ -202,7 +205,7 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertIsNotNone(result.metrics["resume_cursor"])
 
     def test_candidate_attempt_exhaustion_is_mobility_blocked_not_budget_exhausted(self):
-        outcomes = [ToolResult(False, "stuck", True) for _ in range(24)]
+        outcomes = [ToolResult(False, "stuck", True) for _ in range(8)]
         runtime, _, navigator = _runtime(outcomes=outcomes)
 
         result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
@@ -210,7 +213,8 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "mobility_blocked")
         self.assertEqual(result.metrics["budget"]["regions_consumed"], 1)
-        self.assertEqual(len(navigator.calls), 24)
+        self.assertEqual(len(navigator.calls), 8)
+        self.assertTrue(all(isinstance(call[0], GoalComposite) for call in navigator.calls))
 
     def test_scan_failure_keeps_prior_evidence_and_returns_unloaded_boundary(self):
         class FailingAfterMoveBody(ExplorationBody):

@@ -12,7 +12,7 @@ from typing import Protocol
 from minebot.body.navigation import NavigationRunConfig, NavigationTransactions
 from minebot.body.world_read import read_block_facts
 from minebot.contract import Body, BreakContext, JsonObject, PerceptionResult, Position, ToolResult
-from minebot.game.navigation import GoalNear
+from minebot.game.navigation import GoalComposite, GoalNear
 
 
 REGION_SIZE = 16
@@ -452,66 +452,63 @@ class ExplorationTransactions:
                 continue
 
             navigation_failures: list[JsonObject] = []
-            reached = False
-            navigation_reason = "mobility_blocked"
-            for stand in stands[:3]:
-                before = self.body.get_state()
-                nav = self.navigator.navigate_to(
-                    GoalNear(stand, radius=1),
-                    break_context=BreakContext.TRAVEL,
-                    config=NavigationRunConfig(max_segments=16, segment_timeout_s=12.0),
+            candidate_stands = stands[:3]
+            before = self.body.get_state()
+            nav = self.navigator.navigate_to(
+                GoalComposite(tuple(GoalNear(stand, radius=1) for stand in candidate_stands)),
+                break_context=BreakContext.TRAVEL,
+                config=NavigationRunConfig(max_segments=16, segment_timeout_s=12.0),
+            )
+            after = self.body.get_state()
+            distance_consumed += dist(before.pos, after.pos)
+            navigation_reason = str(nav.reason or "mobility_blocked")
+            navigation_failures.append(
+                {
+                    "stands": [list(stand) for stand in candidate_stands],
+                    "selected_goal": (nav.metrics or {}).get("selected_goal"),
+                    "reason": navigation_reason,
+                    "success": nav.success,
+                    "can_retry": nav.can_retry,
+                }
+            )
+            lifecycle = _body_lifecycle_terminal(after)
+            if lifecycle is not None:
+                return _merge_result_context(
+                    lifecycle,
+                    targets=targets,
+                    dimension=dimension,
+                    origin=origin,
+                    max_regions=max_regions,
+                    max_distance=max_distance,
+                    regions_consumed=regions_consumed,
+                    distance_consumed=distance_consumed,
+                    covered_this_call=covered_this_call,
+                    blocks=all_blocks,
+                    entities=all_entities,
+                    failures=[*failures, *navigation_failures],
+                    evidence_keys=evidence_keys,
+                    coverage=prior,
                 )
-                after = self.body.get_state()
-                distance_consumed += dist(before.pos, after.pos)
-                navigation_reason = str(nav.reason or "mobility_blocked")
-                navigation_failures.append(
-                    {
-                        "stand": list(stand),
-                        "reason": navigation_reason,
-                        "success": nav.success,
-                        "can_retry": nav.can_retry,
-                    }
+            if navigation_reason in {"preempted", "owner_preempted"}:
+                return self._result(
+                    "preempted",
+                    targets=targets,
+                    dimension=dimension,
+                    origin=origin,
+                    regions_consumed=regions_consumed,
+                    max_regions=max_regions,
+                    max_distance=max_distance,
+                    distance_consumed=distance_consumed,
+                    covered_this_call=covered_this_call,
+                    blocks=all_blocks,
+                    entities=all_entities,
+                    failures=[*failures, *navigation_failures],
+                    evidence_keys=evidence_keys,
+                    coverage=prior,
+                    success=True,
+                    can_retry=True,
                 )
-                lifecycle = _body_lifecycle_terminal(after)
-                if lifecycle is not None:
-                    return _merge_result_context(
-                        lifecycle,
-                        targets=targets,
-                        dimension=dimension,
-                        origin=origin,
-                        max_regions=max_regions,
-                        max_distance=max_distance,
-                        regions_consumed=regions_consumed,
-                        distance_consumed=distance_consumed,
-                        covered_this_call=covered_this_call,
-                        blocks=all_blocks,
-                        entities=all_entities,
-                        failures=[*failures, *navigation_failures],
-                        evidence_keys=evidence_keys,
-                        coverage=prior,
-                    )
-                if navigation_reason in {"preempted", "owner_preempted"}:
-                    return self._result(
-                        "preempted",
-                        targets=targets,
-                        dimension=dimension,
-                        origin=origin,
-                        regions_consumed=regions_consumed,
-                        max_regions=max_regions,
-                        max_distance=max_distance,
-                        distance_consumed=distance_consumed,
-                        covered_this_call=covered_this_call,
-                        blocks=all_blocks,
-                        entities=all_entities,
-                        failures=[*failures, *navigation_failures],
-                        evidence_keys=evidence_keys,
-                        coverage=prior,
-                        success=True,
-                        can_retry=True,
-                    )
-                if nav.success and _region_key(_block_pos(after.pos)) == region:
-                    reached = True
-                    break
+            reached = nav.success and _region_key(_block_pos(after.pos)) == region
             if not reached:
                 status = (
                     CoverageStatus.UNLOADED_BOUNDARY

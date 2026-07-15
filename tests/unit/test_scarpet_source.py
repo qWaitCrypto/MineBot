@@ -286,7 +286,7 @@ class ScarpetSourceTests(unittest.TestCase):
 
     def test_server_navigation_does_not_plan_through_no_floor_air_waypoints(self):
         source = MINEBOT_SC.read_text()
-        self.assertIn("if(w == 'SOLID' || w == 'NO_FLOOR',", source)
+        self.assertIn("if(w == 'SOLID' || w == 'NO_FLOOR' || w == 'LAVA',", source)
         self.assertNotIn("if(w == 'LIQUID', 3.0, if(w == 'NO_FLOOR', 2.0, 1.0))", source)
 
     def test_server_navigation_requires_meaningful_partial_progress(self):
@@ -295,19 +295,139 @@ class ScarpetSourceTests(unittest.TestCase):
             "navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above, cover_target, min_partial_progress, goal_radius)",
             source,
         )
-        self.assertIn("partial_progress = h0 - best_h", source)
-        self.assertIn("partial_progress >= min_partial_progress", source)
+        self.assertIn("navigation_partial_coefficients() -> l(1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 10.0)", source)
+        self.assertIn("partial_score = h + new_g / coefficient", source)
+        self.assertIn("candidate_distance >= min_partial_progress", source)
+        self.assertIn("partial_key == null && candidate_key != null", source)
         self.assertIn("min_partial_progress = floor(param_number(params, 'min_partial_progress', 5))", source)
         self.assertIn("if(min_partial_progress < 1, min_partial_progress = 1)", source)
 
     def test_server_navigation_honors_near_goal_radius(self):
         source = MINEBOT_SC.read_text()
-        self.assertIn("if(probe_heuristic(cx, cy, cz, gx, gy, gz) <= goal_radius,", source)
+        self.assertIn("navigation_goal_distance(x, y, z, goals) -> (", source)
+        self.assertIn("d = max(0, probe_heuristic(x, y, z, goal:0, goal:1, goal:2) - goal:3)", source)
+        self.assertIn("if(navigation_goal_distance(cx, cy, cz, goals) <= 0,", source)
         self.assertIn("goal_radius = floor(param_number(params, 'goal_radius', 0))", source)
         self.assertIn("if(goal_radius < 0, goal_radius = 0)", source)
         self.assertIn(
-            "navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, y_below, y_above, null, min_partial_progress, goal_radius)",
+            "plan_result = navigate_to_goals_plan(sx, sy, sz, goals, grid_radius, max_expand, y_below, y_above, null, min_partial_progress, context)",
             source,
+        )
+
+    def test_server_navigation_preserves_bounded_goal_set_and_selected_goal(self):
+        source = MINEBOT_SC.read_text()
+        start = source.index("start_navigate_to(name, action_id, gx, gy, gz, params) -> (")
+        end = source.index("finish_navigate(name, move_event_data) -> (")
+        body = source[start:end]
+
+        self.assertIn("navigation_goals_from_params(params, gx, gy, gz, goal_radius) -> (", source)
+        self.assertIn("loop(min(length(raw), 32),", source)
+        self.assertIn("goals = navigation_goals_from_params(params, gx, gy, gz, goal_radius)", body)
+        self.assertIn("plan_result = navigate_to_goals_plan", body)
+        self.assertNotIn("plan_result = navigate_to_plan", body)
+        self.assertIn("selected_goal = plan_result:4", body)
+        self.assertIn('"selected_goal":%s,"goal_count":%d', source)
+        self.assertIn("json_pos(data:17), data:18", source)
+
+    def test_server_navigation_uses_typed_non_mutating_movement_graph(self):
+        source = MINEBOT_SC.read_text()
+
+        for expected in (
+            "navigation_neighbors(x, y, z, context) -> (",
+            "navigation_fall_candidate(x, start_y, z, context) -> (",
+            "if(w == 'LIQUID', 'swim', 'diagonal')",
+            "if(w == 'LIQUID', 3.0, 1.4)",
+            "if(w == 'LIQUID', 'surface_or_stable_water', 'immediate')",
+            "navigation_candidate(nx, y + 1, nz",
+            "'ascend'",
+            "navigation_candidate(nx, y - 1, nz",
+            "'descend'",
+            "navigation_candidate(x, y, z, 'fall', 4.0 + depth, depth, 'land_first')",
+            "came_step:(nkey) = l(candidate:3, candidate:5, candidate:6, candidate:7)",
+            "path += l(number(parts:0), number(parts:1), number(parts:2), movement:0, movement:1, movement:2, movement:3)",
+            "'path_moves' -> execution_moves",
+            "'path_fall_depths' -> execution_fall_depths",
+            "'cancel_policies' -> execution_cancel_policies",
+            '"movement_counts":%s',
+        ):
+            self.assertIn(expected, source)
+
+        self.assertIn("if(is_lava_at(x, y, z) || is_lava_at(x, y + 1, z),", source)
+        self.assertIn("'LAVA'", source)
+        self.assertIn("loop(3,", source[source.index("navigation_fall_candidate"):])
+        self.assertNotIn("loop(4,\n    depth = _ + 1", source)
+
+    def test_server_navigation_bridge_uses_governed_proposal_handshake(self):
+        source = MINEBOT_SC.read_text()
+
+        for expected in (
+            "global_navigation_mutations = {}",
+            "navigation_mutation_candidate(nx, y, nz, 'place'",
+            "navigation_mutation_denied(context, nx, y - 1, nz)",
+            "stage_navigation_mutation(name, nav) -> (",
+            "emit('navigateMutationProposed'",
+            "decide_navigation_mutation(name, params) -> (",
+            "params:'navigation_action_id' == mutation:'action_id'",
+            "run_navigation_mutation_tick(name, mutation) -> (",
+            "emit('navigateMutationDone'",
+            "if(action_name == 'navigationMutationDecision'",
+            "mutation:'status' = 'advancing'",
+            "start_navigation_bridge_motion(name, mutation) -> (",
+            "run('player ' + name + ' jump once')",
+            "floor(number(p:0)) == floor(number(pos:0))",
+            "run('player ' + name + ' use continuous')",
+            "mutation:'status' = 'settling_success'",
+            "navigation_mutation_safe_now(name) -> (",
+            "request_navigation_mutation_cancel(name, reason) -> (",
+        ):
+            self.assertIn(expected, source)
+
+        self.assertNotIn("setblock", source[source.index("decide_navigation_mutation(name, params)"):])
+        interrupt_start = source.index("minebot_interrupt(name, payload) -> (")
+        interrupt_end = source.index("minebot_action(name, payload) -> (")
+        interrupt_body = source[interrupt_start:interrupt_end]
+        self.assertIn("request_navigation_mutation_cancel(name, 'interrupted')", interrupt_body)
+        self.assertNotIn("finish_navigation_mutation(name, false, 'interrupted')", interrupt_body)
+
+    def test_server_navigation_freezes_capabilities_and_live_rechecks_edges(self):
+        source = MINEBOT_SC.read_text()
+
+        for expected in (
+            "navigation_context_from_params(params) -> (",
+            "'allow_diagonal' -> param_bool(params, 'allow_diagonal', true)",
+            "'allow_swim' -> param_bool(params, 'allow_swim', true)",
+            "'max_fall_depth' -> max_fall_depth",
+            "navigation_edge_valid(sx, sy, sz, tx, ty, tz, movement_kind, fall_depth, context)",
+            "navigation_move_recheck_reason(name, m) -> (",
+            "first_index + floor(number(nav:16)) - 1",
+            "emit('navigateRecheck'",
+            "request_move_cancel(name, recheck_reason)",
+        ):
+            self.assertIn(expected, source)
+
+    def test_delayed_move_cancel_keeps_unsafe_movement_running_until_safe(self):
+        source = MINEBOT_SC.read_text()
+        request_start = source.index("request_move_cancel(name, reason) -> (")
+        request_end = source.index("run_move_cancel_tick(name, m) -> (")
+        request_body = source[request_start:request_end]
+        tick_start = source.index("tick_bot(name) -> (")
+        tick_end = source.index("__on_tick() -> (")
+        tick_body = source[tick_start:tick_end]
+
+        self.assertNotIn("stop_body(name);\n    if(movement_cancel_safe_now", request_body)
+        self.assertIn("if(global_move_cancels:name == null,", request_body)
+        self.assertIn("run_move_cancel_tick(name, m);", tick_body)
+        self.assertIn("if(m != null,\n                        run_move_tick(name, m)", tick_body)
+        self.assertNotIn("global_tick - pending:1", source)
+
+        interrupt_start = source.index("minebot_interrupt(name, payload) -> (")
+        interrupt_end = source.index("minebot_action(name, payload) -> (")
+        interrupt_body = source[interrupt_start:interrupt_end]
+        self.assertIn("had_move = global_moves:name != null", interrupt_body)
+        self.assertIn("request_move_cancel(name, 'interrupted')", interrupt_body)
+        self.assertNotIn(
+            "stop_body(name);\n  if(global_navigations:name != null",
+            interrupt_body,
         )
 
     def test_follow_started_json_uses_json_value_for_target(self):
@@ -867,13 +987,18 @@ class ScarpetSourceTests(unittest.TestCase):
         ):
             self.assertIn(expected, source)
 
-        self.assertIn("global_moves:name = l(action_id, x, y, z, arrival_radius, 0, p, start_dist, 0, timeout_ticks, no_progress_ticks, min_progress_delta, max_deviation, points, 0, movement_cancel)", source)
-        self.assertIn("updated_move = l(m:0, m:1, m:2, m:3, m:4, ticks, m:6, min_dist, stuck_ticks, m:9, m:10, m:11, m:12, m:13, m:14, m:15)", source)
+        self.assertIn("path_moves = parse_path_moves(params, points)", source)
+        self.assertIn("path_fall_depths = parse_path_fall_depths(params, points)", source)
+        self.assertIn("cancel_policies = parse_cancel_policies(params, path_moves)", source)
+        self.assertIn("points, 0, movement_cancel, path_moves, path_fall_depths, cancel_policies)", source)
+        self.assertIn("m:13, m:14, m:15, m:16, m:17, m:18)", source)
 
     def test_move_to_controller_pulses_jump_for_ascending_waypoints(self):
         source = MINEBOT_SC.read_text()
 
-        self.assertIn("if(target:1 > p:1 + 0.35,", source)
+        self.assertIn("movement_kind = current_movement_kind(m)", source)
+        self.assertIn("movement_kind == 'ascend'", source)
+        self.assertIn("movement_kind == 'fall' || movement_kind == 'descend'", source)
         self.assertIn("run('player ' + name + ' jump once')", source)
 
     def test_move_to_controller_has_delayed_cancel_state_for_unsafe_movements(self):

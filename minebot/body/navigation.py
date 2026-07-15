@@ -16,6 +16,7 @@ from minebot.contract import (
     BodyState,
     BreakContext,
     Event,
+    InventorySlot,
     LocalProgressController,
     PlaceContext,
     Position,
@@ -25,9 +26,22 @@ from minebot.contract import (
     Result,
     ToolResult,
     terminal_event_to_tool_result,
+    perception_next_cursor,
 )
-from minebot.game.navigation import GoalAvoid, GoalBlock, GridWorld, MoveKind, NavigationCostModel, NavigationSegment, PathStep, SegmentedNavigator
-from minebot.game.navigation import GoalLike, normalize_goal
+from minebot.game.navigation import (
+    GoalAvoid,
+    GoalBlock,
+    GoalComposite,
+    GoalLike,
+    GoalNear,
+    GridWorld,
+    MoveKind,
+    NavigationCostModel,
+    NavigationSegment,
+    PathStep,
+    SegmentedNavigator,
+    normalize_goal,
+)
 
 
 WAYPOINT_MOVES = frozenset({MoveKind.WALK, MoveKind.DIAGONAL, MoveKind.ASCEND, MoveKind.DESCEND, MoveKind.SWIM, MoveKind.FALL})
@@ -37,6 +51,7 @@ TERRAIN_FALLBACK_H_RADIUS = 5
 TERRAIN_FALLBACK_Y_BELOW = 3
 TERRAIN_FALLBACK_Y_ABOVE = 8
 TERRAIN_FALLBACK_MAX_TILES = 64
+SERVER_GOAL_SET_LIMIT = 32
 
 
 @dataclass(frozen=True)
@@ -49,6 +64,21 @@ class NavigationRunConfig:
     server_no_progress_ticks: int = 120
     recheck_lookahead: int = 5
     min_partial_progress: int = 5
+    allow_diagonal: bool = True
+    allow_ascend: bool = True
+    allow_descend: bool = True
+    allow_swim: bool = True
+    max_safe_fall_depth: int = 3
+    allow_place: bool = True
+    max_place_steps: int = 8
+    scaffold_blocks: tuple[str, ...] = (
+        "cobblestone",
+        "cobbled_deepslate",
+        "deepslate",
+        "stone",
+        "dirt",
+        "netherrack",
+    )
     recovery_attempts: int = 2
     backtrack_cost_factor: float = 0.5
     unloaded_boundary_limit: int | None = None
@@ -99,11 +129,13 @@ class NavigationTransactions:
         *,
         progress: ProgressController | None = None,
         work: BlockWork | None = None,
+        governance=None,
     ):
         self.body = body
         self.navigator = navigator
         self.progress = progress or LocalProgressController()
         self.work = work or _default_work_runtime(body, navigator)
+        self.governance = governance or getattr(getattr(navigator, "costs", None), "governance", None)
 
     @classmethod
     def server_side(
@@ -127,6 +159,7 @@ class NavigationTransactions:
             SegmentedNavigator(GridWorld({}), NavigationCostModel(governance)),
             progress=progress,
             work=work,
+            governance=governance,
         )
 
     def navigate_to(
@@ -139,6 +172,12 @@ class NavigationTransactions:
         arrival_radius: float | None = None,
     ) -> ToolResult:
         cfg = config or NavigationRunConfig()
+        if cfg.recheck_lookahead < 0:
+            raise ValueError("recheck_lookahead must be >= 0")
+        if cfg.max_safe_fall_depth < 0 or cfg.max_safe_fall_depth > 3:
+            raise ValueError("max_safe_fall_depth must be between 0 and 3")
+        if cfg.max_place_steps < 0:
+            raise ValueError("max_place_steps must be >= 0")
         if timeout_s is not None:
             if timeout_s <= 0:
                 raise ValueError("timeout_s must be > 0")
@@ -155,9 +194,13 @@ class NavigationTransactions:
         state = self.body.get_state()
         start = _block_pos(state)
         goal_anchor = nav_goal.representative(start)
+        server_goals, goal_set_preserved = _server_goal_set(nav_goal, start)
         gx, gy, gz = int(goal_anchor[0]), int(goal_anchor[1]), int(goal_anchor[2])
         ar = cfg.movement_arrival_radius or 0.75
         goal_radius = int(getattr(nav_goal, "radius", 0) or 0)
+        capability_snapshot = _navigation_capability_snapshot(self.body, cfg)
+        denied_mutations: set[Position] = set()
+        placed_steps = 0
 
         segment_index = 0
         partial_segments = 0
@@ -175,6 +218,7 @@ class NavigationTransactions:
                 "navigateTo",
                 {
                     "target": [gx, gy, gz],
+                    "goals": [list(candidate) for candidate in server_goals],
                     "grid_radius": cfg.server_grid_radius,
                     "max_expand": cfg.server_max_expand,
                     "y_below": 8,
@@ -184,6 +228,17 @@ class NavigationTransactions:
                     "timeout_ticks": max(20, int(cfg.segment_timeout_s * 20)),
                     "no_progress_ticks": cfg.server_no_progress_ticks,
                     "min_partial_progress": max(1, cfg.min_partial_progress),
+                    "allow_diagonal": cfg.allow_diagonal,
+                    "allow_ascend": cfg.allow_ascend,
+                    "allow_descend": cfg.allow_descend,
+                    "allow_swim": cfg.allow_swim,
+                    "max_fall_depth": cfg.max_safe_fall_depth,
+                    "recheck_lookahead": cfg.recheck_lookahead,
+                    "allow_place": bool(capability_snapshot["allow_place"]),
+                    "scaffold_item": capability_snapshot["scaffold_item"],
+                    "scaffold_count": max(0, int(capability_snapshot["scaffold_count"]) - placed_steps),
+                    "place_budget": max(0, cfg.max_place_steps - placed_steps),
+                    "denied_mutations": [list(pos) for pos in sorted(denied_mutations)],
                 },
             )
             result = self.body.execute(action)
@@ -195,11 +250,39 @@ class NavigationTransactions:
                 ))
                 return _result(False, "body_rejected", True, goal_anchor, executed, {"error": result.error})
 
-            terminal = self.body.await_action_terminal(
-                action.id,
-                timeout_s=cfg.segment_timeout_s + 5.0,
-                terminal_events={"navigateDone", "death", "respawned", "ownerPreempted"},
-            )
+            mutation_events: list[dict[str, object]] = []
+            last_proposal_pos: Position | None = None
+            while True:
+                terminal = self.body.await_action_terminal(
+                    action.id,
+                    timeout_s=cfg.segment_timeout_s + 5.0,
+                    terminal_events={
+                        "navigateDone",
+                        "navigateMutationProposed",
+                        "navigateMutationDone",
+                        "death",
+                        "respawned",
+                        "ownerPreempted",
+                    },
+                    intermediate_events={"navigateMutationProposed", "navigateMutationDone"},
+                )
+                if terminal.name == "navigateMutationProposed":
+                    proposal = dict(terminal.data)
+                    mutation_events.append({"event": terminal.name, "data": proposal})
+                    last_proposal_pos = _event_position(proposal.get("pos"))
+                    self._answer_navigation_mutation(action.id, proposal)
+                    continue
+                if terminal.name == "navigateMutationDone":
+                    mutation = dict(terminal.data)
+                    mutation_events.append({"event": terminal.name, "data": mutation})
+                    mutation_pos = _event_position(mutation.get("pos"))
+                    if bool(mutation.get("success")) and mutation.get("kind") == "place" and mutation_pos is not None:
+                        placed_steps += 1
+                        block_type = str(mutation.get("block_type") or capability_snapshot["scaffold_item"] or "unknown")
+                        if self.governance is not None:
+                            self.governance.record_bot_placement(mutation_pos, block_type, "bridge", self.body.bot_name)
+                    continue
+                break
             if not self.progress.generation_current(generation):
                 return _result(False, "preempted", True, goal_anchor, executed, {"generation_current": False})
 
@@ -208,9 +291,10 @@ class NavigationTransactions:
             nav_reason = "preempted" if terminal.name == "ownerPreempted" else raw_nav_reason
             nav_arrived = bool(td.get("arrived", False)) or nav_reason == "arrived"
             goal_dist = td.get("goal_dist", td.get("dist_to_target", 9999.0))
+            selected_goal = _event_position(td.get("selected_goal")) or goal_anchor
 
             executed.append(ExecutedSegment(
-                index=segment_index, status=nav_reason, target=goal_anchor,
+                index=segment_index, status=nav_reason, target=selected_goal,
                 terminal_reason=nav_reason, success=nav_arrived, action_id=action.id,
                 diagnostics={
                     "expanded": td.get("expanded", 0),
@@ -225,11 +309,20 @@ class NavigationTransactions:
                     "move_waypoint_index": td.get("move_waypoint_index"),
                     "move_waypoint_count": td.get("move_waypoint_count"),
                     "move_current_waypoint": td.get("move_current_waypoint"),
+                    "movement_counts": td.get("movement_counts"),
+                    "capability_snapshot": td.get("capability_snapshot"),
+                    "partial_coefficient": td.get("partial_coefficient"),
+                    "partial_distance": td.get("partial_distance"),
+                    "recheck_reason": td.get("recheck_reason"),
+                    "mutation_events": mutation_events,
                     "event_data": dict(td),
+                    "selected_goal": list(selected_goal),
+                    "goal_count": len(server_goals),
+                    "goal_set_preserved": goal_set_preserved,
                 },
             ))
 
-            neutral_step = nav_reason == "partial" or nav_reason == "preempted" or (
+            neutral_step = nav_reason in {"partial", "preempted", "world_changed"} or (
                 cfg.progress_neutral_failures and nav_reason in SCARPET_FALLBACK_REASONS
             )
             self.progress.note_step(
@@ -240,7 +333,21 @@ class NavigationTransactions:
             )
 
             if nav_arrived:
-                return _result(True, "arrived", False, goal_anchor, executed, {"navigation_goal": nav_goal.payload()})
+                return _result(
+                    True,
+                    "arrived",
+                    False,
+                    selected_goal,
+                    executed,
+                    {
+                        "navigation_goal": nav_goal.payload(),
+                        "selected_goal": list(selected_goal),
+                        "goal_count": len(server_goals),
+                        "goal_set_preserved": goal_set_preserved,
+                        "movement_counts": td.get("movement_counts"),
+                        "capability_snapshot": td.get("capability_snapshot"),
+                    },
+                )
 
             if nav_reason == "preempted":
                 reflex = _wait_for_reflex_completion(
@@ -306,6 +413,20 @@ class NavigationTransactions:
                 segment_index += 1
                 continue
 
+            if nav_reason == "world_changed":
+                state = self.body.get_state()
+                start = _block_pos(state)
+                segment_index += 1
+                continue
+
+            if nav_reason == "mutation_denied":
+                if last_proposal_pos is not None:
+                    denied_mutations.add(last_proposal_pos)
+                state = self.body.get_state()
+                start = _block_pos(state)
+                segment_index += 1
+                continue
+
             if _scarpet_failure_can_fallback(nav_reason, break_context, cfg):
                 fallback = self._run_local_terrain_fallback(
                     start=self.body.get_state(),
@@ -326,6 +447,37 @@ class NavigationTransactions:
             })
 
         return _result(False, "segment_budget_exhausted", True, goal_anchor, executed, {"navigation_goal": nav_goal.payload()})
+
+    def _answer_navigation_mutation(self, navigation_action_id: str, proposal: dict[str, object]) -> None:
+        mutation_kind = str(proposal.get("kind") or "unknown")
+        pos = _event_position(proposal.get("pos"))
+        block_type = str(proposal.get("block_type") or "unknown")
+        allowed = False
+        reason = "unsupported_mutation"
+        if mutation_kind == "place" and pos is not None and self.governance is not None:
+            decision = self.governance.can_place(
+                pos,
+                block_type,
+                PlaceContext.WORK,
+                self.body.bot_name,
+            )
+            allowed = decision.allowed
+            reason = decision.reason
+        decision_action = Action.create(
+            "navigationMutationDecision",
+            {
+                "navigation_action_id": navigation_action_id,
+                "proposal_id": proposal.get("proposal_id"),
+                "authorized": allowed,
+                "reason": reason,
+                "pos": list(pos) if pos is not None else None,
+                "kind": mutation_kind,
+                "block_type": block_type,
+            },
+        )
+        accepted = self.body.execute(decision_action)
+        if not (accepted.ok and accepted.accepted):
+            raise RuntimeError(f"navigation mutation decision rejected: {accepted.error or accepted.data}")
 
     def _run_local_terrain_fallback(
         self,
@@ -1427,6 +1579,39 @@ def _block_pos(state: BodyState) -> Position:
     return (round(state.pos[0]), round(state.pos[1]), round(state.pos[2]))
 
 
+def _server_goal_set(goal, start: Position) -> tuple[tuple[tuple[int, int, int, int], ...], bool]:
+    if isinstance(goal, GoalBlock):
+        return ((int(goal.pos[0]), int(goal.pos[1]), int(goal.pos[2]), 0),), True
+    if isinstance(goal, GoalNear):
+        return ((int(goal.pos[0]), int(goal.pos[1]), int(goal.pos[2]), int(goal.radius)),), True
+    if isinstance(goal, GoalComposite) and goal.mode == "any":
+        candidates: list[tuple[int, int, int, int]] = []
+        fully_preserved = True
+        for child in goal.goals:
+            child_goals, preserved = _server_goal_set(child, start)
+            fully_preserved = fully_preserved and preserved
+            for candidate in child_goals:
+                if candidate in candidates:
+                    continue
+                if len(candidates) >= SERVER_GOAL_SET_LIMIT:
+                    return tuple(candidates), False
+                candidates.append(candidate)
+        if candidates:
+            return tuple(candidates), fully_preserved
+    anchor = goal.representative(start)
+    radius = max(0, int(getattr(goal, "radius", 0) or 0))
+    return ((int(anchor[0]), int(anchor[1]), int(anchor[2]), radius),), False
+
+
+def _event_position(value: object) -> Position | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    try:
+        return (int(value[0]), int(value[1]), int(value[2]))
+    except (TypeError, ValueError):
+        return None
+
+
 def make_block_at_prism_world_update(
     body: Body,
     *,
@@ -1887,6 +2072,51 @@ def _result(
     if extra:
         metrics.update(extra)
     return ToolResult(success=success, reason=reason, can_retry=can_retry, metrics=metrics)
+
+
+def _navigation_capability_snapshot(body: Body, cfg: NavigationRunConfig) -> dict[str, object]:
+    disabled = {
+        "allow_place": False,
+        "scaffold_item": None,
+        "scaffold_count": 0,
+        "inventory_complete": False,
+    }
+    if not cfg.allow_place or cfg.max_place_steps <= 0:
+        return disabled
+
+    start: int | None = 0
+    slots: list[InventorySlot] = []
+    try:
+        while start is not None:
+            page = body.perceive("inventory", {"start": start, "limit": 12})
+            if not page.ok:
+                return disabled
+            slots.extend(InventorySlot.from_payload(dict(raw)) for raw in page.data.get("slots") or [])
+            cursor = perception_next_cursor(page)
+            if not page.complete and cursor is None:
+                return disabled
+            start = None if cursor is None else int(cursor)
+    except (AttributeError, KeyError, TypeError, ValueError, RuntimeError, AssertionError):
+        return disabled
+
+    counts: dict[str, int] = {}
+    for slot in slots:
+        if slot.empty or not slot.item:
+            continue
+        item = str(slot.item).removeprefix("minecraft:")
+        counts[item] = counts.get(item, 0) + int(slot.count)
+    scaffold_item = next(
+        (str(item).removeprefix("minecraft:") for item in cfg.scaffold_blocks if counts.get(str(item).removeprefix("minecraft:"), 0) > 0),
+        None,
+    )
+    if scaffold_item is None:
+        return {**disabled, "inventory_complete": True}
+    return {
+        "allow_place": True,
+        "scaffold_item": scaffold_item,
+        "scaffold_count": counts[scaffold_item],
+        "inventory_complete": True,
+    }
 
 
 def _executed_payload(segment: ExecutedSegment) -> dict[str, object]:

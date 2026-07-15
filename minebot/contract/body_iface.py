@@ -30,6 +30,7 @@ class Body(Protocol):
         timeout_s: float = 15.0,
         poll_interval_s: float = 0.10,
         terminal_events: set[str] | None = None,
+        intermediate_events: set[str] | None = None,
     ) -> Event: ...
     def poll_events(self) -> list[Event]: ...
     def ignite_block(

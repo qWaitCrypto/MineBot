@@ -61,6 +61,7 @@ GLOBAL_TERMINAL_EVENTS = {
     "ownerPreempted",
     "interrupted",
 }
+RESULT_TERMINAL_ACTIONS = {"navigationMutationDecision"}
 MAX_MINECRAFT_USERNAME_LENGTH = 16
 CHAT_TEXT_LIMIT = 220
 _MINECRAFT_FORMATTING_RE = re.compile(r"§.")
@@ -94,6 +95,8 @@ class ScarpetBody:
         self.request_history: list[dict[str, object]] = []
         self.completed_action_traces: list[dict[str, object]] = []
         self._inflight_action_traces: dict[str, dict[str, object]] = {}
+        self._action_start_seqs: dict[str, int] = {}
+        self._await_consumed_event_seqs: set[int] = set()
 
     def _record_request(
         self,
@@ -184,6 +187,7 @@ class ScarpetBody:
         observed_events: int,
     ) -> None:
         trace = dict(self._inflight_action_traces.pop(action_id, {}))
+        self._action_start_seqs.pop(action_id, None)
         trace["terminal_event"] = terminal.name
         trace["terminal_seq"] = terminal.seq
         trace["terminal_tick"] = terminal.tick
@@ -192,6 +196,21 @@ class ScarpetBody:
         trace["poll_count"] = poll_count
         trace["observed_events"] = observed_events
         self._append_completed_action_trace(trace)
+
+    def _record_action_intermediate(self, action_id: str, event: Event) -> None:
+        trace = self._inflight_action_traces.get(action_id)
+        if trace is None:
+            return
+        events = trace.setdefault("intermediate_events", [])
+        if isinstance(events, list):
+            events.append(
+                {
+                    "seq": event.seq,
+                    "tick": event.tick,
+                    "name": event.name,
+                    "data": dict(event.data),
+                }
+            )
 
     def transport_latency_snapshot(self, *, max_requests: int = 64) -> dict[str, object]:
         requests = self.request_history[-max_requests:] if max_requests > 0 else self.request_history
@@ -383,6 +402,7 @@ class ScarpetBody:
         return slots
 
     def execute(self, action: Action) -> Result:
+        action_start_seq = self.last_seq
         result = parse_result(
             self._timed_request(
                 build_action_call(self.bot_name, action, self.app),
@@ -400,6 +420,7 @@ class ScarpetBody:
             "dispatch_error": result.error,
             "dispatch_result": dict(result.data),
         }
+        self._action_start_seqs[action.id] = action_start_seq
         if not (result.ok and result.accepted):
             self._append_completed_action_trace(
                 {
@@ -413,6 +434,21 @@ class ScarpetBody:
                     "observed_events": 0,
                 }
             )
+            self._action_start_seqs.pop(action.id, None)
+        elif action.name in RESULT_TERMINAL_ACTIONS:
+            self._append_completed_action_trace(
+                {
+                    **self._inflight_action_traces.pop(action.id),
+                    "terminal_event": "actionResult",
+                    "terminal_seq": None,
+                    "terminal_tick": None,
+                    "terminal_data": dict(result.data),
+                    "wait_ms": 0.0,
+                    "poll_count": 0,
+                    "observed_events": 0,
+                }
+            )
+            self._action_start_seqs.pop(action.id, None)
         return result
 
     def _dispatch_action_and_await(
@@ -707,16 +743,22 @@ class ScarpetBody:
         timeout_s: float = 15.0,
         poll_interval_s: float = 0.10,
         terminal_events: set[str] | None = None,
+        intermediate_events: set[str] | None = None,
     ) -> Event:
         names = terminal_events or DEFAULT_TERMINAL_EVENTS
+        intermediate = intermediate_events or set()
+        after_seq = self._action_start_seqs.get(action_id, 0)
         deadline = time.monotonic() + timeout_s
         started = time.monotonic()
         poll_count = 0
         observed_events = 0
         observed: list[dict[str, object]] = []
-        while time.monotonic() < deadline:
-            poll_count += 1
-            for event in self.poll_events():
+
+        def match(events: list[Event]) -> Event | None:
+            nonlocal observed_events
+            for event in events:
+                if event.seq <= after_seq or event.seq in self._await_consumed_event_seqs:
+                    continue
                 observed_events += 1
                 observed.append(
                     {
@@ -726,10 +768,15 @@ class ScarpetBody:
                         "action_id": event.data.get("action_id"),
                     }
                 )
-                if event.name in names and (
+                if event.name not in names or not (
                     event.data.get("action_id") == action_id
                     or event.name in GLOBAL_TERMINAL_EVENTS
                 ):
+                    continue
+                self._await_consumed_event_seqs.add(event.seq)
+                if event.name in intermediate:
+                    self._record_action_intermediate(action_id, event)
+                else:
                     self._finish_action_trace(
                         action_id,
                         terminal=event,
@@ -737,7 +784,17 @@ class ScarpetBody:
                         poll_count=poll_count,
                         observed_events=observed_events,
                     )
-                    return event
+                return event
+            return None
+
+        buffered = match(self.event_log)
+        if buffered is not None:
+            return buffered
+        while time.monotonic() < deadline:
+            poll_count += 1
+            event = match(self.poll_events())
+            if event is not None:
+                return event
             time.sleep(poll_interval_s)
         raise BodyActionTimeoutError(
             f"timed out waiting for terminal event for action {action_id}",

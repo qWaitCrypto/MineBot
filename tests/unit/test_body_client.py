@@ -677,6 +677,40 @@ class BodyClientTests(unittest.TestCase):
         self.assertGreaterEqual(traces[0]["wait_ms"], 0.0)
         self.assertGreaterEqual(snapshot["transport"]["count"], 2)
 
+    def test_synchronous_navigation_mutation_decision_completes_action_trace_from_result(self):
+        action = Action(
+            id="decision-1",
+            name="navigationMutationDecision",
+            params={"navigation_action_id": "nav-1", "proposal_id": "p1", "authorized": True},
+        )
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "result",
+                        "id": action.id,
+                        "bot": "Bot1",
+                        "ok": True,
+                        "accepted": True,
+                        "complete": True,
+                        "data": {"action": action.name},
+                        "error": None,
+                    }
+                )
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        result = body.execute(action)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(body._inflight_action_traces, {})
+        self.assertEqual(body._action_start_seqs, {})
+        trace = body.observability_snapshot()["action_traces"][0]
+        self.assertEqual(trace["action_name"], "navigationMutationDecision")
+        self.assertEqual(trace["terminal_event"], "actionResult")
+        self.assertEqual(trace["terminal_data"], {"action": "navigationMutationDecision"})
+
     def test_await_action_terminal_accepts_other_terminal_event_names(self):
         transport = FakeTransport(
             [
@@ -786,6 +820,99 @@ class BodyClientTests(unittest.TestCase):
         event = body.await_action_terminal("a2", timeout_s=1.0, poll_interval_s=0.0)
 
         self.assertEqual(event.name, "selectSlotDone")
+
+    def test_await_action_terminal_replays_unconsumed_events_from_same_batch(self):
+        action = Action(id="nav-1", name="navigateTo", params={"target": [3, 64, 0]})
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "result",
+                        "id": action.id,
+                        "bot": "Bot1",
+                        "ok": True,
+                        "accepted": True,
+                        "complete": True,
+                        "data": {"action": "navigateTo"},
+                        "error": None,
+                    }
+                ),
+                envelope(
+                    {
+                        "type": "events",
+                        "bot": "Bot1",
+                        "ok": True,
+                        "complete": True,
+                        "next": None,
+                        "events": [
+                            {
+                                "type": "event",
+                                "seq": 1,
+                                "tick": 20,
+                                "bot": "Bot1",
+                                "name": "navigateMutationProposed",
+                                "data": {"action_id": action.id, "proposal_id": "p1"},
+                            },
+                            {
+                                "type": "event",
+                                "seq": 2,
+                                "tick": 21,
+                                "bot": "Bot1",
+                                "name": "navigateMutationDone",
+                                "data": {"action_id": action.id, "proposal_id": "p1", "success": True},
+                            },
+                            {
+                                "type": "event",
+                                "seq": 3,
+                                "tick": 21,
+                                "bot": "Bot1",
+                                "name": "navigateDone",
+                                "data": {"action_id": action.id, "reason": "world_changed"},
+                            },
+                        ],
+                        "error": None,
+                    }
+                ),
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+        body.execute(action)
+        names = {"navigateMutationProposed", "navigateMutationDone", "navigateDone"}
+        intermediate = {"navigateMutationProposed", "navigateMutationDone"}
+
+        proposed = body.await_action_terminal(
+            action.id,
+            timeout_s=1.0,
+            poll_interval_s=0.0,
+            terminal_events=names,
+            intermediate_events=intermediate,
+        )
+        mutation_done = body.await_action_terminal(
+            action.id,
+            timeout_s=1.0,
+            poll_interval_s=0.0,
+            terminal_events=names,
+            intermediate_events=intermediate,
+        )
+        navigation_done = body.await_action_terminal(
+            action.id,
+            timeout_s=1.0,
+            poll_interval_s=0.0,
+            terminal_events=names,
+            intermediate_events=intermediate,
+        )
+
+        self.assertEqual(
+            [proposed.name, mutation_done.name, navigation_done.name],
+            ["navigateMutationProposed", "navigateMutationDone", "navigateDone"],
+        )
+        self.assertEqual(len(transport.commands), 2)
+        trace = body.observability_snapshot()["action_traces"][0]
+        self.assertEqual(trace["terminal_event"], "navigateDone")
+        self.assertEqual(
+            [event["name"] for event in trace["intermediate_events"]],
+            ["navigateMutationProposed", "navigateMutationDone"],
+        )
 
     def test_jump_executes_action_and_waits_for_terminal_event(self):
         transport = ActionThenEventTransport(

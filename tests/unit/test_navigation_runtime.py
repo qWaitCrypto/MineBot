@@ -8,6 +8,7 @@ from minebot.game.governance import GovernancePolicy, Region
 from minebot.contract import Action, BodyState, BreakContext, Event, PerceptionResult, Result
 from minebot.game.navigation import (
     GoalAvoid,
+    GoalComposite,
     GoalNear,
     GoalXZ,
     GridCell,
@@ -206,6 +207,14 @@ class FakeBody:
             data["move_waypoint_index"] = 2
             data["move_waypoint_count"] = 5
             data["move_current_waypoint"] = [2.5, 64.0, 0.5]
+            data["movement_counts"] = {
+                "walk": 5,
+                "diagonal": 0,
+                "ascend": 0,
+                "descend": 0,
+                "swim": 0,
+                "fall": 0,
+            }
         elif action.name == "followEntity":
             data["arrived"] = stopped_reason == "arrived"
             data["reason"] = stopped_reason
@@ -227,6 +236,62 @@ class FakeBody:
         if not self.poll_event_batches:
             return []
         return self.poll_event_batches.pop(0)
+
+
+class InventoryNavigationBody(FakeBody):
+    def __init__(self, states, inventory_pages, **kwargs):
+        super().__init__(states, **kwargs)
+        self.inventory_pages = list(inventory_pages)
+
+    def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
+        if scope == "inventory":
+            self.perceptions.append((scope, dict(params)))
+            if not self.inventory_pages:
+                raise AssertionError("unexpected inventory page")
+            return self.inventory_pages.pop(0)
+        return super().perceive(scope, params)
+
+
+class MutationNavigationBody(InventoryNavigationBody):
+    def __init__(self, states, inventory_pages, navigation_events, **kwargs):
+        super().__init__(states, inventory_pages, **kwargs)
+        self.navigation_events = list(navigation_events)
+
+    def await_action_terminal(self, action_id: str, timeout_s: float = 15.0, **kwargs) -> Event:
+        self.await_timeouts.append(timeout_s)
+        if not self.navigation_events:
+            raise AssertionError("unexpected navigation await")
+        name, raw_data = self.navigation_events.pop(0)
+        return Event(
+            seq=len(self.actions) + 1,
+            tick=10,
+            bot="Bot1",
+            name=name,
+            data={"action_id": action_id, **dict(raw_data)},
+        )
+
+
+def inventory_page(slots, *, complete: bool, next_start=None, ok: bool = True):
+    return PerceptionResult(
+        bot="Bot1",
+        scope="inventory",
+        type="perception",
+        ok=ok,
+        complete=complete,
+        data={"slots": list(slots), "nextStart": next_start},
+        uncertainty=[] if complete else [{"reason": "page_limit"}],
+        next=None if next_start is None else str(next_start),
+        error=None if ok else "inventory_failed",
+    )
+
+
+def inventory_slot(index, item=None, count=0):
+    return {
+        "slot": index,
+        "empty": item is None or count <= 0,
+        "item": item,
+        "count": count,
+    }
 
 
 class FakeNavigator:
@@ -465,6 +530,27 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(body.actions[0].name, "navigateTo")
         self.assertEqual(body.actions[0].params["target"], [3, 64, 0])
         self.assertEqual(body.actions[0].params["goal_radius"], 0)
+        self.assertEqual(
+            {
+                key: body.actions[0].params[key]
+                for key in (
+                    "allow_diagonal",
+                    "allow_ascend",
+                    "allow_descend",
+                    "allow_swim",
+                    "max_fall_depth",
+                    "recheck_lookahead",
+                )
+            },
+            {
+                "allow_diagonal": True,
+                "allow_ascend": True,
+                "allow_descend": True,
+                "allow_swim": True,
+                "max_fall_depth": 3,
+                "recheck_lookahead": 5,
+            },
+        )
 
     def test_navigate_to_accepts_typed_goal(self):
         nav = FakeNavigator([_segment("arrived", (5, 64, 0), success=True, reason="arrived")])
@@ -479,6 +565,40 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(action.name, "navigateTo")
         self.assertEqual(action.params["target"], [5, 64, 0])
         self.assertEqual(action.params["goal_radius"], 2)
+
+    def test_navigate_to_preserves_composite_goal_set_and_server_selection(self):
+        class SelectedGoalBody(FakeBody):
+            def await_action_terminal(self, action_id: str, timeout_s: float = 15.0, **kwargs) -> Event:
+                terminal = super().await_action_terminal(action_id, timeout_s=timeout_s, **kwargs)
+                return Event(
+                    seq=terminal.seq,
+                    tick=terminal.tick,
+                    bot=terminal.bot,
+                    name=terminal.name,
+                    data={**terminal.data, "selected_goal": [9, 64, 0]},
+                )
+
+        body = SelectedGoalBody([state_at((0, 64, 0))])
+        runtime = NavigationTransactions(body, FakeNavigator([]))
+        goal = GoalComposite(
+            (
+                GoalNear((2, 64, 0), radius=1),
+                GoalNear((9, 64, 0), radius=2),
+            )
+        )
+
+        result = runtime.navigate_to(goal)
+
+        self.assertTrue(result.success)
+        self.assertEqual(body.actions[0].params["target"], [2, 64, 0])
+        self.assertEqual(
+            body.actions[0].params["goals"],
+            [[2, 64, 0, 1], [9, 64, 0, 2]],
+        )
+        self.assertEqual(result.metrics["goal"], [9, 64, 0])
+        self.assertEqual(result.metrics["selected_goal"], [9, 64, 0])
+        self.assertEqual(result.metrics["goal_count"], 2)
+        self.assertTrue(result.metrics["goal_set_preserved"])
 
     def test_navigate_to_treats_arrived_reason_as_terminal_truth(self):
         class ArrivedReasonBody(FakeBody):
@@ -530,6 +650,247 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "arrived")
         self.assertEqual(len(body.actions), 2)
+
+    def test_navigate_to_replans_after_live_world_change(self):
+        body = FakeBody(
+            [state_at((0, 64, 0)), state_at((1, 64, 0)), state_at((1, 64, 0))],
+            terminal_reasons=["world_changed", "arrived"],
+        )
+        runtime = NavigationTransactions(body, FakeNavigator([]))
+
+        result = runtime.navigate_to((8, 64, 0), config=NavigationRunConfig(max_segments=3))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "arrived")
+        self.assertEqual([action.name for action in body.actions], ["navigateTo", "navigateTo"])
+        self.assertEqual(result.metrics["segments"][0]["terminal_reason"], "world_changed")
+
+    def test_navigate_to_sends_configured_capability_snapshot(self):
+        body = FakeBody([state_at((0, 64, 0))])
+        runtime = NavigationTransactions(body, FakeNavigator([]))
+        config = NavigationRunConfig(
+            allow_diagonal=False,
+            allow_ascend=False,
+            allow_descend=False,
+            allow_swim=False,
+            max_safe_fall_depth=1,
+            recheck_lookahead=2,
+        )
+
+        result = runtime.navigate_to((3, 64, 0), config=config)
+
+        self.assertTrue(result.success)
+        action = body.actions[0]
+        self.assertFalse(action.params["allow_diagonal"])
+        self.assertFalse(action.params["allow_ascend"])
+        self.assertFalse(action.params["allow_descend"])
+        self.assertFalse(action.params["allow_swim"])
+        self.assertEqual(action.params["max_fall_depth"], 1)
+        self.assertEqual(action.params["recheck_lookahead"], 2)
+
+    def test_navigate_to_reads_paginated_inventory_before_enabling_bridge(self):
+        body = InventoryNavigationBody(
+            [state_at((0, 64, 0))],
+            [
+                inventory_page([inventory_slot(0, "minecraft:apple", 2)], complete=False, next_start=12),
+                inventory_page([inventory_slot(12, "minecraft:cobblestone", 7)], complete=True),
+            ],
+        )
+        runtime = NavigationTransactions(body, FakeNavigator([]))
+
+        result = runtime.navigate_to((3, 64, 0))
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            [params for scope, params in body.perceptions if scope == "inventory"],
+            [{"start": 0, "limit": 12}, {"start": 12, "limit": 12}],
+        )
+        action = body.actions[0]
+        self.assertTrue(action.params["allow_place"])
+        self.assertEqual(action.params["scaffold_item"], "cobblestone")
+        self.assertEqual(action.params["scaffold_count"], 7)
+        self.assertEqual(action.params["place_budget"], 8)
+
+    def test_navigate_to_disables_bridge_for_incomplete_inventory_without_cursor(self):
+        body = InventoryNavigationBody(
+            [state_at((0, 64, 0))],
+            [inventory_page([inventory_slot(0, "minecraft:cobblestone", 7)], complete=False)],
+        )
+        runtime = NavigationTransactions(body, FakeNavigator([]))
+
+        result = runtime.navigate_to((3, 64, 0))
+
+        self.assertTrue(result.success)
+        action = body.actions[0]
+        self.assertFalse(action.params["allow_place"])
+        self.assertIsNone(action.params["scaffold_item"])
+        self.assertEqual(action.params["scaffold_count"], 0)
+
+    def test_navigate_to_disables_bridge_without_scaffold_or_budget(self):
+        no_scaffold = InventoryNavigationBody(
+            [state_at((0, 64, 0))],
+            [inventory_page([inventory_slot(0, "minecraft:apple", 2)], complete=True)],
+        )
+        runtime = NavigationTransactions(no_scaffold, FakeNavigator([]))
+
+        result = runtime.navigate_to((3, 64, 0))
+
+        self.assertTrue(result.success)
+        self.assertFalse(no_scaffold.actions[0].params["allow_place"])
+
+        no_budget = InventoryNavigationBody([state_at((0, 64, 0))], [])
+        runtime = NavigationTransactions(no_budget, FakeNavigator([]))
+        result = runtime.navigate_to(
+            (3, 64, 0),
+            config=NavigationRunConfig(max_place_steps=0),
+        )
+
+        self.assertTrue(result.success)
+        self.assertFalse(no_budget.actions[0].params["allow_place"])
+        self.assertEqual(no_budget.actions[0].params["place_budget"], 0)
+        self.assertEqual(no_budget.perceptions, [])
+
+    def test_navigate_to_authorizes_verified_bridge_and_records_placement(self):
+        bridge_pos = (1, 63, 0)
+        body = MutationNavigationBody(
+            [state_at((0, 64, 0)), state_at((1, 64, 0))],
+            [inventory_page([inventory_slot(0, "minecraft:cobblestone", 3)], complete=True)],
+            [
+                (
+                    "navigateMutationProposed",
+                    {
+                        "proposal_id": "proposal-1",
+                        "kind": "place",
+                        "pos": list(bridge_pos),
+                        "source": [0, 64, 0],
+                        "block_type": "cobblestone",
+                        "before_type": "air",
+                        "purpose": "bridge",
+                    },
+                ),
+                (
+                    "navigateMutationDone",
+                    {
+                        "proposal_id": "proposal-1",
+                        "kind": "place",
+                        "pos": list(bridge_pos),
+                        "block_type": "cobblestone",
+                        "success": True,
+                        "reason": "placed",
+                        "block_now": "cobblestone",
+                    },
+                ),
+                ("navigateDone", {"reason": "world_changed", "nav_reason": "world_changed"}),
+                ("navigateDone", {"reason": "arrived", "nav_reason": "arrived", "arrived": True}),
+            ],
+        )
+        policy = GovernancePolicy(
+            natural_regions=[Region("bridge-lane", (-4, 0, -4), (8, 100, 4))]
+        )
+        runtime = NavigationTransactions.server_side(body, policy)
+
+        result = runtime.navigate_to(
+            (4, 64, 0),
+            config=NavigationRunConfig(max_segments=3, max_place_steps=2),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "arrived")
+        self.assertEqual(
+            [action.name for action in body.actions],
+            ["navigateTo", "navigationMutationDecision", "navigateTo"],
+        )
+        decision = body.actions[1]
+        self.assertTrue(decision.params["authorized"])
+        self.assertEqual(decision.params["reason"], "allowed_place")
+        self.assertEqual(decision.params["pos"], list(bridge_pos))
+        self.assertEqual(body.actions[2].params["scaffold_count"], 2)
+        self.assertEqual(body.actions[2].params["place_budget"], 1)
+        placement = policy.bot_placements[bridge_pos]
+        self.assertEqual(placement.block_type, "cobblestone")
+        self.assertEqual(placement.purpose, "bridge")
+        self.assertEqual(placement.bot, "Bot1")
+        mutation_events = result.metrics["segments"][0]["diagnostics"]["mutation_events"]
+        self.assertEqual(
+            [event["event"] for event in mutation_events],
+            ["navigateMutationProposed", "navigateMutationDone"],
+        )
+
+    def test_navigate_to_blacklists_governance_denied_bridge_and_keeps_goal_set(self):
+        denied_pos = (1, 63, 0)
+        body = MutationNavigationBody(
+            [state_at((0, 64, 0)), state_at((0, 64, 0))],
+            [inventory_page([inventory_slot(0, "minecraft:cobblestone", 3)], complete=True)],
+            [
+                (
+                    "navigateMutationProposed",
+                    {
+                        "proposal_id": "proposal-1",
+                        "kind": "place",
+                        "pos": list(denied_pos),
+                        "source": [0, 64, 0],
+                        "block_type": "cobblestone",
+                        "before_type": "air",
+                        "purpose": "bridge",
+                    },
+                ),
+                (
+                    "navigateMutationDone",
+                    {
+                        "proposal_id": "proposal-1",
+                        "kind": "place",
+                        "pos": list(denied_pos),
+                        "block_type": "cobblestone",
+                        "success": False,
+                        "reason": "mutation_denied",
+                        "block_now": "air",
+                    },
+                ),
+                ("navigateDone", {"reason": "mutation_denied", "nav_reason": "mutation_denied"}),
+                (
+                    "navigateDone",
+                    {
+                        "reason": "arrived",
+                        "nav_reason": "arrived",
+                        "arrived": True,
+                        "selected_goal": [8, 64, 0],
+                    },
+                ),
+            ],
+        )
+        policy = GovernancePolicy(
+            natural_regions=[Region("work", (-4, 0, -4), (12, 100, 4))],
+            protected_regions=[Region("protected", denied_pos, denied_pos)],
+        )
+        runtime = NavigationTransactions.server_side(body, policy)
+        goal = GoalComposite((GoalNear((3, 64, 0), radius=1), GoalNear((8, 64, 0), radius=1)))
+
+        result = runtime.navigate_to(
+            goal,
+            config=NavigationRunConfig(max_segments=3, max_place_steps=2),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["selected_goal"], [8, 64, 0])
+        decision = body.actions[1]
+        self.assertFalse(decision.params["authorized"])
+        self.assertEqual(decision.params["reason"], "protected_region")
+        self.assertNotIn(denied_pos, policy.bot_placements)
+        first, second = body.actions[0], body.actions[2]
+        self.assertEqual(first.params["goals"], second.params["goals"])
+        self.assertEqual(second.params["denied_mutations"], [list(denied_pos)])
+        self.assertEqual(second.params["scaffold_count"], 3)
+        self.assertEqual(second.params["place_budget"], 2)
+
+    def test_navigate_to_rejects_invalid_snapshot_bounds(self):
+        runtime = NavigationTransactions(FakeBody([state_at((0, 64, 0))]), FakeNavigator([]))
+
+        with self.assertRaises(ValueError):
+            runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_safe_fall_depth=4))
+        with self.assertRaises(ValueError):
+            runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(recheck_lookahead=-1))
+        with self.assertRaises(ValueError):
+            runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_place_steps=-1))
 
     def test_navigate_to_returns_failure_on_stuck(self):
         nav = FakeNavigator([_segment("arrived", (10, 64, 0), success=True, reason="arrived")])
@@ -802,6 +1163,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(diagnostics["move_waypoint_index"], 2)
         self.assertEqual(diagnostics["move_waypoint_count"], 5)
         self.assertEqual(diagnostics["move_current_waypoint"], [2.5, 64.0, 0.5])
+        self.assertEqual(diagnostics["movement_counts"]["walk"], 5)
 
     def test_follow_entity_sends_follow_action_and_returns_arrived(self):
         nav = FakeNavigator([])
