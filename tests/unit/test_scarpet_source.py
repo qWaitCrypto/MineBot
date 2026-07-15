@@ -486,6 +486,36 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertNotIn("global_mines:name", downward_tick.group(1))
         self.assertIn("navigation_mutation_safe_now(name)", downward_tick.group(1))
 
+    def test_server_navigation_open_uses_governed_property_verified_controller(self):
+        source = MINEBOT_SC.read_text()
+
+        for expected in (
+            "'allow_open' -> param_bool(params, 'allow_open', false)",
+            "'open_budget' -> floor(param_number(params, 'open_budget', 0))",
+            "navigation_manual_openable_type(bs) -> (",
+            "replace(bs, '_door', '') != bs",
+            "replace(bs, '_trapdoor', '') == bs",
+            "replace(bs, '_fence_gate', '') != bs",
+            "bs != 'iron_door'",
+            "navigation_openable_open_at(x, y, z) -> (",
+            "navigation_mutation_candidate(nx, y, nz, 'open'",
+            "'purpose' -> 'open'",
+            "run_navigation_open_mutation_tick(name, mutation) -> (",
+            "finish_navigation_mutation(name, true, 'opened')",
+            "finish_navigation_mutation(name, false, 'open_no_effect')",
+        ):
+            self.assertIn(expected, source)
+
+        open_tick = re.search(
+            r"run_navigation_open_mutation_tick\(name, mutation\) -> \((.*?)\n\);",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(open_tick, "navigation open mutation tick not found")
+        self.assertNotIn("setblock", open_tick.group(1))
+        self.assertNotIn("global_uses:name", open_tick.group(1))
+        self.assertIn("navigation_openable_open_at", open_tick.group(1))
+
     def test_server_navigation_freezes_capabilities_and_live_rechecks_edges(self):
         source = MINEBOT_SC.read_text()
 
@@ -503,6 +533,8 @@ class ScarpetSourceTests(unittest.TestCase):
             "'pillar_budget' -> floor(param_number(params, 'pillar_budget', 0))",
             "'allow_downward' -> param_bool(params, 'allow_downward', false)",
             "'downward_budget' -> floor(param_number(params, 'downward_budget', 0))",
+            "'allow_open' -> param_bool(params, 'allow_open', false)",
+            "'open_budget' -> floor(param_number(params, 'open_budget', 0))",
             "navigation_edge_valid(sx, sy, sz, tx, ty, tz, movement_kind, fall_depth, context)",
             "navigation_move_recheck_reason(name, m) -> (",
             "first_index + floor(number(nav:16)) - 1",
@@ -1050,6 +1082,11 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("finish_move(name, 'deviated', false)", source)
         self.assertIn("finish_move(name, 'timeout', false)", source)
         self.assertRegex(source, r"global_moves:name = l\(action_id, x, y, z, arrival_radius")
+        self.assertIn(
+            "execution_arrival_radius = if(plan_status == 'partial', min(arrival_radius, 0.45), arrival_radius)",
+            source,
+        )
+        self.assertIn("'arrival_radius' -> execution_arrival_radius", source)
         self.assertIn('"min_dist":%.3f', source)
         self.assertIn('"stuck_ticks":%d', source)
         self.assertIn('"deviation":%.3f', source)

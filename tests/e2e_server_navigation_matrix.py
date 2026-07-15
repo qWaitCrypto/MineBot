@@ -106,6 +106,25 @@ def setup_downward_area(rcon, x: int, z: int, *, back_length: int = 20) -> None:
     command(rcon, f"setblock {x} {BASE_Y - 3} {z} stone")
 
 
+def setup_open_lane(rcon, x: int, z: int, *, opened: bool = False, iron: bool = False, back_length: int = 12) -> tuple[int, int, int]:
+    command(rcon, f"fill {x - back_length} {BASE_Y - 2} {z - 2} {x + 7} {BASE_Y + 3} {z + 2} air")
+    command(rcon, f"fill {x - back_length} {BASE_Y - 1} {z - 1} {x + 7} {BASE_Y - 1} {z + 1} stone")
+    command(rcon, f"fill {x - back_length} {BASE_Y} {z - 1} {x + 7} {BASE_Y + 2} {z - 1} stone_bricks")
+    command(rcon, f"fill {x - back_length} {BASE_Y} {z + 1} {x + 7} {BASE_Y + 2} {z + 1} stone_bricks")
+    door = (x + 2, BASE_Y, z)
+    door_type = "iron_door" if iron else "oak_door"
+    open_value = "true" if opened else "false"
+    command(
+        rcon,
+        f"setblock {door[0]} {door[1]} {door[2]} {door_type}[facing=east,half=lower,hinge=left,open={open_value},powered=false]",
+    )
+    command(
+        rcon,
+        f"setblock {door[0]} {door[1] + 1} {door[2]} {door_type}[facing=east,half=upper,hinge=left,open={open_value},powered=false]",
+    )
+    return door
+
+
 def inventory_count(body: ScarpetBody, item: str) -> int:
     wanted = item.removeprefix("minecraft:")
     return sum(
@@ -120,6 +139,13 @@ def block_type(body: ScarpetBody, pos: tuple[int, int, int]) -> str:
     if not (fact.ok and fact.complete):
         raise AssertionError(f"block read failed at {pos}: {fact}")
     return str(fact.data.get("type") or "unknown").removeprefix("minecraft:")
+
+
+def block_properties(body: ScarpetBody, pos: tuple[int, int, int]) -> dict[str, object]:
+    fact = body.perceive("blockAt", {"x": pos[0], "y": pos[1], "z": pos[2]})
+    if not (fact.ok and fact.complete):
+        raise AssertionError(f"block read failed at {pos}: {fact}")
+    return dict(fact.data.get("properties") or {})
 
 
 def require_move(body: ScarpetBody, target: tuple[int, int, int], kind: str):
@@ -263,6 +289,28 @@ class DownwardInterruptingBody(ScarpetBody):
             accepted = self.interrupt("matrix_mid_downward")
             if not (accepted.ok and accepted.accepted):
                 raise AssertionError(f"downward interrupt rejected: {accepted}")
+            self.interrupted = True
+        return result
+
+
+class OpenInterruptingBody(ScarpetBody):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.interrupted = False
+
+    def execute(self, action):
+        result = super().execute(action)
+        if (
+            not self.interrupted
+            and action.name == "navigationMutationDecision"
+            and action.params.get("kind") == "open"
+            and action.params.get("authorized") is True
+            and result.ok
+            and result.accepted
+        ):
+            accepted = self.interrupt("matrix_mid_open")
+            if not (accepted.ok and accepted.accepted):
+                raise AssertionError(f"open interrupt rejected: {accepted}")
             self.interrupted = True
         return result
 
@@ -758,6 +806,148 @@ def main() -> None:
             raise AssertionError(f"mid-downward interrupt returned before safe landing: {interrupted_downward_state}")
         print(f"PASS mid_downward_interrupt: reason={interrupted_downward.reason} pos={interrupted_downward_state.pos}")
 
+        x, z = BASE_X, BASE_Z + 120
+        door_pos = setup_open_lane(rcon, x, z)
+        teleport(rcon, (x, BASE_Y, z))
+        command(rcon, f"clear {BOT}")
+        open_policy = GovernancePolicy(
+            natural_regions=[Region("open-lane", (x - 3, BASE_Y - 3, z - 2), (x + 7, BASE_Y + 4, z + 2))]
+        )
+        opened = navigate(
+            body,
+            (x + 5, BASE_Y, z),
+            governance=open_policy,
+            config=NavigationRunConfig(
+                max_segments=5,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                allow_downward=False,
+                max_open_steps=2,
+            ),
+        )
+        open_reasons = [segment["terminal_reason"] for segment in (opened.metrics or {}).get("segments", [])]
+        if not opened.success or "world_changed" not in open_reasons or movement_total(opened, "open") < 1:
+            raise AssertionError(f"open gate failed: {opened.to_payload()}")
+        if str(block_properties(body, door_pos).get("open")).lower() != "true":
+            raise AssertionError(f"door did not open: {opened.to_payload()}")
+        print(f"PASS open_door: pos={body.get_state().pos} reasons={open_reasons}")
+
+        x, z = BASE_X + 30, BASE_Z + 120
+        open_door_pos = setup_open_lane(rcon, x, z, opened=True)
+        teleport(rcon, (x, BASE_Y, z))
+        already_open = navigate(
+            body,
+            (x + 5, BASE_Y, z),
+            governance=GovernancePolicy(
+                natural_regions=[Region("already-open-lane", (x - 3, BASE_Y - 3, z - 2), (x + 7, BASE_Y + 4, z + 2))]
+            ),
+            config=NavigationRunConfig(
+                max_segments=3,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                allow_downward=False,
+                max_open_steps=2,
+            ),
+        )
+        if not already_open.success or movement_total(already_open, "open") != 0:
+            raise AssertionError(f"already-open door was not traversed as passable: {already_open.to_payload()}")
+        if str(block_properties(body, open_door_pos).get("open")).lower() != "true":
+            raise AssertionError(f"already-open door changed state: {already_open.to_payload()}")
+        print(f"PASS already_open_door: pos={body.get_state().pos}")
+
+        x, z = BASE_X + 60, BASE_Z + 120
+        protected_door_pos = setup_open_lane(rcon, x, z, back_length=20)
+        teleport(rcon, (x, BASE_Y, z))
+        protected_open_policy = GovernancePolicy(
+            natural_regions=[Region("open-any-of", (x - 20, BASE_Y - 3, z - 2), (x + 7, BASE_Y + 4, z + 2))],
+            protected_regions=[Region("player-door", protected_door_pos, protected_door_pos)],
+        )
+        far_open_goal = (x - 16, BASE_Y, z)
+        denied_open = navigate(
+            body,
+            GoalComposite((GoalNear((x + 5, BASE_Y, z), radius=0), GoalNear(far_open_goal, radius=0))),
+            governance=protected_open_policy,
+            config=NavigationRunConfig(
+                max_segments=5,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                allow_downward=False,
+                max_open_steps=2,
+            ),
+        )
+        denied_open_reasons = [segment["terminal_reason"] for segment in (denied_open.metrics or {}).get("segments", [])]
+        if not denied_open.success or denied_open.metrics.get("selected_goal") != list(far_open_goal):
+            raise AssertionError(f"denied open did not select alternate goal: {denied_open.to_payload()}")
+        if "mutation_denied" not in denied_open_reasons:
+            raise AssertionError(f"protected door was not proposed and denied: {denied_open.to_payload()}")
+        if str(block_properties(body, protected_door_pos).get("open")).lower() != "false":
+            raise AssertionError(f"protected door changed state: {denied_open.to_payload()}")
+        print(f"PASS open_denied_any_of: selected={far_open_goal} reasons={denied_open_reasons}")
+
+        x, z = BASE_X + 90, BASE_Z + 120
+        iron_door_pos = setup_open_lane(rcon, x, z, iron=True)
+        teleport(rcon, (x, BASE_Y, z))
+        iron_door = navigate(
+            body,
+            (x + 5, BASE_Y, z),
+            governance=GovernancePolicy(
+                natural_regions=[Region("iron-door-lane", (x - 3, BASE_Y - 3, z - 2), (x + 7, BASE_Y + 4, z + 2))]
+            ),
+            config=NavigationRunConfig(
+                max_segments=2,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                allow_downward=False,
+                max_open_steps=2,
+            ),
+        )
+        if iron_door.success or iron_door.reason != "no_path":
+            raise AssertionError(f"iron door did not return no_path: {iron_door.to_payload()}")
+        if str(block_properties(body, iron_door_pos).get("open")).lower() != "false":
+            raise AssertionError(f"iron door changed without redstone: {iron_door.to_payload()}")
+        print(f"PASS iron_door_refusal: reason={iron_door.reason}")
+
+        x, z = BASE_X + 120, BASE_Z + 120
+        interrupted_door_pos = setup_open_lane(rcon, x, z)
+        teleport(rcon, (x, BASE_Y, z))
+        interrupt_open_policy = GovernancePolicy(
+            natural_regions=[Region("interrupt-open", (x - 3, BASE_Y - 3, z - 2), (x + 7, BASE_Y + 4, z + 2))]
+        )
+        interrupting_open_body = OpenInterruptingBody(BOT, rcon)
+        interrupting_open_body.last_seq = body.last_seq
+        interrupted_open = navigate(
+            interrupting_open_body,
+            (x + 5, BASE_Y, z),
+            governance=interrupt_open_policy,
+            config=NavigationRunConfig(
+                max_segments=3,
+                segment_timeout_s=8.0,
+                min_partial_progress=1,
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                allow_downward=False,
+                max_open_steps=1,
+            ),
+        )
+        if interrupted_open.success or interrupted_open.reason != "interrupted":
+            raise AssertionError(f"mid-open interrupt terminal wrong: {interrupted_open.to_payload()}")
+        if str(block_properties(interrupting_open_body, interrupted_door_pos).get("open")).lower() != "true":
+            raise AssertionError(f"mid-open interrupt lost completed interaction: {interrupted_open.to_payload()}")
+        print(f"PASS mid_open_interrupt: reason={interrupted_open.reason} pos={interrupting_open_body.get_state().pos}")
+
         x, z = BASE_X + 70, BASE_Z + 40
         interrupted_bridge_pos = setup_bridge_lane(rcon, x, z)
         teleport(rcon, (x, BASE_Y, z))
@@ -799,7 +989,7 @@ def main() -> None:
         )
 
         command(rcon, f"player {BOT} kill")
-        print("SERVER NAVIGATION N2/N3 BRIDGE/BREAK/PILLAR/DOWNWARD MATRIX PASSED")
+        print("SERVER NAVIGATION N2/N3 BRIDGE/BREAK/PILLAR/DOWNWARD/OPEN MATRIX PASSED")
 
 
 if __name__ == "__main__":

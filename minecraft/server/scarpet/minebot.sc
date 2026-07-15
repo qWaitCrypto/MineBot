@@ -3665,13 +3665,36 @@ __on_player_message(player, message) -> (
 
 probe_node_key(x, y, z) -> str('%d_%d_%d', x, y, z);
 
+navigation_pass_openable_type(bs) -> (
+  (replace(bs, '_door', '') != bs && replace(bs, '_trapdoor', '') == bs) || replace(bs, '_fence_gate', '') != bs
+);
+
+navigation_manual_openable_type(bs) -> (
+  navigation_pass_openable_type(bs) && bs != 'iron_door'
+);
+
+navigation_openable_open_at(x, y, z) -> (
+  b = block(x, y, z);
+  state = block_state(b);
+  navigation_pass_openable_type('' + b) && str('%s', state:'open') == 'true'
+);
+
+navigation_block_kind_at(x, y, z) -> (
+  if(navigation_openable_open_at(x, y, z), 'CLEAR', block_kind('' + block(x, y, z)))
+);
+
+navigation_openable_interaction_y(x, y, z) -> (
+  state = block_state(block(x, y, z));
+  if(str('%s', state:'half') == 'upper', y - 1, y)
+);
+
 probe_walkability(x, y, z) -> (
   feet = '' + block(x, y, z);
   head = '' + block(x, y + 1, z);
-  feet_kind = block_kind(feet);
-  head_kind = block_kind(head);
+  feet_kind = navigation_block_kind_at(x, y, z);
+  head_kind = navigation_block_kind_at(x, y + 1, z);
   floor_bs = '' + block(x, y - 1, z);
-  floor_kind = block_kind(floor_bs);
+  floor_kind = navigation_block_kind_at(x, y - 1, z);
   if(feet_kind == 'SOLID' || head_kind == 'SOLID',
     'SOLID'
   ,
@@ -3739,8 +3762,8 @@ navigation_goal_selected(x, y, z, goals) -> (
 );
 
 navigation_body_clear(x, y, z) -> (
-  feet_kind = block_kind('' + block(x, y, z));
-  head_kind = block_kind('' + block(x, y + 1, z));
+  feet_kind = navigation_block_kind_at(x, y, z);
+  head_kind = navigation_block_kind_at(x, y + 1, z);
   feet_kind != 'SOLID' && head_kind != 'SOLID' && !is_lava_at(x, y, z) && !is_lava_at(x, y + 1, z)
 );
 
@@ -3768,6 +3791,8 @@ navigation_context_from_params(params) -> (
     'pillar_budget' -> floor(param_number(params, 'pillar_budget', 0)),
     'allow_downward' -> param_bool(params, 'allow_downward', false),
     'downward_budget' -> floor(param_number(params, 'downward_budget', 0)),
+    'allow_open' -> param_bool(params, 'allow_open', false),
+    'open_budget' -> floor(param_number(params, 'open_budget', 0)),
     'origin_y' -> 0,
     'scaffold_item' -> params:'scaffold_item',
     'scaffold_count' -> floor(param_number(params, 'scaffold_count', 0)),
@@ -3781,7 +3806,7 @@ navigation_default_context() -> (
 );
 
 navigation_context_json(context) -> (
-  str('{"allow_diagonal":%s,"allow_ascend":%s,"allow_descend":%s,"allow_swim":%s,"max_fall_depth":%d,"allow_break":%s,"break_budget":%d,"break_timeout_ticks":%d,"break_pickaxe":%s,"break_axe":%s,"break_shovel":%s,"allow_place":%s,"allow_pillar":%s,"pillar_budget":%d,"allow_downward":%s,"downward_budget":%d,"scaffold_item":%s,"scaffold_count":%d,"place_budget":%d}',
+  str('{"allow_diagonal":%s,"allow_ascend":%s,"allow_descend":%s,"allow_swim":%s,"max_fall_depth":%d,"allow_break":%s,"break_budget":%d,"break_timeout_ticks":%d,"break_pickaxe":%s,"break_axe":%s,"break_shovel":%s,"allow_place":%s,"allow_pillar":%s,"pillar_budget":%d,"allow_downward":%s,"downward_budget":%d,"allow_open":%s,"open_budget":%d,"scaffold_item":%s,"scaffold_count":%d,"place_budget":%d}',
     json_bool(bool(context:'allow_diagonal')),
     json_bool(bool(context:'allow_ascend')),
     json_bool(bool(context:'allow_descend')),
@@ -3798,6 +3823,8 @@ navigation_context_json(context) -> (
     floor(number(context:'pillar_budget')),
     json_bool(bool(context:'allow_downward')),
     floor(number(context:'downward_budget')),
+    json_bool(bool(context:'allow_open')),
+    floor(number(context:'open_budget')),
     json_string(context:'scaffold_item'),
     floor(number(context:'scaffold_count')),
     floor(number(context:'place_budget')))
@@ -3887,30 +3914,47 @@ navigation_neighbors(x, y, z, context) -> (
       feet_type = '' + block(nx, y, nz);
       head_type = '' + block(nx, y + 1, nz);
       support_kind = block_kind('' + block(nx, y - 1, nz));
-      if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && support_kind == 'SOLID',
-        if(block_kind(head_type) == 'SOLID' && !navigation_mutation_denied(context, nx, y + 1, nz),
+      if(bool(context:'allow_open') && floor(number(context:'open_budget')) > 0 && support_kind == 'SOLID' && navigation_manual_openable_type(feet_type) && !navigation_openable_open_at(nx, y, nz),
+        interaction_y = navigation_openable_interaction_y(nx, y, nz);
+        interaction_type = '' + block(nx, interaction_y, nz);
+        if(!navigation_mutation_denied(context, nx, interaction_y, nz),
           mutation = {
-            'kind' -> 'break',
-            'pos' -> l(nx, y + 1, nz),
+            'kind' -> 'open',
+            'pos' -> l(nx, interaction_y, nz),
             'source' -> l(x, y, z),
-            'block_type' -> head_type,
-            'before_type' -> head_type,
-            'purpose' -> 'headroom',
-            'tool_item' -> navigation_break_tool(context, head_type)
+            'block_type' -> interaction_type,
+            'before_type' -> interaction_type,
+            'purpose' -> 'open',
+            'tool_item' -> null
           };
-          neighbors += navigation_mutation_candidate(nx, y, nz, 'break', 8.0, 'immediate', mutation)
-        ,
-          if(block_kind(feet_type) == 'SOLID' && block_kind(head_type) != 'SOLID' && !is_lava_at(nx, y + 1, nz) && !navigation_mutation_denied(context, nx, y, nz),
+          neighbors += navigation_mutation_candidate(nx, y, nz, 'open', 4.0, 'finish_or_abort_controller', mutation)
+        )
+      ,
+        if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && support_kind == 'SOLID',
+          if(block_kind(head_type) == 'SOLID' && !navigation_mutation_denied(context, nx, y + 1, nz),
             mutation = {
               'kind' -> 'break',
-              'pos' -> l(nx, y, nz),
+              'pos' -> l(nx, y + 1, nz),
               'source' -> l(x, y, z),
-              'block_type' -> feet_type,
-              'before_type' -> feet_type,
-              'purpose' -> 'path',
-              'tool_item' -> navigation_break_tool(context, feet_type)
+              'block_type' -> head_type,
+              'before_type' -> head_type,
+              'purpose' -> 'headroom',
+              'tool_item' -> navigation_break_tool(context, head_type)
             };
             neighbors += navigation_mutation_candidate(nx, y, nz, 'break', 8.0, 'immediate', mutation)
+          ,
+            if(block_kind(feet_type) == 'SOLID' && block_kind(head_type) != 'SOLID' && !is_lava_at(nx, y + 1, nz) && !navigation_mutation_denied(context, nx, y, nz),
+              mutation = {
+                'kind' -> 'break',
+                'pos' -> l(nx, y, nz),
+                'source' -> l(x, y, z),
+                'block_type' -> feet_type,
+                'before_type' -> feet_type,
+                'purpose' -> 'path',
+                'tool_item' -> navigation_break_tool(context, feet_type)
+              };
+              neighbors += navigation_mutation_candidate(nx, y, nz, 'break', 8.0, 'immediate', mutation)
+            )
           )
         )
       )
@@ -3942,7 +3986,7 @@ navigation_neighbors(x, y, z, context) -> (
       )
     );
     up = probe_walkability(nx, y + 1, nz);
-    if(bool(context:'allow_ascend') && block_kind('' + block(nx, y, nz)) == 'SOLID' && (up == 'WALK' || (up == 'LIQUID' && bool(context:'allow_swim'))),
+    if(bool(context:'allow_ascend') && navigation_block_kind_at(nx, y, nz) == 'SOLID' && (up == 'WALK' || (up == 'LIQUID' && bool(context:'allow_swim'))),
       neighbors += navigation_candidate(nx, y + 1, nz, if(up == 'LIQUID', 'swim', 'ascend'), if(up == 'LIQUID', 3.0, 2.0), 0, if(up == 'LIQUID', 'surface_or_stable_water', 'settle_on_support'))
     );
     down = probe_walkability(nx, y - 1, nz);
@@ -3971,7 +4015,7 @@ navigation_neighbors(x, y, z, context) -> (
   );
   downward_floor_type = '' + block(x, y - 1, z);
   downward_support_type = '' + block(x, y - 2, z);
-  if(bool(context:'allow_downward') && floor(number(context:'downward_budget')) > 0 && probe_walkability(x, y, z) == 'WALK' && block_kind(downward_floor_type) == 'SOLID' && block_kind(downward_support_type) == 'SOLID' && !is_lava_at(x, y, z) && !navigation_mutation_denied(context, x, y - 1, z),
+  if(bool(context:'allow_downward') && floor(number(context:'downward_budget')) > 0 && probe_walkability(x, y, z) == 'WALK' && navigation_block_kind_at(x, y - 1, z) == 'SOLID' && navigation_block_kind_at(x, y - 2, z) == 'SOLID' && !is_lava_at(x, y, z) && !navigation_mutation_denied(context, x, y - 1, z),
     mutation = {
       'kind' -> 'downward',
       'pos' -> l(x, y - 1, z),
@@ -4096,6 +4140,7 @@ navigation_movement_counts_json(moves) -> (
   place = 0;
   pillar = 0;
   downward = 0;
+  open_count = 0;
   loop(length(moves),
     kind = moves:_;
     if(kind == 'walk', walk += 1);
@@ -4107,9 +4152,10 @@ navigation_movement_counts_json(moves) -> (
     if(kind == 'break', break_count += 1);
     if(kind == 'place', place += 1);
     if(kind == 'pillar', pillar += 1);
-    if(kind == 'downward', downward += 1)
+    if(kind == 'downward', downward += 1);
+    if(kind == 'open', open_count += 1)
   );
-  str('{"walk":%d,"diagonal":%d,"ascend":%d,"descend":%d,"swim":%d,"fall":%d,"break":%d,"place":%d,"pillar":%d,"downward":%d}', walk, diagonal, ascend, descend, swim, fall, break_count, place, pillar, downward)
+  str('{"walk":%d,"diagonal":%d,"ascend":%d,"descend":%d,"swim":%d,"fall":%d,"break":%d,"place":%d,"pillar":%d,"downward":%d,"open":%d}', walk, diagonal, ascend, descend, swim, fall, break_count, place, pillar, downward, open_count)
 );
 
 navigation_cancel_profile(path) -> (
@@ -4566,7 +4612,7 @@ decide_navigation_mutation(name, params) -> (
       mutation:'decision_reason' = params:'reason';
       global_navigation_mutations:name = mutation;
       if(!bool(params:'authorized'),
-        finish_navigation_mutation(name, false, 'mutation_denied');
+        finish_navigation_mutation(name, false, if(params:'reason' == 'world_changed', 'world_changed', 'mutation_denied'));
         true
       ,
         pos = mutation:'pos';
@@ -4589,30 +4635,40 @@ decide_navigation_mutation(name, params) -> (
               true
             )
           ,
-            if(mutation:'kind' == 'pillar',
-              if(!navigation_select_item(name, mutation:'block_type'),
-                finish_navigation_mutation(name, false, 'missing_capability');
-                true
-              ,
-                mutation:'status' = 'centering';
-                mutation:'ticks' = 0;
-                global_navigation_mutations:name = mutation;
-                true
-              )
+            if(mutation:'kind' == 'open',
+              mutation:'status' = 'opening';
+              mutation:'ticks' = 0;
+              global_navigation_mutations:name = mutation;
+              stop_body(name);
+              run(str('player %s look at %.3f %.3f %.3f', name, pos:0 + 0.5, pos:1 + 0.5, pos:2 + 0.5));
+              run('player ' + name + ' use once');
+              true
             ,
-              if(mutation:'kind' != 'place',
-                finish_navigation_mutation(name, false, 'unsupported_mutation');
-                true
-              ,
+              if(mutation:'kind' == 'pillar',
                 if(!navigation_select_item(name, mutation:'block_type'),
                   finish_navigation_mutation(name, false, 'missing_capability');
                   true
                 ,
-                  mutation:'status' = 'advancing';
+                  mutation:'status' = 'centering';
                   mutation:'ticks' = 0;
                   global_navigation_mutations:name = mutation;
-                  start_navigation_bridge_motion(name, mutation);
                   true
+                )
+              ,
+                if(mutation:'kind' != 'place',
+                  finish_navigation_mutation(name, false, 'unsupported_mutation');
+                  true
+                ,
+                  if(!navigation_select_item(name, mutation:'block_type'),
+                    finish_navigation_mutation(name, false, 'missing_capability');
+                    true
+                  ,
+                    mutation:'status' = 'advancing';
+                    mutation:'ticks' = 0;
+                    global_navigation_mutations:name = mutation;
+                    start_navigation_bridge_motion(name, mutation);
+                    true
+                  )
                 )
               )
             )
@@ -4641,6 +4697,33 @@ run_navigation_break_mutation_tick(name, mutation) -> (
       ,
         mutation:'ticks' = ticks;
         global_navigation_mutations:name = mutation
+      )
+    )
+  )
+);
+
+run_navigation_open_mutation_tick(name, mutation) -> (
+  pos = mutation:'pos';
+  block_now = '' + block(pos:0, pos:1, pos:2);
+  if(navigation_openable_open_at(pos:0, pos:1, pos:2),
+    stop_body(name);
+    finish_navigation_mutation(name, true, 'opened')
+  ,
+    if(block_now != mutation:'before_type',
+      stop_body(name);
+      finish_navigation_mutation(name, false, 'world_changed')
+    ,
+      ticks = floor(number(mutation:'ticks')) + 1;
+      mutation:'ticks' = ticks;
+      global_navigation_mutations:name = mutation;
+      if(mutation:'cancel_reason' != null && navigation_mutation_safe_now(name),
+        stop_body(name);
+        finish_navigation_mutation(name, false, mutation:'cancel_reason')
+      ,
+        if(ticks > floor(number(mutation:'timeout_ticks')),
+          stop_body(name);
+          finish_navigation_mutation(name, false, 'open_no_effect')
+        )
       )
     )
   )
@@ -4850,13 +4933,17 @@ run_navigation_mutation_tick(name, mutation) -> (
   if(mutation:'kind' == 'break',
     run_navigation_break_mutation_tick(name, mutation)
   ,
-    if(mutation:'kind' == 'downward',
-      run_navigation_downward_mutation_tick(name, mutation)
+    if(mutation:'kind' == 'open',
+      run_navigation_open_mutation_tick(name, mutation)
     ,
-      if(mutation:'kind' == 'pillar',
-        run_navigation_pillar_mutation_tick(name, mutation)
+      if(mutation:'kind' == 'downward',
+        run_navigation_downward_mutation_tick(name, mutation)
       ,
-        run_navigation_place_mutation_tick(name, mutation)
+        if(mutation:'kind' == 'pillar',
+          run_navigation_pillar_mutation_tick(name, mutation)
+        ,
+          run_navigation_place_mutation_tick(name, mutation)
+        )
       )
     )
   )
@@ -4906,6 +4993,7 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
       selected_goal = plan_result:4;
       partial_coefficient = plan_result:5;
       partial_distance = plan_result:6;
+      execution_arrival_radius = if(plan_status == 'partial', min(arrival_radius, 0.45), arrival_radius);
       movement_kinds = l();
       fall_depths = l();
       cancel_policies = l();
@@ -4955,7 +5043,7 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
         ,
           last_wp = waypoints:(length(waypoints) - 1);
           move_ok = start_move_to(name, action_id, last_wp:0, last_wp:1, last_wp:2,
-            {'waypoints' -> waypoints, 'arrival_radius' -> arrival_radius,
+            {'waypoints' -> waypoints, 'arrival_radius' -> execution_arrival_radius,
              'timeout_ticks' -> timeout_ticks, 'no_progress_ticks' -> no_progress_ticks,
              'max_deviation' -> 8.0, 'path_moves' -> execution_moves,
              'path_fall_depths' -> execution_fall_depths, 'cancel_policies' -> execution_cancel_policies,

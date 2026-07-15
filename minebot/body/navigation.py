@@ -16,6 +16,7 @@ from minebot.contract import (
     BodyState,
     BreakContext,
     Event,
+    InteractionContext,
     InventorySlot,
     LocalProgressController,
     PlaceContext,
@@ -77,6 +78,8 @@ class NavigationRunConfig:
     max_pillar_steps: int = 8
     allow_downward: bool = True
     max_downward_steps: int = 8
+    allow_open: bool = True
+    max_open_steps: int = 8
     scaffold_blocks: tuple[str, ...] = (
         "cobblestone",
         "cobbled_deepslate",
@@ -189,6 +192,8 @@ class NavigationTransactions:
             raise ValueError("max_pillar_steps must be >= 0")
         if cfg.max_downward_steps < 0:
             raise ValueError("max_downward_steps must be >= 0")
+        if cfg.max_open_steps < 0:
+            raise ValueError("max_open_steps must be >= 0")
         if timeout_s is not None:
             if timeout_s <= 0:
                 raise ValueError("timeout_s must be > 0")
@@ -216,6 +221,7 @@ class NavigationTransactions:
         placed_steps = 0
         pillar_steps = 0
         downward_steps = 0
+        open_steps = 0
 
         segment_index = 0
         partial_segments = 0
@@ -272,6 +278,8 @@ class NavigationTransactions:
                         cfg.allow_downward and cfg.max_downward_steps > downward_steps
                     ),
                     "downward_budget": max(0, cfg.max_downward_steps - downward_steps),
+                    "allow_open": bool(cfg.allow_open and cfg.max_open_steps > open_steps),
+                    "open_budget": max(0, cfg.max_open_steps - open_steps),
                     "denied_mutations": [list(pos) for pos in sorted(denied_mutations)],
                 },
             )
@@ -315,6 +323,8 @@ class NavigationTransactions:
                             broken_steps += 1
                         if mutation.get("kind") == "downward":
                             downward_steps += 1
+                        if mutation.get("kind") == "open":
+                            open_steps += 1
                         if mutation.get("kind") in {"place", "pillar"} and mutation_pos is not None:
                             mutation_kind = str(mutation.get("kind"))
                             purpose = "pillar" if mutation_kind == "pillar" else "bridge"
@@ -540,6 +550,30 @@ class NavigationTransactions:
             )
             allowed = decision.allowed
             reason = decision.reason
+        elif mutation_kind == "open" and pos is not None and self.governance is not None:
+            try:
+                fact = self.body.perceive("blockAt", {"x": pos[0], "y": pos[1], "z": pos[2]})
+            except Exception as exc:
+                fact = None
+                reason = f"world_read_failed:{type(exc).__name__}"
+            observed_type = (
+                "unknown"
+                if fact is None
+                else str(fact.data.get("type") or "unknown").removeprefix("minecraft:")
+            )
+            proposed_type = block_type.removeprefix("minecraft:")
+            if fact is None:
+                pass
+            elif not fact.ok or not fact.complete:
+                reason = "world_read_failed"
+            elif observed_type != proposed_type:
+                reason = "world_changed"
+            elif str((fact.data.get("properties") or {}).get("open") or "false").lower() == "true":
+                reason = "world_changed"
+            else:
+                decision = self.governance.can_interact(pos, observed_type, InteractionContext.ACTIVATE)
+                allowed = decision.allowed
+                reason = decision.reason
         decision_action = Action.create(
             "navigationMutationDecision",
             {

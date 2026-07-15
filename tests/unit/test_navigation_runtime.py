@@ -694,6 +694,8 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(action.params["pillar_budget"], 8)
         self.assertTrue(action.params["allow_downward"])
         self.assertEqual(action.params["downward_budget"], 8)
+        self.assertTrue(action.params["allow_open"])
+        self.assertEqual(action.params["open_budget"], 8)
 
     def test_navigate_to_reads_paginated_inventory_before_enabling_bridge(self):
         body = InventoryNavigationBody(
@@ -1066,6 +1068,68 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(body.actions[2].params["break_budget"], 8)
         self.assertIn(("blockAt", {"x": 0, "y": 63, "z": 0}), body.perceptions)
 
+    def test_navigate_to_authorizes_openable_and_decrements_open_budget(self):
+        door_pos = (1, 64, 0)
+        body = MutationNavigationBody(
+            [state_at((0, 64, 0)), state_at((0, 64, 0))],
+            [],
+            [
+                (
+                    "navigateMutationProposed",
+                    {
+                        "proposal_id": "proposal-open-1",
+                        "kind": "open",
+                        "pos": list(door_pos),
+                        "source": [0, 64, 0],
+                        "block_type": "oak_door",
+                        "before_type": "oak_door",
+                        "purpose": "open",
+                    },
+                ),
+                (
+                    "navigateMutationDone",
+                    {
+                        "proposal_id": "proposal-open-1",
+                        "kind": "open",
+                        "pos": list(door_pos),
+                        "block_type": "oak_door",
+                        "success": True,
+                        "reason": "opened",
+                        "block_now": "oak_door",
+                        "decision_reason": "allowed_interaction",
+                    },
+                ),
+                ("navigateDone", {"reason": "world_changed", "nav_reason": "world_changed"}),
+                ("navigateDone", {"reason": "arrived", "nav_reason": "arrived", "arrived": True}),
+            ],
+            blocks={door_pos: ("oak_door", "SOLID", {"open": "false", "half": "lower"})},
+        )
+        policy = GovernancePolicy(
+            natural_regions=[Region("door-corridor", (-2, 0, -2), (8, 100, 2))]
+        )
+        runtime = NavigationTransactions.server_side(body, policy)
+
+        result = runtime.navigate_to(
+            (4, 64, 0),
+            config=NavigationRunConfig(
+                max_segments=3,
+                allow_break=False,
+                allow_place=False,
+                allow_pillar=False,
+                allow_downward=False,
+                max_open_steps=2,
+            ),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        decision = body.actions[1]
+        self.assertTrue(decision.params["authorized"])
+        self.assertEqual(decision.params["kind"], "open")
+        self.assertEqual(decision.params["reason"], "allowed_interaction")
+        self.assertEqual(body.actions[0].params["open_budget"], 2)
+        self.assertEqual(body.actions[2].params["open_budget"], 1)
+        self.assertIn(("blockAt", {"x": 1, "y": 64, "z": 0}), body.perceptions)
+
     def test_navigate_to_denies_protected_headroom_break_and_preserves_world_fact(self):
         break_pos = (1, 65, 0)
         body = MutationNavigationBody(
@@ -1213,6 +1277,8 @@ class NavigationRuntimeTests(unittest.TestCase):
             runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_pillar_steps=-1))
         with self.assertRaises(ValueError):
             runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_downward_steps=-1))
+        with self.assertRaises(ValueError):
+            runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_open_steps=-1))
 
     def test_navigate_to_returns_failure_on_stuck(self):
         nav = FakeNavigator([_segment("arrived", (10, 64, 0), success=True, reason="arrived")])
