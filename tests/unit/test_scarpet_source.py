@@ -542,6 +542,45 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertNotIn("global_mines:name", downward_tick.group(1))
         self.assertIn("navigation_mutation_safe_now(name)", downward_tick.group(1))
 
+    def test_server_navigation_downward_refuses_liquid_exposed_floor_break(self):
+        source = MINEBOT_SC.read_text()
+
+        risk = re.search(
+            r"navigation_downward_flood_risk\(x, y, z\) -> \((.*?)\n\);",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(risk, "navigation downward flood-risk predicate not found")
+        self.assertIn("navigation_adjacent_fluid_break_risk(x, y + 1, z, true)", risk.group(1))
+        for expected in (
+            "navigation_adjacent_fluid_break_risk(x + 1, y, z, false)",
+            "navigation_adjacent_fluid_break_risk(x - 1, y, z, false)",
+            "navigation_adjacent_fluid_break_risk(x, y, z + 1, false)",
+            "navigation_adjacent_fluid_break_risk(x, y, z - 1, false)",
+        ):
+            self.assertIn(expected, risk.group(1))
+        self.assertNotIn("x, y - 1, z", risk.group(1))
+
+        neighbors = source[source.index("navigation_neighbors(x, y, z, context)"):source.index("navigation_edge_valid(")]
+        downward = neighbors[neighbors.index("downward_floor_type"):neighbors.index("pillar_used")]
+        self.assertIn("!navigation_downward_flood_risk(x, y - 1, z)", downward)
+
+    def test_server_navigation_downward_rechecks_flood_risk_before_break(self):
+        source = MINEBOT_SC.read_text()
+
+        starter = re.search(
+            r"start_navigation_downward_break\(name, mutation\) -> \((.*?)\n\);",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(starter, "navigation downward break starter not found")
+        body = starter.group(1)
+        risk_check = "if(navigation_downward_flood_risk(pos:0, pos:1, pos:2),"
+        attack = "run('player ' + name + ' attack continuous')"
+        self.assertIn(risk_check, body)
+        self.assertIn("finish_navigation_mutation(name, false, 'downward_flood_risk')", body)
+        self.assertLess(body.index(risk_check), body.index(attack))
+
     def test_server_navigation_open_uses_governed_property_verified_controller(self):
         source = MINEBOT_SC.read_text()
 

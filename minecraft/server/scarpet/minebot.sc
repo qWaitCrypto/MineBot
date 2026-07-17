@@ -4034,6 +4034,35 @@ navigation_lava_unsafe(x, y, z) -> (
   lava_near_pos(l(x + 0.5, y, z + 0.5)) || is_lava_at(x, y + 1, z)
 );
 
+navigation_adjacent_fluid_break_risk(x, y, z, directly_above) -> (
+  b = block(x, y, z);
+  bs = '' + b;
+  state = block_state(b);
+  waterlogged = str('%s', state:'waterlogged') == 'true';
+  if(waterlogged,
+    true
+  ,
+    if(block_kind(bs) != 'LIQUID',
+      false
+    ,
+      if(directly_above,
+        true
+      ,
+        level = state:'level';
+        level == null || floor(number(level)) == 0 || navigation_block_kind_at(x, y - 1, z) != 'LIQUID'
+      )
+    )
+  )
+);
+
+navigation_downward_flood_risk(x, y, z) -> (
+  navigation_adjacent_fluid_break_risk(x, y + 1, z, true) ||
+  navigation_adjacent_fluid_break_risk(x + 1, y, z, false) ||
+  navigation_adjacent_fluid_break_risk(x - 1, y, z, false) ||
+  navigation_adjacent_fluid_break_risk(x, y, z + 1, false) ||
+  navigation_adjacent_fluid_break_risk(x, y, z - 1, false)
+);
+
 probe_walkability(x, y, z) -> (
   feet = '' + block(x, y, z);
   head = '' + block(x, y + 1, z);
@@ -4408,7 +4437,7 @@ navigation_neighbors(x, y, z, context) -> (
   );
   downward_floor_type = '' + block(x, y - 1, z);
   downward_support_type = '' + block(x, y - 2, z);
-  if(bool(context:'allow_downward') && floor(number(context:'downward_budget')) > 0 && probe_walkability(x, y, z) == 'WALK' && navigation_block_kind_at(x, y - 1, z) == 'SOLID' && navigation_block_kind_at(x, y - 2, z) == 'SOLID' && !is_lava_at(x, y, z) && !navigation_mutation_denied(context, x, y - 1, z),
+  if(bool(context:'allow_downward') && floor(number(context:'downward_budget')) > 0 && probe_walkability(x, y, z) == 'WALK' && navigation_block_kind_at(x, y - 1, z) == 'SOLID' && navigation_block_kind_at(x, y - 2, z) == 'SOLID' && !is_lava_at(x, y, z) && !navigation_downward_flood_risk(x, y - 1, z) && !navigation_mutation_denied(context, x, y - 1, z),
     mutation = {
       'kind' -> 'downward',
       'pos' -> l(x, y - 1, z),
@@ -4908,11 +4937,16 @@ start_navigation_pillar_jump(name, mutation) -> (
 
 start_navigation_downward_break(name, mutation) -> (
   pos = mutation:'pos';
-  stop_body(name);
-  mutation:'status' = 'breaking';
-  global_navigation_mutations:name = mutation;
-  run(str('player %s look at %.3f %.3f %.3f', name, pos:0 + 0.5, pos:1 + 0.5, pos:2 + 0.5));
-  run('player ' + name + ' attack continuous')
+  if(navigation_downward_flood_risk(pos:0, pos:1, pos:2),
+    stop_body(name);
+    finish_navigation_mutation(name, false, 'downward_flood_risk')
+  ,
+    stop_body(name);
+    mutation:'status' = 'breaking';
+    global_navigation_mutations:name = mutation;
+    run(str('player %s look at %.3f %.3f %.3f', name, pos:0 + 0.5, pos:1 + 0.5, pos:2 + 0.5));
+    run('player ' + name + ' attack continuous')
+  )
 );
 
 navigation_mutation_safe_now(name) -> (
