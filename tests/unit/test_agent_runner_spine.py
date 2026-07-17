@@ -801,6 +801,142 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertIn("model_result", result_event)
         self.assertIn("attempts", result_event["full_result"]["metrics"])
 
+    def test_resource_domain_projection_keeps_actionable_body_blockers(self):
+        result = ToolResult(
+            False,
+            "resource_domain_budget_exhausted",
+            True,
+            metrics={
+                "collected_total": 0,
+                "remaining_delta": 3,
+                "attempts": [
+                    {
+                        "navigation": {
+                            "success": False,
+                            "reason": "water_egress_failed",
+                            "metrics": {
+                                "selected_goal": [-81, 73, 16],
+                                "segments": [
+                                    {
+                                        "diagnostics": {
+                                            "event_data": {"final_pos": [-74.7, 63.0, 14.5]},
+                                            "movement_counts": {"swim": 6, "ascend": 2},
+                                            "capability_snapshot": {
+                                                "allow_break": True,
+                                                "allow_place": False,
+                                                "allow_pillar": False,
+                                                "allow_downward": True,
+                                                "allow_swim": True,
+                                                "scaffold_item": None,
+                                                "scaffold_count": 0,
+                                            },
+                                            "mutation_events": [
+                                                {
+                                                    "event": "navigateMutationDone",
+                                                    "data": {
+                                                        "success": False,
+                                                        "reason": "mutation_denied",
+                                                        "decision_reason": "structure_risk_unknown",
+                                                    },
+                                                }
+                                            ],
+                                        }
+                                    }
+                                ],
+                            },
+                        }
+                    },
+                    {
+                        "navigation": {
+                            "success": False,
+                            "reason": "stuck",
+                            "metrics": {"segments": []},
+                        }
+                    },
+                ],
+                "searches": [
+                    {
+                        "truncated": True,
+                        "uncertainty": [{"reason": "page_limit"}],
+                    }
+                ],
+            },
+        ).to_payload()
+
+        payload = _model_tool_payload(
+            "collect_block_domain",
+            result,
+            trace_ref="resource-domain-trace",
+        )
+
+        summary = payload["summary"]
+        self.assertEqual(summary["process_blockers"], ["stuck:1", "water_egress_failed:1"])
+        self.assertEqual(summary["governance_blockers"], ["structure_risk_unknown:1"])
+        self.assertEqual(summary["movement_counts"], {"ascend": 2, "swim": 6})
+        self.assertEqual(summary["final_pos"], [-74.7, 63.0, 14.5])
+        self.assertEqual(summary["selected_goal"], [-81, 73, 16])
+        self.assertFalse(summary["capability_snapshot"]["allow_pillar"])
+        self.assertEqual(summary["capability_snapshot"]["scaffold_count"], 0)
+        self.assertTrue(summary["search_truncated"])
+        self.assertEqual(summary["search_uncertainty"], ["page_limit:1"])
+        self.assertIn("retry the same Body domain", summary["resume_hint"])
+        self.assertFalse(payload["projection"]["complete"])
+        self.assertIn("metrics.attempts", payload["projection"]["omittedFields"])
+        self.assertIn("metrics.searches", payload["projection"]["omittedFields"])
+
+    def test_navigation_projection_keeps_typed_governance_exhaustion_facts(self):
+        result = ToolResult(
+            False,
+            "protected_or_denied",
+            True,
+            metrics={
+                "goal": [19, 75, -72],
+                "navigation_goal": {"kind": "near", "pos": [19, 75, -72], "radius": 2},
+                "segment_count": 32,
+                "segments": [{"status": "mutation_denied"} for _ in range(32)],
+                "denied_mutation_count": 32,
+                "governance_blockers": {"structure_risk_unknown": 32},
+                "mutation_blockers": {
+                    "break:stone:structure_risk_unknown": 25,
+                    "downward:stone:structure_risk_unknown": 7,
+                },
+                "movement_counts": {"ascend": 17, "break": 37, "downward": 7, "walk": 41},
+                "final_pos": [20.501, 66.0, -75.034],
+                "selected_goal": [19, 75, -72],
+                "capability_snapshot": {
+                    "allow_break": True,
+                    "allow_place": False,
+                    "allow_pillar": False,
+                    "allow_downward": True,
+                    "scaffold_item": None,
+                    "scaffold_count": 0,
+                },
+            },
+        ).to_payload()
+
+        payload = _model_tool_payload(
+            "move_to",
+            result,
+            trace_ref="navigation-denial-trace",
+            observation_handle="observation:navigation-denial",
+        )
+
+        summary = payload["summary"]
+        self.assertEqual(summary["final_pos"], [20.501, 66.0, -75.034])
+        self.assertEqual(summary["denied_mutation_count"], 32)
+        self.assertEqual(summary["governance_blockers"], {"structure_risk_unknown": 32})
+        self.assertEqual(
+            summary["mutation_blockers"],
+            {
+                "break:stone:structure_risk_unknown": 25,
+                "downward:stone:structure_risk_unknown": 7,
+            },
+        )
+        self.assertFalse(summary["capability_snapshot"]["allow_pillar"])
+        self.assertEqual(summary["capability_snapshot"]["scaffold_count"], 0)
+        self.assertNotIn("segments", summary)
+        self.assertIn("metrics.segments", payload["projection"]["omittedFields"])
+
     def test_model_tool_payload_preserves_authoritative_inventory_counts(self):
         result = ToolResult(
             True,
@@ -861,6 +997,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
                 "candidate_failures": [{"reason": "stuck"}, {"reason": "stuck"}],
                 "evidence_keys": ["coverage:one", "block:one"],
                 "resume_cursor": None,
+                "continuation": None,
                 "complete": True,
             },
         ).to_payload()
@@ -874,7 +1011,49 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["candidate_failure_count"], 2)
         self.assertEqual(payload["summary"]["candidate_failure_reasons"], ["stuck:2"])
         self.assertEqual(payload["summary"]["evidence_key_count"], 2)
+        self.assertIsNone(payload["summary"]["continuation"])
         self.assertFalse(payload["projection"]["complete"])
+
+    def test_model_tool_payload_preserves_typed_exploration_continuation(self):
+        block_targets = [f"flower_{index}" for index in range(16)]
+        cursor = {
+            "query_signature": "signature",
+            "dimension": "minecraft:overworld",
+            "coverage_revision": 7,
+        }
+        continuation = {
+            "kind": "resume_operation",
+            "tool": "explore_for",
+            "target_descriptor": {
+                "block_targets": block_targets,
+                "entity_targets": ["#farm_animals"],
+            },
+            "resume_cursor": cursor,
+            "target_descriptor_must_match": True,
+        }
+        result = ToolResult(
+            False,
+            "mobility_blocked",
+            True,
+            metrics={
+                "targets": {
+                    "requested": {
+                        "blocks": block_targets,
+                        "entities": ["#farm_animals"],
+                    },
+                },
+                "resume_cursor": cursor,
+                "continuation": continuation,
+                "candidate_failures": [{"reason": "stuck"}],
+                "complete": False,
+            },
+        ).to_payload()
+
+        payload = _model_tool_payload("explore_for", result, trace_ref="explore-trace")
+
+        self.assertEqual(payload["summary"]["continuation"], continuation)
+        self.assertEqual(payload["summary"]["resume_cursor"], cursor)
+        self.assertNotIn("metrics.continuation", payload["projection"]["omittedFields"])
 
     def test_model_tool_payload_preserves_unknown_small_terminal_facts_generically(self):
         result = ToolResult(
@@ -1120,7 +1299,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertFalse(projected["complete"])
         self.assertEqual(projected["summary"]["count"], 64)
 
-    def test_sdk_tool_auto_continues_collect_after_partial_progress(self):
+    def test_sdk_tool_returns_partial_collect_without_hidden_continuation(self):
         body = FakeBody()
         registry = ToolRegistry()
         collect_calls = []
@@ -1197,24 +1376,13 @@ class AgentRunnerSpineTests(unittest.TestCase):
         out = asyncio.run(sdk_tool.on_invoke_tool(wrapper, json.dumps({"item": "oak_log", "count": 64})))
 
         self.assertTrue(out["success"])
-        self.assertTrue(out["complete"])
-        self.assertEqual(out["reason"], "collected")
-        self.assertEqual(
-            collect_calls,
-            [
-                {"item": "oak_log", "count": 64},
-                {
-                    "item": "oak_log",
-                    "count": 54,
-                    "constraints": {"max_candidates": 80, "max_mutating_calls": 80, "max_wall_s": 300},
-                },
-            ],
-        )
+        self.assertFalse(out["complete"])
+        self.assertEqual(out["reason"], "partial_budget_exhausted")
+        self.assertEqual(collect_calls, [{"item": "oak_log", "count": 64}])
         events = runtime.trace.snapshot()
-        self.assertTrue(any(event["event"] == "tool_continuation" for event in events))
-        self.assertTrue(any(event["event"] == "tool_continuation_result" for event in events))
+        self.assertFalse(any(event["event"].startswith("tool_continuation") for event in events))
         result_event = next(event for event in events if event["event"] == "tool_result")
-        self.assertEqual(result_event["full_result"]["reason"], "collected")
+        self.assertEqual(result_event["full_result"]["reason"], "partial_budget_exhausted")
 
     def test_sdk_tool_does_not_continue_collect_without_inventory_delta(self):
         body = FakeBody()
@@ -1278,7 +1446,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(len(collect_calls), 1)
         self.assertFalse(any(event["event"] == "tool_continuation" for event in runtime.trace.snapshot()))
 
-    def test_sdk_tool_auto_continues_collect_after_prerequisite_partial(self):
+    def test_sdk_tool_returns_collect_prerequisite_partial_to_model(self):
         body = FakeBody()
         registry = ToolRegistry()
         collect_calls = []
@@ -1358,13 +1526,17 @@ class AgentRunnerSpineTests(unittest.TestCase):
         wrapper.context = runtime_context
         out = asyncio.run(sdk_tool.on_invoke_tool(wrapper, json.dumps({"item": "diamond", "count": 3})))
 
-        self.assertTrue(out["success"])
-        self.assertEqual(out["reason"], "collected")
-        self.assertEqual(collect_calls, [{"item": "diamond", "count": 3}, {"item": "diamond", "count": 3}])
-        continuation = next(event for event in runtime.trace.snapshot() if event["event"] == "tool_continuation")
-        self.assertEqual(continuation["reason"], "collect_prerequisite_resume")
+        self.assertFalse(out["success"])
+        self.assertEqual(out["reason"], "ensure_step_incomplete")
+        self.assertEqual(collect_calls, [{"item": "diamond", "count": 3}])
+        self.assertFalse(
+            any(
+                event["event"].startswith("tool_continuation")
+                for event in runtime.trace.snapshot()
+            )
+        )
 
-    def test_sdk_tool_auto_continues_collect_after_candidate_exhaustion_progress(self):
+    def test_sdk_tool_returns_candidate_exhaustion_without_hidden_continuation(self):
         body = FakeBody()
         registry = ToolRegistry()
         collect_calls = []
@@ -1440,19 +1612,16 @@ class AgentRunnerSpineTests(unittest.TestCase):
         wrapper.context = runtime_context
         out = asyncio.run(sdk_tool.on_invoke_tool(wrapper, json.dumps({"item": "log", "count": 64})))
 
-        self.assertEqual(out["reason"], "partial_budget_exhausted")
-        self.assertGreaterEqual(len(collect_calls), 2)
-        self.assertEqual(
-            collect_calls[1],
-            {
-                "item": "logs",
-                "count": 62,
-                "constraints": {"max_candidates": 30, "max_mutating_calls": 80, "max_wall_s": 120},
-            },
+        self.assertEqual(out["reason"], "candidate_targets_exhausted")
+        self.assertEqual(collect_calls, [{"item": "log", "count": 64}])
+        self.assertFalse(
+            any(
+                event["event"].startswith("tool_continuation")
+                for event in runtime.trace.snapshot()
+            )
         )
-        self.assertTrue(any(event["event"] == "tool_continuation" for event in runtime.trace.snapshot()))
 
-    def test_sdk_tool_auto_continues_ensure_by_resume_hint(self):
+    def test_sdk_tool_returns_ensure_resume_hint_without_hidden_continuation(self):
         body = FakeBody()
         registry = ToolRegistry()
         ensure_calls = []
@@ -1519,13 +1688,11 @@ class AgentRunnerSpineTests(unittest.TestCase):
         wrapper.context = runtime_context
         out = asyncio.run(sdk_tool.on_invoke_tool(wrapper, json.dumps({"resource": "iron_pickaxe"})))
 
-        self.assertTrue(out["success"])
-        self.assertEqual(out["reason"], "ensured")
-        self.assertEqual(ensure_calls, [{"resource": "iron_pickaxe"}, {"resource": "iron_pickaxe"}])
+        self.assertFalse(out["success"])
+        self.assertEqual(out["reason"], "partial_budget_exhausted")
+        self.assertEqual(ensure_calls, [{"resource": "iron_pickaxe"}])
         events = runtime.trace.snapshot()
-        continuation = next(event for event in events if event["event"] == "tool_continuation")
-        self.assertEqual(continuation["tool"], "ensure_tool_for")
-        self.assertEqual(continuation["reason"], "reinvoke_ensure")
+        self.assertFalse(any(event["event"].startswith("tool_continuation") for event in events))
 
     def test_sdk_tool_converts_transport_exception_to_tool_result(self):
         def callable_(_params):

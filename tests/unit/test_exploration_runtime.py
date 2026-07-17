@@ -11,7 +11,7 @@ from minebot.body import (
     MemoryExplorationCoverageStore,
 )
 from minebot.contract import BodyState, PerceptionResult, ToolResult
-from minebot.game.navigation import GoalComposite
+from minebot.game.navigation import GoalComposite, GoalNear
 
 
 def _state(pos=(0.0, 64.0, 0.0), *, health=20.0, missing=False):
@@ -133,6 +133,37 @@ class ExplorationNavigator:
         return result
 
 
+class PagedFindBlocksBody(ExplorationBody):
+    def __init__(self, pages):
+        super().__init__()
+        self.pages = dict(pages)
+
+    def perceive(self, scope, params):
+        if scope != "findBlocks":
+            return super().perceive(scope, params)
+        self.perceptions.append((scope, dict(params)))
+        start = int(params.get("start") or 0)
+        if start not in self.pages:
+            raise AssertionError((scope, params))
+        return self.pages[start]
+
+
+def _find_blocks_page(*, blocks=(), complete, next_start=None):
+    return PerceptionResult(
+        bot="Bot1",
+        scope="findBlocks",
+        type="perception",
+        ok=True,
+        complete=complete,
+        data={
+            "blocks": list(blocks),
+            "nextStart": next_start,
+        },
+        uncertainty=[] if complete else [{"reason": "page_limit"}],
+        next=None if next_start is None else str(next_start),
+    )
+
+
 def _runtime(*, body=None, coverage=None, outcomes=None):
     body = body or ExplorationBody()
     navigator = ExplorationNavigator(body, outcomes=outcomes)
@@ -157,6 +188,129 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertEqual(result.metrics["blocks"][0]["pos"], [2, 64, 3])
         self.assertFalse(navigator.calls)
         self.assertEqual(body.perceptions[0][1]["types"][0], "oak_log")
+
+    def test_find_blocks_follows_numeric_cursor_until_complete(self):
+        body = PagedFindBlocksBody(
+            {
+                0: _find_blocks_page(
+                    blocks=({"x": 1, "y": 64, "z": 1, "type": "dandelion"},),
+                    complete=False,
+                    next_start=1,
+                ),
+                1: _find_blocks_page(
+                    blocks=({"x": 2, "y": 64, "z": 2, "type": "poppy"},),
+                    complete=True,
+                ),
+            }
+        )
+        runtime, _, _ = _runtime(body=body)
+
+        result = runtime.explore_for(
+            block_targets=("dandelion", "poppy"),
+            max_regions=1,
+            return_policy="region_budget",
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "found")
+        self.assertEqual([item["type"] for item in result.metrics["blocks"]], ["dandelion", "poppy"])
+        find_calls = [params for scope, params in body.perceptions if scope == "findBlocks"]
+        self.assertEqual([params["start"] for params in find_calls], [0, 1])
+
+    def test_find_blocks_first_match_survives_partial_page(self):
+        body = PagedFindBlocksBody(
+            {
+                0: _find_blocks_page(
+                    blocks=({"x": 1, "y": 64, "z": 1, "type": "dandelion"},),
+                    complete=False,
+                    next_start=1,
+                ),
+            }
+        )
+        runtime, _, _ = _runtime(body=body)
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=1)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "found")
+        self.assertEqual(result.metrics["blocks"][0]["pos"], [1, 64, 1])
+        self.assertEqual(
+            len([scope for scope, _params in body.perceptions if scope == "findBlocks"]),
+            1,
+        )
+
+    def test_find_blocks_page_budget_exhaustion_is_typed_and_not_settled(self):
+        coverage = MemoryExplorationCoverageStore()
+        body = PagedFindBlocksBody(
+            {
+                start: _find_blocks_page(complete=False, next_start=start + 1)
+                for start in range(4)
+            }
+        )
+        runtime, _, _ = _runtime(body=body, coverage=coverage)
+
+        result = runtime.explore_for(
+            block_targets=("dandelion",),
+            max_regions=1,
+            return_policy="region_budget",
+        )
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.reason, "scan_page_limit")
+        self.assertEqual(result.metrics["source_reason"], "scan_page_limit")
+        self.assertEqual(result.metrics["covered_regions"], [])
+        self.assertEqual(result.metrics["evidence_keys"], [])
+        self.assertEqual(
+            coverage.list_regions("minecraft:overworld", result.metrics["targets"]["query_signature"]),
+            (),
+        )
+        find_calls = [params for scope, params in body.perceptions if scope == "findBlocks"]
+        self.assertEqual([params["start"] for params in find_calls], [0, 1, 2, 3])
+
+    def test_find_blocks_page_budget_exhaustion_preserves_positive_facts(self):
+        coverage = MemoryExplorationCoverageStore()
+        pages = {
+            start: _find_blocks_page(complete=False, next_start=start + 1)
+            for start in range(4)
+        }
+        pages[0] = _find_blocks_page(
+            blocks=({"x": 3, "y": 64, "z": 4, "type": "dandelion"},),
+            complete=False,
+            next_start=1,
+        )
+        body = PagedFindBlocksBody(pages)
+        runtime, _, _ = _runtime(body=body, coverage=coverage)
+
+        result = runtime.explore_for(
+            block_targets=("dandelion",),
+            max_regions=1,
+            return_policy="region_budget",
+        )
+
+        self.assertEqual(result.reason, "scan_page_limit")
+        self.assertEqual(result.metrics["blocks"][0]["pos"], [3, 64, 4])
+        self.assertEqual(len(result.metrics["evidence_keys"]), 1)
+        self.assertEqual(
+            coverage.list_regions("minecraft:overworld", result.metrics["targets"]["query_signature"]),
+            (),
+        )
+
+    def test_true_chunk_unloaded_remains_unloaded_boundary(self):
+        coverage = MemoryExplorationCoverageStore()
+        runtime, _, _ = _runtime(
+            body=ExplorationBody(scan_error="chunk_unloaded"),
+            coverage=coverage,
+        )
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=1)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "unloaded_boundary")
+        regions = coverage.list_regions("minecraft:overworld", result.metrics["targets"]["query_signature"])
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0].status, CoverageStatus.UNLOADED_BOUNDARY)
+        self.assertFalse(regions[0].settled)
 
     def test_frontier_navigation_finds_target_in_next_region(self):
         body = ExplorationBody(
@@ -216,6 +370,129 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertEqual(len(navigator.calls), 8)
         self.assertTrue(all(isinstance(call[0], GoalComposite) for call in navigator.calls))
 
+    def test_frontier_attempts_share_objective_scoped_mutation_blacklist(self):
+        denied_pos = (3, 64, 3)
+
+        class DenialRememberingNavigator(ExplorationNavigator):
+            def __init__(self, body):
+                super().__init__(body)
+                self.blacklists_before = []
+
+            def navigate_to(self, goal, **kwargs):
+                blacklist = kwargs["mutation_blacklist"]
+                self.blacklists_before.append((blacklist, set(blacklist)))
+                self.calls.append((goal, kwargs))
+                blacklist.add(denied_pos)
+                return ToolResult(False, "protected_or_denied", True)
+
+        body = ExplorationBody()
+        navigator = DenialRememberingNavigator(body)
+        runtime = ExplorationTransactions(body, navigator, MemoryExplorationCoverageStore())
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertEqual(result.reason, "mobility_blocked")
+        self.assertGreater(len(navigator.blacklists_before), 1)
+        shared = navigator.blacklists_before[0][0]
+        self.assertTrue(all(item[0] is shared for item in navigator.blacklists_before))
+        self.assertEqual(navigator.blacklists_before[0][1], set())
+        self.assertTrue(all(denied_pos in item[1] for item in navigator.blacklists_before[1:]))
+        self.assertTrue(
+            all(
+                failure["navigation_attempts"][0]["mutation_blacklist_size"] == 1
+                for failure in result.metrics["candidate_failures"]
+            )
+        )
+
+    def test_failed_frontier_recovers_last_verified_position_before_next_candidate(self):
+        class PartialFailureNavigator(ExplorationNavigator):
+            def navigate_to(self, goal, **kwargs):
+                call_index = len(self.calls)
+                if call_index == 0:
+                    self.calls.append((goal, kwargs))
+                    self.body.state = _state((-8.0, 58.0, -8.0))
+                    return ToolResult(False, "timeout", True)
+                return super().navigate_to(goal, **kwargs)
+
+        body = ExplorationBody()
+        navigator = PartialFailureNavigator(body)
+        runtime = ExplorationTransactions(body, navigator, MemoryExplorationCoverageStore())
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertEqual(result.reason, "budget_exhausted")
+        self.assertGreaterEqual(len(navigator.calls), 3)
+        self.assertIsInstance(navigator.calls[1][0], GoalNear)
+        self.assertEqual(navigator.calls[1][0].pos, (0, 64, 0))
+        recovery = result.metrics["candidate_failures"][0]["navigation_attempts"][0]["recovery"]
+        self.assertTrue(recovery["success"])
+        self.assertEqual(recovery["final_pos"], [0.0, 64.0, 0.0])
+        recovery_config = navigator.calls[1][1]["config"]
+        self.assertFalse(recovery_config.allow_break)
+        self.assertFalse(recovery_config.allow_place)
+        self.assertFalse(recovery_config.allow_pillar)
+        self.assertFalse(recovery_config.allow_downward)
+
+    def test_failed_frontier_stops_when_verified_position_recovery_fails(self):
+        class FailedRecoveryNavigator(ExplorationNavigator):
+            def navigate_to(self, goal, **kwargs):
+                call_index = len(self.calls)
+                self.calls.append((goal, kwargs))
+                if call_index == 0:
+                    self.body.state = _state((-8.0, 58.0, -8.0))
+                    return ToolResult(False, "timeout", True)
+                return ToolResult(False, "no_path", True)
+
+        body = ExplorationBody()
+        navigator = FailedRecoveryNavigator(body)
+        runtime = ExplorationTransactions(body, navigator, MemoryExplorationCoverageStore())
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "mobility_blocked")
+        self.assertEqual(len(navigator.calls), 2)
+        recovery = result.metrics["candidate_failures"][0]["navigation_attempts"][0]["recovery"]
+        self.assertFalse(recovery["success"])
+        self.assertEqual(recovery["reason"], "no_path")
+
+    def test_frontier_recovery_counts_toward_distance_budget(self):
+        class BudgetRecoveryNavigator(ExplorationNavigator):
+            def navigate_to(self, goal, **kwargs):
+                call_index = len(self.calls)
+                if call_index == 0:
+                    self.calls.append((goal, kwargs))
+                    self.body.state = _state((-8.0, 58.0, -8.0))
+                    return ToolResult(False, "timeout", True)
+                return super().navigate_to(goal, **kwargs)
+
+        body = ExplorationBody()
+        navigator = BudgetRecoveryNavigator(body)
+        runtime = ExplorationTransactions(body, navigator, MemoryExplorationCoverageStore())
+
+        result = runtime.explore_for(
+            block_targets=("dandelion",),
+            max_distance=16,
+            max_regions=2,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "budget_exhausted")
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertGreaterEqual(result.metrics["budget"]["distance_consumed"], 16)
+
+    def test_navigation_progress_exhaustion_stops_exploration_without_recovery(self):
+        runtime, _, navigator = _runtime(
+            outcomes=[ToolResult(False, "progress_yielded", True)]
+        )
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "budget_exhausted")
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertEqual(result.metrics["candidate_failures"][0]["reason"], "progress_yielded")
+
     def test_scan_failure_keeps_prior_evidence_and_returns_unloaded_boundary(self):
         class FailingAfterMoveBody(ExplorationBody):
             def perceive(self, scope, params):
@@ -265,6 +542,49 @@ class ExplorationTransactionsTests(unittest.TestCase):
         )
 
         self.assertEqual(result.reason, "exploration_resume_cursor_mismatch")
+
+    def test_resumable_result_exposes_target_preserving_continuation(self):
+        runtime, _, _ = _runtime()
+
+        result = runtime.explore_for(
+            block_targets=("#logs",),
+            entity_targets=("#farm_animals",),
+            max_regions=1,
+        )
+
+        self.assertIn(result.reason, {"mobility_blocked", "budget_exhausted"})
+        cursor = result.metrics["resume_cursor"]
+        self.assertIsNotNone(cursor)
+        self.assertEqual(
+            result.metrics["continuation"],
+            {
+                "kind": "resume_operation",
+                "tool": "explore_for",
+                "target_descriptor": {
+                    "block_targets": ["#logs"],
+                    "entity_targets": ["#farm_animals"],
+                },
+                "resume_cursor": cursor,
+                "target_descriptor_must_match": True,
+            },
+        )
+
+    def test_found_result_has_no_exploration_continuation(self):
+        body = ExplorationBody(
+            blocks={
+                (0, 0): [
+                    {"type": "oak_log", "x": 1, "y": 64, "z": 1}
+                ]
+            }
+        )
+        runtime, _, _ = _runtime(body=body)
+
+        result = runtime.explore_for(block_targets=("#logs",), max_regions=1)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "found")
+        self.assertIsNone(result.metrics["resume_cursor"])
+        self.assertIsNone(result.metrics["continuation"])
 
     def test_repeated_negative_scan_emits_stable_evidence_key(self):
         coverage = MemoryExplorationCoverageStore()

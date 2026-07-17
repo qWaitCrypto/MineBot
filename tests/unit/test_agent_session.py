@@ -526,6 +526,49 @@ class AgentSessionTests(unittest.TestCase):
             )
         )
 
+    def test_body_event_cannot_revive_paused_task(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(
+            lambda goal: build_parts(goal, calls, bodies),
+            task_workspace=workspace,
+        )
+        session.submit(SessionCommand.start("collect 3 oak_log"))
+        asyncio.run(session.step())
+        session.submit(SessionCommand.pause("user_pause"))
+        asyncio.run(session.step())
+        self.assertEqual(workspace.current_task.status, TaskStatus.PAUSED)
+
+        session.work_queue.enqueue(
+            WorkIntentKind.BODY_EVENT,
+            source="body_event",
+            payload={
+                "event": {
+                    "seq": 13,
+                    "tick": 222,
+                    "bot": "Bot",
+                    "name": "underAttack",
+                    "data": {"health": 10},
+                }
+            },
+        )
+        dropped = asyncio.run(session.step())
+
+        self.assertEqual(dropped.status, "waiting")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(workspace.current_task.status, TaskStatus.PAUSED)
+        self.assertTrue(
+            any(
+                event["event"] == "body_event_intent_dropped"
+                and event["reason"] == "task_not_wakeable"
+                for event in session.parts.runtime.trace.snapshot()
+            )
+        )
+        session.close()
+        store.close()
+
     def test_plain_messages_reuse_conversation_runtime_across_turns(self):
         calls: list[str] = []
         bodies: list[FakeBody] = []

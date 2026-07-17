@@ -114,17 +114,18 @@ class BodyEventPump:
         task_id: str | None = None,
         generation: int | None = None,
         task_waiting: bool = False,
+        wait_checkpoint_id: str | None = None,
         wait_for: tuple[str, ...] = (),
     ) -> BodyEventPollResult:
         events = self.read_events()
         selected = _coalesce_material_events(
             events,
-            has_foreground_task=task_id is not None,
             task_waiting=task_waiting,
             wait_for=wait_for,
         )
         enqueued = 0
         for event in selected:
+            waits_for_terminal = event.name in TASK_TERMINAL_BODY_EVENTS
             intent = self.queue.enqueue(
                 WorkIntentKind.BODY_EVENT,
                 source="body_event",
@@ -135,11 +136,14 @@ class BodyEventPump:
                         "bot": event.bot,
                         "name": event.name,
                         "data": dict(event.data),
-                    }
+                    },
+                    "wait_checkpoint_id": (
+                        wait_checkpoint_id if waits_for_terminal else None
+                    ),
                 },
                 dedupe_key=f"body:{self.epoch}:{event.seq}",
-                task_id=task_id,
-                generation=generation,
+                task_id=task_id if task_id is not None else None,
+                generation=generation if waits_for_terminal else None,
             )
             if intent.state is WorkIntentState.QUEUED:
                 enqueued += 1
@@ -170,16 +174,17 @@ class BodyEventPump:
 def _coalesce_material_events(
     events: list[Event],
     *,
-    has_foreground_task: bool,
     task_waiting: bool = False,
     wait_for: tuple[str, ...] = (),
 ) -> list[Event]:
     selected: dict[tuple[str, str], Event] = {}
     for event in events:
         always_material = event.name in ALWAYS_MATERIAL_BODY_EVENTS
-        task_terminal = has_foreground_task and event.name in TASK_TERMINAL_BODY_EVENTS
-        if task_terminal and task_waiting:
-            task_terminal = event_matches_wait_conditions(event, wait_for)
+        task_terminal = (
+            task_waiting
+            and event.name in TASK_TERMINAL_BODY_EVENTS
+            and event_matches_wait_conditions(event, wait_for)
+        )
         if not always_material and not task_terminal:
             continue
         action_id = str(event.data.get("action_id") or "")

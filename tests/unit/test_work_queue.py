@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateConflict, RuntimeStateStore
 from minebot.app.work_queue import (
@@ -119,6 +120,24 @@ class PersistentWorkIntentQueueTests(unittest.TestCase):
             first.close()
             second = PersistentWorkIntentQueue(store, scope, lease_owner="process-2")
             second.close()
+            store.close()
+
+    def test_scope_scheduler_lock_maps_cross_platform_lock_contention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.sqlite3"
+            scope = RuntimeScope("server", "world", "Bot1")
+            store = RuntimeStateStore(path)
+
+            with patch("minebot.app.work_queue.FileLock.acquire") as acquire:
+                from filelock import Timeout
+
+                acquire.side_effect = Timeout("scheduler.lock")
+                with self.assertRaisesRegex(
+                    RuntimeStateConflict,
+                    "runtime scope already has an active scheduler",
+                ):
+                    PersistentWorkIntentQueue(store, scope, lease_owner="process-1")
+
             store.close()
 
     def test_priority_and_dedupe_are_enforced_in_sqlite(self):

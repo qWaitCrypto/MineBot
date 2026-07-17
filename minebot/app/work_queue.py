@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import fcntl
 import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
+
+from filelock import FileLock, Timeout
 
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateConflict, RuntimeStateStore
 
@@ -340,7 +341,7 @@ class PersistentWorkIntentQueue:
         self._available = threading.Event()
         self._lock = threading.RLock()
         self._notification_version = 0
-        self._scope_lock_file = None
+        self._scope_lock: FileLock | None = None
         try:
             self._acquire_scope_lock()
             self.orphaned_intents = tuple(
@@ -493,14 +494,11 @@ class PersistentWorkIntentQueue:
         return intent
 
     def close(self) -> None:
-        lock_file = self._scope_lock_file
-        self._scope_lock_file = None
-        if lock_file is None:
+        scope_lock = self._scope_lock
+        self._scope_lock = None
+        if scope_lock is None:
             return
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        finally:
-            lock_file.close()
+        scope_lock.release()
 
     def _acquire_scope_lock(self) -> None:
         if str(self.store.db_path) == ":memory:":
@@ -511,19 +509,14 @@ class PersistentWorkIntentQueue:
             f"{db_path.name}.{self.scope.key}.scheduler.lock"
         )
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_file = lock_path.open("a+", encoding="utf-8")
+        scope_lock = FileLock(lock_path)
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            lock_file.close()
+            scope_lock.acquire(timeout=0)
+        except Timeout as exc:
             raise RuntimeStateConflict(
                 f"runtime scope already has an active scheduler: {self.scope.key}"
             ) from exc
-        lock_file.seek(0)
-        lock_file.truncate()
-        lock_file.write(self.lease_owner)
-        lock_file.flush()
-        self._scope_lock_file = lock_file
+        self._scope_lock = scope_lock
 
     def _refresh_available(self) -> None:
         if self.pending_count() > 0:

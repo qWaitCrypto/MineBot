@@ -14,6 +14,8 @@ class ProgressEpochArchive(Protocol):
 
     def latest_cursor(self) -> int: ...
 
+    def mark_progress_aborted(self, epoch_id: str) -> None: ...
+
 
 class PersistentProgressEpochArchive:
     def __init__(self, store: RuntimeStateStore, scope: RuntimeScope) -> None:
@@ -32,6 +34,9 @@ class PersistentProgressEpochArchive:
 
     def latest_cursor(self) -> int:
         return self._state_store.latest_progress_epoch_cursor(self.scope)
+
+    def mark_progress_aborted(self, epoch_id: str) -> None:
+        self._state_store.mark_progress_epoch_aborted(self.scope, epoch_id)
 
 
 __all__ = ["PersistentProgressEpochArchive", "ProgressEpochArchive"]

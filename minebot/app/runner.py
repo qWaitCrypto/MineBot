@@ -262,6 +262,55 @@ class _ProgressEpoch:
     finalized: bool = False
 
 
+def _collapsed_epoch_progress_steps(
+    members: list[_ProgressEpochMember],
+) -> tuple[ProgressStep, ...]:
+    steps = [step for member in members for step in member.progress_steps]
+    if not steps:
+        return ()
+    action_key = (
+        "progress_epoch",
+        tuple(step.action_key for step in steps),
+    )
+    final_fingerprint = next(
+        (step.fingerprint for step in reversed(steps) if step.fingerprint),
+        "",
+    )
+    non_neutral_notes = [
+        step for step in steps if step.kind == "note" and not step.neutral
+    ]
+    if non_neutral_notes:
+        terminal = non_neutral_notes[-1]
+        return (
+            ProgressStep(
+                "note",
+                action_key,
+                final_fingerprint or terminal.fingerprint,
+                success=terminal.success,
+            ),
+        )
+    observations = [step for step in steps if step.kind == "observe"]
+    if observations:
+        terminal = observations[-1]
+        return (
+            ProgressStep(
+                "observe",
+                action_key,
+                final_fingerprint or terminal.fingerprint,
+            ),
+        )
+    terminal = steps[-1]
+    return (
+        ProgressStep(
+            "note",
+            action_key,
+            final_fingerprint or terminal.fingerprint,
+            success=terminal.success,
+            neutral=True,
+        ),
+    )
+
+
 class ProgressEpochAdapter:
     """Bind one complete SDK model-response tool batch to one progress commit."""
 
@@ -504,20 +553,7 @@ class ProgressEpochAdapter:
             return None
         ordered = sorted(epoch.members, key=lambda member: member.order)
         steps = [step for member in ordered for step in member.progress_steps]
-        progress_abort: ProgressAbort | None = None
-        try:
-            self.runtime.authority.commit_steps(steps, self.runtime.agent_context.goal_text)
-        except ProgressAbort as exc:
-            progress_abort = exc
-        if progress_abort is None:
-            progress_abort = next(
-                (
-                    member.pending_abort
-                    for member in ordered
-                    if member.pending_abort is not None
-                ),
-                None,
-            )
+        committed_steps = _collapsed_epoch_progress_steps(ordered)
         post_fingerprint = next(
             (
                 step.fingerprint
@@ -544,10 +580,12 @@ class ProgressEpochAdapter:
             and post_fingerprint
             and epoch.pre_body_fingerprint != post_fingerprint
         )
-        novel_epistemic_keys = [
+        local_novel_epistemic_keys = [
             key for key in epistemic_keys if key not in self._seen_epistemic_keys
         ]
-        self._seen_epistemic_keys.update(epistemic_keys)
+        novel_epistemic_keys = (
+            local_novel_epistemic_keys if self.archive is None else []
+        )
         record: dict[str, object] = {
             "epoch_id": epoch.epoch_id,
             "run_id": epoch.run_id,
@@ -569,9 +607,11 @@ class ProgressEpochAdapter:
             "post_body_fingerprint": post_fingerprint,
             "evidence_refs": evidence_refs,
             "epistemic_keys": epistemic_keys,
-            "novel_epistemic_keys": novel_epistemic_keys,
+            "novel_epistemic_keys": local_novel_epistemic_keys,
             "material_changed": material_changed,
-            "progress_aborted": progress_abort is not None,
+            "progress_aborted": False,
+            "captured_progress_step_count": len(steps),
+            "committed_progress_step_count": len(committed_steps),
         }
         cursor: int | None = None
         if self.archive is not None:
@@ -582,13 +622,50 @@ class ProgressEpochAdapter:
                 if isinstance(stored_novel, list) and all(
                     isinstance(key, str) for key in stored_novel
                 ):
-                    record["novel_epistemic_keys"] = list(stored_novel)
+                    novel_epistemic_keys = list(stored_novel)
+                    record["novel_epistemic_keys"] = novel_epistemic_keys
             except Exception as exc:
+                record["novel_epistemic_keys"] = []
                 self.runtime.trace.emit(
                     "progress_epoch_archive_failed",
                     epoch_id=epoch.epoch_id,
                     error_type=type(exc).__name__,
                 )
+        self._seen_epistemic_keys.update(epistemic_keys)
+
+        progress_abort: ProgressAbort | None = None
+        try:
+            self.runtime.authority.commit_steps(
+                committed_steps,
+                self.runtime.agent_context.goal_text,
+                novel_epistemic_keys=novel_epistemic_keys,
+                material_changed=material_changed,
+            )
+        except ProgressAbort as exc:
+            progress_abort = exc
+        if progress_abort is None:
+            progress_abort = next(
+                (
+                    member.pending_abort
+                    for member in ordered
+                    if member.pending_abort is not None
+                ),
+                None,
+            )
+        record["progress_aborted"] = progress_abort is not None
+        record["epistemic_steps"] = self.runtime.authority.epistemic_steps
+        if progress_abort is not None and self.archive is not None:
+            mark_aborted = getattr(self.archive, "mark_progress_aborted", None)
+            if callable(mark_aborted):
+                try:
+                    mark_aborted(epoch.epoch_id)
+                except Exception as exc:
+                    self.runtime.trace.emit(
+                        "progress_epoch_archive_failed",
+                        epoch_id=epoch.epoch_id,
+                        operation="mark_progress_aborted",
+                        error_type=type(exc).__name__,
+                    )
         epoch.finalized = True
         self.runtime.trace.emit(
             "progress_epoch_settled",
@@ -859,7 +936,6 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                     tool,
                     params,
                     ctx.context,
-                    tool_call_id,
                     timeout_s=tool.sidecar.timeout_s,
                 )
                 progress_steps = captured.progress_steps
@@ -868,19 +944,13 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 assert captured.result is not None
                 result = captured.result
             elif runtime is None:
-                result = _execute_tool_with_continuation(
-                    tool,
-                    params,
-                    ctx.context,
-                    tool_call_id,
-                )
+                result = execute_tool(tool, params, ctx.context.weld_context)
             else:
                 result = await runtime.run_sync(
-                    _execute_tool_with_continuation,
+                    execute_tool,
                     tool,
                     params,
-                    ctx.context,
-                    tool_call_id,
+                    ctx.context.weld_context,
                     timeout_s=tool.sidecar.timeout_s,
                 )
         except asyncio.CancelledError:
@@ -1008,22 +1078,6 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
     )
 
 
-def _execute_tool_with_continuation(
-    tool: RegisteredTool,
-    params: JsonObject,
-    context: RuntimeRunContext,
-    tool_call_id: str,
-) -> JsonObject:
-    result = execute_tool(tool, params, context.weld_context)
-    return _continue_composition_tool(
-        tool,
-        result,
-        context,
-        tool_call_id=tool_call_id,
-        initial_params=params,
-    )
-
-
 @dataclass(frozen=True)
 class _CapturedToolExecution:
     result: JsonObject | None
@@ -1035,16 +1089,10 @@ def _capture_tool_execution(
     tool: RegisteredTool,
     params: JsonObject,
     context: RuntimeRunContext,
-    tool_call_id: str,
 ) -> _CapturedToolExecution:
     with context.weld_context.authority.capture_steps() as captured:
         try:
-            result = _execute_tool_with_continuation(
-                tool,
-                params,
-                context,
-                tool_call_id,
-            )
+            result = execute_tool(tool, params, context.weld_context)
         except Exception as exc:
             return _CapturedToolExecution(None, tuple(captured), exc)
     return _CapturedToolExecution(result, tuple(captured))
@@ -1145,6 +1193,8 @@ def _progress_abort_metrics(exc: ProgressAbort) -> JsonObject:
         "stagnant_steps": facts.stagnant_steps,
         "stalled_steps": facts.stalled_steps,
         "failure_steps": facts.failure_steps,
+        "epistemic_steps": facts.epistemic_steps,
+        "last_epistemic_keys": list(facts.last_epistemic_keys),
         "last_fingerprint": facts.last_fingerprint,
         "current_fingerprint": facts.current_fingerprint,
         "recent_events": list(facts.recent_events),
@@ -1428,6 +1478,8 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
         summary.update(_wiki_tool_summary(tool_name, metrics))
     elif tool_name == "explore_for":
         summary.update(_exploration_tool_summary(metrics))
+    elif tool_name == "collect_block_domain":
+        summary.update(_resource_domain_tool_summary(reason, metrics))
     for key in allowed_keys:
         if key in metrics:
             summary[key] = _bounded_summary_value(metrics[key])
@@ -1494,6 +1546,134 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
     return summary
 
 
+def _resource_domain_tool_summary(reason: str, metrics: dict[str, object]) -> JsonObject:
+    attempts = metrics.get("attempts")
+    searches = metrics.get("searches")
+    blocker_counts: dict[str, int] = {}
+    governance_counts: dict[str, int] = {}
+    movement_counts: dict[str, int] = {}
+    final_pos: object | None = None
+    selected_goal: object | None = None
+    capability_snapshot: dict[str, object] | None = None
+
+    def count_reason(counts: dict[str, int], value: object) -> None:
+        normalized = str(value or "").strip()
+        if normalized:
+            counts[normalized] = counts.get(normalized, 0) + 1
+
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            for phase in ("navigation", "mine"):
+                phase_result = attempt.get(phase)
+                if not isinstance(phase_result, dict) or phase_result.get("success") is True:
+                    continue
+                count_reason(blocker_counts, phase_result.get("reason"))
+            navigation = attempt.get("navigation")
+            if not isinstance(navigation, dict):
+                continue
+            navigation_metrics = navigation.get("metrics")
+            if not isinstance(navigation_metrics, dict):
+                continue
+            if navigation_metrics.get("selected_goal") is not None:
+                selected_goal = navigation_metrics["selected_goal"]
+            if navigation_metrics.get("final_pos") is not None:
+                final_pos = navigation_metrics["final_pos"]
+            segments = navigation_metrics.get("segments")
+            if not isinstance(segments, list):
+                continue
+            for segment in segments:
+                if not isinstance(segment, dict):
+                    continue
+                diagnostics = segment.get("diagnostics")
+                if not isinstance(diagnostics, dict):
+                    continue
+                event_data = diagnostics.get("event_data")
+                if isinstance(event_data, dict) and event_data.get("final_pos") is not None:
+                    final_pos = event_data["final_pos"]
+                segment_counts = diagnostics.get("movement_counts")
+                if isinstance(segment_counts, dict):
+                    for movement, value in segment_counts.items():
+                        if isinstance(value, (int, float)) and int(value) > 0:
+                            key = str(movement)
+                            movement_counts[key] = movement_counts.get(key, 0) + int(value)
+                snapshot = diagnostics.get("capability_snapshot")
+                if isinstance(snapshot, dict):
+                    capability_snapshot = snapshot
+                mutation_events = diagnostics.get("mutation_events")
+                if not isinstance(mutation_events, list):
+                    continue
+                for event in mutation_events:
+                    if not isinstance(event, dict):
+                        continue
+                    data = event.get("data")
+                    if not isinstance(data, dict) or data.get("success") is not False:
+                        continue
+                    count_reason(governance_counts, data.get("decision_reason") or data.get("reason"))
+
+    summary: JsonObject = {}
+    if blocker_counts:
+        summary["process_blockers"] = _bounded_reason_counts(blocker_counts)
+    if governance_counts:
+        summary["governance_blockers"] = _bounded_reason_counts(governance_counts)
+    if movement_counts:
+        summary["movement_counts"] = {
+            key: movement_counts[key]
+            for key in sorted(movement_counts)
+        }
+    if final_pos is not None:
+        summary["final_pos"] = _bounded_summary_value(final_pos)
+    if selected_goal is not None:
+        summary["selected_goal"] = _bounded_summary_value(selected_goal)
+    if capability_snapshot is not None:
+        summary["capability_snapshot"] = {
+            key: _bounded_summary_value(capability_snapshot[key])
+            for key in (
+                "allow_break",
+                "allow_place",
+                "allow_pillar",
+                "allow_downward",
+                "allow_swim",
+                "break_budget",
+                "place_budget",
+                "pillar_budget",
+                "downward_budget",
+                "scaffold_item",
+                "scaffold_count",
+            )
+            if key in capability_snapshot
+        }
+    if isinstance(searches, list):
+        summary["search_count"] = len(searches)
+        summary["search_truncated"] = any(
+            isinstance(search, dict) and search.get("truncated") is True
+            for search in searches
+        )
+        search_uncertainty = [
+            uncertainty
+            for search in searches
+            if isinstance(search, dict)
+            for uncertainty in (search.get("uncertainty") or [])
+            if isinstance(uncertainty, dict)
+        ]
+        if search_uncertainty:
+            summary["search_uncertainty"] = _top_reasons(search_uncertainty)
+    if reason == "resource_domain_budget_exhausted" and final_pos is not None:
+        summary["resume_hint"] = (
+            "bounded resource work ended after physical progress; retry the same Body domain from final_pos "
+            "or choose a different domain or prerequisite from the blocker facts"
+        )
+    return summary
+
+
+def _bounded_reason_counts(counts: dict[str, int]) -> list[str]:
+    return [
+        f"{reason}:{count}"
+        for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:6]
+    ]
+
+
 def _exploration_tool_summary(metrics: dict[str, object]) -> JsonObject:
     summary: JsonObject = {
         key: _bounded_summary_value(metrics[key])
@@ -1508,6 +1688,13 @@ def _exploration_tool_summary(metrics: dict[str, object]) -> JsonObject:
         )
         if key in metrics
     }
+    if "continuation" in metrics:
+        continuation = sanitize_observation(metrics["continuation"])
+        summary["continuation"] = (
+            continuation
+            if isinstance(continuation, dict) or continuation is None
+            else _bounded_summary_value(continuation)
+        )
     targets = metrics.get("targets")
     if isinstance(targets, dict):
         summary["targets"] = _bounded_summary_value(targets.get("requested") or targets)
@@ -2025,143 +2212,6 @@ def _tool_result_summaries(results: list[dict[str, Any]]) -> list[JsonObject]:
             }
         )
     return out
-
-
-def _should_continue_collect(result: JsonObject, metrics: dict[str, object]) -> bool:
-    if not bool(result.get("success")):
-        return False
-    if metrics.get("complete") is True:
-        return False
-    if str(metrics.get("resume_hint") or "") != "reselect_candidates":
-        return False
-    if str(result.get("reason") or "") not in {
-        "partial_budget_exhausted",
-        "partial_candidate_targets_exhausted",
-        "candidate_targets_exhausted",
-    }:
-        return False
-    collected_delta = int(metrics.get("collected_delta") or 0)
-    remaining_count = int(metrics.get("remaining_count") or 0)
-    after_count = int(metrics.get("after_count") or 0)
-    before_count = int(metrics.get("before_count") or 0)
-    return collected_delta > 0 and after_count > before_count and remaining_count > 0
-
-
-def _continuation_constraints(metrics: dict[str, object]) -> dict[str, object]:
-    budget = metrics.get("budget")
-    if not isinstance(budget, dict):
-        return {}
-    out: dict[str, object] = {}
-    for key in ("max_candidates", "max_mutating_calls", "max_wall_s"):
-        value = budget.get(key)
-        if isinstance(value, (int, float)) and value > 0:
-            out[key] = value
-    return out
-
-
-def _continue_composition_tool(
-    tool: RegisteredTool,
-    result: JsonObject,
-    context: RuntimeRunContext,
-    *,
-    tool_call_id: str,
-    initial_params: JsonObject,
-) -> JsonObject:
-    if tool.name not in {"collect_resource", "ensure_tool_for"}:
-        return result
-    trace = context.trace
-    current = result
-    iterations = 0
-    while iterations < 8:
-        metrics = current.get("metrics") if isinstance(current, dict) else None
-        if not isinstance(metrics, dict):
-            return current
-        params = _continuation_params(tool, current, metrics, initial_params)
-        if params is None:
-            return current
-        iterations += 1
-        if trace is not None:
-            payload: JsonObject = {
-                "tool": tool.name,
-                "tool_call_id": tool_call_id,
-                "iteration": iterations,
-                "reason": _continuation_reason(tool.name, metrics),
-                "arguments_summary": _summarize_tool_arguments(json.dumps(params, sort_keys=True)),
-            }
-            if tool.name == "collect_resource":
-                payload.update(
-                    {
-                        "item": str(metrics.get("requested_item") or metrics.get("item") or ""),
-                        "target_count": int(metrics.get("target_count") or 0),
-                        "current_count": int(metrics.get("after_count") or 0),
-                    }
-                )
-            trace.emit(
-                "tool_continuation",
-                **payload,
-            )
-        current = execute_tool(tool, params, context.weld_context)
-        if trace is not None:
-            trace.emit(
-                "tool_continuation_result",
-                tool=tool.name,
-                tool_call_id=tool_call_id,
-                iteration=iterations,
-                reason=str(current.get("reason") or ""),
-                success=bool(current.get("success")),
-                summary=_tool_result_summary(current),
-            )
-    if trace is not None:
-        trace.emit(
-            "tool_continuation_ceiling",
-            tool=tool.name,
-            tool_call_id=tool_call_id,
-            iteration_limit=8,
-            reason=str(current.get("reason") or ""),
-        )
-    return current
-
-
-def _continuation_params(
-    tool: RegisteredTool,
-    current: JsonObject,
-    metrics: dict[str, object],
-    initial_params: JsonObject,
-) -> JsonObject | None:
-    if tool.name == "collect_resource":
-        if str(metrics.get("resume_hint") or "") == "reinvoke_ensure":
-            if not bool(current.get("canRetry", False)):
-                return None
-            return dict(initial_params)
-        if not _should_continue_collect(current, metrics):
-            return None
-        item = str(metrics.get("requested_item") or metrics.get("item") or "")
-        target_count = int(metrics.get("target_count") or 0)
-        after_count = int(metrics.get("after_count") or 0)
-        if not item or target_count <= 0 or after_count <= 0:
-            return None
-        return {
-            "item": item,
-            "count": max(1, target_count - after_count),
-            "constraints": _continuation_constraints(metrics),
-        }
-    if tool.name == "ensure_tool_for":
-        if str(metrics.get("resume_hint") or "") != "reinvoke_ensure":
-            return None
-        if not bool(current.get("canRetry", False)):
-            return None
-        if bool(current.get("success")) and str(current.get("reason") or "") in {"ensured", "already_satisfied"}:
-            return None
-        return dict(initial_params)
-    return None
-
-
-def _continuation_reason(tool_name: str, metrics: dict[str, object]) -> str:
-    if tool_name == "collect_resource":
-        if str(metrics.get("resume_hint") or "") == "reinvoke_ensure":
-            return "collect_prerequisite_resume"
-        return "collect_partial_progress"
-    return str(metrics.get("resume_hint") or "composition_resume")
 
 
 def _recent_session_messages(context: AgentContext, *, limit: int = 3) -> list[JsonObject]:

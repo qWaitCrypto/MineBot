@@ -159,6 +159,10 @@ class TaskWorkspace:
         task = self._require_task()
         if (disposition is CheckpointDisposition.CONTINUE) != (continuation is not None):
             raise ValueError("continue checkpoints require exactly one continuation contract")
+        if disposition is CheckpointDisposition.COMPLETE and not any(
+            str(item).strip() for item in evidence
+        ):
+            raise ValueError("complete checkpoints require bounded completion evidence")
         if task.revision != expected_task_revision:
             raise RuntimeStateConflict(
                 f"task revision conflict: task_id={task.task_id} "
@@ -375,7 +379,7 @@ def _checkpoint_task_tool(
 
     return RegisteredTool(
         "checkpoint_task",
-        "Checkpoint durable work with an explicit disposition: continue, wait_event, yield, or complete. Complete is still verified against authoritative terminal truth when available.",
+        "Checkpoint durable work with an explicit disposition: continue, wait_event, yield, or complete. Complete requires bounded evidence and is only a completion request; Body truth or a human remains the completion authority.",
         {
             "type": "object",
             "properties": {

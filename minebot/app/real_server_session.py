@@ -38,7 +38,7 @@ from minebot.app.wiki import WikiKnowledge
 from minebot.app.reconciliation import StartupReconciliationError, enqueue_startup_reconciliation
 from minebot.app.runtime_identity import RuntimeIdentityError, resolve_runtime_scope
 from minebot.app.runtime_state import DEFAULT_RUNTIME_STATE_DB, RuntimeStateError, RuntimeStateStore
-from minebot.app.runtime_state import CompletionAuthority, TaskStatus
+from minebot.app.runtime_state import TaskStatus
 from minebot.app.tasks import TaskWorkspace
 from minebot.app.work_queue import PersistentWorkIntentQueue
 from minebot.app.runner import RuntimeTrace
@@ -669,17 +669,23 @@ async def _run_interactive_loop(
                         if task is None or not task_waiting
                         else task_workspace.store.get_latest_checkpoint(task.task_id)
                     )
-                    parts = getattr(session, "parts", None)
-                    generation = (
-                        None
-                        if parts is None
-                        else parts.authority.current_generation()
-                    )
+                    task_wakeable = task is not None and task.status in {
+                        TaskStatus.RUNNING,
+                        TaskStatus.WAITING_EVENT,
+                    }
+                    checkpoint_generation = None
+                    if checkpoint is not None and checkpoint.body_fingerprint is not None:
+                        raw_generation = checkpoint.body_fingerprint.get("generation")
+                        if raw_generation is not None:
+                            checkpoint_generation = int(raw_generation)
                     poll_result = await asyncio.to_thread(
                         body_event_pump.poll_once,
-                        task_id=None if task is None else task.task_id,
-                        generation=generation,
+                        task_id=task.task_id if task_wakeable else None,
+                        generation=checkpoint_generation,
                         task_waiting=task_waiting,
+                        wait_checkpoint_id=(
+                            checkpoint.checkpoint_id if checkpoint is not None else None
+                        ),
                         wait_for=() if checkpoint is None else checkpoint.wait_for,
                     )
                 except Exception as exc:
@@ -702,22 +708,20 @@ async def _run_interactive_loop(
             and getattr(session, "task_workspace", None) is not None
             and session.task_workspace.completion_requested
         ):
-            last = session.complete_current_goal(
-                "model_checkpoint_complete",
-                authority=CompletionAuthority.MODEL,
-            )
-            _announce_interactive_terminal(
-                body,
-                TerminalTruth(
+            parts = getattr(session, "parts", None)
+            if parts is not None:
+                checkpoint = session.task_workspace.store.get_latest_checkpoint(
+                    session.task_workspace.current_task.task_id
+                )
+                parts.runtime.trace.emit(
+                    "task_completion_pending_verification",
                     goal=truth.goal,
-                    target=None,
-                    inventory_count=None,
-                    satisfied=True,
-                    status=last.status,
-                    lifecycle=last.lifecycle.value,
-                    exit_code=0,
-                ),
-            )
+                    checkpoint_id=(
+                        None if checkpoint is None else checkpoint.checkpoint_id
+                    ),
+                    evidence=[] if checkpoint is None else list(checkpoint.evidence),
+                    required_authority="human_or_typed_verifier",
+                )
         if remaining is not None:
             remaining -= 1
         await asyncio.sleep(0)
@@ -1020,16 +1024,18 @@ def _exit_code_for(final: SessionStep, *, satisfied: bool, has_target: bool) -> 
 
 def parse_collect_target(goal: str) -> CollectTarget | None:
     text = goal.strip().lower().replace("minecraft:", "")
-    match = re.search(r"\b(?:collect|get|gather|mine)\s+(\d+)\s+([a-z_]+)\b", text)
+    match = re.fullmatch(r"(?:collect|get|gather|mine)\s+(\d+)\s+([a-z_]+)", text)
     if match:
         return _collect_target(match.group(2), int(match.group(1)))
-    match = re.search(r"\b(?:collect|get|gather|mine)\s+([a-z_]+)\s+(\d+)\b", text)
+    match = re.fullmatch(r"(?:collect|get|gather|mine)\s+([a-z_]+)\s+(\d+)", text)
     if match:
         return _collect_target(match.group(1), int(match.group(2)))
     return None
 
 
 def parse_goal_target(goal: str) -> GoalTarget | None:
+    if not _looks_like_strict_goal_command(goal):
+        return None
     collect = parse_collect_target(goal)
     if collect is not None:
         return GoalTarget(kind="collect", item=collect.item, count=collect.count, inventory_items=collect.inventory_items)
@@ -1048,10 +1054,10 @@ def _collect_target(item: str, count: int) -> CollectTarget:
 
 def _parse_acquire_goal(goal: str) -> tuple[str, int] | None:
     text = goal.strip().lower().replace("minecraft:", "")
-    match = re.search(r"\b(?:craft|make|build)\s+(.+)$", text)
+    match = re.fullmatch(r"(?:craft|make|build)\s+(.+)", text)
     if match:
         return _parse_acquire_tail(match.group(1))
-    match = re.search(r"\bget\s+(?:an?\s+)?([a-z_]+)\b", text)
+    match = re.fullmatch(r"get\s+(?:an?\s+)?([a-z_]+)", text)
     if match:
         return (_normalize_goal_item(match.group(1)), 1)
     return None

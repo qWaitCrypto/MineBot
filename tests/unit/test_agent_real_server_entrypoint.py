@@ -266,6 +266,19 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(target.item, "chests")
         self.assertEqual(target.count, 2)
 
+    def test_composite_free_text_goal_has_no_inventory_completion_target(self):
+        goal = "collect 3 logs and craft an iron pickaxe"
+
+        self.assertIsNone(parse_collect_target(goal))
+        self.assertIsNone(parse_goal_target(goal))
+        truth = evaluate_terminal_truth(
+            InventoryBody({"oak_log": 64, "iron_pickaxe": 1}),
+            goal,
+            SessionStep("completed_turn", LifecycleState.ACTIVE),
+        )
+        self.assertFalse(truth.satisfied)
+        self.assertIsNone(truth.target)
+
     def test_terminal_truth_succeeds_only_on_authoritative_inventory(self):
         body = InventoryBody({"spruce_log": 32, "birch_log": 32})
         final = SessionStep("completed_turn", LifecycleState.ACTIVE)
@@ -946,7 +959,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(final.status, "quit")
         self.assertEqual(session.step_count, 2)
 
-    def test_interactive_loop_accepts_model_completion_only_for_open_task(self):
+    def test_interactive_loop_keeps_open_task_pending_for_external_verification(self):
         store = RuntimeStateStore(":memory:")
         workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
         task = workspace.start("prepare safely for the End", source="user")
@@ -987,10 +1000,25 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             )
         )
 
-        completed = store.get_task(task.task_id)
+        pending = store.get_task(task.task_id)
         self.assertEqual(final.status, "quit")
-        self.assertEqual(completed.status, TaskStatus.COMPLETED)
-        self.assertEqual(completed.completion_authority, CompletionAuthority.MODEL)
+        self.assertEqual(pending.status, TaskStatus.WAITING_EVENT)
+        self.assertEqual(pending.completion_authority, CompletionAuthority.NONE)
+        store.close()
+
+    def test_complete_checkpoint_requires_evidence(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        task = workspace.start("prepare safely for the End", source="user")
+
+        with self.assertRaisesRegex(ValueError, "completion evidence"):
+            workspace.checkpoint(
+                expected_task_revision=task.revision,
+                disposition=CheckpointDisposition.COMPLETE,
+                summary="done",
+            )
+
+        self.assertEqual(store.get_task(task.task_id).status, TaskStatus.RUNNING)
         store.close()
 
     def test_model_checkpoint_cannot_complete_canonical_task_without_body_truth(self):
@@ -1001,6 +1029,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             expected_task_revision=task.revision,
             disposition=CheckpointDisposition.COMPLETE,
             summary="I think it is done",
+            evidence=["model-observation-handle"],
         )
 
         class CanonicalSession:

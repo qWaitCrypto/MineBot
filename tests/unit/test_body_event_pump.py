@@ -97,17 +97,34 @@ class BodyEventPumpTests(unittest.TestCase):
         self.assertEqual(result.enqueued, 0)
         self.assertEqual(self.queue.pending_count(), 0)
 
-    def test_foreground_task_terminal_binds_task_and_generation(self):
+    def test_running_task_terminal_does_not_wake_without_explicit_wait(self):
         body = EventBody()
         body.events = [event(1, "moveDone", data={"action_id": "task-action"})]
         pump = BodyEventPump(body, self.queue, self.store, self.scope)
 
         result = pump.poll_once(task_id="task-1", generation=7)
+
+        self.assertEqual(result.enqueued, 0)
+        self.assertEqual(self.queue.pending_count(), 0)
+
+    def test_waiting_task_terminal_binds_checkpoint_generation(self):
+        body = EventBody()
+        body.events = [event(1, "moveDone", data={"action_id": "task-action"})]
+        pump = BodyEventPump(body, self.queue, self.store, self.scope)
+
+        result = pump.poll_once(
+            task_id="task-1",
+            generation=7,
+            task_waiting=True,
+            wait_checkpoint_id="checkpoint-1",
+            wait_for=("action:task-action",),
+        )
         intent = self.queue.lease_next()
 
         self.assertEqual(result.enqueued, 1)
         self.assertEqual(intent.task_id, "task-1")
         self.assertEqual(intent.generation, 7)
+        self.assertEqual(intent.payload["wait_checkpoint_id"], "checkpoint-1")
 
     def test_waiting_task_wakes_only_for_declared_event_or_action(self):
         body = EventBody()
@@ -122,6 +139,7 @@ class BodyEventPumpTests(unittest.TestCase):
             task_id="task-1",
             generation=4,
             task_waiting=True,
+            wait_checkpoint_id="checkpoint-1",
             wait_for=("event:furnaceDone", "action:wanted-action"),
         )
         first = self.queue.lease_next()

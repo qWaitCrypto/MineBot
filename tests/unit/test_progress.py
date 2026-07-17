@@ -154,6 +154,85 @@ class ProgressTests(unittest.TestCase):
 
         self.assertEqual(progress.last_action, ("move_to", 1))
 
+    def test_novel_epistemic_evidence_defers_an_existing_failure_abort(self):
+        progress = ProgressAuthority()
+        fp = progress.fingerprint(state())
+        for index in range(FAILURE_STORM_LIMIT - 1):
+            progress.note_step(("action", index), success=False, fingerprint=fp)
+
+        with progress.capture_steps() as captured:
+            progress.note_step(("action", "terminal"), success=False, fingerprint=fp)
+
+        progress.commit_steps(
+            captured,
+            "test goal",
+            novel_epistemic_keys=("region:overworld:1,0",),
+        )
+
+        self.assertEqual(progress.failure_steps, FAILURE_STORM_LIMIT)
+        self.assertEqual(progress.epistemic_steps, 1)
+        self.assertEqual(progress.last_epistemic_keys, ("region:overworld:1,0",))
+
+    def test_repeated_epistemic_evidence_does_not_reset_progress(self):
+        progress = ProgressAuthority()
+        fp = progress.fingerprint(state())
+        for index in range(FAILURE_STORM_LIMIT - 1):
+            progress.note_step(("action", index), success=False, fingerprint=fp)
+
+        with progress.capture_steps() as captured:
+            progress.note_step(("action", "terminal"), success=False, fingerprint=fp)
+
+        progress.commit_steps(
+            captured,
+            "test goal",
+            novel_epistemic_keys=("region:overworld:1,0",),
+        )
+        with self.assertRaises(ProgressAbort):
+            progress.commit_steps((), "test goal", novel_epistemic_keys=())
+
+        self.assertEqual(progress.epistemic_steps, 1)
+
+    def test_epistemic_only_progress_has_a_bounded_window(self):
+        progress = ProgressAuthority()
+
+        for index in range(STALL_LIMIT - 1):
+            progress.commit_steps(
+                (),
+                "test goal",
+                novel_epistemic_keys=(f"region:{index}",),
+            )
+
+        with self.assertRaises(ProgressAbort) as cm:
+            progress.commit_steps(
+                (),
+                "test goal",
+                novel_epistemic_keys=(f"region:{STALL_LIMIT - 1}",),
+            )
+
+        self.assertEqual(cm.exception.facts.epistemic_steps, STALL_LIMIT)
+        self.assertEqual(
+            cm.exception.facts.last_epistemic_keys,
+            (f"region:{STALL_LIMIT - 1}",),
+        )
+
+    def test_material_progress_resets_epistemic_window(self):
+        progress = ProgressAuthority()
+        progress.commit_steps(
+            (),
+            "test goal",
+            novel_epistemic_keys=("region:one",),
+        )
+        progress.commit_steps(
+            (),
+            "test goal",
+            novel_epistemic_keys=("region:two",),
+        )
+
+        progress.commit_steps((), "test goal", material_changed=True)
+
+        self.assertEqual(progress.epistemic_steps, 0)
+        self.assertEqual(progress.last_epistemic_keys, ())
+
 
 if __name__ == "__main__":
     unittest.main()

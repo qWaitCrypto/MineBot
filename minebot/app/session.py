@@ -18,6 +18,7 @@ from enum import Enum
 from uuid import uuid4
 
 from minebot.app.autonomy import AutonomyAction, AutonomyCoordinator
+from minebot.app.body_events import event_matches_wait_conditions
 from minebot.app.wiring import AgentRuntimeParts
 from minebot.app.runner import RecoveryOutcome
 from minebot.app.runtime_state import CheckpointDisposition, CompletionAuthority, TaskStatus
@@ -672,6 +673,15 @@ class AgentSession:
     async def _apply_runtime_intent(self, intent: WorkIntent) -> list[AgentSignal]:
         if intent.kind is WorkIntentKind.BODY_EVENT:
             task = self.task_workspace.current_task if self.task_workspace is not None else None
+            if task is not None and task.status in {TaskStatus.PAUSED, TaskStatus.YIELDED}:
+                self._turn_pending = False
+                self._trace(
+                    "body_event_intent_dropped",
+                    reason="task_not_wakeable",
+                    current_task_id=task.task_id,
+                    task_status=task.status.value,
+                )
+                return []
             if intent.task_id is not None and (
                 task is None or task.task_id != intent.task_id
             ):
@@ -711,8 +721,40 @@ class AgentSession:
             )
             if not event.name:
                 raise ValueError("body_event intent has no event name")
+            wait_checkpoint_id = str(intent.payload.get("wait_checkpoint_id") or "")
+            if wait_checkpoint_id:
+                if task is None or task.status is not TaskStatus.WAITING_EVENT:
+                    self._turn_pending = False
+                    self._trace(
+                        "body_event_intent_dropped",
+                        reason="task_not_waiting",
+                        checkpoint_id=wait_checkpoint_id,
+                        current_task_id=None if task is None else task.task_id,
+                        task_status=None if task is None else task.status.value,
+                    )
+                    return []
+                checkpoint = self.task_workspace.store.get_latest_checkpoint(task.task_id)
+                if (
+                    checkpoint is None
+                    or checkpoint.checkpoint_id != wait_checkpoint_id
+                    or checkpoint.disposition is not CheckpointDisposition.WAIT_EVENT
+                    or not event_matches_wait_conditions(event, checkpoint.wait_for)
+                ):
+                    self._turn_pending = False
+                    self._trace(
+                        "body_event_intent_dropped",
+                        reason="wait_checkpoint_changed",
+                        checkpoint_id=wait_checkpoint_id,
+                        current_checkpoint_id=(
+                            None if checkpoint is None else checkpoint.checkpoint_id
+                        ),
+                    )
+                    return []
             self._ensure_parts_for_runtime_intent()
             assert self.parts is not None
+            if task is not None and task.status is TaskStatus.WAITING_EVENT:
+                task = self.task_workspace.resume()
+                self._sync_task_context()
             payload = json.dumps(
                 {
                     "seq": event.seq,
@@ -1210,6 +1252,7 @@ class AgentSession:
             return None
         return {
             "fingerprint": fingerprint,
+            "generation": self.parts.authority.current_generation(),
             "pos": list(state.pos),
             "health": state.health,
             "food": state.food,

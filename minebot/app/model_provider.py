@@ -56,6 +56,7 @@ _SETTINGS_ALLOWLIST = (
     "presence_penalty",
     "tool_choice",
     "parallel_tool_calls",
+    "reasoning",
 )
 
 

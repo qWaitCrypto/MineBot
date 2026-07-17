@@ -16,6 +16,7 @@ from minebot.brain.provider import ProviderConfig
 DEFAULT_API_KEY_ENV = "MINEBOT_LLM_API_KEY"
 DEFAULT_OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
 DEFAULT_AGENT_LANGUAGE = "English"
+REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
 
 class AppConfigError(RuntimeError):
@@ -80,6 +81,14 @@ def _settings_from_env(env: Mapping[str, str]) -> dict[str, object]:
         settings["max_tokens"] = int(env["MINEBOT_LLM_MAX_TOKENS"])
     if env.get("MINEBOT_LLM_PARALLEL_TOOL_CALLS"):
         settings["parallel_tool_calls"] = env["MINEBOT_LLM_PARALLEL_TOOL_CALLS"].lower() in {"1", "true", "yes"}
+    if env.get("MINEBOT_LLM_REASONING_EFFORT"):
+        effort = env["MINEBOT_LLM_REASONING_EFFORT"].strip().lower()
+        if effort not in REASONING_EFFORTS:
+            allowed = ", ".join(sorted(REASONING_EFFORTS))
+            raise AppConfigError(
+                f"MINEBOT_LLM_REASONING_EFFORT must be one of: {allowed}"
+            )
+        settings["reasoning"] = {"effort": effort}
     return settings
 
 

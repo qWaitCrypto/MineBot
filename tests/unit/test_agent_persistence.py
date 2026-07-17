@@ -179,6 +179,11 @@ class RuntimeStateStoreTests(unittest.TestCase):
             self.assertEqual(first["novel_epistemic_keys"], ["state:overworld:0,64,0"])
             self.assertEqual(second["novel_epistemic_keys"], [])
             self.assertTrue(first["material_changed"])
+
+            store.mark_progress_epoch_aborted(scope, "epoch-1")
+            marked = store.get_progress_epoch(scope, "epoch-1")
+            self.assertIsNotNone(marked)
+            self.assertTrue(marked["progress_aborted"])
             store.close()
 
     def test_schema_12_migrates_continuation_contract_and_budget_tables(self):

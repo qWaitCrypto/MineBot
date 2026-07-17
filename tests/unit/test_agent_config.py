@@ -55,6 +55,35 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(rows[0]["api_key_env"], "ANTHROPIC_AUTH_TOKEN")
         self.assertNotIn("secret-token-value", repr(rows))
 
+    def test_provider_config_maps_responses_reasoning_effort(self):
+        provider = provider_registry_from_env(
+            {
+                "MINEBOT_LLM_MODEL": "gpt-5.6-luna",
+                "MINEBOT_LLM_KIND": "openai_responses",
+                "MINEBOT_LLM_API_KEY": "provider-key",
+                "MINEBOT_LLM_BASE_URL": "https://provider.example/v1",
+                "MINEBOT_LLM_REASONING_EFFORT": "xhigh",
+            }
+        )
+
+        cfg = provider._configs["primary"]
+        settings = provider.model_settings_for("primary")
+        self.assertEqual(cfg.kind, "openai_responses")
+        self.assertIsNotNone(settings.reasoning)
+        self.assertEqual(settings.reasoning.effort, "xhigh")
+
+    def test_provider_config_rejects_unknown_reasoning_effort(self):
+        with self.assertRaises(AppConfigError) as ctx:
+            provider_registry_from_env(
+                {
+                    "MINEBOT_LLM_MODEL": "gpt-5.6-luna",
+                    "MINEBOT_LLM_API_KEY": "provider-key",
+                    "MINEBOT_LLM_REASONING_EFFORT": "maximum",
+                }
+            )
+
+        self.assertIn("MINEBOT_LLM_REASONING_EFFORT must be one of", str(ctx.exception))
+
     def test_provider_config_error_names_missing_env_without_value(self):
         with self.assertRaises(AppConfigError) as ctx:
             provider_registry_from_env({"OPENAI_MODEL": "glm-5.2"})

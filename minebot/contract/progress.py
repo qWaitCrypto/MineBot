@@ -22,6 +22,8 @@ class ProgressFacts:
     last_fingerprint: str
     current_fingerprint: str
     recent_events: list[str] = field(default_factory=list)
+    epistemic_steps: int = 0
+    last_epistemic_keys: tuple[str, ...] = ()
 
 
 class ProgressAbort(Exception):

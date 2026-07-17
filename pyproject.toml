@@ -8,6 +8,7 @@ dependencies = [
     # Pinned: the SDK adds surfaces fast and LitellmModel is beta
     # (agent-layer-architecture.md §6, §12 watch-item).
     "openai-agents==0.17.6",
+    "filelock>=3.16,<4",
     "PyYAML>=6.0.2,<7",
 ]
 

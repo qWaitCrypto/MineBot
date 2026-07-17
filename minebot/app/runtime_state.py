@@ -1573,6 +1573,26 @@ class RuntimeStateStore:
             ).fetchone()
         return 0 if row is None else int(row["cursor"])
 
+    def mark_progress_epoch_aborted(
+        self,
+        scope: RuntimeScope,
+        epoch_id: str,
+    ) -> None:
+        with self._lock, self._connection:
+            self._require_open()
+            cursor = self._connection.execute(
+                """
+                UPDATE progress_epochs
+                SET progress_aborted = 1
+                WHERE scope_key = ? AND epoch_id = ?
+                """,
+                (scope.key, str(epoch_id)),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeStateConflict(
+                    f"progress epoch not found: scope={scope.key} epoch_id={epoch_id}"
+                )
+
     def progress_epoch_count_after(self, scope: RuntimeScope, *, cursor: int) -> int:
         with self._lock:
             self._require_open()

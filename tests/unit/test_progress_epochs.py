@@ -71,13 +71,26 @@ class RecordingObservationArchive:
 class RecordingEpochArchive:
     def __init__(self) -> None:
         self.records: list[dict[str, object]] = []
+        self.seen_epistemic_keys: set[str] = set()
 
     def store(self, record):
-        self.records.append(dict(record))
-        return {**record, "cursor": len(self.records)}
+        stored = dict(record)
+        epistemic_keys = [
+            str(key) for key in stored.get("epistemic_keys", ()) if str(key)
+        ]
+        stored["novel_epistemic_keys"] = [
+            key for key in epistemic_keys if key not in self.seen_epistemic_keys
+        ]
+        self.seen_epistemic_keys.update(epistemic_keys)
+        self.records.append(stored)
+        return {**stored, "cursor": len(self.records)}
 
     def list_after(self, cursor, *, limit=100):
         return self.records[cursor : cursor + limit]
+
+    def mark_progress_aborted(self, epoch_id):
+        record = next(record for record in self.records if record["epoch_id"] == epoch_id)
+        record["progress_aborted"] = True
 
 
 def make_tool(
@@ -231,6 +244,94 @@ def test_epoch_defers_progress_abort_until_read_only_sibling_settles():
     ]
 
 
+def test_novel_epistemic_evidence_is_archived_before_it_defers_abort():
+    body = EpochBody()
+    authority = ProgressAuthority()
+    fingerprint = authority.fingerprint(body.get_state())
+    for index in range(4):
+        authority.note_step(("prior", index), success=False, fingerprint=fingerprint)
+    failing = make_tool(
+        "move_to",
+        lambda _params: ToolResult(False, "blocked", True),
+        mutating=True,
+    )
+    reader = make_tool(
+        "read_state",
+        lambda _params: ToolResult(
+            True,
+            "new_region_observed",
+            False,
+            metrics={"evidence_keys": ["region:overworld:1,0"]},
+        ),
+        mutating=False,
+        source="body.perception",
+    )
+    archive = RecordingEpochArchive()
+    runtime, adapter, context = runtime_with(
+        body,
+        [failing, reader],
+        authority=authority,
+        epoch_archive=archive,
+    )
+
+    async def scenario():
+        await adapter.open(response(("call-move", "move_to"), ("call-read", "read_state")))
+        first_result = await invoke(failing, context, "call-move")
+        second_result = await invoke(reader, context, "call-read")
+        return first_result, second_result
+
+    first_result, second_result = asyncio.run(scenario())
+    runtime.close()
+
+    assert first_result["reason"] == "blocked"
+    assert second_result["reason"] == "new_region_observed"
+    assert authority.failure_steps == 5
+    assert authority.epistemic_steps == 1
+    assert authority.last_epistemic_keys == ("region:overworld:1,0",)
+    assert archive.records[0]["novel_epistemic_keys"] == ["region:overworld:1,0"]
+    assert archive.records[0]["progress_aborted"] is False
+
+
+def test_archive_failure_does_not_grant_unverified_epistemic_progress():
+    class FailingArchive(RecordingEpochArchive):
+        def store(self, record):
+            raise RuntimeError("archive unavailable")
+
+    body = EpochBody()
+    authority = ProgressAuthority()
+    fingerprint = authority.fingerprint(body.get_state())
+    for index in range(4):
+        authority.note_step(("prior", index), success=False, fingerprint=fingerprint)
+    failing = make_tool(
+        "move_to",
+        lambda _params: ToolResult(
+            False,
+            "blocked_after_observation",
+            True,
+            metrics={"evidence_keys": ["region:overworld:1,0"]},
+        ),
+        mutating=True,
+    )
+    runtime, adapter, context = runtime_with(
+        body,
+        [failing],
+        authority=authority,
+        epoch_archive=FailingArchive(),
+    )
+
+    async def scenario():
+        await adapter.open(response(("call-move", "move_to")))
+        with pytest.raises(ProgressAbort):
+            await invoke(failing, context, "call-move")
+
+    asyncio.run(scenario())
+    events = runtime.trace.snapshot()
+    runtime.close()
+
+    assert authority.epistemic_steps == 0
+    assert any(event["event"] == "progress_epoch_archive_failed" for event in events)
+
+
 def test_native_sdk_call_id_reaches_observation_and_epoch_archives():
     body = EpochBody()
     observations = RecordingObservationArchive()
@@ -366,6 +467,41 @@ def test_duplicate_same_name_calls_claim_predeclared_ids_in_fifo_order():
         "call-first",
         "call-second",
     ]
+
+
+def test_read_only_model_batch_counts_as_one_stall_epoch():
+    body = EpochBody()
+    authority = ProgressAuthority()
+    fingerprint = authority.fingerprint(body.get_state())
+    authority.observe_step(("prior_epoch",), fingerprint)
+    reader = make_tool(
+        "read_recipe",
+        lambda _params: ToolResult(True, "recipe_read", False),
+        mutating=False,
+        source="body.inventory",
+    )
+    archive = RecordingEpochArchive()
+    runtime, adapter, context = runtime_with(
+        body,
+        [reader],
+        authority=authority,
+        epoch_archive=archive,
+    )
+    call_ids = tuple(f"call-recipe-{index}" for index in range(9))
+
+    async def scenario():
+        await adapter.open(response(*((call_id, "read_recipe") for call_id in call_ids)))
+        return [await invoke(reader, context, call_id) for call_id in call_ids]
+
+    results = asyncio.run(scenario())
+    runtime.close()
+
+    assert all(result["reason"] == "recipe_read" for result in results)
+    assert authority.stalled_steps == 1
+    assert authority.failure_steps == 0
+    assert archive.records[0]["captured_progress_step_count"] == 9
+    assert archive.records[0]["committed_progress_step_count"] == 1
+    assert archive.records[0]["progress_aborted"] is False
 
 
 def test_real_sdk_hook_and_tool_context_share_the_same_call_id():

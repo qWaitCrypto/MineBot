@@ -36,6 +36,8 @@ class ProgressAuthority:
     last_fingerprint: str = ""
     current_fingerprint: str = ""
     recent_events: list[str] = field(default_factory=list)
+    epistemic_steps: int = 0
+    last_epistemic_keys: tuple[str, ...] = ()
     _generation: int = 0
     _captures: threading.local = field(
         default_factory=threading.local,
@@ -140,6 +142,7 @@ class ProgressAuthority:
             self.stagnant_steps >= STAGNATION_LIMIT
             or self.stalled_steps >= STALL_LIMIT
             or self.failure_steps >= FAILURE_STORM_LIMIT
+            or self.epistemic_steps >= STALL_LIMIT
         )
 
     def require_can_continue(self, goal_text: str) -> None:
@@ -150,7 +153,8 @@ class ProgressAuthority:
             raise ProgressAbort(
                 "progress authority yielded: "
                 f"goal={facts.goal!r} stagnant={facts.stagnant_steps} "
-                f"stalled={facts.stalled_steps} failures={facts.failure_steps}",
+                f"stalled={facts.stalled_steps} failures={facts.failure_steps} "
+                f"epistemic={facts.epistemic_steps}",
                 facts=facts,
             )
 
@@ -167,7 +171,14 @@ class ProgressAuthority:
             if stack:
                 stack[-1].extend(captured)
 
-    def commit_steps(self, steps: list[ProgressStep] | tuple[ProgressStep, ...], goal_text: str) -> None:
+    def commit_steps(
+        self,
+        steps: list[ProgressStep] | tuple[ProgressStep, ...],
+        goal_text: str,
+        *,
+        novel_epistemic_keys: list[str] | tuple[str, ...] = (),
+        material_changed: bool = False,
+    ) -> None:
         if self._active_capture() is not None:
             raise RuntimeError("cannot commit progress steps inside an active capture")
         for step in steps:
@@ -181,6 +192,21 @@ class ProgressAuthority:
                 step.fingerprint,
                 neutral=step.neutral,
             )
+        epistemic_keys = tuple(dict.fromkeys(str(key) for key in novel_epistemic_keys if str(key)))
+        if material_changed:
+            self.epistemic_steps = 0
+            self.last_epistemic_keys = ()
+            self.failure_steps = 0
+        elif epistemic_keys:
+            self.epistemic_steps += 1
+            self.last_epistemic_keys = epistemic_keys
+            self.stagnant_steps = 0
+            self.stalled_steps = 0
+            self.recent_events.append(
+                f"epistemic_progress:{self.epistemic_steps}:{len(epistemic_keys)}"
+            )
+            if self.epistemic_steps < STALL_LIMIT:
+                return
         self.require_can_continue(goal_text)
 
     def _capture_stack(self) -> list[list[ProgressStep]]:
@@ -204,4 +230,6 @@ class ProgressAuthority:
             last_fingerprint=self.last_fingerprint,
             current_fingerprint=self.current_fingerprint,
             recent_events=list(self.recent_events),
+            epistemic_steps=self.epistemic_steps,
+            last_epistemic_keys=self.last_epistemic_keys,
         )
