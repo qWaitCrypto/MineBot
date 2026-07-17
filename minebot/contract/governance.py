@@ -42,6 +42,12 @@ class InteractionContext(StrEnum):
     FARM = "farm"
 
 
+class StructureRiskLevel(StrEnum):
+    LOW = "low"
+    AMBIGUOUS = "ambiguous"
+    HIGH = "high"
+
+
 @dataclass(frozen=True)
 class Region:
     """Inclusive axis-aligned region."""
@@ -60,6 +66,18 @@ class BotPlacement:
     block_type: str
     purpose: str
     bot: str
+
+
+@dataclass(frozen=True)
+class StructureRiskAssessment:
+    pos: Position
+    block_type: str
+    level: StructureRiskLevel
+    score: float
+    complete: bool
+    sampled_cells: int
+    signals: tuple[str, ...] = ()
+    source: str = "voxel"
 
 
 @dataclass(frozen=True)

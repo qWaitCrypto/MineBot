@@ -1520,6 +1520,14 @@ def _resolve_smelt_output_from_recipe(
         parsed = _ScarpetValueParser(recipe_raw).parse()
     except ValueError:
         return None
+    if (
+        isinstance(parsed, list)
+        and len(parsed) == 1
+        and isinstance(parsed[0], list)
+        and parsed[0]
+        and all(isinstance(entry, list) and len(entry) >= 3 for entry in parsed[0])
+    ):
+        parsed = parsed[0]
     variants = parsed if _is_recipe_variant_list(parsed) else [parsed]
     for variant in variants:
         resolved = _resolve_smelt_output_from_variant(normalized_input, expected_output, variant)

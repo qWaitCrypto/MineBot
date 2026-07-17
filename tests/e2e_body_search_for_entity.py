@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from minebot.body import InteractionTransactions, NavigationTransactions
 from minebot.game import GovernancePolicy, RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
-from minebot.game.navigation import GridCell, GridWorld, NavigationCostModel, SegmentedNavigator
 from minebot.game.rcon import RconConfig
 from tests.e2e_support import spawn_or_fail
 
@@ -53,13 +52,9 @@ def setup_world(rcon: RconClient) -> None:
         command(rcon, cmd)
 
 
-def flat_world(x_min: int, x_max: int, z_min: int, z_max: int, *, y: int = 59) -> GridWorld:
-    return GridWorld({(x, y, z): GridCell() for x in range(x_min, x_max + 1) for z in range(z_min, z_max + 1)})
-
-
 def make_runtime(body: ScarpetBody) -> InteractionTransactions:
     policy = GovernancePolicy(natural_regions=[Region("entity_search", (-3, 0, -3), (12, 100, 3))])
-    navigator = NavigationTransactions(body, SegmentedNavigator(flat_world(-3, 12, -3, 3), NavigationCostModel(policy)))
+    navigator = NavigationTransactions.server_side(body, policy)
     return InteractionTransactions(body, navigator=navigator)
 
 
@@ -91,6 +86,12 @@ def run_happy_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     final_distance = float((result.metrics or {}).get("final_distance", 999.0))
     if final_distance > 4.5:
         raise AssertionError(f"search_for_entity final distance too far: final={final.pos} result={payload}")
+    attempts = ((result.metrics or {}).get("approach") or {}).get("attempts") or []
+    navigation_metrics = ((attempts[0].get("result") or {}).get("metrics") or {}) if attempts else {}
+    capability_snapshot = navigation_metrics.get("capability_snapshot") or {}
+    for flag in ("allow_break", "allow_place", "allow_pillar", "allow_downward"):
+        if capability_snapshot.get(flag) is not False:
+            raise AssertionError(f"search_for_entity enabled terrain mutation {flag}: {payload}")
     return {
         "reason": result.reason,
         "entity_id": entity_id,

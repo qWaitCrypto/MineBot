@@ -480,6 +480,37 @@ class UseRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(result.metrics["position_delta"], 5.0)
         self.assertEqual(result.metrics["watched_item_deltas"], {})
 
+    def test_use_item_waits_for_delayed_position_delta_within_timeout(self):
+        body = FakeUseBody(
+            states=[
+                state_at(food=20, pos=(0, 64, 0), effects=[]),
+                state_at(food=20, pos=(0, 64, 0), effects=[]),
+                state_at(food=20, pos=(9, 64, 0), effects=[]),
+            ],
+            perceptions=[
+                perception([slot(0, "minecraft:ender_pearl", 2)]),
+                perception([slot(0, "minecraft:ender_pearl", 1)]),
+            ],
+            events=[
+                Event(seq=1, tick=10, bot="Bot1", name="selectItemDone", data={"action_id": "a1", "success": True, "stopped_reason": "completed", "slot": 0, "count": 2}),
+                Event(seq=2, tick=20, bot="Bot1", name="lookDone", data={"action_id": "a2", "success": True, "stopped_reason": "completed"}),
+                Event(seq=3, tick=40, bot="Bot1", name="useDone", data={"action_id": "a3", "success": True, "stopped_reason": "completed", "item": "minecraft:ender_pearl"}),
+            ],
+        )
+        inventory = FakeEquipInventory(ToolResult(success=True, reason="completed", can_retry=False, metrics={"slot": 0}))
+        runtime = UseTransactions(body, inventory=inventory)
+
+        result = runtime.use_item(
+            item="minecraft:ender_pearl",
+            look_target=(20.0, 70.0, 0.0),
+            min_position_delta=5.0,
+            timeout_s=1.0,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.metrics["position_settle"]["polls"], 1)
+        self.assertTrue(result.metrics["position_settle"]["matched"])
+
     def test_use_on_entity_reports_not_found(self):
         body = FakeUseBody(
             states=[state_at(food=20)],
@@ -494,6 +525,8 @@ class UseRuntimeTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "use_entity_not_found")
+        entity_queries = [params for scope, params in body.perception_calls if scope == "nearbyEntities"]
+        self.assertEqual(entity_queries[0]["types"], ["cow"])
 
     def test_use_on_entity_reports_completed_on_watched_item_delta(self):
         body = FakeUseBody(
@@ -763,6 +796,86 @@ class UseRuntimeTests(unittest.TestCase):
         self.assertEqual(result.reason, "completed")
         self.assertEqual(result.metrics["target_before"]["properties"]["open"], "false")
         self.assertEqual(result.metrics["target_after"]["properties"]["open"], "true")
+        self.assertEqual([action.name for action in body.actions], ["stop", "lookAt", "useItem"])
+
+    def test_use_on_block_waits_for_delayed_expected_property_truth(self):
+        body = FakeUseBody(
+            states=[state_at(food=20, pos=(0, 64, 0)), state_at(food=20, pos=(0, 64, 0))],
+            perceptions=[],
+            block_perceptions=[
+                block_perception_with_properties(
+                    (1, 64, 0),
+                    "minecraft:lever",
+                    "SOLID",
+                    {"powered": "false", "face": "floor"},
+                ),
+                block_perception_with_properties(
+                    (1, 64, 0),
+                    "minecraft:lever",
+                    "SOLID",
+                    {"powered": "false", "face": "floor"},
+                ),
+                block_perception_with_properties(
+                    (1, 64, 0),
+                    "minecraft:lever",
+                    "SOLID",
+                    {"powered": "true", "face": "floor"},
+                ),
+            ],
+            events=[stop_done(), look_done(), use_done()],
+        )
+        runtime = UseTransactions(body)
+
+        result = runtime.use_on_block(
+            pos=(1, 64, 0),
+            item=None,
+            expected_block_types=("lever",),
+            expected_properties={"powered": "true"},
+            line_of_sight_retries=0,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(result.metrics["property_settle"][0]["polls"], 1)
+        self.assertTrue(result.metrics["property_settle"][0]["matched"])
+        self.assertEqual([action.name for action in body.actions], ["stop", "lookAt", "useItem"])
+
+    def test_use_on_block_does_not_retry_after_property_change(self):
+        body = FakeUseBody(
+            states=[state_at(food=20, pos=(0, 64, 0)), state_at(food=20, pos=(0, 64, 0))],
+            perceptions=[],
+            block_perceptions=[
+                block_perception_with_properties(
+                    (1, 64, 0),
+                    "minecraft:lever",
+                    "SOLID",
+                    {"powered": "false", "face": "floor"},
+                ),
+                block_perception_with_properties(
+                    (1, 64, 0),
+                    "minecraft:lever",
+                    "SOLID",
+                    {"powered": "true", "face": "floor"},
+                ),
+            ],
+            events=[stop_done(), look_done(), use_done()],
+        )
+        navigator = FakeUseNavigator(
+            [ToolResult(success=True, reason="arrived", can_retry=False, metrics={"goal": [2, 64, 0]})]
+        )
+        runtime = UseTransactions(body, navigator=navigator)
+
+        result = runtime.use_on_block(
+            pos=(1, 64, 0),
+            item=None,
+            expected_block_types=("lever",),
+            expected_properties={"powered": "true"},
+            line_of_sight_retries=1,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(navigator.calls, [])
         self.assertEqual([action.name for action in body.actions], ["stop", "lookAt", "useItem"])
 
     def test_use_on_block_treats_empty_hand_as_first_class_contract(self):

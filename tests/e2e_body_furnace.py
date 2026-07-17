@@ -14,7 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from minebot.body import BlockWork, FurnaceTransactions, NavigationTransactions
 from minebot.game import GovernancePolicy, RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
-from minebot.game.navigation import GridCell, GridWorld, NavigationCostModel, SegmentedNavigator
 from minebot.game.rcon import RconConfig
 from tests.e2e_support import spawn_or_fail
 
@@ -93,17 +92,16 @@ def reset_flat_world(rcon: RconClient) -> None:
         set_inventory_slot(rcon, slot, None)
 
 
-def flat_world(x_min: int, x_max: int, z_min: int, z_max: int, *, y: int = 59) -> GridWorld:
-    return GridWorld({(x, y, z): GridCell() for x in range(x_min, x_max + 1) for z in range(z_min, z_max + 1)})
-
-
 def make_runtime(body: ScarpetBody) -> FurnaceTransactions:
     policy = GovernancePolicy(natural_regions=[Region("furnace_nav", (-2, 0, -3), (12, 100, 3))])
-    navigator = NavigationTransactions(
-        body,
-        SegmentedNavigator(flat_world(-2, 12, -3, 3), NavigationCostModel(policy)),
-    )
+    navigator = NavigationTransactions.server_side(body, policy)
     return FurnaceTransactions(body, navigator=navigator, governance=policy)
+
+
+def make_work_runtime(body: ScarpetBody, policy: GovernancePolicy) -> FurnaceTransactions:
+    navigator = NavigationTransactions.server_side(body, policy)
+    work = BlockWork(body, policy, navigator=navigator)
+    return FurnaceTransactions(body, navigator=navigator, governance=policy, work=work)
 
 
 def container_by_slot(body: ScarpetBody, pos: tuple[int, int, int]) -> dict[int, object]:
@@ -924,8 +922,7 @@ def run_smelt_temporary_furnace_path(
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_temporary_furnace(
         TEMP_FURNACE,
         input_item="minecraft:raw_iron",
@@ -982,8 +979,7 @@ def run_smelt_temporary_furnace_partial_timeout_path(rcon: RconClient, body: Sca
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_temporary_furnace(
         TEMP_FURNACE,
         input_item="minecraft:raw_iron",
@@ -1049,8 +1045,7 @@ def run_smelt_temporary_special_furnace_path(
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_temporary_furnace(
         TEMP_FURNACE,
         input_item=input_item,
@@ -1136,8 +1131,7 @@ def run_smelt_temporary_special_furnace_partial_timeout_path(
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_temporary_furnace(
         TEMP_FURNACE,
         input_item=input_item,
@@ -1198,8 +1192,7 @@ def run_smelt_temporary_furnace_smelt_timeout_path(rcon: RconClient, body: Scarp
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_temporary_furnace(
         TEMP_FURNACE,
         input_item="minecraft:cobblestone",
@@ -1261,8 +1254,7 @@ def run_smelt_temporary_special_furnace_wrong_recipe_timeout_path(
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_temporary_furnace(
         TEMP_FURNACE,
         input_item=input_item,
@@ -1331,8 +1323,7 @@ def run_smelt_temporary_furnace_occupied_path(rcon: RconClient, body: ScarpetBod
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_temporary_furnace(
         TEMP_FURNACE,
         input_item="minecraft:raw_iron",
@@ -1379,8 +1370,7 @@ def run_smelt_temporary_furnace_auto_site_path(
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp_auto", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_nearby_temporary_furnace(
         input_item="minecraft:raw_iron",
         input_count=input_count,
@@ -1440,8 +1430,7 @@ def run_smelt_temporary_furnace_auto_site_partial_timeout_path(
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp_auto", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_nearby_temporary_furnace(
         input_item="minecraft:raw_iron",
         input_count=2,
@@ -1503,8 +1492,7 @@ def run_smelt_temporary_furnace_auto_site_smelt_timeout_path(
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp_auto", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_nearby_temporary_furnace(
         input_item="minecraft:cobblestone",
         input_count=1,
@@ -1573,8 +1561,7 @@ def run_smelt_temporary_special_furnace_auto_site_path(
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp_auto", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_nearby_temporary_furnace(
         input_item=input_item,
         input_count=input_count,
@@ -1652,8 +1639,7 @@ def run_smelt_temporary_special_furnace_auto_site_partial_timeout_path(
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp_auto", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_nearby_temporary_furnace(
         input_item=input_item,
         input_count=2,
@@ -1721,8 +1707,7 @@ def run_smelt_temporary_special_furnace_auto_site_wrong_recipe_timeout_path(
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp_auto", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     result = runtime.smelt_with_nearby_temporary_furnace(
         input_item=input_item,
         input_count=1,
@@ -1789,8 +1774,7 @@ def run_smelt_temporary_furnace_no_site_path(rcon: RconClient, body: ScarpetBody
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp_auto", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     before = body.get_state()
     result = runtime.smelt_with_nearby_temporary_furnace(
         input_item="minecraft:raw_iron",
@@ -1838,8 +1822,7 @@ def run_smelt_temporary_special_furnace_no_site_path(
     command(rcon, "script in minebot run minebot_reset()")
 
     policy = GovernancePolicy(natural_regions=[Region("furnace_temp_auto", (-2, 0, -3), (12, 100, 3))])
-    work = BlockWork(body, policy)
-    runtime = FurnaceTransactions(body, governance=policy, work=work)
+    runtime = make_work_runtime(body, policy)
     before = body.get_state()
     result = runtime.smelt_with_nearby_temporary_furnace(
         input_item=input_item,

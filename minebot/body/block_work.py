@@ -12,8 +12,15 @@ from minebot.body.interaction_support import (
     find_block_target,
     interaction_stand_points,
     merge_context,
+    move_to_block_center,
 )
-from minebot.body.world_read import read_block_facts
+from minebot.body.inventory_read import (
+    inventory_counts as _inventory_counts,
+    read_inventory_counts as _inventory_counts_from_body,
+    read_inventory_slots as _read_inventory_slots,
+)
+from minebot.body.pickup import PickupConfig, PickupTransactions
+from minebot.body.world_read import read_block_facts, read_surface_columns
 from minebot.contract import (
     Action,
     Body,
@@ -26,7 +33,6 @@ from minebot.contract import (
     ToolResult,
     PICKAXE_BY_TIER,
     best_owned_pickaxe,
-    perception_next_cursor,
     required_pickaxe_tier,
     terminal_event_to_tool_result,
     tier_satisfies,
@@ -102,6 +108,18 @@ class BlockWork:
         "rooted_dirt": ("dirt",),
     }
     MINE_APPROACH_MAX_BREAK_STEPS = 8
+    SURFACE_GOAL_LIMIT = 32
+    SURFACE_EGRESS_GOAL_LIMIT = 32
+    SURFACE_EGRESS_RADIUS = 12
+    SURFACE_EGRESS_Y_BELOW = 2
+    SURFACE_EGRESS_Y_ABOVE = 10
+    SURFACE_LATERAL_RING_SPECS = ((16, 8), (24, 16), (32, 64))
+    SURFACE_LATERAL_GOAL_LIMIT = 16
+    PLACE_HERE_VERTICAL_RADIUS = 4
+    PLACE_HERE_COLUMN_LIMIT = 32
+    PLACE_HERE_CANDIDATE_LIMIT = 32
+    SHAFT_ALIGNMENT_RADIUS = 0.1
+    SHAFT_ALIGNMENT_TIMEOUT_S = 5.0
 
     def __init__(
         self,
@@ -109,12 +127,14 @@ class BlockWork:
         governance: GovernancePolicy,
         *,
         navigator: SealFaceNavigator | None = None,
+        pickup: PickupTransactions | None = None,
         settle: Callable[[float], None] | None = None,
         mine_approach_settle_s: float = 0.3,
     ):
         self.body = body
         self.governance = governance
         self.navigator = navigator
+        self.pickup = pickup or PickupTransactions(body, navigator, settle=settle)
         self._settle = settle
         self._mine_approach_settle_s = mine_approach_settle_s
 
@@ -239,7 +259,6 @@ class BlockWork:
 
         navigation_config = NavigationRunConfig(
             max_break_steps=self.MINE_APPROACH_MAX_BREAK_STEPS,
-            allow_local_terrain_fallback=False,
         )
         if timeout_s is not None:
             navigation_config = replace(navigation_config, segment_timeout_s=timeout_s)
@@ -260,7 +279,6 @@ class BlockWork:
             "navigation_result": nav.to_payload(),
             "break_context": BreakContext.COLLECT_APPROACH.value,
             "max_break_steps": self.MINE_APPROACH_MAX_BREAK_STEPS,
-            "local_terrain_fallback": False,
             "target_block_type": target_block_type,
         }
         if not nav.success:
@@ -671,111 +689,13 @@ class BlockWork:
         expected: tuple[str, ...],
         pickup_timeout_s: float,
     ) -> dict[str, object]:
-        # Two real defects vs vanilla pickup mechanics shaped this method:
-        #   1. A broken block's dropped item has a ~10-tick (0.5s) pickup delay
-        #      during which NO entity (including the bot) may collect it. The
-        #      wait window must outlast that delay, not race it.
-        #   2. Vanilla auto-pickup range is only ~1 block, but the bot mines
-        #      from up to its reach (~1.5 blocks). The drop rests in the now-air
-        #      cell at `pos` (on top of pos.y-1); to collect, the bot must stand
-        #      AT `pos` so the item sits in its feet-level pickup box. (The old
-        #      walk target `pos.y-1` is the SOLID floor under the drop — the
-        #      planner can never stand inside it, so the assist walk never fired.)
-        # Hence: wait, then walk onto `pos`, then wait again. Inventory delta is
-        # the single source of truth; the itemPickup event is telemetry only.
-        assist: dict[str, object] = {"waited": False, "moved": False}
-
-        def read() -> tuple[dict[str, int] | ToolResult, dict[str, int] | None, int]:
-            counts = _inventory_counts_from_body(self.body)
-            if isinstance(counts, ToolResult):
-                return counts, None, 0
-            d = {item: counts.get(item, 0) - before.get(item, 0) for item in expected}
-            return counts, d, sum(max(0, v) for v in d.values())
-
-        def poll(window_s: float) -> tuple[dict[str, int] | ToolResult, dict[str, int] | None, int]:
-            counts, d, total = read()
-            if isinstance(counts, ToolResult) or total > 0 or window_s <= 0:
-                return counts, d, total
-            assist["waited"] = True
-            deadline = time.monotonic() + window_s
-            while time.monotonic() < deadline:
-                for event in self.body.poll_events():
-                    if event.name == "itemPickup" and event.data.get("player") == self.body.bot_name:
-                        if _normalize_item(str(event.data.get("item") or "unknown")) in expected:
-                            assist["saw_pickup_event"] = True
-                self._pause(0.10)
-                counts, d, total = read()
-                if isinstance(counts, ToolResult) or total > 0:
-                    return counts, d, total
-            return counts, d, total
-
-        after, deltas, collected_total = poll(pickup_timeout_s)
-        if isinstance(after, ToolResult):
-            return {"failed": after, "assist": assist}
-        if collected_total > 0:
-            return {"after": after, "deltas": deltas, "collected_total": collected_total, "assist": assist}
-
-        # pickup-B: walk to the actual drop ENTITY, not the guessed mined cell.
-        # A log mined at trunk height drops an item that FALLS to the ground — it
-        # is not at `pos` (the §8 walk-to-pos only works when the drop stays put,
-        # e.g. surface dirt). Scarpet nearbyEntities gives each item entity's
-        # exact pos; walk to it (TRAVEL — pure reposition, never dig the floor).
-        # Try the nearest few drop entities in turn and only report no delta
-        # after all are exhausted — do not abandon on the first unreachable one
-        # (Mindcraft's pickupNearbyItems gives up if it can't reach the first
-        # item; we keep trying). If no drop entity is visible yet, fall back to
-        # the mined cell.
-        if self.navigator is not None:
-            assist["moved"] = True
-            assist["pickup_arrival_radius"] = 0.25
-            assist["scan_rounds"] = 0
-            assist["move_attempts"] = []
-            max_drop_targets_seen = 0
-            for scan_round in range(2):
-                assist["scan_rounds"] = scan_round + 1
-                drop_positions = self._nearby_drop_positions(radius=8, limit=16)
-                max_drop_targets_seen = max(max_drop_targets_seen, len(drop_positions))
-                assist["drop_targets_seen"] = max_drop_targets_seen
-                walk_targets = _pickup_walk_targets(pos, drop_positions)
-                for target_pos in walk_targets[:5]:
-                    nav = self.navigator.navigate_to(
-                        target_pos,
-                        break_context=BreakContext.TRAVEL,
-                        arrival_radius=0.25,
-                        timeout_s=4.0,
-                    )
-                    assist["move_result"] = nav.to_payload()
-                    assist["move_attempts"].append({"target": list(target_pos), "result": nav.to_payload()})
-                    if not nav.success:
-                        continue
-                    after, deltas, collected_total = poll(pickup_timeout_s)
-                    if isinstance(after, ToolResult):
-                        return {"failed": after, "assist": assist}
-                    if collected_total > 0:
-                        return {"after": after, "deltas": deltas, "collected_total": collected_total, "assist": assist}
-
-        return {"after": after, "deltas": deltas, "collected_total": collected_total, "assist": assist}
-
-    def _nearby_drop_positions(self, *, radius: int, limit: int) -> list[Position]:
-        """Nearest-first positions of dropped-item entities near the bot.
-
-        Powers the pickup assist: a mined block's drop may land away from the
-        mined cell (logs fall), so we walk to where the item entity actually is.
-        Returns [] on any perception error so the caller falls back to the mined
-        cell — a pickup-assist read must never abort the collect.
-        """
-        nearby = self.body.perceive("nearbyEntities", {"radius": radius, "limit": limit})
-        if not nearby.ok:
-            return []
-        positions: list[Position] = []
-        for entity in nearby.data.get("entities") or []:
-            if str(entity.get("type") or "") not in ("item", "minecraft:item"):
-                continue
-            pos_raw = entity.get("pos") or []
-            if len(pos_raw) != 3:
-                continue
-            positions.append((float(pos_raw[0]), float(pos_raw[1]), float(pos_raw[2])))
-        return positions
+        return self.pickup._collect_inventory_delta(
+            before=before,
+            expected=expected,
+            minimum_count=1,
+            fallback_positions=_pickup_fallback_positions(pos),
+            config=PickupConfig(poll_timeout_s=pickup_timeout_s),
+        )
 
     def dig_down_one(
         self,
@@ -964,6 +884,35 @@ class BlockWork:
                     },
                 )
 
+            alignment = self._align_for_descent(
+                current,
+                timeout_s=min(move_timeout_s, self.SHAFT_ALIGNMENT_TIMEOUT_S),
+            )
+            if bool((alignment.metrics or {}).get("attempted")) or not alignment.success:
+                steps.append(
+                    {
+                        "kind": "alignment",
+                        "origin": list(current),
+                        "success": alignment.success,
+                        "reason": alignment.reason,
+                        "metrics": dict(alignment.metrics or {}),
+                    }
+                )
+            if not alignment.success:
+                return ToolResult(
+                    success=False,
+                    reason=alignment.reason,
+                    can_retry=alignment.can_retry,
+                    next_suggestion=alignment.next_suggestion,
+                    metrics={
+                        "origin": list(origin),
+                        "target_y": target_y,
+                        "final_pos": list(_state_block_pos(self.body.get_state().pos)),
+                        "steps": steps,
+                        "steps_completed": descents_completed,
+                    },
+                )
+
             descend_to = (current[0], current[1] - 1, current[2])
             descent = self._wait_for_descent(descend_to, timeout_s=move_timeout_s)
             steps.append(
@@ -1038,6 +987,103 @@ class BlockWork:
                 "steps": steps,
                 "steps_completed": descents_completed,
             },
+        )
+
+    def _align_for_descent(self, shaft: Position, *, timeout_s: float) -> ToolResult:
+        state = self.body.get_state()
+        observed = _state_block_pos(state.pos)
+        base_metrics: dict[str, object] = {
+            "attempted": False,
+            "shaft": list(shaft),
+            "position_before": [round(value, 3) for value in state.pos],
+            "block_pos_before": list(observed),
+        }
+        if observed[1] <= shaft[1] - 1:
+            return ToolResult(
+                success=True,
+                reason="dig_down_alignment_already_descended",
+                can_retry=False,
+                metrics={**base_metrics, "already_descended": True},
+            )
+        if _body_fits_shaft(state.pos, shaft):
+            return ToolResult(
+                success=True,
+                reason="dig_down_alignment_not_required",
+                can_retry=False,
+                metrics={**base_metrics, "already_aligned": True},
+            )
+
+        try:
+            centered = move_to_block_center(
+                self.body,
+                shaft,
+                arrival_radius=self.SHAFT_ALIGNMENT_RADIUS,
+                timeout_s=timeout_s,
+                stabilize=False,
+            )
+        except TimeoutError as exc:
+            interrupted = self.body.interrupt("dig_down_alignment_timeout")
+            return ToolResult(
+                success=False,
+                reason="dig_down_alignment_failed:timeout",
+                can_retry=True,
+                next_suggestion="re-sync position and retry the shaft from a stable centered stance",
+                metrics={
+                    **base_metrics,
+                    "attempted": True,
+                    "timeout_s": timeout_s,
+                    "timeout_diagnostics": dict(getattr(exc, "diagnostics", {}) or {}),
+                    "interrupt": {
+                        "ok": interrupted.ok,
+                        "accepted": interrupted.accepted,
+                        "error": interrupted.error,
+                        "data": interrupted.data,
+                    },
+                },
+            )
+
+        movement = centered.to_payload()
+        after = self.body.get_state()
+        after_block = _state_block_pos(after.pos)
+        descended = after_block[1] <= shaft[1] - 1
+        aligned = _body_fits_shaft(after.pos, shaft)
+        metrics = {
+            **base_metrics,
+            "attempted": True,
+            "movement": movement,
+            "position_after": [round(value, 3) for value in after.pos],
+            "block_pos_after": list(after_block),
+            "aligned": aligned,
+            "already_descended": descended,
+        }
+        if descended:
+            return ToolResult(
+                success=True,
+                reason="dig_down_aligned",
+                can_retry=False,
+                metrics=metrics,
+            )
+        if not centered.success or centered.reason != "arrived":
+            return ToolResult(
+                success=False,
+                reason=f"dig_down_alignment_failed:{centered.reason}",
+                can_retry=centered.can_retry,
+                next_suggestion=centered.next_suggestion or "re-sync position and retry from a stable shaft edge",
+                metrics=metrics,
+            )
+        if not descended and not aligned:
+            return ToolResult(
+                success=False,
+                reason="dig_down_alignment_failed:terminal_position_mismatch",
+                can_retry=True,
+                next_suggestion="re-sync position before continuing the shaft descent",
+                metrics=metrics,
+            )
+        return ToolResult(
+            success=True,
+            reason="dig_down_aligned",
+            can_retry=False,
+            metrics=metrics,
         )
 
     def _wait_for_descent(self, target: Position, *, timeout_s: float, poll_s: float = 0.05) -> ToolResult:
@@ -1335,23 +1381,9 @@ class BlockWork:
         max_steps: int | None = None,
         surface_scan_height: int = 96,
         surface_scan_radius: int = 1,
-        allow_staircase_fallback: bool = False,
         world_top_y: int = 320,
     ) -> ToolResult:
-        """Ascend toward the first verified nearby sky-exposed natural surface.
-
-        This is the first honest `goToSurface` Body transaction layer:
-        scan upward for the first nearby standable position whose support is
-        natural/protected-safe and whose head has real sky exposure, use
-        guarded pillar ascent to reach that Y layer, then step onto the natural
-        surface stand point and re-verify the terminal truth.
-
-        It does not yet implement the full multi-tier surface ladder from the
-        canonical plan (broader scan geometry and hazard/recovery matrices).
-        When explicitly enabled, the staircase fallback first asks shared
-        navigation to route to a higher natural surface before falling back to
-        guarded pillar ascent.
-        """
+        """Reach one bounded, verified surface domain through shared navigation."""
 
         if surface_scan_height < 0:
             raise ValueError("surface_scan_height must be >= 0")
@@ -1360,222 +1392,281 @@ class BlockWork:
         if world_top_y < -64:
             raise ValueError("world_top_y must be realistic")
 
-        origin = current_pos or _state_block_pos(self.body.get_state().pos)
-        scan = self._find_surface_in_column(
-            origin,
-            max_scan_height=surface_scan_height,
-            scan_radius=surface_scan_radius,
-            world_top_y=world_top_y,
-        )
-        if isinstance(scan, ToolResult):
-            return _with_metric(scan, "go_to_surface", {"origin": list(origin)})
-        if scan is None:
-            return ToolResult(
-                success=False,
-                reason="surface_not_found_in_column",
-                can_retry=True,
-                next_suggestion="try another column or fall back to a staircase/surface-search transaction",
-                metrics={
-                    "origin": list(origin),
-                    "surface_scan_height": surface_scan_height,
-                    "surface_scan_radius": surface_scan_radius,
-                    "world_top_y": world_top_y,
-                },
-            )
-
-        target = tuple(scan["feet_pos"])
-        ascent_origin = tuple(scan.get("ascent_origin") or origin)
-        if origin == target:
+        requested_origin = current_pos or _state_block_pos(self.body.get_state().pos)
+        origin = requested_origin
+        surface_egress: dict[str, object] | None = None
+        initial = self._surface_candidate_at(origin, world_top_y=world_top_y)
+        if isinstance(initial, ToolResult):
+            return _with_metric(initial, "go_to_surface", {"origin": list(origin)})
+        if _surface_terminal_verified(initial):
             return ToolResult(
                 success=True,
                 reason="surface_reached",
                 can_retry=False,
                 metrics={
                     "origin": list(origin),
-                    "target_surface": list(target),
+                    "target_surface": list(origin),
+                    "selected_goal": list(origin),
                     "final_pos": list(origin),
-                    "surface": scan,
-                    "ascent": None,
+                    "terminal_surface": initial,
+                    "terminal_surface_verified": True,
+                    "navigation": None,
                 },
             )
 
-        staircase_attempt: dict[str, object] | None = None
-        if allow_staircase_fallback and target[1] > origin[1] and self.navigator is not None:
-            route = self._approach_surface_candidate(
-                target,
-                origin=origin,
-                timeout_s=timeout_s,
-                world_top_y=world_top_y,
+        from minebot.body.navigation import NavigationRunConfig, pure_movement_navigation_config
+
+        if _surface_requires_lateral_egress(initial):
+            egress_domain = self._find_surface_egress_domain(
+                origin,
+                radius=self.SURFACE_EGRESS_RADIUS,
+                y_below=self.SURFACE_EGRESS_Y_BELOW,
+                y_above=self.SURFACE_EGRESS_Y_ABOVE,
+                max_candidates=self.SURFACE_EGRESS_GOAL_LIMIT,
             )
-            if isinstance(route, ToolResult):
-                staircase_attempt = route.to_payload()
-            else:
-                final_pos = tuple(route["final_pos"])
-                terminal = self._surface_candidate_at(final_pos, world_top_y=world_top_y)
-                if isinstance(terminal, ToolResult):
-                    return _with_metric(
-                        terminal,
-                        "go_to_surface",
-                        {
-                            "origin": list(origin),
-                            "ascent_origin": list(origin),
-                            "target_surface": list(target),
-                            "surface": scan,
-                            "staircase_fallback": route,
-                        },
+            if isinstance(egress_domain, ToolResult):
+                return _with_metric(
+                    egress_domain,
+                    "go_to_surface",
+                    {"origin": list(requested_origin), "phase": "lateral_egress"},
+                )
+            egress_candidates = tuple(tuple(entry["feet_pos"]) for entry in egress_domain["candidates"])
+            surface_egress = {
+                "required": True,
+                "origin": list(origin),
+                "domain": egress_domain,
+                "navigation": None,
+            }
+            if egress_candidates:
+                if self.navigator is None:
+                    return ToolResult(
+                        success=False,
+                        reason="surface_navigation_missing",
+                        can_retry=True,
+                        next_suggestion="attach the shared navigation process before requesting a covered-water exit",
+                        metrics={"origin": list(requested_origin), "surface_egress": surface_egress},
                     )
-                if terminal["candidate"]:
+                egress_goal = GoalComposite(tuple(GoalNear(candidate, radius=0) for candidate in egress_candidates))
+                egress_navigation = self.navigator.navigate_to(
+                    egress_goal,
+                    break_context=BreakContext.TRAVEL,
+                    config=pure_movement_navigation_config(
+                        NavigationRunConfig(segment_timeout_s=timeout_s)
+                    ),
+                    arrival_radius=0.25,
+                )
+                selected_egress = _selected_surface_goal(egress_navigation, egress_candidates)
+                surface_egress.update(
+                    {
+                        "selected_goal": list(selected_egress),
+                        "navigation_goal": egress_goal.payload(),
+                        "navigation": egress_navigation.to_payload(),
+                    }
+                )
+                if not egress_navigation.success:
+                    return ToolResult(
+                        success=False,
+                        reason=f"surface_egress_failed:{egress_navigation.reason}",
+                        can_retry=egress_navigation.can_retry,
+                        next_suggestion=egress_navigation.next_suggestion,
+                        metrics={"origin": list(requested_origin), "surface_egress": surface_egress},
+                    )
+                origin = _state_block_pos(self.body.get_state().pos)
+                dry_stand = self._standable_feet_at(origin)
+                surface_egress["final_pos"] = list(origin)
+                surface_egress["terminal_stand"] = (
+                    dry_stand.to_payload() if isinstance(dry_stand, ToolResult) else dry_stand
+                )
+                if isinstance(dry_stand, ToolResult) or not dry_stand["standable"]:
+                    return ToolResult(
+                        success=False,
+                        reason="surface_egress_verification_failed",
+                        can_retry=True,
+                        next_suggestion="rescan a dry shore domain from authoritative world facts",
+                        metrics={"origin": list(requested_origin), "surface_egress": surface_egress},
+                    )
+                initial = self._surface_candidate_at(origin, world_top_y=world_top_y)
+                if isinstance(initial, ToolResult):
+                    return _with_metric(
+                        initial,
+                        "go_to_surface",
+                        {"origin": list(requested_origin), "surface_egress": surface_egress},
+                    )
+                if _surface_terminal_verified(initial):
                     return ToolResult(
                         success=True,
                         reason="surface_reached",
                         can_retry=False,
                         metrics={
-                            "origin": list(origin),
-                            "ascent_origin": list(origin),
-                            "target_surface": list(target),
-                            "final_pos": list(final_pos),
-                            "surface": scan,
-                            "terminal_surface": terminal,
+                            "origin": list(requested_origin),
+                            "surface_origin": list(origin),
+                            "target_surface": list(origin),
+                            "selected_goal": list(origin),
+                            "final_pos": list(origin),
+                            "terminal_surface": initial,
                             "terminal_surface_verified": True,
-                            "ascent": None,
-                            "column_approach": None,
-                            "approach": route,
-                            "staircase_fallback": {
-                                "attempted": True,
-                                "success": True,
-                                "result": route,
-                            },
+                            "surface_egress": surface_egress,
+                            "navigation": None,
                         },
                     )
-                staircase_attempt = {
-                    "success": False,
-                    "reason": "surface_verification_failed",
-                    "result": route,
-                    "terminal_surface": terminal,
-                }
 
-        column_approach: dict[str, object] | None = None
-        ascent_start = origin
-        if ascent_origin != origin and ascent_origin != target:
-            column = self._approach_surface_column(
-                ascent_origin,
-                target_surface=target,
-                origin=origin,
-                timeout_s=timeout_s,
-            )
-            if isinstance(column, ToolResult):
-                return ToolResult(
-                    success=False,
-                    reason=f"surface_column_failed:{column.reason}",
-                    can_retry=column.can_retry,
-                    next_suggestion=column.next_suggestion,
-                    metrics={
-                        "origin": list(origin),
-                        "target_surface": list(target),
-                        "ascent_origin": list(ascent_origin),
-                        "surface": scan,
-                        "staircase_fallback": staircase_attempt,
-                        "column_approach": column.to_payload(),
-                    },
-                )
-            column_approach = column
-            ascent_start = tuple(column["final_pos"])
-
-        ascent = self.dig_up_to_y(
-            target[1],
-            current_pos=ascent_start,
-            context=context,
-            scaffold_blocks=scaffold_blocks,
-            timeout_s=timeout_s,
-            max_steps=max_steps,
-        )
-        if not ascent.success:
+        scaffold_counts = _inventory_counts_from_body(self.body)
+        if isinstance(scaffold_counts, ToolResult):
             return _with_metric(
-                ascent,
+                scaffold_counts,
                 "go_to_surface",
                 {
-                    "origin": list(origin),
-                    "ascent_origin": list(ascent_origin),
-                    "target_surface": list(target),
-                    "surface": scan,
-                    "staircase_fallback": staircase_attempt,
-                    "column_approach": column_approach,
+                    "origin": list(requested_origin),
+                    "surface_origin": list(origin),
+                    "surface_egress": surface_egress,
+                    "phase": "capability_snapshot",
+                },
+            )
+        normalized_scaffolds = tuple(_normalize_item(block) for block in scaffold_blocks)
+        available_scaffolds = tuple(block for block in normalized_scaffolds if scaffold_counts.get(block, 0) > 0)
+        surface_capability = {
+            "constructible_pillar": bool(available_scaffolds),
+            "available_scaffolds": list(available_scaffolds),
+        }
+
+        domain = self._find_surface_domain(
+            origin,
+            max_scan_height=surface_scan_height,
+            scan_radius=surface_scan_radius,
+            world_top_y=world_top_y,
+            max_candidates=self.SURFACE_GOAL_LIMIT,
+            allow_constructible=bool(available_scaffolds),
+        )
+        if isinstance(domain, ToolResult):
+            return _with_metric(
+                domain,
+                "go_to_surface",
+                {
+                    "origin": list(requested_origin),
+                    "surface_origin": list(origin),
+                    "surface_egress": surface_egress,
+                    "surface_capability": surface_capability,
+                },
+            )
+        lateral_domain: dict[str, object] | None = None
+        if surface_egress is not None:
+            lateral = self._find_lateral_surface_domain(
+                origin,
+                ring_specs=self.SURFACE_LATERAL_RING_SPECS,
+                max_candidates=self.SURFACE_LATERAL_GOAL_LIMIT,
+            )
+            if isinstance(lateral, ToolResult):
+                return _with_metric(
+                    lateral,
+                    "go_to_surface",
+                    {
+                        "origin": list(requested_origin),
+                        "surface_origin": list(origin),
+                        "surface_egress": surface_egress,
+                    },
+                )
+            lateral_domain = lateral
+            if lateral_domain["candidates"]:
+                domain = {
+                    **domain,
+                    "local_candidates": domain["candidates"],
+                    "candidates": lateral_domain["candidates"],
+                    "selection": "covered_water_lateral_surface",
+                }
+        candidates = tuple(tuple(entry["feet_pos"]) for entry in domain["candidates"])
+        if not candidates:
+            return ToolResult(
+                success=False,
+                reason="surface_not_found_in_column",
+                can_retry=True,
+                next_suggestion="try another column or fall back to a staircase/surface-search transaction",
+                metrics={
+                    "origin": list(requested_origin),
+                    "surface_origin": list(origin),
+                    "surface_scan_height": surface_scan_height,
+                    "surface_scan_radius": surface_scan_radius,
+                    "world_top_y": world_top_y,
+                    "surface_domain": domain,
+                    "surface_lateral_domain": lateral_domain,
+                    "surface_egress": surface_egress,
+                    "surface_capability": surface_capability,
+                },
+            )
+        if self.navigator is None:
+            return ToolResult(
+                success=False,
+                reason="surface_navigation_missing",
+                can_retry=True,
+                next_suggestion="attach the shared navigation process before requesting a surface exit",
+                metrics={
+                    "origin": list(requested_origin),
+                    "surface_origin": list(origin),
+                    "surface_domain": domain,
+                    "surface_lateral_domain": lateral_domain,
+                    "surface_egress": surface_egress,
+                    "surface_capability": surface_capability,
+                },
+            )
+
+        mutation_budget = max_steps if max_steps is not None else max(1, surface_scan_height)
+        goal = GoalComposite(tuple(GoalNear(candidate, radius=0) for candidate in candidates))
+        navigation = self.navigator.navigate_to(
+            goal,
+            break_context=BreakContext(context),
+            config=NavigationRunConfig(
+                segment_timeout_s=timeout_s,
+                allow_break=True,
+                max_break_steps=mutation_budget,
+                allow_place=True,
+                max_place_steps=mutation_budget,
+                allow_pillar=True,
+                max_pillar_steps=mutation_budget,
+                allow_downward=False,
+                max_downward_steps=0,
+                scaffold_blocks=tuple(scaffold_blocks),
+            ),
+            arrival_radius=0.25,
+        )
+        selected_goal = _selected_surface_goal(navigation, candidates)
+        if not navigation.success:
+            return ToolResult(
+                success=False,
+                reason=f"surface_navigation_failed:{navigation.reason}",
+                can_retry=navigation.can_retry,
+                next_suggestion=navigation.next_suggestion,
+                metrics={
+                    "origin": list(requested_origin),
+                    "surface_origin": list(origin),
+                    "target_surface": list(selected_goal),
+                    "selected_goal": list(selected_goal),
+                    "surface_domain": domain,
+                    "surface_lateral_domain": lateral_domain,
+                    "navigation_goal": goal.payload(),
+                    "navigation": navigation.to_payload(),
+                    "surface_egress": surface_egress,
+                    "surface_capability": surface_capability,
                 },
             )
 
         final_pos = _state_block_pos(self.body.get_state().pos)
-        approach: dict[str, object] | None = None
-        if final_pos != target:
-            if self.navigator is None:
-                return ToolResult(
-                    success=False,
-                    reason="surface_navigation_missing",
-                    can_retry=True,
-                    next_suggestion="attach a navigation transaction before relying on an adjacent natural surface exit",
-                    metrics={
-                        "origin": list(origin),
-                        "ascent_origin": list(ascent_origin),
-                        "target_surface": list(target),
-                        "final_pos": list(final_pos),
-                        "surface": scan,
-                        "staircase_fallback": staircase_attempt,
-                        "column_approach": column_approach,
-                        "ascent": ascent.to_payload(),
-                    },
-                )
-            approach_result = self._approach_surface_candidate(
-                target,
-                origin=origin,
-                timeout_s=timeout_s,
-                world_top_y=world_top_y,
-            )
-            if isinstance(approach_result, ToolResult):
-                return ToolResult(
-                    success=False,
-                    reason=f"surface_navigation_failed:{approach_result.reason}",
-                    can_retry=approach_result.can_retry,
-                    next_suggestion=approach_result.next_suggestion,
-                    metrics={
-                        "origin": list(origin),
-                        "ascent_origin": list(ascent_origin),
-                        "target_surface": list(target),
-                        "final_pos": list(final_pos),
-                        "surface": scan,
-                        "staircase_fallback": staircase_attempt,
-                        "column_approach": column_approach,
-                        "ascent": ascent.to_payload(),
-                        "surface_navigation": approach_result.to_payload(),
-                    },
-                )
-            approach = approach_result
-            final_pos = tuple(approach["final_pos"])
-
         terminal = self._surface_candidate_at(final_pos, world_top_y=world_top_y)
         if isinstance(terminal, ToolResult):
             return _with_metric(
                 terminal,
                 "go_to_surface",
                 {
-                    "origin": list(origin),
-                    "ascent_origin": list(ascent_origin),
-                    "target_surface": list(target),
-                    "ascent": ascent.to_payload(),
-                    "staircase_fallback": staircase_attempt,
-                    "column_approach": column_approach,
-                    "approach": approach,
+                    "origin": list(requested_origin),
+                    "surface_origin": list(origin),
+                    "target_surface": list(selected_goal),
+                    "selected_goal": list(selected_goal),
+                    "surface_domain": domain,
+                    "surface_lateral_domain": lateral_domain,
+                    "navigation": navigation.to_payload(),
+                    "surface_egress": surface_egress,
+                    "surface_capability": surface_capability,
                 },
             )
-        terminal_verified = bool(terminal["candidate"])
-        if not terminal_verified and ascent_origin != origin and ascent_origin != target:
-            support_legality = terminal.get("support_legality") or {}
-            sky_exposure = terminal.get("sky_exposure") or {}
-            terminal_verified = (
-                terminal.get("feet_state") == "CLEAR"
-                and terminal.get("head_state") == "CLEAR"
-                and bool(sky_exposure.get("exposed"))
-                and support_legality.get("reason") == "allowed_bot_owned"
-                and terminal.get("support_pos") == [target[0], target[1] - 1, target[2]]
-            )
+        terminal_verified = final_pos in candidates and _surface_terminal_verified(terminal)
         if not terminal_verified:
             return ToolResult(
                 success=False,
@@ -1583,16 +1674,18 @@ class BlockWork:
                 can_retry=True,
                 next_suggestion="re-sync the body state or continue with a broader surface-search fallback",
                 metrics={
-                    "origin": list(origin),
-                    "ascent_origin": list(ascent_origin),
-                    "target_surface": list(target),
+                    "origin": list(requested_origin),
+                    "surface_origin": list(origin),
+                    "target_surface": list(selected_goal),
+                    "selected_goal": list(selected_goal),
                     "final_pos": list(final_pos),
-                    "surface": scan,
+                    "surface_domain": domain,
+                    "surface_lateral_domain": lateral_domain,
                     "terminal_surface": terminal,
-                    "ascent": ascent.to_payload(),
-                    "staircase_fallback": staircase_attempt,
-                    "column_approach": column_approach,
-                    "approach": approach,
+                    "navigation_goal": goal.payload(),
+                    "navigation": navigation.to_payload(),
+                    "surface_egress": surface_egress,
+                    "surface_capability": surface_capability,
                 },
             )
 
@@ -1601,161 +1694,19 @@ class BlockWork:
             reason="surface_reached",
             can_retry=False,
             metrics={
-                "origin": list(origin),
-                "ascent_origin": list(ascent_origin),
-                "target_surface": list(target),
+                "origin": list(requested_origin),
+                "surface_origin": list(origin),
+                "target_surface": list(selected_goal),
+                "selected_goal": list(selected_goal),
                 "final_pos": list(final_pos),
-                "surface": scan,
+                "surface_domain": domain,
+                "surface_lateral_domain": lateral_domain,
                 "terminal_surface": terminal,
-                "terminal_surface_verified": terminal_verified,
-                "ascent": ascent.to_payload(),
-                "staircase_fallback": staircase_attempt,
-                "column_approach": column_approach,
-                "approach": approach,
-            },
-        )
-
-    def _approach_surface_column(
-        self,
-        ascent_origin: Position,
-        *,
-        target_surface: Position,
-        origin: Position,
-        timeout_s: float,
-    ) -> dict[str, object] | ToolResult:
-        if self.navigator is None:
-            return ToolResult(
-                success=False,
-                reason="surface_navigation_missing",
-                can_retry=True,
-                next_suggestion="attach a navigation transaction before switching to an alternate surface ascent column",
-                metrics={"ascent_origin": list(ascent_origin), "target_surface": list(target_surface)},
-            )
-        stand = self._standable_feet_at(ascent_origin)
-        if isinstance(stand, ToolResult):
-            return stand
-        if not stand["standable"]:
-            return ToolResult(
-                success=False,
-                reason="surface_column_not_standable",
-                can_retry=True,
-                next_suggestion="try another ascent column or a staircase fallback",
-                metrics={
-                    "origin": list(origin),
-                    "ascent_origin": list(ascent_origin),
-                    "target_surface": list(target_surface),
-                    "stand": stand,
-                },
-            )
-        nav_result = self.navigator.navigate_to(
-            ascent_origin,
-            timeout_s=timeout_s,
-            break_context=BreakContext.TRAVEL,
-            arrival_radius=0.25,
-        )
-        if not nav_result.success:
-            return _with_metric(
-                nav_result,
-                "surface_column",
-                {"origin": list(origin), "ascent_origin": list(ascent_origin), "target_surface": list(target_surface)},
-            )
-        final_pos = _state_block_pos(self.body.get_state().pos)
-        if final_pos != ascent_origin:
-            return ToolResult(
-                success=False,
-                reason="surface_column_missed",
-                can_retry=True,
-                next_suggestion="retry with a stricter or different ascent column approach",
-                metrics={
-                    "origin": list(origin),
-                    "ascent_origin": list(ascent_origin),
-                    "target_surface": list(target_surface),
-                    "final_pos": list(final_pos),
-                    "result": nav_result.to_payload(),
-                    "stand": stand,
-                },
-            )
-        return {
-            "navigated": True,
-            "ascent_origin": list(ascent_origin),
-            "target_surface": list(target_surface),
-            "final_pos": list(final_pos),
-            "result": nav_result.to_payload(),
-            "stand": stand,
-        }
-
-    def _approach_surface_candidate(
-        self,
-        target: Position,
-        *,
-        origin: Position,
-        timeout_s: float,
-        world_top_y: int,
-    ) -> dict[str, object] | ToolResult:
-        if self.navigator is None:
-            return ToolResult(
-                success=False,
-                reason="surface_navigation_missing",
-                can_retry=True,
-                next_suggestion="attach a navigation transaction before relying on an adjacent natural surface exit",
-                metrics={"target_surface": list(target)},
-            )
-
-        attempts: list[dict[str, object]] = []
-        last_failure: ToolResult | None = None
-        candidates = _surface_scan_targets((target[0], origin[1], target[2]), target[1])
-        for candidate in candidates:
-            nav_result = self.navigator.navigate_to(
-                candidate,
-                timeout_s=timeout_s,
-                break_context=BreakContext.TRAVEL,
-                arrival_radius=0.25,
-            )
-            if not nav_result.success:
-                attempts.append({"goal": list(candidate), "result": nav_result.to_payload()})
-                last_failure = nav_result
-                continue
-            final_pos = _state_block_pos(self.body.get_state().pos)
-            terminal = self._surface_candidate_at(final_pos, world_top_y=world_top_y)
-            if isinstance(terminal, ToolResult):
-                return terminal
-            attempt = {
-                "goal": list(candidate),
-                "result": nav_result.to_payload(),
-                "final_pos": list(final_pos),
-                "terminal_surface": terminal,
-            }
-            if terminal["candidate"]:
-                attempts.append(attempt)
-                return {
-                    "navigated": True,
-                    "target_surface": list(final_pos),
-                    "requested_goal": list(candidate),
-                    "requested_surface": list(target),
-                    "result": nav_result.to_payload(),
-                    "final_pos": list(final_pos),
-                    "attempts": attempts,
-                }
-            attempt["surface_verified"] = False
-            attempt["reason"] = "surface_point_missed" if final_pos != candidate else "surface_no_longer_valid"
-            attempts.append(attempt)
-            last_failure = ToolResult(
-                success=False,
-                reason=str(attempt["reason"]),
-                can_retry=True,
-                metrics=attempt,
-            )
-
-        reason = last_failure.reason if last_failure is not None else "surface_no_candidate"
-        return ToolResult(
-            success=False,
-            reason=reason,
-            can_retry=True,
-            next_suggestion="retry with a broader surface-search fallback or stricter movement arrival",
-            metrics={
-                "target_surface": list(target),
-                "candidate_surfaces": [list(candidate) for candidate in candidates],
-                "attempts": attempts,
+                "terminal_surface_verified": True,
+                "navigation_goal": goal.payload(),
+                "navigation": navigation.to_payload(),
+                "surface_egress": surface_egress,
+                "surface_capability": surface_capability,
             },
         )
 
@@ -1849,37 +1800,34 @@ class BlockWork:
             metrics={**context, "initial_distance": initial_distance, "final_distance": initial_distance},
         )
 
-    def _find_surface_in_column(
+    def _find_surface_domain(
         self,
         origin: Position,
         *,
         max_scan_height: int,
         scan_radius: int = 1,
         world_top_y: int,
-    ) -> dict[str, object] | ToolResult | None:
+        max_candidates: int,
+        allow_constructible: bool = True,
+    ) -> dict[str, object] | ToolResult:
         top = min(origin[1] + max_scan_height, world_top_y - 1)
+        candidates: list[dict[str, object]] = []
+        seen: set[Position] = set()
+        scanned = 0
         for y in range(origin[1], top + 1):
             for feet_pos in _surface_scan_targets(origin, y, radius=scan_radius):
-                if y > origin[1] and feet_pos[0] == origin[0] and feet_pos[2] == origin[2]:
+                if feet_pos in seen:
                     continue
+                seen.add(feet_pos)
+                scanned += 1
                 candidate = self._surface_candidate_at(feet_pos, world_top_y=world_top_y)
                 if isinstance(candidate, ToolResult):
                     return candidate
                 if candidate["candidate"]:
-                    candidate = dict(candidate)
-                    if feet_pos[0] == origin[0] and feet_pos[2] == origin[2]:
-                        candidate["ascent_origin"] = list(origin)
-                    elif feet_pos[1] > origin[1]:
-                        ascent_origin = (feet_pos[0], origin[1], feet_pos[2])
-                        stand = self._standable_feet_at(ascent_origin)
-                        if isinstance(stand, ToolResult):
-                            return stand
-                        candidate["ascent_origin"] = list(ascent_origin) if stand["standable"] else list(origin)
-                        candidate["ascent_column_stand"] = stand
-                    else:
-                        candidate["ascent_origin"] = [feet_pos[0], origin[1], feet_pos[2]]
-                    return candidate
-                if feet_pos[1] > origin[1] and (feet_pos[0], feet_pos[2]) != (origin[0], origin[2]):
+                    entry = dict(candidate)
+                    entry["support_mode"] = "natural"
+                    candidates.append(entry)
+                elif allow_constructible and feet_pos[1] > origin[1]:
                     ascent_origin = (feet_pos[0], origin[1], feet_pos[2])
                     constructible = self._constructible_surface_column_at(
                         ascent_origin,
@@ -1889,14 +1837,235 @@ class BlockWork:
                     if isinstance(constructible, ToolResult):
                         return constructible
                     if constructible["constructible"]:
-                        candidate = dict(candidate)
-                        candidate["candidate"] = True
-                        candidate["support_mode"] = "constructible_pillar"
-                        candidate["ascent_origin"] = list(ascent_origin)
-                        candidate["ascent_column_stand"] = constructible["stand"]
-                        candidate["column_plan"] = constructible
-                        return candidate
-        return None
+                        entry = dict(candidate)
+                        entry["candidate"] = True
+                        entry["support_mode"] = "constructible_pillar"
+                        entry["ascent_origin"] = list(ascent_origin)
+                        entry["column_plan"] = constructible
+                        candidates.append(entry)
+                if len(candidates) >= max_candidates:
+                    return {
+                        "candidates": candidates,
+                        "scanned": scanned,
+                        "complete": False,
+                        "exhaustion_reason": "surface_goal_limit",
+                        "max_candidates": max_candidates,
+                        "constructible_allowed": allow_constructible,
+                    }
+        return {
+            "candidates": candidates,
+            "scanned": scanned,
+            "complete": True,
+            "exhaustion_reason": None,
+            "max_candidates": max_candidates,
+            "constructible_allowed": allow_constructible,
+        }
+
+    def _find_surface_egress_domain(
+        self,
+        origin: Position,
+        *,
+        radius: int,
+        y_below: int,
+        y_above: int,
+        max_candidates: int,
+    ) -> dict[str, object] | ToolResult:
+        y_min = origin[1] - y_below
+        y_max = origin[1] + y_above
+        columns = tuple(
+            (origin[0] + dx, origin[2] + dz)
+            for dx in range(-radius, radius + 1)
+            for dz in range(-radius, radius + 1)
+            if dx * dx + dz * dz <= radius * radius
+        )
+        scan_positions = tuple(
+            (x, y, z)
+            for x, z in columns
+            for y in range(y_min - 1, y_max + 2)
+        )
+        try:
+            facts = read_block_facts(self.body, scan_positions, failure_label="surface_egress")
+        except ValueError as exc:
+            return ToolResult(
+                success=False,
+                reason="surface_egress_world_read_failed",
+                can_retry=True,
+                next_suggestion="retry the bounded shore-domain read before surface navigation",
+                metrics={"origin": list(origin), "error": str(exc)},
+            )
+
+        def fact_at(pos: Position) -> PerceptionResult | None:
+            return facts.get(pos)
+
+        candidates: list[dict[str, object]] = []
+        for x, z in columns:
+            for y in range(y_min, y_max + 1):
+                feet_pos = (x, y, z)
+                head_pos = (x, y + 1, z)
+                support_pos = (x, y - 1, z)
+                feet = fact_at(feet_pos)
+                head = fact_at(head_pos)
+                support = fact_at(support_pos)
+                if feet is None or head is None or support is None:
+                    continue
+                if not (
+                    _is_clear_perception(feet)
+                    and _is_clear_perception(head)
+                    and _is_solid_support_perception(support)
+                ):
+                    continue
+                water_adjacent = any(
+                    self._is_liquid_perception(fact)
+                    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                    for fact in (
+                        fact_at((x + dx, y, z + dz)),
+                        fact_at((x + dx, y - 1, z + dz)),
+                    )
+                    if fact is not None
+                )
+                if not water_adjacent:
+                    continue
+                candidates.append(
+                    {
+                        "feet_pos": list(feet_pos),
+                        "head_pos": list(head_pos),
+                        "support_pos": list(support_pos),
+                        "support_block": _normalize_item(str(support.data.get("type") or "unknown")),
+                        "distance": dist(origin, feet_pos),
+                    }
+                )
+
+        candidates.sort(
+            key=lambda entry: (
+                float(entry["distance"]),
+                abs(int(entry["feet_pos"][1]) - origin[1]),
+                tuple(entry["feet_pos"]),
+            )
+        )
+        complete = len(candidates) <= max_candidates
+        return {
+            "candidates": candidates[:max_candidates],
+            "candidate_count": len(candidates),
+            "complete": complete,
+            "exhaustion_reason": None if complete else "surface_egress_goal_limit",
+            "radius": radius,
+            "y_min": y_min,
+            "y_max": y_max,
+            "scanned_cells": len(scan_positions),
+            "max_candidates": max_candidates,
+        }
+
+    def _find_lateral_surface_domain(
+        self,
+        origin: Position,
+        *,
+        ring_specs: tuple[tuple[int, int], ...],
+        max_candidates: int,
+    ) -> dict[str, object] | ToolResult:
+        sampled = _surface_lateral_columns(origin, ring_specs)
+        columns = tuple((entry["x"], entry["z"]) for entry in sampled)
+        try:
+            facts = read_surface_columns(self.body, columns, failure_label="surface_lateral")
+        except ValueError as exc:
+            return ToolResult(
+                success=False,
+                reason="surface_lateral_world_read_failed",
+                can_retry=True,
+                next_suggestion="retry the bounded lateral surface-domain read",
+                metrics={"origin": list(origin), "error": str(exc), "column_count": len(columns)},
+            )
+
+        raw_candidates: list[dict[str, object]] = []
+        rejection_counts = {
+            "feet_not_clear": 0,
+            "head_not_clear": 0,
+            "support_not_solid": 0,
+            "support_governance": 0,
+        }
+        for sample in sampled:
+            fact = facts[(sample["x"], sample["z"])]
+            if fact.feet_state != "CLEAR":
+                rejection_counts["feet_not_clear"] += 1
+                continue
+            if fact.head_state != "CLEAR":
+                rejection_counts["head_not_clear"] += 1
+                continue
+            if fact.support_state != "SOLID":
+                rejection_counts["support_not_solid"] += 1
+                continue
+            raw_candidates.append(
+                {
+                    "feet_pos": list(fact.feet_pos),
+                    "head_pos": list(fact.head_pos),
+                    "support_pos": list(fact.support_pos),
+                    "support_block": _normalize_item(fact.support_type),
+                    "feet_state": fact.feet_state,
+                    "head_state": fact.head_state,
+                    "support_state": fact.support_state,
+                    "distance": round(dist(origin, fact.feet_pos), 3),
+                    "vertical_delta": fact.feet_y - origin[1],
+                    "ring_radius": sample["ring_radius"],
+                    "ring_index": sample["ring_index"],
+                    "sample_index": sample["sample_index"],
+                }
+            )
+        raw_candidates.sort(
+            key=lambda entry: (
+                abs(int(entry["vertical_delta"])),
+                float(entry["distance"]),
+                int(entry["ring_index"]),
+                int(entry["sample_index"]),
+            )
+        )
+
+        candidates: list[dict[str, object]] = []
+        evaluated = 0
+        selected_vertical_effort: int | None = None
+        selected_tier_count = 0
+        selected_tier_evaluated = 0
+        vertical_efforts = sorted({abs(int(entry["vertical_delta"])) for entry in raw_candidates})
+        for vertical_effort in vertical_efforts:
+            tier = [entry for entry in raw_candidates if abs(int(entry["vertical_delta"])) == vertical_effort]
+            tier_candidates: list[dict[str, object]] = []
+            tier_evaluated = 0
+            for entry in tier:
+                evaluated += 1
+                tier_evaluated += 1
+                support_pos = tuple(entry["support_pos"])
+                decision = self.governance.can_stand(support_pos, str(entry["support_block"]))
+                entry["support_legality"] = _decision_payload(decision)
+                entry["sky_exposure"] = {"exposed": True, "source": "surface_heightmap"}
+                entry["support_mode"] = "natural"
+                entry["candidate"] = decision.allowed
+                if not entry["candidate"]:
+                    rejection_counts["support_governance"] += 1
+                    continue
+                tier_candidates.append(entry)
+                if len(tier_candidates) >= max_candidates:
+                    break
+            if tier_candidates:
+                candidates = tier_candidates
+                selected_vertical_effort = vertical_effort
+                selected_tier_count = len(tier)
+                selected_tier_evaluated = tier_evaluated
+                break
+        complete = selected_vertical_effort is None or selected_tier_evaluated >= selected_tier_count
+        return {
+            "candidates": candidates,
+            "candidate_count": len(candidates),
+            "raw_candidate_count": len(raw_candidates),
+            "complete": complete,
+            "exhaustion_reason": None if complete else "surface_lateral_goal_limit",
+            "selection_strategy": "minimum_vertical_effort_tier",
+            "selected_vertical_effort": selected_vertical_effort,
+            "selected_tier_count": selected_tier_count,
+            "deferred_candidate_count": max(0, len(raw_candidates) - evaluated),
+            "column_count": len(columns),
+            "ring_specs": [list(spec) for spec in ring_specs],
+            "max_candidates": max_candidates,
+            "rejection_counts": rejection_counts,
+            "source": "surfaceColumns",
+        }
 
     def _standable_feet_at(self, feet_pos: Position) -> dict[str, object] | ToolResult:
         head_pos = (feet_pos[0], feet_pos[1] + 1, feet_pos[2])
@@ -2112,7 +2281,7 @@ class BlockWork:
             return failed
 
         support_type = str(below.data.get("type") or "unknown")
-        support_legality = self.governance.can_break(below_pos, support_type, BreakContext.DIRECT)
+        support_legality = self.governance.can_stand(below_pos, support_type)
         sky = self.sky_exposed(feet_pos, world_top_y=world_top_y)
         if isinstance(sky, ToolResult):
             return sky
@@ -2141,7 +2310,7 @@ class BlockWork:
             return failed
 
         support_type = str(below.data.get("type") or "unknown")
-        support_legality = self.governance.can_break(below_pos, support_type, BreakContext.DIRECT)
+        support_legality = self.governance.can_stand(below_pos, support_type)
         sky = self.sky_exposed(feet_pos, world_top_y=world_top_y)
         if isinstance(sky, ToolResult):
             return sky
@@ -2166,7 +2335,6 @@ class BlockWork:
                 and _is_clear_perception(head)
                 and _is_solid_support_perception(below)
                 and support_legality.allowed
-                and support_legality.reason == "allowed_natural"
                 and sky["exposed"]
             ),
             "feet_pos": list(feet_pos),
@@ -2352,7 +2520,9 @@ class BlockWork:
         This is a bounded Body transaction for the old `!placeHere` family:
         scan a small local neighborhood around the bot, find a clear target with
         solid support directly below, and try candidates in order without asking
-        the Brain to micro-pick exact coordinates.
+        the Brain to micro-pick exact coordinates. Same-level surfaces remain the
+        preferred domain; when that level has no supported target, a bounded
+        vertical band discovers nearby natural banks and ledges.
 
         It now includes two narrow work-position recoveries before giving up:
         clear one recoverable adjacent head block, or carve one recoverable
@@ -2365,9 +2535,18 @@ class BlockWork:
         if radius < 1:
             raise ValueError("radius must be >= 1")
 
-        scan = _scan_place_here_candidates(self.body, origin, radius)
-        if isinstance(scan, ToolResult):
-            return scan
+        scan_result = _scan_place_here_candidates(
+            self.body,
+            origin,
+            radius,
+            vertical_radius=self.PLACE_HERE_VERTICAL_RADIUS,
+            column_limit=self.PLACE_HERE_COLUMN_LIMIT,
+            candidate_limit=self.PLACE_HERE_CANDIDATE_LIMIT,
+        )
+        if isinstance(scan_result, ToolResult):
+            return scan_result
+        scan = scan_result.candidates
+        scan_diagnostics = scan_result.diagnostics
 
         supported = [candidate for candidate in scan if candidate["candidate"]]
         attempts: list[dict[str, object]] = []
@@ -2383,6 +2562,7 @@ class BlockWork:
                     "block_type": block_type,
                     "purpose": purpose,
                     "candidates": scan,
+                    "scan": scan_diagnostics,
                 },
             )
 
@@ -2395,9 +2575,18 @@ class BlockWork:
                 return recovery
             stand_position_recovery = recovery
             if recovery.get("recovered"):
-                scan = _scan_place_here_candidates(self.body, origin, radius)
-                if isinstance(scan, ToolResult):
-                    return scan
+                scan_result = _scan_place_here_candidates(
+                    self.body,
+                    origin,
+                    radius,
+                    vertical_radius=self.PLACE_HERE_VERTICAL_RADIUS,
+                    column_limit=self.PLACE_HERE_COLUMN_LIMIT,
+                    candidate_limit=self.PLACE_HERE_CANDIDATE_LIMIT,
+                )
+                if isinstance(scan_result, ToolResult):
+                    return scan_result
+                scan = scan_result.candidates
+                scan_diagnostics = scan_result.diagnostics
                 supported = [candidate for candidate in scan if candidate["candidate"]]
                 standable = [candidate for candidate in supported if candidate["has_stand_point"]]
         if not standable:
@@ -2406,9 +2595,18 @@ class BlockWork:
                 return recovery
             headroom_recovery = recovery
             if recovery.get("recovered"):
-                scan = _scan_place_here_candidates(self.body, origin, radius)
-                if isinstance(scan, ToolResult):
-                    return scan
+                scan_result = _scan_place_here_candidates(
+                    self.body,
+                    origin,
+                    radius,
+                    vertical_radius=self.PLACE_HERE_VERTICAL_RADIUS,
+                    column_limit=self.PLACE_HERE_COLUMN_LIMIT,
+                    candidate_limit=self.PLACE_HERE_CANDIDATE_LIMIT,
+                )
+                if isinstance(scan_result, ToolResult):
+                    return scan_result
+                scan = scan_result.candidates
+                scan_diagnostics = scan_result.diagnostics
                 supported = [candidate for candidate in scan if candidate["candidate"]]
                 standable = [candidate for candidate in supported if candidate["has_stand_point"]]
         if not standable:
@@ -2423,6 +2621,7 @@ class BlockWork:
                     "block_type": block_type,
                     "purpose": purpose,
                     "candidates": scan,
+                    "scan": scan_diagnostics,
                     "stand_position_recovery": stand_position_recovery,
                     "headroom_recovery": headroom_recovery,
                 },
@@ -2496,6 +2695,7 @@ class BlockWork:
                         "radius": radius,
                         "chosen_target": list(pos),
                         "candidates": scan,
+                        "scan": scan_diagnostics,
                         "attempts": attempts,
                         "stand_position_recovery": stand_position_recovery,
                         "headroom_recovery": headroom_recovery,
@@ -2510,6 +2710,7 @@ class BlockWork:
                         "origin": list(origin),
                         "radius": radius,
                         "candidates": scan,
+                        "scan": scan_diagnostics,
                         "attempts": attempts,
                         "stand_position_recovery": stand_position_recovery,
                         "headroom_recovery": headroom_recovery,
@@ -2528,6 +2729,7 @@ class BlockWork:
                     "block_type": block_type,
                     "purpose": purpose,
                     "candidates": scan,
+                    "scan": scan_diagnostics,
                     "attempts": attempts,
                     "stand_position_recovery": stand_position_recovery,
                     "headroom_recovery": headroom_recovery,
@@ -2547,6 +2749,7 @@ class BlockWork:
                     "block_type": block_type,
                     "purpose": purpose,
                     "candidates": scan,
+                    "scan": scan_diagnostics,
                     "attempts": attempts,
                     "stand_position_recovery": stand_position_recovery,
                     "headroom_recovery": headroom_recovery,
@@ -2564,6 +2767,7 @@ class BlockWork:
                 "block_type": block_type,
                 "purpose": purpose,
                 "candidates": scan,
+                "scan": scan_diagnostics,
                 "attempts": attempts,
                 "stand_position_recovery": stand_position_recovery,
                 "headroom_recovery": headroom_recovery,
@@ -2945,6 +3149,12 @@ class _FallProbe:
         self.failed = failed
 
 
+class _PlaceHereScan:
+    def __init__(self, candidates: list[dict[str, object]], diagnostics: dict[str, object]) -> None:
+        self.candidates = candidates
+        self.diagnostics = diagnostics
+
+
 def _perception_failure(perception: PerceptionResult) -> ToolResult | None:
     if perception.ok and perception.complete:
         return None
@@ -3001,60 +3211,6 @@ def _decision_payload(decision) -> dict[str, object]:
     return payload
 
 
-def _read_inventory_slots(body: Body, page_size: int = 12) -> PerceptionResult:
-    start: int | None = 0
-    slots: list[dict[str, object]] = []
-    last: PerceptionResult | None = None
-    while start is not None:
-        last = body.perceive("inventory", {"start": start, "limit": page_size})
-        if not last.ok:
-            return last
-        slots.extend(dict(item) for item in last.data.get("slots") or [])
-        start = perception_next_cursor(last)
-        if start is not None:
-            start = int(start)
-    if last is None:
-        return PerceptionResult(
-            bot=body.bot_name,
-            scope="inventory",
-            type="perception",
-            ok=False,
-            complete=True,
-            error="no pages read",
-        )
-    data = dict(last.data)
-    data["slots"] = slots
-    return PerceptionResult(
-        bot=last.bot,
-        scope=last.scope,
-        type="perception",
-        ok=last.ok,
-        complete=last.complete,
-        data=data,
-        uncertainty=last.uncertainty,
-        next=last.next,
-        error=last.error,
-    )
-
-
-def _inventory_counts(slots: list[InventorySlot]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for slot in slots:
-        if slot.empty or not slot.item:
-            continue
-        item = _normalize_item(slot.item)
-        counts[item] = counts.get(item, 0) + slot.count
-    return counts
-
-
-def _inventory_counts_from_body(body: Body) -> dict[str, int] | ToolResult:
-    inventory = _read_inventory_slots(body)
-    failed = _perception_failure(inventory)
-    if failed is not None:
-        return failed
-    return _inventory_counts([InventorySlot.from_payload(slot) for slot in inventory.data.get("slots") or []])
-
-
 def _dispatch_select_item(body: Body, item: str, *, timeout_s: float) -> ToolResult:
     action = Action.create("selectItem", {"item": item})
     accepted = body.execute(action)
@@ -3085,6 +3241,20 @@ def _dispatch_select_item(body: Body, item: str, *, timeout_s: float) -> ToolRes
 
 def _normalize_item(item: str) -> str:
     return item.removeprefix("minecraft:")
+
+
+def _body_fits_shaft(
+    pos: tuple[float, float, float],
+    shaft: Position,
+    *,
+    half_width: float = 0.3,
+    edge_margin: float = 0.02,
+) -> bool:
+    inset = half_width + edge_margin
+    return (
+        shaft[0] + inset <= pos[0] <= shaft[0] + 1.0 - inset
+        and shaft[2] + inset <= pos[2] <= shaft[2] + 1.0 - inset
+    )
 
 
 
@@ -3138,28 +3308,59 @@ def _scan_place_here_candidates(
     body: Body,
     origin: Position,
     radius: int,
-) -> list[dict[str, object]] | ToolResult:
-    scanned: list[dict[str, object]] = []
-    for target in _place_here_targets(origin, radius):
-        target_block = body.perceive("blockAt", _block_params(target))
-        failed = _perception_failure(target_block)
-        if failed is not None:
-            return failed
-        below = (target[0], target[1] - 1, target[2])
-        below_block = body.perceive("blockAt", _block_params(below))
-        failed = _perception_failure(below_block)
-        if failed is not None:
-            return failed
+    *,
+    vertical_radius: int,
+    column_limit: int,
+    candidate_limit: int,
+) -> _PlaceHereScan | ToolResult:
+    if vertical_radius < 0:
+        raise ValueError("vertical_radius must be >= 0")
+    if column_limit < 1:
+        raise ValueError("column_limit must be >= 1")
+    if candidate_limit < 1:
+        raise ValueError("candidate_limit must be >= 1")
 
-        target_clear = _is_clear_perception(target_block)
-        support_solid = _is_solid_support_perception(below_block)
-        stand_points: list[Position] = []
-        if target_clear and support_solid:
-            stand_points_result = interaction_stand_points(body, target)
-            if isinstance(stand_points_result, ToolResult):
-                return stand_points_result
-            stand_points = stand_points_result
-        scanned.append(
+    all_columns = _place_here_columns(origin, radius)
+    columns = all_columns[:column_limit]
+    rejection_counts: dict[str, int] = {}
+    rejection_samples: list[dict[str, object]] = []
+    scanned_position_count = 0
+
+    same_level_targets = tuple((x, origin[1], z) for x, z in columns)
+    same_level = _read_place_here_surfaces(body, same_level_targets)
+    if isinstance(same_level, ToolResult):
+        return same_level
+    scanned_position_count += same_level[1]
+    supported = _place_here_supported_surfaces(
+        same_level[0],
+        rejection_counts=rejection_counts,
+        rejection_samples=rejection_samples,
+    )
+    vertical_fallback = not supported and vertical_radius > 0
+
+    if vertical_fallback:
+        offsets = tuple(offset for delta in range(1, vertical_radius + 1) for offset in (delta, -delta))
+        vertical_targets = tuple((x, origin[1] + offset, z) for offset in offsets for x, z in columns)
+        vertical = _read_place_here_surfaces(body, vertical_targets)
+        if isinstance(vertical, ToolResult):
+            return vertical
+        scanned_position_count += vertical[1]
+        supported = _place_here_supported_surfaces(
+            vertical[0],
+            rejection_counts=rejection_counts,
+            rejection_samples=rejection_samples,
+        )
+
+    supported.sort(key=lambda item: _place_here_surface_sort_key(origin, item[0]))
+    supported_total = len(supported)
+    supported = supported[:candidate_limit]
+    candidates: list[dict[str, object]] = []
+    for target, target_block, below_block in supported:
+        below = (target[0], target[1] - 1, target[2])
+        stand_points_result = interaction_stand_points(body, target)
+        if isinstance(stand_points_result, ToolResult):
+            return stand_points_result
+        candidates.append(
             {
                 "target": list(target),
                 "support": list(below),
@@ -3167,12 +3368,93 @@ def _scan_place_here_candidates(
                 "target_state": str(target_block.data.get("state") or "UNKNOWN"),
                 "support_block": _normalize_item(str(below_block.data.get("type") or "unknown")),
                 "support_state": str(below_block.data.get("state") or "UNKNOWN"),
-                "candidate": target_clear and support_solid,
-                "stand_points": [list(point) for point in stand_points],
-                "has_stand_point": bool(stand_points),
+                "vertical_delta": target[1] - origin[1],
+                "candidate": True,
+                "stand_points": [list(point) for point in stand_points_result],
+                "has_stand_point": bool(stand_points_result),
             }
         )
-    return scanned
+
+    return _PlaceHereScan(
+        candidates,
+        {
+            "radius": radius,
+            "vertical_radius": vertical_radius,
+            "vertical_fallback": vertical_fallback,
+            "columns_total": len(all_columns),
+            "columns_scanned": len(columns),
+            "columns_complete": len(columns) == len(all_columns),
+            "column_limit": column_limit,
+            "scanned_position_count": scanned_position_count,
+            "supported_total": supported_total,
+            "candidate_count": len(candidates),
+            "candidate_limit": candidate_limit,
+            "candidates_complete": supported_total <= candidate_limit,
+            "rejection_counts": rejection_counts,
+            "rejection_samples": rejection_samples,
+        },
+    )
+
+
+def _read_place_here_surfaces(
+    body: Body,
+    targets: tuple[Position, ...],
+) -> tuple[list[tuple[Position, PerceptionResult, PerceptionResult]], int] | ToolResult:
+    wanted = tuple(dict.fromkeys((*targets, *((target[0], target[1] - 1, target[2]) for target in targets))))
+    try:
+        facts = read_block_facts(body, wanted, failure_label="place_here_surface")
+    except ValueError as exc:
+        return ToolResult(
+            success=False,
+            reason="perception_failed",
+            can_retry=True,
+            next_suggestion="refresh nearby terrain facts before retrying placement",
+            metrics={
+                "scope": "blockCells",
+                "ok": False,
+                "complete": False,
+                "error": str(exc),
+                "uncertainty": None,
+            },
+        )
+    return [
+        (target, facts[target], facts[(target[0], target[1] - 1, target[2])])
+        for target in targets
+    ], len(wanted)
+
+
+def _place_here_supported_surfaces(
+    surfaces: list[tuple[Position, PerceptionResult, PerceptionResult]],
+    *,
+    rejection_counts: dict[str, int],
+    rejection_samples: list[dict[str, object]],
+) -> list[tuple[Position, PerceptionResult, PerceptionResult]]:
+    supported: list[tuple[Position, PerceptionResult, PerceptionResult]] = []
+    for target, target_block, below_block in surfaces:
+        target_clear = _is_clear_perception(target_block)
+        support_solid = _is_solid_support_perception(below_block)
+        if target_clear and support_solid:
+            supported.append((target, target_block, below_block))
+            continue
+        if not target_clear:
+            reason = "target_not_clear"
+        elif str(below_block.data.get("state") or "UNKNOWN") == "LIQUID":
+            reason = "support_liquid"
+        else:
+            reason = "support_not_solid"
+        rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        if len(rejection_samples) < 8:
+            rejection_samples.append(
+                {
+                    "target": list(target),
+                    "target_block": _normalize_item(str(target_block.data.get("type") or "unknown")),
+                    "target_state": str(target_block.data.get("state") or "UNKNOWN"),
+                    "support_block": _normalize_item(str(below_block.data.get("type") or "unknown")),
+                    "support_state": str(below_block.data.get("state") or "UNKNOWN"),
+                    "reason": reason,
+                }
+            )
+    return supported
 
 
 def _is_solid_support_perception(perception: PerceptionResult) -> bool:
@@ -3180,18 +3462,31 @@ def _is_solid_support_perception(perception: PerceptionResult) -> bool:
     return block_state == "SOLID"
 
 
-def _place_here_targets(origin: Position, radius: int) -> tuple[Position, ...]:
-    candidates: list[tuple[int, float, Position]] = []
+def _place_here_columns(origin: Position, radius: int) -> tuple[tuple[int, int], ...]:
+    candidates: list[tuple[int, float, int, int]] = []
     for dz in range(-radius, radius + 1):
         for dx in range(-radius, radius + 1):
             if dx == 0 and dz == 0:
                 continue
-            target = (origin[0] + dx, origin[1], origin[2] + dz)
             manhattan = abs(dx) + abs(dz)
-            distance = dist((float(origin[0]), float(origin[1]), float(origin[2])), (float(target[0]), float(target[1]), float(target[2])))
-            candidates.append((manhattan, distance, target))
-    candidates.sort(key=lambda item: (item[0], item[1], item[2][2], item[2][0]))
-    return tuple(target for _manhattan, _distance, target in candidates)
+            distance = (dx * dx + dz * dz) ** 0.5
+            candidates.append((manhattan, distance, origin[0] + dx, origin[2] + dz))
+    candidates.sort(key=lambda item: (item[0], item[1], item[3], item[2]))
+    return tuple((x, z) for _manhattan, _distance, x, z in candidates)
+
+
+def _place_here_surface_sort_key(origin: Position, target: Position) -> tuple[float, int, int, int, int]:
+    horizontal = abs(target[0] - origin[0]) + abs(target[2] - origin[2])
+    return (
+        dist(
+            (float(origin[0]), float(origin[1]), float(origin[2])),
+            (float(target[0]), float(target[1]), float(target[2])),
+        ),
+        abs(target[1] - origin[1]),
+        horizontal,
+        target[2],
+        target[0],
+    )
 
 
 def _surface_scan_targets(origin: Position, y: int, *, radius: int = 1) -> tuple[Position, ...]:
@@ -3216,6 +3511,43 @@ def _surface_scan_targets(origin: Position, y: int, *, radius: int = 1) -> tuple
             candidates.append((manhattan, 0 if dx >= 0 else 1, abs(dz), pos))
     candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3][2], item[3][0]))
     return tuple(pos for _manhattan, _x_bias, _z_abs, pos in candidates)
+
+
+def _surface_lateral_columns(
+    origin: Position,
+    ring_specs: tuple[tuple[int, int], ...],
+) -> tuple[dict[str, int], ...]:
+    columns: list[dict[str, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for ring_index, (radius, samples) in enumerate(ring_specs):
+        if radius < 1 or samples < 1:
+            continue
+        perimeter = 8 * radius
+        for sample_index in range(samples):
+            distance = sample_index * perimeter // samples
+            side, offset = divmod(distance, 2 * radius)
+            if side == 0:
+                dx, dz = -radius + offset, -radius
+            elif side == 1:
+                dx, dz = radius, -radius + offset
+            elif side == 2:
+                dx, dz = radius - offset, radius
+            else:
+                dx, dz = -radius, radius - offset
+            column = (origin[0] + dx, origin[2] + dz)
+            if column in seen:
+                continue
+            seen.add(column)
+            columns.append(
+                {
+                    "x": column[0],
+                    "z": column[1],
+                    "ring_radius": radius,
+                    "ring_index": ring_index,
+                    "sample_index": sample_index,
+                }
+            )
+    return tuple(columns)
 
 
 def _place_here_retryable_reason(reason: str) -> bool:
@@ -3329,6 +3661,27 @@ def _selected_mining_stand(result: ToolResult, candidates: list[Position]) -> Po
     return candidates[0]
 
 
+def _selected_surface_goal(result: ToolResult, candidates: tuple[Position, ...]) -> Position:
+    metrics = dict(result.metrics or {})
+    raw = metrics.get("selected_goal", metrics.get("goal"))
+    if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+        selected = (int(raw[0]), int(raw[1]), int(raw[2]))
+        if selected in candidates:
+            return selected
+    return candidates[0]
+
+
+def _surface_terminal_verified(surface: dict[str, object]) -> bool:
+    return bool(surface.get("candidate"))
+
+
+def _surface_requires_lateral_egress(surface: dict[str, object]) -> bool:
+    sky_exposure = surface.get("sky_exposure") or {}
+    return (
+        surface.get("feet_state") == "LIQUID" or surface.get("head_state") == "LIQUID"
+    ) and isinstance(sky_exposure, dict) and not bool(sky_exposure.get("exposed"))
+
+
 def _distance_to_block_center(pos: tuple[float, float, float], target: Position) -> float:
     return dist(pos, (target[0] + 0.5, float(target[1]), target[2] + 0.5))
 
@@ -3349,28 +3702,15 @@ def _block_center_target(pos: Position) -> tuple[float, float, float]:
     return (pos[0] + 0.5, float(pos[1]), pos[2] + 0.5)
 
 
-def _pickup_walk_targets(pos: Position, drop_positions: list[Position]) -> list[Position]:
-    targets: list[Position] = [*drop_positions]
+def _pickup_fallback_positions(pos: Position) -> tuple[Position, ...]:
     px, py, pz = pos
-    targets.extend(
-        [
-            (px + 0.5, py, pz + 0.5),
-            (px, py, pz),
-            (px - 0.25, py, pz + 0.5),
-            (px + 1.25, py, pz + 0.5),
-            (px + 0.5, py, pz - 0.25),
-            (px + 0.5, py, pz + 1.25),
-        ]
+    return (
+        pos,
+        (px - 1, py, pz),
+        (px + 1, py, pz),
+        (px, py, pz - 1),
+        (px, py, pz + 1),
     )
-    unique: list[Position] = []
-    seen: set[tuple[float, float, float]] = set()
-    for target in targets:
-        key = (round(float(target[0]), 3), round(float(target[1]), 3), round(float(target[2]), 3))
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(target)
-    return unique
 
 
 def _same_column(pos: tuple[float, float, float], target: Position) -> bool:

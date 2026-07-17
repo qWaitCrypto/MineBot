@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from minebot.body import NavigationRunConfig, NavigationTransactions
 from minebot.game import GovernancePolicy, RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
-from minebot.game.navigation import GridCell, GridWorld, NavigationCostModel, SegmentedNavigator
 from minebot.game.rcon import RconConfig
 from tests.e2e_support import spawn_or_fail
 
@@ -55,16 +54,9 @@ def setup_world(rcon: RconClient) -> None:
         command(rcon, cmd)
 
 
-def flat_world(x_min: int, x_max: int, z_min: int, z_max: int, *, y: int = 59) -> GridWorld:
-    return GridWorld({(x, y, z): GridCell() for x in range(x_min, x_max + 1) for z in range(z_min, z_max + 1)})
-
-
 def make_runtime(body: ScarpetBody) -> NavigationTransactions:
     policy = GovernancePolicy(natural_regions=[Region("move_away", (-10, 0, -10), (10, 100, 10))])
-    return NavigationTransactions(
-        body,
-        SegmentedNavigator(flat_world(-10, 10, -10, 10), NavigationCostModel(policy)),
-    )
+    return NavigationTransactions.server_side(body, policy)
 
 
 def distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
@@ -103,11 +95,20 @@ def run_happy_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
             f"move_away did not increase distance enough: initial={initial_distance:.3f} final={final_distance:.3f} result={payload}"
         )
     nav_goal = (result.metrics or {}).get("navigation_goal") or {}
-    if nav_goal.get("kind") != "avoid":
-        raise AssertionError(f"move_away did not preserve avoid goal payload: {payload}")
+    chosen_goal = (result.metrics or {}).get("chosen_goal")
+    goal_positions = [goal.get("pos") for goal in nav_goal.get("goals") or []]
+    if nav_goal.get("kind") != "composite" or nav_goal.get("mode") != "any" or chosen_goal not in goal_positions:
+        raise AssertionError(f"move_away did not preserve its bounded witness domain and selected goal: {payload}")
     attempts = (result.metrics or {}).get("attempts") or []
     if not attempts or attempts[-1].get("result", {}).get("reason") != "arrived":
         raise AssertionError(f"move_away did not expose a successful navigation attempt: {payload}")
+    navigation_metrics = attempts[-1]["result"].get("metrics") or {}
+    if navigation_metrics.get("goal_set_preserved") is not True:
+        raise AssertionError(f"move_away truncated its escape witness domain: {payload}")
+    capability_snapshot = navigation_metrics.get("capability_snapshot") or {}
+    for flag in ("allow_break", "allow_place", "allow_pillar", "allow_downward"):
+        if capability_snapshot.get(flag) is not False:
+            raise AssertionError(f"move_away enabled terrain mutation {flag}: {payload}")
 
     return {
         "reason": result.reason,

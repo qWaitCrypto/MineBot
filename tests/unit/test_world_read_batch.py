@@ -1,7 +1,7 @@
 import unittest
 
 from minebot.contract import PerceptionResult
-from minebot.body.world_read import read_block_facts
+from minebot.body.world_read import read_block_facts, read_surface_columns
 
 
 def _fact(pos, block_type="air", state="CLEAR", properties=None):
@@ -87,6 +87,47 @@ class BatchFakeBody:
             uncertainty=[] if nxt is None else [{"reason": "limit_exceeded"}],
             next=str(nxt) if self.envelope_only_next and nxt is not None else None,
             error=None,
+        )
+
+
+class SurfaceColumnFakeBody:
+    bot_name = "Bot1"
+
+    def __init__(self, facts, *, page_limit=64, fail=False):
+        self.facts = dict(facts)
+        self.page_limit = page_limit
+        self.fail = fail
+        self.calls = []
+
+    def perceive(self, scope, params):
+        if scope != "surfaceColumns":
+            raise AssertionError(f"unexpected scope {scope}")
+        self.calls.append(dict(params))
+        if self.fail:
+            return PerceptionResult(
+                bot="Bot1",
+                scope=scope,
+                type="perception",
+                ok=False,
+                complete=True,
+                data={},
+                error="heightmap_unavailable",
+            )
+        columns = params["columns"]
+        start = int(params.get("start") or 0)
+        limit = min(self.page_limit, int(params.get("limit") or 64))
+        page = columns[start : start + limit]
+        rows = [self.facts[(int(column[0]), int(column[1]))] for column in page]
+        next_start = start + len(page)
+        nxt = None if next_start >= len(columns) else next_start
+        return PerceptionResult(
+            bot="Bot1",
+            scope=scope,
+            type="perception",
+            ok=True,
+            complete=nxt is None,
+            data={"columns": rows, "nextStart": nxt},
+            uncertainty=[] if nxt is None else [{"reason": "limit_exceeded"}],
         )
 
 
@@ -197,6 +238,57 @@ class ReadBlockFactsTests(unittest.TestCase):
         body = BatchFakeBody({(0, 64, 0): ("stone", "SOLID")}, unexpected_fact=(99, 64, 99))
         with self.assertRaisesRegex(ValueError, "unexpected cell"):
             read_block_facts(body, ((0, 64, 0),))
+
+
+class ReadSurfaceColumnsTests(unittest.TestCase):
+    def test_reads_paginated_compact_heightmap_facts(self):
+        facts = {
+            (0, 0): {
+                "x": 0,
+                "z": 0,
+                "feetY": 64,
+                "feetType": "air",
+                "feetState": "CLEAR",
+                "headType": "air",
+                "headState": "CLEAR",
+                "supportType": "grass_block",
+                "supportState": "SOLID",
+            },
+            (16, 0): {
+                "x": 16,
+                "z": 0,
+                "feetY": 70,
+                "feetType": "air",
+                "feetState": "CLEAR",
+                "headType": "air",
+                "headState": "CLEAR",
+                "supportType": "stone",
+                "supportState": "SOLID",
+            },
+            (32, 0): {
+                "x": 32,
+                "z": 0,
+                "feetY": 63,
+                "feetType": "air",
+                "feetState": "CLEAR",
+                "headType": "air",
+                "headState": "CLEAR",
+                "supportType": "stone",
+                "supportState": "SOLID",
+            },
+        }
+        body = SurfaceColumnFakeBody(facts, page_limit=2)
+
+        observed = read_surface_columns(body, tuple(facts), page_size=2)
+
+        self.assertEqual(len(body.calls), 2)
+        self.assertEqual(observed[(32, 0)].feet_pos, (32, 63, 0))
+        self.assertEqual(observed[(0, 0)].support_type, "grass_block")
+
+    def test_rejects_failed_surface_envelope(self):
+        body = SurfaceColumnFakeBody({}, fail=True)
+        with self.assertRaisesRegex(ValueError, "heightmap_unavailable"):
+            read_surface_columns(body, ((0, 0),))
 
 
 if __name__ == "__main__":

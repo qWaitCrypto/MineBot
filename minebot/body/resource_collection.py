@@ -200,8 +200,6 @@ class ResourceCollectionTransactions:
                 NavigationRunConfig(),
                 segment_timeout_s=cfg.segment_timeout_s,
                 max_break_steps=self.work.MINE_APPROACH_MAX_BREAK_STEPS,
-                allow_local_terrain_fallback=False,
-                progress_neutral_failures=False,
             )
             navigation = self.navigator.navigate_to(
                 goal,
@@ -220,25 +218,27 @@ class ResourceCollectionTransactions:
                 "navigation": navigation.to_payload(),
             }
 
+            if navigation.reason in {"preempted", "body_missing", "death", "respawned", "progress_yielded"}:
+                attempts.append(attempt)
+                return self._terminal(
+                    success=False,
+                    reason=f"resource_navigation_{navigation.reason}",
+                    can_retry=True,
+                    block_types=normalized_blocks,
+                    expected_drops=normalized_drops,
+                    remaining_count=remaining_count,
+                    collected=collected,
+                    candidate_blacklist=candidate_blacklist,
+                    patch_blacklist=patch_blacklist,
+                    attempts=attempts,
+                    searches=searches,
+                    config=cfg,
+                    started=started,
+                    last_failure=navigation.to_payload(),
+                )
+
             if not navigation.success:
                 attempts.append(attempt)
-                if navigation.reason in {"preempted", "body_missing", "death", "respawned", "progress_yielded"}:
-                    return self._terminal(
-                        success=False,
-                        reason=f"resource_navigation_{navigation.reason}",
-                        can_retry=True,
-                        block_types=normalized_blocks,
-                        expected_drops=normalized_drops,
-                        remaining_count=remaining_count,
-                        collected=collected,
-                        candidate_blacklist=candidate_blacklist,
-                        patch_blacklist=patch_blacklist,
-                        attempts=attempts,
-                        searches=searches,
-                        config=cfg,
-                        started=started,
-                        last_failure=navigation.to_payload(),
-                    )
                 rejected_targets = selected_targets or domain.targets
                 for target in rejected_targets:
                     candidate_blacklist.add(target.pos)

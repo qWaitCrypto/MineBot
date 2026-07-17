@@ -2,9 +2,10 @@ import unittest
 from unittest.mock import patch
 
 from minebot.body import InteractionTransactions
-from minebot.body.interaction import _openable_stand_points
+from minebot.body.interaction import _openable_look_target, _openable_stand_points
 from minebot.body.interaction_support import interaction_stand_points
 from minebot.body.interaction_support import ensure_interaction_range
+from minebot.body.navigation import NavigationRunConfig, SERVER_GOAL_SET_LIMIT
 from minebot.body.use import UseTransactions
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
 from minebot.game.governance import GovernancePolicy, Region
@@ -295,6 +296,22 @@ class InteractionRuntimeTests(unittest.TestCase):
 
         self.assertEqual(stands[0], (3, 64, 0))
         self.assertEqual(stands[-1], (1, 64, 0))
+
+    def test_trapdoor_look_targets_stay_inside_closed_and_open_collision_shapes(self):
+        pos = (2, 64, 0)
+
+        self.assertEqual(
+            _openable_look_target(pos, "oak_trapdoor", {"open": "false", "half": "bottom"}),
+            (2.5, 64.125, 0.5),
+        )
+        self.assertEqual(
+            _openable_look_target(pos, "oak_trapdoor", {"open": "false", "half": "top"}),
+            (2.5, 64.875, 0.5),
+        )
+        self.assertEqual(
+            _openable_look_target(pos, "oak_trapdoor", {"open": "true", "facing": "east"}),
+            (2.125, 64.5, 0.5),
+        )
 
     def test_search_for_entity_requires_filter(self):
         body = FakeInteractionBody(entities=[], block_states={}, states=[state_at((0, 64, 0))])
@@ -592,6 +609,18 @@ class InteractionRuntimeTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "distance_band_reached")
         self.assertEqual(len(navigator.calls), 1)
+        goal, navigation_kwargs = navigator.calls[0]
+        self.assertEqual(len(goal.goals), SERVER_GOAL_SET_LIMIT)
+        config = navigation_kwargs["config"]
+        self.assertIsInstance(config, NavigationRunConfig)
+        self.assertFalse(config.allow_break)
+        self.assertEqual(config.max_break_steps, 0)
+        self.assertFalse(config.allow_place)
+        self.assertEqual(config.max_place_steps, 0)
+        self.assertFalse(config.allow_pillar)
+        self.assertEqual(config.max_pillar_steps, 0)
+        self.assertFalse(config.allow_downward)
+        self.assertEqual(config.max_downward_steps, 0)
         self.assertGreaterEqual(result.metrics["final_distance"], 2.0)
         self.assertLessEqual(result.metrics["final_distance"], 4.5)
 
@@ -1001,7 +1030,7 @@ class InteractionRuntimeTests(unittest.TestCase):
         self.assertEqual(result.metrics["legality"]["reason"], "protected_region")
         self.assertEqual(use.calls, [])
 
-    def test_open_openable_uses_gate_specific_low_look_target(self):
+    def test_open_openable_uses_gate_center_look_target(self):
         body = FakeInteractionBody(
             entities=[],
             block_states={(2, 64, 0): ("minecraft:oak_fence_gate", "SOLID", {"open": "false", "facing": "east"})},
@@ -1013,7 +1042,7 @@ class InteractionRuntimeTests(unittest.TestCase):
         result = runtime.open_openable(pos=(2, 64, 0))
 
         self.assertTrue(result.success)
-        self.assertEqual(use.calls[0]["look_target"], (2.5, 64.2, 0.5))
+        self.assertEqual(use.calls[0]["look_target"], (2.5, 64.5, 0.5))
 
     def test_close_openable_reports_already_closed(self):
         body = FakeInteractionBody(

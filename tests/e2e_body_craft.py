@@ -15,7 +15,6 @@ from minebot.body import BlockWork, InventoryTransactions, NavigationTransaction
 from minebot.game import GovernancePolicy, RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
 from minebot.game.governance import PlaceContext
-from minebot.game.navigation import GridCell, GridWorld, NavigationCostModel, SegmentedNavigator
 from minebot.game.rcon import RconConfig
 from tests.e2e_support import spawn_or_fail
 
@@ -67,16 +66,9 @@ def clear_bot_inventory(rcon: RconClient) -> None:
         set_inventory_slot(rcon, slot, None)
 
 
-def flat_world(x_min: int, x_max: int, z_min: int, z_max: int, *, y: int = 59) -> GridWorld:
-    return GridWorld({(x, y, z): GridCell() for x in range(x_min, x_max + 1) for z in range(z_min, z_max + 1)})
-
-
 def make_runtime(body: ScarpetBody) -> InventoryTransactions:
     policy = GovernancePolicy(natural_regions=[Region("craft", (-8, 0, -8), (8, 100, 8))])
-    navigator = NavigationTransactions(
-        body,
-        SegmentedNavigator(flat_world(-8, 8, -8, 8), NavigationCostModel(policy)),
-    )
+    navigator = NavigationTransactions.server_side(body, policy)
     work = BlockWork(body, policy, navigator=navigator)
     return InventoryTransactions(body, navigator=navigator, governance=policy, work=work)
 

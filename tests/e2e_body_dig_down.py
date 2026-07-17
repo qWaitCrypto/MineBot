@@ -83,6 +83,15 @@ def reset_target_liquid_world(rcon: RconClient) -> None:
     command(rcon, "script in minebot run minebot_reset()")
 
 
+def reset_edge_alignment_world(rcon: RconClient) -> None:
+    setup_world(rcon)
+    command(rcon, f"setblock {ORIGIN[0]} 63 {ORIGIN[2]} air")
+    command(rcon, f"tp {BOT} {ORIGIN[0] + 0.98} {ORIGIN[1]} {ORIGIN[2] + 0.5} 0 0")
+    command(rcon, f"gamemode survival {BOT}")
+    command(rcon, f"effect clear {BOT}")
+    command(rcon, "script in minebot run minebot_reset()")
+
+
 def make_runtime(body: ScarpetBody) -> BlockWork:
     policy = GovernancePolicy(natural_regions=[Region("e2e-dig-down", (126, 55, -4), (134, 80, 4))])
     return BlockWork(body, policy)
@@ -187,6 +196,45 @@ def run_target_liquid_inverse(rcon: RconClient, body: ScarpetBody) -> dict[str, 
     }
 
 
+def run_edge_alignment_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+    reset_edge_alignment_world(rcon)
+    body.poll_events()
+    runtime = make_runtime(body)
+    before = body.get_state()
+    result = runtime.dig_down_to_y(
+        ORIGIN[1] - 1,
+        current_pos=ORIGIN,
+        context=BreakContext.DIRECT,
+        max_steps=1,
+        dig_timeout_s=8.0,
+        move_timeout_s=4.0,
+    )
+    after = body.get_state()
+    shaft = body.perceive("blockAt", {"x": ORIGIN[0], "y": 63, "z": ORIGIN[2]})
+    adjacent_support = body.perceive("blockAt", {"x": ORIGIN[0] + 1, "y": 63, "z": ORIGIN[2]})
+    steps = result.metrics.get("steps", [])
+
+    if not result.success or result.reason != "dig_down_target_reached":
+        raise AssertionError(f"dig_down edge-alignment path failed: {result.to_payload()}")
+    if int(after.pos[1]) > ORIGIN[1] - 1:
+        raise AssertionError(f"edge-aligned body did not descend: before={before.pos} after={after.pos}")
+    if [step.get("kind") for step in steps] != ["open", "alignment", "descent"]:
+        raise AssertionError(f"edge-alignment action order is wrong: {steps}")
+    if steps[1].get("reason") != "dig_down_aligned":
+        raise AssertionError(f"edge-alignment terminal truth is wrong: {steps[1]}")
+    if shaft.data.get("state") != "CLEAR":
+        raise AssertionError(f"edge-alignment shaft unexpectedly changed: {shaft.data}")
+    if adjacent_support.data.get("state") != "SOLID":
+        raise AssertionError(f"edge support unexpectedly changed: {adjacent_support.data}")
+    return {
+        "before": before.pos,
+        "after": after.pos,
+        "step_reasons": [step.get("reason") for step in steps],
+        "shaft": shaft.data,
+        "adjacent_support": adjacent_support.data,
+    }
+
+
 def main() -> None:
     config = RconConfig()
     try:
@@ -204,9 +252,10 @@ def main() -> None:
         spawn_or_fail(body, ORIGIN)
 
         cases = {
-            "happy": lambda: run_happy_path(rcon, body),
-            "fall_risk": lambda: run_fall_risk_inverse(rcon, body),
-            "target_liquid": lambda: run_target_liquid_inverse(rcon, body),
+            "happy": lambda: run_happy_path(rcon, ScarpetBody(BOT, rcon)),
+            "fall_risk": lambda: run_fall_risk_inverse(rcon, ScarpetBody(BOT, rcon)),
+            "target_liquid": lambda: run_target_liquid_inverse(rcon, ScarpetBody(BOT, rcon)),
+            "edge_alignment": lambda: run_edge_alignment_path(rcon, ScarpetBody(BOT, rcon)),
         }
         selected_raw = os.environ.get("MINEBOT_DIG_DOWN_CASES")
         selected = [name.strip() for name in selected_raw.split(",") if name.strip()] if selected_raw else list(cases.keys())

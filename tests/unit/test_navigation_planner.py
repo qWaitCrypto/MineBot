@@ -556,6 +556,26 @@ class NavigationPlannerTests(unittest.TestCase):
         self.assertGreaterEqual(result.diagnostics["progress"], 2)
         self.assertEqual(result.path[-1].pos, (3, 64, 0))
 
+    def test_astar_does_not_yield_a_partial_with_a_liquid_endpoint(self):
+        cells = {
+            (0, 64, 0): GridCell(),
+            (1, 64, 0): GridCell(block_type="water", liquid=True),
+            (2, 64, 0): GridCell(block_type="water", liquid=True),
+            (3, 64, 0): GridCell(block_type="water", liquid=True),
+        }
+        planner = AStarPlanner(GridWorld(cells), NavigationCostModel(GovernancePolicy()))
+
+        result = planner.plan(
+            (0, 64, 0),
+            (10, 64, 0),
+            min_partial_progress=2,
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "no_path")
+        self.assertNotEqual(result.reason, "partial")
+        self.assertEqual(result.path, ())
+
     def test_astar_rejects_invalid_unloaded_boundary_limit(self):
         cells = grid(2, 1)
         planner = AStarPlanner(GridWorld(cells), NavigationCostModel(GovernancePolicy()))

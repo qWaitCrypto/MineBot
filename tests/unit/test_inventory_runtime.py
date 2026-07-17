@@ -1,6 +1,7 @@
 import unittest
 
 from minebot.body import InventoryTransactions
+from minebot.body.inventory import _parse_recipe_variants
 from minebot.contract import Action, Event, PerceptionResult, Result, ToolResult
 
 
@@ -169,6 +170,28 @@ def slot(index, item=None, count=0):
 
 
 class InventoryRuntimeTests(unittest.TestCase):
+    def test_recipe_parser_unwraps_compact_server_variant_list(self):
+        perception_result = PerceptionResult(
+            bot="Bot1",
+            scope="recipeData",
+            type="perception",
+            ok=True,
+            complete=True,
+            data={
+                "item": "minecraft:leather_helmet",
+                "variantCount": 2,
+                "recipe_raw": "[[[[[leather_helmet, 1]], [[leather], [leather]], [shaped, 2, 1]], "
+                "[[[leather_helmet, 1]], [[leather_helmet], [red_dye]], [custom]]]]",
+            },
+        )
+
+        variants = _parse_recipe_variants("minecraft:leather_helmet", perception_result)
+
+        self.assertIsInstance(variants, list)
+        self.assertEqual(len(variants), 2)
+        self.assertEqual(variants[0].recipe_kind, "shaped")
+        self.assertEqual(variants[1].ingredient_groups[1], ("minecraft:red_dye",))
+
     def test_inventory_reads_small_pages_and_merges_slots(self):
         body = FakeInventoryBody(
             [

@@ -15,6 +15,7 @@ from minebot.body import (  # noqa: E402
     NavigationTransactions,
     ResourceCollectionConfig,
     ResourceCollectionTransactions,
+    VoxelStructureRiskAssessor,
 )
 from minebot.brain.composition import (  # noqa: E402
     CompositionBudget,
@@ -116,6 +117,8 @@ def make_registry(
     policy = GovernancePolicy(
         natural_regions=[REGION],
         protected_regions=[Region("protected-target", (3, 70, 0), (8, 70, 0))] if protected else [],
+        structure_risk_assessor=VoxelStructureRiskAssessor(body),
+        require_structure_assessment=True,
     )
     navigator = NavigationTransactions.server_side(body, policy)
     work = BlockWork(body, policy, navigator=navigator)
@@ -287,7 +290,14 @@ def run_resource_ladder(rcon: RconClient, body: ScarpetBody) -> dict[str, object
             rcon,
             body,
             item="logs",
-            blocks=[(3, 70, 1, "oak_log"), (4, 70, 1, "oak_log"), (5, 70, 1, "oak_log")],
+            blocks=[
+                (3, 69, 1, "dirt"),
+                (3, 70, 1, "oak_log"),
+                (3, 71, 1, "oak_log"),
+                (3, 72, 1, "oak_log"),
+                (3, 73, 1, "oak_leaves"),
+                (4, 72, 1, "oak_leaves"),
+            ],
             count=2,
         ),
         "coal": run_happy(
@@ -329,6 +339,42 @@ def run_resource_ladder(rcon: RconClient, body: ScarpetBody) -> dict[str, object
         blocks=[(3, 70, 0, "oak_log"), (4, 70, 0, "oak_log")],
     )
     return {"happy": ladder, "missing_rare": missing_rare, "protected_log": protected_log}
+
+
+def run_exact_target_mining(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+    reset_subject(
+        rcon,
+        blocks=[
+            (3, 69, 1, "dirt"),
+            (3, 70, 1, "oak_log"),
+            (3, 71, 1, "oak_log"),
+        ],
+    )
+    command(rcon, f"tp {BOT} 2 70 1 -90 0")
+    policy = GovernancePolicy(
+        natural_regions=[REGION],
+        structure_risk_assessor=VoxelStructureRiskAssessor(body),
+        require_structure_assessment=True,
+    )
+    result = BlockWork(body, policy).mine_block(
+        (3, 70, 1),
+        context=BreakContext.COLLECT,
+        approach=False,
+        timeout_s=10.0,
+    )
+    target = body.perceive("blockAt", {"x": 3, "y": 70, "z": 1})
+    neighbor = body.perceive("blockAt", {"x": 3, "y": 71, "z": 1})
+    target_after = str(target.data.get("type") or "unknown").removeprefix("minecraft:")
+    neighbor_after = str(neighbor.data.get("type") or "unknown").removeprefix("minecraft:")
+    if not result.success or target_after != "air":
+        raise AssertionError(f"exact-target mine did not clear the authorized target: {result}, after={target_after}")
+    if neighbor_after != "oak_log":
+        raise AssertionError(f"exact-target mine mutated the occluding neighbor: {result}, neighbor={neighbor_after}")
+    return {
+        "reason": result.reason,
+        "target_after": target_after,
+        "neighbor_after": neighbor_after,
+    }
 
 
 def inventory_count(body: ScarpetBody, item: str) -> int:
@@ -450,6 +496,36 @@ def run_illegal(
     }
 
 
+def run_structure_risk_inverse(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+    reset_subject(
+        rcon,
+        blocks=[
+            (3, 70, 0, "stone"),
+            (3, 70, 1, "oak_planks"),
+        ],
+    )
+    policy = GovernancePolicy(
+        natural_regions=[REGION],
+        structure_risk_assessor=VoxelStructureRiskAssessor(body),
+        require_structure_assessment=True,
+    )
+    result = BlockWork(body, policy).mine_block(
+        (3, 70, 0),
+        context=BreakContext.DIRECT,
+        approach=False,
+    )
+    after = body.perceive("blockAt", {"x": 3, "y": 70, "z": 0})
+    if result.success or result.reason != "break_denied:player_structure_risk":
+        raise AssertionError(f"structure-risk inverse returned wrong truth: {result}")
+    if str(after.data.get("type") or "").removeprefix("minecraft:") != "stone":
+        raise AssertionError(f"structure-risk inverse mutated target: {after}")
+    return {
+        "reason": result.reason,
+        "target_after": after.data.get("type"),
+        "risk": result.metrics["legality"]["details"]["structure_risk"],
+    }
+
+
 def main() -> None:
     config = RconConfig()
     try:
@@ -469,18 +545,22 @@ def main() -> None:
         sand = run_happy(rcon, body, item="sand")
         gravel = run_happy(rcon, body, item="gravel")
         resumed = run_interrupt_resume(rcon, body)
+        exact_target_mining = run_exact_target_mining(rcon, body)
         ladder = run_resource_ladder(rcon, body)
         missing = run_not_found(rcon, body)
         illegal = run_illegal(rcon, body)
+        structure_risk = run_structure_risk_inverse(rcon, body)
         print(
             {
                 "dirt": dirt,
                 "sand": sand,
                 "gravel": gravel,
                 "resumed": resumed,
+                "exact_target_mining": exact_target_mining,
                 "ladder": ladder,
                 "missing": missing,
                 "illegal": illegal,
+                "structure_risk": structure_risk,
             }
         )
 

@@ -106,6 +106,18 @@ def setup_downward_area(rcon, x: int, z: int, *, back_length: int = 20) -> None:
     command(rcon, f"setblock {x} {BASE_Y - 3} {z} stone")
 
 
+def setup_high_bank_water_lane(rcon, x: int, z: int) -> tuple[int, int, int]:
+    water_y = BASE_Y - 8
+    command(rcon, f"fill {x - 2} {water_y - 6} {z - 2} {x + 20} {BASE_Y + 3} {z + 2} air")
+    command(rcon, f"fill {x - 2} {BASE_Y - 1} {z - 1} {x} {BASE_Y - 1} {z + 1} stone")
+    command(rcon, f"fill {x + 1} {water_y - 5} {z - 1} {x + 15} {water_y - 5} {z + 1} stone")
+    command(rcon, f"fill {x + 1} {water_y - 4} {z - 1} {x + 15} {water_y} {z + 1} water")
+    command(rcon, f"fill {x + 16} {water_y} {z - 1} {x + 20} {water_y} {z + 1} stone")
+    command(rcon, f"fill {x - 2} {water_y - 5} {z - 2} {x + 20} {BASE_Y + 2} {z - 2} stone")
+    command(rcon, f"fill {x - 2} {water_y - 5} {z + 2} {x + 20} {BASE_Y + 2} {z + 2} stone")
+    return (x + 18, water_y + 1, z)
+
+
 def setup_open_lane(rcon, x: int, z: int, *, opened: bool = False, iron: bool = False, back_length: int = 12) -> tuple[int, int, int]:
     command(rcon, f"fill {x - back_length} {BASE_Y - 2} {z - 2} {x + 7} {BASE_Y + 3} {z + 2} air")
     command(rcon, f"fill {x - back_length} {BASE_Y - 1} {z - 1} {x + 7} {BASE_Y - 1} {z + 1} stone")
@@ -168,6 +180,33 @@ class WorldChangingBody(ScarpetBody):
             command(self.transport, f"setblock {x} {y + 1} {z} stone", delay=0.0)
             self.injected = True
         return super().await_action_terminal(action_id, timeout_s=timeout_s, **kwargs)
+
+
+class RecoveryOpeningBody(ScarpetBody):
+    def __init__(self, *args, opening: tuple[tuple[int, int, int], ...], **kwargs):
+        super().__init__(*args, **kwargs)
+        self.opening = opening
+        self.opened = False
+        self.navigate_actions: list[dict[str, object]] = []
+        self.navigate_terminals: list[dict[str, object]] = []
+
+    def execute(self, action):
+        if action.name == "navigateTo":
+            self.navigate_actions.append({"id": action.id, "params": dict(action.params)})
+        return super().execute(action)
+
+    def await_action_terminal(self, action_id: str, timeout_s: float = 15.0, **kwargs):
+        terminal = super().await_action_terminal(action_id, timeout_s=timeout_s, **kwargs)
+        if terminal.name == "navigateDone":
+            reason = terminal.data.get("reason") or terminal.data.get("nav_reason")
+            self.navigate_terminals.append(
+                {"action_id": terminal.data.get("action_id"), "reason": reason}
+            )
+            if not self.opened and reason == "no_path":
+                for x, y, z in self.opening:
+                    command(self.transport, f"setblock {x} {y} {z} air", delay=0.0)
+                self.opened = True
+        return terminal
 
 
 class InterruptingBody(ScarpetBody):
@@ -375,7 +414,11 @@ def main() -> None:
         command(rcon, f"fill {x + 1} {BASE_Y - 5} {z} {x + 4} {BASE_Y - 5} {z} stone")
         teleport(rcon, (x, BASE_Y, z))
         unsafe = navigate(body, (x + 2, BASE_Y - 4, z))
-        if unsafe.success or unsafe.reason not in {"no_path", "budget_exceeded"}:
+        if unsafe.success or unsafe.reason not in {
+            "no_path",
+            "budget_exceeded",
+            "recovery_exhausted:no_path",
+        }:
             raise AssertionError(f"unsafe fall was accepted: {unsafe.to_payload()}")
         if body.get_state().pos[1] < BASE_Y - 0.5:
             raise AssertionError(f"unsafe fall moved the bot: {body.get_state().pos}")
@@ -387,6 +430,74 @@ def main() -> None:
         command(rcon, f"fill {x + 2} {BASE_Y} {z} {x + 4} {BASE_Y} {z} water")
         teleport(rcon, (x, BASE_Y, z))
         require_move(body, (x + 7, BASE_Y, z), "swim")
+
+        x, z = BASE_X + 70, BASE_Z + 10
+        high_bank_target = setup_high_bank_water_lane(rcon, x, z)
+        teleport(rcon, (x, BASE_Y, z))
+        event_start = len(body.event_log)
+        high_bank = navigate(
+            body,
+            high_bank_target,
+            config=NavigationRunConfig(
+                max_segments=5,
+                max_partial_segments=5,
+                segment_timeout_s=15.0,
+                min_partial_progress=2,
+                allow_break=False,
+                max_break_steps=0,
+                allow_place=False,
+                max_place_steps=0,
+                allow_pillar=False,
+                max_pillar_steps=0,
+                allow_downward=False,
+                max_downward_steps=0,
+                recovery_attempts=0,
+            ),
+        )
+        high_bank_segments = (high_bank.metrics or {}).get("segments", [])
+        high_bank_counts = {
+            kind: movement_total(high_bank, kind)
+            for kind in ("walk", "swim", "ascend", "break", "place", "pillar", "downward")
+        }
+        kind_changes = [
+            (event.data.get("from"), event.data.get("to"))
+            for event in body.event_log[event_start:]
+            if event.name == "moveKindChanged"
+        ]
+        cancellation_profiles = [
+            event.data.get("movement_cancel") or {}
+            for event in body.event_log[event_start:]
+            if event.name in {"moveStarted", "moveDone"}
+        ]
+        sampled_profile = next(
+            (profile for profile in cancellation_profiles if int(profile.get("unsafe_count") or 0) >= 15),
+            None,
+        )
+        if not high_bank.success or high_bank.reason != "arrived":
+            raise AssertionError(f"high-bank water traversal failed: {high_bank.to_payload()}")
+        if high_bank_counts["swim"] < 15 or high_bank_counts["ascend"] < 1 or high_bank_counts["walk"] < 1:
+            raise AssertionError(f"high-bank movement taxonomy incomplete: {high_bank_counts}")
+        if any(high_bank_counts[kind] for kind in ("break", "place", "pillar", "downward")):
+            raise AssertionError(f"high-bank traversal mutated terrain: {high_bank_counts}")
+        if ("swim", "ascend") not in kind_changes or ("ascend", "walk") not in kind_changes:
+            raise AssertionError(f"high-bank control handoff missing: {kind_changes}")
+        if any((segment.get("diagnostics") or {}).get("mutation_events") for segment in high_bank_segments):
+            raise AssertionError(f"high-bank traversal proposed terrain mutation: {high_bank.to_payload()}")
+        if sampled_profile is None:
+            raise AssertionError(f"high-bank cancellation profile missing: {cancellation_profiles}")
+        if sampled_profile.get("unsafe_steps_complete") is not False:
+            raise AssertionError(f"high-bank cancellation projection claimed completeness: {sampled_profile}")
+        if len(sampled_profile.get("unsafe_steps") or []) > 6 or int(sampled_profile.get("omitted_count") or 0) < 1:
+            raise AssertionError(f"high-bank cancellation projection is not bounded: {sampled_profile}")
+        if any(event.name == "eventPayloadTooLarge" for event in body.event_log[event_start:]):
+            raise AssertionError("high-bank event payload exceeded the bounded projection")
+        final_high_bank = body.get_state()
+        if final_high_bank.health <= 0 or final_high_bank.oxygen != 300:
+            raise AssertionError(f"high-bank traversal lost survival truth: {final_high_bank}")
+        print(
+            f"PASS high_bank_water: pos={final_high_bank.pos} counts={high_bank_counts} "
+            f"kind_changes={kind_changes}"
+        )
 
         for offset, block in (
             (20, "oak_slab[type=bottom]"),
@@ -415,6 +526,56 @@ def main() -> None:
         if not changed.success or "world_changed" not in reasons or reasons[-1] != "arrived":
             raise AssertionError(f"world-change replan failed: {changed.to_payload()}")
         print(f"PASS world_change_replan: reasons={reasons}")
+
+        x, z = BASE_X + 80, BASE_Z + 20
+        clear_lane(rcon, x, z, x_size=9, z_size=7)
+        flat_floor(rcon, x, z, x_size=9, z_radius=3)
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            command(rcon, f"fill {x + dx} {BASE_Y} {z + dz} {x + dx} {BASE_Y + 1} {z + dz} stone")
+        teleport(rcon, (x, BASE_Y, z))
+        opening = ((x + 1, BASE_Y, z), (x + 1, BASE_Y + 1, z))
+        recovery_body = RecoveryOpeningBody(BOT, rcon, opening=opening)
+        recovered = navigate(
+            recovery_body,
+            (x + 7, BASE_Y, z),
+            config=NavigationRunConfig(
+                max_segments=4,
+                segment_timeout_s=5.0,
+                min_partial_progress=1,
+                allow_break=False,
+                max_break_steps=0,
+                allow_place=False,
+                max_place_steps=0,
+                allow_pillar=False,
+                max_pillar_steps=0,
+                allow_downward=False,
+                max_downward_steps=0,
+                recovery_attempts=1,
+            ),
+        )
+        recovery_reasons = [entry["reason"] for entry in recovery_body.navigate_terminals]
+        if not recovered.success or recovered.reason != "arrived":
+            raise AssertionError(f"recovery continuation failed: {recovered.to_payload()}")
+        if recovery_reasons != ["no_path", "arrived", "arrived"]:
+            raise AssertionError(
+                f"recovery action sequence was not original -> recovery -> original: {recovery_reasons}"
+            )
+        if len(recovery_body.navigate_actions) != 3:
+            raise AssertionError(f"unexpected recovery action count: {recovery_body.navigate_actions}")
+        first_goals = recovery_body.navigate_actions[0]["params"].get("goals")
+        recovery_goals = recovery_body.navigate_actions[1]["params"].get("goals")
+        resumed_goals = recovery_body.navigate_actions[2]["params"].get("goals")
+        if first_goals != resumed_goals or [*opening[0], 0] not in recovery_goals:
+            raise AssertionError(
+                f"recovery goal domain/resume mismatch: first={first_goals} recovery={recovery_goals} resumed={resumed_goals}"
+            )
+        if any(
+            action["params"].get(key)
+            for action in recovery_body.navigate_actions
+            for key in ("allow_break", "allow_place", "allow_pillar", "allow_downward")
+        ):
+            raise AssertionError(f"recovery escalated terrain mutation capability: {recovery_body.navigate_actions}")
+        print(f"PASS recovery_continuation: reasons={recovery_reasons} pos={recovery_body.get_state().pos}")
 
         x, z = BASE_X, BASE_Z + 40
         bridge_pos = setup_bridge_lane(rcon, x, z)
@@ -765,6 +926,7 @@ def main() -> None:
                 allow_place=False,
                 allow_pillar=False,
                 max_downward_steps=2,
+                recovery_attempts=0,
             ),
         )
         if unsafe_downward.success or unsafe_downward.reason != "no_path":
@@ -911,6 +1073,7 @@ def main() -> None:
                 allow_pillar=False,
                 allow_downward=False,
                 max_open_steps=2,
+                recovery_attempts=0,
             ),
         )
         if iron_door.success or iron_door.reason != "no_path":

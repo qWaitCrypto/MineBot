@@ -4,6 +4,7 @@ global_tick = 0;
 global_event_epoch = null;
 global_moves = {};
 global_move_cancels = {};
+global_move_control_inits = {};
 global_navigations = {};
 global_navigation_mutations = {};
 global_follows = {};
@@ -28,6 +29,7 @@ global_engages = {};
 global_hostile_types = l('minecraft:zombie', 'minecraft:husk', 'minecraft:drowned', 'minecraft:zombie_villager', 'minecraft:skeleton', 'minecraft:stray', 'minecraft:bogged', 'minecraft:creeper', 'minecraft:spider', 'minecraft:cave_spider', 'minecraft:witch', 'minecraft:silverfish', 'minecraft:endmite', 'minecraft:slime', 'minecraft:magma_cube', 'minecraft:enderman', 'minecraft:endermite', 'minecraft:blaze', 'minecraft:ghast', 'minecraft:pillager', 'minecraft:vindicator', 'minecraft:evoker', 'minecraft:ravager', 'minecraft:shulker', 'minecraft:phantom', 'minecraft:wither_skeleton', 'minecraft:zoglin', 'minecraft:hoglin', 'minecraft:piglin_brute');
 global_ranged_types = l('minecraft:skeleton', 'minecraft:stray', 'minecraft:bogged', 'minecraft:witch', 'minecraft:blaze', 'minecraft:ghast', 'minecraft:pillager', 'minecraft:shulker');
 global_response_char_budget = 2000;
+global_movement_cancel_step_sample_limit = 6;
 global_pending_spawns = {};
 global_respawn_notices = {};
 global_missing_notices = {};
@@ -92,12 +94,17 @@ json_waypoint_summary(points) -> (
 json_movement_cancel_steps(steps) -> (
   out = '';
   first = true;
-  if(steps != null,
-    loop(length(steps),
+  count = if(steps == null, 0, length(steps));
+  edge_count = floor(global_movement_cancel_step_sample_limit / 2);
+  tail_start = max(edge_count, count - edge_count);
+  if(count > 0,
+    loop(count,
       step = steps:_;
-      if(first, first = false, out += ',');
-      out += str('{"index":%d,"pos":%s,"move":%s,"policy":%s}',
-        floor(number(step:'index')), json_pos(step:'pos'), json_string(step:'move'), json_string(step:'policy'))
+      if(_ < edge_count || _ >= tail_start,
+        if(first, first = false, out += ',');
+        out += str('{"index":%d,"pos":%s,"move":%s,"policy":%s}',
+          floor(number(step:'index')), json_pos(step:'pos'), json_string(step:'move'), json_string(step:'policy'))
+      )
     )
   );
   str('[%s]', out)
@@ -105,12 +112,20 @@ json_movement_cancel_steps(steps) -> (
 
 movement_cancel_json(profile) -> (
   if(profile == null,
-    '{"safe_to_cancel":true,"unsafe_count":0,"unsafe_steps":[]}'
+    '{"safe_to_cancel":true,"unsafe_count":0,"unsafe_steps":[],"unsafe_steps_complete":true,"omitted_count":0}'
   ,
-    str('{"safe_to_cancel":%s,"unsafe_count":%d,"unsafe_steps":%s}',
+    unsafe_count = max(0, floor(number(profile:'unsafe_count')));
+    steps = profile:'unsafe_steps';
+    available_count = if(steps == null, 0, length(steps));
+    emitted_count = min(available_count, global_movement_cancel_step_sample_limit);
+    steps_complete = available_count == unsafe_count && available_count <= global_movement_cancel_step_sample_limit;
+    omitted_count = max(0, unsafe_count - emitted_count);
+    str('{"safe_to_cancel":%s,"unsafe_count":%d,"unsafe_steps":%s,"unsafe_steps_complete":%s,"omitted_count":%d}',
       json_bool(bool(profile:'safe_to_cancel')),
-      floor(number(profile:'unsafe_count')),
-      json_movement_cancel_steps(profile:'unsafe_steps'))
+      unsafe_count,
+      json_movement_cancel_steps(steps),
+      json_bool(steps_complete),
+      omitted_count)
   )
 );
 
@@ -210,9 +225,13 @@ event_data_json(kind, data) -> (
     out = str('{"action_id":"%s","reason":"%s","arrived":%s,"final_pos":%s,"target":%s,"dist_to_target":%.3f,"ticks":%d,"stuck_ticks":%d}',
       data:0, data:1, json_bool(data:2), json_pos(data:3), json_pos(data:4), data:5, data:6, data:7)
   );
+  if(kind == 'moveKindChanged',
+    out = str('{"action_id":"%s","from":"%s","to":"%s","pos":%s,"target":%s}',
+      data:0, data:1, data:2, json_pos(data:3), json_pos(data:4))
+  );
   if(kind == 'navigateStartTrace',
-    out = str('{"action_id":"%s","plan_status":"%s","goal":%s,"expanded":%d,"path_length":%d,"goal_count":%d,"movement_counts":%s,"partial_coefficient":%s,"partial_distance":%.3f,"capability_snapshot":%s}',
-      data:0, data:1, json_pos(data:2), data:3, data:4, data:5, data:6, json_number_null(data:7), data:8, data:9)
+    out = str('{"action_id":"%s","plan_status":"%s","goal":%s,"expanded":%d,"path_length":%d,"goal_count":%d,"movement_counts":%s,"partial_coefficient":%s,"partial_distance":%.3f,"capability_snapshot":%s,"segment_index":%d,"partial_replans_remaining":%d}',
+      data:0, data:1, json_pos(data:2), data:3, data:4, data:5, data:6, json_number_null(data:7), data:8, data:9, data:10, data:11)
   );
   if(kind == 'navigateFinishTrace',
     out = str('{"action_id":"%s","arrived":%s,"reason":"%s","final_pos":%s,"goal":%s,"goal_dist":%.3f,"expanded":%d,"waypoints":%d,"goal_count":%d,"movement_counts":%s,"capability_snapshot":%s,"partial_coefficient":%s,"partial_distance":%.3f}',
@@ -261,6 +280,10 @@ event_data_json(kind, data) -> (
   if(kind == 'moveCancelDelayed',
     out = str('{"action_id":"%s","stopped_reason":"%s","movement_cancel":%s,"requested_tick":%d}',
       data:0, data:1, data:2, data:3)
+  );
+  if(kind == 'moveCancelEgress',
+    out = str('{"action_id":"%s","reason":"%s","phase":"%s","pos":%s,"target":%s,"target_dry":%s}',
+      data:0, data:1, data:2, json_pos(data:3), json_pos(data:4), json_bool(data:5))
   );
   if(kind == 'lookDone',
     out = str('{"action_id":"%s","success":%s,"target":%s,"final_pos":%s,"stopped_reason":"%s"}',
@@ -358,6 +381,12 @@ event_json(e) -> (
     e:0, e:1, e:3, e:2, event_data_json(e:2, e:4))
 );
 
+oversized_event_json(e, payload_chars) -> (
+  if(length(e) == 1, e = e:0);
+  str('{"type":"event","seq":%d,"tick":%d,"bot":"%s","name":"eventPayloadTooLarge","data":{"original_name":%s,"source_seq":%d,"payload_chars":%d,"payload_complete":false}}',
+    e:0, e:1, e:3, json_string(e:2), e:0, payload_chars)
+);
+
 events_json(name, evs) -> (
   out = '';
   first = true;
@@ -370,6 +399,11 @@ events_json(name, evs) -> (
       item = event_json(e);
       candidate = if(first, item, out + ',' + item);
       if(length(candidate) > 2600,
+        if(first,
+          out = oversized_event_json(e, length(item));
+          first = false;
+          last_seq = e:0
+        );
         complete = false
       ,
         if(first, first = false, out += ',');
@@ -394,6 +428,11 @@ events_since_json(name, evs, since_seq) -> (
       item = event_json(e);
       candidate = if(first, item, out + ',' + item);
       if(length(candidate) > 2600,
+        if(first,
+          out = oversized_event_json(e, length(item));
+          first = false;
+          last_seq = e:0
+        );
         complete = false
       ,
         if(first, first = false, out += ',');
@@ -435,7 +474,7 @@ block_kind(bs) -> (
     if(bs == 'water' || bs == 'minecraft:water' || bs == 'lava' || bs == 'minecraft:lava',
       'LIQUID'
     ,
-      'SOLID'
+      if(block_tags(bs, 'replaceable'), 'CLEAR', 'SOLID')
     )
   )
 );
@@ -557,6 +596,70 @@ perceive_block_cells(name, params) -> (
       perception_json(name, 'blockCells', false, true, data, '[{"reason":"single_cell_exceeds_budget"}]', null, 'single_cell_exceeds_budget')
     ,
       perception_json(name, 'blockCells', true, !overflow, data, uncertainty, next_value, null)
+    )
+  )
+);
+
+surface_column_fact_json(x, z) -> (
+  y = floor(top('surface', block(x, 0, z)));
+  feet = block(x, y, z);
+  head = block(x, y + 1, z);
+  support = block(x, y - 1, z);
+  feet_type = '' + feet;
+  head_type = '' + head;
+  support_type = '' + support;
+  str('{"x":%d,"z":%d,"feetY":%d,"feetType":"%s","feetState":"%s","headType":"%s","headState":"%s","supportType":"%s","supportState":"%s"}', x, z, y, feet_type, block_kind(feet_type), head_type, block_kind(head_type), support_type, block_kind(support_type))
+);
+
+perceive_surface_columns(name, params) -> (
+  columns = params:'columns';
+  if(columns == null || length(columns) == 0,
+    perception_json(name, 'surfaceColumns', true, true, '{"count":0,"total":0,"next":null,"columns":[]}', '[]', null, null)
+  ,
+    if(length(columns) > 64,
+      perception_json(name, 'surfaceColumns', false, true, '{"count":0,"total":0,"next":null,"columns":[]}', '[{"reason":"column_limit_exceeded"}]', null, 'column_limit_exceeded')
+    ,
+      total = length(columns);
+      start = 0;
+      if(params:'start' != null, start = floor(number(params:'start')));
+      if(start < 0, start = 0);
+      if(start > total, start = total);
+      limit = 64;
+      if(params:'limit' != null, limit = floor(number(params:'limit')));
+      if(limit < 1, limit = 1);
+      if(limit > 64, limit = 64);
+      out = '';
+      count = 0;
+      first = true;
+      idx = start;
+      overflow = false;
+      loop(total - start,
+        if(overflow,
+          null
+        ,
+          column = columns:(start + _);
+          x = floor(number(column:0));
+          z = floor(number(column:1));
+          fact = surface_column_fact_json(x, z);
+          if(count >= limit || length(out) + length(fact) >= global_response_char_budget,
+            overflow = true
+          ,
+            if(first, first = false, out += ',');
+            out += fact;
+            count += 1;
+            idx += 1
+          )
+        )
+      );
+      next_start = if(idx >= total, null, idx);
+      next_value = if(idx >= total, null, str('%d', idx));
+      data = str('{"count":%d,"total":%d,"nextStart":%s,"columns":[%s]}', count, total, json_int_null(next_start), out);
+      uncertainty = if(overflow, '[{"reason":"limit_exceeded"}]', '[]');
+      if(overflow && count == 0,
+        perception_json(name, 'surfaceColumns', false, true, data, '[{"reason":"single_column_exceeds_budget"}]', null, 'single_column_exceeds_budget')
+      ,
+        perception_json(name, 'surfaceColumns', true, !overflow, data, uncertainty, next_value, null)
+      )
     )
   )
 );
@@ -804,6 +907,17 @@ entity_matches_type(e, wanted) -> (
   wanted == null || wanted == '' || kind == wanted || kind == 'minecraft:' + wanted || 'minecraft:' + kind == wanted
 );
 
+entity_matches_filters(e, wanted_types, wanted_name) -> (
+  type_match = wanted_types == null || length(wanted_types) == 0;
+  if(!type_match,
+    loop(min(length(wanted_types), 64),
+      if(!type_match && entity_matches_type(e, wanted_types:_), type_match = true)
+    )
+  );
+  name_match = wanted_name == null || wanted_name == '' || query(e, 'name') == wanted_name;
+  type_match && name_match
+);
+
 list_contains(lst, item) -> (
   found = false;
   loop(length(lst),
@@ -854,8 +968,10 @@ perceive_nearby_entities(name, params) -> (
     if(params:'limit' != null, limit = floor(number(params:'limit')));
     if(limit < 1, limit = 1);
     if(limit > 128, limit = 128);
-    selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,limit=%d,sort=nearest]',
-      floor(number(p:0)), floor(number(p:1)), floor(number(p:2)), radius, limit + 1);
+    wanted_types = if(params:'types' == null, l(), params:'types');
+    wanted_name = params:'name';
+    selector = str('@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,sort=nearest]',
+      floor(number(p:0)), floor(number(p:1)), floor(number(p:2)), radius);
     found = entity_selector(selector);
     out = '';
     count = 0;
@@ -863,12 +979,13 @@ perceive_nearby_entities(name, params) -> (
     first = true;
     loop(length(found),
       e = found:_;
-      if(e != player(name),
-        if(count >= limit || length(out) >= global_response_char_budget,
+      if(e != player(name) && entity_matches_filters(e, wanted_types, wanted_name),
+        fact = entity_fact_json(e, p);
+        if(count >= limit || length(out) + length(fact) >= global_response_char_budget,
           overflow = true
         ,
           if(first, first = false, out += ',');
-          out += entity_fact_json(e, p);
+          out += fact;
           count += 1
         )
       )
@@ -1140,6 +1257,68 @@ perceive_container(name, params) -> (
   )
 );
 
+compact_recipe_outputs(outputs) -> (
+  compact_outputs = l();
+  if(outputs != null && length(outputs) > 0,
+    output = outputs:0;
+    if(output != null && length(output) >= 2,
+      compact_outputs += l('' + output:0, floor(number(output:1)))
+    )
+  );
+  compact_outputs
+);
+
+compact_recipe_groups(groups) -> (
+  compact_groups = l();
+  if(groups != null,
+    loop(length(groups),
+      group = groups:_;
+      if(group == null,
+        compact_groups += null
+      ,
+        compact_group = l();
+        loop(length(group), compact_group += '' + group:_);
+        compact_groups += compact_group
+      )
+    )
+  );
+  compact_groups
+);
+
+compact_recipe_meta(meta) -> (
+  compact_meta = l();
+  if(meta != null && length(meta) > 0,
+    compact_meta += '' + meta:0;
+    if(length(meta) >= 3,
+      compact_meta += floor(number(meta:1));
+      compact_meta += floor(number(meta:2))
+    )
+  );
+  compact_meta
+);
+
+compact_recipe_variant(raw) -> (
+  l(compact_recipe_outputs(raw:0), compact_recipe_groups(raw:1), compact_recipe_meta(raw:2))
+);
+
+compact_recipe_variants_at(realized, recipe_index, compact, seen) -> (
+  if(recipe_index >= length(realized),
+    compact
+  ,
+    variant = realized:recipe_index;
+    key = str('%s', l(variant));
+    if(seen:key == null,
+      seen:key = true;
+      compact += variant
+    );
+    compact_recipe_variants_at(realized, recipe_index + 1, compact, seen)
+  )
+);
+
+compact_recipe_variants(recipe) -> (
+  compact_recipe_variants_at(l(map(recipe, compact_recipe_variant(_))):0, 0, l(), {})
+);
+
 perceive_recipe_data(name, params) -> (
   item = if(params:'item' == null, '', params:'item');
   recipe_type = params:'type';
@@ -1147,7 +1326,8 @@ perceive_recipe_data(name, params) -> (
   if(recipe == null,
     perception_json(name, 'recipeData', false, true, '{}', '[]', null, 'recipe_not_found')
   ,
-    data = str('{"item":%s,"type":%s,"recipe_raw":%s}', json_string(item), if(recipe_type == null, 'null', json_string(recipe_type)), json_string(str('%s', l(recipe))));
+    compact = compact_recipe_variants(recipe);
+    data = str('{"item":%s,"type":%s,"variantCount":%d,"recipe_raw":%s}', json_string(item), if(recipe_type == null, 'null', json_string(recipe_type)), length(compact), json_string(str('%s', l(compact))));
     perception_json(name, 'recipeData', true, true, data, '[]', null, null)
   )
 );
@@ -1261,6 +1441,7 @@ finish_move(name, reason, arrived) -> (
     emit('moveDone', name, l(m:0, arrived, p, target, dist, reason, m:5, m:7, m:8, deviation, m:14, length(m:13), move_guard_json(m), movement_cancel_json(m:15)));
     global_moves:name = null;
     global_move_cancels:name = null;
+    global_move_control_inits:name = null;
     release_owner(name, 'moveTo');
     if(global_navigations:name != null,
       finish_navigate(name, l(m:0, arrived, p, target, dist, reason, m:5, m:7, m:8, deviation, m:14, length(m:13), current_waypoint(m)))
@@ -1288,6 +1469,40 @@ finish_mine(name, reason) -> (
 
 block_matches_expected(block_now, expected) -> (
   block_now == expected || block_now == 'minecraft:' + expected || 'minecraft:' + block_now == expected
+);
+
+mine_trace_matches(name, x, y, z) -> (
+  pe = player_entity(name);
+  if(pe == null,
+    false
+  ,
+    traced = query(pe, 'trace', 5);
+    if(traced == null,
+      false
+    ,
+      hit = pos(traced);
+      hit:0 == x && hit:1 == y && hit:2 == z
+    )
+  )
+);
+
+mine_aim_candidate(name, x, y, z, index) -> (
+  points = l(
+    l(x + 0.5, y + 0.5, z + 0.5),
+    l(x + 0.05, y + 0.5, z + 0.5),
+    l(x + 0.95, y + 0.5, z + 0.5),
+    l(x + 0.5, y + 0.05, z + 0.5),
+    l(x + 0.5, y + 0.95, z + 0.5),
+    l(x + 0.5, y + 0.5, z + 0.05),
+    l(x + 0.5, y + 0.5, z + 0.95)
+  );
+  if(index < 0 || index >= length(points),
+    false
+  ,
+    point = points:index;
+    run(str('player %s look at %.3f %.3f %.3f', name, point:0, point:1, point:2));
+    true
+  )
 );
 
 face_value(params) -> if(params:'face' == null, 'up', params:'face');
@@ -1404,7 +1619,7 @@ parse_waypoints(params, x, y, z) -> (
 
 movement_cancel_policy_for(kind) -> (
   if(kind == 'ascend', 'settle_on_support',
-    if(kind == 'swim', 'surface_or_stable_water',
+    if(kind == 'swim', 'egress_to_dry',
       if(kind == 'fall', 'land_first',
         if(kind == 'descend', 'after_step', 'immediate'))))
 );
@@ -1460,6 +1675,19 @@ current_cancel_policy(m) -> (
   if(values != null && idx < length(values), values:idx, movement_cancel_policy_for(current_movement_kind(m)))
 );
 
+swim_waypoint_reached(m, p, target) -> (
+  idx = m:14;
+  moves = m:16;
+  next_kind = if(moves != null && idx + 1 < length(moves), moves:(idx + 1), null);
+  horizontal_dist = sqrt((p:0 - target:0) * (p:0 - target:0) + (p:2 - target:2) * (p:2 - target:2));
+  in_target_cell = floor(p:0) == floor(target:0) && navigation_node_y(p) == floor(target:1) && floor(p:2) == floor(target:2);
+  in_target_cell && (next_kind == null || next_kind == 'swim' || horizontal_dist <= min(m:4, 0.17))
+);
+
+current_waypoint_reached(m, p, target, dist) -> (
+  if(current_movement_kind(m) == 'swim', swim_waypoint_reached(m, p, target), dist <= m:4)
+);
+
 current_waypoint(m) -> (
   idx = m:14;
   points = m:13;
@@ -1468,6 +1696,23 @@ current_waypoint(m) -> (
   ,
     normalize_waypoint_point(points:idx)
   )
+);
+
+apply_movement_controls(name, movement_kind, p, target) -> (
+  look_y = if(movement_kind == 'swim', target:1 + 1.8, if(movement_kind == 'fall' || movement_kind == 'descend', p:1 + 0.8, target:1 + 1.0));
+  run(str('player %s look at %.3f %.3f %.3f', name, target:0, look_y, target:2));
+  if(movement_kind == 'walk' && target:1 > p:1 + 0.35,
+    run('player ' + name + ' jump once')
+  );
+  run('player ' + name + ' move forward')
+);
+
+initialize_movement_controls(name, movement_kind, p, target) -> (
+  run('player ' + name + ' sprint');
+  if(movement_kind == 'swim' || movement_kind == 'ascend',
+    run('player ' + name + ' jump continuous')
+  );
+  apply_movement_controls(name, movement_kind, p, target)
 );
 
 advance_waypoint(name, m) -> (
@@ -1479,6 +1724,13 @@ advance_waypoint(name, m) -> (
   ,
     wp = normalize_waypoint_point(points:idx);
     dist = dist_to_target(p, wp:0, wp:1, wp:2);
+    next_kind = if(m:16 != null && idx < length(m:16), m:16:idx, 'walk');
+    if(next_kind != current_movement_kind(m),
+      previous_kind = current_movement_kind(m);
+      stop_body(name);
+      global_move_control_inits:name = l(m:0, idx, global_tick);
+      emit('moveKindChanged', name, l(m:0, previous_kind, next_kind, p, wp))
+    );
     global_moves:name = l(m:0, m:1, m:2, m:3, m:4, m:5, p, dist, 0, m:9, m:10, m:11, m:12, points, idx, m:15, m:16, m:17, m:18);
     false
   )
@@ -1489,7 +1741,7 @@ movement_cancel_safe_now(name, m) -> (
   if(policy == 'immediate',
     true
   ,
-    if(policy == 'land_first' || policy == 'settle_on_support' || policy == 'surface_or_stable_water' || policy == 'after_step',
+    if(policy == 'land_first' || policy == 'settle_on_support' || policy == 'egress_to_dry' || policy == 'after_step',
       p = bot_pos(name);
       if(p == null,
         false
@@ -1498,14 +1750,34 @@ movement_cancel_safe_now(name, m) -> (
         pe = player_entity(name);
         nbt = if(pe == null, null, query(pe, 'nbt'));
         on_ground = nbt != null && bool(nbt:'OnGround');
-        motion = if(nbt == null, null, nbt:'Motion');
-        vertical_speed = if(motion == null, 999.0, abs(number(motion:1)));
-        in_stable_water = in_water_now(name) && vertical_speed <= 0.12;
-        at_waypoint = dist_to_target(p, current:0, current:1, current:2) <= m:4;
-        at_waypoint && (on_ground || (policy == 'surface_or_stable_water' && in_stable_water))
+        current_dist = dist_to_target(p, current:0, current:1, current:2);
+        at_waypoint = current_waypoint_reached(m, p, current, current_dist);
+        dry_stand = is_dry_stand_cell(floor(p:0), floor(p:1), floor(p:2));
+        at_waypoint && if(policy == 'egress_to_dry', dry_stand, on_ground)
       )
     ,
       false
+    )
+  )
+);
+
+start_move_cancel_water_egress(name, m, reason) -> (
+  if(current_cancel_policy(m) != 'egress_to_dry' || !in_water_now(name) || global_reflexes:name != null,
+    false
+  ,
+    p = bot_pos(name);
+    target = water_escape_target(p);
+    if(target == null,
+      target = water_surface_target(p)
+    );
+    if(target == null,
+      emit('moveCancelEgress', name, l(m:0, reason, 'unavailable', p, p, false));
+      finish_move(name, reason + '_egress_unavailable', false);
+      false
+    ,
+      global_reflexes:name = l(target:0, target:1, target:2, 0, 'water', 'moveTo');
+      emit('moveCancelEgress', name, l(m:0, reason, 'started', p, target, reflex_target_is_dry_stand(target)));
+      true
     )
   )
 );
@@ -1520,6 +1792,10 @@ request_move_cancel(name, reason) -> (
       if(global_move_cancels:name == null,
         global_move_cancels:name = l(reason, global_tick, movement_cancel_json(m:15));
         emit('moveCancelDelayed', name, l(m:0, reason, movement_cancel_json(m:15), global_tick))
+      );
+      m = global_moves:name;
+      if(m != null && global_reflexes:name == null,
+        start_move_cancel_water_egress(name, m, global_move_cancels:name:0)
       )
     )
   )
@@ -1561,7 +1837,7 @@ start_move_to(name, action_id, x, y, z, params) -> (
       start_dist = dist_to_target(p, first_target:0, first_target:1, first_target:2);
       global_moves:name = l(action_id, x, y, z, arrival_radius, 0, p, start_dist, 0, timeout_ticks, no_progress_ticks, min_progress_delta, max_deviation, points, 0, movement_cancel, path_moves, path_fall_depths, cancel_policies);
       emit('moveStarted', name, l(action_id, p, l(x, y, z), points, move_guard_json(global_moves:name), movement_cancel_json(movement_cancel)));
-      run('player ' + name + ' sprint');
+      initialize_movement_controls(name, current_movement_kind(global_moves:name), p, first_target);
       true
     )
   )
@@ -2539,13 +2815,12 @@ start_mine_block(name, action_id, x, y, z, params) -> (
     watch_bot(name);
     timeout_ticks = floor(param_number(params, 'timeout_ticks', 180));
     block_now = '' + block(x, y, z);
-    global_mines:name = l(action_id, x, y, z, block_type, 0, timeout_ticks);
+    global_mines:name = l(action_id, x, y, z, block_type, 0, timeout_ticks, 0, false);
     queue_immediate_lava_reflex(name);
     if(block_kind(block_now) == 'CLEAR',
       finish_mine(name, 'already_clear')
     ,
-      run(str('player %s look at %.3f %.3f %.3f', name, x + 0.5, y + 0.5, z + 0.5));
-      run('player ' + name + ' attack continuous')
+      mine_aim_candidate(name, x, y, z, 0)
     );
     true
   )
@@ -2738,11 +3013,17 @@ water_surface_target(p) -> (
   bx = floor(p:0);
   by = floor(p:1);
   bz = floor(p:2);
+  offsets = l(l(1, 0), l(-1, 0), l(0, 1), l(0, -1), l(0, 0));
   best = null;
   loop(9,
     sy = by + _;
-    if(best == null && is_water_at(bx, sy, bz) && !is_water_at(bx, sy + 1, bz) && is_clear_block_at(bx, sy + 1, bz),
-      best = l(bx + 0.5, sy + 0.8, bz + 0.5)
+    loop(length(offsets),
+      offset = offsets:_;
+      tx = bx + offset:0;
+      tz = bz + offset:1;
+      if(best == null && is_water_at(tx, sy, tz) && !is_water_at(tx, sy + 1, tz) && is_clear_block_at(tx, sy + 1, tz),
+        best = l(tx + 0.5, sy + 0.8, tz + 0.5)
+      )
     )
   );
   best
@@ -3032,10 +3313,27 @@ start_combat_flee_reflex(name, hostile_pos) -> (
   )
 );
 
+continue_delayed_move_controls(name, movement_kind, p, target, controls_ready) -> (
+  if(global_moves:name != null && global_move_cancels:name != null && global_reflexes:name == null && controls_ready,
+    apply_movement_controls(name, movement_kind, p, target)
+  );
+  true
+);
+
 run_move_tick(name, m) -> (
   p = bot_pos(name);
   target = current_waypoint(m);
   movement_kind = current_movement_kind(m);
+  pending_control_init = global_move_control_inits:name;
+  controls_ready = true;
+  if(pending_control_init != null && pending_control_init:0 == m:0 && pending_control_init:1 == m:14,
+    if(global_tick > pending_control_init:2 + 1,
+      initialize_movement_controls(name, movement_kind, p, target);
+      global_move_control_inits:name = null
+    ,
+      controls_ready = false
+    )
+  );
   dist = dist_to_target(p, target:0, target:1, target:2);
   ticks = m:5 + 1;
   min_dist = m:7;
@@ -3051,31 +3349,30 @@ run_move_tick(name, m) -> (
   global_moves:name = updated_move;
   recheck_reason = navigation_move_recheck_reason(name, updated_move);
   if(recheck_reason != null,
-    request_move_cancel(name, recheck_reason)
+    request_move_cancel(name, recheck_reason);
+    continue_delayed_move_controls(name, movement_kind, p, target, controls_ready)
   ,
-    if(dist <= m:4,
+    if(current_waypoint_reached(m, p, target, dist),
       if(advance_waypoint(name, updated_move),
         finish_move(name, 'arrived', true)
       )
     ,
         if(ticks > m:9,
-          finish_move(name, 'timeout', false)
+          request_move_cancel(name, 'timeout');
+          continue_delayed_move_controls(name, movement_kind, p, target, controls_ready)
         ,
           if(movement_water_escape_should_trigger(name, updated_move, stuck_ticks),
             start_water_reflex(name)
           ,
             if(stuck_ticks >= m:10,
-              finish_move(name, 'stuck', false)
+              request_move_cancel(name, 'stuck');
+              continue_delayed_move_controls(name, movement_kind, p, target, controls_ready)
             ,
               if(deviation > m:12,
-                finish_move(name, 'deviated', false)
+                request_move_cancel(name, 'deviated');
+                continue_delayed_move_controls(name, movement_kind, p, target, controls_ready)
               ,
-                look_y = if(movement_kind == 'fall' || movement_kind == 'descend', p:1 + 0.8, target:1 + 1.0);
-                run(str('player %s look at %.3f %.3f %.3f', name, target:0, look_y, target:2));
-                if(movement_kind == 'ascend' || (movement_kind == 'swim' && target:1 > p:1 + 0.2) || (movement_kind == 'walk' && target:1 > p:1 + 0.35),
-                  run('player ' + name + ' jump once')
-                );
-                run('player ' + name + ' move forward')
+                if(controls_ready, apply_movement_controls(name, movement_kind, p, target))
               )
             )
           )
@@ -3095,22 +3392,41 @@ run_reflex_tick(name, r) -> (
   owner_name = if(r:5 == null, 'lavaReflex', r:5);
   global_reflexes:name = l(r:0, r:1, r:2, ticks, kind, owner_name);
   clear_of_hazard = if(kind == 'fire', !on_fire_now(name), if(kind == 'water', water_hazard_clear(name), !lava_near_pos(p)));
+  move_cancel_egress = kind == 'water' && owner_name == 'moveTo' && global_moves:name != null && global_move_cancels:name != null;
   water_target_is_shore = kind == 'water' && is_dry_stand_cell(floor(r:0), floor(r:1), floor(r:2));
   water_on_dry_stand = kind == 'water' && is_dry_stand_cell(floor(p:0), floor(p:1), floor(p:2));
-  escaped = if(kind == 'water', water_target_is_shore && dist <= 0.9 && water_on_dry_stand, dist <= 0.9 && clear_of_hazard);
+  water_surface_reached = kind == 'water' && !move_cancel_egress && !water_target_is_shore && dist <= 0.9 && clear_of_hazard;
+  escaped = if(kind == 'water', if(move_cancel_egress, water_target_is_shore && dist <= 0.9 && water_on_dry_stand, if(water_target_is_shore, dist <= 0.9 && water_on_dry_stand, water_surface_reached)), dist <= 0.9 && clear_of_hazard);
+  retarget = null;
+  if(move_cancel_egress && !water_target_is_shore && dist <= 0.9 && clear_of_hazard,
+    retarget = water_escape_target(p)
+  );
+  if(retarget != null,
+    global_reflexes:name = l(retarget:0, retarget:1, retarget:2, 0, kind, owner_name);
+    emit('moveCancelEgress', name, l(global_moves:name:0, global_move_cancels:name:0, 'retargeted', p, retarget, reflex_target_is_dry_stand(retarget)))
+  ,
   if(escaped,
     stop_body(name);
     target = l(r:0, r:1, r:2);
     emit('reflexCompleted', name, l(p, dist, ticks, true, kind, target, reflex_target_is_dry_stand(target), if(kind == 'water', water_on_dry_stand, reflex_target_is_dry_stand(p)), reflex_target_block_type(target), reflex_target_below_type(target)));
     global_reflexes:name = null;
-    release_owner(name, owner_name)
+    if(move_cancel_egress,
+      finish_move(name, global_move_cancels:name:0, false)
+    ,
+      release_owner(name, owner_name)
+    )
   ,
     if(ticks > 100,
       stop_body(name);
       target = l(r:0, r:1, r:2);
       emit('reflexCompleted', name, l(p, dist, ticks, false, kind, target, reflex_target_is_dry_stand(target), if(kind == 'water', water_on_dry_stand, reflex_target_is_dry_stand(p)), reflex_target_block_type(target), reflex_target_below_type(target)));
       global_reflexes:name = null;
-      release_owner(name, owner_name)
+      if(move_cancel_egress,
+        emit('moveCancelEgress', name, l(global_moves:name:0, global_move_cancels:name:0, 'failed', p, target, water_on_dry_stand));
+        finish_move(name, global_move_cancels:name:0 + '_egress_failed', false)
+      ,
+        release_owner(name, owner_name)
+      )
     ,
       look_y = if(water_target_is_shore, p:1 + 0.8, r:1 + 1.0);
       run(str('player %s look at %.3f %.3f %.3f', name, r:0, look_y, r:2));
@@ -3118,24 +3434,50 @@ run_reflex_tick(name, r) -> (
         run('player ' + name + ' sprint');
         run('player ' + name + ' jump')
       ,
-        if((kind == 'water' && !water_target_is_shore) || r:1 > p:1 + 0.35,
-          run('player ' + name + ' jump once')
+        if(kind == 'water' && !water_target_is_shore,
+          run('player ' + name + ' sprint');
+          run('player ' + name + ' jump')
+        ,
+          if(r:1 > p:1 + 0.35,
+            run('player ' + name + ' jump once')
+          )
         )
       );
       run('player ' + name + ' move forward')
     )
   )
+  )
 );
 
 run_mine_tick(name, m) -> (
   ticks = m:5 + 1;
-  global_mines:name = l(m:0, m:1, m:2, m:3, m:4, ticks, m:6);
+  global_mines:name = l(m:0, m:1, m:2, m:3, m:4, ticks, m:6, m:7, m:8);
   block_now = '' + block(m:1, m:2, m:3);
   if(block_kind(block_now) == 'CLEAR',
     finish_mine(name, 'completed')
   ,
     if(ticks > m:6,
       finish_mine(name, 'timeout')
+    ,
+      if(!m:8,
+        if(mine_trace_matches(name, m:1, m:2, m:3),
+          run('player ' + name + ' attack continuous');
+          global_mines:name = l(m:0, m:1, m:2, m:3, m:4, ticks, m:6, m:7, true)
+        ,
+          next_aim = m:7 + 1;
+          if(mine_aim_candidate(name, m:1, m:2, m:3, next_aim),
+            global_mines:name = l(m:0, m:1, m:2, m:3, m:4, ticks, m:6, next_aim, false)
+          ,
+            finish_mine(name, 'target_occluded')
+          )
+        )
+      ,
+        if(!mine_trace_matches(name, m:1, m:2, m:3),
+          stop_body(name);
+          mine_aim_candidate(name, m:1, m:2, m:3, 0);
+          global_mines:name = l(m:0, m:1, m:2, m:3, m:4, ticks, m:6, 0, false)
+        )
+      )
     )
   )
 );
@@ -3688,6 +4030,10 @@ navigation_openable_interaction_y(x, y, z) -> (
   if(str('%s', state:'half') == 'upper', y - 1, y)
 );
 
+navigation_lava_unsafe(x, y, z) -> (
+  lava_near_pos(l(x + 0.5, y, z + 0.5)) || is_lava_at(x, y + 1, z)
+);
+
 probe_walkability(x, y, z) -> (
   feet = '' + block(x, y, z);
   head = '' + block(x, y + 1, z);
@@ -3695,11 +4041,11 @@ probe_walkability(x, y, z) -> (
   head_kind = navigation_block_kind_at(x, y + 1, z);
   floor_bs = '' + block(x, y - 1, z);
   floor_kind = navigation_block_kind_at(x, y - 1, z);
-  if(feet_kind == 'SOLID' || head_kind == 'SOLID',
-    'SOLID'
+  if(navigation_lava_unsafe(x, y, z),
+    'LAVA'
   ,
-    if(is_lava_at(x, y, z) || is_lava_at(x, y + 1, z),
-      'LAVA'
+    if(feet_kind == 'SOLID' || head_kind == 'SOLID',
+      'SOLID'
     ,
       if(feet_kind == 'LIQUID' || head_kind == 'LIQUID',
         'LIQUID'
@@ -3764,13 +4110,16 @@ navigation_goal_selected(x, y, z, goals) -> (
 navigation_body_clear(x, y, z) -> (
   feet_kind = navigation_block_kind_at(x, y, z);
   head_kind = navigation_block_kind_at(x, y + 1, z);
-  feet_kind != 'SOLID' && head_kind != 'SOLID' && !is_lava_at(x, y, z) && !is_lava_at(x, y + 1, z)
+  feet_kind != 'SOLID' && head_kind != 'SOLID' && !navigation_lava_unsafe(x, y, z)
 );
 
 navigation_context_from_params(params) -> (
   max_fall_depth = floor(param_number(params, 'max_fall_depth', 3));
   if(max_fall_depth < 0, max_fall_depth = 0);
   if(max_fall_depth > 3, max_fall_depth = 3);
+  max_water_drop_depth = floor(param_number(params, 'max_water_drop_depth', 32));
+  if(max_water_drop_depth < 1, max_water_drop_depth = 1);
+  if(max_water_drop_depth > 64, max_water_drop_depth = 64);
   break_timeout_ticks = floor(param_number(params, 'break_timeout_ticks', 300));
   if(break_timeout_ticks < 20, break_timeout_ticks = 20);
   if(break_timeout_ticks > 1200, break_timeout_ticks = 1200);
@@ -3780,6 +4129,7 @@ navigation_context_from_params(params) -> (
     'allow_descend' -> param_bool(params, 'allow_descend', true),
     'allow_swim' -> param_bool(params, 'allow_swim', true),
     'max_fall_depth' -> max_fall_depth,
+    'max_water_drop_depth' -> max_water_drop_depth,
     'allow_break' -> param_bool(params, 'allow_break', false),
     'break_budget' -> floor(param_number(params, 'break_budget', 0)),
     'break_timeout_ticks' -> break_timeout_ticks,
@@ -3806,12 +4156,13 @@ navigation_default_context() -> (
 );
 
 navigation_context_json(context) -> (
-  str('{"allow_diagonal":%s,"allow_ascend":%s,"allow_descend":%s,"allow_swim":%s,"max_fall_depth":%d,"allow_break":%s,"break_budget":%d,"break_timeout_ticks":%d,"break_pickaxe":%s,"break_axe":%s,"break_shovel":%s,"allow_place":%s,"allow_pillar":%s,"pillar_budget":%d,"allow_downward":%s,"downward_budget":%d,"allow_open":%s,"open_budget":%d,"scaffold_item":%s,"scaffold_count":%d,"place_budget":%d}',
+  str('{"allow_diagonal":%s,"allow_ascend":%s,"allow_descend":%s,"allow_swim":%s,"max_fall_depth":%d,"max_water_drop_depth":%d,"allow_break":%s,"break_budget":%d,"break_timeout_ticks":%d,"break_pickaxe":%s,"break_axe":%s,"break_shovel":%s,"allow_place":%s,"allow_pillar":%s,"pillar_budget":%d,"allow_downward":%s,"downward_budget":%d,"allow_open":%s,"open_budget":%d,"scaffold_item":%s,"scaffold_count":%d,"place_budget":%d}',
     json_bool(bool(context:'allow_diagonal')),
     json_bool(bool(context:'allow_ascend')),
     json_bool(bool(context:'allow_descend')),
     json_bool(bool(context:'allow_swim')),
     floor(number(context:'max_fall_depth')),
+    floor(number(context:'max_water_drop_depth')),
     json_bool(bool(context:'allow_break')),
     floor(number(context:'break_budget')),
     floor(number(context:'break_timeout_ticks')),
@@ -3850,8 +4201,10 @@ navigation_partial_support_block(bs) -> (
 
 navigation_node_y(p) -> (
   y = floor(number(p:1));
-  bs = '' + block(floor(number(p:0)), y, floor(number(p:2)));
-  if(navigation_partial_support_block(bs), y + 1, y)
+  x = floor(number(p:0));
+  z = floor(number(p:2));
+  bs = '' + block(x, y, z);
+  if(navigation_partial_support_block(bs), y + 1, if(probe_walkability(x, y, z) == 'LIQUID', floor(number(p:1) + 0.5), y))
 );
 
 navigation_candidate(x, y, z, kind, cost, fall_depth, cancel_policy) -> (
@@ -3877,21 +4230,39 @@ navigation_break_tool(context, block_type) -> (
 navigation_fall_candidate(x, start_y, z, context) -> (
   result = null;
   clear = true;
-  loop(3,
+  scan_depth = max(floor(number(context:'max_fall_depth')), floor(number(context:'max_water_drop_depth')));
+  loop(scan_depth,
     depth = _ + 1;
-    if(clear && result == null && depth <= floor(number(context:'max_fall_depth')),
+    if(clear && result == null,
       y = start_y - depth;
       w = probe_walkability(x, y, z);
       if(w == 'SOLID' || w == 'LAVA',
         clear = false
       ,
-        if(w == 'WALK' || (w == 'LIQUID' && bool(context:'allow_swim')),
-          if(depth == 1,
-            if(bool(context:'allow_descend'),
-              result = navigation_candidate(x, y, z, if(w == 'LIQUID', 'swim', 'descend'), if(w == 'LIQUID', 3.0, 1.2), 1, if(w == 'LIQUID', 'surface_or_stable_water', 'after_step'))
+        if(w == 'WALK',
+          if(depth <= floor(number(context:'max_fall_depth')),
+            if(depth == 1,
+              if(bool(context:'allow_descend'),
+                result = navigation_candidate(x, y, z, 'descend', 1.2, 1, 'after_step')
+              )
+            ,
+              result = navigation_candidate(x, y, z, 'fall', 4.0 + depth, depth, 'land_first')
             )
           ,
-            result = navigation_candidate(x, y, z, 'fall', 4.0 + depth, depth, 'land_first')
+            clear = false
+          )
+        ,
+          if(w == 'LIQUID',
+            if(bool(context:'allow_swim') && depth <= floor(number(context:'max_water_drop_depth')),
+              if(depth == 1,
+                if(bool(context:'allow_descend'),
+                  result = navigation_candidate(x, y, z, 'swim', 3.0, 1, 'egress_to_dry')
+                )
+              ,
+                result = navigation_candidate(x, y, z, 'swim', 4.0 + depth, depth, 'egress_to_dry')
+              )
+            );
+            clear = false
           )
         )
       )
@@ -3902,6 +4273,7 @@ navigation_fall_candidate(x, start_y, z, context) -> (
 
 navigation_neighbors(x, y, z, context) -> (
   neighbors = l();
+  source_kind = probe_walkability(x, y, z);
   cardinal_dx = l(-1, 1, 0, 0);
   cardinal_dz = l(0, 0, -1, 1);
   loop(4,
@@ -3930,7 +4302,7 @@ navigation_neighbors(x, y, z, context) -> (
           neighbors += navigation_mutation_candidate(nx, y, nz, 'open', 4.0, 'finish_or_abort_controller', mutation)
         )
       ,
-        if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && support_kind == 'SOLID',
+        if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && support_kind == 'SOLID' && source_kind != 'LIQUID',
           if(block_kind(head_type) == 'SOLID' && !navigation_mutation_denied(context, nx, y + 1, nz),
             mutation = {
               'kind' -> 'break',
@@ -3963,7 +4335,7 @@ navigation_neighbors(x, y, z, context) -> (
         neighbors += navigation_candidate(nx, y, nz, 'walk', 1.0, 0, 'immediate')
       ,
         if(flat == 'LIQUID' && bool(context:'allow_swim'),
-          neighbors += navigation_candidate(nx, y, nz, 'swim', 3.0, 0, 'surface_or_stable_water')
+          neighbors += navigation_candidate(nx, y, nz, 'swim', 3.0, 0, 'egress_to_dry')
         ,
           if(flat == 'NO_FLOOR',
             fall = navigation_fall_candidate(nx, y, nz, context);
@@ -3986,12 +4358,33 @@ navigation_neighbors(x, y, z, context) -> (
       )
     );
     up = probe_walkability(nx, y + 1, nz);
+    source_head_type = '' + block(x, y + 1, z);
+    source_cap_type = '' + block(x, y + 2, z);
+    source_head_blocked = navigation_block_kind_at(x, y + 1, z) == 'SOLID';
+    source_cap_blocked = navigation_block_kind_at(x, y + 2, z) == 'SOLID';
     if(bool(context:'allow_ascend') && navigation_block_kind_at(nx, y, nz) == 'SOLID' && (up == 'WALK' || (up == 'LIQUID' && bool(context:'allow_swim'))),
-      neighbors += navigation_candidate(nx, y + 1, nz, if(up == 'LIQUID', 'swim', 'ascend'), if(up == 'LIQUID', 3.0, 2.0), 0, if(up == 'LIQUID', 'surface_or_stable_water', 'settle_on_support'))
+      if(source_head_blocked || source_cap_blocked,
+        source_clearance_y = if(source_head_blocked, y + 1, y + 2);
+        source_clearance_type = if(source_head_blocked, source_head_type, source_cap_type);
+        if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && source_kind != 'LIQUID' && !navigation_mutation_denied(context, x, source_clearance_y, z),
+          mutation = {
+            'kind' -> 'break',
+            'pos' -> l(x, source_clearance_y, z),
+            'source' -> l(x, y, z),
+            'block_type' -> source_clearance_type,
+            'before_type' -> source_clearance_type,
+            'purpose' -> 'headroom',
+            'tool_item' -> navigation_break_tool(context, source_clearance_type)
+          };
+          neighbors += navigation_mutation_candidate(nx, y + 1, nz, 'break', 8.0, 'immediate', mutation)
+        )
+      ,
+        neighbors += navigation_candidate(nx, y + 1, nz, if(up == 'LIQUID', 'swim', 'ascend'), if(up == 'LIQUID', 3.0, 2.0), 0, if(up == 'LIQUID', 'egress_to_dry', 'settle_on_support'))
+      )
     );
     down = probe_walkability(nx, y - 1, nz);
     if(bool(context:'allow_descend') && flat != 'NO_FLOOR' && navigation_body_clear(nx, y, nz) && (down == 'WALK' || (down == 'LIQUID' && bool(context:'allow_swim'))),
-      neighbors += navigation_candidate(nx, y - 1, nz, if(down == 'LIQUID', 'swim', 'descend'), if(down == 'LIQUID', 3.0, 1.2), 1, if(down == 'LIQUID', 'surface_or_stable_water', 'after_step'))
+      neighbors += navigation_candidate(nx, y - 1, nz, if(down == 'LIQUID', 'swim', 'descend'), if(down == 'LIQUID', 3.0, 1.2), 1, if(down == 'LIQUID', 'egress_to_dry', 'after_step'))
     )
   );
   diagonal_dx = l(-1, -1, 1, 1);
@@ -4003,15 +4396,15 @@ navigation_neighbors(x, y, z, context) -> (
     nz = z + dz;
     w = probe_walkability(nx, y, nz);
     if((w == 'WALK' || (w == 'LIQUID' && bool(context:'allow_swim'))) && navigation_body_clear(x + dx, y, z) && navigation_body_clear(x, y, z + dz),
-      neighbors += navigation_candidate(nx, y, nz, if(w == 'LIQUID', 'swim', 'diagonal'), if(w == 'LIQUID', 3.0, 1.4), 0, if(w == 'LIQUID', 'surface_or_stable_water', 'immediate'))
+      neighbors += navigation_candidate(nx, y, nz, if(w == 'LIQUID', 'swim', 'diagonal'), if(w == 'LIQUID', 3.0, 1.4), 0, if(w == 'LIQUID', 'egress_to_dry', 'immediate'))
     )
   ));
-  current = probe_walkability(x, y, z);
+  current = source_kind;
   if(current == 'LIQUID' && bool(context:'allow_swim'),
     up = probe_walkability(x, y + 1, z);
     down = probe_walkability(x, y - 1, z);
-    if(up == 'LIQUID', neighbors += navigation_candidate(x, y + 1, z, 'swim', 3.0, 0, 'surface_or_stable_water'));
-    if(down == 'LIQUID', neighbors += navigation_candidate(x, y - 1, z, 'swim', 3.0, 0, 'surface_or_stable_water'))
+    if(up == 'LIQUID', neighbors += navigation_candidate(x, y + 1, z, 'swim', 3.0, 0, 'egress_to_dry'));
+    if(down == 'LIQUID', neighbors += navigation_candidate(x, y - 1, z, 'swim', 3.0, 0, 'egress_to_dry'))
   );
   downward_floor_type = '' + block(x, y - 1, z);
   downward_support_type = '' + block(x, y - 2, z);
@@ -4388,7 +4781,7 @@ navigate_to_goals_plan(sx, sy, sz, goals, grid_radius, max_expand, y_below, y_ab
                     ci = _;
                     coefficient = coefficients:ci;
                     partial_score = h + new_g / coefficient;
-                    if(best_partial_scores:(ci) - partial_score > 0.01,
+                    if(is_dry_stand_cell(nx, ny, nz) && best_partial_scores:(ci) - partial_score > 0.01,
                       best_partial_scores:(ci) = partial_score;
                       best_partial_keys:(ci) = nkey;
                       best_partial_goals:(ci) = navigation_goal_selected(nx, ny, nz, goals)
@@ -4565,8 +4958,9 @@ finish_navigation_without_move(name, reason) -> (
     context_json = nav:15;
     partial_coefficient = nav:17;
     partial_distance = nav:18;
+    segment_index = nav:23;
     emit('navigateFinishTrace', name, l(action_id, false, reason, p, selected_goal, goal_dist, nav:5, nav:6, goal_count, movement_counts, context_json, partial_coefficient, partial_distance));
-    emit('navigateDone', name, l(action_id, false, p, selected_goal, goal_dist, reason, nav:5, nav:6, 0, reason, 0, 9999.0, 0, 0.0, 0, 0, l(0, 0, 0), selected_goal, goal_count, movement_counts, context_json, partial_coefficient, partial_distance, null));
+    emit('navigateDone', name, l(action_id, false, p, selected_goal, goal_dist, reason, nav:5, nav:6, segment_index, reason, 0, 9999.0, 0, 0.0, 0, 0, l(0, 0, 0), selected_goal, goal_count, movement_counts, context_json, partial_coefficient, partial_distance, null));
     global_navigations:name = null;
     global_navigation_mutations:name = null;
     stop_body(name);
@@ -5021,11 +5415,16 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
   goals = navigation_goals_from_params(params, gx, gy, gz, goal_radius);
   goal_count = length(goals);
   selected_goal = goals:0;
+  partial_continuation = params:'partial_replans' != null;
+  partial_replans = floor(param_number(params, 'partial_replans', 0));
+  if(partial_replans < 0, partial_replans = 0);
+  segment_index = floor(param_number(params, 'segment_index', 0));
+  if(segment_index < 0, segment_index = 0);
   empty_movement_counts = navigation_movement_counts_json(l());
   p = bot_pos(name);
   if(p == null,
-    emit('navigateStartTrace', name, l(action_id, 'missing_body', selected_goal, 0, 0, goal_count, empty_movement_counts, null, 0.0, context_json));
-        emit('navigateDone', name, l(action_id, false, l(0, 0, 0), selected_goal, 9999.0, 'missing_body', 0, 0, 0, 'missing_body', 0, 9999.0, 0, 0.0, 0, 0, l(0, 0, 0), selected_goal, goal_count, empty_movement_counts, context_json, null, 0.0, null));
+    emit('navigateStartTrace', name, l(action_id, 'missing_body', selected_goal, 0, 0, goal_count, empty_movement_counts, null, 0.0, context_json, segment_index, partial_replans));
+        emit('navigateDone', name, l(action_id, false, l(0, 0, 0), selected_goal, 9999.0, 'missing_body', 0, 0, segment_index, 'missing_body', 0, 9999.0, 0, 0.0, 0, 0, l(0, 0, 0), selected_goal, goal_count, empty_movement_counts, context_json, null, 0.0, null));
     true
   ,
     (
@@ -5074,9 +5473,9 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
       mutation_kind = if(mutation_step == null, null, mutation_step:6:'kind');
       execution_arrival_radius = if(mutation_kind == 'downward', min(arrival_radius, 0.15), if(plan_status == 'partial', min(arrival_radius, 0.45), arrival_radius));
       movement_counts = navigation_movement_counts_json(movement_kinds);
-      emit('navigateStartTrace', name, l(action_id, plan_status, selected_goal, plan_expanded, length(plan_path), goal_count, movement_counts, partial_coefficient, partial_distance, context_json));
+      emit('navigateStartTrace', name, l(action_id, plan_status, selected_goal, plan_expanded, length(plan_path), goal_count, movement_counts, partial_coefficient, partial_distance, context_json, segment_index, partial_replans));
       if(plan_status == 'no_path' || plan_status == 'budget_exceeded' || length(plan_path) == 0,
-        emit('navigateDone', name, l(action_id, false, p, selected_goal, navigation_goal_distance(p:0, p:1, p:2, goals), plan_status, plan_expanded, 0, 0, plan_status, 0, 9999.0, 0, 0.0, 0, 0, l(0, 0, 0), selected_goal, goal_count, movement_counts, context_json, partial_coefficient, partial_distance, null));
+        emit('navigateDone', name, l(action_id, false, p, selected_goal, navigation_goal_distance(p:0, p:1, p:2, goals), plan_status, plan_expanded, 0, segment_index, plan_status, 0, 9999.0, 0, 0.0, 0, 0, l(0, 0, 0), selected_goal, goal_count, movement_counts, context_json, partial_coefficient, partial_distance, null));
         if(plan_status == 'no_path',
           emit('mobilityBlocked', name, l('no_path', p, selected_goal, plan_expanded))
         );
@@ -5100,7 +5499,7 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
           waypoints += l(wp:0 + 0.5, wp:1, wp:2 + 0.5)
         );
         movement_cancel = navigation_cancel_profile(execution_path);
-        global_navigations:name = l(action_id, gx, gy, gz, plan_status, plan_expanded, length(waypoints), arrival_radius, goals, selected_goal, movement_kinds, fall_depths, cancel_policies, movement_counts, context, context_json, recheck_lookahead, partial_coefficient, partial_distance, mutation_step, mutation_index);
+        global_navigations:name = l(action_id, gx, gy, gz, plan_status, plan_expanded, length(waypoints), arrival_radius, goals, selected_goal, movement_kinds, fall_depths, cancel_policies, movement_counts, context, context_json, recheck_lookahead, partial_coefficient, partial_distance, mutation_step, mutation_index, params, partial_replans, segment_index, partial_continuation);
         if(length(waypoints) == 0 && mutation_step != null,
           stage_navigation_mutation(name, global_navigations:name);
           true
@@ -5114,7 +5513,7 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
              'movement_cancel' -> movement_cancel});
           if(!move_ok,
             emit('navigateFinishTrace', name, l(action_id, false, 'move_start_failed', p, selected_goal, navigation_goal_distance(p:0, p:1, p:2, goals), plan_expanded, length(waypoints), goal_count, movement_counts, context_json, partial_coefficient, partial_distance));
-            emit('navigateDone', name, l(action_id, false, p, selected_goal, navigation_goal_distance(p:0, p:1, p:2, goals), 'move_start_failed', plan_expanded, length(waypoints), 0, 'move_start_failed', 0, 9999.0, 0, 0.0, 0, length(waypoints), if(length(waypoints) > 0, waypoints:0, l(0, 0, 0)), selected_goal, goal_count, movement_counts, context_json, partial_coefficient, partial_distance, null));
+            emit('navigateDone', name, l(action_id, false, p, selected_goal, navigation_goal_distance(p:0, p:1, p:2, goals), 'move_start_failed', plan_expanded, length(waypoints), segment_index, 'move_start_failed', 0, 9999.0, 0, 0.0, 0, length(waypoints), if(length(waypoints) > 0, waypoints:0, l(0, 0, 0)), selected_goal, goal_count, movement_counts, context_json, partial_coefficient, partial_distance, null));
             global_navigations:name = null;
             true
           ,
@@ -5144,6 +5543,10 @@ finish_navigate(name, move_event_data) -> (
     context_json = nav:15;
     partial_coefficient = nav:17;
     partial_distance = nav:18;
+    params = nav:21;
+    partial_replans = nav:22;
+    segment_index = nav:23;
+    partial_continuation = nav:24;
     goal_count = length(goals);
     p = bot_pos(name);
     goal_dist = if(p != null, navigation_goal_distance(p:0, p:1, p:2, goals), 9999.0);
@@ -5152,19 +5555,29 @@ finish_navigate(name, move_event_data) -> (
     if(nav:19 != null && move_arrived,
       stage_navigation_mutation(name, nav)
     ,
-      nav_arrived = move_arrived && plan_status == 'arrived';
-      nav_reason = if(nav_arrived, 'arrived',
-        if(plan_status == 'partial' && move_arrived, 'partial',
-          if(move_reason == 'stuck', 'stuck',
-            if(move_reason == 'timeout', 'timeout',
-              if(move_reason == 'deviated', 'deviated', move_reason)))));
-      recheck_reason = if(nav_reason == 'world_changed', nav_reason, null);
-      emit('navigateFinishTrace', name, l(action_id, nav_arrived, nav_reason, p, selected_goal, goal_dist, plan_expanded, plan_waypoints, goal_count, movement_counts, context_json, partial_coefficient, partial_distance));
-      emit('navigateDone', name, l(action_id, nav_arrived, p, selected_goal, goal_dist, nav_reason, plan_expanded, plan_waypoints, 0, nav_reason, move_event_data:6, move_event_data:7, move_event_data:8, move_event_data:9, move_event_data:10, move_event_data:11, move_event_data:12, selected_goal, goal_count, movement_counts, context_json, partial_coefficient, partial_distance, recheck_reason));
-      if(!nav_arrived && (nav_reason == 'stuck' || nav_reason == 'no_path'),
-        emit('mobilityBlocked', name, l(nav_reason, p, selected_goal, plan_expanded))
-      );
-      global_navigations:name = null
+      if(plan_status == 'partial' && move_arrived && partial_continuation && partial_replans > 0,
+        emit('navigateFinishTrace', name, l(action_id, false, 'partial_continue', p, selected_goal, goal_dist, plan_expanded, plan_waypoints, goal_count, movement_counts, context_json, partial_coefficient, partial_distance));
+        params:'partial_replans' = partial_replans - 1;
+        params:'segment_index' = segment_index + 1;
+        global_navigations:name = null;
+        start_navigate_to(name, action_id, gx, gy, gz, params)
+      ,
+        nav_arrived = move_arrived && plan_status == 'arrived';
+        nav_reason = if(nav_arrived, 'arrived',
+          if(plan_status == 'partial' && move_arrived,
+            if(partial_continuation, 'partial_segment_budget_exhausted', 'partial')
+          ,
+            if(move_reason == 'stuck', 'stuck',
+              if(move_reason == 'timeout', 'timeout',
+                if(move_reason == 'deviated', 'deviated', move_reason)))));
+        recheck_reason = if(nav_reason == 'world_changed', nav_reason, null);
+        emit('navigateFinishTrace', name, l(action_id, nav_arrived, nav_reason, p, selected_goal, goal_dist, plan_expanded, plan_waypoints, goal_count, movement_counts, context_json, partial_coefficient, partial_distance));
+        emit('navigateDone', name, l(action_id, nav_arrived, p, selected_goal, goal_dist, nav_reason, plan_expanded, plan_waypoints, segment_index, nav_reason, move_event_data:6, move_event_data:7, move_event_data:8, move_event_data:9, move_event_data:10, move_event_data:11, move_event_data:12, selected_goal, goal_count, movement_counts, context_json, partial_coefficient, partial_distance, recheck_reason));
+        if(!nav_arrived && (nav_reason == 'stuck' || nav_reason == 'no_path'),
+          emit('mobilityBlocked', name, l(nav_reason, p, selected_goal, plan_expanded))
+        );
+        global_navigations:name = null
+      )
     )
   )
 );
@@ -5188,6 +5601,9 @@ follow_replan(name, target_pos) -> (
   keep_radius = f:2;
   grid_radius = f:8;
   max_expand = f:9;
+  context = f:11;
+  no_progress_ticks = f:12;
+  min_partial_progress = f:13;
   move_arrival_radius = 0.45;
   p = bot_pos(name);
   sx = floor(p:0);
@@ -5196,29 +5612,34 @@ follow_replan(name, target_pos) -> (
   gx = floor(target_pos:0);
   gy = floor(target_pos:1);
   gz = floor(target_pos:2);
-  plan_result = navigate_to_plan(sx, sy, sz, gx, gy, gz, grid_radius, max_expand, 8, 8, null, 1, keep_radius);
+  context:'origin_y' = sy;
+  plan_result = navigate_to_goals_plan(sx, sy, sz, l(l(gx, gy, gz, keep_radius)), grid_radius, max_expand, 8, 8, null, min_partial_progress, context);
   plan_status = plan_result:1;
   plan_expanded = plan_result:2;
   plan_path = plan_result:3;
-  global_follows:name = l(f:0, f:1, f:2, f:3, f:4, f:5, target_pos, plan_expanded, f:8, f:9, f:10);
-  direct_wp = l(gx + 0.5, gy, gz + 0.5);
+  global_follows:name = l(f:0, f:1, f:2, f:3, f:4, f:5, target_pos, plan_expanded, f:8, f:9, f:10, context, f:12, f:13);
   if(plan_status == 'no_path' || plan_status == 'budget_exceeded' || length(plan_path) == 0,
-    start_move_to(name, action_id, direct_wp:0, direct_wp:1, direct_wp:2,
-      {'waypoints' -> l(direct_wp), 'arrival_radius' -> move_arrival_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
+    finish_follow(name, plan_status)
   ,
     waypoints = l();
+    movement_kinds = l();
+    fall_depths = l();
+    cancel_policies = l();
     loop(length(plan_path),
       wp = plan_path:_;
-      waypoints += l(wp:0 + 0.5, wp:1, wp:2 + 0.5)
+      waypoints += l(wp:0 + 0.5, wp:1, wp:2 + 0.5);
+      movement_kinds += wp:3;
+      fall_depths += wp:4;
+      cancel_policies += wp:5
     );
-    if(length(waypoints) == 0,
-      start_move_to(name, action_id, direct_wp:0, direct_wp:1, direct_wp:2,
-        {'waypoints' -> l(direct_wp), 'arrival_radius' -> move_arrival_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
-    ,
-      last_wp = waypoints:(length(waypoints) - 1);
-      start_move_to(name, action_id, last_wp:0, last_wp:1, last_wp:2,
-        {'waypoints' -> waypoints, 'arrival_radius' -> move_arrival_radius, 'timeout_ticks' -> 60, 'no_progress_ticks' -> 20, 'max_deviation' -> 8.0})
-    )
+    last_wp = waypoints:(length(waypoints) - 1);
+    movement_cancel = navigation_cancel_profile(plan_path);
+    move_ok = start_move_to(name, action_id, last_wp:0, last_wp:1, last_wp:2,
+      {'waypoints' -> waypoints, 'arrival_radius' -> move_arrival_radius, 'timeout_ticks' -> 60,
+       'no_progress_ticks' -> no_progress_ticks, 'max_deviation' -> 8.0,
+       'path_moves' -> movement_kinds, 'path_fall_depths' -> fall_depths,
+       'cancel_policies' -> cancel_policies, 'movement_cancel' -> movement_cancel});
+    if(!move_ok, finish_follow(name, 'move_start_failed'))
   )
 );
 
@@ -5249,7 +5670,17 @@ start_follow(name, action_id, target_spec, params) -> (
       max_expand = floor(param_number(params, 'max_expand', 200));
       if(max_expand < 10, max_expand = 10);
       if(max_expand > 5000, max_expand = 5000);
-      global_follows:name = l(action_id, target_spec, keep_radius, replan_distance, timeout_ticks, 0, target_pos, 0, grid_radius, max_expand, acquire_radius);
+      no_progress_ticks = floor(param_number(params, 'no_progress_ticks', 120));
+      if(no_progress_ticks < 20, no_progress_ticks = 20);
+      min_partial_progress = floor(param_number(params, 'min_partial_progress', 5));
+      if(min_partial_progress < 1, min_partial_progress = 1);
+      context = navigation_context_from_params(params);
+      context:'allow_break' = false;
+      context:'allow_place' = false;
+      context:'allow_pillar' = false;
+      context:'allow_downward' = false;
+      context:'allow_open' = false;
+      global_follows:name = l(action_id, target_spec, keep_radius, replan_distance, timeout_ticks, 0, target_pos, 0, grid_radius, max_expand, acquire_radius, context, no_progress_ticks, min_partial_progress);
       emit('followStarted', name, l(action_id, target_spec, target_pos, keep_radius));
       if(dist_to_target(p, target_pos:0, target_pos:1, target_pos:2) > keep_radius,
         follow_replan(name, target_pos)
@@ -5293,7 +5724,7 @@ run_follow_tick(name, f) -> (
           finish_move(name, 'follow_hold', false)
         );
         stop_body(name);
-        global_follows:name = l(f:0, f:1, f:2, f:3, f:4, ticks, f:6, f:7, f:8, f:9, f:10)
+        global_follows:name = l(f:0, f:1, f:2, f:3, f:4, ticks, f:6, f:7, f:8, f:9, f:10, f:11, f:12, f:13)
       ,
         last_plan_pos = f:6;
         need_replan = false;
@@ -5308,7 +5739,7 @@ run_follow_tick(name, f) -> (
             )
           )
         );
-        global_follows:name = l(f:0, f:1, f:2, f:3, f:4, ticks, f:6, f:7, f:8, f:9, f:10);
+        global_follows:name = l(f:0, f:1, f:2, f:3, f:4, ticks, f:6, f:7, f:8, f:9, f:10, f:11, f:12, f:13);
         if(need_replan,
           if(global_moves:name != null,
             finish_move(name, 'follow_replan', false)
@@ -5335,7 +5766,7 @@ finish_follow(name, reason) -> (
       finish_move(name, reason, false)
     );
     stop_body(name);
-    emit('followDone', name, l(action_id, reason != 'timeout' && reason != 'target_lost' && reason != 'interrupted', p, reason));
+    emit('followDone', name, l(action_id, reason == 'arrived', p, reason));
     global_follows:name = null
   )
 );
@@ -5564,6 +5995,7 @@ minebot_reset() -> (
   global_tick = 0;
   global_moves = {};
   global_move_cancels = {};
+  global_move_control_inits = {};
   global_navigations = {};
   global_navigation_mutations = {};
   global_follows = {};
@@ -5645,43 +6077,47 @@ minebot_perceive(name, scope, payload) -> (
   if(scope == 'blockAt',
     perceive_block_at(name, params)
   ,
-    if(scope == 'blockCells',
-      perceive_block_cells(name, params)
-    ,
-    if(scope == 'nearbyBlocks',
-      perceive_nearby_blocks(name, params)
-    ,
-      if(scope == 'findBlocks',
-        perceive_find_blocks(name, params)
-      ,
-        if(scope == 'nearbyEntities',
-          perceive_nearby_entities(name, params)
-        ,
-          if(scope == 'debugBlocks',
-            perceive_debug_blocks(name, params)
-          ,
-          if(scope == 'inventory',
-            perceive_inventory(name, params)
-          ,
-            if(scope == 'container',
-              perceive_container(name, params)
-            ,
-              if(scope == 'recipeData',
-                perceive_recipe_data(name, params)
-              ,
-                if(scope == 'nearbyHostiles',
-                  perceive_hostiles(name, params)
-                ,
-                  perception_json(name, scope, false, true, '{}', '[]', null, 'unknown perception scope')
-                )
-              )
-            )
-          )
-          )
-        )
-      )
-    )
-    )
+  if(scope == 'blockCells',
+    perceive_block_cells(name, params)
+  ,
+  if(scope == 'surfaceColumns',
+    perceive_surface_columns(name, params)
+  ,
+  if(scope == 'nearbyBlocks',
+    perceive_nearby_blocks(name, params)
+  ,
+  if(scope == 'findBlocks',
+    perceive_find_blocks(name, params)
+  ,
+  if(scope == 'nearbyEntities',
+    perceive_nearby_entities(name, params)
+  ,
+  if(scope == 'debugBlocks',
+    perceive_debug_blocks(name, params)
+  ,
+  if(scope == 'inventory',
+    perceive_inventory(name, params)
+  ,
+  if(scope == 'container',
+    perceive_container(name, params)
+  ,
+  if(scope == 'recipeData',
+    perceive_recipe_data(name, params)
+  ,
+  if(scope == 'nearbyHostiles',
+    perceive_hostiles(name, params)
+  ,
+    perception_json(name, scope, false, true, '{}', '[]', null, 'unknown perception scope')
+  )
+  )
+  )
+  )
+  )
+  )
+  )
+  )
+  )
+  )
   )
 );
 

@@ -6,17 +6,15 @@ from __future__ import annotations
 import math
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from minebot.body import BlockWork, NavigationRunConfig, NavigationTransactions
+from minebot.body import BlockApproachTransactions, BlockWork, GetToBlockConfig, NavigationTransactions
 from minebot.game import GovernancePolicy, RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
 from minebot.game.rcon import RconConfig
-from minebot.game.navigation import GridCell, GridWorld, NavigationCostModel, SegmentedNavigator
 from tests.e2e_support import spawn_or_fail
 
 
@@ -53,21 +51,19 @@ def setup_world(rcon: RconClient) -> None:
         command(rcon, cmd)
 
 
-def flat_world(x_min: int, x_max: int, z_min: int, z_max: int, *, y: int = 59) -> GridWorld:
-    return GridWorld({(x, y, z): GridCell() for x in range(x_min, x_max + 1) for z in range(z_min, z_max + 1)})
-
-
 def distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
     return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
 
 
 def make_runtime(body: ScarpetBody) -> BlockWork:
     policy = GovernancePolicy(natural_regions=[Region("search_block", (-2, 0, -3), (12, 100, 3))])
-    navigator = NavigationTransactions(
-        body,
-        SegmentedNavigator(flat_world(-2, 12, -3, 3), NavigationCostModel(policy)),
-    )
+    navigator = NavigationTransactions.server_side(body, policy)
     return BlockWork(body, policy, navigator=navigator)
+
+
+def make_approach_runtime(body: ScarpetBody) -> BlockApproachTransactions:
+    policy = GovernancePolicy(natural_regions=[Region("search_block", (-2, 0, -4), (14, 100, 4))])
+    return BlockApproachTransactions(body, NavigationTransactions.server_side(body, policy))
 
 
 def run_happy_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
@@ -88,47 +84,23 @@ def run_happy_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     target_center = (TARGET[0] + 0.5, TARGET[1] + 0.5, TARGET[2] + 0.5)
     final_distance = distance(final.pos, target_center)
 
-    if not result.success or result.reason != "block_in_range":
+    if not result.success or result.reason != "block_candidates_found":
         raise AssertionError(
-            "search_for_block did not reach target range: "
-            f"result={payload} final={final} stand_probe={stand_probe(body, TARGET)}"
+            "search_for_block did not return target facts: "
+            f"result={payload} final={final}"
         )
-    if final_distance > 4.5:
-        raise AssertionError(f"search_for_block final distance too far: final={final.pos} dist={final_distance:.3f} result={payload}")
+    if distance(final.pos, (0.5, 59.0, 0.5)) > 1.0:
+        raise AssertionError(f"search_for_block perception moved the body: final={final.pos} result={payload}")
     if block.data.get("type") not in {"oak_log", "minecraft:oak_log"}:
         raise AssertionError(f"search target changed unexpectedly: block={block.data} result={payload}")
-    attempts = (result.metrics or {}).get("attempts") or []
-    if not attempts or not attempts[0].get("result", {}).get("success"):
-        raise AssertionError(f"search_for_block did not expose successful navigation attempt: {payload}")
-    nav_result = attempts[0]["result"]
-    if nav_result.get("reason") != "arrived":
-        raise AssertionError(f"search_for_block navigation did not arrive: {payload}")
-
     return {
         "reason": result.reason,
         "target": (result.metrics or {}).get("target"),
         "initial_distance": round(float((result.metrics or {}).get("initial_distance", 0.0)), 3),
         "final_distance": round(final_distance, 3),
         "body_pos": final.pos,
-        "navigation_reason": nav_result.get("reason"),
+        "candidate_count": len((result.metrics or {}).get("candidates") or []),
     }
-
-
-def stand_probe(body: ScarpetBody, target: tuple[int, int, int]) -> list[dict[str, object]]:
-    probes: list[dict[str, object]] = []
-    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-        feet = (target[0] + dx, target[1], target[2] + dz)
-        head = (feet[0], feet[1] + 1, feet[2])
-        below = (feet[0], feet[1] - 1, feet[2])
-        probes.append(
-            {
-                "feet": list(feet),
-                "feet_block": body.perceive("blockAt", {"x": feet[0], "y": feet[1], "z": feet[2]}).data,
-                "head_block": body.perceive("blockAt", {"x": head[0], "y": head[1], "z": head[2]}).data,
-                "below_block": body.perceive("blockAt", {"x": below[0], "y": below[1], "z": below[2]}).data,
-            }
-        )
-    return probes
 
 
 def run_not_found_inverse(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
@@ -156,24 +128,15 @@ def run_not_found_inverse(rcon: RconClient, body: ScarpetBody) -> dict[str, obje
     return {"reason": result.reason, "can_retry": result.can_retry, "final": final.pos, "metrics": result.metrics}
 
 
-def run_candidate_fallback_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+def run_multiple_candidate_truth(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     command(rcon, "script in minebot run minebot_reset()")
     command(rcon, "fill -2 59 -4 14 66 4 air")
     command(rcon, "fill -2 58 -4 14 58 4 stone")
     command(rcon, "setblock 6 59 0 oak_log")
     command(rcon, "setblock 11 59 0 oak_log")
     command(rcon, f"tp {BOT} 0 59 0 -90 0")
-    cells = flat_world(-2, 14, -4, 4).cells
-    cells[(6, 59, 1)] = GridCell(block_type="stone", walkable=False)
-    cells[(6, 59, -1)] = GridCell(block_type="stone", walkable=False)
-    cells[(5, 59, 0)] = GridCell(block_type="stone", walkable=False)
-    cells[(7, 59, 0)] = GridCell(block_type="stone", walkable=False)
-    policy = GovernancePolicy(
-        natural_regions=[Region("search_block_fallback", (-2, 0, -4), (14, 100, 4))],
-        protected_regions=[Region("first_candidate_ring", (5, 0, -1), (7, 100, 1))],
-    )
-    navigator = NavigationTransactions(body, SegmentedNavigator(GridWorld(cells), NavigationCostModel(policy)))
-    runtime = BlockWork(body, policy, navigator=navigator)
+    runtime = make_runtime(body)
+    before = body.get_state()
 
     result = runtime.search_for_block(
         block_types=("oak_log",),
@@ -183,58 +146,121 @@ def run_candidate_fallback_path(rcon: RconClient, body: ScarpetBody) -> dict[str
         find_limit=8,
     )
     payload = result.to_payload()
-    if not result.success or result.reason != "block_in_range":
-        raise AssertionError(f"candidate fallback did not reach a later target: {payload}")
-    target = (result.metrics or {}).get("target") or {}
-    if target.get("pos") != [11, 59, 0]:
-        raise AssertionError(f"candidate fallback did not skip the blocked nearest target: {payload}")
-    attempts = (result.metrics or {}).get("attempts") or []
-    if not any((attempt.get("target") or {}).get("pos") == [6, 59, 0] and not attempt.get("result", {}).get("success") for attempt in attempts):
-        raise AssertionError(f"candidate fallback did not expose failed nearest-target attempts: {payload}")
+    if not result.success or result.reason != "block_candidates_found":
+        raise AssertionError(f"multi-candidate search returned wrong truth: {payload}")
+    candidates = (result.metrics or {}).get("candidates") or []
+    if [candidate.get("pos") for candidate in candidates] != [[6, 59, 0], [11, 59, 0]]:
+        raise AssertionError(f"multi-candidate search lost deterministic candidate facts: {payload}")
+    after = body.get_state()
+    if distance(before.pos, after.pos) > 0.75:
+        raise AssertionError(f"multi-candidate perception moved the body: before={before.pos} after={after.pos}")
     return {
         "reason": result.reason,
-        "target": target,
-        "candidate_count": len((result.metrics or {}).get("candidates") or []),
-        "attempt_count": len(attempts),
+        "candidates": candidates,
+        "before": before.pos,
+        "after": after.pos,
     }
 
 
-def run_target_lost_inverse(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+def run_get_to_block_happy(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     command(rcon, "script in minebot run minebot_reset()")
-    command(rcon, "fill -2 59 -3 12 66 3 air")
-    command(rcon, "fill -2 58 -3 12 58 3 stone")
+    command(rcon, "fill -2 59 -4 14 66 4 air")
+    command(rcon, "fill -2 58 -4 14 58 4 stone")
     command(rcon, f"setblock {TARGET[0]} {TARGET[1]} {TARGET[2]} oak_log")
     command(rcon, f"tp {BOT} 0 59 0 -90 0")
-    runtime = make_runtime(body)
+    runtime = make_approach_runtime(body)
+    before = body.get_state()
 
-    def remove_target() -> None:
-        time.sleep(0.25)
-        remover = RconClient(RconConfig())
-        remover.connect()
-        try:
-            remover.command(f"setblock {TARGET[0]} {TARGET[1]} {TARGET[2]} air")
-        finally:
-            remover.close()
-
-    remover = threading.Thread(target=remove_target, daemon=True)
-    remover.start()
-    result = runtime.search_for_block(
+    result = runtime.get_to_block(
         block_types=("oak_log",),
-        search_radius=12,
-        interaction_radius=4.5,
-        timeout_s=18.0,
-        find_limit=8,
+        config=GetToBlockConfig(
+            search_radius=12,
+            candidate_budget=4,
+            find_limit=8,
+            max_segments=4,
+            segment_timeout_s=8.0,
+        ),
     )
-    remover.join(timeout=2.0)
     payload = result.to_payload()
-    if result.success:
-        raise AssertionError(f"target-lost inverse unexpectedly succeeded: {payload}")
-    if result.reason != "search_block_target_lost" or not result.can_retry:
-        raise AssertionError(f"target-lost inverse returned wrong truth: {payload}")
-    refreshed = (result.metrics or {}).get("refreshed_block") or {}
-    if refreshed.get("type") in {"oak_log", "minecraft:oak_log"}:
-        raise AssertionError(f"target-lost inverse still saw the requested target block: {payload}")
-    return {"reason": result.reason, "can_retry": result.can_retry, "refreshed_block": refreshed}
+    after = body.get_state()
+    target_center = (TARGET[0] + 0.5, TARGET[1] + 0.5, TARGET[2] + 0.5)
+    if not result.success or result.reason != "block_reached":
+        raise AssertionError(f"get_to_block did not reach target: {payload}")
+    if distance(before.pos, after.pos) < 2.0:
+        raise AssertionError(f"get_to_block did not physically approach: before={before.pos} after={after.pos}")
+    if distance(after.pos, target_center) > 4.5:
+        raise AssertionError(f"get_to_block terminal range false: final={after.pos} result={payload}")
+    metrics = result.metrics or {}
+    if metrics.get("target") != list(TARGET) or not metrics.get("identity_verified") or not metrics.get("range_verified"):
+        raise AssertionError(f"get_to_block terminal identity/range truth missing: {payload}")
+    nav_metrics = ((metrics.get("navigation") or {}).get("metrics") or {})
+    capability = nav_metrics.get("capability_snapshot") or {}
+    if any(capability.get(key) for key in ("allow_break", "allow_place", "allow_pillar", "allow_downward")):
+        raise AssertionError(f"get_to_block escalated terrain mutation capability: {payload}")
+    if nav_metrics.get("goal_set_preserved") is not True:
+        raise AssertionError(f"get_to_block stand goal set was truncated: {payload}")
+    return {
+        "reason": result.reason,
+        "target": metrics.get("target"),
+        "before": before.pos,
+        "after": after.pos,
+        "final_distance": round(distance(after.pos, target_center), 3),
+        "capability_snapshot": capability,
+    }
+
+
+def run_get_to_block_blacklist_replan(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+    near = (6, 59, 0)
+    far = (11, 59, 0)
+    command(rcon, "script in minebot run minebot_reset()")
+    command(rcon, "fill -2 59 -4 14 66 4 air")
+    command(rcon, "fill -2 58 -4 14 58 4 stone")
+    command(rcon, f"setblock {near[0]} {near[1]} {near[2]} oak_log")
+    command(rcon, f"setblock {far[0]} {far[1]} {far[2]} oak_log")
+    command(rcon, "fill 4 59 -2 8 60 -2 stone")
+    command(rcon, "fill 4 59 2 8 60 2 stone")
+    command(rcon, "fill 4 59 -2 4 60 2 stone")
+    command(rcon, "fill 8 59 -2 8 60 2 stone")
+    command(rcon, f"tp {BOT} 0 59 0 -90 0")
+    runtime = make_approach_runtime(body)
+
+    result = runtime.get_to_block(
+        block_types=("oak_log",),
+        config=GetToBlockConfig(
+            search_radius=14,
+            candidate_budget=2,
+            candidate_batch_size=1,
+            find_limit=8,
+            max_segments=4,
+            segment_timeout_s=8.0,
+        ),
+    )
+    payload = result.to_payload()
+    metrics = result.metrics or {}
+    attempts = metrics.get("attempts") or []
+    if not result.success or result.reason != "block_reached" or metrics.get("target") != list(far):
+        raise AssertionError(f"get_to_block did not replan to reachable candidate: {payload}")
+    if metrics.get("candidate_blacklist") != [list(near)] or len(attempts) != 2:
+        raise AssertionError(f"get_to_block blacklist/replan truth missing: {payload}")
+    first_navigation = attempts[0].get("navigation") or {}
+    if first_navigation.get("success") is not False or first_navigation.get("reason") not in {
+        "no_path",
+        "budget_exceeded",
+        "recovery_exhausted:no_path",
+    }:
+        raise AssertionError(f"get_to_block first candidate did not fail physically: {payload}")
+    if not attempts[1].get("verification", {}).get("success"):
+        raise AssertionError(f"get_to_block second candidate lacked terminal verification: {payload}")
+    return {
+        "reason": result.reason,
+        "target": metrics.get("target"),
+        "candidate_blacklist": metrics.get("candidate_blacklist"),
+        "attempt_reasons": [
+            (attempt.get("navigation") or {}).get("reason")
+            for attempt in attempts
+        ],
+        "final": body.get_state().pos,
+    }
 
 
 def main() -> None:
@@ -258,8 +284,9 @@ def main() -> None:
         cases = {
             "happy": lambda: run_happy_path(rcon, body),
             "not_found": lambda: run_not_found_inverse(rcon, body),
-            "candidate_fallback": lambda: run_candidate_fallback_path(rcon, body),
-            "target_lost": lambda: run_target_lost_inverse(rcon, body),
+            "multiple_candidates": lambda: run_multiple_candidate_truth(rcon, body),
+            "get_to_block_happy": lambda: run_get_to_block_happy(rcon, body),
+            "get_to_block_blacklist_replan": lambda: run_get_to_block_blacklist_replan(rcon, body),
         }
         selected_raw = os.environ.get("MINEBOT_SEARCH_BLOCK_CASES")
         selected = [name.strip() for name in selected_raw.split(",") if name.strip()] if selected_raw else list(cases.keys())

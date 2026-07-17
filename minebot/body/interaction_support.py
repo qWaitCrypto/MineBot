@@ -8,6 +8,11 @@ from math import floor
 from math import dist
 from typing import Protocol
 
+from minebot.body.navigation import (
+    SERVER_GOAL_SET_LIMIT,
+    NavigationRunConfig,
+    pure_movement_navigation_config,
+)
 from minebot.contract import Action, Body, PerceptionResult, Position, ToolResult, perception_next_cursor
 from minebot.contract import terminal_event_to_tool_result
 from minebot.body.world_read import read_block_facts
@@ -28,6 +33,8 @@ def _navigation_goal_for_stands(stands: list[Position]) -> GoalComposite:
     unique = tuple(dict.fromkeys(stands))
     if not unique:
         raise ValueError("stand goal set requires at least one position")
+    if len(unique) > SERVER_GOAL_SET_LIMIT:
+        raise ValueError(f"stand goal set exceeds server limit {SERVER_GOAL_SET_LIMIT}")
     return GoalComposite(tuple(GoalNear(stand, radius=0) for stand in unique))
 
 
@@ -240,7 +247,10 @@ def find_named_entity_target(
     not_found_reason: str,
     wanted_types: tuple[str, ...] = ("player",),
 ) -> NearbyEntityTarget | ToolResult:
-    nearby = body.perceive("nearbyEntities", {"radius": radius, "limit": 64})
+    nearby = body.perceive(
+        "nearbyEntities",
+        {"radius": radius, "limit": 64, "types": list(wanted_types), "name": entity_name},
+    )
     failed = perception_failure(nearby)
     if failed is not None:
         return failed
@@ -287,7 +297,12 @@ def find_entity_target(
     wanted_types: tuple[str, ...] = (),
     entity_name: str | None = None,
 ) -> NearbyEntityTarget | ToolResult:
-    nearby = body.perceive("nearbyEntities", {"radius": radius, "limit": 64})
+    query: dict[str, object] = {"radius": radius, "limit": 64}
+    if wanted_types:
+        query["types"] = list(wanted_types)
+    if entity_name is not None:
+        query["name"] = entity_name
+    nearby = body.perceive("nearbyEntities", query)
     failed = perception_failure(nearby)
     if failed is not None:
         return failed
@@ -435,7 +450,7 @@ def ensure_interaction_range(
     else:
         last_failure = None
         if navigation_arrival_radius is not None and center_after_navigation:
-            center_result = _move_to_stand_center(
+            center_result = move_to_block_center(
                 body,
                 selected_stand,
                 arrival_radius=navigation_arrival_radius,
@@ -476,13 +491,20 @@ def ensure_interaction_range(
     )
 
 
-def _move_to_stand_center(
+def move_to_block_center(
     body: Body,
     stand: Position,
     *,
     arrival_radius: float,
     timeout_s: float,
+    stabilize: bool = True,
 ) -> ToolResult:
+    """Execute one bounded sub-block centering pulse inside ``stand``.
+
+    This is not route planning: the caller already owns the destination block
+    and uses this primitive only when exact horizontal placement matters.
+    """
+
     center = (stand[0] + 0.5, stand[1], stand[2] + 0.5)
     precise_radius = min(arrival_radius, 0.1)
     action = Action.create(
@@ -491,7 +513,7 @@ def _move_to_stand_center(
             "target": list(center),
             "waypoints": [list(center)],
             "arrival_radius": precise_radius,
-            "timeout_ticks": 80,
+            "timeout_ticks": min(80, max(20, int(timeout_s * 20))),
             "no_progress_ticks": 25,
             "max_deviation": 1.5,
         },
@@ -517,7 +539,11 @@ def _move_to_stand_center(
         )
     terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
     result = terminal_event_to_tool_result(terminal)
-    stop_result = _stop_body_controls(body, timeout_s=min(timeout_s, 2.0)) if result.success else None
+    stop_result = (
+        _stop_body_controls(body, timeout_s=min(timeout_s, 2.0))
+        if result.success and stabilize
+        else None
+    )
     return ToolResult(
         success=result.success and (stop_result is None or stop_result.success),
         reason=result.reason if stop_result is None or stop_result.success else f"stabilize_failed:{stop_result.reason}",
@@ -576,6 +602,7 @@ def ensure_entity_range(
     failure_prefix: str,
     no_stand_reason: str,
     include_entity_block: bool = False,
+    navigation_config: NavigationRunConfig | None = None,
 ) -> dict[str, object] | ToolResult:
     state = body.get_state()
     initial_distance = dist(state.pos, target)
@@ -624,11 +651,12 @@ def ensure_entity_range(
             },
         )
 
-    nav_result = navigator.navigate_to(
-        _navigation_goal_for_stands(stand_points),
-        timeout_s=timeout_s,
-        arrival_radius=ENTITY_STAND_ARRIVAL_RADIUS,
-    )
+    navigation_kwargs: dict[str, object] = {
+        "timeout_s": timeout_s,
+        "arrival_radius": ENTITY_STAND_ARRIVAL_RADIUS,
+        "config": pure_movement_navigation_config(navigation_config),
+    }
+    nav_result = navigator.navigate_to(_navigation_goal_for_stands(stand_points), **navigation_kwargs)
     selected_stand = _selected_navigation_stand(nav_result, stand_points)
     attempts = [
         {
@@ -681,11 +709,49 @@ def interaction_stand_points(
     target: Position,
     *,
     include_target: bool = False,
+    expand_vertical: bool = False,
+    interaction_radius: float = INTERACTION_RANGE,
 ) -> list[Position] | ToolResult:
     same_level = _interaction_stand_points_at_y(body, target, target[1], include_target=include_target)
     if isinstance(same_level, ToolResult) or same_level:
         return same_level
-    return _interaction_stand_points_at_y(body, target, target[1] - 1, include_target=include_target)
+    one_below = _interaction_stand_points_at_y(body, target, target[1] - 1, include_target=include_target)
+    if isinstance(one_below, ToolResult) or one_below or not expand_vertical:
+        return one_below
+
+    current_y = body.get_state().pos[1]
+    extra_levels = _interaction_vertical_reach_levels(
+        target,
+        interaction_radius=interaction_radius,
+        current_y=current_y,
+    )
+    for stand_y in extra_levels:
+        stands = _interaction_stand_points_at_y(body, target, stand_y, include_target=include_target)
+        if isinstance(stands, ToolResult) or stands:
+            return stands
+    return []
+
+
+def _interaction_vertical_reach_levels(
+    target: Position,
+    *,
+    interaction_radius: float,
+    current_y: float,
+) -> tuple[int, ...]:
+    if interaction_radius <= 0:
+        return ()
+    vertical_limit = int(interaction_radius)
+    levels = []
+    for offset in range(-vertical_limit, vertical_limit + 2):
+        stand_y = target[1] + offset
+        if stand_y in {target[1], target[1] - 1}:
+            continue
+        stand_center = (target[0] + 1.5, float(stand_y), target[2] + 0.5)
+        target_center = (target[0] + 0.5, target[1] + 0.5, target[2] + 0.5)
+        if dist(stand_center, target_center) <= interaction_radius:
+            levels.append(stand_y)
+    levels.sort(key=lambda stand_y: (abs(float(stand_y) - current_y), abs(stand_y - target[1]), stand_y))
+    return tuple(levels)
 
 
 def _interaction_stand_points_at_y(
@@ -745,13 +811,17 @@ def entity_stand_points(
     include_entity_block: bool = False,
     min_distance: float = 0.0,
     max_distance: float | None = None,
+    max_points: int = SERVER_GOAL_SET_LIMIT,
 ) -> list[tuple[float, float, float]] | ToolResult:
+    if max_points < 1 or max_points > SERVER_GOAL_SET_LIMIT:
+        raise ValueError(f"max_points must be between 1 and {SERVER_GOAL_SET_LIMIT}")
     block_pos = (floor(target[0]), floor(target[1]), floor(target[2]))
     stand_points = _entity_distance_band_stand_points(
         body,
         target,
         min_distance=min_distance,
         max_distance=max_distance,
+        max_points=max_points,
     )
     if isinstance(stand_points, ToolResult) or not include_entity_block:
         return stand_points
@@ -786,7 +856,9 @@ def entity_stand_points(
         and _interaction_head_clear(head, head_pos=(handoff_block[0], handoff_block[1] + 1, handoff_block[2]), target=block_pos)
         and _interaction_support_standable(below)
     ):
-        return [*stand_points, handoff]
+        if handoff in stand_points:
+            return stand_points
+        return [*stand_points[: max_points - 1], handoff]
     return stand_points
 
 
@@ -796,6 +868,7 @@ def _entity_distance_band_stand_points(
     *,
     min_distance: float,
     max_distance: float | None,
+    max_points: int,
 ) -> list[Position] | ToolResult:
     block_pos = (floor(target[0]), floor(target[1]), floor(target[2]))
     radius = max(1, int(max_distance or INTERACTION_RANGE) + 1)
@@ -837,7 +910,7 @@ def _entity_distance_band_stand_points(
             candidates.append((dist(state.pos, (pos[0] + 0.5, pos[1], pos[2] + 0.5)), pos))
 
     candidates.sort(key=lambda item: (item[0], item[1]))
-    return [pos for _distance, pos in candidates]
+    return [pos for _distance, pos in candidates[:max_points]]
 
 
 def perception_failure(perception: PerceptionResult) -> ToolResult | None:

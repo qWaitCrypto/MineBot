@@ -1,8 +1,18 @@
 import unittest
 
 from minebot.body import BlockWork
+from minebot.body.block_work import _scan_place_here_candidates, _surface_lateral_columns
 from minebot.game.governance import BreakContext, GovernancePolicy, PlaceContext, Region
-from minebot.contract import Action, BodyState, Event, PerceptionResult, Result, ToolResult
+from minebot.contract import (
+    Action,
+    BodyState,
+    Event,
+    PerceptionResult,
+    Result,
+    StructureRiskAssessment,
+    StructureRiskLevel,
+    ToolResult,
+)
 from minebot.game.navigation import GoalComposite, NavigationGoal
 from tests.unit._body_batch_helper import batch_block_cells_from_blockat
 
@@ -112,6 +122,47 @@ class FakeBody:
             )
         if self.blocks is not None and scope == "blockCells":
             return batch_block_cells_from_blockat(self, params)
+        if self.blocks is not None and scope == "surfaceColumns":
+            columns = params.get("columns") or []
+            start = int(params.get("start") or 0)
+            limit = int(params.get("limit") or 64)
+            page = columns[start : start + limit]
+            facts = []
+            for column in page:
+                x, z = int(column[0]), int(column[1])
+                occupied = [
+                    y
+                    for (bx, y, bz), (_block_type, state) in self.blocks.items()
+                    if bx == x and bz == z and state != "CLEAR"
+                ]
+                feet_y = max(occupied) + 1 if occupied else 0
+                feet_type, feet_state = self.blocks.get((x, feet_y, z), ("air", "CLEAR"))
+                head_type, head_state = self.blocks.get((x, feet_y + 1, z), ("air", "CLEAR"))
+                support_type, support_state = self.blocks.get((x, feet_y - 1, z), ("air", "CLEAR"))
+                facts.append(
+                    {
+                        "x": x,
+                        "z": z,
+                        "feetY": feet_y,
+                        "feetType": feet_type,
+                        "feetState": feet_state,
+                        "headType": head_type,
+                        "headState": head_state,
+                        "supportType": support_type,
+                        "supportState": support_state,
+                    }
+                )
+            next_start = start + len(page)
+            nxt = None if next_start >= len(columns) else next_start
+            return PerceptionResult(
+                bot="Bot1",
+                scope="surfaceColumns",
+                type="perception",
+                ok=True,
+                complete=nxt is None,
+                data={"columns": facts, "nextStart": nxt},
+                uncertainty=[] if nxt is None else [{"reason": "limit_exceeded"}],
+            )
         if self.blocks is not None and scope == "blockAt":
             pos = (int(params["x"]), int(params["y"]), int(params["z"]))
             block_type, state = self.blocks.get(pos, ("air", "CLEAR"))
@@ -342,6 +393,24 @@ class FallingBody(FakeBody):
         return super().get_state()
 
 
+class EdgeSupportedFallingBody(FakeBody):
+    def get_state(self) -> BodyState:
+        if self.blocks is not None:
+            feet = (
+                int(self.state_pos[0] // 1),
+                int(self.state_pos[1] // 1),
+                int(self.state_pos[2] // 1),
+            )
+            below = (feet[0], feet[1] - 1, feet[2])
+            within_shaft = (
+                feet[0] + 0.32 <= self.state_pos[0] <= feet[0] + 0.68
+                and feet[2] + 0.32 <= self.state_pos[2] <= feet[2] + 0.68
+            )
+            if within_shaft and self.blocks.get(below, ("air", "CLEAR"))[1] == "CLEAR":
+                self.state_pos = (self.state_pos[0], self.state_pos[1] - 1.0, self.state_pos[2])
+        return super().get_state()
+
+
 class FallProbeBatchFailureBody(FallingBody):
     def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
         self.perceptions.append((scope, params))
@@ -409,6 +478,14 @@ class ScopeBatchFailureBody(FakeBody):
 
 
 class BlockWorkTests(unittest.TestCase):
+    def test_surface_lateral_sampling_keeps_outer_ring_four_block_coverage(self):
+        columns = _surface_lateral_columns((0, 64, 0), ((16, 8), (24, 16), (32, 64)))
+
+        self.assertEqual(len(columns), 88)
+        sampled = {(entry["x"], entry["z"]) for entry in columns}
+        self.assertIn((-28, -32), sampled)
+        self.assertIn((32, 28), sampled)
+
     def test_mine_block_approach_uses_feet_y_above_target_floor(self):
         blocks = {
             (0, 64, 0): ("minecraft:stone", "SOLID"),
@@ -976,7 +1053,6 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(nav_kwargs["break_context"], BreakContext.COLLECT_APPROACH)
         nav_config = nav_kwargs["config"]
         self.assertEqual(nav_config.max_break_steps, BlockWork.MINE_APPROACH_MAX_BREAK_STEPS)
-        self.assertFalse(nav_config.allow_local_terrain_fallback)
         self.assertEqual(body.blocks[(0, 65, 4)], ("air", "CLEAR"))
         mine_actions = [action for action in body.actions if action.name == "mineBlock"]
         self.assertEqual([action.params["target"] for action in mine_actions], [[0, 64, 5]])
@@ -1086,8 +1162,6 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.reason, "mine_approach_failed:no_path")
         self.assertTrue(navigator.calls)
         nav_config = navigator.calls[-1][1]["config"]
-        self.assertFalse(nav_config.allow_local_terrain_fallback)
-        self.assertFalse(nav_config.progress_neutral_failures)
 
 
 
@@ -1108,7 +1182,6 @@ class BlockWorkTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "mine_approach_failed:stuck")
         self.assertEqual(len(navigator.calls), 1)
-        self.assertFalse(navigator.calls[0][1]["config"].progress_neutral_failures)
 
     def test_mine_block_approach_uses_feet_level_stand_for_headroom_target(self):
         body = FakeBody(
@@ -1470,7 +1543,9 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.metrics["expected_drops"], ["diamond"])
         self.assertEqual(result.metrics["deltas"], {"diamond": 0})
         # No navigator wired in, so the assist walk must not have fired.
-        self.assertEqual(result.metrics["pickup_assist"], {"waited": True, "moved": False})
+        self.assertTrue(result.metrics["pickup_assist"]["waited"])
+        self.assertFalse(result.metrics["pickup_assist"]["moved"])
+        self.assertEqual(result.metrics["pickup_assist"]["plans"], [])
 
     def test_mine_block_collect_walks_onto_drop_cell_when_pickup_lags(self):
         # The pickup root cause: after mining, the drop often isn't collected
@@ -1490,6 +1565,10 @@ class BlockWorkTests(unittest.TestCase):
                 selected = goal_position(goal)
                 if isinstance(goal, GoalComposite):
                     self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
+                    if not kwargs["config"].allow_break:
+                        self.body.inventory_pages.append(
+                            inventory_page([slot(9, "minecraft:dirt", 1)])
+                        )
                     return ToolResult(
                         success=True,
                         reason="arrived",
@@ -1529,10 +1608,13 @@ class BlockWorkTests(unittest.TestCase):
         # Walked into the drop cell center, not pos-1 (the solid floor), with a
         # tight arrival radius so pickup range is actually reached.
         self.assertTrue(navigator.calls, "pickup-assist walk did not fire")
-        goal, nav_kwargs = next(call for call in navigator.calls if not isinstance(call[0], GoalComposite))
-        self.assertEqual(tuple(goal), (0.5, 64, 5.5))
+        goal, nav_kwargs = navigator.calls[-1]
+        self.assertIsInstance(goal, GoalComposite)
+        self.assertIn((0, 64, 5), {child.pos for child in goal.goals})
         self.assertEqual(nav_kwargs["break_context"], BreakContext.TRAVEL)
         self.assertEqual(nav_kwargs["arrival_radius"], 0.25)
+        self.assertFalse(nav_kwargs["config"].allow_break)
+        self.assertFalse(nav_kwargs["config"].allow_place)
         assist = result.metrics["pickup_assist"]
         self.assertTrue(assist["moved"])
         self.assertTrue(assist["waited"])
@@ -1574,6 +1656,10 @@ class BlockWorkTests(unittest.TestCase):
                 selected = goal_position(goal)
                 if isinstance(goal, GoalComposite):
                     self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
+                    if not kwargs["config"].allow_break:
+                        self.body.inventory_pages.append(
+                            inventory_page([slot(9, "minecraft:dirt", 1)])
+                        )
                     return ToolResult(
                         success=True,
                         reason="arrived",
@@ -1612,13 +1698,15 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.metrics["deltas"], {"dirt": 1})
         # Walked to the drop ENTITY's position, not the mined cell.
         self.assertTrue(navigator.calls, "pickup-assist walk did not fire")
-        goal, nav_kwargs = next(call for call in navigator.calls if not isinstance(call[0], GoalComposite))
-        self.assertEqual(tuple(goal), (2, 64, 5))
-        self.assertNotEqual(tuple(goal), (0, 64, 5))
+        goal, nav_kwargs = navigator.calls[-1]
+        self.assertIsInstance(goal, GoalComposite)
+        self.assertEqual(goal.goals[0].pos, (2, 64, 5))
+        self.assertEqual(tuple(child.pos for child in goal.goals), ((2, 64, 5),))
+        self.assertNotEqual(goal.goals[0].pos, (0, 64, 5))
         self.assertEqual(nav_kwargs["break_context"], BreakContext.TRAVEL)
         self.assertEqual(nav_kwargs["arrival_radius"], 0.25)
         assist = result.metrics["pickup_assist"]
-        self.assertEqual(assist["drop_targets_seen"], 1)
+        self.assertEqual(assist["scans"][0]["candidate_count"], 1)
         self.assertTrue(assist["moved"])
 
     def test_mine_block_collect_uses_ore_drop_mapping_for_raw_resource(self):
@@ -1961,6 +2049,109 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual([action.name for action in body.actions], ["mineBlock", "mineBlock"])
         self.assertEqual([step["kind"] for step in result.metrics["steps"]], ["open", "descent", "open", "descent"])
 
+    def test_dig_down_to_y_centers_off_edge_before_waiting_for_descent(self):
+        blocks = {
+            (0, 64, 0): ("air", "CLEAR"),
+            (0, 65, 0): ("air", "CLEAR"),
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 62, 0): ("stone", "SOLID"),
+        }
+        body = EdgeSupportedFallingBody(blocks=blocks)
+        body.state_pos = (0.98, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("shaft", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, settle=lambda _seconds: None)
+
+        result = runtime.dig_down_to_y(63, current_pos=(0, 64, 0), dig_timeout_s=1.0, move_timeout_s=1.0)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "dig_down_target_reached")
+        self.assertEqual([action.name for action in body.actions], ["mineBlock", "moveTo"])
+        self.assertEqual(body.actions[1].params["target"], [0.5, 64, 0.5])
+        self.assertEqual(body.actions[1].params["arrival_radius"], 0.1)
+        self.assertEqual([step["kind"] for step in result.metrics["steps"]], ["open", "alignment", "descent"])
+        self.assertEqual(result.metrics["steps"][1]["reason"], "dig_down_aligned")
+        self.assertEqual(result.metrics["final_pos"], [0, 63, 0])
+
+    def test_dig_down_to_y_reports_typed_alignment_failure(self):
+        class BlockedCenterBody(EdgeSupportedFallingBody):
+            def execute(self, action: Action) -> Result:
+                accepted = super().execute(action)
+                if action.name == "moveTo":
+                    self.state_pos = (0.98, 64.0, 0.5)
+                    self.terminal = Event(
+                        seq=self.terminal.seq,
+                        tick=self.terminal.tick,
+                        bot=self.terminal.bot,
+                        name="moveDone",
+                        data={
+                            "action_id": action.id,
+                            "arrived": False,
+                            "final_pos": list(self.state_pos),
+                            "target": list(action.params["target"]),
+                            "stopped_reason": "blocked",
+                        },
+                    )
+                return accepted
+
+        blocks = {
+            (0, 64, 0): ("air", "CLEAR"),
+            (0, 65, 0): ("air", "CLEAR"),
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 62, 0): ("stone", "SOLID"),
+        }
+        body = BlockedCenterBody(blocks=blocks)
+        body.state_pos = (0.98, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("shaft", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, settle=lambda _seconds: None)
+
+        result = runtime.dig_down_to_y(63, current_pos=(0, 64, 0), dig_timeout_s=1.0, move_timeout_s=1.0)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "dig_down_alignment_failed:blocked")
+        self.assertEqual([action.name for action in body.actions], ["mineBlock", "moveTo"])
+        self.assertEqual(result.metrics["steps_completed"], 0)
+        self.assertEqual(result.metrics["steps"][-1]["kind"], "alignment")
+
+    def test_dig_down_to_y_accepts_authoritative_descent_when_center_move_stops_stuck(self):
+        class GravityWinsBody(EdgeSupportedFallingBody):
+            def execute(self, action: Action) -> Result:
+                accepted = super().execute(action)
+                if action.name == "moveTo":
+                    self.state_pos = (0.58, 63.79, 0.5)
+                    self.terminal = Event(
+                        seq=self.terminal.seq,
+                        tick=self.terminal.tick,
+                        bot=self.terminal.bot,
+                        name="moveDone",
+                        data={
+                            "action_id": action.id,
+                            "arrived": False,
+                            "final_pos": list(self.state_pos),
+                            "target": list(action.params["target"]),
+                            "stopped_reason": "stuck",
+                        },
+                    )
+                return accepted
+
+        blocks = {
+            (0, 64, 0): ("air", "CLEAR"),
+            (0, 65, 0): ("air", "CLEAR"),
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 62, 0): ("stone", "SOLID"),
+        }
+        body = GravityWinsBody(blocks=blocks)
+        body.state_pos = (0.98, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("shaft", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, settle=lambda _seconds: None)
+
+        result = runtime.dig_down_to_y(63, current_pos=(0, 64, 0), dig_timeout_s=1.0, move_timeout_s=1.0)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "dig_down_target_reached")
+        self.assertEqual(result.metrics["steps"][1]["reason"], "dig_down_aligned")
+        self.assertEqual(result.metrics["steps"][1]["metrics"]["movement"]["reason"], "stuck")
+        self.assertTrue(result.metrics["steps"][1]["metrics"]["already_descended"])
+
     def test_dig_down_to_y_stops_on_second_step_fall_risk(self):
         blocks = {
             (0, 64, 0): ("air", "CLEAR"),
@@ -2298,27 +2489,32 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.reason, "surface_reached")
         self.assertEqual(result.metrics["target_surface"], [1, 65, 0])
         self.assertEqual(result.metrics["final_pos"], [1, 65, 0])
-        self.assertEqual(result.metrics["ascent"]["reason"], "dig_up_target_reached")
         self.assertEqual(result.metrics["terminal_surface"]["candidate"], True)
-        self.assertIn(
-            ((1, 65, 0), {"timeout_s": 1.0, "break_context": BreakContext.TRAVEL, "arrival_radius": 0.25}),
-            navigator.calls,
-        )
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
+        self.assertEqual(navigator.calls[0][1]["arrival_radius"], 0.25)
+        nav_config = navigator.calls[0][1]["config"]
+        self.assertTrue(nav_config.allow_break)
+        self.assertTrue(nav_config.allow_pillar)
+        self.assertFalse(nav_config.allow_downward)
+        self.assertEqual(body.actions, [])
 
     def test_go_to_surface_requires_verified_surface_feet_after_navigation(self):
-        class MissThenHitNavigator(FakeNavigator):
+        class MissNavigator(FakeNavigator):
             def __init__(self, body):
                 super().__init__(result=True, reason="arrived")
                 self.body = body
 
             def navigate_to(self, goal, **kwargs):
                 self.calls.append((goal, kwargs))
-                if len(self.calls) == 1:
-                    self.body.state_pos = (0.5, 65.0, 0.5)
-                else:
-                    selected = goal_position(goal)
-                    self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
-                return ToolResult(success=True, reason="arrived", can_retry=False, metrics={"goal": list(goal), "kwargs": kwargs})
+                self.body.state_pos = (0.5, 65.0, 0.5)
+                selected = goal_position(goal)
+                return ToolResult(
+                    success=True,
+                    reason="arrived",
+                    can_retry=False,
+                    metrics={"goal": list(selected), "selected_goal": list(selected), "kwargs": kwargs},
+                )
 
         blocks = {
             (0, 64, 0): ("air", "CLEAR"),
@@ -2334,19 +2530,16 @@ class BlockWorkTests(unittest.TestCase):
         body = FakeBody(blocks=blocks)
         body.state_pos = (0.5, 65.0, 0.5)
         policy = GovernancePolicy(natural_regions=[Region("surface", (-10, 0, -10), (10, 120, 10))])
-        navigator = MissThenHitNavigator(body)
+        navigator = MissNavigator(body)
         runtime = BlockWork(body, policy, navigator=navigator)
 
         result = runtime.go_to_surface(timeout_s=1.0, surface_scan_height=4, world_top_y=70)
 
-        self.assertTrue(result.success, result.to_payload())
-        approach = result.metrics["approach"]
-        self.assertEqual(approach["attempts"][0]["reason"], "surface_point_missed")
-        self.assertEqual(approach["attempts"][0]["final_pos"], [0, 65, 0])
-        self.assertEqual(approach["target_surface"], list(navigator.calls[1][0]))
+        self.assertFalse(result.success, result.to_payload())
+        self.assertEqual(result.reason, "surface_verification_failed")
+        self.assertEqual(result.metrics["final_pos"], [0, 65, 0])
         self.assertEqual(navigator.calls[0][1]["arrival_radius"], 0.25)
-        self.assertEqual(navigator.calls[1][1]["arrival_radius"], 0.25)
-        self.assertEqual(len(navigator.calls), 2)
+        self.assertEqual(len(navigator.calls), 1)
 
     def test_go_to_surface_can_use_same_level_alternate_surface(self):
         class MovingNavigator(FakeNavigator):
@@ -2380,12 +2573,172 @@ class BlockWorkTests(unittest.TestCase):
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.reason, "surface_reached")
         self.assertEqual(result.metrics["target_surface"], [1, 64, 0])
-        self.assertEqual(result.metrics["ascent_origin"], [1, 64, 0])
-        self.assertIsNone(result.metrics["column_approach"])
-        self.assertEqual(result.metrics["approach"]["final_pos"], [1, 64, 0])
-        self.assertEqual(result.metrics["ascent"]["metrics"]["steps_completed"], 0)
-        self.assertEqual(navigator.calls[0][0], (1, 64, 0))
+        self.assertEqual(result.metrics["final_pos"], [1, 64, 0])
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
         self.assertEqual(navigator.calls[0][1]["arrival_radius"], 0.25)
+
+    def test_go_to_surface_stages_covered_water_egress_before_surface_navigation(self):
+        class StagedNavigator(FakeNavigator):
+            def __init__(self, body):
+                super().__init__(result=True, reason="arrived")
+                self.body = body
+
+            def navigate_to(self, goal, **kwargs):
+                result = super().navigate_to(goal, **kwargs)
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
+                return result
+
+        blocks = {
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 64, 0): ("water", "LIQUID"),
+            (0, 67, 0): ("stone", "SOLID"),
+            (1, 64, 0): ("water", "LIQUID"),
+            (2, 64, 0): ("stone", "SOLID"),
+            (2, 67, 0): ("stone", "SOLID"),
+            (3, 65, 0): ("stone", "SOLID"),
+        }
+        body = FakeBody(blocks=blocks)
+        body.state_pos = (0.5, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("surface", (-20, 0, -20), (20, 120, 20))])
+        navigator = StagedNavigator(body)
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.go_to_surface(
+            timeout_s=1.0,
+            surface_scan_height=2,
+            world_top_y=70,
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "surface_reached")
+        self.assertEqual(result.metrics["origin"], [0, 64, 0])
+        self.assertEqual(result.metrics["surface_origin"], [2, 65, 0])
+        self.assertEqual(result.metrics["final_pos"], [3, 66, 0])
+        self.assertEqual(len(navigator.calls), 2)
+        egress_goal, egress_kwargs = navigator.calls[0]
+        self.assertIsInstance(egress_goal, GoalComposite)
+        self.assertIn((2, 65, 0), tuple(goal_position(goal) for goal in egress_goal.goals))
+        egress_config = egress_kwargs["config"]
+        self.assertFalse(egress_config.allow_break)
+        self.assertFalse(egress_config.allow_place)
+        self.assertFalse(egress_config.allow_pillar)
+        self.assertFalse(egress_config.allow_downward)
+        surface_goal, surface_kwargs = navigator.calls[1]
+        self.assertIsInstance(surface_goal, GoalComposite)
+        self.assertIn((3, 66, 0), tuple(goal_position(goal) for goal in surface_goal.goals))
+        self.assertTrue(surface_kwargs["config"].allow_break)
+        self.assertEqual(result.metrics["surface_egress"]["final_pos"], [2, 65, 0])
+        self.assertTrue(result.metrics["surface_egress"]["terminal_stand"]["standable"])
+
+    def test_go_to_surface_uses_sparse_lateral_surface_after_covered_water_egress(self):
+        remote_surface = (2, 66, -32)
+
+        class AmbiguousMutationRisk:
+            def __init__(self):
+                self.calls = []
+
+            def assess(self, pos, block_type, context):
+                self.calls.append((pos, block_type, context))
+                return StructureRiskAssessment(
+                    pos=pos,
+                    block_type=block_type,
+                    level=StructureRiskLevel.AMBIGUOUS,
+                    score=0.35,
+                    complete=True,
+                    sampled_cells=63,
+                    signals=("exposed_regular_plane",),
+                )
+
+        class LateralNavigator(FakeNavigator):
+            def __init__(self, body):
+                super().__init__(result=True, reason="arrived")
+                self.body = body
+
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                goals = tuple(goal_position(candidate) for candidate in goal.goals)
+                selected = goals[0] if len(self.calls) == 1 else remote_surface
+                if selected not in goals:
+                    raise AssertionError(f"expected lateral surface missing from {goals}")
+                self.body.state_pos = tuple(float(value) for value in selected)
+                return ToolResult(
+                    success=True,
+                    reason="arrived",
+                    can_retry=False,
+                    metrics={"goal": list(selected), "selected_goal": list(selected)},
+                )
+
+        blocks = {
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 64, 0): ("water", "LIQUID"),
+            (0, 67, 0): ("stone", "SOLID"),
+            (1, 64, 0): ("water", "LIQUID"),
+            (2, 64, 0): ("stone", "SOLID"),
+            (2, 67, 0): ("stone", "SOLID"),
+            (3, 65, 0): ("stone", "SOLID"),
+            (2, 65, -32): ("stone", "SOLID"),
+            (18, 74, 0): ("stone", "SOLID"),
+        }
+        body = FakeBody(blocks=blocks)
+        body.state_pos = (0.5, 64.0, 0.5)
+        assessor = AmbiguousMutationRisk()
+        policy = GovernancePolicy(
+            natural_regions=[Region("surface", (-40, 0, -40), (40, 120, 40))],
+            structure_risk_assessor=assessor,
+            require_structure_assessment=True,
+        )
+        navigator = LateralNavigator(body)
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.go_to_surface(timeout_s=1.0, surface_scan_height=2, world_top_y=70)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["final_pos"], list(remote_surface))
+        self.assertEqual(result.metrics["surface_domain"]["selection"], "covered_water_lateral_surface")
+        self.assertEqual(result.metrics["surface_lateral_domain"]["source"], "surfaceColumns")
+        self.assertIn(
+            remote_surface,
+            tuple(goal_position(candidate) for candidate in navigator.calls[1][0].goals),
+        )
+        self.assertNotIn(
+            (18, 75, 0),
+            tuple(goal_position(candidate) for candidate in navigator.calls[1][0].goals),
+        )
+        self.assertEqual(result.metrics["surface_lateral_domain"]["selection_strategy"], "minimum_vertical_effort_tier")
+        self.assertEqual(result.metrics["surface_lateral_domain"]["selected_vertical_effort"], 1)
+        self.assertGreater(result.metrics["surface_lateral_domain"]["deferred_candidate_count"], 0)
+        self.assertEqual(result.metrics["terminal_surface"]["candidate"], True)
+        self.assertEqual(result.metrics["terminal_surface"]["support_legality"]["reason"], "allowed_stand")
+        self.assertEqual(assessor.calls, [])
+
+    def test_go_to_surface_excludes_constructible_candidates_without_scaffold(self):
+        blocks = {
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 64, 0): ("air", "CLEAR"),
+            (0, 65, 0): ("dirt", "SOLID"),
+            (0, 66, 0): ("dirt", "SOLID"),
+            (1, 63, 0): ("stone", "SOLID"),
+            (1, 64, 0): ("air", "CLEAR"),
+            (1, 65, 0): ("air", "CLEAR"),
+            (1, 66, 0): ("dirt", "SOLID"),
+        }
+        body = FakeBody(blocks=blocks)
+        body.state_pos = (0.5, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("surface", (-10, 0, -10), (10, 120, 10))])
+        runtime = BlockWork(body, policy, navigator=FakeNavigator())
+
+        result = runtime.go_to_surface(
+            timeout_s=1.0,
+            surface_scan_height=2,
+            world_top_y=70,
+        )
+
+        self.assertFalse(result.success, result.to_payload())
+        self.assertEqual(result.reason, "surface_not_found_in_column")
+        self.assertFalse(result.metrics["surface_capability"]["constructible_pillar"])
+        self.assertEqual(result.metrics["surface_domain"]["candidates"], [])
+        self.assertFalse(result.metrics["surface_domain"]["constructible_allowed"])
 
     def test_go_to_surface_can_use_alternate_ascent_column(self):
         class RisingBody(FakeBody):
@@ -2408,13 +2761,19 @@ class BlockWorkTests(unittest.TestCase):
                 return result
 
         class MovingNavigator(FakeNavigator):
-            def __init__(self, body):
+            def __init__(self, body, policy):
                 super().__init__(result=True, reason="arrived")
                 self.body = body
+                self.policy = policy
 
             def navigate_to(self, goal, **kwargs):
                 result = super().navigate_to(goal, **kwargs)
                 selected = goal_position(goal)
+                support = (selected[0], selected[1] - 1, selected[2])
+                self.body.blocks[support] = ("cobblestone", "SOLID")
+                self.body.blocks[selected] = ("air", "CLEAR")
+                self.body.blocks[(selected[0], selected[1] + 1, selected[2])] = ("air", "CLEAR")
+                self.policy.record_bot_placement(support, "cobblestone", "pillar", self.body.bot_name)
                 self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
                 return result
 
@@ -2434,7 +2793,7 @@ class BlockWorkTests(unittest.TestCase):
         body = RisingBody(blocks=blocks, inventory_pages=[inventory_page([slot(9, "minecraft:cobblestone", 8)])])
         body.state_pos = (0.5, 64.0, 0.5)
         policy = GovernancePolicy(natural_regions=[Region("surface", (-10, 0, -10), (10, 120, 10))])
-        navigator = MovingNavigator(body)
+        navigator = MovingNavigator(body, policy)
         runtime = BlockWork(body, policy, navigator=navigator)
 
         result = runtime.go_to_surface(timeout_s=1.0, surface_scan_height=2, world_top_y=70)
@@ -2442,12 +2801,10 @@ class BlockWorkTests(unittest.TestCase):
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.reason, "surface_reached")
         self.assertEqual(result.metrics["target_surface"], [1, 65, 0])
-        self.assertEqual(result.metrics["ascent_origin"], [1, 64, 0])
-        self.assertEqual(result.metrics["column_approach"]["final_pos"], [1, 64, 0])
-        self.assertEqual(result.metrics["ascent"]["metrics"]["steps_completed"], 1)
-        self.assertEqual(result.metrics["approach"], None)
         self.assertEqual(result.metrics["final_pos"], [1, 65, 0])
-        self.assertEqual(navigator.calls[0][0], (1, 64, 0))
+        self.assertEqual(result.metrics["terminal_surface"]["support_legality"]["reason"], "allowed_bot_owned")
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
+        self.assertEqual(len(navigator.calls), 1)
         self.assertEqual(navigator.calls[0][1]["arrival_radius"], 0.25)
 
     def test_go_to_surface_can_route_to_wider_exit_after_ascent(self):
@@ -2504,12 +2861,9 @@ class BlockWorkTests(unittest.TestCase):
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.reason, "surface_reached")
         self.assertEqual(result.metrics["target_surface"], [2, 65, 0])
-        self.assertEqual(result.metrics["ascent_origin"], [0, 64, 0])
-        self.assertIsNone(result.metrics["column_approach"])
-        self.assertEqual(result.metrics["ascent"]["metrics"]["steps_completed"], 1)
-        self.assertEqual(result.metrics["approach"]["final_pos"], [2, 65, 0])
         self.assertEqual(result.metrics["final_pos"], [2, 65, 0])
-        self.assertEqual(navigator.calls[0][0], (2, 65, 0))
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
+        self.assertEqual(len(navigator.calls), 1)
         self.assertEqual(navigator.calls[0][1]["arrival_radius"], 0.25)
 
     def test_go_to_surface_can_use_shared_navigation_staircase_fallback(self):
@@ -2519,10 +2873,15 @@ class BlockWorkTests(unittest.TestCase):
                 self.body = body
 
             def navigate_to(self, goal, **kwargs):
-                result = super().navigate_to(goal, **kwargs)
-                selected = goal_position(goal)
+                self.calls.append((goal, kwargs))
+                selected = goal.goals[1].representative((0, 0, 0))
                 self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
-                return result
+                return ToolResult(
+                    success=True,
+                    reason="arrived",
+                    can_retry=False,
+                    metrics={"goal": list(selected), "selected_goal": list(selected)},
+                )
 
         blocks = {
             (0, 63, 0): ("stone", "SOLID"),
@@ -2543,22 +2902,15 @@ class BlockWorkTests(unittest.TestCase):
         result = runtime.go_to_surface(
             timeout_s=1.0,
             surface_scan_height=2,
-            allow_staircase_fallback=True,
             world_top_y=70,
         )
 
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.reason, "surface_reached")
         self.assertEqual(result.metrics["target_surface"], [1, 65, 0])
-        self.assertIsNone(result.metrics["ascent"])
-        self.assertIsNone(result.metrics["column_approach"])
-        self.assertEqual(result.metrics["approach"]["final_pos"], [1, 65, 0])
-        fallback = result.metrics["staircase_fallback"]
-        self.assertEqual(fallback["attempted"], True)
-        self.assertEqual(fallback["success"], True)
-        self.assertEqual(fallback["result"]["final_pos"], [1, 65, 0])
         self.assertEqual(result.metrics["terminal_surface"]["candidate"], True)
-        self.assertEqual(navigator.calls[0][0], (1, 65, 0))
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
+        self.assertEqual(len(navigator.calls), 1)
         self.assertEqual(navigator.calls[0][1]["arrival_radius"], 0.25)
         self.assertEqual(body.actions, [])
 
@@ -2597,22 +2949,15 @@ class BlockWorkTests(unittest.TestCase):
             timeout_s=1.0,
             surface_scan_height=2,
             surface_scan_radius=2,
-            allow_staircase_fallback=True,
             world_top_y=70,
         )
 
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.reason, "surface_reached")
         self.assertEqual(result.metrics["target_surface"], [2, 66, 0])
-        self.assertIsNone(result.metrics["ascent"])
-        self.assertIsNone(result.metrics["column_approach"])
-        self.assertEqual(result.metrics["approach"]["final_pos"], [2, 66, 0])
-        fallback = result.metrics["staircase_fallback"]
-        self.assertEqual(fallback["attempted"], True)
-        self.assertEqual(fallback["success"], True)
-        self.assertEqual(fallback["result"]["final_pos"], [2, 66, 0])
         self.assertEqual(result.metrics["terminal_surface"]["candidate"], True)
-        self.assertEqual(navigator.calls[0][0], (2, 66, 0))
+        self.assertIsInstance(navigator.calls[0][0], GoalComposite)
+        self.assertEqual(len(navigator.calls), 1)
         self.assertEqual(navigator.calls[0][1]["arrival_radius"], 0.25)
         self.assertEqual(body.actions, [])
 
@@ -2653,8 +2998,8 @@ class BlockWorkTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "surface_navigation_missing")
-        self.assertEqual(result.metrics["target_surface"], [1, 65, 0])
-        self.assertEqual(result.metrics["final_pos"], [0, 65, 0])
+        self.assertEqual(result.metrics["surface_domain"]["candidates"][0]["feet_pos"], [1, 65, 0])
+        self.assertEqual(body.state_pos, (0.5, 64.0, 0.5))
 
     def test_go_to_surface_reports_not_found_when_no_sky_exposed_natural_surface_exists(self):
         blocks = {
@@ -2914,9 +3259,9 @@ class BlockWorkTests(unittest.TestCase):
             blocks={
                 (0, 63, 0): ("stone", "SOLID"),
                 (0, 64, 1): ("air", "CLEAR"),
-                (0, 63, 1): ("air", "CLEAR"),
-                (1, 64, 0): ("stone", "SOLID"),
-                (1, 63, 0): ("stone", "SOLID"),
+                (0, 63, 1): ("water", "LIQUID"),
+                (1, 64, 0): ("air", "CLEAR"),
+                (1, 63, 0): ("water", "LIQUID"),
             },
         )
         body.state_pos = (0.5, 64.0, 0.5)
@@ -2927,7 +3272,145 @@ class BlockWorkTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "place_here_no_supported_spot")
+        self.assertTrue(result.metrics["scan"]["vertical_fallback"])
+        self.assertGreater(result.metrics["scan"]["rejection_counts"]["support_liquid"], 0)
         self.assertEqual(body.actions, [])
+
+    def test_place_here_finds_higher_natural_surface_when_same_level_has_no_support(self):
+        body = FakeBody(
+            blocks={
+                (0, 63, 0): ("stone", "SOLID"),
+                (1, 66, 0): ("grass_block", "SOLID"),
+                (2, 66, 0): ("grass_block", "SOLID"),
+            },
+        )
+        body.state_pos = (0.5, 64.0, 0.5)
+        navigator = FakeNavigator()
+        navigator.body = body
+        runtime = BlockWork(
+            body,
+            GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))]),
+            navigator=navigator,
+        )
+
+        result = runtime.place_here(
+            "minecraft:crafting_table",
+            radius=1,
+            context=PlaceContext.DIRECT,
+            purpose="workstation",
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["place_here"]["chosen_target"], [1, 67, 0])
+        self.assertEqual(result.metrics["place_here"]["scan"]["vertical_fallback"], True)
+        self.assertEqual(result.metrics["place_here"]["candidates"][0]["vertical_delta"], 3)
+        self.assertEqual(body.actions[-1].params["target"], [1, 67, 0])
+
+    def test_place_here_finds_lower_natural_surface_when_same_level_has_no_support(self):
+        body = FakeBody(
+            blocks={
+                (0, 63, 0): ("stone", "SOLID"),
+                (1, 61, 0): ("grass_block", "SOLID"),
+                (2, 61, 0): ("grass_block", "SOLID"),
+            },
+        )
+        body.state_pos = (0.5, 64.0, 0.5)
+        navigator = FakeNavigator()
+        navigator.body = body
+        runtime = BlockWork(
+            body,
+            GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))]),
+            navigator=navigator,
+        )
+
+        result = runtime.place_here("minecraft:cobblestone", radius=1, context=PlaceContext.WORK)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["place_here"]["chosen_target"], [1, 62, 0])
+        self.assertEqual(result.metrics["place_here"]["candidates"][0]["vertical_delta"], -2)
+        self.assertEqual(body.actions[-1].params["target"], [1, 62, 0])
+
+    def test_place_here_rejects_occupied_vertical_surface(self):
+        body = FakeBody(
+            blocks={
+                (0, 63, 0): ("stone", "SOLID"),
+                (1, 67, 0): ("grass_block", "SOLID"),
+                (1, 68, 0): ("stone", "SOLID"),
+            },
+        )
+        body.state_pos = (0.5, 64.0, 0.5)
+        runtime = BlockWork(
+            body,
+            GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))]),
+        )
+
+        result = runtime.place_here("minecraft:cobblestone", radius=1, context=PlaceContext.WORK)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "place_here_no_supported_spot")
+        self.assertGreater(result.metrics["scan"]["rejection_counts"]["target_not_clear"], 0)
+        self.assertEqual(body.actions, [])
+
+    def test_place_here_preserves_governance_for_vertical_surface(self):
+        body = FakeBody(
+            blocks={
+                (0, 63, 0): ("stone", "SOLID"),
+                (0, 65, 0): ("stone", "SOLID"),
+                (1, 66, 0): ("grass_block", "SOLID"),
+            },
+        )
+        body.state_pos = (0.5, 64.0, 0.5)
+        navigator = FakeNavigator()
+        navigator.body = body
+        runtime = BlockWork(
+            body,
+            GovernancePolicy(
+                natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))],
+                protected_regions=[Region("protected", (1, 67, 0), (1, 67, 0))],
+            ),
+            navigator=navigator,
+        )
+
+        result = runtime.place_here(
+            "minecraft:crafting_table",
+            radius=1,
+            context=PlaceContext.DIRECT,
+            purpose="workstation",
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "place_here_no_placeable_spot")
+        self.assertEqual(result.metrics["attempts"][0]["result"]["reason"], "place_denied:protected_region")
+        self.assertEqual(body.actions, [])
+
+    def test_place_here_vertical_scan_has_hard_column_and_candidate_budgets(self):
+        blocks = {(0, 63, 0): ("stone", "SOLID")}
+        for dz in range(-6, 7):
+            for dx in range(-6, 7):
+                if dx == 0 and dz == 0:
+                    continue
+                blocks[(dx, 64, dz)] = ("stone", "SOLID")
+                blocks[(dx, 66, dz)] = ("stone", "SOLID")
+        body = FakeBody(blocks=blocks)
+        body.state_pos = (0.5, 64.0, 0.5)
+
+        scan = _scan_place_here_candidates(
+            body,
+            (0, 64, 0),
+            6,
+            vertical_radius=4,
+            column_limit=32,
+            candidate_limit=32,
+        )
+
+        self.assertFalse(isinstance(scan, ToolResult))
+        self.assertEqual(scan.diagnostics["columns_total"], 168)
+        self.assertEqual(scan.diagnostics["columns_scanned"], 32)
+        self.assertFalse(scan.diagnostics["columns_complete"])
+        self.assertEqual(scan.diagnostics["supported_total"], 64)
+        self.assertEqual(scan.diagnostics["candidate_count"], 32)
+        self.assertFalse(scan.diagnostics["candidates_complete"])
+        self.assertEqual(len(scan.candidates), 32)
 
     def test_place_here_skips_denied_candidate_and_uses_next_supported_spot(self):
         body = FakeBody(

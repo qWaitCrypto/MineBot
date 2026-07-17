@@ -15,7 +15,6 @@ from minebot.body import BlockWork, NavigationTransactions
 from minebot.game import GovernancePolicy, RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
 from minebot.game.governance import BreakContext
-from minebot.game.navigation import GridCell, GridWorld, NavigationCostModel, SegmentedNavigator
 from minebot.game.rcon import RconConfig
 from tests.e2e_support import spawn_or_fail
 
@@ -53,17 +52,21 @@ def setup_world(rcon: RconClient) -> None:
         command(rcon, cmd)
 
 
-def flat_world(x_min: int, x_max: int, z_min: int, z_max: int, *, y_min: int = 64, y_max: int = 66) -> GridWorld:
-    return GridWorld({(x, y, z): GridCell() for x in range(x_min, x_max + 1) for y in range(y_min, y_max + 1) for z in range(z_min, z_max + 1)})
-
-
-def make_runtime(body: ScarpetBody, world: GridWorld | None = None) -> BlockWork:
+def make_runtime(body: ScarpetBody) -> BlockWork:
     policy = GovernancePolicy(natural_regions=[Region("go_to_surface", (166, 55, -4), (174, 90, 4))])
-    navigator = NavigationTransactions(
-        body,
-        SegmentedNavigator(world or flat_world(166, 174, -4, 4), NavigationCostModel(policy)),
-    )
+    navigator = NavigationTransactions.server_side(body, policy)
     return BlockWork(body, policy, navigator=navigator)
+
+
+def navigation_facts(result) -> tuple[dict[str, object], list[dict[str, object]], dict[str, int]]:
+    navigation = result.metrics.get("navigation") or {}
+    segments = (navigation.get("metrics") or {}).get("segments") or []
+    kinds = ("walk", "diagonal", "ascend", "descend", "swim", "fall", "break", "place", "pillar")
+    movement_counts = {
+        kind: sum(int((segment.get("diagnostics", {}).get("movement_counts") or {}).get(kind, 0)) for segment in segments)
+        for kind in kinds
+    }
+    return navigation, segments, movement_counts
 
 
 def reset_happy_world(rcon: RconClient) -> None:
@@ -92,7 +95,7 @@ def run_happy_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     payload = result.to_payload()
     final = body.get_state()
     surface_block = body.perceive("blockAt", {"x": SURFACE[0], "y": SURFACE[1], "z": SURFACE[2]})
-    pillar = body.perceive("blockAt", {"x": ORIGIN[0], "y": ORIGIN[1], "z": ORIGIN[2]})
+    source_head = body.perceive("blockAt", {"x": ORIGIN[0], "y": ORIGIN[1] + 1, "z": ORIGIN[2]})
 
     if not result.success or result.reason != "surface_reached":
         raise AssertionError(f"go_to_surface happy path failed: {payload} final={final}")
@@ -100,19 +103,30 @@ def run_happy_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
         raise AssertionError(f"go_to_surface selected wrong surface target: {payload}")
     if result.metrics.get("final_pos") != list(SURFACE):
         raise AssertionError(f"go_to_surface did not verify final surface position: {payload} final={final}")
-    ascent = result.metrics.get("ascent") or {}
-    if ascent.get("reason") != "dig_up_target_reached" or ascent.get("metrics", {}).get("steps_completed") != 1:
-        raise AssertionError(f"go_to_surface did not use guarded ascent: {payload}")
-    approach = result.metrics.get("approach") or {}
-    if approach.get("navigated") is not True or approach.get("result", {}).get("reason") != "arrived":
+    navigation, segments, movement_counts = navigation_facts(result)
+    if navigation.get("success") is not True or navigation.get("reason") != "arrived":
         raise AssertionError(f"go_to_surface did not use shared navigation to the surface exit: {payload}")
+    mutation_events = [
+        event
+        for segment in segments
+        for event in segment.get("diagnostics", {}).get("mutation_events") or []
+    ]
+    source_clearance = any(
+        event.get("event") == "navigateMutationDone"
+        and event.get("data", {}).get("kind") == "break"
+        and event.get("data", {}).get("pos") == [ORIGIN[0], ORIGIN[1] + 1, ORIGIN[2]]
+        and event.get("data", {}).get("success") is True
+        for event in mutation_events
+    )
+    if movement_counts["break"] < 1 or movement_counts["ascend"] < 1 or not source_clearance:
+        raise AssertionError(f"go_to_surface did not clear source headroom then ascend through shared navigation: {payload}")
     terminal = result.metrics.get("terminal_surface") or {}
     if terminal.get("candidate") is not True:
         raise AssertionError(f"go_to_surface terminal surface truth not verified: {payload}")
     if surface_block.data.get("state") != "CLEAR":
         raise AssertionError(f"surface feet is not clear: {surface_block.data} result={payload}")
-    if pillar.data.get("type") not in {"cobblestone", "minecraft:cobblestone"}:
-        raise AssertionError(f"pillar block from ascent missing: {pillar.data} result={payload}")
+    if source_head.data.get("state") != "CLEAR":
+        raise AssertionError(f"source headroom was not cleared: {source_head.data} result={payload}")
     if math.dist(final.pos, (SURFACE[0] + 0.5, SURFACE[1], SURFACE[2] + 0.5)) > 1.25:
         raise AssertionError(f"final body position is not near surface target: final={final.pos} result={payload}")
 
@@ -120,8 +134,8 @@ def run_happy_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
         "reason": result.reason,
         "target_surface": result.metrics.get("target_surface"),
         "final": final.pos,
-        "ascent_steps": ascent.get("metrics", {}).get("steps_completed"),
-        "navigation_reason": approach.get("result", {}).get("reason"),
+        "movement_counts": movement_counts,
+        "navigation_reason": navigation.get("reason"),
         "terminal_candidate": terminal.get("candidate"),
     }
 
@@ -130,7 +144,7 @@ def reset_no_surface_world(rcon: RconClient) -> None:
     command(rcon, "script in minebot run minebot_reset()")
     command(rcon, "fill 166 63 -4 174 72 4 air")
     command(rcon, "setblock 170 63 0 stone")
-    command(rcon, "fill 168 66 -2 172 66 2 stone")
+    command(rcon, "fill 168 66 -2 172 66 2 chest")
     command(rcon, f"tp {BOT} {ORIGIN[0]} {ORIGIN[1]} {ORIGIN[2]} 0 0")
     command(rcon, f"item replace entity {BOT} hotbar.0 with cobblestone 16")
 
@@ -198,9 +212,10 @@ def reset_multi_step_staircase_fallback_world(rcon: RconClient) -> None:
     command(rcon, "fill 166 63 -4 174 72 4 air")
     command(rcon, "fill 168 63 -2 172 63 2 stone")
     command(rcon, "fill 168 66 -2 172 66 2 chest[facing=north]")
+    command(rcon, "setblock 170 66 0 dirt")
     command(rcon, "setblock 171 64 0 stone")
     command(rcon, "setblock 171 66 0 air")
-    command(rcon, "setblock 171 67 0 chest")
+    command(rcon, "setblock 171 67 0 dirt")
     command(rcon, "setblock 172 65 0 stone")
     command(rcon, "setblock 172 66 0 air")
     command(rcon, "setblock 172 67 0 air")
@@ -227,14 +242,11 @@ def run_same_level_exit_path(rcon: RconClient, body: ScarpetBody) -> dict[str, o
         raise AssertionError(f"go_to_surface same-level-exit path failed: {payload} final={final}")
     if result.metrics.get("target_surface") != [171, 64, 0]:
         raise AssertionError(f"go_to_surface same-level-exit selected wrong target: {payload}")
-    approach = result.metrics.get("approach") or {}
-    if approach.get("navigated") is not True or approach.get("final_pos") != [171, 64, 0]:
-        raise AssertionError(f"go_to_surface same-level-exit did not approach the alternate surface: {payload}")
-    if result.metrics.get("column_approach") is not None:
-        raise AssertionError(f"go_to_surface same-level alternate surface should not need column approach: {payload}")
-    ascent = result.metrics.get("ascent") or {}
-    if ascent.get("reason") != "dig_up_target_reached" or ascent.get("metrics", {}).get("steps_completed") != 0:
-        raise AssertionError(f"go_to_surface same-level-exit should not pillar on same-Y surface: {payload}")
+    navigation, _segments, movement_counts = navigation_facts(result)
+    if navigation.get("success") is not True or navigation.get("reason") != "arrived":
+        raise AssertionError(f"go_to_surface same-level-exit did not use shared navigation: {payload}")
+    if movement_counts["walk"] < 1 or any(movement_counts[kind] for kind in ("break", "place", "pillar")):
+        raise AssertionError(f"go_to_surface same-level-exit used the wrong movement profile: {payload}")
     terminal = result.metrics.get("terminal_surface") or {}
     if terminal.get("candidate") is not True:
         raise AssertionError(f"go_to_surface same-level-exit terminal truth not verified: {payload}")
@@ -243,10 +255,8 @@ def run_same_level_exit_path(rcon: RconClient, body: ScarpetBody) -> dict[str, o
     return {
         "reason": result.reason,
         "target_surface": result.metrics.get("target_surface"),
-        "ascent_origin": result.metrics.get("ascent_origin"),
-        "approach_final": approach.get("final_pos"),
         "final": final.pos,
-        "ascent_steps": ascent.get("metrics", {}).get("steps_completed"),
+        "movement_counts": movement_counts,
     }
 
 
@@ -269,16 +279,17 @@ def run_alternate_column_path(rcon: RconClient, body: ScarpetBody) -> dict[str, 
         raise AssertionError(f"go_to_surface alternate-column path failed: {payload} final={final}")
     if result.metrics.get("target_surface") != [171, 65, 0]:
         raise AssertionError(f"go_to_surface alternate-column selected wrong target: {payload}")
-    if result.metrics.get("ascent_origin") != [171, 64, 0]:
-        raise AssertionError(f"go_to_surface alternate-column selected wrong ascent origin: {payload}")
-    column = result.metrics.get("column_approach") or {}
-    if column.get("navigated") is not True or column.get("final_pos") != [171, 64, 0]:
-        raise AssertionError(f"go_to_surface alternate-column did not approach ascent column: {payload}")
-    ascent = result.metrics.get("ascent") or {}
-    if ascent.get("reason") != "dig_up_target_reached" or ascent.get("metrics", {}).get("steps_completed") != 1:
-        raise AssertionError(f"go_to_surface alternate-column should pillar once after column approach: {payload}")
-    if result.metrics.get("approach") is not None:
-        raise AssertionError(f"go_to_surface alternate-column should not need final surface approach: {payload}")
+    navigation, _segments, movement_counts = navigation_facts(result)
+    if navigation.get("success") is not True or navigation.get("reason") != "arrived":
+        raise AssertionError(f"go_to_surface alternate-column did not use shared navigation: {payload}")
+    if movement_counts["pillar"] < 1:
+        raise AssertionError(f"go_to_surface alternate-column did not create a governed pillar step: {payload}")
+    domain_entry = next(
+        (entry for entry in (result.metrics.get("surface_domain") or {}).get("candidates") or [] if entry.get("feet_pos") == [171, 65, 0]),
+        None,
+    )
+    if domain_entry is None or domain_entry.get("support_mode") != "constructible_pillar":
+        raise AssertionError(f"go_to_surface alternate-column lost constructible surface facts: {payload}")
     terminal = result.metrics.get("terminal_surface") or {}
     if result.metrics.get("terminal_surface_verified") is not True:
         raise AssertionError(f"go_to_surface alternate-column terminal truth not verified: {payload}")
@@ -290,10 +301,8 @@ def run_alternate_column_path(rcon: RconClient, body: ScarpetBody) -> dict[str, 
     return {
         "reason": result.reason,
         "target_surface": result.metrics.get("target_surface"),
-        "ascent_origin": result.metrics.get("ascent_origin"),
-        "column_final": column.get("final_pos"),
         "final": final.pos,
-        "ascent_steps": ascent.get("metrics", {}).get("steps_completed"),
+        "movement_counts": movement_counts,
     }
 
 
@@ -317,16 +326,11 @@ def run_route_to_exit_path(rcon: RconClient, body: ScarpetBody) -> dict[str, obj
         raise AssertionError(f"go_to_surface route-to-exit path failed: {payload} final={final}")
     if result.metrics.get("target_surface") != [172, 65, 0]:
         raise AssertionError(f"go_to_surface route-to-exit selected wrong target: {payload}")
-    if result.metrics.get("ascent_origin") != list(ORIGIN):
-        raise AssertionError(f"go_to_surface route-to-exit should ascend from origin: {payload}")
-    if result.metrics.get("column_approach") is not None:
-        raise AssertionError(f"go_to_surface route-to-exit should not use alternate-column approach: {payload}")
-    ascent = result.metrics.get("ascent") or {}
-    if ascent.get("reason") != "dig_up_target_reached" or ascent.get("metrics", {}).get("steps_completed") != 1:
-        raise AssertionError(f"go_to_surface route-to-exit should ascend once before routing: {payload}")
-    approach = result.metrics.get("approach") or {}
-    if approach.get("navigated") is not True or approach.get("final_pos") != [172, 65, 0]:
-        raise AssertionError(f"go_to_surface route-to-exit did not route to the wider exit: {payload}")
+    navigation, _segments, movement_counts = navigation_facts(result)
+    if navigation.get("success") is not True or navigation.get("reason") != "arrived":
+        raise AssertionError(f"go_to_surface route-to-exit did not use shared navigation: {payload}")
+    if movement_counts["ascend"] < 1 or movement_counts["walk"] < 1:
+        raise AssertionError(f"go_to_surface route-to-exit did not ascend then route to the exit: {payload}")
     terminal = result.metrics.get("terminal_surface") or {}
     if terminal.get("candidate") is not True:
         raise AssertionError(f"go_to_surface route-to-exit terminal truth not verified: {payload}")
@@ -335,20 +339,15 @@ def run_route_to_exit_path(rcon: RconClient, body: ScarpetBody) -> dict[str, obj
     return {
         "reason": result.reason,
         "target_surface": result.metrics.get("target_surface"),
-        "ascent_origin": result.metrics.get("ascent_origin"),
-        "approach_final": approach.get("final_pos"),
         "final": final.pos,
-        "ascent_steps": ascent.get("metrics", {}).get("steps_completed"),
+        "movement_counts": movement_counts,
     }
 
 
 def run_staircase_fallback_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     reset_staircase_fallback_world(rcon)
     policy = GovernancePolicy(natural_regions=[Region("go_to_surface", (166, 55, -4), (174, 90, 4))])
-    navigator = NavigationTransactions(
-        body,
-        SegmentedNavigator(flat_world(166, 174, -4, 4), NavigationCostModel(policy)),
-    )
+    navigator = NavigationTransactions.server_side(body, policy)
     runtime = BlockWork(body, policy, navigator=navigator)
 
     result = runtime.go_to_surface(
@@ -359,7 +358,6 @@ def run_staircase_fallback_path(rcon: RconClient, body: ScarpetBody) -> dict[str
         max_steps=2,
         surface_scan_height=2,
         surface_scan_radius=2,
-        allow_staircase_fallback=True,
         world_top_y=70,
     )
     payload = result.to_payload()
@@ -368,16 +366,11 @@ def run_staircase_fallback_path(rcon: RconClient, body: ScarpetBody) -> dict[str
         raise AssertionError(f"go_to_surface staircase-fallback path failed: {payload} final={final}")
     if result.metrics.get("target_surface") != [171, 65, 0]:
         raise AssertionError(f"go_to_surface staircase-fallback selected wrong target: {payload}")
-    if result.metrics.get("ascent") is not None:
-        raise AssertionError(f"go_to_surface staircase-fallback should not pillar when shared navigation can ascend: {payload}")
-    if result.metrics.get("column_approach") is not None:
-        raise AssertionError(f"go_to_surface staircase-fallback should not use column approach: {payload}")
-    approach = result.metrics.get("approach") or {}
-    if approach.get("navigated") is not True or approach.get("final_pos") != [171, 65, 0]:
-        raise AssertionError(f"go_to_surface staircase-fallback did not route to the surface step: {payload}")
-    fallback = result.metrics.get("staircase_fallback") or {}
-    if fallback.get("attempted") is not True or fallback.get("success") is not True:
-        raise AssertionError(f"go_to_surface staircase-fallback metrics did not record success: {payload}")
+    navigation, _segments, movement_counts = navigation_facts(result)
+    if navigation.get("success") is not True or navigation.get("reason") != "arrived":
+        raise AssertionError(f"go_to_surface staircase fixture did not use shared navigation: {payload}")
+    if movement_counts["ascend"] < 1 or movement_counts["pillar"] != 0:
+        raise AssertionError(f"go_to_surface staircase fixture did not use the expected ascend route: {payload}")
     terminal = result.metrics.get("terminal_surface") or {}
     if terminal.get("candidate") is not True:
         raise AssertionError(f"go_to_surface staircase-fallback terminal truth not verified: {payload}")
@@ -389,28 +382,14 @@ def run_staircase_fallback_path(rcon: RconClient, body: ScarpetBody) -> dict[str
     return {
         "reason": result.reason,
         "target_surface": result.metrics.get("target_surface"),
-        "approach_final": approach.get("final_pos"),
         "final": final.pos,
-        "staircase_fallback": fallback.get("success"),
+        "movement_counts": movement_counts,
     }
 
 
 def run_multi_step_staircase_fallback_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     reset_multi_step_staircase_fallback_world(rcon)
-    cells = {
-        (x, y, z): GridCell()
-        for x in range(168, 173)
-        for y in range(64, 67)
-        for z in range(-2, 3)
-    }
-    for x in range(168, 173):
-        for z in range(-2, 3):
-            cells[(x, 66, z)] = GridCell(block_type="chest", walkable=False)
-    cells[(171, 64, 0)] = GridCell(block_type="stone", walkable=False)
-    cells[(172, 65, 0)] = GridCell(block_type="stone", walkable=False)
-    cells[(172, 66, 0)] = GridCell()
-    cells[(171, 66, 0)] = GridCell()
-    runtime = make_runtime(body, GridWorld(cells))
+    runtime = make_runtime(body)
 
     result = runtime.go_to_surface(
         current_pos=ORIGIN,
@@ -420,7 +399,6 @@ def run_multi_step_staircase_fallback_path(rcon: RconClient, body: ScarpetBody) 
         max_steps=3,
         surface_scan_height=3,
         surface_scan_radius=3,
-        allow_staircase_fallback=True,
         world_top_y=70,
     )
     payload = result.to_payload()
@@ -429,16 +407,11 @@ def run_multi_step_staircase_fallback_path(rcon: RconClient, body: ScarpetBody) 
         raise AssertionError(f"go_to_surface multi-step staircase-fallback path failed: {payload} final={final}")
     if result.metrics.get("target_surface") != [172, 66, 0]:
         raise AssertionError(f"go_to_surface multi-step staircase-fallback selected wrong target: {payload}")
-    if result.metrics.get("ascent") is not None:
-        raise AssertionError(f"go_to_surface multi-step staircase-fallback should not pillar when shared navigation can ascend: {payload}")
-    if result.metrics.get("column_approach") is not None:
-        raise AssertionError(f"go_to_surface multi-step staircase-fallback should not use column approach: {payload}")
-    approach = result.metrics.get("approach") or {}
-    if approach.get("navigated") is not True or approach.get("final_pos") != [172, 66, 0]:
-        raise AssertionError(f"go_to_surface multi-step staircase-fallback did not route to the higher surface: {payload}")
-    fallback = result.metrics.get("staircase_fallback") or {}
-    if fallback.get("attempted") is not True or fallback.get("success") is not True:
-        raise AssertionError(f"go_to_surface multi-step staircase-fallback metrics did not record success: {payload}")
+    navigation, _segments, movement_counts = navigation_facts(result)
+    if navigation.get("success") is not True or navigation.get("reason") != "arrived":
+        raise AssertionError(f"go_to_surface multi-step staircase fixture did not use shared navigation: {payload}")
+    if movement_counts["break"] < 2 or movement_counts["ascend"] < 2 or movement_counts["pillar"] != 0:
+        raise AssertionError(f"go_to_surface multi-step staircase fixture did not clear both caps and ascend twice: {payload}")
     terminal = result.metrics.get("terminal_surface") or {}
     if terminal.get("candidate") is not True:
         raise AssertionError(f"go_to_surface multi-step staircase-fallback terminal truth not verified: {payload}")
@@ -450,9 +423,8 @@ def run_multi_step_staircase_fallback_path(rcon: RconClient, body: ScarpetBody) 
     return {
         "reason": result.reason,
         "target_surface": result.metrics.get("target_surface"),
-        "approach_final": approach.get("final_pos"),
         "final": final.pos,
-        "staircase_fallback": fallback.get("success"),
+        "movement_counts": movement_counts,
     }
 
 
@@ -515,6 +487,7 @@ def main() -> None:
             "alternate_column",
             "route_to_exit",
             "staircase_fallback",
+            "multi_step_staircase_fallback",
             "not_found",
         ]
         selected_raw = os.environ.get("MINEBOT_SURFACE_CASES")

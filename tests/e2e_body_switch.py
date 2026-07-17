@@ -14,7 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from minebot.body import InteractionTransactions, NavigationTransactions
 from minebot.game import GovernancePolicy, RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
-from minebot.game.navigation import GridCell, GridWorld, NavigationCostModel, SegmentedNavigator
 from minebot.game.rcon import RconConfig
 from tests.e2e_support import spawn_or_fail
 
@@ -85,16 +84,9 @@ def reset_world(
         command(rcon, f"setblock {BUTTON_OAK_CEILING[0]} {BUTTON_OAK_CEILING[1]} {BUTTON_OAK_CEILING[2]} oak_button[face=ceiling,facing=east,powered=false]")
 
 
-def flat_world(x_min: int, x_max: int, z_min: int, z_max: int, *, y: int = 59) -> GridWorld:
-    return GridWorld({(x, y, z): GridCell() for x in range(x_min, x_max + 1) for z in range(z_min, z_max + 1)})
-
-
 def make_runtime(body: ScarpetBody) -> InteractionTransactions:
     policy = GovernancePolicy(natural_regions=[Region("switch_nav", (-2, 0, -3), (12, 100, 3))])
-    navigator = NavigationTransactions(
-        body,
-        SegmentedNavigator(flat_world(-2, 12, -3, 3), NavigationCostModel(policy)),
-    )
+    navigator = NavigationTransactions.server_side(body, policy)
     return InteractionTransactions(body, navigator=navigator, governance=policy)
 
 

@@ -91,7 +91,7 @@ class RecordingNavigator:
         self.calls.append((goal, kwargs))
         selected = self.selected_goals.pop(0)
         success, reason = self.outcomes.pop(0) if self.outcomes else (True, "arrived")
-        if success:
+        if success and reason == "arrived":
             self.body.state_pos = (selected[0] + 0.5, float(selected[1]), selected[2] + 0.5)
         return ToolResult(
             success,
@@ -143,8 +143,6 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertIn((5, 65, -1), goal_positions)
         self.assertIn((8, 65, -1), goal_positions)
         self.assertEqual(work.calls[0][0], (8, 64, 0))
-        self.assertEqual(kwargs["config"].progress_neutral_failures, False)
-        self.assertFalse(kwargs["config"].allow_local_terrain_fallback)
         self.assertEqual(work.calls[0][1]["prepositioned"], True)
         self.assertEqual([scope for scope, _params in body.perceptions].count("blockCells"), 1)
 
@@ -201,6 +199,28 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual(len(navigator.calls), 2)
         self.assertEqual([call[0] for call in work.calls], [second])
         self.assertIn(list(first), result.metrics["candidate_blacklist"])
+
+    def test_successful_preemption_is_terminal_before_mining(self):
+        body = ResourceBody([((5, 64, 0), "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [(5, 65, -1)],
+            outcomes=[(True, "preempted")],
+        )
+        work = RecordingWork()
+        runtime = ResourceCollectionTransactions(body, navigator, work)
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "resource_navigation_preempted")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(work.calls, [])
 
     def test_missing_tool_is_terminal_not_a_candidate_skip(self):
         body = ResourceBody([((5, -55, 0), "diamond_ore"), ((8, -55, 0), "diamond_ore")])

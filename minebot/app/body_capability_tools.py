@@ -6,13 +6,17 @@ from dataclasses import dataclass
 from typing import Literal
 
 from minebot.body import (
+    BlockApproachTransactions,
     BlockWork,
     ContainerTransactions,
     ExplorationTransactions,
     FurnaceTransactions,
+    GetToBlockConfig,
     InteractionTransactions,
     InventoryTransactions,
     NavigationTransactions,
+    PickupConfig,
+    PickupTransactions,
     ResourceCollectionConfig,
     ResourceCollectionTransactions,
     UseTransactions,
@@ -49,6 +53,11 @@ def _closure(
 
 
 BODY_TRANSACTION_CLOSURE: dict[str, CapabilityClosure] = {
+    "BlockApproachTransactions.get_to_block": _closure(
+        "tool",
+        "get_to_block",
+        note="Body-owned block candidate, stand-domain, planner selection, and terminal verification.",
+    ),
     "BlockWork.mine_block": _closure(
         "owned",
         "mine_block_collect",
@@ -194,6 +203,11 @@ BODY_TRANSACTION_CLOSURE: dict[str, CapabilityClosure] = {
     "NavigationTransactions.move_away": _closure(
         "tool", "move_away", note="Shared avoid-goal hazard-spacing transaction."
     ),
+    "PickupTransactions.pickup_items": _closure(
+        "tool",
+        "pickup_items",
+        note="Body-owned dropped-item domain planning with authoritative inventory-delta completion.",
+    ),
     "ResourceCollectionTransactions.collect_block_domain": _closure(
         "tool",
         "collect_block_domain",
@@ -310,17 +324,20 @@ def register_body_capability_tools(
     registry: ToolRegistry,
     *,
     body: Body,
+    block_approach: BlockApproachTransactions,
     navigator: NavigationTransactions,
     work: BlockWork,
     inventory: InventoryTransactions,
     furnace: FurnaceTransactions,
     container: ContainerTransactions,
     interaction: InteractionTransactions,
+    pickup: PickupTransactions,
     resource_collection: ResourceCollectionTransactions,
     use: UseTransactions,
 ) -> None:
     tools = (
         _move_away_tool(navigator),
+        _get_to_block_tool(block_approach),
         _go_to_player_tool(interaction),
         _follow_player_tool(interaction),
         _search_for_entity_tool(interaction),
@@ -343,6 +360,7 @@ def register_body_capability_tools(
         _place_here_tool(work),
         _dig_down_tool(work),
         _dig_up_tool(work),
+        _pickup_items_tool(pickup),
         _collect_block_domain_tool(resource_collection),
         _read_block_tool(body),
         _read_nearby_blocks_tool(body),
@@ -486,6 +504,47 @@ def _move_away_tool(navigator: NavigationTransactions) -> RegisteredTool:
         body_scope=("navigation",),
         terminal_truth=("position", "ToolResult"),
         timeout_s=120.0,
+    )
+
+
+def _get_to_block_tool(approach: BlockApproachTransactions) -> RegisteredTool:
+    return _tool(
+        "get_to_block",
+        "Approach a usable nearby block type; Body selects candidates and stand points, replans, then verifies block identity and range.",
+        _object_schema(
+            {
+                "block_types": STRING_LIST_SCHEMA,
+                "search_radius": {"type": "integer", "minimum": 1, "maximum": 64},
+                "interaction_radius": {"type": "number", "exclusiveMinimum": 0, "maximum": 6},
+                "candidate_budget": {"type": "integer", "minimum": 1, "maximum": 32},
+                "candidate_batch_size": {"type": "integer", "minimum": 1, "maximum": 16},
+                "find_limit": {"type": "integer", "minimum": 1, "maximum": 64},
+                "max_pages": {"type": "integer", "minimum": 1, "maximum": 8},
+                "max_segments": {"type": "integer", "minimum": 1, "maximum": 16},
+                "segment_timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 60},
+            },
+            required=("block_types",),
+        ),
+        lambda params: approach.get_to_block(
+            block_types=_strings(params.get("block_types")),
+            config=GetToBlockConfig(
+                search_radius=int(_param(params, "search_radius", 16)),
+                interaction_radius=float(_param(params, "interaction_radius", 4.5)),
+                candidate_budget=int(_param(params, "candidate_budget", 8)),
+                candidate_batch_size=int(_param(params, "candidate_batch_size", 8)),
+                find_limit=int(_param(params, "find_limit", 16)),
+                max_pages=int(_param(params, "max_pages", 1)),
+                max_segments=int(_param(params, "max_segments", 5)),
+                segment_timeout_s=float(_param(params, "segment_timeout_s", 15.0)),
+            ),
+        ),
+        mutating=True,
+        source="body.block_approach",
+        tool_type="navigation",
+        permission="move",
+        body_scope=("navigation", "blocks"),
+        terminal_truth=("position", "blockAt", "ToolResult"),
+        timeout_s=180.0,
     )
 
 
@@ -1245,6 +1304,42 @@ def _collect_block_domain_tool(resource: ResourceCollectionTransactions) -> Regi
         body_scope=("search", "navigation", "mine", "pickup", "inventory"),
         terminal_truth=("findBlocks", "navigateDone", "mineDone", "blockAt", "inventory"),
         timeout_s=960.0,
+    )
+
+
+def _pickup_items_tool(pickup: PickupTransactions) -> RegisteredTool:
+    return _tool(
+        "pickup_items",
+        "Pick up nearby dropped items through one bounded planner-owned candidate domain and verify inventory gain.",
+        _object_schema(
+            {
+                "expected_items": STRING_LIST_SCHEMA,
+                "minimum_count": {"type": "integer", "minimum": 1, "maximum": 2304},
+                "radius": {"type": "integer", "minimum": 1, "maximum": 32},
+                "entity_limit": {"type": "integer", "minimum": 1, "maximum": 128},
+                "max_scan_rounds": {"type": "integer", "minimum": 1, "maximum": 8},
+                "candidate_budget": {"type": "integer", "minimum": 1, "maximum": 32},
+                "max_wall_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 120},
+            }
+        ),
+        lambda params: pickup.pickup_items(
+            expected_items=_strings(params.get("expected_items")),
+            minimum_count=int(params.get("minimum_count") or 1),
+            config=PickupConfig(
+                radius=int(params.get("radius") or 8),
+                entity_limit=int(params.get("entity_limit") or 16),
+                max_scan_rounds=int(params.get("max_scan_rounds") or 2),
+                candidate_budget=int(params.get("candidate_budget") or 5),
+                max_wall_s=float(params.get("max_wall_s") or 20.0),
+            ),
+        ),
+        mutating=True,
+        source="body.pickup",
+        tool_type="resource",
+        permission="pickup_items",
+        body_scope=("navigation", "pickup", "inventory", "entities"),
+        terminal_truth=("nearbyEntities", "navigateDone", "inventory", "ToolResult"),
+        timeout_s=125.0,
     )
 
 

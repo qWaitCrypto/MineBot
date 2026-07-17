@@ -71,6 +71,8 @@ FOOD_ITEMS = {
 }
 
 POST_MOVE_SETTLE_S = 0.10
+POST_USE_PROPERTY_SETTLE_S = 0.25
+POST_USE_PROPERTY_POLL_S = 0.05
 
 
 Position = tuple[int, int, int]
@@ -234,6 +236,7 @@ class UseTransactions:
                     },
                 )
 
+        use_started = time.monotonic()
         use = _dispatch(
             self.body,
             "useItem",
@@ -241,12 +244,15 @@ class UseTransactions:
             timeout_s=timeout_s,
         )
         after_state = self.body.get_state()
+        position_settle: dict[str, object] | None = None
         if min_position_delta > 0 and use.success:
-            after_state = _await_position_delta(
+            remaining_timeout_s = max(0.0, float(timeout_s) - (time.monotonic() - use_started))
+            after_state, position_settle = _await_position_delta(
                 self.body,
                 origin=before_state.pos,
                 current=after_state,
                 min_position_delta=float(min_position_delta),
+                timeout_s=remaining_timeout_s,
             )
         after_inventory = _read_inventory(self.body)
         failed = _perception_failure(after_inventory)
@@ -286,6 +292,8 @@ class UseTransactions:
         if look_target is not None:
             metrics["look_target"] = list(look_target)
             metrics["look"] = look.to_payload() if look is not None else None
+        if position_settle is not None:
+            metrics["position_settle"] = position_settle
 
         observed_delta = primary_item_delta > 0 or int(effect_metrics["effect_delta"]) > 0 or position_delta > 0.01
         if (watched_ok and effect_ok and position_ok and observed_delta) or (
@@ -609,8 +617,37 @@ class UseTransactions:
                 },
             )
 
+        property_settle: list[dict[str, object]] = []
+        attempt, settle_metrics = _settle_expected_block_properties(
+            self.body,
+            attempt=attempt,
+            pos=pos,
+            observe_pos=observed_pos,
+            expectation=expectation,
+        )
+        if settle_metrics is not None:
+            property_settle.append(settle_metrics)
+        if isinstance(attempt, ToolResult):
+            return merge_context(
+                attempt,
+                {
+                    "item": use_item,
+                    "empty_hand": use_item is None,
+                    "target": list(pos),
+                    "observe_pos": list(observed_pos),
+                    "equip": equip.to_payload(),
+                    "approach": approach,
+                    "property_settle": property_settle,
+                },
+            )
+
         recovery: dict[str, object] | None = None
-        if _should_retry_line_of_sight(attempt, before_type=before_type, before_state=before_state):
+        if _should_retry_line_of_sight(
+            attempt,
+            before_type=before_type,
+            before_state=before_state,
+            before_properties=before_properties,
+        ):
             recovery = _recover_line_of_sight(
                 self.body,
                 self.navigator,
@@ -689,6 +726,29 @@ class UseTransactions:
                             "line_of_sight_recovery": recovery,
                         },
                     )
+                retried, settle_metrics = _settle_expected_block_properties(
+                    self.body,
+                    attempt=retried,
+                    pos=pos,
+                    observe_pos=observed_pos,
+                    expectation=expectation,
+                )
+                if settle_metrics is not None:
+                    property_settle.append(settle_metrics)
+                if isinstance(retried, ToolResult):
+                    return merge_context(
+                        retried,
+                        {
+                            "item": use_item,
+                            "empty_hand": use_item is None,
+                            "target": list(pos),
+                            "observe_pos": list(observed_pos),
+                            "equip": equip.to_payload(),
+                            "approach": approach,
+                            "line_of_sight_recovery": recovery,
+                            "property_settle": property_settle,
+                        },
+                    )
                 attempt = retried
 
         target_after_type = normalize_block_type(str(attempt.target_after.data.get("type") or "unknown"))
@@ -760,6 +820,8 @@ class UseTransactions:
             metrics["expected_properties"] = dict(expectation.expected_properties)
         if recovery is not None:
             metrics["line_of_sight_recovery"] = recovery
+        if property_settle:
+            metrics["property_settle"] = property_settle
 
         matched_expectation = expectation is not None and _matches_expectation(
             after_type,
@@ -939,19 +1001,30 @@ def _await_position_delta(
     origin: tuple[float, float, float],
     current,
     min_position_delta: float,
-    timeout_s: float = 1.5,
+    timeout_s: float,
     poll_interval_s: float = 0.1,
 ):
     latest = current
+    started = time.monotonic()
+    polls = 0
     if dist(origin, latest.pos) >= min_position_delta:
-        return latest
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        time.sleep(poll_interval_s)
+        return latest, {"polls": 0, "elapsed_s": 0.0, "matched": True}
+    deadline = started + max(0.0, timeout_s)
+    while time.monotonic() < deadline:
+        time.sleep(min(poll_interval_s, max(0.0, deadline - time.monotonic())))
         latest = body.get_state()
+        polls += 1
         if dist(origin, latest.pos) >= min_position_delta:
-            return latest
-    return latest
+            return latest, {
+                "polls": polls,
+                "elapsed_s": round(time.monotonic() - started, 3),
+                "matched": True,
+            }
+    return latest, {
+        "polls": polls,
+        "elapsed_s": round(time.monotonic() - started, 3),
+        "matched": False,
+    }
 
 
 def _read_inventory(body: Body, page_size: int = 12) -> PerceptionResult:
@@ -1270,6 +1343,69 @@ def _attempt_block_use(
     return BlockUseAttempt(look=looked, use=used, target_after=target_after, observe_after=observe_after)
 
 
+def _settle_expected_block_properties(
+    body: Body,
+    *,
+    attempt: BlockUseAttempt,
+    pos: Position,
+    observe_pos: Position,
+    expectation: BlockUseExpectation | None,
+) -> tuple[BlockUseAttempt | ToolResult, dict[str, object] | None]:
+    if expectation is None or not expectation.expected_properties or not attempt.use.success:
+        return attempt, None
+
+    current = attempt
+    current_type = normalize_block_type(str(current.observe_after.data.get("type") or "unknown"))
+    current_properties = _normalize_block_properties(current.observe_after.data.get("properties"))
+    if _matches_expectation(current_type, current_properties, expectation):
+        return current, None
+
+    started = time.monotonic()
+    deadline = started + POST_USE_PROPERTY_SETTLE_S
+    polls = 0
+    while time.monotonic() < deadline:
+        time.sleep(min(POST_USE_PROPERTY_POLL_S, max(0.0, deadline - time.monotonic())))
+        target_after = body.perceive("blockAt", _block_params(pos))
+        failed = _perception_failure(target_after)
+        if failed is not None:
+            return failed, {
+                "polls": polls,
+                "elapsed_s": round(time.monotonic() - started, 3),
+                "matched": False,
+            }
+        observe_after = target_after
+        if observe_pos != pos:
+            observe_after = body.perceive("blockAt", _block_params(observe_pos))
+            failed = _perception_failure(observe_after)
+            if failed is not None:
+                return failed, {
+                    "polls": polls,
+                    "elapsed_s": round(time.monotonic() - started, 3),
+                    "matched": False,
+                }
+        polls += 1
+        current = BlockUseAttempt(
+            look=attempt.look,
+            use=attempt.use,
+            target_after=target_after,
+            observe_after=observe_after,
+        )
+        current_type = normalize_block_type(str(observe_after.data.get("type") or "unknown"))
+        current_properties = _normalize_block_properties(observe_after.data.get("properties"))
+        if _matches_expectation(current_type, current_properties, expectation):
+            return current, {
+                "polls": polls,
+                "elapsed_s": round(time.monotonic() - started, 3),
+                "matched": True,
+            }
+
+    return current, {
+        "polls": polls,
+        "elapsed_s": round(time.monotonic() - started, 3),
+        "matched": False,
+    }
+
+
 def _attempt_fire_ignite(
     body: Body,
     *,
@@ -1349,10 +1485,16 @@ def _should_retry_line_of_sight(
     *,
     before_type: str,
     before_state: str,
+    before_properties: dict[str, str],
 ) -> bool:
     after_type = normalize_block_type(str(attempt.observe_after.data.get("type") or "unknown"))
     after_state = str(attempt.observe_after.data.get("state") or "UNKNOWN")
-    unchanged = after_type == before_type and after_state == before_state
+    after_properties = _normalize_block_properties(attempt.observe_after.data.get("properties"))
+    unchanged = (
+        after_type == before_type
+        and after_state == before_state
+        and after_properties == before_properties
+    )
     return unchanged and attempt.use.reason in {"no_effect", "completed"}
 
 

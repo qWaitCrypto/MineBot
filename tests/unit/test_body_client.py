@@ -540,6 +540,62 @@ class BodyClientTests(unittest.TestCase):
         self.assertIn("'0'", transport.commands[0])
         self.assertIn("'1'", transport.commands[1])
 
+    def test_poll_events_advances_past_typed_oversized_event(self):
+        first = envelope(
+            {
+                "type": "events",
+                "bot": "Bot1",
+                "ok": True,
+                "complete": True,
+                "next": "180",
+                "events": [
+                    {
+                        "type": "event",
+                        "seq": 180,
+                        "tick": 50,
+                        "bot": "Bot1",
+                        "name": "eventPayloadTooLarge",
+                        "data": {
+                            "original_name": "moveStarted",
+                            "source_seq": 180,
+                            "payload_chars": 2865,
+                            "payload_complete": False,
+                        },
+                    }
+                ],
+                "error": None,
+            }
+        )
+        second = envelope(
+            {
+                "type": "events",
+                "bot": "Bot1",
+                "ok": True,
+                "complete": True,
+                "next": None,
+                "events": [
+                    {
+                        "type": "event",
+                        "seq": 181,
+                        "tick": 60,
+                        "bot": "Bot1",
+                        "name": "moveDone",
+                        "data": {"action_id": "a1", "arrived": True},
+                    }
+                ],
+                "error": None,
+            }
+        )
+        transport = FakeTransport([first, second])
+        body = ScarpetBody("Bot1", transport)
+        body.last_seq = 179
+
+        events = body.poll_events()
+
+        self.assertEqual([event.name for event in events], ["eventPayloadTooLarge", "moveDone"])
+        self.assertEqual(body.last_seq, 181)
+        self.assertIn("'180'", transport.commands[1])
+
     def test_poll_chat_events_uses_separate_chat_drain(self):
         transport = FakeTransport(
             [

@@ -9,9 +9,21 @@ from enum import StrEnum
 from math import dist, floor, hypot
 from typing import Protocol
 
-from minebot.body.navigation import NavigationRunConfig, NavigationTransactions
+from minebot.body.navigation import (
+    NavigationRunConfig,
+    NavigationTransactions,
+    pure_movement_navigation_config,
+)
 from minebot.body.world_read import read_block_facts
-from minebot.contract import Body, BreakContext, JsonObject, PerceptionResult, Position, ToolResult
+from minebot.contract import (
+    Body,
+    BreakContext,
+    JsonObject,
+    PerceptionResult,
+    Position,
+    ToolResult,
+    perception_next_cursor,
+)
 from minebot.game.navigation import GoalComposite, GoalNear
 
 
@@ -22,6 +34,8 @@ MAX_REQUESTED_TARGETS = 32
 MAX_EXPANDED_TARGETS = 64
 FRONTIER_FAILURE_LIMIT = 2
 FRONTIER_COLUMN_OFFSETS = ((0, 0), (-4, 0), (4, 0), (0, -4), (0, 4))
+FIND_BLOCK_PAGE_SIZE = 32
+FIND_BLOCK_MAX_PAGES = 4
 
 BLOCK_TARGET_GROUPS: dict[str, tuple[str, ...]] = {
     "#logs": (
@@ -307,6 +321,7 @@ class ExplorationTransactions:
         max_candidate_attempts = max(4, max_regions * 4)
         attempted_this_call: set[tuple[int, int]] = set()
         failures: list[JsonObject] = []
+        mutation_blacklist: set[Position] = set()
         evidence_keys: list[str] = []
         covered_this_call: list[list[int]] = []
         all_blocks: list[JsonObject] = []
@@ -370,6 +385,25 @@ class ExplorationTransactions:
             )
 
         while regions_consumed < max_regions and candidate_attempts < max_candidate_attempts:
+            if distance_consumed >= max_distance:
+                return self._result(
+                    "budget_exhausted",
+                    targets=targets,
+                    dimension=dimension,
+                    origin=origin,
+                    regions_consumed=regions_consumed,
+                    max_regions=max_regions,
+                    max_distance=max_distance,
+                    distance_consumed=distance_consumed,
+                    covered_this_call=covered_this_call,
+                    blocks=all_blocks,
+                    entities=all_entities,
+                    failures=failures,
+                    evidence_keys=evidence_keys,
+                    coverage=prior,
+                    success=True,
+                    can_retry=True,
+                )
             state = self.body.get_state()
             lifecycle = _body_lifecycle_terminal(state)
             if lifecycle is not None:
@@ -458,6 +492,7 @@ class ExplorationTransactions:
                 GoalComposite(tuple(GoalNear(stand, radius=1) for stand in candidate_stands)),
                 break_context=BreakContext.TRAVEL,
                 config=NavigationRunConfig(max_segments=16, segment_timeout_s=12.0),
+                mutation_blacklist=mutation_blacklist,
             )
             after = self.body.get_state()
             distance_consumed += dist(before.pos, after.pos)
@@ -469,6 +504,7 @@ class ExplorationTransactions:
                     "reason": navigation_reason,
                     "success": nav.success,
                     "can_retry": nav.can_retry,
+                    "mutation_blacklist_size": len(mutation_blacklist),
                 }
             )
             lifecycle = _body_lifecycle_terminal(after)
@@ -510,6 +546,52 @@ class ExplorationTransactions:
                 )
             reached = nav.success and _region_key(_block_pos(after.pos)) == region
             if not reached:
+                recovery: JsonObject | None = None
+                recovered = after
+                verified_goal = GoalNear(_block_pos(before.pos), radius=1)
+                if (
+                    navigation_reason != "progress_yielded"
+                    and not verified_goal.is_satisfied(_block_pos(after.pos))
+                ):
+                    recovery_result = self.navigator.navigate_to(
+                        verified_goal,
+                        break_context=BreakContext.TRAVEL,
+                        config=pure_movement_navigation_config(
+                            NavigationRunConfig(
+                                max_segments=8,
+                                segment_timeout_s=12.0,
+                                recovery_attempts=0,
+                            )
+                        ),
+                    )
+                    recovered = self.body.get_state()
+                    distance_consumed += dist(after.pos, recovered.pos)
+                    recovery = {
+                        "attempted": True,
+                        "target": list(_block_pos(before.pos)),
+                        "success": recovery_result.success,
+                        "reason": recovery_result.reason,
+                        "final_pos": list(recovered.pos),
+                    }
+                    navigation_failures[0]["recovery"] = recovery
+                    recovery_lifecycle = _body_lifecycle_terminal(recovered)
+                    if recovery_lifecycle is not None:
+                        return _merge_result_context(
+                            recovery_lifecycle,
+                            targets=targets,
+                            dimension=dimension,
+                            origin=origin,
+                            max_regions=max_regions,
+                            max_distance=max_distance,
+                            regions_consumed=regions_consumed,
+                            distance_consumed=distance_consumed,
+                            covered_this_call=covered_this_call,
+                            blocks=all_blocks,
+                            entities=all_entities,
+                            failures=[*failures, *navigation_failures],
+                            evidence_keys=evidence_keys,
+                            coverage=prior,
+                        )
                 status = (
                     CoverageStatus.UNLOADED_BOUNDARY
                     if _is_unloaded_reason(navigation_reason)
@@ -532,6 +614,63 @@ class ExplorationTransactions:
                         "navigation_attempts": navigation_failures,
                     }
                 )
+                if recovery is not None and recovery["success"] is not True:
+                    return self._result(
+                        "mobility_blocked",
+                        targets=targets,
+                        dimension=dimension,
+                        origin=origin,
+                        regions_consumed=regions_consumed,
+                        max_regions=max_regions,
+                        max_distance=max_distance,
+                        distance_consumed=distance_consumed,
+                        covered_this_call=covered_this_call,
+                        blocks=all_blocks,
+                        entities=all_entities,
+                        failures=failures,
+                        evidence_keys=evidence_keys,
+                        coverage=prior,
+                        success=False,
+                        can_retry=True,
+                    )
+                if navigation_reason == "progress_yielded":
+                    return self._result(
+                        "budget_exhausted",
+                        targets=targets,
+                        dimension=dimension,
+                        origin=origin,
+                        regions_consumed=regions_consumed,
+                        max_regions=max_regions,
+                        max_distance=max_distance,
+                        distance_consumed=distance_consumed,
+                        covered_this_call=covered_this_call,
+                        blocks=all_blocks,
+                        entities=all_entities,
+                        failures=failures,
+                        evidence_keys=evidence_keys,
+                        coverage=prior,
+                        success=True,
+                        can_retry=True,
+                    )
+                if distance_consumed >= max_distance:
+                    return self._result(
+                        "budget_exhausted",
+                        targets=targets,
+                        dimension=dimension,
+                        origin=origin,
+                        regions_consumed=regions_consumed,
+                        max_regions=max_regions,
+                        max_distance=max_distance,
+                        distance_consumed=distance_consumed,
+                        covered_this_call=covered_this_call,
+                        blocks=all_blocks,
+                        entities=all_entities,
+                        failures=failures,
+                        evidence_keys=evidence_keys,
+                        coverage=prior,
+                        success=True,
+                        can_retry=True,
+                    )
                 continue
 
             final_state = self.body.get_state()
@@ -594,6 +733,25 @@ class ExplorationTransactions:
                     success=True,
                     can_retry=False,
                 )
+            if distance_consumed >= max_distance:
+                return self._result(
+                    "budget_exhausted",
+                    targets=targets,
+                    dimension=dimension,
+                    origin=origin,
+                    regions_consumed=regions_consumed,
+                    max_regions=max_regions,
+                    max_distance=max_distance,
+                    distance_consumed=distance_consumed,
+                    covered_this_call=covered_this_call,
+                    blocks=all_blocks,
+                    entities=all_entities,
+                    failures=failures,
+                    evidence_keys=evidence_keys,
+                    coverage=prior,
+                    success=True,
+                    can_retry=True,
+                )
 
         if all_blocks or all_entities:
             reason = "found"
@@ -633,32 +791,89 @@ class ExplorationTransactions:
         entities: list[JsonObject] = []
         uncertainty: list[JsonObject] = []
         if targets.blocks:
-            perception = self.body.perceive(
-                "findBlocks",
-                {
-                    "types": list(targets.blocks),
-                    "radius": scan_radius,
-                    "y_radius": min(DEFAULT_VERTICAL_RADIUS, scan_radius * 2),
-                    "limit": 32,
-                    "start": 0,
-                },
-            )
-            terminal = _perception_terminal(perception)
-            if terminal is not None:
-                return _ScanResult((), (), tuple(_uncertainty(perception)), terminal)
-            for item in perception.data.get("blocks") or []:
-                if not isinstance(item, dict):
-                    continue
-                block_type = _normalize_identifier(item.get("type"))
-                if block_type in targets.blocks:
-                    blocks.append(_normalized_block_match(item))
-            uncertainty.extend(_uncertainty(perception))
-            if blocks and stop_on_match:
-                return _ScanResult(tuple(blocks), (), tuple(uncertainty))
+            start = 0
+            for page_index in range(FIND_BLOCK_MAX_PAGES):
+                perception = self.body.perceive(
+                    "findBlocks",
+                    {
+                        "types": list(targets.blocks),
+                        "radius": scan_radius,
+                        "y_radius": min(DEFAULT_VERTICAL_RADIUS, scan_radius * 2),
+                        "limit": FIND_BLOCK_PAGE_SIZE,
+                        "start": start,
+                    },
+                )
+                terminal = _perception_terminal(perception, allow_partial=True)
+                if terminal is not None:
+                    return _ScanResult(
+                        tuple(blocks),
+                        (),
+                        tuple([*uncertainty, *_uncertainty(perception)]),
+                        terminal,
+                    )
+                for item in perception.data.get("blocks") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    block_type = _normalize_identifier(item.get("type"))
+                    if block_type in targets.blocks:
+                        blocks.append(_normalized_block_match(item))
+                uncertainty.extend(_uncertainty(perception))
+                if blocks and stop_on_match:
+                    return _ScanResult(tuple(blocks), (), tuple(uncertainty))
+                if perception.complete:
+                    uncertainty = [
+                        item
+                        for item in uncertainty
+                        if str(item.get("reason") or "").casefold() != "page_limit"
+                    ]
+                    break
+                next_cursor = perception_next_cursor(perception, "nextStart", "next")
+                if next_cursor is None:
+                    return _ScanResult(
+                        tuple(blocks),
+                        (),
+                        tuple(uncertainty),
+                        "scan_cursor_missing",
+                    )
+                try:
+                    next_start = int(next_cursor)
+                except (TypeError, ValueError):
+                    return _ScanResult(
+                        tuple(blocks),
+                        (),
+                        tuple(uncertainty),
+                        "scan_cursor_invalid",
+                    )
+                if next_start <= start:
+                    return _ScanResult(
+                        tuple(blocks),
+                        (),
+                        tuple(uncertainty),
+                        "scan_cursor_invalid",
+                    )
+                if page_index + 1 >= FIND_BLOCK_MAX_PAGES:
+                    uncertainty.append(
+                        {
+                            "reason": "scan_page_limit",
+                            "pages": FIND_BLOCK_MAX_PAGES,
+                            "next_start": next_start,
+                        }
+                    )
+                    return _ScanResult(
+                        tuple(blocks),
+                        (),
+                        tuple(uncertainty),
+                        "scan_page_limit",
+                    )
+                start = next_start
         if targets.entities:
             perception = self.body.perceive(
                 "nearbyEntities",
-                {"radius": min(32, max(scan_radius, 16)), "limit": 128},
+                {
+                    "radius": min(32, max(scan_radius, 16)),
+                    "limit": 128,
+                    "types": list(targets.entities),
+                },
             )
             terminal = _perception_terminal(perception, allow_partial=True)
             if terminal is not None:
@@ -684,8 +899,7 @@ class ExplorationTransactions:
         if scan.terminal_reason is None:
             return None
         reason = scan.terminal_reason
-        if reason not in {"body_missing", "death"}:
-            reason = "unloaded_boundary"
+        if reason == "unloaded_boundary":
             record = self.coverage.record_region(
                 dimension=dimension,
                 query_signature=targets.query_signature,
@@ -817,6 +1031,7 @@ class ExplorationTransactions:
             if resumable
             else None
         )
+        continuation = _exploration_continuation(targets, resume_cursor)
         return ToolResult(
             success,
             reason,
@@ -839,6 +1054,7 @@ class ExplorationTransactions:
                 "candidate_failures": failures,
                 "evidence_keys": list(dict.fromkeys(evidence_keys)),
                 "resume_cursor": resume_cursor,
+                "continuation": continuation,
                 "complete": reason in {"found", "frontier_exhausted"},
             },
         )
@@ -1053,6 +1269,24 @@ def _target_evidence_keys(dimension: str, scan: _ScanResult) -> list[str]:
     return keys
 
 
+def _exploration_continuation(
+    targets: ExplorationTargets,
+    resume_cursor: JsonObject | None,
+) -> JsonObject | None:
+    if resume_cursor is None:
+        return None
+    return {
+        "kind": "resume_operation",
+        "tool": "explore_for",
+        "target_descriptor": {
+            "block_targets": list(targets.requested_blocks),
+            "entity_targets": list(targets.requested_entities),
+        },
+        "resume_cursor": dict(resume_cursor),
+        "target_descriptor_must_match": True,
+    }
+
+
 def _validate_resume_cursor(
     cursor: JsonObject | None,
     *,
@@ -1111,6 +1345,15 @@ def _merge_result_context(
     metrics = dict(result.metrics or {})
     latest_revision = max((item.revision for item in coverage.values()), default=0)
     resumable = result.reason in {"mobility_blocked", "unloaded_boundary", "preempted"}
+    resume_cursor = (
+        {
+            "query_signature": targets.query_signature,
+            "dimension": dimension,
+            "coverage_revision": latest_revision,
+        }
+        if resumable
+        else None
+    )
     metrics.update(
         {
             "targets": targets.payload(),
@@ -1128,15 +1371,8 @@ def _merge_result_context(
             "entities": entities,
             "candidate_failures": failures,
             "evidence_keys": list(dict.fromkeys(evidence_keys)),
-            "resume_cursor": (
-                {
-                    "query_signature": targets.query_signature,
-                    "dimension": dimension,
-                    "coverage_revision": latest_revision,
-                }
-                if resumable
-                else None
-            ),
+            "resume_cursor": resume_cursor,
+            "continuation": _exploration_continuation(targets, resume_cursor),
             "complete": False,
         }
     )

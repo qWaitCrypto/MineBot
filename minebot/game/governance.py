@@ -1,22 +1,8 @@
-"""Break/place legality for the Body layer.
-
-This module is the shared governance path required by the canonical docs. The
-red line is "never break player-made blocks" (CLAUDE.md: natural blocks/ores/
-logs are fine). Break provenance is therefore established by block TYPE: only
-``NATURAL_BREAKABLE`` types are breakable, and the red line is held by
-``STRONGLY_PROTECTED_TYPES`` + ``protected_regions`` + the bot placement ledger.
-A declared ``natural_region`` is no longer required to break a known-natural
-block — it only annotates the decision. (Placement and interaction remain
-region-gated; only ``can_break`` uses type-based provenance.)
-
-Residual, accepted tradeoff: a player structure built from raw natural types
-(dirt/stone/log) outside any ``protected_region`` is breakable. Mitigate with a
-``protected_region`` overlay and the bot ledger on shared servers.
-"""
+"""Break/place legality for the Body layer."""
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Protocol
 
 from minebot.contract.governance import (
     BotPlacement,
@@ -26,6 +12,8 @@ from minebot.contract.governance import (
     PlaceContext,
     Position,
     Region,
+    StructureRiskAssessment,
+    StructureRiskLevel,
 )
 
 
@@ -185,6 +173,21 @@ STRONGLY_PROTECTED_TYPES = frozenset(
     }
 )
 
+UNSAFE_STAND_SUPPORT_TYPES = frozenset(
+    {
+        "cactus",
+        "campfire",
+        "fire",
+        "lava",
+        "magma_block",
+        "powder_snow",
+        "soul_campfire",
+        "soul_fire",
+        "sweet_berry_bush",
+        "wither_rose",
+    }
+)
+
 TEMPORARY_BOT_PURPOSES = frozenset(
     {
         "scaffold",
@@ -201,6 +204,15 @@ def normalize_block_type(block_type: str) -> str:
     return block_type.removeprefix("minecraft:")
 
 
+class StructureRiskAssessor(Protocol):
+    def assess(
+        self,
+        pos: Position,
+        block_type: str,
+        context: BreakContext,
+    ) -> StructureRiskAssessment: ...
+
+
 class GovernancePolicy:
     def __init__(
         self,
@@ -208,10 +220,14 @@ class GovernancePolicy:
         natural_regions: Iterable[Region] = (),
         protected_regions: Iterable[Region] = (),
         bot_placements: Iterable[BotPlacement] = (),
+        structure_risk_assessor: StructureRiskAssessor | None = None,
+        require_structure_assessment: bool = False,
     ) -> None:
         self.natural_regions = list(natural_regions)
         self.protected_regions = list(protected_regions)
         self.bot_placements: dict[Position, BotPlacement] = {entry.pos: entry for entry in bot_placements}
+        self.structure_risk_assessor = structure_risk_assessor
+        self.require_structure_assessment = require_structure_assessment
 
     def record_bot_placement(self, pos: Position, block_type: str, purpose: str, bot: str) -> None:
         self.bot_placements[pos] = BotPlacement(
@@ -257,12 +273,6 @@ class GovernancePolicy:
             # known-natural target or to clear a path to one.
             return LegalityDecision(allowed=False, reason="unknown_provenance", protected=True)
 
-        # Provenance is established by block TYPE membership in NATURAL_BREAKABLE,
-        # not by a declared natural_region. The red line ("never break player-made
-        # blocks") is held by STRONGLY_PROTECTED_TYPES + protected_regions + the
-        # bot ledger; unknown/unrecognized types stay protected by failing the
-        # NATURAL_BREAKABLE gate below. A declared natural_region is no longer
-        # required to break a known-natural block — it only annotates the decision.
         if block_type not in NATURAL_BREAKABLE:
             return LegalityDecision(
                 allowed=False,
@@ -283,7 +293,99 @@ class GovernancePolicy:
         if context == BreakContext.BOT_CLEANUP:
             return LegalityDecision(allowed=False, reason="not_bot_owned", protected=True, natural_region=region_name)
 
-        return LegalityDecision(allowed=True, reason="allowed_natural", natural_region=region_name)
+        assessment = self._assess_structure_risk(pos, block_type, context)
+        if assessment is None:
+            if self.require_structure_assessment:
+                return LegalityDecision(
+                    allowed=False,
+                    reason="structure_assessment_required",
+                    protected=True,
+                    natural_region=region_name,
+                )
+            return LegalityDecision(allowed=True, reason="allowed_natural", natural_region=region_name)
+        risk = _structure_risk_payload(assessment)
+        if not assessment.complete or assessment.level is StructureRiskLevel.AMBIGUOUS:
+            return LegalityDecision(
+                allowed=False,
+                reason="structure_risk_unknown",
+                protected=True,
+                natural_region=region_name,
+                details={"structure_risk": risk},
+            )
+        if assessment.level is StructureRiskLevel.HIGH:
+            return LegalityDecision(
+                allowed=False,
+                reason="player_structure_risk",
+                protected=True,
+                natural_region=region_name,
+                details={"structure_risk": risk},
+            )
+        return LegalityDecision(
+            allowed=True,
+            reason="allowed_natural",
+            natural_region=region_name,
+            details={"structure_risk": risk},
+        )
+
+    def can_stand(self, pos: Position, support_type: str) -> LegalityDecision:
+        """Authorize a non-mutating stand goal without granting mutation rights."""
+
+        support_type = normalize_block_type(support_type)
+        protected_region = self._region_containing(self.protected_regions, pos)
+        if protected_region is not None:
+            return LegalityDecision(
+                allowed=False,
+                reason="protected_region",
+                protected=True,
+                details={"region": protected_region.name, "operation": "stand"},
+            )
+
+        bot_entry = self.bot_placements.get(pos)
+        if bot_entry is not None:
+            if bot_entry.block_type != support_type:
+                return LegalityDecision(
+                    allowed=False,
+                    reason="bot_ledger_type_mismatch",
+                    protected=True,
+                    bot_owned=True,
+                    details={"ledger_type": bot_entry.block_type, "observed_type": support_type},
+                )
+            return LegalityDecision(
+                allowed=True,
+                reason="allowed_bot_owned",
+                bot_owned=True,
+                details={"operation": "stand"},
+            )
+
+        if support_type in STRONGLY_PROTECTED_TYPES:
+            return LegalityDecision(
+                allowed=False,
+                reason="protected_support_type",
+                protected=True,
+                details={"operation": "stand"},
+            )
+        if support_type in UNSAFE_STAND_SUPPORT_TYPES:
+            return LegalityDecision(
+                allowed=False,
+                reason="unsafe_support_type",
+                protected=True,
+                details={"operation": "stand"},
+            )
+
+        natural_region = self._region_containing(self.natural_regions, pos)
+        if natural_region is None:
+            return LegalityDecision(
+                allowed=False,
+                reason="unknown_provenance",
+                protected=True,
+                details={"operation": "stand"},
+            )
+        return LegalityDecision(
+            allowed=True,
+            reason="allowed_stand",
+            natural_region=natural_region.name,
+            details={"operation": "stand"},
+        )
 
     def can_place(self, pos: Position, block_type: str, context: PlaceContext | str, bot: str) -> LegalityDecision:
         context = PlaceContext(context)
@@ -354,9 +456,41 @@ class GovernancePolicy:
             return LegalityDecision(allowed=False, reason="bot_owned_not_temporary", protected=True, bot_owned=True)
         return LegalityDecision(allowed=True, reason="allowed_bot_owned", bot_owned=True)
 
+    def _assess_structure_risk(
+        self,
+        pos: Position,
+        block_type: str,
+        context: BreakContext,
+    ) -> StructureRiskAssessment | None:
+        if self.structure_risk_assessor is None:
+            return None
+        try:
+            return self.structure_risk_assessor.assess(pos, block_type, context)
+        except Exception as exc:
+            return StructureRiskAssessment(
+                pos=pos,
+                block_type=block_type,
+                level=StructureRiskLevel.AMBIGUOUS,
+                score=1.0,
+                complete=False,
+                sampled_cells=0,
+                signals=(f"assessor_failed:{type(exc).__name__}",),
+            )
+
     @staticmethod
     def _region_containing(regions: Iterable[Region], pos: Position) -> Region | None:
         for region in regions:
             if region.contains(pos):
                 return region
         return None
+
+
+def _structure_risk_payload(assessment: StructureRiskAssessment) -> dict[str, object]:
+    return {
+        "level": assessment.level.value,
+        "score": assessment.score,
+        "complete": assessment.complete,
+        "sampled_cells": assessment.sampled_cells,
+        "signals": list(assessment.signals),
+        "source": assessment.source,
+    }

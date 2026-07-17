@@ -15,7 +15,6 @@ from minebot.body import BlockWork, NavigationRunConfig, NavigationTransactions
 from minebot.game import GovernancePolicy, RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
 from minebot.game.governance import BreakContext, PlaceContext
-from minebot.game.navigation import GridCell, GridWorld, NavigationCostModel, SegmentedNavigator
 from minebot.game.rcon import RconConfig
 from tests.e2e_support import spawn_or_fail
 
@@ -55,10 +54,6 @@ def setup_world(rcon: RconClient) -> None:
         command(rcon, cmd)
 
 
-def flat_world(x_min: int, x_max: int, z_min: int, z_max: int, *, y: int = 59) -> GridWorld:
-    return GridWorld({(x, y, z): GridCell() for x in range(x_min, x_max + 1) for z in range(z_min, z_max + 1)})
-
-
 def make_runtime(body: ScarpetBody, *, protect_adjacent_targets: bool = False) -> BlockWork:
     protected = []
     if protect_adjacent_targets:
@@ -72,10 +67,15 @@ def make_runtime(body: ScarpetBody, *, protect_adjacent_targets: bool = False) -
         natural_regions=[Region("place_here", (-5, 0, -5), (5, 100, 5))],
         protected_regions=protected,
     )
-    navigator = NavigationTransactions(
-        body,
-        SegmentedNavigator(flat_world(-5, 5, -5, 5), NavigationCostModel(policy)),
+    navigator = NavigationTransactions.server_side(body, policy)
+    return BlockWork(body, policy, navigator=navigator)
+
+
+def make_natural_runtime(body: ScarpetBody) -> BlockWork:
+    policy = GovernancePolicy(
+        natural_regions=[Region("fixed_natural_place_here", (48, 0, -72), (72, 120, -40))],
     )
+    navigator = NavigationTransactions.server_side(body, policy)
     return BlockWork(body, policy, navigator=navigator)
 
 
@@ -147,7 +147,8 @@ def run_happy_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
 
 def run_no_supported_spot_inverse(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     reset_position(rcon, body)
-    command(rcon, "fill -2 58 -2 2 58 2 air")
+    command(rcon, "fill -2 58 -2 2 58 2 water")
+    command(rcon, "setblock 0 58 0 stone")
     runtime = make_runtime(body)
 
     before = body.get_state()
@@ -177,6 +178,86 @@ def run_no_supported_spot_inverse(rcon: RconClient, body: ScarpetBody) -> dict[s
         "before": before.pos,
         "after": after.pos,
         "candidate_count": len((result.metrics or {}).get("candidates") or []),
+        "scan": (result.metrics or {}).get("scan"),
+    }
+
+
+def run_vertical_surface_happy_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+    reset_position(rcon, body)
+    command(rcon, "fill -2 58 -2 2 58 2 water")
+    command(rcon, "setblock 0 58 0 stone")
+    command(rcon, "setblock 1 61 0 grass_block")
+    command(rcon, "setblock 2 61 0 grass_block")
+    command(rcon, "fill 1 62 0 2 63 0 air")
+    runtime = make_runtime(body)
+
+    result = runtime.place_here(
+        "minecraft:cobblestone",
+        radius=2,
+        context=PlaceContext.WORK,
+        purpose="bridge",
+        timeout_s=18.0,
+    )
+    payload = result.to_payload()
+    place_here = (result.metrics or {}).get("place_here") or {}
+    chosen = place_here.get("chosen_target")
+    scan = place_here.get("scan") or {}
+    if not result.success or result.reason != "completed":
+        raise AssertionError(f"place_here vertical-surface happy path failed: {payload}")
+    if chosen != [1, 62, 0]:
+        raise AssertionError(f"place_here chose the wrong elevated target: {payload}")
+    if scan.get("vertical_fallback") is not True:
+        raise AssertionError(f"place_here did not expose vertical fallback truth: {payload}")
+    placed = body.perceive("blockAt", {"x": 1, "y": 62, "z": 0})
+    if placed.data.get("type") not in {"cobblestone", "minecraft:cobblestone"}:
+        raise AssertionError(f"place_here did not place on the elevated surface: block={placed.data} result={payload}")
+    return {
+        "reason": result.reason,
+        "chosen_target": chosen,
+        "vertical_delta": place_here.get("candidates", [{}])[0].get("vertical_delta"),
+        "final": body.get_state().pos,
+        "scan": scan,
+    }
+
+
+def run_fixed_natural_crafting_table_surface(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+    command(rcon, "script in minebot run minebot_reset()")
+    command(rcon, f"clear {BOT}")
+    command(rcon, f"item replace entity {BOT} weapon.mainhand with crafting_table 1")
+    command(rcon, f"tp {BOT} 59.62 63 -58.7 -90 0")
+    runtime = make_natural_runtime(body)
+
+    result = runtime.place_here(
+        "minecraft:crafting_table",
+        radius=2,
+        context=PlaceContext.DIRECT,
+        purpose="workstation",
+        timeout_s=18.0,
+    )
+    payload = result.to_payload()
+    place_here = (result.metrics or {}).get("place_here") or {}
+    chosen = place_here.get("chosen_target")
+    scan = place_here.get("scan") or {}
+    if not result.success or result.reason != "completed":
+        raise AssertionError(f"fixed-world crafting-table placement failed: {payload}")
+    if not chosen or int(scan.get("candidate_count") or 0) < 1:
+        raise AssertionError(f"fixed-world placement did not expose a bounded surface candidate: {payload}")
+    if int(scan.get("columns_scanned") or 0) > BlockWork.PLACE_HERE_COLUMN_LIMIT:
+        raise AssertionError(f"fixed-world placement exceeded its column budget: {payload}")
+    placed = body.perceive("blockAt", {"x": chosen[0], "y": chosen[1], "z": chosen[2]})
+    if placed.data.get("type") not in {"crafting_table", "minecraft:crafting_table"}:
+        raise AssertionError(f"fixed-world crafting table lacks terminal block truth: block={placed.data} result={payload}")
+
+    cleanup = runtime.mine_block(tuple(chosen), context=BreakContext.BOT_CLEANUP, timeout_s=18.0)
+    if not cleanup.success:
+        raise AssertionError(f"fixed-world crafting table cleanup failed: {cleanup.to_payload()}")
+    return {
+        "reason": result.reason,
+        "chosen_target": chosen,
+        "vertical_delta": place_here.get("candidates", [{}])[0].get("vertical_delta"),
+        "vertical_fallback": scan.get("vertical_fallback"),
+        "scan": scan,
+        "cleanup_reason": cleanup.reason,
     }
 
 
@@ -538,6 +619,8 @@ def main() -> None:
             "stand_point_creation": lambda: run_stand_point_creation(rcon, body),
             "stand_point_creation_illegal": lambda: run_stand_point_creation_illegal_inverse(rcon, body),
             "step_support": lambda: run_step_support_happy_path(rcon, body),
+            "vertical_surface": lambda: run_vertical_surface_happy_path(rcon, body),
+            "fixed_natural_surface": lambda: run_fixed_natural_crafting_table_surface(rcon, body),
             "no_supported_spot": lambda: run_no_supported_spot_inverse(rcon, body),
         }
         selected_raw = os.environ.get("MINEBOT_PLACE_HERE_CASES")

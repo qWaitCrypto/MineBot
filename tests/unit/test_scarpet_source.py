@@ -4,18 +4,28 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MINEBOT_SC = ROOT / "test-server" / "world" / "scripts" / "minebot.sc"
-ASSET_MINEBOT_SC = ROOT / "minecraft" / "server" / "scarpet" / "minebot.sc"
+MINEBOT_SC = ROOT / "minecraft" / "server" / "scarpet" / "minebot.sc"
+RUNTIME_MIRROR_MINEBOT_SC = ROOT / "test-server" / "world" / "scripts" / "minebot.sc"
 
 
 class ScarpetSourceTests(unittest.TestCase):
-    def test_test_server_and_deployable_minebot_scripts_stay_in_sync(self):
-        self.assertEqual(MINEBOT_SC.read_text(), ASSET_MINEBOT_SC.read_text())
+    def test_block_kind_uses_authoritative_replaceable_tag(self):
+        source = MINEBOT_SC.read_text()
+
+        self.assertIn("if(block_tags(bs, 'replaceable'), 'CLEAR', 'SOLID')", source)
+        self.assertLess(source.index("bs == 'water'"), source.index("block_tags(bs, 'replaceable')"))
+
+    def test_deployable_minebot_script_is_present(self):
+        self.assertTrue(MINEBOT_SC.is_file())
+
+    def test_local_runtime_mirror_stays_in_sync_when_present(self):
+        if not RUNTIME_MIRROR_MINEBOT_SC.exists():
+            self.skipTest("local runtime mirror is not part of the clean-clone fixture")
+        self.assertEqual(MINEBOT_SC.read_text(), RUNTIME_MIRROR_MINEBOT_SC.read_text())
 
     def test_source_remains_comment_free_for_scarpet_loader(self):
-        for path in (MINEBOT_SC, ASSET_MINEBOT_SC):
-            source = path.read_text()
-            self.assertNotRegex(source, r"(?m)^\s*#")
+        source = MINEBOT_SC.read_text()
+        self.assertNotRegex(source, r"(?m)^\s*#")
 
     def test_minebot_say_is_synchronous_outbound_chat_primitive(self):
         source = MINEBOT_SC.read_text()
@@ -96,12 +106,15 @@ class ScarpetSourceTests(unittest.TestCase):
         source = MINEBOT_SC.read_text()
         self.assertIn("minebot_perceive(name, scope, payload)", source)
         self.assertIn("scope == 'blockAt'", source)
+        self.assertIn("scope == 'surfaceColumns'", source)
         self.assertIn("scope == 'nearbyBlocks'", source)
         self.assertIn("scope == 'findBlocks'", source)
         self.assertIn("scope == 'nearbyEntities'", source)
         self.assertIn("scope == 'inventory'", source)
         self.assertIn("scope == 'container'", source)
         self.assertIn("block_fact_json", source)
+        self.assertIn("perceive_surface_columns", source)
+        self.assertIn("top('surface', block(x, 0, z))", source)
         self.assertIn("perceive_find_blocks", source)
         self.assertIn("perceive_nearby_entities", source)
         self.assertIn("perceive_inventory", source)
@@ -186,9 +199,10 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("global_response_char_budget = 2000;", source)
         # Referenced in each list-style perception. Static block scopes expose
         # resumable cursors; moving-entity scopes remain bounded top-k results.
-        self.assertEqual(source.count("global_response_char_budget"), 7)  # 1 decl + 6 uses
+        self.assertEqual(source.count("global_response_char_budget"), 8)  # 1 decl + 7 uses
         self.assertIn("length(out) + length(fact) >= global_response_char_budget", source)
-        self.assertIn("length(out) >= global_response_char_budget", source)
+        self.assertIn("length(out) + length(fact) >= global_response_char_budget", source)
+        self.assertIn("entity_matches_filters(e, wanted_types, wanted_name)", source)
 
     def test_static_block_perceptions_use_numeric_resume_cursors(self):
         source = MINEBOT_SC.read_text()
@@ -297,10 +311,20 @@ class ScarpetSourceTests(unittest.TestCase):
         )
         self.assertIn("navigation_partial_coefficients() -> l(1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 10.0)", source)
         self.assertIn("partial_score = h + new_g / coefficient", source)
+        self.assertIn(
+            "if(is_dry_stand_cell(nx, ny, nz) && best_partial_scores:(ci) - partial_score > 0.01,",
+            source,
+        )
         self.assertIn("candidate_distance >= min_partial_progress", source)
         self.assertIn("partial_key == null && candidate_key != null", source)
+        self.assertIn("if(probe_walkability(x, y, z) == 'LIQUID', floor(number(p:1) + 0.5), y)", source)
         self.assertIn("min_partial_progress = floor(param_number(params, 'min_partial_progress', 5))", source)
         self.assertIn("if(min_partial_progress < 1, min_partial_progress = 1)", source)
+        self.assertIn("partial_continuation = params:'partial_replans' != null", source)
+        self.assertIn("params:'partial_replans' = partial_replans - 1", source)
+        self.assertIn("params:'segment_index' = segment_index + 1", source)
+        self.assertIn("start_navigate_to(name, action_id, gx, gy, gz, params)", source)
+        self.assertIn("'partial_segment_budget_exhausted'", source)
 
     def test_server_navigation_honors_near_goal_radius(self):
         source = MINEBOT_SC.read_text()
@@ -341,25 +365,42 @@ class ScarpetSourceTests(unittest.TestCase):
             "navigation_fall_candidate(x, start_y, z, context) -> (",
             "if(w == 'LIQUID', 'swim', 'diagonal')",
             "if(w == 'LIQUID', 3.0, 1.4)",
-            "if(w == 'LIQUID', 'surface_or_stable_water', 'immediate')",
+            "if(w == 'LIQUID', 'egress_to_dry', 'immediate')",
             "navigation_candidate(nx, y + 1, nz",
             "'ascend'",
             "navigation_candidate(nx, y - 1, nz",
             "'descend'",
             "navigation_candidate(x, y, z, 'fall', 4.0 + depth, depth, 'land_first')",
+            "navigation_candidate(x, y, z, 'swim', 4.0 + depth, depth, 'egress_to_dry')",
             "came_step:(nkey) = l(candidate:3, candidate:5, candidate:6, candidate:7)",
             "path += l(number(parts:0), number(parts:1), number(parts:2), movement:0, movement:1, movement:2, movement:3)",
             "'path_moves' -> execution_moves",
             "'path_fall_depths' -> execution_fall_depths",
             "'cancel_policies' -> execution_cancel_policies",
+            "if(movement_kind == 'swim',",
+            "look_y = if(movement_kind == 'swim', target:1 + 1.8",
+            "run('player ' + name + ' jump')",
             '"movement_counts":%s',
         ):
             self.assertIn(expected, source)
 
-        self.assertIn("if(is_lava_at(x, y, z) || is_lava_at(x, y + 1, z),", source)
+        self.assertIn("navigation_lava_unsafe(x, y, z) -> (", source)
+        self.assertIn("lava_near_pos(l(x + 0.5, y, z + 0.5)) || is_lava_at(x, y + 1, z)", source)
+        probe_body = source[source.index("probe_walkability(x, y, z) -> ("):source.index("probe_heuristic(")]
+        self.assertIn("if(navigation_lava_unsafe(x, y, z),", probe_body)
+        self.assertIn("feet_kind != 'SOLID' && head_kind != 'SOLID' && !navigation_lava_unsafe(x, y, z)", source)
+        self.assertLess(
+            probe_body.index("if(navigation_lava_unsafe(x, y, z),"),
+            probe_body.index("if(feet_kind == 'SOLID' || head_kind == 'SOLID',"),
+        )
         self.assertIn("'LAVA'", source)
-        self.assertIn("loop(3,", source[source.index("navigation_fall_candidate"):])
-        self.assertNotIn("loop(4,\n    depth = _ + 1", source)
+        fall_body = source[source.index("navigation_fall_candidate"):source.index("navigation_neighbors(x, y, z, context)")]
+        self.assertIn("loop(scan_depth,", fall_body)
+        self.assertIn("depth <= floor(number(context:'max_fall_depth'))", fall_body)
+        self.assertIn("depth <= floor(number(context:'max_water_drop_depth'))", fall_body)
+        neighbors_body = source[source.index("navigation_neighbors(x, y, z, context)"):source.index("navigation_edge_valid(")]
+        self.assertIn("source_kind = probe_walkability(x, y, z)", neighbors_body)
+        self.assertGreaterEqual(neighbors_body.count("source_kind != 'LIQUID'"), 2)
 
     def test_server_navigation_bridge_uses_governed_proposal_handshake(self):
         source = MINEBOT_SC.read_text()
@@ -403,6 +444,11 @@ class ScarpetSourceTests(unittest.TestCase):
             "'tool_item' -> navigation_break_tool(context, head_type)",
             "'tool_item' -> navigation_break_tool(context, feet_type)",
             "navigation_mutation_candidate(nx, y, nz, 'break'",
+            "source_head_blocked = navigation_block_kind_at(x, y + 1, z) == 'SOLID'",
+            "source_cap_blocked = navigation_block_kind_at(x, y + 2, z) == 'SOLID'",
+            "source_clearance_y = if(source_head_blocked, y + 1, y + 2)",
+            "'pos' -> l(x, source_clearance_y, z)",
+            "navigation_mutation_candidate(nx, y + 1, nz, 'break'",
             "'purpose' -> 'headroom'",
             "'purpose' -> 'path'",
             "mutation:'status' = 'breaking'",
@@ -534,6 +580,7 @@ class ScarpetSourceTests(unittest.TestCase):
             "'allow_diagonal' -> param_bool(params, 'allow_diagonal', true)",
             "'allow_swim' -> param_bool(params, 'allow_swim', true)",
             "'max_fall_depth' -> max_fall_depth",
+            "'max_water_drop_depth' -> max_water_drop_depth",
             "'allow_break' -> param_bool(params, 'allow_break', false)",
             "'break_timeout_ticks' -> break_timeout_ticks",
             "'break_pickaxe' -> params:'break_pickaxe'",
@@ -578,6 +625,27 @@ class ScarpetSourceTests(unittest.TestCase):
             interrupt_body,
         )
 
+    def test_delayed_swim_cancel_uses_bounded_dry_egress_and_always_terminates(self):
+        source = MINEBOT_SC.read_text()
+        request_start = source.index("start_move_cancel_water_egress(name, m, reason) -> (")
+        request_end = source.index("run_move_cancel_tick(name, m) -> (")
+        request_body = source[request_start:request_end]
+        reflex_start = source.index("run_reflex_tick(name, r) -> (")
+        reflex_end = source.index("run_mine_tick(name, m) -> (")
+        reflex_body = source[reflex_start:reflex_end]
+
+        self.assertIn("target = water_escape_target(p)", request_body)
+        self.assertIn("target = water_surface_target(p)", request_body)
+        self.assertIn("'water', 'moveTo'", request_body)
+        self.assertIn("reason + '_egress_unavailable'", request_body)
+        self.assertIn("start_move_cancel_water_egress(name, m, global_move_cancels:name:0)", request_body)
+        self.assertIn("global_reflexes:name == null && controls_ready", source)
+        self.assertIn("move_cancel_egress = kind == 'water' && owner_name == 'moveTo'", reflex_body)
+        self.assertIn("retarget = water_escape_target(p)", reflex_body)
+        self.assertIn("finish_move(name, global_move_cancels:name:0, false)", reflex_body)
+        self.assertIn("global_move_cancels:name:0 + '_egress_failed'", reflex_body)
+        self.assertIn("if(kind == 'moveCancelEgress'", source)
+
     def test_follow_started_json_uses_json_value_for_target(self):
         source = MINEBOT_SC.read_text()
 
@@ -604,6 +672,11 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("move_arrival_radius = 0.45", body)
         self.assertIn("'arrival_radius' -> move_arrival_radius", body)
         self.assertNotIn("'arrival_radius' -> keep_radius", body)
+        self.assertIn("navigate_to_goals_plan(", body)
+        self.assertIn("'path_moves' -> movement_kinds", body)
+        self.assertIn("'path_fall_depths' -> fall_depths", body)
+        self.assertIn("'cancel_policies' -> cancel_policies", body)
+        self.assertNotIn("direct_wp", body)
 
     def test_engage_replan_uses_tight_waypoint_arrival_not_attack_range(self):
         source = MINEBOT_SC.read_text()
@@ -620,7 +693,7 @@ class ScarpetSourceTests(unittest.TestCase):
 
         for expected in (
             "entity_selector(selector)",
-            "@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,limit=%d,sort=nearest]",
+            "@e[x=%d,y=%d,z=%d,distance=..%d,tag=!minebot.camera.observer,sort=nearest]",
             "if(radius > 32, radius = 32)",
             "if(limit > 128, limit = 128)",
             "entity_fact_json",
@@ -634,6 +707,8 @@ class ScarpetSourceTests(unittest.TestCase):
             '"health":%s',
         ):
             self.assertIn(expected, source)
+        self.assertIn("e != player(name) && entity_matches_filters(e, wanted_types, wanted_name)", source)
+        self.assertIn("if(count >= limit || length(out) + length(fact) >= global_response_char_budget", source)
 
     def test_auto_combat_reflex_is_defensive_not_auto_pursuit(self):
         source = MINEBOT_SC.read_text()
@@ -688,6 +763,18 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("if(complete && e:3 == name", source)
         self.assertIn("if(complete && e:3 == name && e:0 > since_seq", source)
         self.assertIn("if(length(candidate) > 2600", source)
+        self.assertIn("oversized_event_json(e, payload_chars) -> (", source)
+        self.assertEqual(source.count("out = oversized_event_json(e, length(item));"), 2)
+        self.assertEqual(
+            source.count(
+                "out = oversized_event_json(e, length(item));\n"
+                "          first = false;\n"
+                "          last_seq = e:0"
+            ),
+            2,
+        )
+        self.assertIn('"name":"eventPayloadTooLarge"', source)
+        self.assertIn('"payload_complete":false', source)
         self.assertIn('"next":%s', source)
         self.assertIn("next_value = if(complete, null, last_seq)", source)
 
@@ -822,10 +909,17 @@ class ScarpetSourceTests(unittest.TestCase):
         for expected in (
             "recipe_type = params:'type'",
             "recipe_data(item), recipe_data(item, recipe_type)",
-            "str('%s', l(recipe))",
+            "compact_recipe_variant(raw)",
+            "compact_recipe_variants(recipe)",
+            "compact_outputs += l('' + output:0, floor(number(output:1)))",
+            "compact_groups += compact_group",
+            "if(seen:key == null",
+            '"variantCount":%d',
+            "json_string(str('%s', l(compact)))",
             '"type":%s',
         ):
             self.assertIn(expected, source)
+        self.assertNotIn("json_string(str('%s', l(recipe)))", source)
 
     def test_use_item_controller_uses_physical_use_and_reports_inventory_delta_facts(self):
         source = MINEBOT_SC.read_text()
@@ -1088,9 +1182,9 @@ class ScarpetSourceTests(unittest.TestCase):
         ):
             self.assertIn(param, source)
 
-        self.assertIn("finish_move(name, 'stuck', false)", source)
-        self.assertIn("finish_move(name, 'deviated', false)", source)
-        self.assertIn("finish_move(name, 'timeout', false)", source)
+        self.assertIn("request_move_cancel(name, 'stuck')", source)
+        self.assertIn("request_move_cancel(name, 'deviated')", source)
+        self.assertIn("request_move_cancel(name, 'timeout')", source)
         self.assertRegex(source, r"global_moves:name = l\(action_id, x, y, z, arrival_radius")
         self.assertIn("mutation_kind = if(mutation_step == null, null, mutation_step:6:'kind')", source)
         self.assertIn(
@@ -1112,6 +1206,10 @@ class ScarpetSourceTests(unittest.TestCase):
             "parse_waypoints",
             "normalize_waypoint_point",
             "current_waypoint",
+            "swim_waypoint_reached",
+            "current_waypoint_reached",
+            "apply_movement_controls",
+            "initialize_movement_controls",
             "advance_waypoint",
         ):
             self.assertIn(helper, source)
@@ -1120,6 +1218,16 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("points = parse_waypoints(params, x, y, z)", source)
         self.assertIn("first_target = normalize_waypoint_point(points:0)", source)
         self.assertIn("target = current_waypoint(m)", source)
+        self.assertIn("navigation_node_y(p) == floor(target:1)", source)
+        self.assertIn("next_kind == null || next_kind == 'swim' || horizontal_dist <= min(m:4, 0.17)", source)
+        self.assertIn("if(current_movement_kind(m) == 'swim', swim_waypoint_reached(m, p, target), dist <= m:4)", source)
+        self.assertIn("if(next_kind != current_movement_kind(m),", source)
+        self.assertIn("global_move_control_inits:name = l(m:0, idx, global_tick)", source)
+        self.assertIn("pending_control_init:0 == m:0 && pending_control_init:1 == m:14", source)
+        self.assertIn("global_tick > pending_control_init:2 + 1", source)
+        self.assertIn("if(controls_ready, apply_movement_controls(name, movement_kind, p, target))", source)
+        self.assertIn("initialize_movement_controls(name, current_movement_kind(global_moves:name), p, first_target)", source)
+        self.assertIn("apply_movement_controls(name, movement_kind, p, target)", source)
         self.assertIn("advance_waypoint(name, updated_move)", source)
         self.assertIn('"waypoints":%s', source)
         self.assertIn("json_waypoint_summary(data:3)", source)
@@ -1132,12 +1240,16 @@ class ScarpetSourceTests(unittest.TestCase):
         source = MINEBOT_SC.read_text()
 
         for expected in (
+            "global_movement_cancel_step_sample_limit = 6",
             "json_movement_cancel_steps",
             "movement_cancel_json",
             "movement_cancel = params:'movement_cancel'",
             "movement_cancel_json(movement_cancel)",
             "movement_cancel_json(m:15)",
             '"movement_cancel":%s',
+            '"unsafe_steps_complete":%s',
+            '"omitted_count":%d',
+            "_ < edge_count || _ >= tail_start",
         ):
             self.assertIn(expected, source)
 
@@ -1151,7 +1263,8 @@ class ScarpetSourceTests(unittest.TestCase):
         source = MINEBOT_SC.read_text()
 
         self.assertIn("movement_kind = current_movement_kind(m)", source)
-        self.assertIn("movement_kind == 'ascend'", source)
+        self.assertIn("movement_kind == 'swim' || movement_kind == 'ascend'", source)
+        self.assertIn("run('player ' + name + ' jump continuous')", source)
         self.assertIn("movement_kind == 'fall' || movement_kind == 'descend'", source)
         self.assertIn("run('player ' + name + ' jump once')", source)
 
@@ -1174,7 +1287,17 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("request_move_cancel(name, 'interrupted')", source)
         self.assertNotIn("finish_move(name, 'interrupted', false)", source)
         self.assertIn("run_move_cancel_tick(name, m)", source)
-        self.assertIn("policy == 'land_first' || policy == 'settle_on_support' || policy == 'surface_or_stable_water' || policy == 'after_step'", source)
+        self.assertIn("policy == 'land_first' || policy == 'settle_on_support' || policy == 'egress_to_dry' || policy == 'after_step'", source)
+        self.assertIn("if(kind == 'swim', 'egress_to_dry'", source)
+        self.assertIn("dry_stand = is_dry_stand_cell(floor(p:0), floor(p:1), floor(p:2))", source)
+        self.assertNotIn("surface_or_stable_water", source)
+
+        move_tick = re.search(r"run_move_tick\(name, m\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(move_tick, "run_move_tick function not found")
+        for reason in ("timeout", "stuck", "deviated"):
+            self.assertIn(f"request_move_cancel(name, '{reason}')", move_tick.group(1))
+            self.assertNotIn(f"finish_move(name, '{reason}'", move_tick.group(1))
+        self.assertEqual(move_tick.group(1).count("continue_delayed_move_controls("), 4)
 
     def test_mine_block_controller_uses_physical_attack_and_authoritative_block_truth(self):
         source = MINEBOT_SC.read_text()
@@ -1194,13 +1317,21 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertRegex(source, r"global_mines:name = l\(action_id, x, y, z, block_type")
         self.assertIn("run('player ' + name + ' attack continuous')", source)
         self.assertIn("block_kind(block_now) == 'CLEAR'", source)
+        self.assertIn("mine_trace_matches(name, x, y, z)", source)
+        self.assertIn("mine_aim_candidate(name, x, y, z, 0)", source)
+        self.assertIn("finish_mine(name, 'target_occluded')", source)
+        self.assertIn("if(!mine_trace_matches(name, m:1, m:2, m:3),", source)
+        self.assertIn("if(!m:8,", source)
+        self.assertIn("mine_aim_candidate(name, m:1, m:2, m:3, 0)", source)
         start = re.search(r"start_mine_block\(name, action_id, x, y, z, params\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(start, "start_mine_block function not found")
+        self.assertNotIn("x + 0.5, y + 0.5, z + 0.5", start.group(1))
+        self.assertNotIn("attack continuous", start.group(1))
         self.assertNotIn("setblock", start.group(1))
         run_tick = re.search(r"run_mine_tick\(name, m\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(run_tick, "run_mine_tick function not found")
         self.assertNotIn("look at", run_tick.group(1))
-        self.assertNotIn("attack continuous", run_tick.group(1))
+        self.assertEqual(run_tick.group(1).count("attack continuous"), 1)
         self.assertNotIn("setblock", run_tick.group(1))
 
     def test_mine_block_controller_is_preempted_by_survival_reflex_and_interrupt(self):
@@ -1240,7 +1371,10 @@ class ScarpetSourceTests(unittest.TestCase):
             "target = water_surface_target(p)",
             "if(kind == 'fire', 'fireReflex', if(kind == 'water', 'waterReflex', 'lavaReflex'))",
             "if(kind == 'fire', !on_fire_now(name), if(kind == 'water', water_hazard_clear(name), !lava_near_pos(p)))",
-            "escaped = if(kind == 'water', water_target_is_shore && dist <= 0.9 && water_on_dry_stand",
+            "move_cancel_egress = kind == 'water' && owner_name == 'moveTo'",
+            "water_surface_reached = kind == 'water' && !move_cancel_egress && !water_target_is_shore && dist <= 0.9 && clear_of_hazard",
+            "escaped = if(kind == 'water', if(move_cancel_egress, water_target_is_shore && dist <= 0.9 && water_on_dry_stand",
+            "retarget = water_escape_target(p)",
             "global_pending_reflexes:name = 'water'",
             "global_pending_reflexes:name = 'fire'",
             "global_pending_reflexes:name = 'lava'",

@@ -1,6 +1,26 @@
 import unittest
 
+from minebot.contract import StructureRiskAssessment, StructureRiskLevel
 from minebot.game.governance import BreakContext, GovernancePolicy, InteractionContext, PlaceContext, Region
+
+
+class StaticRiskAssessor:
+    def __init__(self, level, *, complete=True):
+        self.level = level
+        self.complete = complete
+        self.calls = []
+
+    def assess(self, pos, block_type, context):
+        self.calls.append((pos, block_type, context))
+        return StructureRiskAssessment(
+            pos=pos,
+            block_type=block_type,
+            level=self.level,
+            score=0.9 if self.level is StructureRiskLevel.HIGH else 0.2,
+            complete=self.complete,
+            sampled_cells=63,
+            signals=("test_signal",),
+        )
 
 
 class GovernanceTests(unittest.TestCase):
@@ -213,6 +233,105 @@ class GovernanceTests(unittest.TestCase):
         self.assertTrue(decision.protected)
         self.assertEqual(decision.reason, "unknown_provenance")
         self.assertEqual(decision.details["context"], "farm")
+
+    def test_required_structure_assessment_never_falls_back_to_block_type(self):
+        policy = GovernancePolicy(require_structure_assessment=True)
+
+        decision = policy.can_break((100, 64, 100), "stone", BreakContext.DIRECT)
+
+        self.assertFalse(decision.allowed)
+        self.assertTrue(decision.protected)
+        self.assertEqual(decision.reason, "structure_assessment_required")
+
+    def test_high_structure_risk_denies_raw_natural_block(self):
+        assessor = StaticRiskAssessor(StructureRiskLevel.HIGH)
+        policy = GovernancePolicy(
+            structure_risk_assessor=assessor,
+            require_structure_assessment=True,
+        )
+
+        decision = policy.can_break((100, 64, 100), "stone", BreakContext.DIRECT)
+
+        self.assertFalse(decision.allowed)
+        self.assertTrue(decision.protected)
+        self.assertEqual(decision.reason, "player_structure_risk")
+        self.assertEqual(decision.details["structure_risk"]["level"], "high")
+
+    def test_ambiguous_structure_risk_requires_more_evidence_or_new_candidate(self):
+        assessor = StaticRiskAssessor(StructureRiskLevel.AMBIGUOUS)
+        policy = GovernancePolicy(
+            structure_risk_assessor=assessor,
+            require_structure_assessment=True,
+        )
+
+        decision = policy.can_break((100, 64, 100), "dirt", BreakContext.COLLECT)
+
+        self.assertFalse(decision.allowed)
+        self.assertTrue(decision.protected)
+        self.assertEqual(decision.reason, "structure_risk_unknown")
+
+    def test_low_structure_risk_allows_context_legal_natural_target(self):
+        assessor = StaticRiskAssessor(StructureRiskLevel.LOW)
+        policy = GovernancePolicy(
+            structure_risk_assessor=assessor,
+            require_structure_assessment=True,
+        )
+
+        decision = policy.can_break((100, 64, 100), "diamond_ore", BreakContext.COLLECT)
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed_natural")
+        self.assertEqual(decision.details["structure_risk"]["source"], "voxel")
+
+    def test_bot_cleanup_uses_exact_ledger_without_probabilistic_assessment(self):
+        assessor = StaticRiskAssessor(StructureRiskLevel.HIGH)
+        policy = GovernancePolicy(
+            structure_risk_assessor=assessor,
+            require_structure_assessment=True,
+        )
+        policy.record_bot_placement((1, 64, 1), "cobblestone", "bridge", "Bot1")
+
+        decision = policy.can_break((1, 64, 1), "cobblestone", BreakContext.BOT_CLEANUP)
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(assessor.calls, [])
+
+    def test_ambiguous_mutation_risk_does_not_deny_non_mutating_stand(self):
+        assessor = StaticRiskAssessor(StructureRiskLevel.AMBIGUOUS)
+        policy = GovernancePolicy(
+            natural_regions=[Region("surface", (-10, 0, -10), (10, 100, 10))],
+            structure_risk_assessor=assessor,
+            require_structure_assessment=True,
+        )
+
+        break_decision = policy.can_break((0, 63, 0), "stone", BreakContext.DIRECT)
+        stand_decision = policy.can_stand((0, 63, 0), "stone")
+
+        self.assertFalse(break_decision.allowed)
+        self.assertEqual(break_decision.reason, "structure_risk_unknown")
+        self.assertTrue(stand_decision.allowed)
+        self.assertEqual(stand_decision.reason, "allowed_stand")
+        self.assertEqual(stand_decision.natural_region, "surface")
+        self.assertEqual(len(assessor.calls), 1)
+
+    def test_stand_still_refuses_protected_regions_and_support_types(self):
+        protected = self.policy.can_stand((25, 64, 25), "stone")
+        functional = self.policy.can_stand((0, 64, 0), "crafting_table")
+        hazardous = self.policy.can_stand((0, 64, 0), "magma_block")
+
+        self.assertEqual((protected.allowed, protected.reason), (False, "protected_region"))
+        self.assertEqual((functional.allowed, functional.reason), (False, "protected_support_type"))
+        self.assertEqual((hazardous.allowed, hazardous.reason), (False, "unsafe_support_type"))
+
+    def test_stand_allows_matching_bot_owned_support_without_natural_region(self):
+        policy = GovernancePolicy()
+        policy.record_bot_placement((100, 64, 100), "cobblestone", "bridge", "Bot1")
+
+        decision = policy.can_stand((100, 64, 100), "minecraft:cobblestone")
+
+        self.assertTrue(decision.allowed)
+        self.assertTrue(decision.bot_owned)
+        self.assertEqual(decision.reason, "allowed_bot_owned")
 
 
 if __name__ == "__main__":

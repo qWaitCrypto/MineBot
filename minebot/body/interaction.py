@@ -11,7 +11,6 @@ from minebot.body.interaction_support import (
     INTERACTION_RANGE,
     InteractionNavigator,
     NearbyEntityTarget,
-    _move_to_stand_center,
     _navigation_goal_for_stands,
     _selected_navigation_stand,
     ensure_interaction_range,
@@ -1890,16 +1889,20 @@ def _openable_look_target(pos: Position, block_type: str, properties: dict[str, 
     normalized_type = normalize_block_type(block_type)
     props = {str(key): str(value).lower() for key, value in dict(properties or {}).items()}
     if normalized_type.endswith("_fence_gate"):
+        return (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5)
+    if normalized_type.endswith("_trapdoor"):
         if props.get("open") == "true":
             facing = props.get("facing")
-            if facing in {"east", "west"}:
-                return (pos[0] + 0.5, pos[1] + 0.2, pos[2] + 0.9)
-            if facing in {"north", "south"}:
-                return (pos[0] + 0.9, pos[1] + 0.2, pos[2] + 0.5)
-        return (pos[0] + 0.5, pos[1] + 0.2, pos[2] + 0.5)
-    if normalized_type.endswith("_trapdoor"):
+            if facing == "east":
+                return (pos[0] + 0.125, pos[1] + 0.5, pos[2] + 0.5)
+            if facing == "west":
+                return (pos[0] + 0.875, pos[1] + 0.5, pos[2] + 0.5)
+            if facing == "south":
+                return (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.125)
+            if facing == "north":
+                return (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.875)
         half = props.get("half")
-        y_offset = 0.8 if half == "top" else 0.2
+        y_offset = 0.875 if half == "top" else 0.125
         return (pos[0] + 0.5, pos[1] + y_offset, pos[2] + 0.5)
     if normalized_type.endswith("_door"):
         if props.get("open") == "true":

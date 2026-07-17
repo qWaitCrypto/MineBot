@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from minebot.body import InteractionTransactions, NavigationTransactions
 from minebot.game import GovernancePolicy, RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
-from minebot.game.navigation import GridCell, GridWorld, NavigationCostModel, SegmentedNavigator
 from minebot.game.rcon import RconConfig
 from tests.e2e_support import spawn_or_fail
 
@@ -57,21 +56,25 @@ def setup_world(rcon: RconClient) -> None:
         command(rcon, cmd)
 
 
-def flat_world(x_min: int, x_max: int, z_min: int, z_max: int, *, y: int = 59) -> GridWorld:
-    return GridWorld({(x, y, z): GridCell() for x in range(x_min, x_max + 1) for z in range(z_min, z_max + 1)})
-
-
 def make_runtime(body: ScarpetBody) -> InteractionTransactions:
     policy = GovernancePolicy(natural_regions=[Region("player_nav", (-3, 0, -3), (12, 100, 3))])
-    navigator = NavigationTransactions(
-        body,
-        SegmentedNavigator(flat_world(-3, 12, -3, 3), NavigationCostModel(policy)),
-    )
+    navigator = NavigationTransactions.server_side(body, policy)
     return InteractionTransactions(body, navigator=navigator)
 
 
 def distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
     return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+
+
+def assert_pure_movement_attempt(attempt: dict[str, object]) -> None:
+    result = dict(attempt.get("result") or {})
+    metrics = dict(result.get("metrics") or {})
+    if metrics.get("goal_set_preserved") is not True:
+        raise AssertionError(f"player navigation truncated its stand domain: {attempt}")
+    snapshot = dict(metrics.get("capability_snapshot") or {})
+    for flag in ("allow_break", "allow_place", "allow_pillar", "allow_downward"):
+        if snapshot.get(flag) is not False:
+            raise AssertionError(f"player navigation enabled terrain mutation {flag}: {attempt}")
 
 
 def reset_positions(rcon: RconClient) -> None:
@@ -116,6 +119,7 @@ def run_go_to_player_happy_path(rcon: RconClient, body: ScarpetBody) -> dict[str
     attempts = approach.get("attempts") or []
     if not attempts or attempts[0].get("result", {}).get("reason") != "arrived":
         raise AssertionError(f"go_to_player did not expose successful navigation attempt: {payload}")
+    assert_pure_movement_attempt(attempts[0])
     return {
         "reason": result.reason,
         "final_distance": round(final_distance, 3),
@@ -152,6 +156,7 @@ def run_follow_player_happy_path(rcon: RconClient, body: ScarpetBody) -> dict[st
     attempts = approach.get("attempts") or []
     if not attempts or attempts[0].get("result", {}).get("reason") != "arrived":
         raise AssertionError(f"follow_player did not expose successful navigation attempt: {payload}")
+    assert_pure_movement_attempt(attempts[0])
     return {
         "reason": result.reason,
         "final_distance": round(final_distance, 3),
@@ -216,7 +221,11 @@ def run_follow_player_moving_target_liveness(rcon: RconClient, body: ScarpetBody
         raise AssertionError(f"moving follow did not expose two maintenance checks: {payload}")
     if not any(attempt.get("approach", {}).get("navigated") for attempt in attempts):
         raise AssertionError(f"moving follow never used shared navigation: {payload}")
-    target_positions = [tuple((attempt.get("target_after") or {}).get("pos") or []) for attempt in attempts]
+    target_positions = [
+        tuple((attempt.get(key) or {}).get("pos") or [])
+        for attempt in attempts
+        for key in ("target_before", "target_after")
+    ]
     if len({pos for pos in target_positions if pos}) < 2:
         raise AssertionError(f"moving follow did not observe target movement: {payload}")
     return {

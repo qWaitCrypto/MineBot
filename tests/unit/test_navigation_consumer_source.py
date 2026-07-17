@@ -11,6 +11,8 @@ CONTAINER = (ROOT / "minebot" / "body" / "container.py").read_text()
 FURNACE = (ROOT / "minebot" / "body" / "furnace.py").read_text()
 BLOCK_WORK = (ROOT / "minebot" / "body" / "block_work.py").read_text()
 RESOURCE_COLLECTION = (ROOT / "minebot" / "body" / "resource_collection.py").read_text()
+PICKUP = (ROOT / "minebot" / "body" / "pickup.py").read_text()
+NAVIGATION = (ROOT / "minebot" / "body" / "navigation.py").read_text()
 COMPOSITION = (ROOT / "minebot" / "brain" / "composition.py").read_text()
 
 
@@ -60,6 +62,10 @@ class NavigationConsumerSourceTests(unittest.TestCase):
             self.assertIn("_navigation_goal_for_stands(", body)
             self.assertNotRegex(body, r"for stand in .*:\n\s+nav_result = .*navigate_to\(stand")
         self.assertNotIn("class DirectInteractionNavigator", INTERACTION_SUPPORT)
+        self.assertIn(
+            '"config": pure_movement_navigation_config(navigation_config)',
+            function_body(INTERACTION_SUPPORT, "ensure_entity_range"),
+        )
 
     def test_container_and_furnace_nearest_transactions_use_shared_interaction_range(self):
         self.assertIn("ensure_interaction_range(", function_body(CONTAINER, "transfer_nearest_container"))
@@ -74,17 +80,23 @@ class NavigationConsumerSourceTests(unittest.TestCase):
         self.assertNotIn("interaction_stand_points(", search_body)
         self.assertNotIn("self.navigator.navigate_to(", search_body)
         self.assertIn("_approach_place_candidate(", function_body(BLOCK_WORK, "place_here"))
-        self.assertIn("_approach_surface_candidate(", function_body(BLOCK_WORK, "go_to_surface"))
-        self.assertIn("_approach_surface_column(", function_body(BLOCK_WORK, "go_to_surface"))
-        self.assertIn("self.dig_up_to_y(", function_body(BLOCK_WORK, "go_to_surface"))
+        surface = function_body(BLOCK_WORK, "go_to_surface")
+        self.assertIn("_find_surface_domain(", surface)
+        self.assertIn("_find_surface_egress_domain(", surface)
+        self.assertIn("_find_lateral_surface_domain(", surface)
+        self.assertIn("GoalComposite(", surface)
+        self.assertEqual(surface.count("self.navigator.navigate_to("), 2)
+        self.assertIn("pure_movement_navigation_config(", surface)
+        self.assertNotIn("self.dig_up_to_y(", surface)
+        self.assertNotIn("_approach_surface_candidate(", BLOCK_WORK)
+        self.assertNotIn("_approach_surface_column(", BLOCK_WORK)
+        self.assertIn("read_surface_columns(", function_body(BLOCK_WORK, "_find_lateral_surface_domain"))
 
     def test_mining_stands_are_one_governed_goal_set(self):
         approach = function_body(BLOCK_WORK, "_approach_mining_target")
         self.assertIn("GoalComposite(", approach)
         self.assertEqual(approach.count("self.navigator.navigate_to("), 1)
         self.assertIn("break_context=BreakContext.COLLECT_APPROACH", approach)
-        self.assertIn("allow_local_terrain_fallback=False", approach)
-        self.assertNotIn("progress_neutral_failures=True", approach)
         self.assertNotIn("self.body.execute(", approach)
         self.assertNotIn("_clear_collect_approach_stand", BLOCK_WORK)
         self.assertNotIn('Action.create("moveTo"', BLOCK_WORK)
@@ -112,6 +124,33 @@ class NavigationConsumerSourceTests(unittest.TestCase):
         self.assertIn("self.navigator.navigate_to(", body_process)
         self.assertIn("candidate_blacklist", body_process)
         self.assertIn("prepositioned=True", body_process)
+
+    def test_pickup_candidates_are_one_non_mutating_goal_domain(self):
+        collect_delta = function_body(BLOCK_WORK, "_collect_inventory_delta")
+        self.assertIn("self.pickup._collect_inventory_delta(", collect_delta)
+        self.assertNotIn("self.navigator.navigate_to(", collect_delta)
+
+        pickup = function_body(PICKUP, "_collect_inventory_delta")
+        self.assertIn("GoalComposite(", pickup)
+        self.assertEqual(pickup.count("self.navigator.navigate_to("), 1)
+        self.assertIn("allow_break=False", pickup)
+        self.assertIn("allow_place=False", pickup)
+        self.assertIn("allow_pillar=False", pickup)
+        self.assertIn("allow_downward=False", pickup)
+        self.assertNotRegex(pickup, r"for .*target.*:\n\s+.*navigate_to\(")
+
+    def test_move_away_submits_the_complete_bounded_escape_domain(self):
+        move_away = function_body(NAVIGATION, "move_away")
+        self.assertIn("GoalComposite(", move_away)
+        self.assertIn("_selected_candidate(", move_away)
+        self.assertIn("pure_movement_navigation_config(config)", move_away)
+        self.assertNotIn("GoalAvoid(", move_away)
+
+    def test_live_navigation_gates_do_not_construct_the_conformance_planner(self):
+        for path in sorted((ROOT / "tests").glob("e2e*.py")):
+            source = path.read_text()
+            for retired_constructor in ("SegmentedNavigator(", "GridWorld(", "NavigationCostModel("):
+                self.assertNotIn(retired_constructor, source, f"{path.name} constructs {retired_constructor}")
 
 
 if __name__ == "__main__":

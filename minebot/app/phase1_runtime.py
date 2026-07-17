@@ -29,6 +29,7 @@ from minebot.app.progress_epochs import ProgressEpochArchive
 from minebot.app.tasks import TaskWorkspace, register_task_tools
 from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
 from minebot.body import (
+    BlockApproachTransactions,
     BlockWork,
     ContainerTransactions,
     ExplorationCoverageStore,
@@ -40,8 +41,10 @@ from minebot.body import (
     NavigationRunConfig,
     NavigationTransactions,
     MemoryExplorationCoverageStore,
+    PickupTransactions,
     ResourceCollectionTransactions,
     UseTransactions,
+    VoxelStructureRiskAssessor,
 )
 from minebot.body.combat import CombatTransactions, find_hostiles
 from minebot.body.furnace import DEFAULT_SMELT_SECONDS_PER_ITEM, resolve_smelt_output, select_fuel
@@ -433,6 +436,7 @@ def _task_body_fingerprint(body: Body, authority: ProgressAuthority) -> dict[str
         ) from exc
     return {
         "fingerprint": authority.fingerprint(state),
+        "generation": authority.current_generation(),
         "pos": list(state.pos),
         "health": state.health,
         "food": state.food,
@@ -511,7 +515,11 @@ def build_phase1_registry(
     *,
     authority: ProgressAuthority | None = None,
 ) -> ToolRegistry:
-    policy = GovernancePolicy(natural_regions=[config.natural_region])
+    policy = GovernancePolicy(
+        natural_regions=[config.natural_region],
+        structure_risk_assessor=VoxelStructureRiskAssessor(body),
+        require_structure_assessment=True,
+    )
     progress = authority or ProgressAuthority()
     navigator = NavigationTransactions.server_side(body, policy, progress=progress)
     exploration = ExplorationTransactions(
@@ -519,7 +527,9 @@ def build_phase1_registry(
         navigator,
         config.exploration_coverage_store or MemoryExplorationCoverageStore(),
     )
-    work = BlockWork(body, policy, navigator=navigator)
+    pickup = PickupTransactions(body, navigator)
+    work = BlockWork(body, policy, navigator=navigator, pickup=pickup)
+    block_approach = BlockApproachTransactions(body, navigator)
     resource_collection = ResourceCollectionTransactions(body, navigator, work)
     inventory_txn = InventoryTransactions(body, navigator=navigator, governance=policy, work=work)
     furnace_txn = FurnaceTransactions(body, navigator=navigator, governance=policy, work=work)
@@ -551,12 +561,14 @@ def build_phase1_registry(
     register_body_capability_tools(
         registry,
         body=body,
+        block_approach=block_approach,
         navigator=navigator,
         work=work,
         inventory=inventory_txn,
         furnace=furnace_txn,
         container=container_txn,
         interaction=interaction_txn,
+        pickup=pickup,
         resource_collection=resource_collection,
         use=use_txn,
     )
@@ -684,7 +696,10 @@ def _move_to_tool(navigator: NavigationTransactions) -> RegisteredTool:
 def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
     return RegisteredTool(
         "explore_for",
-        "Explore safe new world frontiers for one or more block or entity target classes. Choose WHAT to find; the Body owns frontier selection, navigation, coverage, and terminal verification.",
+        "Explore safe new world frontiers for one or more block or entity target classes. "
+        "Choose WHAT to find; the Body owns frontier selection, navigation, coverage, and "
+        "terminal verification. Resumable results include a typed continuation whose target "
+        "descriptor must remain unchanged.",
         {
             "type": "object",
             "properties": {
@@ -707,6 +722,10 @@ def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
                 "scan_radius": {"type": "integer", "minimum": 4, "maximum": 32},
                 "resume_cursor": {
                     "type": ["object", "null"],
+                    "description": (
+                        "Opaque cursor from a resumable explore_for result. Pass it unchanged "
+                        "only with the exact target descriptor returned by that result."
+                    ),
                     "properties": {
                         "query_signature": {"type": "string"},
                         "dimension": {"type": "string"},
@@ -756,7 +775,6 @@ def _go_to_surface_tool(work: BlockWork) -> RegisteredTool:
                 "surface_scan_height": {"type": "integer", "minimum": 0},
                 "surface_scan_radius": {"type": "integer", "minimum": 0},
                 "max_steps": {"type": "integer", "minimum": 1},
-                "allow_staircase_fallback": {"type": "boolean"},
                 "world_top_y": {"type": "integer"},
             },
             "additionalProperties": False,
@@ -767,7 +785,6 @@ def _go_to_surface_tool(work: BlockWork) -> RegisteredTool:
             surface_scan_height=int(params.get("surface_scan_height") or 32),
             surface_scan_radius=int(params.get("surface_scan_radius") or 2),
             max_steps=(int(params["max_steps"]) if params.get("max_steps") is not None else None),
-            allow_staircase_fallback=bool(params.get("allow_staircase_fallback", True)),
             world_top_y=int(params.get("world_top_y") or 320),
         ),
         ToolSidecar(
@@ -1148,7 +1165,7 @@ def _search_tool(work: BlockWork) -> RegisteredTool:
             permission="read_world",
             body_scope=("blocks",),
             timeout_s=15.0,
-            body_mutating=True,
+            body_mutating=False,
         ),
     )
 

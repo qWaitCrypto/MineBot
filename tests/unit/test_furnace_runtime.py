@@ -363,6 +363,16 @@ class FurnaceRuntimeTests(unittest.TestCase):
         self.assertEqual(result, ("iron_ingot", 1))
         self.assertEqual(calls, ["iron_ingot"])
 
+    def test_resolve_smelt_output_unwraps_compact_server_variant_list(self):
+        def lookup(output_item):
+            return recipe_perception(
+                output_item,
+                "[[[[[iron_ingot, 1]], [[iron_ore]], [smelting, 200, 1]], "
+                "[[[iron_ingot, 1]], [[raw_iron]], [smelting, 200, 1]]]]",
+            )
+
+        self.assertEqual(resolve_smelt_output("minecraft:raw_iron", lookup), ("iron_ingot", 1))
+
     def test_resolve_smelt_output_falls_back_when_runtime_recipe_unavailable(self):
         self.assertEqual(resolve_smelt_output("minecraft:raw_iron", lambda output_item: None), ("iron_ingot", 1))
         self.assertEqual(

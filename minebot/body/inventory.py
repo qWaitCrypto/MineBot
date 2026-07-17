@@ -1217,6 +1217,13 @@ def _parse_recipe_variants(item: str, perception: PerceptionResult) -> list[Craf
             metrics={"item": item, "recipe_raw": recipe_raw, "error": "recipe_data did not decode to a list"},
         )
     if (
+        len(parsed) == 1
+        and isinstance(parsed[0], list)
+        and parsed[0]
+        and all(isinstance(entry, list) and len(entry) >= 3 for entry in parsed[0])
+    ):
+        parsed = parsed[0]
+    if (
         len(parsed) >= 3
         and isinstance(parsed[0], list)
         and isinstance(parsed[1], list)

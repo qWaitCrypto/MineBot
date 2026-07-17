@@ -5,7 +5,17 @@ transport/transactions can import these names without crossing the
 `brain/ -> game/` boundary.
 """
 
-from .governance import BotPlacement, BreakContext, InteractionContext, LegalityDecision, PlaceContext, Position, Region
+from .governance import (
+    BotPlacement,
+    BreakContext,
+    InteractionContext,
+    LegalityDecision,
+    PlaceContext,
+    Position,
+    Region,
+    StructureRiskAssessment,
+    StructureRiskLevel,
+)
 from .harvest import (
     MIN_PICKAXE_TIER,
     PICKAXE_BY_TIER,
@@ -69,6 +79,8 @@ __all__ = [
     "ToolResult",
     "STAGNATION_LIMIT",
     "STALL_LIMIT",
+    "StructureRiskAssessment",
+    "StructureRiskLevel",
     "TOOL_TIER_ORDER",
     "best_owned_pickaxe",
     "is_candidate_skip",

@@ -653,7 +653,9 @@ class AStarPlanner:
             expanded += 1
             current_distance = nav_goal.heuristic(current)
             progress = start_distance - current_distance
-            if current != start and progress >= min_partial_progress:
+            current_cell = current_state.overlay.cell_at(self.world, current)
+            partial_endpoint_safe = current_cell is not None and not current_cell.liquid
+            if current != start and progress >= min_partial_progress and partial_endpoint_safe:
                 self._note_partial_candidates(
                     partial_candidates,
                     current,

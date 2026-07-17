@@ -9,6 +9,7 @@ from minebot.app.body_capability_tools import (
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry, tool_manifest
 from minebot.app.runner import tool_is_enabled
 from minebot.body import (
+    BlockApproachTransactions,
     BlockWork,
     CombatTransactions,
     ContainerTransactions,
@@ -18,6 +19,7 @@ from minebot.body import (
     InventoryTransactions,
     LifecycleTransactions,
     NavigationTransactions,
+    PickupTransactions,
     ResourceCollectionTransactions,
     UseTransactions,
 )
@@ -28,6 +30,7 @@ from minebot.game import ScarpetBody
 
 
 TRANSACTION_CLASSES = (
+    BlockApproachTransactions,
     BlockWork,
     CombatTransactions,
     ContainerTransactions,
@@ -37,6 +40,7 @@ TRANSACTION_CLASSES = (
     InventoryTransactions,
     LifecycleTransactions,
     NavigationTransactions,
+    PickupTransactions,
     ResourceCollectionTransactions,
     UseTransactions,
 )
@@ -130,6 +134,7 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
             "place_here",
             "dig_down",
             "dig_up",
+            "pickup_items",
             "read_block",
             "read_nearby_blocks",
             "read_nearby_entities",
@@ -144,6 +149,17 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
                 self.assertTrue(manifest[name]["permission"])
                 self.assertTrue(manifest[name]["body_scope"])
                 self.assertTrue(manifest[name]["terminal_truth"])
+
+    def test_exploration_cursor_contract_requires_the_same_target_descriptor(self):
+        tool = _registry().get("explore_for")
+
+        self.assertIn("target descriptor must remain unchanged", tool.description)
+        cursor_schema = tool.input_schema["properties"]["resume_cursor"]
+        self.assertIn("exact target descriptor", cursor_schema["description"])
+        self.assertEqual(
+            cursor_schema["required"],
+            ["query_signature", "dimension", "coverage_revision"],
+        )
 
     def test_all_modes_receive_the_same_shared_tool_pool(self):
         registry = _registry()
@@ -164,7 +180,8 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
     def test_body_effect_metadata_covers_leaf_led_physical_tools(self):
         registry = _registry()
 
-        self.assertTrue(registry.sidecar("search_for_block").can_mutate_body)
+        self.assertFalse(registry.sidecar("search_for_block").can_mutate_body)
+        self.assertTrue(registry.sidecar("get_to_block").can_mutate_body)
         self.assertTrue(registry.sidecar("explore_for").can_mutate_body)
         self.assertTrue(registry.sidecar("move_to").can_mutate_body)
         self.assertFalse(registry.sidecar("read_block").can_mutate_body)

@@ -15,6 +15,113 @@ class BlockCellRead:
     diagnostics: dict[str, object]
 
 
+@dataclass(frozen=True)
+class SurfaceColumnFact:
+    x: int
+    z: int
+    feet_y: int
+    feet_type: str
+    feet_state: str
+    head_type: str
+    head_state: str
+    support_type: str
+    support_state: str
+
+    @property
+    def feet_pos(self) -> Position:
+        return (self.x, self.feet_y, self.z)
+
+    @property
+    def head_pos(self) -> Position:
+        return (self.x, self.feet_y + 1, self.z)
+
+    @property
+    def support_pos(self) -> Position:
+        return (self.x, self.feet_y - 1, self.z)
+
+
+def read_surface_columns(
+    body: Body,
+    columns: tuple[tuple[int, int], ...],
+    *,
+    page_size: int = 64,
+    failure_label: str = "surface",
+) -> dict[tuple[int, int], SurfaceColumnFact]:
+    """Read one authoritative world-surface fact per bounded X/Z column."""
+
+    if page_size < 1 or page_size > 64:
+        raise ValueError("page_size must be between 1 and 64")
+    normalized = tuple(dict.fromkeys((int(x), int(z)) for x, z in columns))
+    requested = set(normalized)
+    facts: dict[tuple[int, int], SurfaceColumnFact] = {}
+    offset = 0
+    while offset < len(normalized):
+        request_columns = normalized[offset : offset + 64]
+        start = 0
+        while start is not None:
+            perception = body.perceive(
+                "surfaceColumns",
+                {
+                    "columns": [[x, z] for x, z in request_columns],
+                    "start": start,
+                    "limit": page_size,
+                },
+            )
+            absolute_start = offset + start
+            if not perception.ok:
+                raise ValueError(
+                    f"surfaceColumns {failure_label} failed at start={absolute_start}: "
+                    f"complete={perception.complete} error={perception.error}"
+                )
+            response_columns = perception.data.get("columns") or []
+            if not isinstance(response_columns, list):
+                raise ValueError(
+                    f"surfaceColumns {failure_label} returned malformed columns at start={absolute_start}"
+                )
+            for raw in response_columns:
+                key = (int(raw["x"]), int(raw["z"]))
+                if key not in requested:
+                    raise ValueError(
+                        f"surfaceColumns {failure_label} returned unexpected column {list(key)} "
+                        f"at start={absolute_start}"
+                    )
+                facts[key] = SurfaceColumnFact(
+                    x=key[0],
+                    z=key[1],
+                    feet_y=int(raw["feetY"]),
+                    feet_type=str(raw.get("feetType") or "unknown"),
+                    feet_state=str(raw.get("feetState") or "UNKNOWN"),
+                    head_type=str(raw.get("headType") or "unknown"),
+                    head_state=str(raw.get("headState") or "UNKNOWN"),
+                    support_type=str(raw.get("supportType") or "unknown"),
+                    support_state=str(raw.get("supportState") or "UNKNOWN"),
+                )
+            nxt = perception_next_cursor(perception, "next", "nextStart")
+            if nxt is None:
+                if not perception.complete:
+                    raise ValueError(
+                        f"surfaceColumns {failure_label} incomplete without next at start={absolute_start}"
+                    )
+                start = None
+            else:
+                next_start = int(nxt)
+                if next_start <= start or next_start > len(request_columns):
+                    raise ValueError(
+                        f"surfaceColumns {failure_label} returned invalid next cursor: "
+                        f"start={absolute_start} next={offset + next_start}"
+                    )
+                start = next_start
+        offset += len(request_columns)
+    missing = requested.difference(facts)
+    if missing:
+        sample = [list(column) for column in sorted(missing)[:5]]
+        raise ValueError(
+            f"surfaceColumns {failure_label} returned {len(facts)}/{len(requested)} requested columns; "
+            f"missing={sample}"
+        )
+    return facts
+
+
 def read_block_facts(
     body: Body,
     positions: tuple[Position, ...],

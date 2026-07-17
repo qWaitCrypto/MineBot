@@ -2,12 +2,10 @@ import unittest
 from types import SimpleNamespace
 
 from minebot.body import NavigationRunConfig, NavigationTransactions
-from minebot.body.navigation import make_block_at_prism_world_update
 from minebot.body.world_read import read_block_cells_tiled, refresh_grid_world_around
 from minebot.game.governance import GovernancePolicy, Region
 from minebot.contract import Action, BodyState, BreakContext, Event, PerceptionResult, Result
 from minebot.game.navigation import (
-    GoalAvoid,
     GoalComposite,
     GoalNear,
     GoalXZ,
@@ -444,10 +442,24 @@ class NavigationRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "moved_away")
-        self.assertEqual(result.metrics["chosen_goal"], [4, 64, 4])
+        self.assertEqual(result.metrics["chosen_goal"], [-4, 64, -4])
         self.assertGreater(result.metrics["final_distance"], result.metrics["initial_distance"])
         self.assertEqual(len(body.actions), 1)
         self.assertEqual(body.actions[0].name, "navigateTo")
+        self.assertFalse(body.actions[0].params["allow_break"])
+        self.assertEqual(body.actions[0].params["break_budget"], 0)
+        self.assertFalse(body.actions[0].params["allow_place"])
+        self.assertEqual(body.actions[0].params["place_budget"], 0)
+        self.assertFalse(body.actions[0].params["allow_pillar"])
+        self.assertEqual(body.actions[0].params["pillar_budget"], 0)
+        self.assertFalse(body.actions[0].params["allow_downward"])
+        self.assertEqual(body.actions[0].params["downward_budget"], 0)
+
+    def test_move_away_rejects_a_goal_domain_larger_than_the_server_contract(self):
+        runtime = NavigationTransactions(FakeBody([state_at((0, 64, 0))]))
+
+        with self.assertRaisesRegex(ValueError, "max_candidates must be <= 32"):
+            runtime.move_away((0.0, 64.0, 0.0), max_candidates=33)
 
     def test_move_away_wraps_last_navigation_failure(self):
         nav = FakeNavigator([_segment("blocked", None, success=False, reason="no_path")])
@@ -455,7 +467,13 @@ class NavigationRuntimeTests(unittest.TestCase):
                         terminal_reasons=["no_path"])
         runtime = NavigationTransactions(body, nav)
 
-        result = runtime.move_away((0.0, 64.0, 0.0), min_distance=3.0, candidate_radii=(4,), max_candidates=1)
+        result = runtime.move_away(
+            (0.0, 64.0, 0.0),
+            min_distance=3.0,
+            candidate_radii=(4,),
+            max_candidates=1,
+            config=NavigationRunConfig(recovery_attempts=0),
+        )
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "move_away_failed:no_path")
@@ -539,6 +557,7 @@ class NavigationRuntimeTests(unittest.TestCase):
                     "allow_descend",
                     "allow_swim",
                     "max_fall_depth",
+                    "max_water_drop_depth",
                     "recheck_lookahead",
                 )
             },
@@ -548,6 +567,7 @@ class NavigationRuntimeTests(unittest.TestCase):
                 "allow_descend": True,
                 "allow_swim": True,
                 "max_fall_depth": 3,
+                "max_water_drop_depth": 32,
                 "recheck_lookahead": 5,
             },
         )
@@ -674,6 +694,7 @@ class NavigationRuntimeTests(unittest.TestCase):
             allow_descend=False,
             allow_swim=False,
             max_safe_fall_depth=1,
+            max_water_drop_depth=12,
             recheck_lookahead=2,
         )
 
@@ -686,6 +707,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertFalse(action.params["allow_descend"])
         self.assertFalse(action.params["allow_swim"])
         self.assertEqual(action.params["max_fall_depth"], 1)
+        self.assertEqual(action.params["max_water_drop_depth"], 12)
         self.assertEqual(action.params["recheck_lookahead"], 2)
         self.assertTrue(action.params["allow_break"])
         self.assertEqual(action.params["break_budget"], 8)
@@ -1196,6 +1218,188 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(body.actions[2].params["denied_mutations"], [list(break_pos)])
         self.assertEqual(body.actions[2].params["break_budget"], 2)
 
+    def test_navigate_to_reports_governance_denial_domain_instead_of_segment_budget(self):
+        first = (1, 64, 0)
+        second = (0, 63, 0)
+        capability_snapshot = {
+            "allow_break": True,
+            "allow_place": False,
+            "allow_pillar": False,
+            "allow_downward": True,
+            "scaffold_item": None,
+            "scaffold_count": 0,
+        }
+        body = MutationNavigationBody(
+            [state_at((0, 64, 0))],
+            [inventory_page([], complete=True)],
+            [
+                (
+                    "navigateMutationProposed",
+                    {
+                        "proposal_id": "proposal-break",
+                        "kind": "break",
+                        "pos": list(first),
+                        "source": [0, 64, 0],
+                        "block_type": "stone",
+                        "before_type": "stone",
+                        "purpose": "path",
+                    },
+                ),
+                (
+                    "navigateMutationDone",
+                    {
+                        "proposal_id": "proposal-break",
+                        "kind": "break",
+                        "pos": list(first),
+                        "block_type": "stone",
+                        "success": False,
+                        "reason": "mutation_denied",
+                        "decision_reason": "structure_risk_unknown",
+                    },
+                ),
+                (
+                    "navigateDone",
+                    {
+                        "reason": "mutation_denied",
+                        "nav_reason": "mutation_denied",
+                        "final_pos": [0.5, 64.0, 0.5],
+                        "selected_goal": [4, 72, 0],
+                        "movement_counts": {"walk": 3, "break": 1},
+                        "capability_snapshot": capability_snapshot,
+                    },
+                ),
+                (
+                    "navigateMutationProposed",
+                    {
+                        "proposal_id": "proposal-downward",
+                        "kind": "downward",
+                        "pos": list(second),
+                        "source": [0, 64, 0],
+                        "block_type": "stone",
+                        "before_type": "stone",
+                        "purpose": "downward",
+                    },
+                ),
+                (
+                    "navigateMutationDone",
+                    {
+                        "proposal_id": "proposal-downward",
+                        "kind": "downward",
+                        "pos": list(second),
+                        "block_type": "stone",
+                        "success": False,
+                        "reason": "mutation_denied",
+                        "decision_reason": "structure_risk_unknown",
+                    },
+                ),
+                (
+                    "navigateDone",
+                    {
+                        "reason": "mutation_denied",
+                        "nav_reason": "mutation_denied",
+                        "final_pos": [0.5, 64.0, 0.5],
+                        "selected_goal": [4, 72, 0],
+                        "movement_counts": {"downward": 1},
+                        "capability_snapshot": capability_snapshot,
+                    },
+                ),
+            ],
+            blocks={first: ("stone", "SOLID"), second: ("stone", "SOLID")},
+        )
+        runtime = NavigationTransactions.server_side(body, GovernancePolicy())
+
+        result = runtime.navigate_to(
+            GoalNear((4, 72, 0), radius=2),
+            config=NavigationRunConfig(max_segments=2),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "protected_or_denied")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.metrics["denied_mutation_count"], 2)
+        self.assertEqual(result.metrics["governance_blockers"], {"structure_risk_unknown": 2})
+        self.assertEqual(
+            result.metrics["mutation_blockers"],
+            {
+                "break:stone:structure_risk_unknown": 1,
+                "downward:stone:structure_risk_unknown": 1,
+            },
+        )
+        self.assertEqual(result.metrics["movement_counts"], {"walk": 3, "break": 1, "downward": 1})
+        self.assertEqual(result.metrics["final_pos"], [0.5, 64.0, 0.5])
+        self.assertEqual(result.metrics["selected_goal"], [4, 72, 0])
+        self.assertEqual(result.metrics["capability_snapshot"], capability_snapshot)
+
+    def test_navigate_to_reuses_caller_owned_mutation_blacklist_across_calls(self):
+        denied_pos = (1, 64, 0)
+        body = MutationNavigationBody(
+            [state_at((0, 64, 0))],
+            [inventory_page([], complete=True)],
+            [
+                (
+                    "navigateMutationProposed",
+                    {
+                        "proposal_id": "proposal-denied",
+                        "kind": "break",
+                        "pos": list(denied_pos),
+                        "source": [0, 64, 0],
+                        "block_type": "stone",
+                        "before_type": "stone",
+                        "purpose": "path",
+                    },
+                ),
+                (
+                    "navigateMutationDone",
+                    {
+                        "proposal_id": "proposal-denied",
+                        "kind": "break",
+                        "pos": list(denied_pos),
+                        "block_type": "stone",
+                        "success": False,
+                        "reason": "mutation_denied",
+                        "decision_reason": "structure_risk_unknown",
+                    },
+                ),
+                (
+                    "navigateDone",
+                    {
+                        "reason": "mutation_denied",
+                        "nav_reason": "mutation_denied",
+                    },
+                ),
+                (
+                    "navigateDone",
+                    {
+                        "reason": "arrived",
+                        "nav_reason": "arrived",
+                        "arrived": True,
+                        "selected_goal": [4, 64, 0],
+                    },
+                ),
+            ],
+            blocks={denied_pos: ("stone", "SOLID")},
+        )
+        runtime = NavigationTransactions.server_side(body, GovernancePolicy())
+        mutation_blacklist = set()
+
+        first = runtime.navigate_to(
+            GoalNear((4, 64, 0), radius=0),
+            config=NavigationRunConfig(max_segments=1),
+            mutation_blacklist=mutation_blacklist,
+        )
+        second = runtime.navigate_to(
+            GoalNear((4, 64, 0), radius=0),
+            config=NavigationRunConfig(max_segments=1),
+            mutation_blacklist=mutation_blacklist,
+        )
+
+        self.assertEqual(first.reason, "protected_or_denied")
+        self.assertTrue(second.success, second.to_payload())
+        self.assertEqual(mutation_blacklist, {denied_pos})
+        navigate_actions = [action for action in body.actions if action.name == "navigateTo"]
+        self.assertEqual(navigate_actions[0].params["denied_mutations"], [])
+        self.assertEqual(navigate_actions[1].params["denied_mutations"], [list(denied_pos)])
+
     def test_navigate_to_blacklists_governance_denied_bridge_and_keeps_goal_set(self):
         denied_pos = (1, 63, 0)
         body = MutationNavigationBody(
@@ -1268,6 +1472,8 @@ class NavigationRuntimeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_safe_fall_depth=4))
         with self.assertRaises(ValueError):
+            runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_water_drop_depth=65))
+        with self.assertRaises(ValueError):
             runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(recheck_lookahead=-1))
         with self.assertRaises(ValueError):
             runtime.navigate_to((3, 64, 0), config=NavigationRunConfig(max_break_steps=-1))
@@ -1285,7 +1491,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["stuck"])
         runtime = NavigationTransactions(body, nav)
 
-        result = runtime.navigate_to((10, 64, 0))
+        result = runtime.navigate_to((10, 64, 0), config=NavigationRunConfig(recovery_attempts=0))
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "stuck")
@@ -1307,7 +1513,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["no_path"])
         runtime = NavigationTransactions(body, nav)
 
-        result = runtime.navigate_to((10, 64, 0))
+        result = runtime.navigate_to((10, 64, 0), config=NavigationRunConfig(recovery_attempts=0))
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "no_path")
@@ -1558,7 +1764,21 @@ class NavigationRuntimeTests(unittest.TestCase):
         body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["arrived"])
         runtime = NavigationTransactions(body, nav)
 
-        result = runtime.follow_entity("TargetPlayer", keep_distance=3.0, timeout_s=5.0)
+        result = runtime.follow_entity(
+            "TargetPlayer",
+            keep_distance=3.0,
+            timeout_s=5.0,
+            config=NavigationRunConfig(
+                server_grid_radius=48,
+                server_max_expand=1800,
+                allow_diagonal=False,
+                allow_ascend=False,
+                allow_descend=True,
+                allow_swim=False,
+                max_safe_fall_depth=2,
+                max_water_drop_depth=10,
+            ),
+        )
 
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "arrived")
@@ -1566,6 +1786,14 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(body.actions[0].name, "followEntity")
         self.assertEqual(body.actions[0].params["target_spec"], "TargetPlayer")
         self.assertEqual(body.actions[0].params["keep_radius"], 3.0)
+        self.assertEqual(body.actions[0].params["grid_radius"], 48)
+        self.assertEqual(body.actions[0].params["max_expand"], 1800)
+        self.assertFalse(body.actions[0].params["allow_diagonal"])
+        self.assertFalse(body.actions[0].params["allow_ascend"])
+        self.assertTrue(body.actions[0].params["allow_descend"])
+        self.assertFalse(body.actions[0].params["allow_swim"])
+        self.assertEqual(body.actions[0].params["max_fall_depth"], 2)
+        self.assertEqual(body.actions[0].params["max_water_drop_depth"], 10)
 
     def test_follow_entity_returns_target_lost(self):
         nav = FakeNavigator([])
@@ -1754,6 +1982,8 @@ class WorldRefreshNavigationIntegrationTests(unittest.TestCase):
         self.assertEqual(action.params["no_progress_ticks"], 120)
         self.assertEqual(action.params["timeout_ticks"], 300)
         self.assertEqual(action.params["min_partial_progress"], 5)
+        self.assertEqual(action.params["partial_replans"], 7)
+        self.assertEqual(action.params["segment_index"], 0)
         self.assertEqual(action.params["goal_radius"], 0)
 
     def test_navigate_to_passes_configured_min_partial_progress_to_body(self):
@@ -1784,118 +2014,67 @@ class WorldRefreshNavigationIntegrationTests(unittest.TestCase):
         self.assertNotIn("blockAt", scopes)
         self.assertFalse(world.cell_at((0, 63, 0)).walkable)
 
-    def test_navigate_to_does_not_use_local_terrain_fallback_by_default(self):
-        body = FakeBody(
-            [
-                state_at((0, 64, 0)),
-                state_at((0, 64, 0)),
-            ],
-            terminal_reasons=["stuck"],
-        )
-        policy = GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))])
-        navigator = SegmentedNavigator(GridWorld({}), NavigationCostModel(policy))
-        work = FakeWork(success=True, body=body)
-        runtime = NavigationTransactions(body, navigator, work=work)
+    def test_navigate_to_can_disable_recovery_and_return_stuck(self):
+        body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["stuck"])
+        runtime = NavigationTransactions.server_side(body, GovernancePolicy())
 
         result = runtime.navigate_to(
-            (0, 65, 0),
-            break_context=BreakContext.RECOVERY,
-            config=NavigationRunConfig(max_segments=4, min_partial_progress=1),
+            (3, 64, 0),
+            config=NavigationRunConfig(max_segments=4, recovery_attempts=0),
         )
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "stuck")
         self.assertEqual([action.name for action in body.actions], ["navigateTo"])
-        self.assertEqual(work.place_calls, [])
-        self.assertEqual(work.dig_up_calls, [])
-        self.assertNotIn("blockCells", [scope for scope, _params in body.perceptions])
 
-    def test_collect_approach_can_opt_in_to_terrain_fallback_after_scarpet_stuck(self):
-        body = FakeBody(
-            [
-                state_at((0, 64, 0)),
-                state_at((0, 64, 0)),
-                state_at((0, 64, 0)),
-                state_at((0, 64, 0)),
-                state_at((0, 64, 0)),
-                state_at((0, 65, 0)),
-            ],
-            terminal_reasons=["stuck"],
-        )
-        policy = GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))])
-        navigator = SegmentedNavigator(GridWorld({}), NavigationCostModel(policy))
-        work = FakeWork(success=True, body=body)
-        runtime = NavigationTransactions(body, navigator, work=work)
+    def test_navigate_to_recovery_uses_goal_domain_then_resumes_original_goal(self):
+        class RecoveryBody(FakeBody):
+            def __init__(self):
+                super().__init__([state_at((0, 64, 0))], terminal_reasons=["stuck", "arrived", "arrived"])
+                self.current = state_at((0, 64, 0))
 
-        result = runtime.navigate_to(
-            (0, 65, 0),
-            break_context=BreakContext.COLLECT_APPROACH,
-            config=NavigationRunConfig(
-                max_segments=4,
-                min_partial_progress=1,
-                allow_local_terrain_fallback=True,
-            ),
-        )
+            def get_state(self):
+                return self.current
 
-        self.assertTrue(result.success)
-        self.assertEqual(result.reason, "arrived")
-        self.assertEqual(body.actions[0].name, "navigateTo")
-        self.assertEqual(work.place_calls, [((0, 64, 0), "minecraft:cobblestone", None, BreakContext.TRAVEL, "scaffold", 15.0)])
-        self.assertEqual(work.dig_up_calls, [((0, 64, 0), BreakContext.COLLECT_APPROACH, 15.0)])
-        self.assertTrue(any(scope == "blockCells" for scope, _params in body.perceptions))
-        self.assertNotIn("blockAt", [scope for scope, _params in body.perceptions])
-        segments = result.metrics["segments"]
-        self.assertTrue(any(item["status"] == "terrain_place" for item in segments))
-        self.assertTrue(any(item["status"] == "terrain_pillar" for item in segments))
-        self.assertEqual(result.metrics["terrain_fallback_original_reason"], "stuck")
-
-    def test_collect_approach_fallback_moves_to_prefix_before_terrain_action(self):
-        class MovingFakeBody(FakeBody):
             def await_action_terminal(self, action_id: str, timeout_s: float = 15.0, **kwargs) -> Event:
                 terminal = super().await_action_terminal(action_id, timeout_s=timeout_s, **kwargs)
                 action = next(action for action in self.actions if action.id == action_id)
-                if action.name == "moveTo" and terminal.data.get("arrived"):
-                    self.states.insert(0, state_at(tuple(action.params["target"])))
+                if terminal.data.get("arrived"):
+                    self.current = state_at(tuple(action.params["target"]))
                 return terminal
 
-        body = MovingFakeBody(
-            [
-                state_at((0, 64, 0)),
-                state_at((0, 64, 0)),
-                state_at((0, 64, 0)),
-            ],
-            terminal_reasons=["stuck", "arrived"],
-            blocks={
-                (0, 63, 0): ("stone", "SOLID"),
-                (1, 63, 0): ("stone", "SOLID"),
-                (2, 63, 0): ("stone", "SOLID"),
-                (3, 63, 0): ("stone", "SOLID"),
-                (3, 64, 0): ("stone", "SOLID"),
-            },
-        )
-        policy = GovernancePolicy(natural_regions=[Region("work", (-10, 0, -10), (10, 100, 10))])
-        navigator = SegmentedNavigator(GridWorld({}), NavigationCostModel(policy))
-        work = FakeWork(success=True, body=body)
-        runtime = NavigationTransactions(body, navigator, work=work)
+        body = RecoveryBody()
+        runtime = NavigationTransactions.server_side(body, GovernancePolicy())
 
         result = runtime.navigate_to(
             (3, 64, 0),
-            break_context=BreakContext.COLLECT_APPROACH,
-            config=NavigationRunConfig(
-                max_segments=5,
-                min_partial_progress=1,
-                allow_local_terrain_fallback=True,
-            ),
+            config=NavigationRunConfig(max_segments=4, recovery_attempts=1),
         )
 
-        self.assertTrue(result.success)
+        self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.reason, "arrived")
-        self.assertEqual([action.name for action in body.actions[:2]], ["navigateTo", "moveTo"])
-        self.assertEqual(body.actions[1].params["target"], [2, 64, 0])
-        self.assertEqual(work.mine_calls, [((3, 64, 0), BreakContext.COLLECT_APPROACH, 15.0)])
-        segments = result.metrics["segments"]
-        self.assertTrue(any(item["status"] == "advanced" for item in segments))
-        self.assertTrue(any(item["status"] == "terrain_break" for item in segments))
+        self.assertEqual([action.name for action in body.actions], ["navigateTo", "navigateTo", "navigateTo"])
+        self.assertEqual(body.actions[0].params["target"], [3, 64, 0])
+        self.assertGreater(len(body.actions[1].params["goals"]), 1)
+        self.assertEqual(body.actions[2].params["target"], [3, 64, 0])
+        recovery = result.metrics["segments"][0]["diagnostics"]["recovery"]
+        self.assertEqual(recovery["reason"], "arrived")
+        self.assertEqual(recovery["metrics"]["original_reason"], "stuck")
+
+    def test_navigate_to_returns_typed_recovery_exhaustion(self):
+        body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["stuck", "no_path"])
+        runtime = NavigationTransactions.server_side(body, GovernancePolicy())
+
+        result = runtime.navigate_to(
+            (3, 64, 0),
+            config=NavigationRunConfig(max_segments=4, recovery_attempts=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "recovery_exhausted:stuck")
+        self.assertEqual([action.name for action in body.actions], ["navigateTo", "navigateTo"])
+        self.assertEqual(result.metrics["recovery_attempts"][0]["reason"], "no_path")
+
 
 
 if __name__ == "__main__":
