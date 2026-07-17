@@ -32,9 +32,10 @@ The model chooses from one shared capability pool. The harness preserves task
 continuity. The Body handles the grind inside one physical objective. Every
 result comes back as structured world truth.
 
-Mindcraft and mineflayer automate through a Minecraft client; Baritone is a
-full-client pathfinder. MineBot keeps physics and fast reactions on the server,
-then accepts success only when authoritative world state confirms it.
+MineBot's current lightweight Body keeps physics and fast reactions on the
+server through Carpet + Scarpet. A planned second, narrow-version Body runs a
+real Minecraft client and reuses Baritone broadly for mature physical work. Both
+accept success only when observed world state confirms it.
 
 ## Built To Finish
 
@@ -56,8 +57,8 @@ Python Body transactions complete physical objectives through JSON over RCON;
 Scarpet reads authoritative server state and runs planning, controllers, events,
 and reflexes; Carpet supplies the physical FakePlayer body.
 
-The Brain decides **what**. The Body resolves **how**. Player-made blocks remain
-protected across both planning and execution.
+The Brain decides **what**. The Body resolves **how**. Before physical mutation,
+governance refuses protected claims and ambiguous/high-risk structure evidence.
 
 ```text
 minebot/
@@ -77,18 +78,23 @@ tests/        unit, live Body, and real-agent gates
 
 ## The Road Gets Stranger
 
-<img src="assets/readme/roadmap.webp" alt="MineBot roadmap from the playable agent through an observer, memory and Skills, deeper platform work, and the Ender Dragon and autonomous building north stars" width="100%">
+<img src="assets/readme/roadmap.webp" alt="MineBot long-range roadmap toward deeper world understanding, the Ender Dragon, and autonomous building" width="100%">
 
 The reliable Body and persistent agent are the foundation, not the finish line.
-Next comes a real observer; then memory, Minecraft knowledge, and loadable Skills;
-farther out are Vision, richer providers and transport, and many-bot worlds. The
-two north stars are deliberately unreasonable: beat the Ender Dragon from
-nothing, then learn to design and build in an open world.
+The observer, scoped Memory, Minecraft Wiki access, and loadable Skills are now
+part of that foundation. The immediate challenge is purposeful action in
+natural terrain and one honest 30-minute integrated run. Farther out are Vision,
+richer providers and transport, and many-bot worlds. The two north stars remain
+deliberately unreasonable: beat the Ender Dragon from nothing, then learn to
+design and build in an open world.
 
 ## Wake It Up
 
 MineBot currently targets Python 3.13 and a Minecraft 26.1.2 Fabric server with
 Carpet, the MineBot Scarpet app, and local RCON enabled.
+
+The contributor gate targets Ubuntu Linux and is developed under WSL2. Native
+Windows and macOS are not currently claimed; see [support status](SUPPORT.md).
 
 Use a disposable local world for the developer console: it spawns and resets a
 FakePlayer, changes gamerules, and can seed a tiny demo patch. Install Fabric +
@@ -142,6 +148,14 @@ Run the unit suite with:
 ```bash
 python3 -m pytest tests/unit -q
 ```
+
+## Make It More Reliable
+
+Contributions are not limited to code. Reproducible failures, evaluation scenes,
+traces, compatibility fixes, and clear documentation all make MineBot stronger.
+Start with [Contributing](CONTRIBUTING.md), then check the current
+[support matrix](SUPPORT.md). A stable failure case is a complete contribution,
+even without a fix.
 
 MineBot is released under the [MIT License](LICENSE). Minecraft is a trademark
 of Microsoft. MineBot is independent and is not affiliated with Mojang Studios

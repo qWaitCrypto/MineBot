@@ -1,0 +1,80 @@
+name: Bug report
+description: Report a bounded code, setup, or compatibility defect.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include model keys, RCON passwords, private world data, or player information.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Agent Runtime
+        - Body / Scarpet
+        - Eval / tests
+        - Observability / Camera
+        - Developer Experience / platform
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: MineBot commit plus Python, OS, and Minecraft stack versions when relevant.
+      placeholder: "MineBot abc1234; Python 3.13; Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Give exact commands or the smallest deterministic sequence.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed result
+      description: Separate model text, command acceptance, and authoritative state.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Authoritative evidence
+      description: Add sanitized world, inventory, event, or trace facts. Explain when none are available.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and world impact
+      description: State whether block mutation, player builds, shared worlds, credentials, or player data are involved.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed secrets, private world content, and player information.
+          required: true
+        - label: I distinguished command/model claims from authoritative completion evidence.
+          required: true

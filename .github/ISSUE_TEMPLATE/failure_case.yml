@@ -1,0 +1,115 @@
+name: Eval / failure case
+description: Contribute a reproducible false success, stall, recovery failure, or safety boundary.
+title: "[Failure Case] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A stable failure is a complete contribution; you do not need to provide a fix. Prefer seeds and setup commands over full world archives.
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: MineBot commit and all relevant Minecraft/Fabric/Carpet/Scarpet versions.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: dimension
+    attributes:
+      label: Dimension
+      options:
+        - Overworld
+        - Nether
+        - End
+        - Other / not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Seed and location
+      description: Provide seed and coordinates, or explain why they do not apply.
+    validations:
+      required: true
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: Minimal scene setup
+      description: Commands, fixtures, entities, inventory, structures, and relevant environment facts.
+    validations:
+      required: true
+
+  - type: textarea
+    id: initial_truth
+    attributes:
+      label: Initial authoritative state
+      description: Relevant server position, inventory, blocks, entities, task state, and event cursor.
+    validations:
+      required: true
+
+  - type: textarea
+    id: action
+    attributes:
+      label: Goal or Body action
+      description: Exact user goal, tool call, or Body action and parameters.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed result
+      description: Include what the model/tool claimed separately from what the world did.
+    validations:
+      required: true
+
+  - type: textarea
+    id: final_truth
+    attributes:
+      label: Final authoritative state
+      description: Relevant server position, inventory, blocks, entities, task state, and terminal events.
+    validations:
+      required: true
+
+  - type: textarea
+    id: replay
+    attributes:
+      label: Minimal replay
+      description: Exact commands or script needed to reproduce the scene and action.
+    validations:
+      required: true
+
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Sanitized artifacts
+      description: Paste or link redacted trace/event excerpts and screenshots when useful.
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Player-build and safety implications
+      description: Explain mutation risk, protected claims, shared-world impact, and cleanup behavior.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: This report contains no model keys, RCON passwords, private player data, or private world content.
+          required: true
+        - label: The failure is reproducible or I have clearly identified the missing reproduction evidence.
+          required: true
