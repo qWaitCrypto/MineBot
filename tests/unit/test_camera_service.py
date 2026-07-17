@@ -16,6 +16,7 @@ from minebot.camera.config import CameraConfigError, load_camera_config
 from minebot.camera.control.observer import ObserverControlClient
 from minebot.camera.output.ffmpeg import CameraOutputError, build_ffmpeg_command, resolve_live_publish_url
 from minebot.camera.service import (
+    _process_alive,
     _process_start_token,
     _spawn_child,
     _stop_children,
@@ -183,6 +184,30 @@ def test_child_cleanup_terminates_owned_process_group(tmp_path: Path) -> None:
     assert not Path(f"/proc/{grandchild_pid}").exists()
 
 
+def test_process_alive_reaps_an_exited_owned_supervisor() -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(0.05)"],
+        start_new_session=True,
+    )
+    start = _process_start_token(process.pid)
+    assert start is not None
+
+    for _ in range(200):
+        try:
+            fields = Path(f"/proc/{process.pid}/stat").read_text(encoding="utf-8").split()
+        except FileNotFoundError:
+            break
+        if len(fields) > 2 and fields[2] == "Z":
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("Camera supervisor fixture did not exit")
+
+    assert _process_alive(process.pid, start) is False
+    assert not Path(f"/proc/{process.pid}").exists()
+    process.poll()
+
+
 def test_supervisor_stop_budget_covers_observer_and_all_child_cleanup(tmp_path: Path) -> None:
     service = load_camera_config(_camera_config(tmp_path)).service
 
@@ -214,6 +239,16 @@ def test_real_server_camera_switch_delegates_lifecycle_to_session() -> None:
 def test_camera_session_waits_for_body_and_stops_owned_sidecar() -> None:
     body = SimpleNamespace(get_state=lambda: SimpleNamespace(missing=True))
     camera = _CameraSession(Path("/tmp/camera.toml"))
+
+    async def run() -> None:
+        camera.maybe_start(body)
+        start.assert_not_called()
+
+        body.get_state = lambda: SimpleNamespace(missing=False)
+        camera.maybe_start(body)
+        camera.maybe_start(body)
+        await camera.close()
+
     with (
         patch(
             "minebot.camera.service.start_service",
@@ -225,15 +260,12 @@ def test_camera_session_waits_for_body_and_stops_owned_sidecar() -> None:
                 "started": True,
             },
         ) as start,
-        patch("minebot.camera.service.stop_service") as stop,
+        patch(
+            "minebot.camera.service.stop_service",
+            return_value={"phase": "stopped", "children": {}, "error": None},
+        ) as stop,
     ):
-        camera.maybe_start(body)
-        start.assert_not_called()
-
-        body.get_state = lambda: SimpleNamespace(missing=False)
-        camera.maybe_start(body)
-        camera.maybe_start(body)
-        asyncio.run(camera.close())
+        asyncio.run(run())
 
     start.assert_called_once_with(
         Path("/tmp/camera.toml"),
@@ -246,6 +278,11 @@ def test_camera_session_waits_for_body_and_stops_owned_sidecar() -> None:
 def test_camera_session_does_not_stop_preexisting_camera() -> None:
     camera = _CameraSession(Path("/tmp/camera.toml"))
     body = SimpleNamespace(get_state=lambda: SimpleNamespace(missing=False))
+
+    async def run() -> None:
+        camera.maybe_start(body)
+        await camera.close()
+
     with (
         patch(
             "minebot.camera.service.start_service",
@@ -259,10 +296,51 @@ def test_camera_session_does_not_stop_preexisting_camera() -> None:
         ),
         patch("minebot.camera.service.stop_service") as stop,
     ):
-        camera.maybe_start(body)
-        asyncio.run(camera.close())
+        asyncio.run(run())
 
     stop.assert_not_called()
+
+
+def test_camera_session_keeps_monitoring_after_ready() -> None:
+    camera = _CameraSession(Path("/tmp/camera.toml"))
+    body = SimpleNamespace(get_state=lambda: SimpleNamespace(missing=False))
+
+    async def run() -> None:
+        camera.maybe_start(body)
+        for _ in range(20):
+            if camera.failure is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert camera.failure == "lease_expired"
+        await camera.close()
+
+    with (
+        patch(
+            "minebot.camera.service.start_service",
+            return_value={
+                "phase": "ready",
+                "target": "Bot1",
+                "recording": True,
+                "live": False,
+                "started": True,
+            },
+        ),
+        patch(
+            "minebot.camera.service.service_status",
+            return_value={
+                "phase": "failed",
+                "target": "Bot1",
+                "recording": True,
+                "live": False,
+                "error": "lease_expired",
+            },
+        ),
+        patch(
+            "minebot.camera.service.stop_service",
+            return_value={"phase": "stopped", "children": {}, "error": None},
+        ),
+    ):
+        asyncio.run(run())
 
 
 class _FakeWebsocket:

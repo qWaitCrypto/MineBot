@@ -75,6 +75,9 @@ class _CameraSession:
     launched: bool = False
     owned: bool = False
     monitor_task: asyncio.Task[None] | None = None
+    ready_reported: bool = False
+    failure: str | None = None
+    last_state: dict[str, object] | None = None
 
     def maybe_start(self, body: Body) -> None:
         if self.config_path is None or self.launched:
@@ -97,14 +100,17 @@ class _CameraSession:
                 wait_for_ready=False,
             )
         except (CameraConfigError, CameraServiceError) as exc:
-            print(f"Camera unavailable; continuing without it: {exc}", file=sys.stderr)
+            self.failure = str(exc)
+            print(f"Camera unavailable; continuing without it: {self.failure}", file=sys.stderr)
             return
 
         self.owned = camera_state.get("started") is True
         if camera_state.get("phase") == "ready":
             _print_camera_ready(camera_state)
-            return
-        print(f"Camera starting: target={camera_state.get('target')}", flush=True)
+            self.ready_reported = True
+        else:
+            print(f"Camera starting: target={camera_state.get('target')}", flush=True)
+        self.last_state = dict(camera_state)
         self.monitor_task = asyncio.create_task(self._monitor())
 
     async def _monitor(self) -> None:
@@ -116,15 +122,19 @@ class _CameraSession:
             try:
                 state = service_status(self.config_path)
             except (CameraConfigError, CameraServiceError) as exc:
-                print(f"Camera unavailable; continuing without it: {exc}", file=sys.stderr)
+                self.failure = str(exc)
+                print(f"Camera unavailable; continuing without it: {self.failure}", file=sys.stderr)
                 return
+            self.last_state = dict(state)
             phase = state.get("phase")
             if phase == "ready":
-                _print_camera_ready(state)
-                return
+                if not self.ready_reported:
+                    _print_camera_ready(state)
+                    self.ready_reported = True
             if phase in {"failed", "stopped"}:
                 detail = state.get("error") or f"Camera entered {phase}"
-                print(f"Camera unavailable; continuing without it: {detail}", file=sys.stderr)
+                self.failure = str(detail)
+                print(f"Camera unavailable; continuing without it: {self.failure}", file=sys.stderr)
                 return
             await asyncio.sleep(0.25)
 
@@ -139,9 +149,15 @@ class _CameraSession:
         from minebot.camera.service import CameraServiceError, stop_service
 
         try:
-            stop_service(self.config_path)
+            state = stop_service(self.config_path)
         except (CameraConfigError, CameraServiceError) as exc:
             print(f"Camera cleanup warning: {exc}", file=sys.stderr)
+            return
+        self.last_state = dict(state)
+        error = state.get("error")
+        if error:
+            self.failure = str(error)
+            print(f"Camera cleanup warning: {self.failure}", file=sys.stderr)
 
 
 def _print_camera_ready(state: Mapping[str, object]) -> None:

@@ -388,6 +388,10 @@ def _process_start_token(pid: int) -> str | None:
         fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
     except OSError:
         return None
+    if len(fields) > 2 and fields[2] == "Z":
+        with contextlib.suppress(ChildProcessError, ProcessLookupError):
+            os.waitpid(pid, os.WNOHANG)
+        return None
     return fields[21] if len(fields) > 21 else None
 
 
