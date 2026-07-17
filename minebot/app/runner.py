@@ -37,7 +37,7 @@ from minebot.brain.modes import (
 from minebot.brain.progress import ProgressAuthority, ProgressStep
 from minebot.brain.registry import RegisteredTool, ToolRegistry, WeldContext, execute_tool
 from minebot.contract import Body, JsonObject, ProgressAbort, ProgressFacts
-from minebot.game.errors import BodyProtocolError
+from minebot.game.errors import BodyActionTimeoutError, BodyProtocolError
 
 RunnerCallable = Callable[..., Awaitable[Any]]
 StreamingRunnerCallable = Callable[..., Any]
@@ -45,6 +45,7 @@ RecoveryHandler = Callable[["AgentRuntime"], Any]
 BODY_TRANSPORT_RECOVERY_LIMIT = 3
 EXECUTION_LANE_POLL_S = 0.01
 EXECUTION_LANE_CANCEL_TIMEOUT_S = 30.0
+BODY_OWNER_SETTLE_POLL_S = 0.10
 BODY_WATCH_POLL_S = 0.25
 STREAM_CANCEL_DRAIN_TIMEOUT_S = EXECUTION_LANE_CANCEL_TIMEOUT_S + 5.0
 MODEL_COUNT_MAP_LIMIT = 48
@@ -987,11 +988,26 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 )
             raise
         except Exception as exc:
-            if isinstance(exc, ToolExecutionTimeout):
+            cancellation_reason: str | None = None
+            cancellation_facts: JsonObject | None = None
+            if isinstance(exc, (ToolExecutionTimeout, BodyActionTimeoutError)):
                 settlement_status = "timeout"
                 if runtime is not None:
-                    await runtime.cancel_active_execution(f"tool_timeout:{tool.name}")
+                    cancellation_reason = _tool_timeout_cancellation_reason(tool.name, exc)
+                    cancellation_facts = await runtime.cancel_active_execution_with_facts(
+                        cancellation_reason
+                    )
             result = _tool_exception_payload(exc)
+            if cancellation_facts is not None:
+                metrics = result.get("metrics")
+                if isinstance(metrics, dict):
+                    metrics["orphan_cleanup"] = cancellation_facts
+                if cancellation_facts.get("owner_observed") and not cancellation_facts.get("settled"):
+                    result["canRetry"] = False
+                    result["nextSuggestion"] = (
+                        "Body owner cleanup did not settle; do not start another Body action "
+                        "until lifecycle recovery clears the owner."
+                    )
             if trace is not None:
                 trace.emit(
                     "tool_exception",
@@ -1163,6 +1179,8 @@ def _persist_tool_observation(
 def _tool_exception_payload(exc: Exception) -> JsonObject:
     if isinstance(exc, ToolExecutionTimeout):
         reason = "tool_timeout"
+    elif isinstance(exc, BodyActionTimeoutError):
+        reason = "body_action_timeout"
     else:
         reason = "transport_error" if isinstance(exc, (BodyProtocolError, OSError, TimeoutError)) else "tool_runtime_error"
     diagnostics = getattr(exc, "diagnostics", None)
@@ -1176,13 +1194,29 @@ def _tool_exception_payload(exc: Exception) -> JsonObject:
         "success": False,
         "reason": reason,
         "canRetry": True,
-        "nextSuggestion": (
-            "Refresh state before retrying; the timed-out Body action was interrupted."
-            if reason == "tool_timeout"
-            else "retry after refreshing state; choose a different action if the same failure repeats"
-        ),
+        "nextSuggestion": _tool_exception_next_suggestion(reason),
         "metrics": metrics,
     }
+
+
+def _tool_timeout_cancellation_reason(tool_name: str, exc: TimeoutError) -> str:
+    if isinstance(exc, BodyActionTimeoutError):
+        action_id = exc.diagnostics.get("action_id")
+        if isinstance(action_id, str) and action_id:
+            return f"body_action_timeout:{tool_name}:action_id={_shorten(action_id, limit=96)}"
+        return f"body_action_timeout:{tool_name}"
+    return f"tool_timeout:{tool_name}"
+
+
+def _tool_exception_next_suggestion(reason: str) -> str:
+    if reason == "tool_timeout":
+        return "Refresh state before retrying; the timed-out Body action was interrupted."
+    if reason == "body_action_timeout":
+        return (
+            "Refresh Body state before retrying; server-owner cleanup was requested "
+            "for the timed-out action."
+        )
+    return "retry after refreshing state; choose a different action if the same failure repeats"
 
 
 def _progress_abort_metrics(exc: ProgressAbort) -> JsonObject:
@@ -2505,19 +2539,107 @@ class AgentRuntime:
         return await self.execution_lane.wait_idle(timeout_s=timeout_s)
 
     async def cancel_active_execution(self, reason: str) -> bool:
+        facts = await self.cancel_active_execution_with_facts(reason)
+        return bool(facts.get("settled"))
+
+    async def cancel_active_execution_with_facts(self, reason: str) -> JsonObject:
+        cancellation_started = time.monotonic()
         self.authority.invalidate_generation(reason)
+        interrupt_ok: bool | None = None
+        interrupt_accepted: bool | None = None
+        interrupt_complete: bool | None = None
+        interrupt_error: JsonObject | None = None
         try:
-            await asyncio.to_thread(self.body.interrupt, reason)
+            interrupt = await asyncio.to_thread(self.body.interrupt, reason)
+            interrupt_ok = _optional_bool_attr(interrupt, "ok")
+            interrupt_accepted = _optional_bool_attr(interrupt, "accepted")
+            interrupt_complete = _optional_bool_attr(interrupt, "complete")
         except Exception as exc:
             self.trace.emit("body_interrupt_failed", reason=reason, error_type=type(exc).__name__)
-        idle = await self.wait_for_execution_idle()
+            interrupt_error = {
+                "error_type": type(exc).__name__,
+                "message": _shorten(str(exc), limit=300),
+            }
+        remaining_s = max(
+            0.0,
+            EXECUTION_LANE_CANCEL_TIMEOUT_S - (time.monotonic() - cancellation_started),
+        )
+        execution_idle = await self.wait_for_execution_idle(timeout_s=remaining_s)
+        remaining_s = max(
+            0.0,
+            EXECUTION_LANE_CANCEL_TIMEOUT_S - (time.monotonic() - cancellation_started),
+        )
+        owner_facts = await self._wait_for_body_owner_idle(
+            timeout_s=remaining_s,
+        )
+        owner_observed = bool(owner_facts.get("owner_observed"))
+        owner = owner_facts.get("owner")
+        owner_settled = owner_observed and owner is None
+        if not owner_observed:
+            owner_settled = (
+                "owner_probe_error" not in owner_facts
+                and interrupt_complete is True
+            )
+        settled = execution_idle and owner_settled
+        facts: JsonObject = {
+            "interrupt_requested": True,
+            "interrupt_ok": interrupt_ok,
+            "interrupt_accepted": interrupt_accepted,
+            "interrupt_complete": interrupt_complete,
+            "execution_idle": execution_idle,
+            **owner_facts,
+            "settled": settled,
+            "reason": reason,
+        }
+        if interrupt_error is not None:
+            facts["interrupt_error"] = interrupt_error
         self.trace.emit(
             "execution_cancelled",
-            reason=reason,
-            idle=idle,
+            **facts,
+            idle=execution_idle,
             active_count=self.execution_lane.active_count,
         )
-        return idle
+        return facts
+
+    async def _wait_for_body_owner_idle(self, *, timeout_s: float) -> JsonObject:
+        read_head = getattr(self.body, "event_head", None)
+        if not callable(read_head):
+            return {
+                "owner_observed": False,
+                "owner": None,
+                "owner_checks": 0,
+                "owner_wait_ms": 0.0,
+            }
+        started = time.monotonic()
+        deadline = started + max(0.0, timeout_s)
+        proposed_epoch = f"cancel-{uuid4().hex}"
+        owner: str | None = None
+        checks = 0
+        while True:
+            checks += 1
+            try:
+                head = await asyncio.to_thread(read_head, proposed_epoch)
+            except Exception as exc:
+                return {
+                    "owner_observed": False,
+                    "owner": owner,
+                    "owner_checks": checks,
+                    "owner_wait_ms": round((time.monotonic() - started) * 1000.0, 3),
+                    "owner_probe_error": {
+                        "error_type": type(exc).__name__,
+                        "message": _shorten(str(exc), limit=300),
+                    },
+                }
+            raw_owner = head.get("owner") if isinstance(head, dict) else None
+            owner = None if raw_owner is None else str(raw_owner)
+            if owner is None or time.monotonic() >= deadline:
+                return {
+                    "owner_observed": True,
+                    "owner": owner,
+                    "owner_checks": checks,
+                    "owner_wait_ms": round((time.monotonic() - started) * 1000.0, 3),
+                }
+            await asyncio.sleep(BODY_OWNER_SETTLE_POLL_S)
 
     def close(self) -> None:
         self.execution_lane.close()
@@ -3359,6 +3481,11 @@ def _public_text(value: object) -> str:
         except TypeError:
             return str(value)
     return str(value)
+
+
+def _optional_bool_attr(value: object, name: str) -> bool | None:
+    raw = getattr(value, name, None)
+    return raw if isinstance(raw, bool) else None
 
 
 def _shorten(text: str, *, limit: int = 500) -> str:

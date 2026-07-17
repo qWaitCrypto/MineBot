@@ -677,6 +677,12 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("target = water_surface_target(p)", request_body)
         self.assertIn("'water', 'moveTo'", request_body)
         self.assertIn("reason + '_egress_unavailable'", request_body)
+        self.assertNotIn("!in_water_now(name)", request_body)
+        self.assertIn("on_dry_stand = p != null && is_dry_stand_cell", request_body)
+        self.assertIn(
+            "if(policy == 'egress_to_dry', dry_stand, at_waypoint && on_ground)",
+            source,
+        )
         self.assertIn("start_move_cancel_water_egress(name, m, global_move_cancels:name:0)", request_body)
         self.assertIn("global_reflexes:name == null && controls_ready", source)
         self.assertIn("move_cancel_egress = kind == 'water' && owner_name == 'moveTo'", reflex_body)

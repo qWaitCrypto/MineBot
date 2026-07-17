@@ -1753,7 +1753,7 @@ movement_cancel_safe_now(name, m) -> (
         current_dist = dist_to_target(p, current:0, current:1, current:2);
         at_waypoint = current_waypoint_reached(m, p, current, current_dist);
         dry_stand = is_dry_stand_cell(floor(p:0), floor(p:1), floor(p:2));
-        at_waypoint && if(policy == 'egress_to_dry', dry_stand, on_ground)
+        if(policy == 'egress_to_dry', dry_stand, at_waypoint && on_ground)
       )
     ,
       false
@@ -1762,10 +1762,11 @@ movement_cancel_safe_now(name, m) -> (
 );
 
 start_move_cancel_water_egress(name, m, reason) -> (
-  if(current_cancel_policy(m) != 'egress_to_dry' || !in_water_now(name) || global_reflexes:name != null,
+  p = bot_pos(name);
+  on_dry_stand = p != null && is_dry_stand_cell(floor(p:0), floor(p:1), floor(p:2));
+  if(current_cancel_policy(m) != 'egress_to_dry' || p == null || on_dry_stand || global_reflexes:name != null,
     false
   ,
-    p = bot_pos(name);
     target = water_escape_target(p);
     if(target == null,
       target = water_surface_target(p)

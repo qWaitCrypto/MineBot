@@ -29,7 +29,7 @@ from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext
 from minebot.brain.persona import prompt_with_language
 from minebot.contract import BodyState, LegalityDecision, PerceptionResult, Result, ToolResult
-from minebot.game.errors import RconError
+from minebot.game.errors import BodyActionTimeoutError, RconError
 
 
 def body_state(x=0.0):
@@ -702,6 +702,111 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertFalse(
             any(event["event"] == "tool_transport_recovery_candidate" for event in runtime.trace.snapshot())
         )
+
+    def test_body_action_timeout_requests_owner_cleanup_without_transport_recovery(self):
+        action_id = "action-timeout-1"
+
+        class OwnerBody(FakeBody):
+            def __init__(self):
+                super().__init__()
+                self.owner = "moveTo"
+                self.owner_checks = 0
+
+            def event_head(self, _proposed_epoch):
+                self.owner_checks += 1
+                if self.owner_checks >= 2:
+                    self.owner = None
+                return {"owner": self.owner}
+
+            def interrupt(self, reason=None):
+                return super().interrupt(reason)
+
+        body = OwnerBody()
+        calls = 0
+
+        def callable_(_params):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise BodyActionTimeoutError(
+                    f"timed out waiting for terminal event for action {action_id}",
+                    diagnostics={
+                        "action_id": action_id,
+                        "terminal_events": ["moveDone", "navigateDone"],
+                        "poll_count": 168,
+                        "wait_ms": 17099.98,
+                        "observed_events": 3,
+                        "observed": [
+                            {
+                                "seq": 1667,
+                                "name": "moveCancelDelayed",
+                                "action_id": action_id,
+                            }
+                        ],
+                    },
+                )
+            body.x += 1.0
+            return ToolResult(True, "arrived", False, metrics={"x": body.x})
+
+        tool = RegisteredTool(
+            name="move_to",
+            description="Move",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(
+                progress_key="move_to",
+                mutating=True,
+                permission="move",
+                body_scope=("navigation",),
+                terminal_truth=("position",),
+            ),
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="test"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=lambda *_args, **_kwargs: None,
+        )
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            runtime=runtime,
+        )
+        sdk_tool = sdk_tool_for(tool)
+
+        class Wrapper:
+            context = runtime_context
+
+        try:
+            timeout_result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            next_result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            trace = runtime.trace.snapshot()
+        finally:
+            runtime.close()
+
+        self.assertEqual(timeout_result["reason"], "body_action_timeout")
+        self.assertEqual(
+            body.interrupt_reasons,
+            [f"body_action_timeout:move_to:action_id={action_id}"],
+        )
+        self.assertEqual(runtime.consecutive_transport_errors, 0)
+        self.assertFalse(
+            any(event["event"] == "tool_transport_recovery_candidate" for event in trace)
+        )
+        self.assertFalse(any(event["event"] == "body_transport_error" for event in trace))
+        cancelled = next(event for event in trace if event["event"] == "execution_cancelled")
+        self.assertTrue(cancelled["owner_observed"])
+        self.assertIsNone(cancelled["owner"])
+        self.assertEqual(cancelled["owner_checks"], 2)
+        self.assertTrue(cancelled["settled"])
+        self.assertTrue(next_result["success"])
+        self.assertEqual(next_result["reason"], "arrived")
+        self.assertEqual(calls, 2)
+        self.assertEqual(runtime.execution_lane.active_count, 0)
 
     def test_streamed_turn_body_death_preempts_into_recovery(self):
         class FakeStream:

@@ -27,6 +27,7 @@ from minebot.brain.modes import ModeRuntime
 from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
 from minebot.contract import BodyState, ProgressAbort, ToolResult
+from minebot.game.errors import BodyActionTimeoutError
 
 
 class EpochBody:
@@ -56,7 +57,7 @@ class EpochBody:
 
     def interrupt(self, reason: str):
         self.interrupt_reasons.append(reason)
-        return SimpleNamespace(ok=True)
+        return SimpleNamespace(ok=True, accepted=True, complete=True)
 
 
 class RecordingObservationArchive:
@@ -417,6 +418,61 @@ def test_epoch_records_execution_timeout_and_interrupts_orphaned_body_work():
     assert body.interrupt_reasons == ["tool_timeout:timed_read"]
     assert archive.records[0]["members"][0]["status"] == "timeout"
     assert archive.records[0]["members"][0]["reason"] == "tool_timeout"
+
+
+def test_epoch_records_body_action_timeout_without_transport_recovery():
+    body = EpochBody()
+    action_id = "action-epoch-timeout"
+
+    def timeout(_params):
+        raise BodyActionTimeoutError(
+            f"timed out waiting for terminal event for action {action_id}",
+            diagnostics={
+                "action_id": action_id,
+                "terminal_events": ["navigateDone"],
+                "poll_count": 42,
+                "wait_ms": 15000.0,
+                "observed_events": 1,
+            },
+        )
+
+    timed = make_tool(
+        "move_to",
+        timeout,
+        mutating=True,
+    )
+    archive = RecordingEpochArchive()
+    runtime, adapter, context = runtime_with(body, [timed], epoch_archive=archive)
+
+    async def scenario():
+        await adapter.open(response(("call-body-timeout", "move_to")))
+        return await invoke(timed, context, "call-body-timeout")
+
+    result = asyncio.run(scenario())
+    trace = runtime.trace.snapshot()
+    runtime.close()
+
+    timeout_event = next(
+        event
+        for event in trace
+        if event["event"] == "tool_result"
+        and event["reason"] == "body_action_timeout"
+    )
+    assert result["reason"] == "body_action_timeout"
+    assert timeout_event["full_result"]["metrics"]["await_diagnostics"]["action_id"] == action_id
+    cleanup = timeout_event["full_result"]["metrics"]["orphan_cleanup"]
+    assert cleanup["interrupt_requested"] is True
+    assert cleanup["execution_idle"] is True
+    assert cleanup["settled"] is True
+    assert cleanup["reason"] == f"body_action_timeout:move_to:action_id={action_id}"
+    assert body.interrupt_reasons == [
+        f"body_action_timeout:move_to:action_id={action_id}"
+    ]
+    assert archive.records[0]["members"][0]["status"] == "timeout"
+    assert archive.records[0]["members"][0]["reason"] == "body_action_timeout"
+    assert runtime.consecutive_transport_errors == 0
+    assert not any(event["event"] == "tool_transport_recovery_candidate" for event in trace)
+    assert not any(event["event"] == "body_transport_error" for event in trace)
 
 
 def test_duplicate_same_name_calls_claim_predeclared_ids_in_fifo_order():
