@@ -192,7 +192,7 @@ with RconClient(RconConfig(host=host, port=port, password=password, timeout_s=3,
     r.command("gamerule fire_spread_radius_around_player 0")
     r.command("weather clear")
     r.command("time set day")
-    r.command("kill @e[type=!minecraft:player,type=!minecraft:item]")
+    r.command("kill @e[type=minecraft:item]")
     r.command("script load minebot global")
     r.command("script load w1_probe global")
     reset = r.command("script in minebot run minebot_reset()")

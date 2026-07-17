@@ -31,6 +31,13 @@ class ResetWorldScriptTests(unittest.TestCase):
         self.assertIn("-Dminebot.camera.observerUuid=", source)
         self.assertIn('java "${SERVER_JAVA_ARGS[@]}" -jar fabric-server-launch.jar nogui', source)
 
+    def test_reset_preserves_fixed_world_passive_entities(self):
+        source = RESET_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('r.command("kill @e[type=minecraft:item]")', source)
+        self.assertNotIn("type=!minecraft:player,type=!minecraft:item", source)
+        self.assertIn("for entity_type in hostile_types:", source)
+
 
 if __name__ == "__main__":
     unittest.main()
