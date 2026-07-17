@@ -90,6 +90,29 @@ class ObserverControlClient:
         finally:
             await self._websocket.close()
 
+    async def disconnect(self) -> None:
+        self._attached = False
+        await self._websocket.close()
+
+    async def reconnect(self, endpoint: str) -> "ObserverControlClient":
+        try:
+            import websockets
+        except ImportError as error:  # pragma: no cover - environment preflight
+            raise ObserverControlError("Camera requires the 'camera' optional dependency") from error
+        websocket = await websockets.connect(endpoint, max_size=32_768, proxy=None)
+        self._websocket = websocket
+        try:
+            hello = await self._request("HELLO", protocol=PROTOCOL)
+            if hello.get("protocol") != PROTOCOL:
+                raise ObserverControlError("bridge negotiated an unexpected protocol")
+            await self.status()
+            await self.heartbeat()
+            self._attached = True
+        except BaseException:
+            await websocket.close()
+            raise
+        return self
+
     async def _advance(self, request_type: str, **fields: Any) -> Mapping[str, Any]:
         generation = self._generation + 1
         response = await self._mutation(request_type, generation=generation, **fields)

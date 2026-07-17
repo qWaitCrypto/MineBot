@@ -9,7 +9,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -108,7 +108,8 @@ def _wait_until_ready(
 def service_status(config_path: Path) -> dict[str, Any]:
     config = load_camera_config(config_path.expanduser().resolve())
     state = _read_state(config.service)
-    if state.get("phase") in _RUNNING_PHASES and not _state_process_alive(state):
+    process_alive = _state_process_alive(state)
+    if state.get("phase") in _RUNNING_PHASES and not process_alive:
         return {
             **state,
             "phase": "failed",
@@ -208,8 +209,29 @@ async def run_worker(config_path: Path) -> int:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=service.heartbeat_s)
             except TimeoutError:
-                await observer.heartbeat()
-                _raise_for_exited_child(children)
+                observer, reconnected = await _maintain_observer(
+                    service,
+                    children,
+                    stop_event,
+                    observer,
+                    before_reconnect=lambda: _write_state(
+                        service,
+                        phase="connecting",
+                        error=None,
+                        children=_child_pids(children),
+                        record_pattern=record_pattern,
+                        **base_state,
+                    ),
+                )
+                if reconnected:
+                    _write_state(
+                        service,
+                        phase="ready",
+                        error=None,
+                        children=_child_pids(children),
+                        record_pattern=record_pattern,
+                        **base_state,
+                    )
     except BaseException as error:
         if stop_event.is_set() or isinstance(error, (KeyboardInterrupt, asyncio.CancelledError)):
             stop_event.set()
@@ -242,6 +264,37 @@ async def run_worker(config_path: Path) -> int:
             **base_state,
         )
     return 0 if failed_reason is None else 1
+
+
+async def _maintain_observer(
+    service: CameraServiceConfig,
+    children: Mapping[str, subprocess.Popen[bytes]],
+    stop_event: asyncio.Event,
+    observer: Any,
+    *,
+    before_reconnect: Callable[[], None],
+) -> tuple[Any, bool]:
+    try:
+        await observer.heartbeat()
+        _raise_for_exited_child(children)
+        return observer, False
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        raise
+    except Exception:
+        _raise_for_exited_child(children)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(observer.disconnect(), timeout=_OBSERVER_CLOSE_TIMEOUT_S)
+        if stop_event.is_set():
+            raise CameraServiceError("Camera stopped during observer reconnection")
+        before_reconnect()
+        try:
+            resumed = await observer.reconnect(service.bridge_endpoint)
+            _raise_for_exited_child(children)
+            return resumed, True
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            raise
+        except Exception:
+            return await _connect_observer(service, children, stop_event), True
 
 
 async def _connect_observer(

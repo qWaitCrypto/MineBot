@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -16,8 +17,11 @@ from minebot.camera.config import CameraConfigError, load_camera_config
 from minebot.camera.control.observer import ObserverControlClient
 from minebot.camera.output.ffmpeg import CameraOutputError, build_ffmpeg_command, resolve_live_publish_url
 from minebot.camera.service import (
+    CameraServiceError,
+    _maintain_observer,
     _process_alive,
     _process_start_token,
+    run_worker,
     _spawn_child,
     _stop_children,
     _supervisor_shutdown_timeout_s,
@@ -109,6 +113,76 @@ def test_observer_client_negotiates_generation_and_advances_on_detach(monkeypatc
     assert websocket.closed is True
 
 
+def test_observer_disconnect_closes_transport_without_detach(monkeypatch: pytest.MonkeyPatch) -> None:
+    websocket = _FakeWebsocket()
+
+    async def connect(*_args, **_kwargs):
+        return websocket
+
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=connect))
+
+    async def run() -> None:
+        from minebot.camera.control.follow import FollowConfig
+
+        client = await ObserverControlClient.connect(
+            "ws://127.0.0.1:8766",
+            observer_id="observer",
+            generation=7,
+            target="Bot1",
+            follow=FollowConfig(),
+        )
+        await client.disconnect()
+        await client.close()
+
+    asyncio.run(run())
+
+    assert [request["type"] for request in websocket.requests] == ["HELLO", "STATUS", "ATTACH"]
+    assert websocket.closed is True
+
+
+def test_observer_reconnect_resumes_existing_lease_without_attach(monkeypatch: pytest.MonkeyPatch) -> None:
+    initial = _FakeWebsocket()
+    replacement = _FakeWebsocket()
+    websockets = iter((initial, replacement))
+
+    async def connect(*_args, **_kwargs):
+        return next(websockets)
+
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=connect))
+
+    async def run() -> None:
+        from minebot.camera.control.follow import FollowConfig
+
+        client = await ObserverControlClient.connect(
+            "ws://127.0.0.1:8766",
+            observer_id="observer",
+            generation=7,
+            target="Bot1",
+            follow=FollowConfig(),
+        )
+        await client.disconnect()
+        resumed = await client.reconnect("ws://127.0.0.1:8766")
+        assert resumed is client
+        await client.close()
+
+    asyncio.run(run())
+
+    assert [request["type"] for request in initial.requests] == ["HELLO", "STATUS", "ATTACH"]
+    assert [request["type"] for request in replacement.requests] == [
+        "HELLO",
+        "STATUS",
+        "HEARTBEAT",
+        "DETACH",
+    ]
+    first_attach = initial.requests[-1]
+    resumed_heartbeat = replacement.requests[-2]
+    assert resumed_heartbeat["lease_id"] == first_attach["lease_id"]
+    assert resumed_heartbeat["generation"] == first_attach["generation"]
+    assert replacement.requests[-1]["generation"] == first_attach["generation"] + 1
+    assert initial.closed is True
+    assert replacement.closed is True
+
+
 def test_start_is_idempotent_for_a_live_supervisor_state(tmp_path: Path) -> None:
     path = _camera_config(tmp_path)
     service = load_camera_config(path).service
@@ -150,6 +224,191 @@ def test_stale_supervisor_state_is_reported_failed(tmp_path: Path) -> None:
 
     assert state["phase"] == "failed"
     assert state["error"] == "Camera supervisor is not running"
+
+
+def test_failed_status_reaps_owned_zombie_without_rewriting_failure(tmp_path: Path) -> None:
+    path = _camera_config(tmp_path)
+    service = load_camera_config(path).service
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(0.05)"],
+        start_new_session=True,
+    )
+    start = _process_start_token(process.pid)
+    assert start is not None
+    _write_state(
+        service,
+        phase="failed",
+        pid=process.pid,
+        process_start=start,
+        target="Bot1",
+        recording=True,
+        live=False,
+        children={},
+        error="heartbeat_timeout",
+    )
+
+    for _ in range(200):
+        fields = Path(f"/proc/{process.pid}/stat").read_text(encoding="utf-8").split()
+        if len(fields) > 2 and fields[2] == "Z":
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("Camera supervisor fixture did not exit")
+
+    state = service_status(path)
+
+    assert state["phase"] == "failed"
+    assert state["error"] == "heartbeat_timeout"
+    assert not Path(f"/proc/{process.pid}").exists()
+    process.poll()
+
+
+def test_heartbeat_timeout_disconnects_and_reconnects_without_restarting_children(tmp_path: Path) -> None:
+    service = load_camera_config(_camera_config(tmp_path)).service
+    replacement = SimpleNamespace()
+    observer = SimpleNamespace(
+        heartbeat=AsyncMock(side_effect=TimeoutError),
+        disconnect=AsyncMock(),
+        reconnect=AsyncMock(return_value=replacement),
+    )
+    child = SimpleNamespace(poll=lambda: None)
+    children = {"observer_client": child, "ffmpeg": child}
+    reconnecting = []
+
+    async def run() -> tuple[object, bool]:
+        with patch(
+            "minebot.camera.service._connect_observer",
+            new=AsyncMock(return_value=replacement),
+        ) as connect:
+            result = await _maintain_observer(
+                service,
+                children,
+                asyncio.Event(),
+                observer,
+                before_reconnect=lambda: reconnecting.append(True),
+            )
+        connect.assert_not_awaited()
+        return result
+
+    maintained, reconnected = asyncio.run(run())
+
+    observer.disconnect.assert_awaited_once()
+    observer.reconnect.assert_awaited_once_with(service.bridge_endpoint)
+    assert reconnecting == [True]
+    assert maintained is replacement
+    assert reconnected is True
+
+
+def test_healthy_heartbeat_keeps_existing_observer_connection(tmp_path: Path) -> None:
+    service = load_camera_config(_camera_config(tmp_path)).service
+    observer = SimpleNamespace(heartbeat=AsyncMock())
+    child = SimpleNamespace(poll=lambda: None)
+
+    async def run() -> tuple[object, bool]:
+        with patch("minebot.camera.service._connect_observer", new=AsyncMock()) as connect:
+            result = await _maintain_observer(
+                service,
+                {"observer_client": child, "ffmpeg": child},
+                asyncio.Event(),
+                observer,
+                before_reconnect=lambda: pytest.fail("healthy heartbeat started reconnection"),
+            )
+        connect.assert_not_awaited()
+        return result
+
+    maintained, reconnected = asyncio.run(run())
+
+    observer.heartbeat.assert_awaited_once()
+    assert maintained is observer
+    assert reconnected is False
+
+
+def test_heartbeat_reconnect_failure_remains_typed(tmp_path: Path) -> None:
+    service = load_camera_config(_camera_config(tmp_path)).service
+    observer = SimpleNamespace(
+        heartbeat=AsyncMock(side_effect=TimeoutError),
+        disconnect=AsyncMock(),
+        reconnect=AsyncMock(side_effect=TimeoutError),
+    )
+    child = SimpleNamespace(poll=lambda: None)
+
+    async def run() -> None:
+        with (
+            patch(
+                "minebot.camera.service._connect_observer",
+                new=AsyncMock(side_effect=CameraServiceError("observer bridge unavailable (TimeoutError)")),
+            ),
+            pytest.raises(CameraServiceError, match="observer bridge unavailable"),
+        ):
+            await _maintain_observer(
+                service,
+                {"observer_client": child, "ffmpeg": child},
+                asyncio.Event(),
+                observer,
+                before_reconnect=lambda: None,
+            )
+
+    asyncio.run(run())
+
+
+def test_worker_reconnects_control_channel_without_restarting_capture(tmp_path: Path) -> None:
+    service = replace(
+        load_camera_config(_camera_config(tmp_path)).service,
+        heartbeat_s=0.001,
+        relay_command=(),
+    )
+    replacement = SimpleNamespace(
+        heartbeat=AsyncMock(side_effect=KeyboardInterrupt),
+        close=AsyncMock(),
+    )
+    old_observer = SimpleNamespace(
+        heartbeat=AsyncMock(side_effect=TimeoutError),
+        disconnect=AsyncMock(),
+        reconnect=AsyncMock(return_value=replacement),
+    )
+    observer_process = SimpleNamespace(pid=101, poll=lambda: None)
+    ffmpeg_process = SimpleNamespace(pid=102, poll=lambda: None)
+    states: list[dict[str, object]] = []
+
+    def capture_state(_service, **fields) -> None:
+        states.append(fields)
+
+    async def run() -> int:
+        with (
+            patch("minebot.camera.service.load_camera_config", return_value=SimpleNamespace(service=service)),
+            patch(
+                "minebot.camera.service._spawn_child",
+                side_effect=[observer_process, ffmpeg_process],
+            ) as spawn,
+            patch(
+                "minebot.camera.service._connect_observer",
+                new=AsyncMock(return_value=old_observer),
+            ) as connect,
+            patch("minebot.camera.service.resolve_live_publish_url", return_value=None),
+            patch(
+                "minebot.camera.service.build_ffmpeg_command",
+                return_value=(("ffmpeg", "capture"), "/recordings/camera-%05d.mp4"),
+            ),
+            patch("minebot.camera.service._write_state", side_effect=capture_state),
+            patch("minebot.camera.service._stop_children", new=AsyncMock()) as stop_children,
+        ):
+            result = await run_worker(Path("/tmp/camera.toml"))
+        assert spawn.call_count == 2
+        assert connect.await_count == 1
+        stop_children.assert_awaited_once()
+        return result
+
+    result = asyncio.run(run())
+
+    assert result == 0
+    old_observer.disconnect.assert_awaited_once()
+    old_observer.reconnect.assert_awaited_once_with(service.bridge_endpoint)
+    replacement.close.assert_awaited_once()
+    phases = [state["phase"] for state in states]
+    assert phases == ["starting", "connecting", "ready", "connecting", "ready", "stopping", "stopped"]
+    reconnecting, reconnected = states[3:5]
+    assert reconnecting["children"] == {"observer_client": 101, "ffmpeg": 102}
+    assert reconnected["children"] == {"observer_client": 101, "ffmpeg": 102}
 
 
 def test_child_cleanup_terminates_owned_process_group(tmp_path: Path) -> None:
