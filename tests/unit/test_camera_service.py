@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -14,7 +15,15 @@ import pytest
 from minebot.camera.config import CameraConfigError, load_camera_config
 from minebot.camera.control.observer import ObserverControlClient
 from minebot.camera.output.ffmpeg import CameraOutputError, build_ffmpeg_command, resolve_live_publish_url
-from minebot.camera.service import _process_start_token, _stop_children, _write_state, service_status, start_service
+from minebot.camera.service import (
+    _process_start_token,
+    _spawn_child,
+    _stop_children,
+    _supervisor_shutdown_timeout_s,
+    _write_state,
+    service_status,
+    start_service,
+)
 from minebot.app.real_server_session import _CameraSession, main as real_server_main
 
 
@@ -142,12 +151,47 @@ def test_stale_supervisor_state_is_reported_failed(tmp_path: Path) -> None:
     assert state["error"] == "Camera supervisor is not running"
 
 
-def test_child_cleanup_terminates_owned_process() -> None:
-    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+def test_child_cleanup_terminates_owned_process_group(tmp_path: Path) -> None:
+    grandchild_pid_path = tmp_path / "grandchild.pid"
+    process = _spawn_child(
+        (
+            sys.executable,
+            "-c",
+            (
+                "import subprocess,sys,time; "
+                "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+                "open(sys.argv[1],'w').write(str(child.pid)); "
+                "time.sleep(60)"
+            ),
+            str(grandchild_pid_path),
+        ),
+        os.environ,
+    )
+    for _ in range(100):
+        if grandchild_pid_path.exists():
+            break
+        time.sleep(0.01)
+    grandchild_pid = int(grandchild_pid_path.read_text(encoding="utf-8"))
 
     asyncio.run(_stop_children({"child": process}, timeout_s=2.0))
 
     assert process.poll() is not None
+    for _ in range(100):
+        if not Path(f"/proc/{grandchild_pid}").exists():
+            break
+        time.sleep(0.01)
+    assert not Path(f"/proc/{grandchild_pid}").exists()
+
+
+def test_supervisor_stop_budget_covers_observer_and_all_child_cleanup(tmp_path: Path) -> None:
+    service = load_camera_config(_camera_config(tmp_path)).service
+
+    timeout = _supervisor_shutdown_timeout_s(
+        service,
+        {"children": {"observer_client": 101, "ffmpeg": 102, "relay": 103}},
+    )
+
+    assert timeout == service.shutdown_timeout_s + 3.0 + 3.0 + 2.0
 
 
 def test_real_server_camera_switch_delegates_lifecycle_to_session() -> None:

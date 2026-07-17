@@ -24,6 +24,9 @@ class CameraServiceError(RuntimeError):
 
 
 _RUNNING_PHASES = {"starting", "connecting", "ready", "stopping"}
+_OBSERVER_CLOSE_TIMEOUT_S = 3.0
+_CHILD_REAP_TIMEOUT_S = 1.0
+_SUPERVISOR_EXIT_GRACE_S = 2.0
 
 
 def start_service(
@@ -128,7 +131,7 @@ def stop_service(config_path: Path) -> dict[str, Any]:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
-    deadline = time.monotonic() + service.shutdown_timeout_s
+    deadline = time.monotonic() + _supervisor_shutdown_timeout_s(service, state)
     while time.monotonic() < deadline:
         if not _process_alive(pid, state.get("process_start")):
             final = _read_state(service)
@@ -229,7 +232,7 @@ async def run_worker(config_path: Path) -> int:
         )
         if observer is not None:
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(observer.close(), timeout=3.0)
+                await asyncio.wait_for(observer.close(), timeout=_OBSERVER_CLOSE_TIMEOUT_S)
         await _stop_children(children, timeout_s=service.shutdown_timeout_s)
         _write_state(
             service,
@@ -281,6 +284,7 @@ def _spawn_child(command: Sequence[str], environ: Mapping[str, str]) -> subproce
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=dict(environ),
+        start_new_session=True,
     )
 
 
@@ -298,19 +302,33 @@ async def _stop_children(
 ) -> None:
     live = [process for process in reversed(tuple(children.values())) if process.poll() is None]
     for process in live:
-        with contextlib.suppress(ProcessLookupError):
-            process.terminate()
+        _signal_process_group(process, signal.SIGTERM)
     deadline = time.monotonic() + timeout_s
     for process in live:
         remaining = max(0.0, deadline - time.monotonic())
         try:
             process.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
+            _signal_process_group(process, signal.SIGKILL)
     for process in live:
         with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=1.0)
+            process.wait(timeout=_CHILD_REAP_TIMEOUT_S)
+
+
+def _signal_process_group(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, sig)
+
+
+def _supervisor_shutdown_timeout_s(service: CameraServiceConfig, state: Mapping[str, Any]) -> float:
+    children = state.get("children")
+    child_count = len(children) if isinstance(children, Mapping) else 0
+    return (
+        service.shutdown_timeout_s
+        + _OBSERVER_CLOSE_TIMEOUT_S
+        + max(1, child_count) * _CHILD_REAP_TIMEOUT_S
+        + _SUPERVISOR_EXIT_GRACE_S
+    )
 
 
 def _read_state(service: CameraServiceConfig) -> dict[str, Any]:

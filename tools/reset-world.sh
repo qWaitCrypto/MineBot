@@ -61,6 +61,7 @@ if endpoint.hostname is None or endpoint.port is None:
 print(f"-Dminebot.bridge.host={endpoint.hostname}")
 print(f"-Dminebot.bridge.port={endpoint.port}")
 print(f"-Dminebot.camera.observerUuid={config.observer_id}")
+print("-Dminebot.camera.leaseTtlTicks=1200")
 PY
 )"
   readarray -t camera_jvm_args <<< "$camera_jvm_output"
