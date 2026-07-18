@@ -260,17 +260,18 @@ class SkillWorkspace:
 
     def read(self, name: str, version: str | None = None) -> SkillDocument | None:
         clean_name = str(name or "").strip()
-        builtin = self.catalog.load(clean_name, version)
+        clean_version = _normalize_skill_version_reference(version)
+        builtin = self.catalog.load(clean_name, clean_version)
         if builtin is not None:
             return builtin
         head = self.store.get_skill_head(self.scope, clean_name, include_retired=True)
         if head is None:
             return None
-        if head.status == "retired" and version is None:
+        if head.status == "retired" and clean_version is None:
             return None
         record = self.store.get_skill_version(
             head.skill_id,
-            version_digest=version or head.head_version,
+            version_digest=clean_version or head.head_version,
         )
         if record is None:
             return None
@@ -938,12 +939,26 @@ def _rank_documents(documents: Iterable[SkillDocument], query: str) -> list[Skil
 
 def _descriptor_line(document: SkillDocument) -> str:
     line = (
-        f"- {document.name} [{document.origin} {document.version}] "
+        f"- {document.name} origin={document.origin} head_version={document.version} "
         f"loadable={'true' if document.loadable else 'false'}: {document.description}"
     )
     if document.missing_tools:
         line += " missing_tools=" + json.dumps(list(document.missing_tools), ensure_ascii=False)
     return line
+
+
+def _normalize_skill_version_reference(version: str | None) -> str | None:
+    if version is None:
+        return None
+    clean = str(version).strip()
+    if clean.startswith("[") and clean.endswith("]"):
+        clean = clean[1:-1].strip()
+    if clean.startswith("head_version="):
+        clean = clean.removeprefix("head_version=").strip()
+    parts = clean.split()
+    if len(parts) == 2 and parts[0] in {"builtin", "learned"} and parts[1].startswith("sha256:"):
+        return parts[1]
+    return clean
 
 
 def _validate_active_context(documents: Iterable[SkillDocument]) -> None:
@@ -1018,7 +1033,14 @@ def _skill_reference_schema() -> dict[str, object]:
         "type": "object",
         "properties": {
             "name": {"type": "string", "minLength": 1, "maxLength": 64},
-            "version": {"type": "string", "maxLength": 128},
+            "version": {
+                "type": "string",
+                "maxLength": 128,
+                "description": (
+                    "Exact head_version value (sha256:...) from AVAILABLE_SKILLS. "
+                    "Omit it to load the current head; do not include origin."
+                ),
+            },
         },
         "required": ["name"],
         "additionalProperties": False,

@@ -168,7 +168,7 @@ class AgentContextTests(unittest.TestCase):
             ],
             available_rendered=(
                 "AVAILABLE_SKILLS catalog_revision=sha256:catalog complete=true\n"
-                "- resource-progression [builtin sha256:resource] loadable=true: "
+                "- resource-progression origin=builtin head_version=sha256:resource loadable=true: "
                 "Acquire prerequisites when a goal needs materials."
             ),
             active=[

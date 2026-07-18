@@ -272,6 +272,33 @@ class SkillCrudTests(unittest.TestCase):
 
 
 class SkillActivationTests(unittest.TestCase):
+    def test_advertised_builtin_version_round_trips_through_load_skill(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = SkillWorkspace(store, RuntimeScope("server", "world", "Bot1"), SkillCatalog())
+        registry = bind_workspace(workspace)
+        document = workspace.catalog.load("resource-progression")
+
+        snapshot = workspace.catalog_snapshot()
+        loaded = registry.get("load_skill").callable(
+            {
+                "name": document.name,
+                "version": f"builtin {document.version}",
+            }
+        )
+
+        self.assertIn(
+            f"- {document.name} origin=builtin head_version={document.version} loadable=true:",
+            snapshot.rendered,
+        )
+        self.assertIn(
+            "Exact head_version value",
+            registry.get("load_skill").input_schema["properties"]["version"]["description"],
+        )
+        self.assertTrue(loaded.success)
+        self.assertEqual(loaded.reason, "skill_loaded")
+        self.assertEqual(loaded.metrics["version"], document.version)
+        store.close()
+
     def test_active_and_descriptor_budgets_reject_instead_of_silently_omitting(self):
         store = RuntimeStateStore(":memory:")
         scope = RuntimeScope("server", "world", "Bot1")
