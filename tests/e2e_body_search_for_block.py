@@ -211,11 +211,13 @@ def run_get_to_block_happy(rcon: RconClient, body: ScarpetBody) -> dict[str, obj
 
 def run_get_to_block_blacklist_replan(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     near = (6, 59, 0)
+    near_upper = (6, 60, 0)
     far = (11, 59, 0)
     command(rcon, "script in minebot run minebot_reset()")
     command(rcon, "fill -2 59 -4 14 66 4 air")
     command(rcon, "fill -2 58 -4 14 58 4 stone")
     command(rcon, f"setblock {near[0]} {near[1]} {near[2]} oak_log")
+    command(rcon, f"setblock {near_upper[0]} {near_upper[1]} {near_upper[2]} oak_log")
     command(rcon, f"setblock {far[0]} {far[1]} {far[2]} oak_log")
     command(rcon, "fill 4 59 -2 8 60 -2 stone")
     command(rcon, "fill 4 59 2 8 60 2 stone")

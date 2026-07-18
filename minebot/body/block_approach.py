@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from math import dist
 
@@ -42,6 +43,7 @@ class _BlockStandDomain:
     goals: tuple[Position, ...]
     targets_by_goal: dict[Position, tuple[NearbyBlockTarget, ...]]
     targets: tuple[NearbyBlockTarget, ...]
+    targets_without_stands: tuple[NearbyBlockTarget, ...]
     diagnostics: dict[str, object]
 
 
@@ -94,11 +96,11 @@ class BlockApproachTransactions:
                     config=cfg,
                 )
 
-            active = tuple(
-                target
-                for target in search.targets
-                if target.pos not in blacklist
-            )[: min(cfg.candidate_batch_size, cfg.candidate_budget - len(blacklist))]
+            active = _active_candidate_clusters(
+                search.targets,
+                blacklist=blacklist,
+                limit=min(cfg.candidate_batch_size, cfg.candidate_budget - len(blacklist)),
+            )
             searches.append(_search_payload(search, active))
             if not active:
                 return _terminal(
@@ -155,9 +157,9 @@ class BlockApproachTransactions:
                     searches=searches,
                     config=cfg,
                 )
+            no_stand = tuple(target.pos for target in domain.targets_without_stands)
+            _blacklist_candidate_clusters(blacklist, no_stand)
             if not domain.goals:
-                no_stand = {target.pos for target in active}
-                blacklist.update(no_stand)
                 attempts.append(
                     {
                         "phase": "stand_domain",
@@ -226,7 +228,7 @@ class BlockApproachTransactions:
                         searches=searches,
                         config=cfg,
                     )
-                blacklist.update(target.pos for target in selected_targets)
+                _blacklist_candidate_clusters(blacklist, (target.pos for target in selected_targets))
                 continue
 
             verified = self._verify_selected_targets(selected_targets, wanted_set, cfg.interaction_radius)
@@ -259,7 +261,7 @@ class BlockApproachTransactions:
                     searches=searches,
                     config=cfg,
                 )
-            blacklist.update(target.pos for target in selected_targets)
+            _blacklist_candidate_clusters(blacklist, (target.pos for target in selected_targets))
 
         return _terminal(
             ToolResult(False, "get_to_block_candidate_budget_exhausted", True),
@@ -404,6 +406,7 @@ def _build_block_stand_domain(
         goals=tuple(goals),
         targets_by_goal={goal: tuple(linked) for goal, linked in targets_by_goal.items()},
         targets=targets,
+        targets_without_stands=tuple(target for target in targets if not stands_by_target[target.pos]),
         diagnostics={
             "candidate_targets": [
                 {
@@ -420,6 +423,39 @@ def _build_block_stand_domain(
             "goal_count": len(goals),
             "max_goals": max_goals,
         },
+    )
+
+
+def _active_candidate_clusters(
+    targets: list[NearbyBlockTarget],
+    *,
+    blacklist: set[Position],
+    limit: int,
+) -> tuple[NearbyBlockTarget, ...]:
+    active: list[NearbyBlockTarget] = []
+    for target in targets:
+        if _in_candidate_cluster(target.pos, blacklist):
+            continue
+        if _in_candidate_cluster(target.pos, (candidate.pos for candidate in active)):
+            continue
+        active.append(target)
+        if len(active) >= limit:
+            break
+    return tuple(active)
+
+
+def _blacklist_candidate_clusters(blacklist: set[Position], positions: Iterable[Position]) -> None:
+    for pos in positions:
+        if not _in_candidate_cluster(pos, blacklist):
+            blacklist.add(pos)
+
+
+def _in_candidate_cluster(pos: Position, centers: Iterable[Position]) -> bool:
+    return any(
+        abs(pos[0] - center[0]) <= 2
+        and abs(pos[1] - center[1]) <= 6
+        and abs(pos[2] - center[2]) <= 2
+        for center in centers
     )
 
 

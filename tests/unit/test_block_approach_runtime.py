@@ -137,11 +137,18 @@ class BlockApproachTransactionsTests(unittest.TestCase):
 
     def test_navigation_failure_blacklists_selected_candidate_and_replans(self):
         near = (8, 64, 0)
+        same_cluster = (8, 65, 0)
         far = (12, 64, 0)
         body = FakeBody(
-            blocks=target_blocks(near, far),
+            blocks=target_blocks(near, same_cluster, far),
             find_blocks=[
                 {"x": near[0], "y": near[1], "z": near[2], "type": "minecraft:oak_log"},
+                {
+                    "x": same_cluster[0],
+                    "y": same_cluster[1],
+                    "z": same_cluster[2],
+                    "type": "minecraft:oak_log",
+                },
                 {"x": far[0], "y": far[1], "z": far[2], "type": "minecraft:oak_log"},
             ],
         )
@@ -150,7 +157,7 @@ class BlockApproachTransactionsTests(unittest.TestCase):
 
         result = runtime.get_to_block(
             block_types=("oak_log",),
-            config=GetToBlockConfig(candidate_budget=2, candidate_batch_size=1),
+            config=GetToBlockConfig(candidate_budget=2, candidate_batch_size=2),
         )
 
         self.assertTrue(result.success, result.to_payload())
@@ -158,6 +165,36 @@ class BlockApproachTransactionsTests(unittest.TestCase):
         self.assertEqual(result.metrics["candidate_blacklist"], [list(near)])
         self.assertEqual(len(navigator.calls), 2)
         self.assertEqual(result.metrics["attempts"][0]["navigation"]["reason"], "no_path")
+        self.assertEqual(result.metrics["searches"][0]["active"], [list(near), list(far)])
+
+    def test_candidate_without_stands_is_retired_without_hiding_other_cluster(self):
+        sealed = (6, 64, 0)
+        reachable = (12, 64, 0)
+        blocks = target_blocks(reachable)
+        blocks[sealed] = ("minecraft:oak_log", "SOLID")
+        body = FakeBody(
+            blocks=blocks,
+            find_blocks=[
+                {"x": sealed[0], "y": sealed[1], "z": sealed[2], "type": "minecraft:oak_log"},
+                {
+                    "x": reachable[0],
+                    "y": reachable[1],
+                    "z": reachable[2],
+                    "type": "minecraft:oak_log",
+                },
+            ],
+        )
+        navigator = SequencedNavigator(body, [(True, "arrived")])
+
+        result = BlockApproachTransactions(body, navigator).get_to_block(
+            block_types=("oak_log",),
+            config=GetToBlockConfig(candidate_budget=2, candidate_batch_size=2),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["target"], list(reachable))
+        self.assertEqual(result.metrics["candidate_blacklist"], [list(sealed)])
+        self.assertEqual(len(navigator.calls), 1)
 
     def test_post_move_identity_change_is_not_reported_as_reached(self):
         target = (8, 64, 0)
