@@ -196,6 +196,32 @@ class BlockApproachTransactionsTests(unittest.TestCase):
         self.assertEqual(result.metrics["candidate_blacklist"], [list(sealed)])
         self.assertEqual(len(navigator.calls), 1)
 
+    def test_candidate_batch_spans_different_spatial_regions(self):
+        nearest = (8, 64, 0)
+        near_middle = (9, 64, 5)
+        middle = (10, 64, 10)
+        far_region = (12, 64, 30)
+        targets = (nearest, near_middle, middle, far_region)
+        body = FakeBody(
+            blocks=target_blocks(*targets),
+            find_blocks=[
+                {"x": target[0], "y": target[1], "z": target[2], "type": "minecraft:oak_log"}
+                for target in targets
+            ],
+        )
+        navigator = SequencedNavigator(body, [(True, "arrived")])
+
+        result = BlockApproachTransactions(body, navigator).get_to_block(
+            block_types=("oak_log",),
+            config=GetToBlockConfig(candidate_budget=3, candidate_batch_size=3),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(
+            result.metrics["searches"][0]["active"],
+            [list(nearest), list(far_region), list(middle)],
+        )
+
     def test_post_move_identity_change_is_not_reported_as_reached(self):
         target = (8, 64, 0)
         body = FakeBody(

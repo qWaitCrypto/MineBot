@@ -432,15 +432,30 @@ def _active_candidate_clusters(
     blacklist: set[Position],
     limit: int,
 ) -> tuple[NearbyBlockTarget, ...]:
-    active: list[NearbyBlockTarget] = []
+    representatives: list[NearbyBlockTarget] = []
     for target in targets:
         if _in_candidate_cluster(target.pos, blacklist):
             continue
-        if _in_candidate_cluster(target.pos, (candidate.pos for candidate in active)):
+        if _in_candidate_cluster(target.pos, (candidate.pos for candidate in representatives)):
             continue
-        active.append(target)
-        if len(active) >= limit:
-            break
+        representatives.append(target)
+    if len(representatives) <= limit:
+        return tuple(representatives)
+
+    active = [representatives[0]]
+    remaining = representatives[1:]
+    while remaining and len(active) < limit:
+        selected_index = max(
+            range(len(remaining)),
+            key=lambda index: (
+                min(
+                    _horizontal_distance_sq(remaining[index].pos, selected.pos)
+                    for selected in active
+                ),
+                -index,
+            ),
+        )
+        active.append(remaining.pop(selected_index))
     return tuple(active)
 
 
@@ -457,6 +472,10 @@ def _in_candidate_cluster(pos: Position, centers: Iterable[Position]) -> bool:
         and abs(pos[2] - center[2]) <= 2
         for center in centers
     )
+
+
+def _horizontal_distance_sq(left: Position, right: Position) -> int:
+    return (left[0] - right[0]) ** 2 + (left[2] - right[2]) ** 2
 
 
 def _selected_goal(result: ToolResult, goals: tuple[Position, ...]) -> Position:
