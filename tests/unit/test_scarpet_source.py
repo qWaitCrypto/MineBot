@@ -850,6 +850,60 @@ class ScarpetSourceTests(unittest.TestCase):
         ):
             self.assertIn(expected, source)
 
+    def test_death_and_missing_body_clear_controller_and_owner_state(self):
+        source = MINEBOT_SC.read_text()
+        clear_start = source.index("clear_body_runtime(name) -> (")
+        clear_end = source.index("finish_move(name, reason, arrived) -> (")
+        clear_body = source[clear_start:clear_end]
+
+        for expected in (
+            "global_moves:name = null",
+            "global_move_cancels:name = null",
+            "global_move_control_inits:name = null",
+            "global_navigations:name = null",
+            "global_navigation_mutations:name = null",
+            "global_follows:name = null",
+            "global_mines:name = null",
+            "global_places:name = null",
+            "global_uses:name = null",
+            "global_ignites:name = null",
+            "global_sows:name = null",
+            "global_attacks:name = null",
+            "global_ranged:name = null",
+            "global_drops:name = null",
+            "global_reflexes:name = null",
+            "global_pending_reflexes:name = null",
+            "global_engages:name = null",
+            "global_owners:name = null",
+        ):
+            self.assertIn(expected, clear_body)
+
+        death_start = source.index("__on_player_dies(player) -> (")
+        death_end = source.index("__on_player_connects(player) -> (")
+        death_body = source[death_start:death_end]
+        self.assertLess(death_body.index("clear_body_runtime(name)"), death_body.index("emit('death', name"))
+
+        tick_start = source.index("tick_bot(name) -> (")
+        tick_end = source.index("__on_tick() -> (")
+        tick_body = source[tick_start:tick_end]
+        self.assertLess(tick_body.index("clear_body_runtime(name)"), tick_body.index("emit('bodyMissing', name"))
+
+    def test_interrupt_releases_only_orphaned_owner_state(self):
+        source = MINEBOT_SC.read_text()
+        active_start = source.index("body_runtime_active(name) -> (")
+        active_end = source.index("clear_body_runtime(name) -> (")
+        active_body = source[active_start:active_end]
+        self.assertIn("if(!body_runtime_active(name), global_owners:name = null)", active_body)
+
+        interrupt_start = source.index("minebot_interrupt(name, payload) -> (")
+        interrupt_end = source.index("minebot_action(name, payload) -> (")
+        interrupt_body = source[interrupt_start:interrupt_end]
+        self.assertIn("release_orphan_owner(name)", interrupt_body)
+        self.assertLess(
+            interrupt_body.index("if(global_drops:name != null"),
+            interrupt_body.index("release_orphan_owner(name)"),
+        )
+
     def test_spawn_supports_positioned_payload_fields(self):
         source = MINEBOT_SC.read_text()
 

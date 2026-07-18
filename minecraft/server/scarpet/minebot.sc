@@ -1424,6 +1424,54 @@ stop_body(name) -> (
   true
 );
 
+body_runtime_active(name) -> (
+  global_moves:name != null ||
+  global_navigations:name != null ||
+  global_navigation_mutations:name != null ||
+  global_follows:name != null ||
+  global_mines:name != null ||
+  global_places:name != null ||
+  global_uses:name != null ||
+  global_ignites:name != null ||
+  global_sows:name != null ||
+  global_attacks:name != null ||
+  global_ranged:name != null ||
+  global_drops:name != null ||
+  global_reflexes:name != null ||
+  global_pending_reflexes:name != null ||
+  global_engages:name != null
+);
+
+release_orphan_owner(name) -> (
+  if(!body_runtime_active(name), global_owners:name = null);
+  true
+);
+
+clear_body_runtime(name) -> (
+  if(player_entity(name) != null, stop_body(name));
+  global_moves:name = null;
+  global_move_cancels:name = null;
+  global_move_control_inits:name = null;
+  global_navigations:name = null;
+  global_navigation_mutations:name = null;
+  global_follows:name = null;
+  global_mines:name = null;
+  global_places:name = null;
+  global_uses:name = null;
+  global_ignites:name = null;
+  global_sows:name = null;
+  global_attacks:name = null;
+  global_ranged:name = null;
+  global_drops:name = null;
+  global_reflexes:name = null;
+  global_pending_reflexes:name = null;
+  global_engages:name = null;
+  global_water_reflex_health_baselines:name = null;
+  global_combat_health_baselines:name = null;
+  global_owners:name = null;
+  true
+);
+
 finish_move(name, reason, arrived) -> (
   m = global_moves:name;
   p = bot_pos(name);
@@ -3808,6 +3856,7 @@ tick_bot(name) -> (
   p = bot_pos(name);
   if(p == null,
     if(global_missing_notices:name == null,
+      clear_body_runtime(name);
       global_missing_notices:name = l(0, 0, 0);
       emit('bodyMissing', name, l(l(0, 0, 0)))
     );
@@ -3980,6 +4029,7 @@ __on_player_dies(player) -> (
     if(global_watched:name != null,
       inv = inventory_get(name);
       raw = str('%s', inv);
+      clear_body_runtime(name);
       emit('death', name, l(query(player, 'pos'), raw, hash_code(raw), inventory_counts_json(name)))
     )
   )
@@ -6217,6 +6267,7 @@ minebot_interrupt(name, payload) -> (
   if(global_drops:name != null,
     finish_drop(name, 'interrupted')
   );
+  release_orphan_owner(name);
   result_json(null, name, true, true, '{"action":"interrupt"}', null)
 );
 
