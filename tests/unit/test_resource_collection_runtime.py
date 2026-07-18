@@ -200,6 +200,64 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual([call[0] for call in work.calls], [second])
         self.assertIn(list(first), result.metrics["candidate_blacklist"])
 
+    def test_navigation_budget_exhaustion_retires_vertical_log_cluster_and_tries_far_tree(self):
+        trunk = tuple((5, y, 0) for y in range(64, 68))
+        far_tree = (20, 64, 0)
+        targets = [(target, "oak_log") for target in trunk]
+        targets.append((far_tree, "oak_log"))
+        body = ResourceBody(targets)
+        navigator = RecordingNavigator(
+            body,
+            [(5, 65, -1), (20, 65, -1)],
+            outcomes=[(False, "budget_exceeded"), (True, "arrived")],
+        )
+        work = RecordingWork()
+        runtime = ResourceCollectionTransactions(body, navigator, work)
+
+        result = runtime.collect_block_domain(
+            block_types=("oak_log",),
+            expected_drops=("oak_log",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertEqual([call[0] for call in work.calls], [far_tree])
+        self.assertEqual(
+            result.metrics["searches"][0]["active_candidates"],
+            [list(trunk[0]), list(far_tree)],
+        )
+        self.assertEqual(
+            result.metrics["searches"][1]["active_candidates"],
+            [list(far_tree)],
+        )
+        self.assertEqual(result.metrics["candidate_blacklist"], [list(trunk[0])])
+
+    def test_candidate_batch_spans_different_spatial_regions(self):
+        nearest = (5, 64, 0)
+        near_middle = (6, 64, 5)
+        middle = (7, 64, 10)
+        far_region = (8, 64, 30)
+        targets = (nearest, near_middle, middle, far_region)
+        body = ResourceBody([(target, "oak_log") for target in targets])
+        navigator = RecordingNavigator(body, [(5, 65, -1)])
+        work = RecordingWork()
+        runtime = ResourceCollectionTransactions(body, navigator, work)
+
+        result = runtime.collect_block_domain(
+            block_types=("oak_log",),
+            expected_drops=("oak_log",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=3, mutation_budget=1, find_limit=4),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(
+            result.metrics["searches"][0]["active_candidates"],
+            [list(nearest), list(far_region), list(middle)],
+        )
+
     def test_successful_preemption_is_terminal_before_mining(self):
         body = ResourceBody([((5, 64, 0), "dirt")])
         navigator = RecordingNavigator(

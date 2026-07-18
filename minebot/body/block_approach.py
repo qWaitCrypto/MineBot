@@ -96,7 +96,7 @@ class BlockApproachTransactions:
                     config=cfg,
                 )
 
-            active = _active_candidate_clusters(
+            active = select_spatial_candidate_clusters(
                 search.targets,
                 blacklist=blacklist,
                 limit=min(cfg.candidate_batch_size, cfg.candidate_budget - len(blacklist)),
@@ -158,7 +158,7 @@ class BlockApproachTransactions:
                     config=cfg,
                 )
             no_stand = tuple(target.pos for target in domain.targets_without_stands)
-            _blacklist_candidate_clusters(blacklist, no_stand)
+            blacklist_candidate_clusters(blacklist, no_stand)
             if not domain.goals:
                 attempts.append(
                     {
@@ -228,7 +228,7 @@ class BlockApproachTransactions:
                         searches=searches,
                         config=cfg,
                     )
-                _blacklist_candidate_clusters(blacklist, (target.pos for target in selected_targets))
+                blacklist_candidate_clusters(blacklist, (target.pos for target in selected_targets))
                 continue
 
             verified = self._verify_selected_targets(selected_targets, wanted_set, cfg.interaction_radius)
@@ -261,7 +261,7 @@ class BlockApproachTransactions:
                     searches=searches,
                     config=cfg,
                 )
-            _blacklist_candidate_clusters(blacklist, (target.pos for target in selected_targets))
+            blacklist_candidate_clusters(blacklist, (target.pos for target in selected_targets))
 
         return _terminal(
             ToolResult(False, "get_to_block_candidate_budget_exhausted", True),
@@ -426,7 +426,7 @@ def _build_block_stand_domain(
     )
 
 
-def _active_candidate_clusters(
+def select_spatial_candidate_clusters(
     targets: list[NearbyBlockTarget],
     *,
     blacklist: set[Position],
@@ -459,7 +459,7 @@ def _active_candidate_clusters(
     return tuple(active)
 
 
-def _blacklist_candidate_clusters(blacklist: set[Position], positions: Iterable[Position]) -> None:
+def blacklist_candidate_clusters(blacklist: set[Position], positions: Iterable[Position]) -> None:
     for pos in positions:
         if not _in_candidate_cluster(pos, blacklist):
             blacklist.add(pos)
@@ -553,4 +553,9 @@ def _terminal(
     )
 
 
-__all__ = ["BlockApproachTransactions", "GetToBlockConfig"]
+__all__ = [
+    "BlockApproachTransactions",
+    "GetToBlockConfig",
+    "blacklist_candidate_clusters",
+    "select_spatial_candidate_clusters",
+]

@@ -5,6 +5,10 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 
+from minebot.body.block_approach import (
+    blacklist_candidate_clusters,
+    select_spatial_candidate_clusters,
+)
 from minebot.body.block_work import (
     BlockWork,
     _is_clear_perception,
@@ -240,11 +244,15 @@ class ResourceCollectionTransactions:
             if not navigation.success:
                 attempts.append(attempt)
                 rejected_targets = selected_targets or domain.targets
+                blacklist_size = len(candidate_blacklist)
+                blacklist_candidate_clusters(
+                    candidate_blacklist,
+                    (target.pos for target in rejected_targets),
+                )
                 for target in rejected_targets:
-                    candidate_blacklist.add(target.pos)
                     if _is_patch_resource(target.block_type) and _is_patch_blocker(navigation.reason):
                         _add_patch_blacklist(patch_blacklist, target.pos)
-                candidate_attempts += len(rejected_targets)
+                candidate_attempts += len(candidate_blacklist) - blacklist_size
                 continue
 
             target = _selected_target(self.body, selected_targets)
@@ -289,7 +297,7 @@ class ResourceCollectionTransactions:
                 candidate_blacklist.discard(target.pos)
                 _remove_patch_blacklist(patch_blacklist, target.pos)
                 if delta <= 0:
-                    candidate_blacklist.add(target.pos)
+                    blacklist_candidate_clusters(candidate_blacklist, (target.pos,))
                 continue
 
             if mined.reason == "missing_required_tool" or mined.reason.startswith("tool_equip_failed:"):
@@ -311,7 +319,7 @@ class ResourceCollectionTransactions:
                 )
 
             if is_candidate_skip(mined.reason) or mined.reason == "collect_no_inventory_delta":
-                candidate_blacklist.add(target.pos)
+                blacklist_candidate_clusters(candidate_blacklist, (target.pos,))
                 if _is_patch_resource(target.block_type) and _is_patch_blocker(mined.reason):
                     _add_patch_blacklist(patch_blacklist, target.pos)
                 continue
@@ -430,16 +438,19 @@ def _active_targets(
     patch_blacklist: list[Position],
     limit: int,
 ) -> tuple[NearbyBlockTarget, ...]:
-    out: list[NearbyBlockTarget] = []
-    for target in search.targets:
-        if target.pos in candidate_blacklist:
-            continue
-        if _is_patch_resource(target.block_type) and _in_patch_blacklist(target.pos, patch_blacklist):
-            continue
-        out.append(target)
-        if len(out) >= limit:
-            break
-    return tuple(out)
+    eligible = [
+        target
+        for target in search.targets
+        if not (
+            _is_patch_resource(target.block_type)
+            and _in_patch_blacklist(target.pos, patch_blacklist)
+        )
+    ]
+    return select_spatial_candidate_clusters(
+        eligible,
+        blacklist=candidate_blacklist,
+        limit=limit,
+    )
 
 
 def _build_stand_domain(
