@@ -36,6 +36,8 @@ def setup_world(rcon: RconClient) -> None:
         "difficulty normal",
         "kill @e[type=!player]",
         f"player {BOT} kill",
+        "fill -2 59 -2 8 62 2 air",
+        "fill -2 58 -2 8 58 2 stone",
         "script in minebot run minebot_reset()",
         "script in minebot run global_reflex_scan = false",
     ]:
@@ -79,8 +81,9 @@ def run_death_respawn_happy_path(rcon: RconClient, body: ScarpetBody) -> None:
     state = body.get_state()
     if state.missing:
         raise AssertionError(f"body unexpectedly missing after spawn: {state}")
-    if "bread" not in state.inventory_raw:
-        raise AssertionError(f"expected pre-death inventory seed missing from state: {state.inventory_raw}")
+    inventory = body.get_inventory()
+    if not any(slot.item.removeprefix("minecraft:") == "bread" and slot.count == 2 for slot in inventory):
+        raise AssertionError(f"expected pre-death inventory seed missing: {inventory}")
 
     command(rcon, f"tp {BOT} 0 -80 0", delay=0.2)
     events = wait_for_events(body, {"death", "bodyMissing"}, timeout_s=12.0)
@@ -98,8 +101,8 @@ def run_death_respawn_happy_path(rcon: RconClient, body: ScarpetBody) -> None:
             f"death event inventory hash drifted from pre-death authoritative state: "
             f"event={death.data.get('inventory_hash')} state={state.inventory_hash}"
         )
-    inventory_before = str(death.data.get("inventory_before") or "")
-    if "bread" not in inventory_before:
+    inventory_counts_before = death.data.get("inventory_counts_before")
+    if not isinstance(inventory_counts_before, dict) or inventory_counts_before.get("bread") != 2:
         raise AssertionError(f"death event inventory_before lost pre-death item truth: {death.data}")
 
     action = Action.create("moveTo", {"target": [1, 59, 0]})

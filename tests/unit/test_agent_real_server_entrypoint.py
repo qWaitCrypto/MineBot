@@ -41,9 +41,9 @@ from minebot.app.runtime_state import (
     RuntimeStateStore,
     TaskStatus,
 )
-from minebot.app.session import SessionCommandKind
-from minebot.app.session import SessionStep
+from minebot.app.session import AgentSession, SessionCommandKind, SessionStep
 from minebot.app.tasks import TaskWorkspace
+from minebot.app.wiring import AgentRuntimeParts
 from minebot.brain.lifecycle import LifecycleState
 from minebot.contract import BodyState, InventorySlot, PerceptionResult, Region, Result, ToolResult
 from minebot.contract import Event
@@ -1443,6 +1443,86 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(outcome.facts["safe_respawn"]["reason"], "safe_completed")
         self.assertEqual(outcome.facts["safe_respawn"]["metrics"]["safe_respawn_pos"], [2, 80, 0])
         self.assertEqual(outcome.facts["state_after_pos"], [2.5, 80.0, 0.5])
+
+    def test_phase1_recovery_reconciles_prior_spawn_and_resumes_durable_task(self):
+        body = RecoveringInventoryBody(before_counts={}, after_counts={})
+        body.default_spawn_pos = (0.5, 79.766, 0.5)
+        body.default_spawn_oxygen = 8
+        cfg = Phase1RuntimeConfig(
+            natural_region=Region("test", (0, 0, 0), (16, 128, 16)),
+            recovery_gamemode="survival",
+        )
+        store = RuntimeStateStore(":memory:")
+        workspace = TaskWorkspace(store, RuntimeScope("server", "world", body.bot_name))
+        task = workspace.start("collect 3 flowers", source="user")
+        model_calls: list[str] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            async def fake_runner(_agent, input_text, **_kwargs):
+                model_calls.append(input_text)
+                return {"ok": True}
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=fake_runner,
+                recovery_handler=_phase1_recovery_handler(body, cfg),
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        session = AgentSession(parts_factory, task_workspace=workspace)
+        session.parts = parts_factory(task.goal_text)
+        session._goal_active = True
+        session.parts.lifecycle.ready()
+        session.parts.lifecycle.start()
+        session.parts.lifecycle.enter_recovery()
+
+        first = asyncio.run(session.step())
+        self.assertEqual(first.status, "recovery_retry")
+        self.assertEqual(first.message, "recovery_retry:respawn_unsafe:no_dry_stand")
+        self.assertEqual(len(body.recover_calls), 1)
+
+        body.recovered_pos = (0.5, 70.0, 0.5)
+        body.recovered_oxygen = 300
+        recovered = asyncio.run(session.step())
+        resumed = asyncio.run(session.step())
+
+        self.assertEqual(recovered.lifecycle, LifecycleState.RESUMING)
+        self.assertEqual(resumed.status, "completed_turn")
+        self.assertEqual(len(body.recover_calls), 1)
+        self.assertEqual(len(model_calls), 1)
+        self.assertEqual(session.parts.runtime.last_known_body_state["pos"], [0.5, 70.0, 0.5])
+        self.assertEqual(workspace.current_task.task_id, task.task_id)
+        recovery_results = [
+            event
+            for event in session.parts.runtime.trace.snapshot()
+            if event["event"] == "session_recovery_result"
+        ]
+        self.assertEqual([event["reason"] for event in recovery_results], [
+            "respawn_unsafe:no_dry_stand",
+            "body_reconciled",
+        ])
+        self.assertEqual(
+            recovery_results[-1]["facts"]["recovery_reconciliation"],
+            "body_already_present",
+        )
+        session.close()
+        store.close()
 
     def test_phase1_recovery_rejects_authoritative_position_mismatch(self):
         body = AdjustedSpawnRecoveryBody()

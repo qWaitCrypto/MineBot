@@ -197,11 +197,28 @@ def _phase1_recovery_handler(body: ScarpetBody, config: Phase1RuntimeConfig):
             facts["last_known_body_state"] = dict(runtime.last_known_body_state)
         if isinstance(result.metrics, dict):
             facts["recovery_metrics"] = dict(result.metrics)
-        if not result.success:
+        reconciled_existing_body = (
+            not result.success
+            and result.reason == "body_not_missing"
+            and isinstance(result.metrics, dict)
+            and result.metrics.get("state_before_missing") is False
+        )
+        if reconciled_existing_body:
+            facts["recovery_reconciliation"] = "body_already_present"
+        elif not result.success:
             return RecoveryOutcome(False, result.reason, facts=facts, can_retry=result.can_retry)
         after_state, after_state_errors = _body_state_with_transport_retry(body)
         if after_state_errors:
             facts["state_after_recheck_errors"] = after_state_errors
+        if reconciled_existing_body and after_state.missing:
+            facts["state_after_pos"] = list(after_state.pos)
+            facts["state_after_missing"] = True
+            return RecoveryOutcome(
+                False,
+                "body_missing_during_reconciliation",
+                facts=facts,
+                can_retry=True,
+            )
         safe_respawn = _ensure_safe_recovery_stand(body, lifecycle, after_state, config)
         if safe_respawn is not None:
             facts["safe_respawn"] = safe_respawn.to_payload()
@@ -221,7 +238,8 @@ def _phase1_recovery_handler(body: ScarpetBody, config: Phase1RuntimeConfig):
                 "state_after_inventory_hash": after_state.inventory_hash,
             }
         )
-        return RecoveryOutcome(True, "respawned", facts=facts, can_retry=False)
+        reason = "body_reconciled" if reconciled_existing_body else "respawned"
+        return RecoveryOutcome(True, reason, facts=facts, can_retry=False)
 
     return recover
 
