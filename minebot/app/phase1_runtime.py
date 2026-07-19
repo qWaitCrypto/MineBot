@@ -682,7 +682,10 @@ def _read_state_tool(body: Body) -> RegisteredTool:
 def _move_to_tool(navigator: NavigationTransactions) -> RegisteredTool:
     return RegisteredTool(
         "move_to",
-        "Navigate the bot to a target position or near a target position using the Body navigation transaction.",
+        "Travel to a coordinate or coordinate radius through the Body navigation transaction. "
+        "This is generic spatial travel: arrival does not prove line of sight, interaction readiness, "
+        "or access to a nearby block. Use get_to_block for one block-approach objective and "
+        "collect_resource for count-based acquisition.",
         {
             "type": "object",
             "properties": {
@@ -1156,7 +1159,9 @@ def _tool_inventory_counts(body: Body, *, page_size: int = 12) -> dict[str, int]
 def _search_tool(work: BlockWork) -> RegisteredTool:
     return RegisteredTool(
         "search_for_block",
-        "Search for nearby natural resource blocks.",
+        "Read nearby block candidates without moving. A hit verifies block identity and geometric "
+        "distance only; it does not verify line of sight, a usable stand point, or interaction readiness. "
+        "Use get_to_block for one block-approach objective and collect_resource for count-based acquisition.",
         {
             "type": "object",
             "properties": {
@@ -1191,7 +1196,9 @@ def _search_tool(work: BlockWork) -> RegisteredTool:
 def _mine_collect_tool(work: BlockWork) -> RegisteredTool:
     return RegisteredTool(
         "mine_block_collect",
-        "Mine one target block and verify pickup by authoritative inventory delta.",
+        "Mine one already selected exact block through governed approach and verify pickup by authoritative "
+        "inventory delta. It does not discover or choose alternative resource candidates; use "
+        "collect_resource for count-based acquisition.",
         {
             "type": "object",
             "properties": {

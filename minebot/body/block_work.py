@@ -1781,6 +1781,8 @@ class BlockWork:
             "uncertainty": list(search.uncertainty),
             "pages_read": search.pages_read,
             "total_matches": search.total_matches,
+            "line_of_sight_verified": False,
+            "interaction_readiness": "unknown",
         }
         if search.errors:
             context["perception_errors"] = list(search.errors)
@@ -1790,14 +1792,32 @@ class BlockWork:
                 success=True,
                 reason="block_in_range",
                 can_retry=False,
-                metrics={**context, "initial_distance": initial_distance, "final_distance": initial_distance},
+                next_suggestion=(
+                    "Distance alone is not interaction truth. Use collect_resource for count-based acquisition "
+                    "or get_to_block for one block-approach objective before choosing an exact-target action."
+                ),
+                metrics={
+                    **context,
+                    "range_verified": True,
+                    "initial_distance": initial_distance,
+                    "final_distance": initial_distance,
+                },
             )
 
         return ToolResult(
             success=True,
             reason="block_candidates_found",
             can_retry=False,
-            metrics={**context, "initial_distance": initial_distance, "final_distance": initial_distance},
+            next_suggestion=(
+                "A search hit is not an approach result. Use collect_resource for count-based acquisition or "
+                "get_to_block for one block-approach objective; generic move_to does not prove access."
+            ),
+            metrics={
+                **context,
+                "range_verified": False,
+                "initial_distance": initial_distance,
+                "final_distance": initial_distance,
+            },
         )
 
     def _find_surface_domain(

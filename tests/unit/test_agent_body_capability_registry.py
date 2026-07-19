@@ -161,6 +161,29 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
             ["query_signature", "dimension", "coverage_revision"],
         )
 
+    def test_resource_tool_descriptions_expose_the_capability_hierarchy(self):
+        registry = _registry()
+
+        search = registry.get("search_for_block").description
+        approach = registry.get("get_to_block").description
+        move = registry.get("move_to").description
+        mine = registry.get("mine_block_collect").description
+
+        self.assertIn("without moving", search)
+        self.assertIn("does not verify line of sight", search)
+        self.assertIn("Approach one usable block", approach)
+        self.assertIn("does not mine", approach)
+        self.assertIn("generic spatial travel", move)
+        self.assertIn("does not prove line of sight", move)
+        self.assertIn("one already selected exact block", mine)
+        self.assertIn("does not discover or choose alternative", mine)
+
+        self.assertEqual(
+            {"search_for_block", "get_to_block", "move_to", "mine_block_collect"}
+            - set(registry.names()),
+            set(),
+        )
+
     def test_all_modes_receive_the_same_shared_tool_pool(self):
         registry = _registry()
         expected = set(registry.names())

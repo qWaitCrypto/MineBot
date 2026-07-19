@@ -557,6 +557,30 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.reason, "block_candidates_found")
         self.assertEqual(result.metrics["target"]["pos"], [8, 64, 0])
         self.assertEqual(result.metrics["candidates"][0]["pos"], [8, 64, 0])
+        self.assertFalse(result.metrics["range_verified"])
+        self.assertFalse(result.metrics["line_of_sight_verified"])
+        self.assertEqual(result.metrics["interaction_readiness"], "unknown")
+        self.assertIn("collect_resource", result.next_suggestion)
+        self.assertIn("get_to_block", result.next_suggestion)
+        self.assertEqual(body.actions, [])
+
+    def test_search_for_block_in_range_does_not_claim_interaction_readiness(self):
+        body = FakeBody(
+            find_blocks=[{"x": 3, "y": 64, "z": 0, "type": "minecraft:oak_log"}],
+        )
+        work = BlockWork(
+            body,
+            GovernancePolicy(natural_regions=[Region("search", (-20, 0, -20), (20, 100, 20))]),
+        )
+
+        result = work.search_for_block(block_types=("oak_log",), search_radius=12)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "block_in_range")
+        self.assertTrue(result.metrics["range_verified"])
+        self.assertFalse(result.metrics["line_of_sight_verified"])
+        self.assertEqual(result.metrics["interaction_readiness"], "unknown")
+        self.assertIn("Distance alone is not interaction truth", result.next_suggestion)
         self.assertEqual(body.actions, [])
 
     def test_search_for_block_does_not_navigate_even_when_navigator_is_available(self):

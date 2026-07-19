@@ -31,10 +31,19 @@ observations.
 3. Check whether the target block requires a tool tier before breaking it.
    Prefer `ensure_tool_for` when the missing prerequisite is itself a bounded
    acquisition chain; use finer tools when the situation needs explicit control.
-4. Use `collect_resource`, `craft_item`, `smelt_item`, and `equip_item` as
-   governed physical transactions. The model chooses the sequence; each Body
-   transaction owns only its local HOW.
-5. Update the visible plan when prerequisites change. Checkpoint only after
+4. For count-based acquisition, or when search candidates have not been proven
+   interactable, prefer `collect_resource`. It owns bounded candidate discovery,
+   stand-point selection, navigation, governed mining, pickup, and authoritative
+   inventory completion. Do not replace that transaction with a manual
+   `search_for_block` -> `move_to` -> `mine_block_collect` chain.
+5. Use `mine_block_collect` only for one deliberately selected exact block.
+   Use `get_to_block` for one block-approach objective. Generic `move_to` is
+   coordinate travel and does not prove line of sight or block interaction
+   readiness.
+6. Use `craft_item`, `smelt_item`, and `equip_item` as governed physical
+   transactions. The model chooses the sequence; each Body transaction owns
+   only its local HOW.
+7. Update the visible plan when prerequisites change. Checkpoint only after
    meaningful world progress or with a concrete wait or yield condition.
 
 ## Evidence Of Success

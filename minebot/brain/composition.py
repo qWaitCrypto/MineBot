@@ -75,7 +75,13 @@ def register_collect_resource_tool(registry: ToolRegistry, context: CompositionC
     registry.register(
         RegisteredTool(
             name="collect_resource",
-            description="Collect a requested resource count by composing search, mine, and inventory tools.",
+            description=(
+                "Collect a requested resource count through one bounded high-level transaction. "
+                "For collect-N goals, prefer this over manually chaining search_for_block, move_to, "
+                "get_to_block, or mine_block_collect: the Body owns candidate discovery and blacklisting, "
+                "stand-point selection, navigation, governed mining, pickup, and authoritative inventory "
+                "completion truth."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {

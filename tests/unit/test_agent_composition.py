@@ -1146,6 +1146,21 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(registry.get("collect_resource").sidecar.can_mutate_body)
         self.assertIsNone(ctx.weld_context.writer.holder)
 
+    def test_collect_resource_framework_contract_exposes_the_full_collect_n_process(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry)
+        register_collect_resource_tool(registry, ctx)
+
+        tool = registry.get("collect_resource")
+
+        self.assertIn("bounded high-level transaction", tool.description)
+        self.assertIn("stand-point selection", tool.description)
+        self.assertIn("pickup", tool.description)
+        self.assertIn("authoritative inventory completion truth", tool.description)
+        self.assertEqual(tool.framework_view()["description"], tool.description)
+
     def test_collect_resource_passes_bounded_domain_budgets(self):
         body = FakeBody()
         registry = ToolRegistry()

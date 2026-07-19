@@ -510,7 +510,9 @@ def _move_away_tool(navigator: NavigationTransactions) -> RegisteredTool:
 def _get_to_block_tool(approach: BlockApproachTransactions) -> RegisteredTool:
     return _tool(
         "get_to_block",
-        "Approach a usable nearby block type; Body selects candidates and stand points, replans, then verifies block identity and range.",
+        "Approach one usable block from the requested block types. The Body selects bounded candidates and "
+        "stand points, replans, then verifies block identity and interaction range. This does not mine or "
+        "collect a requested count; use collect_resource for count-based acquisition.",
         _object_schema(
             {
                 "block_types": STRING_LIST_SCHEMA,
