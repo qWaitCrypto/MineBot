@@ -297,6 +297,11 @@ class AgentSession:
                 self.parts.runtime.run_turn(
                     extra_signals=signals,
                     body_actions_allowed=intent.kind is not WorkIntentKind.MAINTENANCE,
+                    continuation_evidence_cursor=(
+                        int(intent.payload.get("evidence_cursor") or 0)
+                        if intent.kind is WorkIntentKind.TASK_BOUNDARY
+                        else None
+                    ),
                 ),
                 work_kind="agent_turn",
                 admission_version=admission_version,
@@ -435,6 +440,14 @@ class AgentSession:
         self._trace("session_goal_completed", goal=completed_goal, reason=reason)
         if self.task_workspace is not None:
             self.task_workspace.complete(authority=authority)
+        if self.work_queue is not None:
+            self.work_queue.supersede(
+                {
+                    WorkIntentKind.TASK_BOUNDARY,
+                    WorkIntentKind.TASK_CONTINUE,
+                },
+                reason="goal_completed",
+            )
         skills = self._skill_runtime()
         if skills is not None and completed_task is not None:
             skills.end_task(completed_task.task_id)
@@ -785,16 +798,43 @@ class AgentSession:
             return signalize_events([event])
 
         if intent.kind in {
+            WorkIntentKind.TASK_BOUNDARY,
             WorkIntentKind.TASK_CONTINUE,
             WorkIntentKind.RECOVERY_RECONCILE,
         }:
             self._ensure_parts_for_runtime_intent()
             assert self.parts is not None
             task = self.task_workspace.current_task if self.task_workspace is not None else None
-            if intent.kind is WorkIntentKind.TASK_CONTINUE and task is None:
+            if intent.kind in {
+                WorkIntentKind.TASK_BOUNDARY,
+                WorkIntentKind.TASK_CONTINUE,
+            } and task is None:
                 self._turn_pending = False
-                self._trace("task_continue_dropped", reason="no_active_task")
+                self._trace(
+                    f"{intent.kind.value}_dropped",
+                    reason="no_active_task",
+                )
                 return []
+            if intent.kind is WorkIntentKind.TASK_BOUNDARY:
+                if (
+                    intent.task_id != task.task_id
+                    or task.status is not TaskStatus.RUNNING
+                    or (
+                        intent.generation is not None
+                        and not self.parts.authority.generation_current(intent.generation)
+                    )
+                ):
+                    self._turn_pending = False
+                    self._trace(
+                        "task_boundary_dropped",
+                        reason="task_changed",
+                        intent_task_id=intent.task_id,
+                        current_task_id=task.task_id,
+                        task_status=task.status.value,
+                        intent_generation=intent.generation,
+                        current_generation=self.parts.authority.current_generation(),
+                    )
+                    return []
             if intent.kind is WorkIntentKind.TASK_CONTINUE:
                 if intent.task_id != task.task_id or task.status is not TaskStatus.RUNNING:
                     self._turn_pending = False
@@ -831,9 +871,20 @@ class AgentSession:
                 self.parts.context.set_goal(task.goal_text)
                 self.parts.runtime.weld_context.goal_text = task.goal_text
             frame = json.dumps(intent.payload, ensure_ascii=False, sort_keys=True)
-            self.parts.context.observe_system_message(
-                f"{intent.kind.value.upper()}: {frame}"
-            )
+            if intent.kind is WorkIntentKind.TASK_BOUNDARY:
+                self.parts.context.observe_system_message(
+                    "TASK_BOUNDARY: The previous finite SDK run ended while the "
+                    "durable task remained running and created no new checkpoint. "
+                    "Continue reasoning with the full shared tool pool, inspect or act "
+                    "as needed, and before final output call checkpoint_task with exactly "
+                    "one explicit disposition. This bounded boundary-closure run does not "
+                    "choose your strategy. FACTS: "
+                    + frame
+                )
+            else:
+                self.parts.context.observe_system_message(
+                    f"{intent.kind.value.upper()}: {frame}"
+                )
             decision = str(intent.payload.get("decision") or "resume")
             if (
                 intent.kind is WorkIntentKind.RECOVERY_RECONCILE
@@ -1161,17 +1212,44 @@ class AgentSession:
                 WorkIntentKind.RECOVERY_RECONCILE,
                 WorkIntentKind.TASK_CONTINUE,
             }:
+                boundary = self.work_queue.enqueue(
+                    WorkIntentKind.TASK_BOUNDARY,
+                    source="model_final_without_continuation",
+                    payload={
+                        "origin_intent_id": intent.intent_id,
+                        "task_revision": task.revision,
+                        "evidence_cursor": self.parts.runtime.current_run_evidence_cursor(),
+                    },
+                    dedupe_key=(
+                        f"task_boundary:{task.task_id}:r{task.revision}:"
+                        f"g{self.parts.authority.current_generation()}"
+                    ),
+                    task_id=task.task_id,
+                    generation=self.parts.authority.current_generation(),
+                )
+                self._trace(
+                    "task_boundary_queued",
+                    task_id=task.task_id,
+                    intent_id=boundary.intent_id,
+                    origin_intent_id=intent.intent_id,
+                    evidence_cursor=self.parts.runtime.current_run_evidence_cursor(),
+                )
+            elif intent.kind is WorkIntentKind.TASK_BOUNDARY:
                 final_fingerprint = self._current_body_fingerprint()
-                parked = self.task_workspace.park_without_continuation(
+                yielded = self.task_workspace.yield_without_continuation(
                     body_fingerprint=final_fingerprint,
                 )
-                if parked is not None:
+                if yielded is not None:
                     self._trace(
-                        "task_parked_without_continuation",
-                        task_id=parked[0].task_id,
-                        checkpoint_id=parked[1].checkpoint_id,
+                        "task_boundary_unclosed",
+                        task_id=yielded[0].task_id,
+                        checkpoint_id=yielded[1].checkpoint_id,
+                        reason=yielded[1].summary,
                     )
-                    self._stand_down()
+                    if self.parts.lifecycle.state is LifecycleState.ACTIVE:
+                        self.parts.lifecycle.yield_()
+                    else:
+                        self._stand_down()
             return
         if self.autonomy_coordinator is None:
             if checkpoint.disposition is CheckpointDisposition.CONTINUE:

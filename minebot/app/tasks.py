@@ -95,7 +95,7 @@ class TaskWorkspace:
             completion_authority=authority,
         )
 
-    def park_without_continuation(
+    def yield_without_continuation(
         self,
         *,
         body_fingerprint: dict[str, object] | None,
@@ -105,9 +105,9 @@ class TaskWorkspace:
             return None
         return self.checkpoint(
             expected_task_revision=task.revision,
-            disposition=CheckpointDisposition.WAIT_EVENT,
-            summary="model_final_without_continuation",
-            wait_for=("user_input_or_material_body_event",),
+            disposition=CheckpointDisposition.YIELD,
+            summary="model_final_without_continuation_after_boundary_retry",
+            evidence=("bounded_task_boundary_retry_exhausted",),
             body_fingerprint=body_fingerprint,
         )
 

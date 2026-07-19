@@ -120,6 +120,8 @@ class AgentContextTests(unittest.TestCase):
 
         self.assertIn("TASK_ARTIFACT:", preamble)
         self.assertIn('"task_id": "task-1"', preamble)
+        self.assertIn("TASK_RUNTIME_CONTRACT:", preamble)
+        self.assertIn("checkpoint_task", preamble)
         self.assertNotIn("TASK_ARTIFACT", ctx.pending_turn_input(fallback="new input")[0])
 
     def test_compacted_conversation_summary_is_injected_without_replacing_task_facts(self):

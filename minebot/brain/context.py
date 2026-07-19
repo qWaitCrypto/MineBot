@@ -286,6 +286,16 @@ class AgentContext:
                 "TASK_ARTIFACT: "
                 + json.dumps(self._task_artifact, ensure_ascii=False, sort_keys=True)
             )
+            task = self._task_artifact.get("task")
+            if isinstance(task, dict) and task.get("status") == "running":
+                parts.append(
+                    "TASK_RUNTIME_CONTRACT: A durable task spans finite SDK runs only "
+                    "through checkpoint_task. Before final output, record exactly one "
+                    "explicit disposition: continue with a structured continuation when "
+                    "the unfinished goal remains actionable; wait_event only for a named "
+                    "material wake condition; yield only for a grounded bounded blocker; "
+                    "complete only with authoritative evidence."
+                )
         if self._conversation_summary is not None and self._conversation_summary.get("compacted_turns", 0):
             parts.append(
                 "CONVERSATION_SUMMARY: "

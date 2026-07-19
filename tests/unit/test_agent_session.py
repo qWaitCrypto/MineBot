@@ -344,6 +344,135 @@ class AgentSessionTests(unittest.TestCase):
         session.close()
         store.close()
 
+    def test_missing_checkpoint_gets_one_bounded_task_boundary_retry_then_yields(self):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        workspace = TaskWorkspace(store, scope)
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(
+            lambda goal: build_parts(goal, calls, bodies),
+            task_workspace=workspace,
+        )
+        session.submit(SessionCommand.start("prepare for the End"))
+
+        first = asyncio.run(session.step())
+        task = workspace.current_task
+        boundary = session.work_queue.queued_intents(WorkIntentKind.TASK_BOUNDARY)
+
+        self.assertEqual(first.status, "completed_turn")
+        self.assertEqual(first.lifecycle, LifecycleState.ACTIVE)
+        self.assertEqual(task.status, TaskStatus.RUNNING)
+        self.assertEqual(len(boundary), 1)
+        self.assertEqual(boundary[0].task_id, task.task_id)
+        self.assertEqual(boundary[0].payload["evidence_cursor"], 0)
+
+        second = asyncio.run(session.step())
+        checkpoint = store.get_latest_checkpoint(task.task_id)
+
+        self.assertEqual(second.status, "completed_turn")
+        self.assertEqual(second.lifecycle, LifecycleState.YIELDED)
+        self.assertEqual(workspace.current_task.status, TaskStatus.YIELDED)
+        self.assertEqual(session.work_queue.pending_count(), 0)
+        self.assertEqual(
+            checkpoint.summary,
+            "model_final_without_continuation_after_boundary_retry",
+        )
+        self.assertIn("TASK_BOUNDARY:", calls[-1])
+        session.close()
+        store.close()
+
+    def test_task_boundary_continuation_uses_origin_run_evidence_cursor(self):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        workspace = TaskWorkspace(store, scope)
+        archive = PersistentProgressEpochArchive(store, scope)
+        bodies: list[FakeBody] = []
+        calls: list[int] = []
+        observed_cursors: list[int] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], bodies)
+
+            async def runner(_agent, _input_text, **_kwargs):
+                calls.append(len(calls) + 1)
+                observed_cursors.append(parts.runtime.current_run_evidence_cursor())
+                task = workspace.current_task
+                if len(calls) == 1:
+                    parts.runtime.body.x += 1.0
+                    archive.store(
+                        {
+                            "epoch_id": "epoch-before-boundary",
+                            "run_id": "run-before-boundary",
+                            "model_turn": 1,
+                            "members": [],
+                            "pre_body_fingerprint": "before",
+                            "post_body_fingerprint": "after",
+                            "evidence_refs": [],
+                            "epistemic_keys": [],
+                            "material_changed": True,
+                            "progress_aborted": False,
+                        }
+                    )
+                elif len(calls) == 2:
+                    workspace.checkpoint(
+                        expected_task_revision=task.revision,
+                        disposition=CheckpointDisposition.CONTINUE,
+                        summary="resume after finite SDK boundary",
+                        body_fingerprint={"dimension": "overworld"},
+                        continuation=ContinuationContract(
+                            objective="continue preparing",
+                            operation_class=ContinuationOperationClass.MATERIAL,
+                            target_descriptor={"kind": "state", "identifier": "prepared"},
+                            expected_evidence=("material_change",),
+                            bounded_epoch_budget=4,
+                            approach_key="approach:boundary",
+                            evidence_cursor=parts.runtime.current_run_evidence_cursor(),
+                            generation=parts.authority.current_generation(),
+                        ),
+                    )
+                else:
+                    workspace.checkpoint(
+                        expected_task_revision=task.revision,
+                        disposition=CheckpointDisposition.WAIT_EVENT,
+                        summary="wait",
+                    )
+                return {"ok": True}
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory, task_workspace=workspace)
+        session.autonomy_coordinator = AutonomyCoordinator(
+            workspace,
+            session.work_queue,
+            archive,
+        )
+        session.submit(SessionCommand.start("prepare for the End"))
+
+        asyncio.run(session.step())
+        self.assertEqual(archive.latest_cursor(), 1)
+
+        boundary_result = asyncio.run(session.step())
+        task = workspace.current_task
+
+        self.assertEqual(boundary_result.lifecycle, LifecycleState.ACTIVE)
+        self.assertEqual(observed_cursors, [0, 0])
+        self.assertEqual(task.status, TaskStatus.RUNNING)
+        self.assertEqual(
+            session.work_queue.count_for_task(
+                WorkIntentKind.TASK_CONTINUE,
+                task.task_id,
+            ),
+            1,
+        )
+
+        asyncio.run(session.step())
+        self.assertEqual(workspace.current_task.status, TaskStatus.WAITING_EVENT)
+        self.assertEqual(calls, [1, 2, 3])
+        session.close()
+        store.close()
+
     def test_persistent_task_is_separate_from_plain_chat_and_reaches_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = RuntimeStateStore(Path(tmp) / "state.sqlite3")

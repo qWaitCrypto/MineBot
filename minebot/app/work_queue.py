@@ -24,6 +24,7 @@ class WorkIntentKind(str, Enum):
     QUIT = "quit"
     BODY_EVENT = "body_event"
     RECOVERY_RECONCILE = "recovery_reconcile"
+    TASK_BOUNDARY = "task_boundary"
     TASK_CONTINUE = "task_continue"
     MAINTENANCE = "maintenance"
 
@@ -46,6 +47,7 @@ WORK_INTENT_PRIORITY: dict[WorkIntentKind, int] = {
     WorkIntentKind.CONTINUE: 70,
     WorkIntentKind.START: 65,
     WorkIntentKind.MESSAGE: 60,
+    WorkIntentKind.TASK_BOUNDARY: 55,
     WorkIntentKind.TASK_CONTINUE: 50,
     WorkIntentKind.MAINTENANCE: 10,
 }

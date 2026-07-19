@@ -2396,6 +2396,7 @@ class AgentRuntime:
         extra_signals: list[AgentSignal] | None = None,
         *,
         body_actions_allowed: bool = True,
+        continuation_evidence_cursor: int | None = None,
     ) -> AgentTurnOutcome:
         prepared = await self.run_sync(self._prepare_turn, extra_signals)
         if isinstance(prepared, AgentTurnOutcome):
@@ -2442,7 +2443,12 @@ class AgentRuntime:
             **context_budget,
         )
 
-        self._run_evidence_cursor = self.latest_progress_evidence_cursor()
+        latest_evidence_cursor = self.latest_progress_evidence_cursor()
+        self._run_evidence_cursor = (
+            latest_evidence_cursor
+            if continuation_evidence_cursor is None
+            else max(0, min(int(continuation_evidence_cursor), latest_evidence_cursor))
+        )
         run_id = f"run-{uuid4().hex}"
         progress_epochs = ProgressEpochAdapter(
             runtime=self,
