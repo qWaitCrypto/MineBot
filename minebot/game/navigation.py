@@ -908,6 +908,15 @@ class AStarPlanner:
             dy = pos[1] - current.pos[1]
             dx = pos[0] - current.pos[0]
             dz = pos[2] - current.pos[2]
+            current_cell = current.overlay.cell_at(self.world, current.pos)
+            if (
+                current_cell is not None
+                and current_cell.liquid
+                and dy > 0
+                and dx == 0
+                and dz == 0
+            ):
+                return MovementCandidate(kind=MoveKind.SWIM, pos=pos, block_type=cell.block_type)
             if cell.liquid:
                 return MovementCandidate(kind=MoveKind.SWIM, pos=pos, block_type=cell.block_type)
             if dy > 0:

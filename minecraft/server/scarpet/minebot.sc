@@ -4484,6 +4484,7 @@ navigation_neighbors(x, y, z, context) -> (
     up = probe_walkability(x, y + 1, z);
     down = probe_walkability(x, y - 1, z);
     if(up == 'LIQUID', neighbors += navigation_candidate(x, y + 1, z, 'swim', 3.0, 0, 'egress_to_dry'));
+    if(up == 'NO_FLOOR' && navigation_body_clear(x, y + 1, z), neighbors += navigation_candidate(x, y + 1, z, 'swim', 3.0, 0, 'egress_to_dry'));
     if(down == 'LIQUID', neighbors += navigation_candidate(x, y - 1, z, 'swim', 3.0, 0, 'egress_to_dry'))
   );
   downward_floor_type = '' + block(x, y - 1, z);

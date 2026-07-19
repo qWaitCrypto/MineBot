@@ -401,6 +401,10 @@ class ScarpetSourceTests(unittest.TestCase):
         neighbors_body = source[source.index("navigation_neighbors(x, y, z, context)"):source.index("navigation_edge_valid(")]
         self.assertIn("source_kind = probe_walkability(x, y, z)", neighbors_body)
         self.assertGreaterEqual(neighbors_body.count("source_kind != 'LIQUID'"), 2)
+        self.assertIn(
+            "if(up == 'NO_FLOOR' && navigation_body_clear(x, y + 1, z), neighbors += navigation_candidate(x, y + 1, z, 'swim', 3.0, 0, 'egress_to_dry'))",
+            neighbors_body,
+        )
 
     def test_server_navigation_bridge_uses_governed_proposal_handshake(self):
         source = MINEBOT_SC.read_text()
