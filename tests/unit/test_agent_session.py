@@ -1,6 +1,7 @@
 import asyncio
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from minebot.brain.lifecycle import LifecycleController, LifecycleState
 from minebot.brain.modes import ModeRuntime
 from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import ToolResult
+from minebot.contract import ToolResult, execution_checkpoint
 
 from tests.unit.test_agent_runner_spine import FakeBody
 
@@ -815,6 +816,103 @@ class AgentSessionTests(unittest.TestCase):
                 for event in session.parts.runtime.trace.snapshot()
             )
         )
+
+    def test_quarantine_trace_is_emitted_once_across_rechecks(self):
+        bodies: list[FakeBody] = []
+        started = threading.Event()
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], bodies)
+
+            async def runner(_agent, _input_text, **_kwargs):
+                started.set()
+                await asyncio.Event().wait()
+
+            async def never_idle(*, timeout_s=30.0):
+                return False
+
+            parts.runtime.runner_run = runner
+            parts.runtime.wait_for_execution_idle = never_idle
+            return parts
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.message("hello"))
+
+        async def scenario():
+            active = asyncio.create_task(session.step())
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            session.submit(SessionCommand.message("new instruction"))
+            await active
+            first = await session.step()
+            second = await session.step()
+            return first, second
+
+        first, second = asyncio.run(scenario())
+        traces = [
+            event
+            for event in session.parts.runtime.trace.snapshot()
+            if event["event"] == "session_execution_quarantined"
+        ]
+
+        self.assertEqual(first.message, "execution_not_idle_after_preempt")
+        self.assertEqual(second.message, "execution_not_idle_after_preempt")
+        self.assertEqual(len(traces), 1)
+
+    def test_quit_cooperatively_settles_sync_execution_and_completes_intent(self):
+        bodies: list[FakeBody] = []
+        started = threading.Event()
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], bodies)
+
+            def body_scan():
+                started.set()
+                while True:
+                    execution_checkpoint()
+                    time.sleep(0.002)
+
+            async def runner(_agent, _input_text, **_kwargs):
+                return await parts.runtime.run_sync(body_scan)
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("explore and gather materials"))
+
+        async def scenario():
+            active = asyncio.create_task(session.step())
+            while not started.is_set():
+                await asyncio.sleep(0.002)
+            quit_intent = session.submit(
+                SessionCommand.quit("30m_gate_complete"),
+                dedupe_key="quit:30m_gate_complete",
+            )
+            preempted = await active
+            quit_step = await session.step()
+            idle = await session.parts.runtime.wait_for_execution_idle(timeout_s=0.25)
+            return quit_intent, preempted, quit_step, idle
+
+        quit_intent, preempted, quit_step, idle = asyncio.run(scenario())
+        completed_intent = session.work_queue.get_by_dedupe("quit:30m_gate_complete")
+        quarantine_traces = [
+            event
+            for event in session.parts.runtime.trace.snapshot()
+            if event["event"] == "session_execution_quarantined"
+        ]
+        session.close()
+
+        self.assertEqual(preempted.status, "preempted")
+        self.assertEqual(quit_step.status, "quit")
+        self.assertEqual(quit_step.lifecycle, LifecycleState.IDLE)
+        self.assertTrue(idle)
+        self.assertEqual(session.parts.runtime.execution_lane.active_count, 0)
+        self.assertEqual(quit_intent.kind, WorkIntentKind.QUIT)
+        self.assertIsNotNone(completed_intent)
+        self.assertEqual(completed_intent.state, WorkIntentState.COMPLETED)
+        self.assertLessEqual(len(quarantine_traces), 1)
+        self.assertIn("30m_gate_complete", bodies[0].interrupt_reasons)
 
     def test_pause_continue_resumes_inflight_plain_turn_without_creating_goal(self):
         bodies: list[FakeBody] = []

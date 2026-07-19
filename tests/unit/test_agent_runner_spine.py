@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+import time
 import unittest
 
 from agents.exceptions import MaxTurnsExceeded, UserError
@@ -15,6 +16,7 @@ from minebot.app.runner import (
     RuntimeRunContext,
     RuntimeTrace,
     SerialExecutionLane,
+    ToolExecutionTimeout,
     _model_tool_payload,
     extract_model_response_observations,
     extract_run_observations,
@@ -28,7 +30,15 @@ from minebot.brain.modes import AgentSignal, ModeRuntime
 from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext
 from minebot.brain.persona import prompt_with_language
-from minebot.contract import BodyState, LegalityDecision, PerceptionResult, Result, ToolResult
+from minebot.contract import (
+    BodyState,
+    LegalityDecision,
+    PerceptionResult,
+    Result,
+    ToolResult,
+    execution_checkpoint,
+)
+from minebot.game.body import ScarpetBody
 from minebot.game.errors import BodyActionTimeoutError, RconError
 
 
@@ -644,6 +654,85 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(first_result, "first")
         self.assertEqual(second_result, "second")
         self.assertGreater(elapsed, 0.05)
+
+    def test_execution_lane_timeout_cooperatively_settles_callback(self):
+        lane = SerialExecutionLane(thread_name="timeout-cancel-test")
+        started = threading.Event()
+
+        def callback():
+            started.set()
+            while True:
+                execution_checkpoint()
+                time.sleep(0.002)
+
+        async def scenario():
+            with self.assertRaises(ToolExecutionTimeout):
+                await lane.run(callback, timeout_s=0.03)
+            return await lane.wait_idle(timeout_s=0.25)
+
+        try:
+            idle = asyncio.run(scenario())
+        finally:
+            lane.close()
+
+        self.assertTrue(started.is_set())
+        self.assertTrue(idle)
+        self.assertEqual(lane.active_count, 0)
+
+    def test_scarpet_body_request_boundary_settles_cancelled_execution(self):
+        class SlowTransport:
+            def __init__(self):
+                self.started = threading.Event()
+
+            def request(self, _command):
+                self.started.set()
+                time.sleep(0.05)
+                return "{}"
+
+        transport = SlowTransport()
+        body = ScarpetBody("Bot1", transport)
+        lane = SerialExecutionLane(thread_name="body-cancel-test")
+
+        async def scenario():
+            task = asyncio.create_task(lane.run(body.get_state))
+            while not transport.started.is_set():
+                await asyncio.sleep(0.002)
+            cancelled_count = lane.request_cancel("session_command:quit")
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            idle = await lane.wait_idle(timeout_s=0.25)
+            return cancelled_count, idle
+
+        try:
+            cancelled_count, idle = asyncio.run(scenario())
+        finally:
+            lane.close()
+
+        self.assertEqual(cancelled_count, 1)
+        self.assertTrue(idle)
+        self.assertEqual(lane.active_count, 0)
+
+    def test_execution_lane_close_waits_for_cooperative_worker_exit(self):
+        lane = SerialExecutionLane(thread_name="close-cancel-test")
+        started = threading.Event()
+
+        def callback():
+            started.set()
+            while True:
+                execution_checkpoint()
+                time.sleep(0.002)
+
+        async def scenario():
+            task = asyncio.create_task(lane.run(callback))
+            while not started.is_set():
+                await asyncio.sleep(0.002)
+            await asyncio.to_thread(lane.close)
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+
+        self.assertEqual(lane.active_count, 0)
 
     def test_tool_execution_timeout_interrupts_body_and_is_not_transport_error(self):
         release = threading.Event()

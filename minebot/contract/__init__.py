@@ -39,6 +39,12 @@ from .messages import (
     perception_next_cursor,
 )
 from .body_iface import Body
+from .execution import (
+    ExecutionCancellation,
+    ExecutionCancelled,
+    execution_cancellation_scope,
+    execution_checkpoint,
+)
 from .progress import (
     FAILURE_STORM_LIMIT,
     LocalProgressController,
@@ -60,6 +66,8 @@ __all__ = [
     "CANDIDATE_SKIP_REASONS",
     "InteractionContext",
     "Event",
+    "ExecutionCancellation",
+    "ExecutionCancelled",
     "InventorySlot",
     "JsonObject",
     "LegalityDecision",
@@ -83,6 +91,8 @@ __all__ = [
     "StructureRiskLevel",
     "TOOL_TIER_ORDER",
     "best_owned_pickaxe",
+    "execution_cancellation_scope",
+    "execution_checkpoint",
     "is_candidate_skip",
     "required_pickaxe_tier",
     "tier_satisfies",

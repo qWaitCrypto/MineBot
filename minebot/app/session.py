@@ -37,6 +37,9 @@ from minebot.brain.modes import AgentSignal, signalize_events
 from minebot.contract import Event
 
 DEFAULT_RUNAWAY_STEP_LIMIT = 100_000
+EXECUTION_QUARANTINE_POLL_S = 0.25
+
+
 class SessionCommandKind(Enum):
     START = "start"
     PAUSE = "pause"
@@ -113,6 +116,7 @@ class AgentSession:
     _suspended_turn_request: tuple[str, str] | None = None
     _work_in_flight: bool = False
     _execution_quarantined: bool = False
+    _execution_quarantine_reported: bool = False
     _scheduler_id: str = field(default_factory=lambda: f"session-{uuid4().hex}")
 
     def __post_init__(self) -> None:
@@ -138,7 +142,9 @@ class AgentSession:
                 return existing
         intent_kind = WorkIntentKind(command.kind.value)
         if self.parts is not None and (self._work_in_flight or always_interrupt):
-            self.parts.authority.invalidate_generation(f"session_command:{command.kind.value}")
+            cancellation_reason = f"session_command:{command.kind.value}"
+            self.parts.authority.invalidate_generation(cancellation_reason)
+            self.parts.runtime.request_execution_cancel(cancellation_reason)
             self._body_interrupt(command.reason)
         superseded = superseded_kinds_for(intent_kind)
         if superseded:
@@ -1284,45 +1290,65 @@ class AgentSession:
     ):
         task = asyncio.create_task(work)
         assert self.work_queue is not None
+
+        async def settle_preempted_work():
+            idle = True
+            if self.parts is not None:
+                idle = await self.parts.runtime.wait_for_execution_idle()
+                self._execution_quarantined = not idle
+                self._execution_quarantine_reported = False
+                self._trace(
+                    "session_work_preempted",
+                    work_kind=work_kind,
+                    execution_idle=idle,
+                    pending_count=self.work_queue.pending_count(),
+                )
+            return _WORK_PREEMPTED
+
         try:
             while not task.done():
                 if self.work_queue.notification_version != admission_version:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
-                    idle = True
-                    if self.parts is not None:
-                        idle = await self.parts.runtime.wait_for_execution_idle()
-                        self._execution_quarantined = not idle
-                        self._trace(
-                            "session_work_preempted",
-                            work_kind=work_kind,
-                            execution_idle=idle,
-                            pending_count=self.work_queue.pending_count(),
-                        )
-                    return _WORK_PREEMPTED
+                    return await settle_preempted_work()
                 await asyncio.sleep(0.01)
             return task.result()
         except asyncio.CancelledError:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+            if self.work_queue.notification_version != admission_version:
+                return await settle_preempted_work()
             raise
 
     async def _guard_execution_quarantine(self) -> SessionStep | None:
         if not self._execution_quarantined or self.parts is None:
             return None
-        idle = await self.parts.runtime.wait_for_execution_idle(timeout_s=0.0)
+        queued_control = _queued_quarantine_control(self.work_queue)
+        if queued_control is not None:
+            self.parts.runtime.request_execution_cancel(
+                f"quarantine_control:{queued_control.kind.value}"
+            )
+        idle = await self.parts.runtime.wait_for_execution_idle(
+            timeout_s=EXECUTION_QUARANTINE_POLL_S
+        )
         if idle:
             self._execution_quarantined = False
+            self._execution_quarantine_reported = False
             self._trace("session_execution_quarantine_cleared")
             return None
         self._turn_pending = False
-        self._trace(
-            "session_execution_quarantined",
-            reason="execution_not_idle_after_preempt",
-            active_count=self.parts.runtime.execution_lane.active_count,
-        )
+        if not self._execution_quarantine_reported:
+            self._trace(
+                "session_execution_quarantined",
+                reason="execution_not_idle_after_preempt",
+                active_count=self.parts.runtime.execution_lane.active_count,
+                pending_control=(
+                    None if queued_control is None else queued_control.kind.value
+                ),
+            )
+            self._execution_quarantine_reported = True
         if self.parts.lifecycle.state is LifecycleState.ACTIVE:
             self.parts.lifecycle.yield_()
         else:
@@ -1332,6 +1358,19 @@ class AgentSession:
             self.parts.lifecycle.state,
             "execution_not_idle_after_preempt",
         )
+
+
+def _queued_quarantine_control(queue: WorkIntentQueue | None) -> WorkIntent | None:
+    if queue is None:
+        return None
+    controls = [
+        intent
+        for intent in queue.queued_intents()
+        if intent.kind in {WorkIntentKind.QUIT, WorkIntentKind.CANCEL}
+    ]
+    if not controls:
+        return None
+    return min(controls, key=lambda intent: (-intent.priority, intent.intent_id))
 
 
 def _command_from_intent(intent: WorkIntent) -> SessionCommand:

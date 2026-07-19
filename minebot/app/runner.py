@@ -8,6 +8,7 @@ import json
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
@@ -36,7 +37,15 @@ from minebot.brain.modes import (
 )
 from minebot.brain.progress import ProgressAuthority, ProgressStep
 from minebot.brain.registry import RegisteredTool, ToolRegistry, WeldContext, execute_tool
-from minebot.contract import Body, JsonObject, ProgressAbort, ProgressFacts
+from minebot.contract import (
+    Body,
+    ExecutionCancellation,
+    ExecutionCancelled,
+    JsonObject,
+    ProgressAbort,
+    ProgressFacts,
+    execution_cancellation_scope,
+)
 from minebot.game.errors import BodyActionTimeoutError, BodyProtocolError
 
 RunnerCallable = Callable[..., Awaitable[Any]]
@@ -56,7 +65,7 @@ class SerialExecutionLane:
 
     def __init__(self, *, thread_name: str = "minebot-body") -> None:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=thread_name)
-        self._futures: set[Future[Any]] = set()
+        self._futures: dict[Future[Any], ExecutionCancellation] = {}
         self._lock = threading.Lock()
         self._closed = False
 
@@ -71,33 +80,56 @@ class SerialExecutionLane:
         submitted_at = time.monotonic()
         started = threading.Event()
         started_at: list[float] = []
+        cancellation = ExecutionCancellation()
 
         def invoke() -> Any:
             started_at.append(time.monotonic())
             started.set()
-            return callback(*args)
+            with execution_cancellation_scope(cancellation):
+                return callback(*args)
 
         with self._lock:
             if self._closed:
                 raise RuntimeError("execution lane is closed")
             future = self._executor.submit(invoke)
-            self._futures.add(future)
+            self._futures[future] = cancellation
         future.add_done_callback(self._discard)
         try:
             while not future.done():
                 if timeout_s is not None and started.is_set():
                     elapsed_s = time.monotonic() - started_at[0]
                     if elapsed_s >= timeout_s:
+                        cancellation.cancel("execution_timeout")
+                        future.cancel()
                         raise ToolExecutionTimeout(
                             timeout_s=timeout_s,
                             execution_elapsed_s=elapsed_s,
                             queue_wait_s=started_at[0] - submitted_at,
                         )
                 await asyncio.sleep(EXECUTION_LANE_POLL_S)
-            return future.result()
+            if future.cancelled():
+                raise asyncio.CancelledError
+            try:
+                return future.result()
+            except (FutureCancelledError, ExecutionCancelled) as exc:
+                raise asyncio.CancelledError from exc
         except asyncio.CancelledError:
+            cancellation.cancel("asyncio_cancelled")
             future.cancel()
             raise
+
+    def request_cancel(self, reason: str) -> int:
+        """Signal every running or queued callback without violating serialization."""
+
+        with self._lock:
+            pending = list(self._futures.items())
+        cancellation_scope_count = sum(
+            not future.done() for future, _cancellation in pending
+        )
+        for future, cancellation in pending:
+            cancellation.cancel(reason)
+            future.cancel()
+        return cancellation_scope_count
 
     async def wait_idle(self, *, timeout_s: float = EXECUTION_LANE_CANCEL_TIMEOUT_S) -> bool:
         deadline = time.monotonic() + max(0.0, timeout_s)
@@ -117,11 +149,12 @@ class SerialExecutionLane:
             if self._closed:
                 return
             self._closed = True
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self.request_cancel("execution_lane_closed")
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
     def _discard(self, future: Future[Any]) -> None:
         with self._lock:
-            self._futures.discard(future)
+            self._futures.pop(future, None)
 
 
 class ToolExecutionTimeout(TimeoutError):
@@ -2538,6 +2571,9 @@ class AgentRuntime:
     async def wait_for_execution_idle(self, *, timeout_s: float = EXECUTION_LANE_CANCEL_TIMEOUT_S) -> bool:
         return await self.execution_lane.wait_idle(timeout_s=timeout_s)
 
+    def request_execution_cancel(self, reason: str) -> int:
+        return self.execution_lane.request_cancel(reason)
+
     async def cancel_active_execution(self, reason: str) -> bool:
         facts = await self.cancel_active_execution_with_facts(reason)
         return bool(facts.get("settled"))
@@ -2545,6 +2581,7 @@ class AgentRuntime:
     async def cancel_active_execution_with_facts(self, reason: str) -> JsonObject:
         cancellation_started = time.monotonic()
         self.authority.invalidate_generation(reason)
+        cancellation_scope_count = self.request_execution_cancel(reason)
         interrupt_ok: bool | None = None
         interrupt_accepted: bool | None = None
         interrupt_complete: bool | None = None
@@ -2583,6 +2620,7 @@ class AgentRuntime:
         settled = execution_idle and owner_settled
         facts: JsonObject = {
             "interrupt_requested": True,
+            "cancellation_scope_count": cancellation_scope_count,
             "interrupt_ok": interrupt_ok,
             "interrupt_accepted": interrupt_accepted,
             "interrupt_complete": interrupt_complete,

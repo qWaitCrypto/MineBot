@@ -6,7 +6,16 @@ import time
 import re
 from typing import Any
 
-from minebot.contract import Action, BodyState, Event, InventorySlot, PerceptionResult, Result, perception_next_cursor
+from minebot.contract import (
+    Action,
+    BodyState,
+    Event,
+    InventorySlot,
+    PerceptionResult,
+    Result,
+    execution_checkpoint,
+    perception_next_cursor,
+)
 from minebot.game.errors import BodyActionTimeoutError
 from minebot.game.protocol import (
     RCON_SLOT_PAGE_SIZE,
@@ -145,6 +154,7 @@ class ScarpetBody:
         action_name: str | None = None,
         scope: str | None = None,
     ) -> str:
+        execution_checkpoint()
         started = time.monotonic()
         try:
             raw = self.transport.request(command)
@@ -173,6 +183,7 @@ class ScarpetBody:
             action_name=action_name,
             scope=scope,
         )
+        execution_checkpoint()
         return raw
 
     def _append_completed_action_trace(self, trace: dict[str, object]) -> None:
@@ -794,10 +805,12 @@ class ScarpetBody:
         if buffered is not None:
             return buffered
         while time.monotonic() < deadline:
+            execution_checkpoint()
             poll_count += 1
             event = match(self.poll_events())
             if event is not None:
                 return event
+            execution_checkpoint()
             time.sleep(poll_interval_s)
         raise BodyActionTimeoutError(
             f"timed out waiting for terminal event for action {action_id}",
