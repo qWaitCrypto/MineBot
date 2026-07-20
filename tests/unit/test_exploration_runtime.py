@@ -325,6 +325,15 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertEqual(len(navigator.calls), 1)
         self.assertIsInstance(navigator.calls[0][0], GoalComposite)
         self.assertEqual(len(navigator.calls[0][0].goals), 3)
+        navigation_config = navigator.calls[0][1]["config"]
+        self.assertFalse(navigation_config.allow_break)
+        self.assertEqual(navigation_config.max_break_steps, 0)
+        self.assertFalse(navigation_config.allow_place)
+        self.assertEqual(navigation_config.max_place_steps, 0)
+        self.assertFalse(navigation_config.allow_pillar)
+        self.assertEqual(navigation_config.max_pillar_steps, 0)
+        self.assertFalse(navigation_config.allow_downward)
+        self.assertEqual(navigation_config.max_downward_steps, 0)
         self.assertEqual(_region(body.state.pos), (-1, -1))
         block_cell_requests = [params for scope, params in body.perceptions if scope == "blockCells"]
         self.assertTrue(block_cell_requests)

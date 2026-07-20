@@ -491,7 +491,9 @@ class ExplorationTransactions:
             nav = self.navigator.navigate_to(
                 GoalComposite(tuple(GoalNear(stand, radius=1) for stand in candidate_stands)),
                 break_context=BreakContext.TRAVEL,
-                config=NavigationRunConfig(max_segments=16, segment_timeout_s=12.0),
+                config=pure_movement_navigation_config(
+                    NavigationRunConfig(max_segments=16, segment_timeout_s=12.0)
+                ),
                 mutation_blacklist=mutation_blacklist,
             )
             after = self.body.get_state()
