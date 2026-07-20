@@ -669,6 +669,26 @@ class ScarpetSourceTests(unittest.TestCase):
             interrupt_body,
         )
 
+    def test_settle_on_support_cancel_can_finish_on_stable_support_before_waypoint(self):
+        source = MINEBOT_SC.read_text()
+        settle_start = source.index("movement_settled_on_support(p, on_ground, nbt) -> (")
+        settle_end = source.index("apply_movement_controls(name, movement_kind, p, target) -> (")
+        settle_body = source[settle_start:settle_end]
+        safe_start = source.index("movement_cancel_safe_now(name, m) -> (")
+        safe_end = source.index("start_move_cancel_water_egress(name, m, reason) -> (")
+        safe_body = source[safe_start:safe_end]
+
+        self.assertIn("if(on_ground,", settle_body)
+        self.assertIn("is_dry_stand_cell(floor(p:0), floor(p:1), floor(p:2))", settle_body)
+        self.assertIn("p:1 - floor(p:1) <= 0.25", settle_body)
+        self.assertIn("abs(number(motion:1))", settle_body)
+        self.assertIn("vertical_speed <= 0.12", settle_body)
+        self.assertIn("settled_on_support = movement_settled_on_support(p, on_ground, nbt);", safe_body)
+        self.assertIn(
+            "if(policy == 'settle_on_support', settled_on_support, at_waypoint && on_ground)",
+            safe_body,
+        )
+
     def test_delayed_swim_cancel_uses_bounded_dry_egress_and_always_terminates(self):
         source = MINEBOT_SC.read_text()
         request_start = source.index("start_move_cancel_water_egress(name, m, reason) -> (")
@@ -684,8 +704,9 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("reason + '_egress_unavailable'", request_body)
         self.assertNotIn("!in_water_now(name)", request_body)
         self.assertIn("on_dry_stand = p != null && is_dry_stand_cell", request_body)
+        self.assertIn("if(policy == 'egress_to_dry', dry_stand,", source)
         self.assertIn(
-            "if(policy == 'egress_to_dry', dry_stand, at_waypoint && on_ground)",
+            "if(policy == 'settle_on_support', settled_on_support, at_waypoint && on_ground)",
             source,
         )
         self.assertIn("start_move_cancel_water_egress(name, m, global_move_cancels:name:0)", request_body)

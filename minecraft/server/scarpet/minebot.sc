@@ -1747,6 +1747,21 @@ current_waypoint(m) -> (
   )
 );
 
+movement_settled_on_support(p, on_ground, nbt) -> (
+  if(on_ground,
+    true
+  ,
+    if(p == null || nbt == null,
+      false
+    ,
+      motion = nbt:'Motion';
+      vertical_speed = if(motion == null, 999.0, abs(number(motion:1)));
+      dry_stand = is_dry_stand_cell(floor(p:0), floor(p:1), floor(p:2));
+      dry_stand && p:1 - floor(p:1) <= 0.25 && vertical_speed <= 0.12
+    )
+  )
+);
+
 apply_movement_controls(name, movement_kind, p, target) -> (
   look_y = if(movement_kind == 'swim', target:1 + 1.8, if(movement_kind == 'fall' || movement_kind == 'descend', p:1 + 0.8, target:1 + 1.0));
   run(str('player %s look at %.3f %.3f %.3f', name, target:0, look_y, target:2));
@@ -1802,7 +1817,9 @@ movement_cancel_safe_now(name, m) -> (
         current_dist = dist_to_target(p, current:0, current:1, current:2);
         at_waypoint = current_waypoint_reached(m, p, current, current_dist);
         dry_stand = is_dry_stand_cell(floor(p:0), floor(p:1), floor(p:2));
-        if(policy == 'egress_to_dry', dry_stand, at_waypoint && on_ground)
+        settled_on_support = movement_settled_on_support(p, on_ground, nbt);
+        if(policy == 'egress_to_dry', dry_stand,
+          if(policy == 'settle_on_support', settled_on_support, at_waypoint && on_ground))
       )
     ,
       false
