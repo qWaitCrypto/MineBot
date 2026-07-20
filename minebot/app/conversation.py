@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from agents import SQLiteSession, SessionSettings
 
+from minebot.app.observability import sanitize_observation
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
 
 CONVERSATION_WINDOW_TURNS = 12
@@ -101,7 +102,7 @@ class PersistentWindowedConversationSession:
         self.scope = scope
 
     async def get_items(self, limit: int | None = None) -> list[Any]:
-        archived = await self._session.get_items(limit=None)
+        archived = await self._sanitized_items()
         self._sync_archive(archived)
         items = bounded_session_input([], archived, max_turns=self.max_turns)
         if limit is None:
@@ -111,16 +112,16 @@ class PersistentWindowedConversationSession:
         return _complete_turn_item_limit(items, limit)
 
     async def sync_archive(self) -> None:
-        self._sync_archive(await self._session.get_items(limit=None))
+        self._sync_archive(await self._sanitized_items())
 
     async def add_items(self, items: list[Any]) -> None:
-        await self._session.add_items(items)
-        self._sync_archive(await self._session.get_items(limit=None))
+        await self._session.add_items([_sanitized_item(item) for item in items])
+        self._sync_archive(await self._sanitized_items())
 
     async def pop_item(self) -> Any | None:
         item = await self._session.pop_item()
-        self._sync_archive(await self._session.get_items(limit=None))
-        return item
+        self._sync_archive(await self._sanitized_items())
+        return None if item is None else _sanitized_item(item)
 
     async def clear_session(self) -> None:
         await self._session.clear_session()
@@ -221,6 +222,15 @@ class PersistentWindowedConversationSession:
             return None
         return self.archive_store.get_conversation_archive(self.scope)
 
+    async def _sanitized_items(self) -> list[Any]:
+        items = [_json_item(item) for item in await self._session.get_items(limit=None)]
+        sanitized = [_sanitized_item(item) for item in items]
+        if sanitized != items:
+            await self._session.clear_session()
+            if sanitized:
+                await self._session.add_items(sanitized)
+        return sanitized
+
 
 def bounded_session_input(
     history: list[Any],
@@ -275,6 +285,10 @@ def _json_item(item: Any) -> object:
     if callable(model_dump):
         return model_dump(mode="json")
     return json.loads(json.dumps(item, ensure_ascii=False, default=str))
+
+
+def _sanitized_item(item: Any) -> Any:
+    return sanitize_observation(_json_item(item))
 
 
 def _closed_turns(items: list[object], scope: RuntimeScope | None) -> list[dict[str, object]]:

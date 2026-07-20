@@ -22,16 +22,29 @@ class AgentObservabilityTests(unittest.TestCase):
             path = Path(tmp) / "session.jsonl"
             sink = JsonlObservationSink(path)
             trace = RuntimeTrace(session_id="s1", sink=sink)
+            raw_key = "sk-exampletokenvalue1234567890"
 
-            trace.emit("provider_config", api_key="secret", nested={"auth_token": "jwt"}, ok=True)
+            trace.emit(
+                "provider_config",
+                api_key="secret",
+                nested={"auth_token": "jwt"},
+                recent_session_messages=[{"role": "user", "content": f"provider key: {raw_key}"}],
+                ok=True,
+            )
             trace.close()
 
             rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            rendered = json.dumps(rows, sort_keys=True)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["session_id"], "s1")
             self.assertEqual(rows[0]["event"], "provider_config")
             self.assertEqual(rows[0]["api_key"], "<redacted>")
             self.assertEqual(rows[0]["nested"]["auth_token"], "<redacted>")
+            self.assertNotIn(raw_key, rendered)
+            self.assertEqual(
+                rows[0]["recent_session_messages"][0]["content"],
+                "provider key: <redacted>",
+            )
             self.assertTrue(rows[0]["ok"])
 
     def test_runtime_trace_records_body_state_events_and_turn_profile_to_jsonl(self):
@@ -80,6 +93,29 @@ class AgentObservabilityTests(unittest.TestCase):
         self.assertEqual(safe["password"], "<redacted>")
         self.assertEqual(safe["metrics"][0]["token"], "<redacted>")
         self.assertEqual(safe["metrics"][0]["count"], 3)
+
+    def test_sanitize_observation_redacts_secret_values_embedded_in_text(self):
+        raw_key = "sk-exampletokenvalue1234567890"
+        raw_bearer = "abcdefghijklmnopqrstuvwxyz0123456789"
+        safe = sanitize_observation(
+            {
+                "recent_session_messages": [
+                    {"role": "user", "content": f"provider key: {raw_key}"},
+                    {"role": "user", "content": f"Authorization: Bearer {raw_bearer}"},
+                ],
+                "summary": f"api_key={raw_key}",
+            }
+        )
+
+        rendered = json.dumps(safe, sort_keys=True)
+        self.assertNotIn(raw_key, rendered)
+        self.assertNotIn(raw_bearer, rendered)
+        self.assertEqual(safe["recent_session_messages"][0]["content"], "provider key: <redacted>")
+        self.assertEqual(
+            safe["recent_session_messages"][1]["content"],
+            "Authorization: Bearer <redacted>",
+        )
+        self.assertEqual(safe["summary"], "api_key=<redacted>")
 
     def test_safe_terminal_truth_failure_is_logged_and_degrades_to_unsatisfied(self):
         class BrokenBody(FakeBody):

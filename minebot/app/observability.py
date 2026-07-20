@@ -3,8 +3,24 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Protocol
+
+
+_RAW_SECRET_PATTERNS = (
+    re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
+    re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?P<label>\b(?:api[_ -]?key|password|secret|token|auth(?:orization)?)\b\s*"
+    r"(?:[:=]\s*|is\s+))"
+    r"(?P<quote>['\"]?)(?P<value>[^\s,;\)\]\}>\"']{8,})(?P=quote)",
+    re.IGNORECASE,
+)
+_BEARER_TOKEN_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~-]{16,}\b", re.IGNORECASE)
 
 
 class ObservationSink(Protocol):
@@ -44,9 +60,19 @@ def sanitize_observation(value: Any) -> Any:
         return [sanitize_observation(item) for item in value]
     if isinstance(value, tuple):
         return [sanitize_observation(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    if isinstance(value, (int, float, bool)) or value is None:
         return value
-    return str(value)
+    return _sanitize_text(str(value))
+
+
+def _sanitize_text(value: str) -> str:
+    safe = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group('label')}<redacted>", value)
+    safe = _BEARER_TOKEN_RE.sub("Bearer <redacted>", safe)
+    for pattern in _RAW_SECRET_PATTERNS:
+        safe = pattern.sub("<redacted>", safe)
+    return safe
 
 
 def _secret_key(key: str) -> bool:

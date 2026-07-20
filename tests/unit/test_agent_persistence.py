@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agents import SQLiteSession
+
 from minebot.app.conversation import PersistentWindowedConversationSession
 from minebot.app.conversation_tools import register_conversation_archive_tools
 from minebot.app.runtime_identity import (
@@ -545,6 +547,61 @@ class TaskWorkspaceTests(unittest.TestCase):
 
 
 class PersistentConversationTests(unittest.TestCase):
+    def test_conversation_redacts_secret_text_before_persisting_and_rewrites_legacy_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.sqlite3"
+            scope = RuntimeScope("server", "world", "Bot1")
+            raw_key = "sk-exampletokenvalue1234567890"
+            legacy = SQLiteSession(session_id=scope.conversation_session_id, db_path=path)
+            asyncio.run(
+                legacy.add_items(
+                    [
+                        {"role": "user", "content": f"provider key: {raw_key}"},
+                        {"role": "assistant", "content": "I will not retain credentials."},
+                    ]
+                )
+            )
+            legacy.close()
+
+            store = RuntimeStateStore(path)
+            session = PersistentWindowedConversationSession(
+                scope.conversation_session_id,
+                path,
+                archive_store=store,
+                scope=scope,
+            )
+            items = asyncio.run(session.get_items())
+            archive = session.read_archive_turn(
+                session.query_archive(limit=1)["results"][0]["handle"]
+            )
+            session.close()
+            store.close()
+
+            rendered = json.dumps({"items": items, "archive": archive}, sort_keys=True)
+            self.assertNotIn(raw_key, rendered)
+            self.assertIn("<redacted>", rendered)
+
+            clean_path = Path(tmp) / "clean-state.sqlite3"
+            clean = PersistentWindowedConversationSession(
+                scope.conversation_session_id,
+                clean_path,
+            )
+            asyncio.run(
+                clean.add_items(
+                    [
+                        {"role": "user", "content": f"provider key: {raw_key}"},
+                        {"role": "assistant", "content": "Credentials are redacted."},
+                    ]
+                )
+            )
+            clean.close()
+            on_disk = b"".join(
+                candidate.read_bytes()
+                for candidate in Path(tmp).glob("clean-state.sqlite3*")
+                if candidate.is_file()
+            )
+            self.assertNotIn(raw_key.encode(), on_disk)
+
     def test_conversation_survives_reopen_and_model_window_keeps_whole_turns(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "state.sqlite3"
