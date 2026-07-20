@@ -3325,6 +3325,7 @@ start_hazard_reflex(name, kind) -> (
       target = water_surface_target(p)
     );
     cancel_move_preempted(name);
+    request_navigation_mutation_cancel(name, 'preempted');
     cancel_mine_preempted(name);
     cancel_place_preempted(name);
     cancel_use_preempted(name);

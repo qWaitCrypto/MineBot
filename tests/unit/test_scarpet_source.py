@@ -1547,6 +1547,19 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIsNotNone(movement_water, "movement_water_escape_should_trigger function not found")
         self.assertIn("water_reflex_should_trigger(name)", movement_water.group(1))
 
+    def test_survival_reflex_cancels_waiting_navigation_mutations(self):
+        source = MINEBOT_SC.read_text()
+        hazard = re.search(r"start_hazard_reflex\(name, kind\) -> \((.*?)\n\);", source, re.S)
+
+        self.assertIsNotNone(hazard, "start_hazard_reflex function not found")
+        body = hazard.group(1)
+        self.assertIn("cancel_move_preempted(name);", body)
+        self.assertIn("request_navigation_mutation_cancel(name, 'preempted');", body)
+        self.assertLess(
+            body.index("cancel_move_preempted(name);"),
+            body.index("request_navigation_mutation_cancel(name, 'preempted');"),
+        )
+
     def test_ranged_attack_controller_uses_weapon_specific_fire_and_authoritative_damage_truth(self):
         source = MINEBOT_SC.read_text()
 
