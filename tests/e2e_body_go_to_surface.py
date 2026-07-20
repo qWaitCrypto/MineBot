@@ -260,6 +260,68 @@ def run_same_level_exit_path(rcon: RconClient, body: ScarpetBody) -> dict[str, o
     }
 
 
+def run_pickaxe_capability_paths(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+    reset_happy_world(rcon)
+    command(rcon, "setblock 170 65 0 stone")
+    command(rcon, f"clear {BOT}")
+    runtime = make_runtime(body)
+
+    bare = runtime.go_to_surface(
+        current_pos=ORIGIN,
+        context=BreakContext.DIRECT,
+        scaffold_blocks=(),
+        timeout_s=20.0,
+        max_steps=2,
+        surface_scan_height=3,
+        world_top_y=70,
+    )
+    bare_payload = bare.to_payload()
+    bare_navigation, bare_segments, _bare_counts = navigation_facts(bare)
+    bare_events = [
+        event
+        for segment in bare_segments
+        for event in segment.get("diagnostics", {}).get("mutation_events") or []
+    ]
+    blocked = body.perceive("blockAt", {"x": ORIGIN[0], "y": ORIGIN[1] + 1, "z": ORIGIN[2]})
+    expected_bare_reasons = {"surface_navigation_failed:unreachable", "surface_navigation_failed:budget_exceeded"}
+    if bare.success or bare.reason not in expected_bare_reasons:
+        raise AssertionError(f"go_to_surface did not reject the stone path without a pickaxe: {bare_payload}")
+    if bare_navigation.get("reason") not in {"unreachable", "budget_exceeded"}:
+        raise AssertionError(f"pickaxe capability failure did not remain planner-terminal: {bare_payload}")
+    if bare_events:
+        raise AssertionError(f"pickaxe capability failure proposed a mutation: {bare_payload}")
+    if blocked.data.get("type") not in {"stone", "minecraft:stone"}:
+        raise AssertionError(f"pickaxe capability failure changed stone: block={blocked.data} result={bare_payload}")
+
+    reset_happy_world(rcon)
+    command(rcon, "setblock 170 65 0 stone")
+    command(rcon, f"clear {BOT}")
+    command(rcon, f"item replace entity {BOT} hotbar.0 with wooden_pickaxe")
+    equipped = runtime.go_to_surface(
+        current_pos=ORIGIN,
+        context=BreakContext.DIRECT,
+        scaffold_blocks=(),
+        timeout_s=20.0,
+        max_steps=2,
+        surface_scan_height=3,
+        world_top_y=70,
+    )
+    equipped_payload = equipped.to_payload()
+    _equipped_navigation, _equipped_segments, equipped_counts = navigation_facts(equipped)
+    cleared = body.perceive("blockAt", {"x": ORIGIN[0], "y": ORIGIN[1] + 1, "z": ORIGIN[2]})
+    if not equipped.success or equipped.reason != "surface_reached":
+        raise AssertionError(f"go_to_surface did not use a wooden pickaxe for stone: {equipped_payload}")
+    if equipped_counts["break"] < 1:
+        raise AssertionError(f"go_to_surface reached surface without recording the stone break: {equipped_payload}")
+    if cleared.data.get("type") not in {"air", "minecraft:air"}:
+        raise AssertionError(f"go_to_surface did not break the stone with a wooden pickaxe: block={cleared.data} result={equipped_payload}")
+    return {
+        "bare_reason": bare.reason,
+        "equipped_reason": equipped.reason,
+        "equipped_break_count": equipped_counts["break"],
+    }
+
+
 def run_alternate_column_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     reset_alternate_column_world(rcon)
     runtime = make_runtime(body)
@@ -474,6 +536,7 @@ def main() -> None:
 
         cases = {
             "happy": lambda: run_happy_path(rcon, body),
+            "pickaxe_capability": lambda: run_pickaxe_capability_paths(rcon, body),
             "same_level_exit": lambda: run_same_level_exit_path(rcon, body),
             "alternate_column": lambda: run_alternate_column_path(rcon, body),
             "route_to_exit": lambda: run_route_to_exit_path(rcon, body),
@@ -483,6 +546,7 @@ def main() -> None:
         }
         default_cases = [
             "happy",
+            "pickaxe_capability",
             "same_level_exit",
             "alternate_column",
             "route_to_exit",

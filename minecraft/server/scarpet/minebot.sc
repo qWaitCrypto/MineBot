@@ -4364,6 +4364,37 @@ navigation_break_tool(context, block_type) -> (
   )
 );
 
+navigation_pickaxe_tier(item) -> (
+  normalized = replace('' + item, 'minecraft:', '');
+  if(normalized == 'netherite_pickaxe' || normalized == 'diamond_pickaxe', 3,
+    if(normalized == 'iron_pickaxe', 2,
+      if(normalized == 'stone_pickaxe', 1,
+        if(normalized == 'golden_pickaxe' || normalized == 'wooden_pickaxe', 0, -1)
+      )
+    )
+  )
+);
+
+navigation_required_pickaxe_tier(block_type) -> (
+  if(block_tags(block_type, 'needs_diamond_tool'), 3,
+    if(block_tags(block_type, 'needs_iron_tool'), 2,
+      if(block_tags(block_type, 'needs_stone_tool'), 1,
+        if(block_tags(block_type, 'mineable/pickaxe'), 0, null)
+      )
+    )
+  )
+);
+
+navigation_break_available(context, block_type) -> (
+  required = navigation_required_pickaxe_tier(block_type);
+  if(required == null,
+    true
+  ,
+    tool = context:'break_pickaxe';
+    if(tool == null, false, navigation_pickaxe_tier(tool) >= required)
+  )
+);
+
 navigation_fall_candidate(x, start_y, z, context) -> (
   result = null;
   clear = true;
@@ -4440,7 +4471,7 @@ navigation_neighbors(x, y, z, context) -> (
         )
       ,
         if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && support_kind == 'SOLID' && source_kind != 'LIQUID',
-          if(block_kind(head_type) == 'SOLID' && !navigation_mutation_denied(context, nx, y + 1, nz),
+          if(block_kind(head_type) == 'SOLID' && navigation_break_available(context, head_type) && !navigation_mutation_denied(context, nx, y + 1, nz),
             mutation = {
               'kind' -> 'break',
               'pos' -> l(nx, y + 1, nz),
@@ -4452,7 +4483,7 @@ navigation_neighbors(x, y, z, context) -> (
             };
             neighbors += navigation_mutation_candidate(nx, y, nz, 'break', 8.0, 'immediate', mutation)
           ,
-            if(block_kind(feet_type) == 'SOLID' && block_kind(head_type) != 'SOLID' && !is_lava_at(nx, y + 1, nz) && !navigation_mutation_denied(context, nx, y, nz),
+            if(block_kind(feet_type) == 'SOLID' && block_kind(head_type) != 'SOLID' && !is_lava_at(nx, y + 1, nz) && navigation_break_available(context, feet_type) && !navigation_mutation_denied(context, nx, y, nz),
               mutation = {
                 'kind' -> 'break',
                 'pos' -> l(nx, y, nz),
@@ -4503,7 +4534,7 @@ navigation_neighbors(x, y, z, context) -> (
       if(source_head_blocked || source_cap_blocked,
         source_clearance_y = if(source_head_blocked, y + 1, y + 2);
         source_clearance_type = if(source_head_blocked, source_head_type, source_cap_type);
-        if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && source_kind != 'LIQUID' && !navigation_mutation_denied(context, x, source_clearance_y, z),
+        if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && source_kind != 'LIQUID' && navigation_break_available(context, source_clearance_type) && !navigation_mutation_denied(context, x, source_clearance_y, z),
           mutation = {
             'kind' -> 'break',
             'pos' -> l(x, source_clearance_y, z),
@@ -4546,7 +4577,7 @@ navigation_neighbors(x, y, z, context) -> (
   );
   downward_floor_type = '' + block(x, y - 1, z);
   downward_support_type = '' + block(x, y - 2, z);
-  if(bool(context:'allow_downward') && floor(number(context:'downward_budget')) > 0 && probe_walkability(x, y, z) == 'WALK' && navigation_block_kind_at(x, y - 1, z) == 'SOLID' && navigation_block_kind_at(x, y - 2, z) == 'SOLID' && !is_lava_at(x, y, z) && !navigation_downward_flood_risk(x, y - 1, z) && !navigation_mutation_denied(context, x, y - 1, z),
+  if(bool(context:'allow_downward') && floor(number(context:'downward_budget')) > 0 && probe_walkability(x, y, z) == 'WALK' && navigation_block_kind_at(x, y - 1, z) == 'SOLID' && navigation_block_kind_at(x, y - 2, z) == 'SOLID' && !is_lava_at(x, y, z) && !navigation_downward_flood_risk(x, y - 1, z) && navigation_break_available(context, downward_floor_type) && !navigation_mutation_denied(context, x, y - 1, z),
     mutation = {
       'kind' -> 'downward',
       'pos' -> l(x, y - 1, z),
@@ -4566,7 +4597,7 @@ navigation_neighbors(x, y, z, context) -> (
   pillar_support_type = '' + block(x, y - 1, z);
   if(bool(context:'allow_pillar') && pillar_used >= 0 && pillar_used < pillar_capacity && block_kind(pillar_feet_type) == 'CLEAR' && block_kind(pillar_head_type) == 'CLEAR' && block_kind(pillar_support_type) == 'SOLID' && !is_lava_at(x, y, z) && !is_lava_at(x, y + 1, z) && !is_lava_at(x, y + 2, z),
     if(block_kind(pillar_cap_type) == 'SOLID',
-      if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && !navigation_mutation_denied(context, x, y + 2, z),
+      if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && navigation_break_available(context, pillar_cap_type) && !navigation_mutation_denied(context, x, y + 2, z),
         mutation = {
           'kind' -> 'break',
           'pos' -> l(x, y + 2, z),
