@@ -14,10 +14,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from minebot.camera.config import CameraConfigError, load_camera_config
+from minebot.camera.cli.main import main as camera_cli_main
 from minebot.camera.control.observer import ObserverControlClient
 from minebot.camera.output.ffmpeg import CameraOutputError, build_ffmpeg_command, resolve_live_publish_url
 from minebot.camera.service import (
     CameraServiceError,
+    _camera_child_environment,
     _maintain_observer,
     _process_alive,
     _process_start_token,
@@ -41,6 +43,34 @@ def test_runtime_config_is_default_off_and_keeps_commands_as_argv(tmp_path: Path
     assert config.service.capture_input_args[-2:] == ("-i", ":91.0")
     assert config.service.record_enabled is True
     assert config.service.live_enabled is True
+
+
+def test_camera_child_environment_carries_configured_local_paths(tmp_path: Path) -> None:
+    config = load_camera_config(_camera_config(tmp_path))
+
+    environment = _camera_child_environment(config, environ={"UNCHANGED": "yes"})
+
+    assert environment["UNCHANGED"] == "yes"
+    assert environment["MINEBOT_CAMERA_PROFILE_DIR"] == str(config.dependencies.launcher_profile)
+    assert environment["MINEBOT_CAMERA_RUNTIME_DIR"] == str(config.service.runtime_directory)
+    assert environment["MINEBOT_CAMERA_PYTHON"] == sys.executable
+    assert environment["MINEBOT_CAMERA_DISPLAY"] == ":91"
+
+
+def test_camera_cli_explicit_start_uses_the_persistent_config_without_force() -> None:
+    config_path = Path("/persistent/camera.toml")
+    with (
+        patch("minebot.camera.cli.main.resolve_camera_config_path", return_value=config_path) as resolve,
+        patch(
+            "minebot.camera.cli.main.start_service",
+            return_value={"phase": "ready", "target": "Bot1", "recording": True, "live": False},
+        ) as start,
+    ):
+        result = camera_cli_main(["start", "--json"])
+
+    assert result == 0
+    resolve.assert_called_once_with(None)
+    start.assert_called_once_with(config_path, force=True)
 
 
 def test_runtime_config_rejects_non_loopback_control_endpoint(tmp_path: Path) -> None:
@@ -375,7 +405,13 @@ def test_worker_reconnects_control_channel_without_restarting_capture(tmp_path: 
 
     async def run() -> int:
         with (
-            patch("minebot.camera.service.load_camera_config", return_value=SimpleNamespace(service=service)),
+            patch(
+                "minebot.camera.service.load_camera_config",
+                return_value=SimpleNamespace(
+                    service=service,
+                    dependencies=SimpleNamespace(launcher_profile=Path("/camera-profile")),
+                ),
+            ),
             patch(
                 "minebot.camera.service._spawn_child",
                 side_effect=[observer_process, ffmpeg_process],
@@ -492,6 +528,26 @@ def test_real_server_camera_switch_delegates_lifecycle_to_session() -> None:
         "observe",
         max_steps=100_000,
         camera_config=Path("/tmp/camera.toml"),
+    )
+
+
+def test_real_server_camera_switch_uses_persistent_config_when_not_overridden() -> None:
+    fake_config = object()
+    persistent_config = Path("/persistent/camera.toml")
+    with (
+        patch("minebot.app.real_server_session.real_server_config_from_env", return_value=fake_config),
+        patch("minebot.camera.config.resolve_camera_config_path", return_value=persistent_config) as resolve,
+        patch("minebot.app.real_server_session.run_real_server_goal", new=AsyncMock(return_value=7)) as run_goal,
+    ):
+        result = real_server_main(["observe", "--camera"])
+
+    assert result == 7
+    resolve.assert_called_once_with(None)
+    run_goal.assert_awaited_once_with(
+        fake_config,
+        "observe",
+        max_steps=100_000,
+        camera_config=persistent_config,
     )
 
 

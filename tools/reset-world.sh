@@ -7,7 +7,15 @@ WORLD="$SERVER_DIR/world"
 GOLDEN="$SERVER_DIR/world-golden"
 SCRIPT_ASSETS="$ROOT/minecraft/server/scarpet"
 LOG="$SERVER_DIR/logs/minebot-reset-world.log"
-CAMERA_CONFIG="${MINEBOT_CAMERA_CONFIG:-}"
+CAMERA_CONFIG="$(
+  PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
+from minebot.camera.config import discover_camera_config_path
+
+path = discover_camera_config_path()
+if path is not None:
+    print(path)
+PY
+)"
 RCON_HOST="${MINEBOT_REAL_RCON_HOST:-127.0.0.1}"
 RCON_PORT="${MINEBOT_REAL_RCON_PORT:-25576}"
 RCON_PASSWORD="${MINEBOT_REAL_RCON_PASSWORD:-test}"
@@ -47,7 +55,7 @@ fi
 
 SERVER_JAVA_ARGS=(-Xmx2G)
 if [[ -n "$CAMERA_CONFIG" ]]; then
-  camera_jvm_output="$(python3 - "$CAMERA_CONFIG" <<'PY'
+  camera_jvm_output="$(PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - "$CAMERA_CONFIG" <<'PY'
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit

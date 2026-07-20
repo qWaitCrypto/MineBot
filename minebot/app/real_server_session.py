@@ -1119,8 +1119,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--camera-config",
         type=Path,
-        default=Path(os.environ.get("MINEBOT_CAMERA_CONFIG", "camera.toml")),
-        help="Camera TOML path; used only with --camera.",
+        help="Optional Camera TOML override; defaults to the persistent local Camera config.",
     )
     args = parser.parse_args(argv)
     if not args.interactive and not args.goal:
@@ -1130,7 +1129,12 @@ def main(argv: list[str] | None = None) -> int:
     except (RealServerConfigError, AppConfigError, ValueError) as exc:
         print(f"Real-server agent config error: {exc}", file=sys.stderr)
         return 2
-    camera_config = args.camera_config if args.camera else None
+    if args.camera:
+        from minebot.camera.config import resolve_camera_config_path
+
+        camera_config = resolve_camera_config_path(args.camera_config)
+    else:
+        camera_config = None
     try:
         if args.interactive:
             return asyncio.run(

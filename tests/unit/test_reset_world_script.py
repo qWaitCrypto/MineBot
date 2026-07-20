@@ -24,7 +24,9 @@ class ResetWorldScriptTests(unittest.TestCase):
     def test_camera_config_is_forwarded_to_server_bridge_startup(self):
         source = RESET_SCRIPT.read_text(encoding="utf-8")
 
-        self.assertIn('CAMERA_CONFIG="${MINEBOT_CAMERA_CONFIG:-}"', source)
+        self.assertIn("from minebot.camera.config import discover_camera_config_path", source)
+        self.assertIn('PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"', source)
+        self.assertIn('PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - "$CAMERA_CONFIG"', source)
         self.assertIn("from minebot.camera.config import load_camera_config", source)
         self.assertIn("-Dminebot.bridge.host=", source)
         self.assertIn("-Dminebot.bridge.port=", source)

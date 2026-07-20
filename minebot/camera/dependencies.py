@@ -31,6 +31,7 @@ class CameraDependencyConfig:
     encoder: str
     output_directory: Path
     artifacts: tuple[DependencyArtifact, ...] = ()
+    required_commands: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,16 @@ def check_dependencies(
             f"launcher command ready ({Path(launcher_path).name})" if launcher_path else "launcher command not found",
         )
     )
+    for command in config.required_commands:
+        command_path = _resolve_command(command, which)
+        checks.append(
+            DependencyCheck(
+                f"command:{command}",
+                command_path is not None,
+                True,
+                f"command ready ({Path(command_path).name})" if command_path else "command not found",
+            )
+        )
 
     profile_ok = config.launcher_profile.exists() and os.access(config.launcher_profile, os.R_OK)
     checks.append(

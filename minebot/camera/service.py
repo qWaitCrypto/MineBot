@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from minebot.camera.config import CameraServiceConfig, load_camera_config
+from minebot.camera.config import CameraConfig, CameraServiceConfig, load_camera_config
 from minebot.camera.dependencies import check_dependencies
 from minebot.camera.output.ffmpeg import CameraOutputError, build_ffmpeg_command, resolve_live_publish_url
 
@@ -174,9 +174,7 @@ async def run_worker(config_path: Path) -> int:
 
     try:
         _write_state(service, phase="starting", error=None, children={}, **base_state)
-        child_env = os.environ.copy()
-        if service.display is not None:
-            child_env["DISPLAY"] = service.display
+        child_env = _camera_child_environment(config)
 
         if service.relay_command:
             children["relay"] = _spawn_child(service.relay_command, child_env)
@@ -264,6 +262,21 @@ async def run_worker(config_path: Path) -> int:
             **base_state,
         )
     return 0 if failed_reason is None else 1
+
+
+def _camera_child_environment(
+    config: CameraConfig,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    environment = dict(os.environ if environ is None else environ)
+    environment["MINEBOT_CAMERA_PROFILE_DIR"] = str(config.dependencies.launcher_profile)
+    environment["MINEBOT_CAMERA_RUNTIME_DIR"] = str(config.service.runtime_directory)
+    environment["MINEBOT_CAMERA_PYTHON"] = sys.executable
+    if config.service.display is not None:
+        environment["DISPLAY"] = config.service.display
+        environment["MINEBOT_CAMERA_DISPLAY"] = config.service.display
+    return environment
 
 
 async def _maintain_observer(

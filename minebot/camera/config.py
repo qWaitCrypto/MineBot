@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import tomllib
 from collections.abc import Mapping
@@ -19,6 +21,14 @@ class CameraConfigError(ValueError):
 _SECRET_KEY_PARTS = ("token", "password", "secret", "credential")
 _EXACT_VERSION = re.compile(r"^[0-9]+\.[0-9]+(?:\.[0-9]+)?$")
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_CAMERA_CONFIG_ENV = "MINEBOT_CAMERA_CONFIG"
+_DEFAULT_CAMERA_OBSERVER_ID = "e3be19c1-6923-3226-8108-2df310ddff82"
+
+
+@dataclass(frozen=True)
+class CameraConfigBootstrap:
+    path: Path
+    created: bool
 
 
 @dataclass(frozen=True)
@@ -61,6 +71,89 @@ class CameraServiceConfig:
 class CameraConfig:
     dependencies: CameraDependencyConfig
     service: CameraServiceConfig
+
+
+def default_camera_config_path(
+    *,
+    environ: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> Path:
+    environment = os.environ if environ is None else environ
+    resolved_home = (Path.home() if home is None else home).expanduser()
+    config_home = environment.get("XDG_CONFIG_HOME")
+    root = Path(config_home).expanduser() if config_home else resolved_home / ".config"
+    return root / "minebot" / "camera.toml"
+
+
+def resolve_camera_config_path(
+    path: Path | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> Path:
+    if path is not None:
+        return path.expanduser()
+    environment = os.environ if environ is None else environ
+    configured = (environment.get(_CAMERA_CONFIG_ENV) or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return default_camera_config_path(environ=environment, home=home)
+
+
+def discover_camera_config_path(
+    *,
+    environ: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> Path | None:
+    environment = os.environ if environ is None else environ
+    configured = (environment.get(_CAMERA_CONFIG_ENV) or "").strip()
+    path = resolve_camera_config_path(environ=environment, home=home)
+    if path.is_file():
+        return path.resolve()
+    if configured:
+        raise CameraConfigError(f"camera config from {_CAMERA_CONFIG_ENV} does not exist: {path}")
+    return None
+
+
+def initialize_camera_config(
+    path: Path | None = None,
+    *,
+    overwrite: bool = False,
+    environ: Mapping[str, str] | None = None,
+    home: Path | None = None,
+    repository_root: Path | None = None,
+) -> CameraConfigBootstrap:
+    environment = os.environ if environ is None else environ
+    resolved_home = (Path.home() if home is None else home).expanduser()
+    config_path = resolve_camera_config_path(path, environ=environment, home=resolved_home)
+    if config_path.exists() and not config_path.is_file():
+        raise CameraConfigError(f"camera config path is not a file: {config_path}")
+    if config_path.is_file() and not overwrite:
+        return CameraConfigBootstrap(path=config_path.resolve(), created=False)
+
+    data_root = _camera_data_root(environment, resolved_home)
+    state_root = _camera_state_root(environment, resolved_home)
+    profile_directory = data_root / "profile"
+    recording_directory = data_root / "recordings"
+    runtime_directory = state_root / "runtime"
+    for directory in (config_path.parent, profile_directory, recording_directory, runtime_directory):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    root = (Path(__file__).resolve().parents[2] if repository_root is None else repository_root).resolve()
+    launcher = root / "tools" / "camera-observer-client.sh"
+    display = (environment.get("MINEBOT_CAMERA_DISPLAY") or ":91").strip() or ":91"
+    config_path.write_text(
+        _default_camera_config_document(
+            launcher=launcher,
+            profile_directory=profile_directory,
+            recording_directory=recording_directory,
+            runtime_directory=runtime_directory,
+            display=display,
+        ),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+    return CameraConfigBootstrap(path=config_path.resolve(), created=True)
 
 
 def load_dependency_config(path: Path) -> CameraDependencyConfig:
@@ -162,6 +255,7 @@ def _dependency_config(path: Path, document: Mapping[str, Any]) -> CameraDepende
     launcher_profile = _resolve(path, _string(observer, "launcher_profile"))
     output_directory = _resolve(path, _string(record, "directory"))
     artifacts = _parse_artifacts(path, dependencies.get("artifacts", []))
+    required_commands = _string_list(dependencies, "required_commands")
 
     return CameraDependencyConfig(
         expected_mc_version=expected_version,
@@ -172,6 +266,7 @@ def _dependency_config(path: Path, document: Mapping[str, Any]) -> CameraDepende
         encoder=_optional_string(capture, "encoder", "libx264"),
         output_directory=output_directory,
         artifacts=artifacts,
+        required_commands=required_commands,
     )
 
 
@@ -201,6 +296,13 @@ def _parse_artifacts(config_path: Path, raw: Any) -> tuple[DependencyArtifact, .
             )
         )
     return tuple(artifacts)
+
+
+def _string_list(parent: Mapping[str, Any], name: str) -> tuple[str, ...]:
+    value = parent.get(name, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise CameraConfigError(f"{name} must be an array of nonempty strings")
+    return tuple(item.strip() for item in value)
 
 
 def _reject_embedded_secret_fields(value: Any, prefix: str = "") -> None:
@@ -317,3 +419,79 @@ def _resolve(config_path: Path, value: str) -> Path:
     if candidate.is_absolute():
         return candidate
     return config_path.parent / candidate
+
+
+def _camera_data_root(environ: Mapping[str, str], home: Path) -> Path:
+    configured = environ.get("XDG_DATA_HOME")
+    root = Path(configured).expanduser() if configured else home / ".local" / "share"
+    return root / "minebot" / "camera"
+
+
+def _camera_state_root(environ: Mapping[str, str], home: Path) -> Path:
+    configured = environ.get("XDG_STATE_HOME")
+    root = Path(configured).expanduser() if configured else home / ".local" / "state"
+    return root / "minebot" / "camera"
+
+
+def _default_camera_config_document(
+    *,
+    launcher: Path,
+    profile_directory: Path,
+    recording_directory: Path,
+    runtime_directory: Path,
+    display: str,
+) -> str:
+    quote = lambda value: json.dumps(str(value))
+    return f'''[camera]
+enabled = false
+target = "Bot1"
+startup_timeout_s = 240
+shutdown_timeout_s = 20
+runtime_directory = {quote(runtime_directory)}
+
+[camera.follow]
+distance = 6.0
+azimuth_deg = 155.0
+elevation_deg = 25.0
+height_offset = 1.6
+stiffness = 0.2
+fov_deg = 75.0
+collision_margin = 0.25
+
+[observer]
+id = "{_DEFAULT_CAMERA_OBSERVER_ID}"
+generation = 1
+expected_mc_version = "26.1.2"
+launcher_command = [{quote(launcher)}]
+launcher_profile = {quote(profile_directory)}
+display = {quote(display)}
+
+[bridge]
+endpoint = "ws://127.0.0.1:8766"
+heartbeat_s = 2
+
+[capture]
+ffmpeg_command = "ffmpeg"
+input_args = [
+  "-f", "x11grab",
+  "-draw_mouse", "0",
+  "-framerate", "30",
+  "-video_size", "1280x720",
+  "-i", {quote(f"{display}.0")},
+]
+fps = 30
+encoder = "libx264"
+preset = "veryfast"
+
+[output.record]
+enabled = true
+directory = {quote(recording_directory)}
+segment_s = 600
+
+[output.live]
+enabled = false
+format = "rtsp"
+
+[dependencies]
+required_commands = ["Xvfb", "xdpyinfo"]
+'''
