@@ -61,7 +61,6 @@ DEFAULT_TERMINAL_EVENTS = {
     "moveItemDone",
     "death",
     "respawned",
-    "ownerPreempted",
     "interrupted",
 }
 GLOBAL_TERMINAL_EVENTS = {

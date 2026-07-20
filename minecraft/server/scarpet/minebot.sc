@@ -2949,11 +2949,14 @@ is_solid_floor(x, y, z) -> (
   bs != 'water' && bs != 'minecraft:water'
 );
 
-is_safe_cell(x, y, z) -> (
+is_reflex_escape_cell(x, y, z) -> (
   here = '' + block(x, y, z);
   head = '' + block(x, y + 1, z);
+  here_kind = block_kind(here);
+  head_kind = block_kind(head);
   here != 'lava' && here != 'minecraft:lava' &&
   head != 'lava' && head != 'minecraft:lava' &&
+  here_kind != 'SOLID' && head_kind != 'SOLID' &&
   is_solid_floor(x, y, z)
 );
 
@@ -3091,7 +3094,7 @@ safe_escape_target(p) -> (
     c = candidates:_;
     tx = bx + c:0;
     tz = bz + c:1;
-    if(best == null && is_safe_cell(tx, by, tz),
+    if(best == null && is_reflex_escape_cell(tx, by, tz),
       best = l(tx + 0.5, by, tz + 0.5)
     )
   );

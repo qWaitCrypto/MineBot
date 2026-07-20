@@ -830,6 +830,84 @@ class BodyClientTests(unittest.TestCase):
         self.assertEqual(event.name, "death")
         self.assertEqual(event.data["inventory_hash"], "dead")
 
+    def test_await_action_terminal_waits_for_action_terminal_after_unrequested_owner_preempt(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "events",
+                        "bot": "Bot1",
+                        "ok": True,
+                        "complete": True,
+                        "next": None,
+                        "events": [
+                            {
+                                "type": "event",
+                                "seq": 1,
+                                "tick": 12,
+                                "bot": "Bot1",
+                                "name": "ownerPreempted",
+                                "data": {"previous_owner": "useItem", "new_owner": "lavaReflex"},
+                            },
+                            {
+                                "type": "event",
+                                "seq": 2,
+                                "tick": 12,
+                                "bot": "Bot1",
+                                "name": "useDone",
+                                "data": {"action_id": "a1", "success": False, "stopped_reason": "preempted"},
+                            },
+                        ],
+                        "error": None,
+                    }
+                )
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        event = body.await_action_terminal("a1", timeout_s=1.0, poll_interval_s=0.0)
+
+        self.assertEqual(event.name, "useDone")
+        self.assertEqual(event.data["stopped_reason"], "preempted")
+        self.assertEqual([item.name for item in body.event_log], ["ownerPreempted", "useDone"])
+
+    def test_await_action_terminal_accepts_explicit_owner_preempt(self):
+        transport = FakeTransport(
+            [
+                envelope(
+                    {
+                        "type": "events",
+                        "bot": "Bot1",
+                        "ok": True,
+                        "complete": True,
+                        "next": None,
+                        "events": [
+                            {
+                                "type": "event",
+                                "seq": 1,
+                                "tick": 12,
+                                "bot": "Bot1",
+                                "name": "ownerPreempted",
+                                "data": {"previous_owner": "moveTo", "new_owner": "lavaReflex"},
+                            }
+                        ],
+                        "error": None,
+                    }
+                )
+            ]
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        event = body.await_action_terminal(
+            "a1",
+            timeout_s=1.0,
+            poll_interval_s=0.0,
+            terminal_events={"ownerPreempted"},
+        )
+
+        self.assertEqual(event.name, "ownerPreempted")
+        self.assertEqual(event.data["previous_owner"], "moveTo")
+
     def test_await_action_terminal_accepts_instant_body_action_events(self):
         transport = FakeTransport(
             [

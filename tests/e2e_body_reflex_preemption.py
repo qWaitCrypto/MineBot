@@ -68,6 +68,21 @@ def arm_lava_reflex_fixture(rcon) -> None:
     command(rcon, f"player {BOT} stop")
 
 
+def arm_lava_reflex_blocked_first_candidate_fixture(rcon) -> None:
+    x, y, z = BASE
+    command(rcon, f"fill {x-2} {y-1} {z-2} {x+2} {y+3} {z+2} air")
+    command(rcon, f"fill {x-2} {y-1} {z-2} {x+2} {y-1} {z+2} stone")
+    command(rcon, f"fill {x-2} {y} {z-2} {x-2} {y+2} {z+2} stone")
+    command(rcon, f"fill {x+2} {y} {z-2} {x+2} {y+2} {z+2} stone")
+    command(rcon, f"fill {x-1} {y} {z-2} {x+1} {y+2} {z-2} stone")
+    command(rcon, f"fill {x-1} {y} {z+2} {x+1} {y+2} {z+2} stone")
+    command(rcon, f"setblock {x+1} {y-1} {z} lava")
+    command(rcon, f"setblock {x+1} {y} {z} gravel")
+    command(rcon, f"tp {BOT} {x} {y} {z} -90 0")
+    command(rcon, f"gamemode survival {BOT}")
+    command(rcon, f"player {BOT} stop")
+
+
 def arm_persistent_lava_reflex_fixture(rcon) -> None:
     x, y, z = BASE
     command(rcon, f"fill {x-2} {y} {z-2} {x+16} {y+6} {z+3} air")
@@ -99,19 +114,6 @@ def arm_water_reflex_fixture(rcon) -> None:
     command(rcon, f"setblock {x-1} {y} {z} stone")
     command(rcon, f"setblock {x-1} {y+1} {z} stone")
     command(rcon, f"fill {x+1} {y} {z} {x+4} {y+1} {z} stone")
-    command(rcon, f"setblock {x} {y} {z} water")
-    command(rcon, f"setblock {x} {y+1} {z} water")
-    command(rcon, f"tp {BOT} {x} {y} {z} -90 0")
-    command(rcon, f"gamemode survival {BOT}")
-    command(rcon, f"player {BOT} stop")
-    command(rcon, "script in minebot run global_water_reflex_air_threshold = 295")
-    command(rcon, "script in minebot run global_water_reflex_damage_budget = null")
-
-
-def arm_near_shore_water_reflex_fixture(rcon) -> None:
-    x, y, z = BASE
-    command(rcon, f"fill {x-3} {y} {z-3} {x+8} {y+5} {z+3} air")
-    command(rcon, f"fill {x-3} {y-1} {z-3} {x+8} {y-1} {z+3} stone")
     command(rcon, f"setblock {x} {y} {z} water")
     command(rcon, f"setblock {x} {y+1} {z} water")
     command(rcon, f"tp {BOT} {x} {y} {z} -90 0")
@@ -465,7 +467,7 @@ def run_water_entry_below_threshold_does_not_preempt(rcon, body: ScarpetBody) ->
 
 
 def run_water_damage_budget_auto_preempt(rcon, body: ScarpetBody) -> None:
-    arm_near_shore_water_reflex_fixture(rcon)
+    arm_water_reflex_fixture(rcon)
     set_reflex_scan(rcon, False)
     command(rcon, "script in minebot run global_water_reflex_air_threshold = -1")
     command(rcon, "script in minebot run global_water_reflex_damage_budget = 1")
@@ -532,6 +534,36 @@ def run_lava_reflex_honest_failure_releases_owner(rcon, body: ScarpetBody) -> No
     assert_post_reflex_stop_release(body)
 
 
+def run_lava_reflex_skips_non_standable_candidate(rcon, body: ScarpetBody) -> None:
+    arm_lava_reflex_blocked_first_candidate_fixture(rcon)
+    event_start = len(body.event_log)
+    trigger_lava_reflex(rcon)
+    recent_events = body.event_log[event_start:]
+    triggered = next((event for event in recent_events if event.name == "reflexTriggered"), None)
+    if triggered is None:
+        triggered = wait_for_event(body, "reflexTriggered", timeout_s=3.0)
+    if triggered.data.get("kind") != "lava" or triggered.data.get("target_is_dry_stand") is not True:
+        raise AssertionError(f"lava reflex selected a non-standable target: {triggered.data}")
+    target = triggered.data.get("target")
+    if not isinstance(target, list) or len(target) != 3:
+        raise AssertionError(f"lava reflex target is not a position: {triggered.data}")
+    target_cell = tuple(math.floor(float(axis)) for axis in target)
+    expected = (BASE[0] - 1, BASE[1], BASE[2])
+    if target_cell != expected:
+        raise AssertionError(f"lava reflex did not skip blocked first candidate: target={target} expected={expected}")
+    recent_events = body.event_log[event_start:]
+    completed = next((event for event in recent_events if event.name == "reflexCompleted"), None)
+    if completed is None:
+        completed = wait_for_event(body, "reflexCompleted", timeout_s=8.0)
+    if completed.data.get("escaped_hazard") is not True or completed.data.get("final_is_dry_stand") is not True:
+        raise AssertionError(f"lava reflex did not settle on dry ground: {completed.data}")
+    final = body.get_state()
+    x, y, z = (math.floor(axis) for axis in final.pos)
+    raw = command(rcon, f"script in minebot run is_dry_stand_cell({x},{y},{z})", delay=0.0)
+    if "true" not in raw:
+        raise AssertionError(f"lava reflex final position is not a dry stand: final={final.pos} raw={raw}")
+
+
 def main() -> int:
     with connect_or_skip() as rcon:
         setup_world(rcon)
@@ -550,6 +582,7 @@ def main() -> int:
             run_water_damage_budget_auto_preempt(rcon, body)
             run_water_reflex_honest_failure(rcon, body)
             run_lava_reflex_honest_failure_releases_owner(rcon, body)
+            run_lava_reflex_skips_non_standable_candidate(rcon, body)
         finally:
             command(rcon, "script in minebot run global_reflex_scan = false", delay=0.0)
             command(rcon, "script in minebot run global_water_reflex_air_threshold = 80", delay=0.0)

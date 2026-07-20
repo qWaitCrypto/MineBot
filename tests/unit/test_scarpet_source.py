@@ -1547,6 +1547,18 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIsNotNone(movement_water, "movement_water_escape_should_trigger function not found")
         self.assertIn("water_reflex_should_trigger(name)", movement_water.group(1))
 
+    def test_lava_escape_target_requires_an_occupiable_non_lava_cell(self):
+        source = MINEBOT_SC.read_text()
+
+        escape = re.search(r"safe_escape_target\(p\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(escape, "safe_escape_target function not found")
+        self.assertIn("is_reflex_escape_cell(tx, by, tz)", escape.group(1))
+        candidate = re.search(r"is_reflex_escape_cell\(x, y, z\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(candidate, "is_reflex_escape_cell function not found")
+        self.assertIn("here_kind != 'SOLID' && head_kind != 'SOLID'", candidate.group(1))
+        self.assertIn("here != 'lava' && here != 'minecraft:lava'", candidate.group(1))
+        self.assertIn("is_solid_floor(x, y, z)", candidate.group(1))
+
     def test_survival_reflex_cancels_waiting_navigation_mutations(self):
         source = MINEBOT_SC.read_text()
         hazard = re.search(r"start_hazard_reflex\(name, kind\) -> \((.*?)\n\);", source, re.S)
