@@ -379,7 +379,7 @@ class ScarpetSourceTests(unittest.TestCase):
             "'cancel_policies' -> execution_cancel_policies",
             "if(movement_kind == 'swim',",
             "look_y = if(movement_kind == 'swim', target:1 + 1.8",
-            "run('player ' + name + ' jump')",
+            "run('player ' + name + ' jump continuous')",
             '"movement_counts":%s',
         ):
             self.assertIn(expected, source)
@@ -701,6 +701,7 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("target = water_escape_target(p)", request_body)
         self.assertIn("target = water_surface_target(p)", request_body)
         self.assertIn("'water', 'moveTo'", request_body)
+        self.assertIn("initialize_water_reflex_controls(name);", request_body)
         self.assertIn("reason + '_egress_unavailable'", request_body)
         self.assertNotIn("!in_water_now(name)", request_body)
         self.assertIn("on_dry_stand = p != null && is_dry_stand_cell", request_body)
@@ -713,6 +714,8 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("global_reflexes:name == null && controls_ready", source)
         self.assertIn("move_cancel_egress = kind == 'water' && owner_name == 'moveTo'", reflex_body)
         self.assertIn("retarget = water_escape_target(p)", reflex_body)
+        self.assertIn("if(kind == 'water', initialize_water_reflex_controls(name));", reflex_body)
+        self.assertNotIn("run('player ' + name + ' jump')", reflex_body)
         self.assertIn("if(move_cancel_egress,\n      emit('moveCancelEgress'", reflex_body)
         self.assertIn("finish_move(name, global_move_cancels:name:0, false)", reflex_body)
         self.assertIn("global_move_cancels:name:0 + '_egress_failed'", reflex_body)
@@ -1501,6 +1504,9 @@ class ScarpetSourceTests(unittest.TestCase):
             "start_water_reflex(name)",
             "water_reflex_should_trigger(name) &&",
             "start_water_reflex(name) -> start_hazard_reflex(name, 'water');",
+            "initialize_water_reflex_controls(name) -> (",
+            "run('player ' + name + ' jump continuous');",
+            "if(kind == 'water', initialize_water_reflex_controls(name));",
             "if(kind == 'water', water_escape_target(p), safe_escape_target(p))",
             "if(kind == 'water' && target == null,",
             "target = water_surface_target(p)",

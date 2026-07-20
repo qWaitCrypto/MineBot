@@ -1779,6 +1779,12 @@ initialize_movement_controls(name, movement_kind, p, target) -> (
   apply_movement_controls(name, movement_kind, p, target)
 );
 
+initialize_water_reflex_controls(name) -> (
+  run('player ' + name + ' sprint');
+  run('player ' + name + ' jump continuous');
+  true
+);
+
 advance_waypoint(name, m) -> (
   idx = m:14 + 1;
   points = m:13;
@@ -1843,6 +1849,7 @@ start_move_cancel_water_egress(name, m, reason) -> (
       false
     ,
       global_reflexes:name = l(target:0, target:1, target:2, 0, 'water', 'moveTo');
+      initialize_water_reflex_controls(name);
       emit('moveCancelEgress', name, l(m:0, reason, 'started', p, target, reflex_target_is_dry_stand(target)));
       true
     )
@@ -3332,6 +3339,7 @@ start_hazard_reflex(name, kind) -> (
       false
     ,
       global_reflexes:name = l(target:0, target:1, target:2, 0, kind, owner_name);
+      if(kind == 'water', initialize_water_reflex_controls(name));
       emit('reflexTriggered', name, l(kind, p, target, reflex_target_is_dry_stand(target), reflex_target_block_type(target), reflex_target_below_type(target)));
       true
     )
@@ -3491,6 +3499,7 @@ run_reflex_tick(name, r) -> (
   );
   if(retarget != null,
     global_reflexes:name = l(retarget:0, retarget:1, retarget:2, 0, kind, owner_name);
+    if(kind == 'water', initialize_water_reflex_controls(name));
     if(move_cancel_egress,
       emit('moveCancelEgress', name, l(global_moves:name:0, global_move_cancels:name:0, 'retargeted', p, retarget, reflex_target_is_dry_stand(retarget)))
     )
@@ -3532,18 +3541,8 @@ run_reflex_tick(name, r) -> (
     ,
       look_y = if(water_target_is_shore, p:1 + 0.8, r:1 + 1.0);
       run(str('player %s look at %.3f %.3f %.3f', name, r:0, look_y, r:2));
-      if(kind == 'water' && water_target_is_shore,
-        run('player ' + name + ' sprint');
-        run('player ' + name + ' jump')
-      ,
-        if(kind == 'water' && !water_target_is_shore,
-          run('player ' + name + ' sprint');
-          run('player ' + name + ' jump')
-        ,
-          if(r:1 > p:1 + 0.35,
-            run('player ' + name + ' jump once')
-          )
-        )
+      if(kind != 'water' && r:1 > p:1 + 0.35,
+        run('player ' + name + ' jump once')
       );
       run('player ' + name + ' move forward')
     )
