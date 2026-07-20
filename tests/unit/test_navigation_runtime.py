@@ -1633,7 +1633,15 @@ class NavigationRuntimeTests(unittest.TestCase):
             ],
             terminal_reasons=["preempted", "arrived"],
             poll_events=[
-                [Event(seq=10, tick=20, bot="Bot1", name="reflexCompleted", data={"kind": "water"})],
+                [
+                    Event(
+                        seq=10,
+                        tick=20,
+                        bot="Bot1",
+                        name="reflexCompleted",
+                        data={"kind": "water", "escaped_hazard": True, "final_is_dry_stand": True},
+                    )
+                ],
             ],
         )
         runtime = NavigationTransactions(body, nav)
@@ -1668,7 +1676,15 @@ class NavigationRuntimeTests(unittest.TestCase):
             ],
             terminal_reasons=["arrived"],
             poll_events=[
-                [Event(seq=11, tick=21, bot="Bot1", name="reflexCompleted", data={"kind": "water"})],
+                [
+                    Event(
+                        seq=11,
+                        tick=21,
+                        bot="Bot1",
+                        name="reflexCompleted",
+                        data={"kind": "water", "escaped_hazard": True, "final_is_dry_stand": True},
+                    )
+                ],
             ],
         )
         runtime = NavigationTransactions(body, nav)
@@ -1712,6 +1728,41 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(result.reason, "water_egress_failed")
         self.assertEqual(result.metrics["paused"], False)
         self.assertEqual(result.metrics["reflex_handoff"], "reflex_failed")
+        self.assertEqual(result.metrics["reflex"]["final_is_dry_stand"], False)
+        self.assertEqual(len(body.actions), 1)
+
+    def test_navigate_to_rejects_water_surface_reflex_claimed_as_escape(self):
+        nav = FakeNavigator([])
+        body = FakeBody(
+            [
+                state_at((0, 64, 0)),
+                state_at((1, 63, 0)),
+            ],
+            terminal_reasons=["preempted", "arrived"],
+            poll_events=[
+                [
+                    Event(
+                        seq=10,
+                        tick=20,
+                        bot="Bot1",
+                        name="reflexCompleted",
+                        data={
+                            "kind": "water",
+                            "escaped_hazard": True,
+                            "target_is_dry_stand": False,
+                            "final_is_dry_stand": False,
+                        },
+                    )
+                ],
+            ],
+        )
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((2, 64, 0), config=NavigationRunConfig(max_segments=4))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "water_egress_failed")
+        self.assertEqual(result.metrics["reflex"]["escaped_hazard"], True)
         self.assertEqual(result.metrics["reflex"]["final_is_dry_stand"], False)
         self.assertEqual(len(body.actions), 1)
 

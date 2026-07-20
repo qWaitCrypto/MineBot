@@ -411,7 +411,14 @@ class NavigationTransactions:
                             "seq": reflex.seq,
                             "data": dict(reflex.data),
                         }
-                    if reflex.data.get("escaped_hazard") is False:
+                    water_egress_confirmed = (
+                        reflex.data.get("kind") == "water"
+                        and reflex.data.get("escaped_hazard") is True
+                        and reflex.data.get("final_is_dry_stand") is True
+                    )
+                    if reflex.data.get("escaped_hazard") is False or (
+                        reflex.data.get("kind") == "water" and not water_egress_confirmed
+                    ):
                         return _result(
                             False,
                             "water_egress_failed" if reflex.data.get("kind") == "water" else "reflex_failed",

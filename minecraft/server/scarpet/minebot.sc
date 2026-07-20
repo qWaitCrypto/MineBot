@@ -3130,12 +3130,10 @@ water_escape_corridor_clear(bx, bz, tx, tz, sy) -> (
   dx = tx - bx;
   dz = tz - bz;
   steps = max(abs(dx), abs(dz));
-  step_x = if(dx == 0, 0, if(dx > 0, 1, -1));
-  step_z = if(dz == 0, 0, if(dz > 0, 1, -1));
   clear = true;
   loop(steps,
-    cx = bx + step_x * (_ + 1);
-    cz = bz + step_z * (_ + 1);
+    cx = bx + floor(dx * (_ + 1) / steps);
+    cz = bz + floor(dz * (_ + 1) / steps);
     feet_kind = block_kind('' + block(cx, sy, cz));
     head_kind = block_kind('' + block(cx, sy + 1, cz));
     if(feet_kind == 'SOLID' || head_kind == 'SOLID',
@@ -3145,21 +3143,29 @@ water_escape_corridor_clear(bx, bz, tx, tz, sy) -> (
   clear
 );
 
+water_shore_candidate_offsets() -> (
+  candidates = l();
+  loop(8,
+    radius = _ + 1;
+    loop(radius * 2 + 1,
+      delta = _ - radius;
+      candidates += l(radius, delta);
+      candidates += l(-radius, delta)
+    );
+    loop(radius * 2 - 1,
+      delta = _ - radius + 1;
+      candidates += l(delta, radius);
+      candidates += l(delta, -radius)
+    )
+  );
+  candidates
+);
+
 water_shore_escape_target(p) -> (
   bx = floor(p:0);
   by = floor(p:1);
   bz = floor(p:2);
-  candidates = l(
-    l(1, 0), l(-1, 0), l(0, 1), l(0, -1),
-    l(2, 0), l(-2, 0), l(0, 2), l(0, -2),
-    l(3, 0), l(-3, 0), l(0, 3), l(0, -3),
-    l(4, 0), l(-4, 0), l(0, 4), l(0, -4),
-    l(5, 0), l(-5, 0), l(0, 5), l(0, -5),
-    l(6, 0), l(-6, 0), l(0, 6), l(0, -6),
-    l(7, 0), l(-7, 0), l(0, 7), l(0, -7),
-    l(8, 0), l(-8, 0), l(0, 8), l(0, -8),
-    l(1, 1), l(1, -1), l(-1, 1), l(-1, -1)
-  );
+  candidates = water_shore_candidate_offsets();
   best = null;
   loop(11,
     sy = by - 2 + _;
@@ -3477,15 +3483,29 @@ run_reflex_tick(name, r) -> (
   move_cancel_egress = kind == 'water' && owner_name == 'moveTo' && global_moves:name != null && global_move_cancels:name != null;
   water_target_is_shore = kind == 'water' && is_dry_stand_cell(floor(r:0), floor(r:1), floor(r:2));
   water_on_dry_stand = kind == 'water' && is_dry_stand_cell(floor(p:0), floor(p:1), floor(p:2));
-  water_surface_reached = kind == 'water' && !move_cancel_egress && !water_target_is_shore && dist <= 0.9 && clear_of_hazard;
-  escaped = if(kind == 'water', if(move_cancel_egress, water_target_is_shore && dist <= 0.9 && water_on_dry_stand, if(water_target_is_shore, dist <= 0.9 && water_on_dry_stand, water_surface_reached)), dist <= 0.9 && clear_of_hazard);
+  water_surface_reached = kind == 'water' && !water_target_is_shore && dist <= 0.9 && clear_of_hazard;
+  escaped = if(kind == 'water', water_target_is_shore && dist <= 0.9 && water_on_dry_stand, dist <= 0.9 && clear_of_hazard);
   retarget = null;
-  if(move_cancel_egress && !water_target_is_shore && dist <= 0.9 && clear_of_hazard,
+  if(water_surface_reached,
     retarget = water_escape_target(p)
   );
   if(retarget != null,
     global_reflexes:name = l(retarget:0, retarget:1, retarget:2, 0, kind, owner_name);
-    emit('moveCancelEgress', name, l(global_moves:name:0, global_move_cancels:name:0, 'retargeted', p, retarget, reflex_target_is_dry_stand(retarget)))
+    if(move_cancel_egress,
+      emit('moveCancelEgress', name, l(global_moves:name:0, global_move_cancels:name:0, 'retargeted', p, retarget, reflex_target_is_dry_stand(retarget)))
+    )
+  ,
+  if(water_surface_reached,
+    stop_body(name);
+    target = l(r:0, r:1, r:2);
+    emit('reflexCompleted', name, l(p, dist, ticks, false, kind, target, reflex_target_is_dry_stand(target), false, reflex_target_block_type(target), reflex_target_below_type(target)));
+    global_reflexes:name = null;
+    if(move_cancel_egress,
+      emit('moveCancelEgress', name, l(global_moves:name:0, global_move_cancels:name:0, 'unavailable', p, target, false));
+      finish_move(name, global_move_cancels:name:0 + '_egress_unavailable', false)
+    ,
+      release_owner(name, owner_name)
+    )
   ,
   if(escaped,
     stop_body(name);
@@ -3527,6 +3547,7 @@ run_reflex_tick(name, r) -> (
       );
       run('player ' + name + ' move forward')
     )
+  )
   )
   )
 );

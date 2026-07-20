@@ -713,6 +713,7 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("global_reflexes:name == null && controls_ready", source)
         self.assertIn("move_cancel_egress = kind == 'water' && owner_name == 'moveTo'", reflex_body)
         self.assertIn("retarget = water_escape_target(p)", reflex_body)
+        self.assertIn("if(move_cancel_egress,\n      emit('moveCancelEgress'", reflex_body)
         self.assertIn("finish_move(name, global_move_cancels:name:0, false)", reflex_body)
         self.assertIn("global_move_cancels:name:0 + '_egress_failed'", reflex_body)
         self.assertIn("if(kind == 'moveCancelEgress'", source)
@@ -1490,6 +1491,7 @@ class ScarpetSourceTests(unittest.TestCase):
             "water_surface_target(p)",
             "water_near_cell(x, y, z)",
             "water_near_escape_cell(x, y, z)",
+            "water_shore_candidate_offsets()",
             "water_shore_escape_target(p)",
             "water_escape_target(p)",
             "water_hazard_clear(name)",
@@ -1505,8 +1507,8 @@ class ScarpetSourceTests(unittest.TestCase):
             "if(kind == 'fire', 'fireReflex', if(kind == 'water', 'waterReflex', 'lavaReflex'))",
             "if(kind == 'fire', !on_fire_now(name), if(kind == 'water', water_hazard_clear(name), !lava_near_pos(p)))",
             "move_cancel_egress = kind == 'water' && owner_name == 'moveTo'",
-            "water_surface_reached = kind == 'water' && !move_cancel_egress && !water_target_is_shore && dist <= 0.9 && clear_of_hazard",
-            "escaped = if(kind == 'water', if(move_cancel_egress, water_target_is_shore && dist <= 0.9 && water_on_dry_stand",
+            "water_surface_reached = kind == 'water' && !water_target_is_shore && dist <= 0.9 && clear_of_hazard",
+            "escaped = if(kind == 'water', water_target_is_shore && dist <= 0.9 && water_on_dry_stand",
             "retarget = water_escape_target(p)",
             "global_pending_reflexes:name = 'water'",
             "global_pending_reflexes:name = 'fire'",
@@ -1524,6 +1526,13 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIsNotNone(escape, "water_escape_target function not found")
         self.assertIn("water_shore_escape_target(p)", escape.group(1))
         self.assertNotIn("water_surface_target(p)", escape.group(1))
+        shore = re.search(r"water_shore_escape_target\(p\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(shore, "water_shore_escape_target function not found")
+        self.assertIn("candidates = water_shore_candidate_offsets();", shore.group(1))
+        corridor = re.search(r"water_escape_corridor_clear\(bx, bz, tx, tz, sy\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(corridor, "water_escape_corridor_clear function not found")
+        self.assertIn("cx = bx + floor(dx * (_ + 1) / steps);", corridor.group(1))
+        self.assertIn("cz = bz + floor(dz * (_ + 1) / steps);", corridor.group(1))
         move_tick = re.search(r"run_move_tick\(name, m\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(move_tick, "run_move_tick function not found")
         self.assertIn("movement_water_escape_should_trigger(name, updated_move, stuck_ticks)", move_tick.group(1))
