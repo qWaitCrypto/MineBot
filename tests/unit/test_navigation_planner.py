@@ -417,19 +417,32 @@ class NavigationPlannerTests(unittest.TestCase):
         self.assertFalse(result.path[0].safe_to_cancel)
         self.assertEqual(result.path[0].cancel_policy, "surface_or_stable_water")
 
-    def test_astar_uses_swim_to_breach_surface_before_bank_ascent(self):
+    def test_astar_uses_swim_to_breach_surface_air(self):
         cells = {
             (0, 64, 0): GridCell(block_type="water", liquid=True),
-            (0, 65, 0): GridCell(),
+            (0, 65, 0): GridCell(requires_support=True),
+        }
+        planner = AStarPlanner(GridWorld(cells), NavigationCostModel(GovernancePolicy()))
+
+        result = planner.plan((0, 64, 0), (0, 65, 0), allow_partial=False)
+
+        self.assertTrue(result.success)
+        self.assertEqual([step.move for step in result.path], [MoveKind.SWIM])
+        self.assertEqual([step.pos for step in result.path], [(0, 65, 0)])
+
+    def test_astar_does_not_ground_ascend_from_unsupported_surface_air(self):
+        cells = {
+            (0, 64, 0): GridCell(block_type="water", liquid=True),
+            (0, 65, 0): GridCell(requires_support=True),
             (1, 66, 0): GridCell(),
         }
         planner = AStarPlanner(GridWorld(cells), NavigationCostModel(GovernancePolicy()))
 
         result = planner.plan((0, 64, 0), (1, 66, 0), allow_partial=False)
 
-        self.assertTrue(result.success)
-        self.assertEqual([step.move for step in result.path], [MoveKind.SWIM, MoveKind.ASCEND])
-        self.assertEqual([step.pos for step in result.path], [(0, 65, 0), (1, 66, 0)])
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "no_path")
+        self.assertTrue(any(item["reason"] == "ascend_requires_support" for item in result.diagnostics["blocked"]))
 
     def test_astar_uses_diagonal_step_when_both_corners_are_clear(self):
         cells = {

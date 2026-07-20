@@ -1729,7 +1729,8 @@ swim_waypoint_reached(m, p, target) -> (
   next_kind = if(moves != null && idx + 1 < length(moves), moves:(idx + 1), null);
   horizontal_dist = sqrt((p:0 - target:0) * (p:0 - target:0) + (p:2 - target:2) * (p:2 - target:2));
   in_target_cell = floor(p:0) == floor(target:0) && navigation_node_y(p) == floor(target:1) && floor(p:2) == floor(target:2);
-  in_target_cell && (next_kind == null || next_kind == 'swim' || horizontal_dist <= min(m:4, 0.17))
+  transition_ready = horizontal_dist <= min(m:4, 0.17) && p:1 >= target:1 - min(m:4, 0.17);
+  in_target_cell && (next_kind == null || next_kind == 'swim' || transition_ready)
 );
 
 current_waypoint_reached(m, p, target, dist) -> (
@@ -3020,6 +3021,21 @@ water_reflex_should_trigger(name) -> (
   )
 );
 
+active_move_owns_water_egress(name) -> (
+  m = global_moves:name;
+  if(m == null,
+    false
+  ,
+    points = m:13;
+    if(current_cancel_policy(m) != 'egress_to_dry' || points == null || length(points) == 0,
+      false
+    ,
+      target = normalize_waypoint_point(points:(length(points) - 1));
+      is_dry_stand_cell(floor(target:0), floor(target:1), floor(target:2)) && m:8 < movement_water_escape_ticks(m)
+    )
+  )
+);
+
 hazard_kind_near_name(name) -> (
   p = bot_pos(name);
   if(p == null,
@@ -3032,7 +3048,7 @@ hazard_kind_near_name(name) -> (
         'fire'
       ,
         if(water_reflex_should_trigger(name),
-          'water'
+          if(active_move_owns_water_egress(name), null, 'water')
         ,
           null
         )
@@ -4442,7 +4458,7 @@ navigation_neighbors(x, y, z, context) -> (
     source_cap_type = '' + block(x, y + 2, z);
     source_head_blocked = navigation_block_kind_at(x, y + 1, z) == 'SOLID';
     source_cap_blocked = navigation_block_kind_at(x, y + 2, z) == 'SOLID';
-    if(bool(context:'allow_ascend') && navigation_block_kind_at(nx, y, nz) == 'SOLID' && (up == 'WALK' || (up == 'LIQUID' && bool(context:'allow_swim'))),
+    if(bool(context:'allow_ascend') && source_kind != 'NO_FLOOR' && navigation_block_kind_at(nx, y, nz) == 'SOLID' && (up == 'WALK' || (up == 'LIQUID' && bool(context:'allow_swim'))),
       if(source_head_blocked || source_cap_blocked,
         source_clearance_y = if(source_head_blocked, y + 1, y + 2);
         source_clearance_type = if(source_head_blocked, source_head_type, source_cap_type);

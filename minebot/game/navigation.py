@@ -885,6 +885,19 @@ class AStarPlanner:
         cell: GridCell,
         break_context: BreakContext | str,
     ) -> MovementCandidate:
+        dy = pos[1] - current.pos[1]
+        dx = pos[0] - current.pos[0]
+        dz = pos[2] - current.pos[2]
+        current_cell = current.overlay.cell_at(self.world, current.pos)
+        if (
+            current_cell is not None
+            and current_cell.liquid
+            and dy > 0
+            and dx == 0
+            and dz == 0
+            and cell.walkable
+        ):
+            return MovementCandidate(kind=MoveKind.SWIM, pos=pos, block_type=cell.block_type)
         if cell.requires_support and not self._has_support(current.overlay, pos):
             return MovementCandidate(
                 kind=MoveKind.PLACE,
@@ -905,18 +918,8 @@ class AStarPlanner:
                 return gravity_hazard
             return MovementCandidate(kind=MoveKind.BREAK, pos=headroom_pos, block_type=block_type, context=break_context)
         if cell.walkable:
-            dy = pos[1] - current.pos[1]
-            dx = pos[0] - current.pos[0]
-            dz = pos[2] - current.pos[2]
-            current_cell = current.overlay.cell_at(self.world, current.pos)
-            if (
-                current_cell is not None
-                and current_cell.liquid
-                and dy > 0
-                and dx == 0
-                and dz == 0
-            ):
-                return MovementCandidate(kind=MoveKind.SWIM, pos=pos, block_type=cell.block_type)
+            if current_cell is not None and current_cell.requires_support and dy > 0:
+                return MovementCandidate(kind=MoveKind.INVALID, pos=pos, context="ascend_requires_support")
             if cell.liquid:
                 return MovementCandidate(kind=MoveKind.SWIM, pos=pos, block_type=cell.block_type)
             if dy > 0:

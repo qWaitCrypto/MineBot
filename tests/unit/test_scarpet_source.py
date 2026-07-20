@@ -405,6 +405,7 @@ class ScarpetSourceTests(unittest.TestCase):
             "if(up == 'NO_FLOOR' && navigation_body_clear(x, y + 1, z), neighbors += navigation_candidate(x, y + 1, z, 'swim', 3.0, 0, 'egress_to_dry'))",
             neighbors_body,
         )
+        self.assertIn("bool(context:'allow_ascend') && source_kind != 'NO_FLOOR'", neighbors_body)
 
     def test_server_navigation_bridge_uses_governed_proposal_handshake(self):
         source = MINEBOT_SC.read_text()
@@ -1322,7 +1323,11 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("first_target = normalize_waypoint_point(points:0)", source)
         self.assertIn("target = current_waypoint(m)", source)
         self.assertIn("navigation_node_y(p) == floor(target:1)", source)
-        self.assertIn("next_kind == null || next_kind == 'swim' || horizontal_dist <= min(m:4, 0.17)", source)
+        self.assertIn(
+            "transition_ready = horizontal_dist <= min(m:4, 0.17) && p:1 >= target:1 - min(m:4, 0.17)",
+            source,
+        )
+        self.assertIn("next_kind == null || next_kind == 'swim' || transition_ready", source)
         self.assertIn("if(current_movement_kind(m) == 'swim', swim_waypoint_reached(m, p, target), dist <= m:4)", source)
         self.assertIn("if(next_kind != current_movement_kind(m),", source)
         self.assertIn("global_move_control_inits:name = l(m:0, idx, global_tick)", source)
@@ -1455,6 +1460,10 @@ class ScarpetSourceTests(unittest.TestCase):
             "bot_air(name)",
             "head_in_water_now(name)",
             "water_reflex_should_trigger(name)",
+            "active_move_owns_water_egress(name)",
+            "current_cancel_policy(m) != 'egress_to_dry'",
+            "m:8 < movement_water_escape_ticks(m)",
+            "is_dry_stand_cell(floor(target:0), floor(target:1), floor(target:2))",
             "air_risk = head_in_water_now(name) && air != null && air <= global_water_reflex_air_threshold;",
             "damage_risk = global_water_reflex_health_baselines:name - hp >= global_water_reflex_damage_budget",
             "water_surface_target(p)",
@@ -1488,6 +1497,7 @@ class ScarpetSourceTests(unittest.TestCase):
         hazard = re.search(r"hazard_kind_near_name\(name\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(hazard, "hazard_kind_near_name function not found")
         self.assertIn("water_reflex_should_trigger(name)", hazard.group(1))
+        self.assertIn("if(active_move_owns_water_egress(name), null, 'water')", hazard.group(1))
         self.assertNotIn("if(in_water_now(name),", hazard.group(1))
         escape = re.search(r"water_escape_target\(p\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(escape, "water_escape_target function not found")
