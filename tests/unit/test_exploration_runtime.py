@@ -189,6 +189,20 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertFalse(navigator.calls)
         self.assertEqual(body.perceptions[0][1]["types"][0], "oak_log")
 
+    def test_frontier_navigation_uses_dry_non_mutating_profile(self):
+        runtime, _, navigator = _runtime()
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertTrue(result.success)
+        self.assertTrue(navigator.calls)
+        config = navigator.calls[0][1]["config"]
+        self.assertFalse(config.allow_swim)
+        self.assertFalse(config.allow_break)
+        self.assertFalse(config.allow_place)
+        self.assertFalse(config.allow_pillar)
+        self.assertFalse(config.allow_downward)
+
     def test_find_blocks_follows_numeric_cursor_until_complete(self):
         body = PagedFindBlocksBody(
             {

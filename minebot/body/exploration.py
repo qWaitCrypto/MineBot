@@ -12,6 +12,7 @@ from typing import Protocol
 from minebot.body.navigation import (
     NavigationRunConfig,
     NavigationTransactions,
+    dry_land_navigation_config,
     pure_movement_navigation_config,
 )
 from minebot.body.world_read import read_block_facts
@@ -491,8 +492,10 @@ class ExplorationTransactions:
             nav = self.navigator.navigate_to(
                 GoalComposite(tuple(GoalNear(stand, radius=1) for stand in candidate_stands)),
                 break_context=BreakContext.TRAVEL,
-                config=pure_movement_navigation_config(
-                    NavigationRunConfig(max_segments=16, segment_timeout_s=12.0)
+                config=dry_land_navigation_config(
+                    pure_movement_navigation_config(
+                        NavigationRunConfig(max_segments=16, segment_timeout_s=12.0)
+                    )
                 ),
                 mutation_blacklist=mutation_blacklist,
             )
