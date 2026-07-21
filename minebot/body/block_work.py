@@ -1541,38 +1541,40 @@ class BlockWork:
             egress = self.egress_to_dry(current_pos=origin, timeout_s=timeout_s)
             surface_egress = {"required": True, **dict(egress.metrics or {})}
             if not egress.success:
-                return ToolResult(
-                    success=False,
-                    reason=f"surface_egress_failed:{egress.reason}",
-                    can_retry=egress.can_retry,
-                    next_suggestion=egress.next_suggestion,
-                    metrics={"origin": list(requested_origin), "surface_egress": surface_egress},
-                )
-            origin = _state_block_pos(self.body.get_state().pos)
-            initial = self._surface_candidate_at(origin, world_top_y=world_top_y)
-            if isinstance(initial, ToolResult):
-                return _with_metric(
-                    initial,
-                    "go_to_surface",
-                    {"origin": list(requested_origin), "surface_egress": surface_egress},
-                )
-            if _surface_terminal_verified(initial):
-                return ToolResult(
-                    success=True,
-                    reason="surface_reached",
-                    can_retry=False,
-                    metrics={
-                        "origin": list(requested_origin),
-                        "surface_origin": list(origin),
-                        "target_surface": list(origin),
-                        "selected_goal": list(origin),
-                        "final_pos": list(origin),
-                        "terminal_surface": initial,
-                        "terminal_surface_verified": True,
-                        "surface_egress": surface_egress,
-                        "navigation": None,
-                    },
-                )
+                if egress.reason != "dry_egress_unavailable":
+                    return ToolResult(
+                        success=False,
+                        reason=f"surface_egress_failed:{egress.reason}",
+                        can_retry=egress.can_retry,
+                        next_suggestion=egress.next_suggestion,
+                        metrics={"origin": list(requested_origin), "surface_egress": surface_egress},
+                    )
+            else:
+                origin = _state_block_pos(self.body.get_state().pos)
+                initial = self._surface_candidate_at(origin, world_top_y=world_top_y)
+                if isinstance(initial, ToolResult):
+                    return _with_metric(
+                        initial,
+                        "go_to_surface",
+                        {"origin": list(requested_origin), "surface_egress": surface_egress},
+                    )
+                if _surface_terminal_verified(initial):
+                    return ToolResult(
+                        success=True,
+                        reason="surface_reached",
+                        can_retry=False,
+                        metrics={
+                            "origin": list(requested_origin),
+                            "surface_origin": list(origin),
+                            "target_surface": list(origin),
+                            "selected_goal": list(origin),
+                            "final_pos": list(origin),
+                            "terminal_surface": initial,
+                            "terminal_surface_verified": True,
+                            "surface_egress": surface_egress,
+                            "navigation": None,
+                        },
+                    )
 
         scaffold_counts = _inventory_counts_from_body(self.body)
         if isinstance(scaffold_counts, ToolResult):
