@@ -2586,9 +2586,15 @@ class AgentRuntime:
         facts = await self.cancel_active_execution_with_facts(reason)
         return bool(facts.get("settled"))
 
-    async def cancel_active_execution_with_facts(self, reason: str) -> JsonObject:
+    async def cancel_active_execution_with_facts(
+        self,
+        reason: str,
+        *,
+        invalidate_generation: bool = True,
+    ) -> JsonObject:
         cancellation_started = time.monotonic()
-        self.authority.invalidate_generation(reason)
+        if invalidate_generation:
+            self.authority.invalidate_generation(reason)
         cancellation_scope_count = self.request_execution_cancel(reason)
         interrupt_ok: bool | None = None
         interrupt_accepted: bool | None = None

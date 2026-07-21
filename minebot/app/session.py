@@ -117,6 +117,7 @@ class AgentSession:
     _work_in_flight: bool = False
     _execution_quarantined: bool = False
     _execution_quarantine_reported: bool = False
+    _body_cleanup_generation: int | None = None
     _scheduler_id: str = field(default_factory=lambda: f"session-{uuid4().hex}")
 
     def __post_init__(self) -> None:
@@ -145,7 +146,6 @@ class AgentSession:
             cancellation_reason = f"session_command:{command.kind.value}"
             self.parts.authority.invalidate_generation(cancellation_reason)
             self.parts.runtime.request_execution_cancel(cancellation_reason)
-            self._body_interrupt(command.reason)
         superseded = superseded_kinds_for(intent_kind)
         if superseded:
             self.work_queue.supersede(
@@ -247,6 +247,12 @@ class AgentSession:
     ) -> SessionStep:
         checkpoint_before = self._latest_checkpoint_id()
         command = _command_from_intent(intent) if _is_command_intent(intent) else None
+        if (
+            command is not None
+            and self.parts is not None
+            and _command_requires_body_interrupt(command)
+        ):
+            await self._settle_command_body_interrupt(command)
         signals = (
             await self._apply_command(command)
             if command is not None
@@ -324,6 +330,28 @@ class AgentSession:
             SessionStep(outcome.status, outcome.lifecycle, outcome.message),
             intent=intent,
             checkpoint_before=checkpoint_before,
+        )
+
+    async def _settle_command_body_interrupt(self, command: SessionCommand) -> None:
+        assert self.parts is not None
+        generation = self.parts.authority.current_generation()
+        if self._body_cleanup_generation == generation:
+            return
+        facts = await self.parts.runtime.cancel_active_execution_with_facts(
+            command.reason,
+            invalidate_generation=False,
+        )
+        settled = bool(facts.get("settled"))
+        if settled:
+            self._body_cleanup_generation = generation
+        else:
+            self._execution_quarantined = True
+            self._execution_quarantine_reported = False
+        self._trace(
+            "session_command_body_interrupt",
+            command=command.kind.value,
+            settled=settled,
+            execution_idle=bool(facts.get("execution_idle")),
         )
 
     async def _drive_recovery(self) -> SessionStep:
@@ -1346,13 +1374,6 @@ class AgentSession:
             "missing": state.missing,
         }
 
-    def _body_interrupt(self, reason: str) -> None:
-        assert self.parts is not None
-        try:
-            self.parts.runtime.body.interrupt(reason)
-        except Exception as exc:  # pragma: no cover - interruption must not hide command receipt
-            self.parts.runtime.trace.emit("body_interrupt_failed", reason=reason, error_type=type(exc).__name__)
-
     def close(self) -> None:
         if self.parts is not None:
             self.parts.runtime.close()
@@ -1369,27 +1390,48 @@ class AgentSession:
         task = asyncio.create_task(work)
         assert self.work_queue is not None
 
-        async def settle_preempted_work():
+        async def settle_preempted_work(cancellation_task: asyncio.Task[dict[str, object]] | None):
             idle = True
+            settled = True
             if self.parts is not None:
-                idle = await self.parts.runtime.wait_for_execution_idle()
-                self._execution_quarantined = not idle
+                if cancellation_task is None:
+                    idle = await self.parts.runtime.wait_for_execution_idle()
+                    settled = idle
+                else:
+                    cancellation_facts = await cancellation_task
+                    idle = bool(cancellation_facts.get("execution_idle"))
+                    settled = bool(cancellation_facts.get("settled"))
+                    if settled:
+                        self._body_cleanup_generation = self.parts.authority.current_generation()
+                self._execution_quarantined = not settled
                 self._execution_quarantine_reported = False
                 self._trace(
                     "session_work_preempted",
                     work_kind=work_kind,
                     execution_idle=idle,
+                    settled=settled,
                     pending_count=self.work_queue.pending_count(),
                 )
             return _WORK_PREEMPTED
 
+        async def preempt_work():
+            cancellation_task: asyncio.Task[dict[str, object]] | None = None
+            if self.parts is not None:
+                cancellation_task = asyncio.create_task(
+                    self.parts.runtime.cancel_active_execution_with_facts(
+                        _queued_preemption_reason(self.work_queue, work_kind),
+                        invalidate_generation=False,
+                    )
+                )
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            return await settle_preempted_work(cancellation_task)
+
         try:
             while not task.done():
                 if self.work_queue.notification_version != admission_version:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-                    return await settle_preempted_work()
+                    return await preempt_work()
                 await asyncio.sleep(0.01)
             return task.result()
         except asyncio.CancelledError:
@@ -1397,7 +1439,7 @@ class AgentSession:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
             if self.work_queue.notification_version != admission_version:
-                return await settle_preempted_work()
+                return await settle_preempted_work(None)
             raise
 
     async def _guard_execution_quarantine(self) -> SessionStep | None:
@@ -1449,6 +1491,26 @@ def _queued_quarantine_control(queue: WorkIntentQueue | None) -> WorkIntent | No
     if not controls:
         return None
     return min(controls, key=lambda intent: (-intent.priority, intent.intent_id))
+
+
+def _queued_preemption_reason(queue: WorkIntentQueue, work_kind: str) -> str:
+    queued = queue.queued_intents()
+    if not queued:
+        return f"session_work_preempted:{work_kind}"
+    intent = queued[0]
+    reason = intent.payload.get("reason")
+    if isinstance(reason, str) and reason:
+        return reason
+    return intent.source
+
+
+def _command_requires_body_interrupt(command: SessionCommand) -> bool:
+    return command.kind in {
+        SessionCommandKind.PAUSE,
+        SessionCommandKind.CANCEL,
+        SessionCommandKind.REPLACE_GOAL,
+        SessionCommandKind.QUIT,
+    }
 
 
 def _command_from_intent(intent: WorkIntent) -> SessionCommand:

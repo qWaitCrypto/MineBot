@@ -901,6 +901,66 @@ class AgentSessionTests(unittest.TestCase):
         self.assertIn(("user", "hello"), session.parts.context.session_messages())
         self.assertEqual(bodies[0].interrupt_reasons, ["user_message"])
 
+    def test_chat_control_is_queued_before_a_blocking_body_interrupt_settles(self):
+        bodies: list[FakeBody] = []
+        runner_started = threading.Event()
+        interrupt_started = threading.Event()
+        release_interrupt = threading.Event()
+
+        class BlockingInterruptBody(FakeBody):
+            def interrupt(self, reason=None):
+                interrupt_started.set()
+                release_interrupt.wait(timeout=1.0)
+                return super().interrupt(reason)
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, [], bodies)
+            body = BlockingInterruptBody()
+            bodies[-1] = body
+            parts.runtime.body = body
+
+            async def runner(_agent, _input_text, **_kwargs):
+                runner_started.set()
+                await asyncio.Event().wait()
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.message("hello"))
+
+        async def scenario():
+            active = asyncio.create_task(session.step())
+            while not runner_started.is_set():
+                await asyncio.sleep(0.01)
+
+            submitted = threading.Event()
+
+            def submit_quit():
+                session.submit(SessionCommand.quit("chat_quit"))
+                submitted.set()
+
+            thread = threading.Thread(target=submit_quit)
+            thread.start()
+            thread.join(timeout=0.1)
+            queued = session.work_queue.queued_intents(WorkIntentKind.QUIT)
+            while not interrupt_started.is_set():
+                await asyncio.sleep(0.01)
+            pending_before_release = not active.done()
+            release_interrupt.set()
+            preempted = await active
+            quit_step = await session.step()
+            return submitted.is_set(), queued, pending_before_release, preempted, quit_step
+
+        submitted, queued, pending_before_release, preempted, quit_step = asyncio.run(scenario())
+
+        self.assertTrue(submitted)
+        self.assertEqual(len(queued), 1)
+        self.assertTrue(pending_before_release)
+        self.assertEqual(preempted.status, "preempted")
+        self.assertEqual(quit_step.status, "quit")
+        self.assertEqual(bodies[0].interrupt_reasons, ["chat_quit"])
+
     def test_preempt_timeout_quarantines_lane_instead_of_starting_new_work(self):
         bodies: list[FakeBody] = []
         started = threading.Event()
@@ -1095,7 +1155,7 @@ class AgentSessionTests(unittest.TestCase):
         asyncio.run(session.step())
 
         session.submit(SessionCommand.pause("user_said_wait"))
-        self.assertEqual(bodies[0].interrupt_reasons, ["user_said_wait"])
+        self.assertEqual(bodies[0].interrupt_reasons, [])
         paused = asyncio.run(session.step())
 
         self.assertEqual(paused.status, "stopped")
@@ -1167,7 +1227,7 @@ class AgentSessionTests(unittest.TestCase):
         before_generation = session.parts.authority._generation
 
         session.submit(SessionCommand.replace_goal("collect 64 sand"))
-        self.assertEqual(bodies[0].interrupt_reasons, ["goal_replaced"])
+        self.assertEqual(bodies[0].interrupt_reasons, [])
         replaced = asyncio.run(session.step())
 
         self.assertEqual(replaced.status, "completed_turn")
@@ -1185,7 +1245,7 @@ class AgentSessionTests(unittest.TestCase):
         asyncio.run(session.step())
 
         session.submit(SessionCommand.cancel("stop_now"))
-        self.assertEqual(bodies[0].interrupt_reasons, ["stop_now"])
+        self.assertEqual(bodies[0].interrupt_reasons, [])
         cancelled = asyncio.run(session.step())
 
         self.assertEqual(cancelled.status, "waiting")
@@ -1218,11 +1278,12 @@ class AgentSessionTests(unittest.TestCase):
         asyncio.run(session.step())
 
         session.submit(SessionCommand.quit("user_quit"))
-        self.assertEqual(bodies[0].interrupt_reasons, ["user_quit"])
+        self.assertEqual(bodies[0].interrupt_reasons, [])
         quit_step = asyncio.run(session.step())
 
         self.assertEqual(quit_step.status, "quit")
         self.assertEqual(quit_step.lifecycle, LifecycleState.IDLE)
+        self.assertEqual(bodies[0].interrupt_reasons, ["user_quit"])
 
     def test_complete_current_goal_stands_down_from_active(self):
         calls: list[str] = []
