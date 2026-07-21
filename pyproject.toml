@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 minebot-camera = "minebot.camera.cli.main:main"
+minebot-local = "minebot.app.local_launcher:main"
 
 [tool.setuptools.package-data]
 "minebot.skills" = ["catalog/*/SKILL.md"]

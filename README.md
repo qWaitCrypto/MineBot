@@ -130,6 +130,25 @@ export MINEBOT_LLM_BASE_URL=<https://host/v1>
 python3 -m minebot.app.console
 ```
 
+For the managed local golden-world environment, start the server reset, provider
+preflight, Camera, trace/state directory, and production interactive session with
+one command:
+
+```bash
+minebot-local
+```
+
+The launcher uses the local test server defaults and your existing provider
+environment. For a persistent private provider profile, run `minebot-local
+--init` once and fill `~/.config/minebot/runtime.env`; initialize the optional
+observer once with `minebot-camera init`.
+
+`minebot-local` resets only a loopback test server and enables Camera by
+default. Use `--no-reset` to preserve the current local world or `--no-camera`
+on machines without the observer stack. Remote servers continue to use the
+explicit `minebot.app.real_server_session` entrypoint and are never reset by the
+launcher.
+
 Then talk to it:
 
 ```text
