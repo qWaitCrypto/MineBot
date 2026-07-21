@@ -14,7 +14,7 @@ import os
 import re
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,6 +67,138 @@ class RealServerConfig:
 
 class RealServerConfigError(RuntimeError):
     pass
+
+
+_MINECRAFT_NAME_RE = re.compile(r"[A-Za-z0-9_]{1,16}")
+
+
+@dataclass(frozen=True)
+class InteractiveScenarioContext:
+    """Restricted test-fixture surface for a production interactive session.
+
+    The scenario owns only scheduled external facts. It cannot submit
+    SessionCommands, inspect the tool registry, or invoke Body transactions.
+    Every operation uses the session's existing RCON client.
+    """
+
+    bot_name: str
+    _rcon: RconClient
+    _trace_event: Callable[[str, Mapping[str, object]], None]
+
+    async def emit_chat(self, sender: str, message: str) -> None:
+        _require_minecraft_name(sender)
+        text = str(message).strip()
+        if not text:
+            raise ValueError("scenario chat message must not be empty")
+        command = (
+            "script in minebot run emit_agent_chat("
+            f"'{self.bot_name}', '{sender}', '{_escape_scarpet_string(text)}')"
+        )
+        await asyncio.to_thread(self._rcon.request, command)
+        self._trace_event("scenario_chat_emitted", {"sender": sender, "message": text})
+
+    async def wait_for_body_ready(self, *, timeout_s: float = 60.0) -> None:
+        if timeout_s <= 0:
+            raise ValueError("fixture ready timeout must be positive")
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while True:
+            state = await self._read_bot_state()
+            if not state.missing:
+                self._trace_event("scenario_body_ready", {"position": list(state.pos)})
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError("fixture Bot did not become ready before timeout")
+            await asyncio.sleep(0.25)
+
+    async def spawn_fake_player(
+        self,
+        name: str,
+        position: tuple[int, int, int],
+    ) -> None:
+        _require_minecraft_name(name)
+        x, y, z = _fixture_position(position)
+        await asyncio.to_thread(self._rcon.request, f"player {name} kill")
+        await asyncio.to_thread(self._rcon.request, f"player {name} spawn at {x} {y} {z}")
+        self._trace_event(
+            "scenario_fake_player_spawned",
+            {"name": name, "position": [x, y, z]},
+        )
+
+    async def remove_fake_player(self, name: str) -> None:
+        _require_minecraft_name(name)
+        await asyncio.to_thread(self._rcon.request, f"player {name} kill")
+        self._trace_event("scenario_fake_player_removed", {"name": name})
+
+    async def spawn_fake_player_near_bot(self, name: str, *, distance: int = 5) -> None:
+        if distance < 1 or distance > 32:
+            raise ValueError("fixture fake-player distance must be between 1 and 32")
+        state = await self._bot_state()
+        await self.spawn_fake_player(
+            name,
+            (round(state.pos[0]) + distance, round(state.pos[1]), round(state.pos[2])),
+        )
+
+    async def set_difficulty(self, difficulty: str) -> None:
+        normalized = str(difficulty).lower()
+        if normalized not in {"peaceful", "easy", "normal", "hard"}:
+            raise ValueError(f"unsupported fixture difficulty: {difficulty!r}")
+        await asyncio.to_thread(self._rcon.request, f"difficulty {normalized}")
+        self._trace_event("scenario_difficulty_set", {"difficulty": normalized})
+
+    async def spawn_husk_near_bot(self, *, distance: int = 2) -> None:
+        if distance < 1 or distance > 8:
+            raise ValueError("fixture hostile distance must be between 1 and 8")
+        state = await self._bot_state()
+        x = round(state.pos[0]) + distance
+        y = round(state.pos[1])
+        z = round(state.pos[2])
+        await asyncio.to_thread(self._rcon.request, "kill @e[type=minecraft:husk]")
+        await asyncio.to_thread(
+            self._rcon.request,
+            f"summon husk {x} {y} {z} {{PersistenceRequired:1b}}",
+        )
+        self._trace_event(
+            "scenario_husk_spawned",
+            {"position": [x, y, z], "distance": distance},
+        )
+
+    async def clear_hostiles(self) -> None:
+        await asyncio.to_thread(self._rcon.request, "kill @e[type=minecraft:husk]")
+        self._trace_event("scenario_hostiles_cleared", {})
+
+    async def _bot_state(self):
+        state = await self._read_bot_state()
+        if state.missing:
+            raise RuntimeError("cannot schedule fixture fact while Bot is missing")
+        return state
+
+    async def _read_bot_state(self):
+        state = await asyncio.to_thread(
+            parse_state,
+            self._rcon.request(build_state_call(self.bot_name)),
+        )
+        return state
+
+
+InteractiveScenarioHook = Callable[[InteractiveScenarioContext], Awaitable[None]]
+
+
+def _require_minecraft_name(name: str) -> None:
+    if _MINECRAFT_NAME_RE.fullmatch(name) is None:
+        raise ValueError("fixture Minecraft names must be 1-16 alphanumeric or underscore characters")
+
+
+def _fixture_position(position: tuple[int, int, int]) -> tuple[int, int, int]:
+    if len(position) != 3:
+        raise ValueError("fixture position must contain exactly three coordinates")
+    values = tuple(int(value) for value in position)
+    if any(abs(value) > 30_000_000 for value in values):
+        raise ValueError("fixture position is outside Minecraft world bounds")
+    return values
+
+
+def _escape_scarpet_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
 @dataclass
@@ -373,6 +505,7 @@ async def run_real_server_interactive(
     *,
     max_steps: int | None,
     camera_config: Path | None = None,
+    scenario_hook: InteractiveScenarioHook | None = None,
 ) -> int:
     """Run one persistent real-server session with stdin as the user channel."""
     provider = provider_registry_from_env()
@@ -533,6 +666,32 @@ async def run_real_server_interactive(
                 )
         reader = asyncio.create_task(_stdin_command_reader(session))
         chat_reader = asyncio.create_task(_chat_command_reader(session, body_event_pump))
+        scenario_task: asyncio.Task[None] | None = None
+        if scenario_hook is not None:
+            def trace_scenario_event(event: str, fields: Mapping[str, object]) -> None:
+                parts = session.parts
+                if parts is not None:
+                    parts.runtime.trace.emit(event, **dict(fields))
+
+            scenario_context = InteractiveScenarioContext(
+                bot_name=config.bot_name,
+                _rcon=rcon,
+                _trace_event=trace_scenario_event,
+            )
+            scenario_task = asyncio.create_task(scenario_hook(scenario_context))
+
+            def record_scenario_failure(task: asyncio.Task[None]) -> None:
+                if task.cancelled():
+                    return
+                try:
+                    task.result()
+                except Exception as exc:
+                    trace_scenario_event(
+                        "scenario_fixture_failed",
+                        {"error_type": type(exc).__name__, "message": str(exc)},
+                    )
+
+            scenario_task.add_done_callback(record_scenario_failure)
         print(
             f"interactive_ready bot={config.bot_name} "
             f"server={config.rcon.host}:{config.rcon.port}",
@@ -547,6 +706,8 @@ async def run_real_server_interactive(
                 body_event_pump=body_event_pump,
                 iteration_hook=lambda: camera.maybe_start(body),
             )
+            if scenario_task is not None and scenario_task.done():
+                scenario_task.result()
             terminal_goal = _session_goal(session, goal)
             truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
             _announce_interactive_terminal(body, truth)
@@ -567,6 +728,10 @@ async def run_real_server_interactive(
             )
             return truth.exit_code
         finally:
+            if scenario_task is not None:
+                scenario_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await scenario_task
             reader.cancel()
             chat_reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1163,6 +1328,8 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "InteractiveScenarioContext",
+    "InteractiveScenarioHook",
     "RealServerConfig",
     "RealServerConfigError",
     "env_required",

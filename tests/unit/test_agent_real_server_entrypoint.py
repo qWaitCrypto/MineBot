@@ -23,6 +23,7 @@ from minebot.app.real_server_session import (
     _interactive_speech_sink,
     _poll_chat_commands,
     _run_interactive_loop,
+    InteractiveScenarioContext,
     evaluate_terminal_truth,
     main,
     parse_canonical_goal_command,
@@ -50,6 +51,60 @@ from minebot.contract import Event
 
 
 class AgentRealServerEntrypointTests(unittest.TestCase):
+    def test_interactive_scenario_context_only_exposes_fixture_facts(self):
+        commands = []
+        trace = []
+
+        class FakeRcon:
+            def request(self, command):
+                commands.append(command)
+                if "minebot_state" in command:
+                    return _state_envelope("Bot1")
+                return "ok"
+
+        context = InteractiveScenarioContext(
+            bot_name="Bot1",
+            _rcon=FakeRcon(),
+            _trace_event=lambda event, fields: trace.append((event, dict(fields))),
+        )
+
+        async def exercise():
+            await context.wait_for_body_ready(timeout_s=1)
+            await context.emit_chat("Tester", "hello 'MineBot'")
+            await context.spawn_fake_player("MineBotGuide", (4, 70, -2))
+            await context.set_difficulty("normal")
+            await context.clear_hostiles()
+            await context.remove_fake_player("MineBotGuide")
+
+        asyncio.run(exercise())
+
+        self.assertFalse(any(hasattr(context, name) for name in ("submit", "body", "registry", "tools")))
+        self.assertEqual(
+            commands,
+            [
+                "script in minebot run minebot_state('Bot1')",
+                "script in minebot run emit_agent_chat('Bot1', 'Tester', 'hello \\'MineBot\\'')",
+                "player MineBotGuide kill",
+                "player MineBotGuide spawn at 4 70 -2",
+                "difficulty normal",
+                "kill @e[type=minecraft:husk]",
+                "player MineBotGuide kill",
+            ],
+        )
+        self.assertEqual(
+            [event for event, _fields in trace],
+            [
+                "scenario_body_ready",
+                "scenario_chat_emitted",
+                "scenario_fake_player_spawned",
+                "scenario_difficulty_set",
+                "scenario_hostiles_cleared",
+                "scenario_fake_player_removed",
+            ],
+        )
+        with self.assertRaises(ValueError):
+            asyncio.run(context.emit_chat("bad name", "hello"))
+
     def test_config_requires_explicit_real_server_env(self):
         with self.assertRaises(RealServerConfigError) as ctx:
             real_server_config_from_env({})
