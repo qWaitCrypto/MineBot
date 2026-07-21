@@ -2805,6 +2805,51 @@ class BlockWorkTests(unittest.TestCase):
         self.assertFalse(config.allow_place)
         self.assertFalse(config.allow_pillar)
         self.assertFalse(config.allow_downward)
+        self.assertTrue(config.aquatic_traversal)
+
+    def test_go_to_surface_mobile_egress_keeps_nearby_dry_surface_candidates(self):
+        local_surface = (1, 64, 0)
+
+        class MovingNavigator(FakeNavigator):
+            def __init__(self, body):
+                super().__init__(result=True, reason="arrived")
+                self.body = body
+
+            def navigate_to(self, goal, **kwargs):
+                result = super().navigate_to(goal, **kwargs)
+                selected = goal_position(goal)
+                self.body.state_pos = tuple(float(value) for value in selected)
+                return result
+
+        blocks = {
+            (0, 63, 0): ("stone", "SOLID"),
+            (1, 63, 0): ("stone", "SOLID"),
+        }
+        body = FakeBody(blocks=blocks)
+        body.state_pos = (0.5, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("surface", (-40, 0, -40), (40, 120, 40))])
+        navigator = MovingNavigator(body)
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.go_to_surface(
+            timeout_s=1.0,
+            surface_scan_height=0,
+            world_top_y=70,
+            require_mobility_egress=True,
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "surface_reached")
+        self.assertEqual(result.metrics["final_pos"], list(local_surface))
+        self.assertEqual(result.metrics["surface_domain"]["selection"], "mobility_egress_local_surface")
+        goals = tuple(goal_position(candidate) for candidate in navigator.calls[0][0].goals)
+        self.assertIn(local_surface, goals)
+        self.assertNotIn((0, 64, 0), goals)
+        config = navigator.calls[0][1]["config"]
+        self.assertFalse(config.allow_break)
+        self.assertFalse(config.allow_place)
+        self.assertFalse(config.allow_pillar)
+        self.assertFalse(config.allow_downward)
 
     def test_go_to_surface_mobile_egress_refuses_to_relabel_an_island_as_a_surface_exit(self):
         blocks = {(0, 63, 0): ("stone", "SOLID")}

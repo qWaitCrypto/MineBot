@@ -20,6 +20,7 @@ from minebot.body.inventory_read import (
     read_inventory_slots as _read_inventory_slots,
 )
 from minebot.body.pickup import PickupConfig, PickupTransactions
+from minebot.body.navigation import SERVER_GOAL_SET_LIMIT
 from minebot.body.world_read import read_block_facts, read_surface_columns
 from minebot.contract import (
     Action,
@@ -1640,31 +1641,58 @@ class BlockWork:
                     },
                 )
             lateral_domain = lateral
-            if lateral_domain["candidates"]:
+            if require_mobility_egress:
+                local_candidates = tuple(
+                    entry
+                    for entry in domain["candidates"]
+                    if entry.get("support_mode") == "natural"
+                    and tuple(entry["feet_pos"]) != origin
+                )
+                lateral_candidates = tuple(lateral_domain["candidates"])
+                local_limit = max(0, SERVER_GOAL_SET_LIMIT - len(lateral_candidates))
+                merged_candidates: list[dict[str, object]] = []
+                seen: set[Position] = set()
+                for entry in (*local_candidates[:local_limit], *lateral_candidates):
+                    feet_pos = tuple(entry["feet_pos"])
+                    if feet_pos in seen or len(merged_candidates) >= SERVER_GOAL_SET_LIMIT:
+                        continue
+                    seen.add(feet_pos)
+                    merged_candidates.append(entry)
+                if merged_candidates:
+                    domain = {
+                        **domain,
+                        "local_candidates": list(local_candidates),
+                        "lateral_candidates": list(lateral_candidates),
+                        "candidates": merged_candidates,
+                        "selection": (
+                            "mobility_egress_local_then_lateral_surface"
+                            if local_candidates and lateral_candidates
+                            else "mobility_egress_local_surface"
+                            if local_candidates
+                            else "mobility_egress_lateral_surface"
+                        ),
+                    }
+                else:
+                    return ToolResult(
+                        success=False,
+                        reason="surface_mobility_egress_unavailable",
+                        can_retry=True,
+                        next_suggestion="continue with a different bounded frontier after the surface egress domain is exhausted",
+                        metrics={
+                            "origin": list(requested_origin),
+                            "surface_origin": list(origin),
+                            "surface_domain": domain,
+                            "surface_lateral_domain": lateral_domain,
+                            "surface_egress": surface_egress,
+                        },
+                    )
+            elif lateral_domain["candidates"]:
                 domain = {
                     **domain,
                     "local_candidates": domain["candidates"],
                     "candidates": lateral_domain["candidates"],
-                    "selection": (
-                        "mobility_egress_lateral_surface"
-                        if require_mobility_egress
-                        else "covered_water_lateral_surface"
-                    ),
+                    "selection": "covered_water_lateral_surface",
                 }
-            elif require_mobility_egress:
-                return ToolResult(
-                    success=False,
-                    reason="surface_mobility_egress_unavailable",
-                    can_retry=True,
-                    next_suggestion="continue with a different bounded frontier after the surface egress domain is exhausted",
-                    metrics={
-                        "origin": list(requested_origin),
-                        "surface_origin": list(origin),
-                        "surface_domain": domain,
-                        "surface_lateral_domain": lateral_domain,
-                        "surface_egress": surface_egress,
-                    },
-                )
         candidates = tuple(tuple(entry["feet_pos"]) for entry in domain["candidates"])
         if not candidates:
             return ToolResult(
@@ -1703,9 +1731,9 @@ class BlockWork:
         mutation_budget = max_steps if max_steps is not None else max(1, surface_scan_height)
         goal = GoalComposite(tuple(GoalNear(candidate, radius=0) for candidate in candidates))
         if require_mobility_egress:
-            from minebot.body.navigation import pure_movement_navigation_config
+            from minebot.body.navigation import aquatic_navigation_config
 
-            navigation_config = pure_movement_navigation_config(
+            navigation_config = aquatic_navigation_config(
                 NavigationRunConfig(segment_timeout_s=timeout_s)
             )
         else:
