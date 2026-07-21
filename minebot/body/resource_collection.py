@@ -88,6 +88,25 @@ class ResourceCollectionTransactions:
         searches: list[dict[str, object]] = []
         navigation_failures: list[str] = []
 
+        dry_egress = self.work.egress_to_dry(timeout_s=cfg.segment_timeout_s)
+        if not dry_egress.success:
+            return self._terminal(
+                success=False,
+                reason=f"resource_{dry_egress.reason}",
+                can_retry=dry_egress.can_retry,
+                block_types=normalized_blocks,
+                expected_drops=normalized_drops,
+                remaining_count=remaining_count,
+                collected=collected,
+                candidate_blacklist=candidate_blacklist,
+                patch_blacklist=patch_blacklist,
+                attempts=attempts,
+                searches=searches,
+                config=cfg,
+                started=started,
+                last_failure=dry_egress.to_payload(),
+            )
+
         while collected < remaining_count:
             if (
                 mutation_attempts >= cfg.mutation_budget

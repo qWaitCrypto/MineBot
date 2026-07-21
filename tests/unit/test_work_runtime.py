@@ -2655,6 +2655,43 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.metrics["surface_egress"]["final_pos"], [2, 65, 0])
         self.assertTrue(result.metrics["surface_egress"]["terminal_stand"]["standable"])
 
+    def test_egress_to_dry_leaves_an_open_water_surface_without_mutation(self):
+        class EgressNavigator(FakeNavigator):
+            def __init__(self, body):
+                super().__init__(result=True, reason="arrived")
+                self.body = body
+
+            def navigate_to(self, goal, **kwargs):
+                result = super().navigate_to(goal, **kwargs)
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
+                return result
+
+        blocks = {
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 64, 0): ("water", "LIQUID"),
+            (1, 64, 0): ("water", "LIQUID"),
+            (2, 64, 0): ("stone", "SOLID"),
+        }
+        body = FakeBody(blocks=blocks)
+        body.state_pos = (0.5, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("surface", (-20, 0, -20), (20, 120, 20))])
+        navigator = EgressNavigator(body)
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.egress_to_dry(timeout_s=1.0)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "dry_egress_reached")
+        self.assertEqual(result.metrics["final_pos"], [2, 65, 0])
+        self.assertTrue(result.metrics["terminal_stand"]["standable"])
+        self.assertEqual(len(navigator.calls), 1)
+        config = navigator.calls[0][1]["config"]
+        self.assertFalse(config.allow_break)
+        self.assertFalse(config.allow_place)
+        self.assertFalse(config.allow_pillar)
+        self.assertFalse(config.allow_downward)
+
     def test_go_to_surface_uses_sparse_lateral_surface_after_covered_water_egress(self):
         remote_surface = (2, 66, -32)
 

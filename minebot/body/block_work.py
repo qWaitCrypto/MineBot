@@ -1371,6 +1371,127 @@ class BlockWork:
             },
         )
 
+    def egress_to_dry(
+        self,
+        *,
+        current_pos: Position | None = None,
+        timeout_s: float = 30.0,
+    ) -> ToolResult:
+        """Reach a nearby verified dry stand without altering terrain."""
+
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+
+        origin = current_pos or _state_block_pos(self.body.get_state().pos)
+        initial_stand = self._standable_feet_at(origin)
+        if isinstance(initial_stand, ToolResult):
+            return _with_metric(initial_stand, "egress_to_dry", {"origin": list(origin)})
+        if initial_stand["standable"]:
+            return ToolResult(
+                success=True,
+                reason="dry_stand",
+                can_retry=False,
+                metrics={
+                    "origin": list(origin),
+                    "final_pos": list(origin),
+                    "initial_stand": initial_stand,
+                    "terminal_stand": initial_stand,
+                    "navigation": None,
+                },
+            )
+        if not _stand_has_liquid_contact(initial_stand):
+            return ToolResult(
+                success=False,
+                reason="dry_egress_not_liquid",
+                can_retry=True,
+                next_suggestion="re-read the body position before choosing a non-liquid recovery",
+                metrics={"origin": list(origin), "initial_stand": initial_stand},
+            )
+
+        egress_domain = self._find_surface_egress_domain(
+            origin,
+            radius=self.SURFACE_EGRESS_RADIUS,
+            y_below=self.SURFACE_EGRESS_Y_BELOW,
+            y_above=self.SURFACE_EGRESS_Y_ABOVE,
+            max_candidates=self.SURFACE_EGRESS_GOAL_LIMIT,
+        )
+        if isinstance(egress_domain, ToolResult):
+            return _with_metric(
+                egress_domain,
+                "egress_to_dry",
+                {"origin": list(origin), "initial_stand": initial_stand},
+            )
+        egress_candidates = tuple(tuple(entry["feet_pos"]) for entry in egress_domain["candidates"])
+        metrics: dict[str, object] = {
+            "origin": list(origin),
+            "initial_stand": initial_stand,
+            "domain": egress_domain,
+            "navigation": None,
+        }
+        if not egress_candidates:
+            return ToolResult(
+                success=False,
+                reason="dry_egress_unavailable",
+                can_retry=True,
+                next_suggestion="choose another resource domain after the bounded dry-shore read",
+                metrics=metrics,
+            )
+        if self.navigator is None:
+            return ToolResult(
+                success=False,
+                reason="dry_egress_navigation_missing",
+                can_retry=True,
+                next_suggestion="attach the shared navigation process before requesting a dry egress",
+                metrics=metrics,
+            )
+
+        from minebot.body.navigation import NavigationRunConfig, pure_movement_navigation_config
+
+        egress_goal = GoalComposite(tuple(GoalNear(candidate, radius=0) for candidate in egress_candidates))
+        navigation = self.navigator.navigate_to(
+            egress_goal,
+            break_context=BreakContext.TRAVEL,
+            config=pure_movement_navigation_config(NavigationRunConfig(segment_timeout_s=timeout_s)),
+            arrival_radius=0.25,
+        )
+        selected_goal = _selected_surface_goal(navigation, egress_candidates)
+        metrics.update(
+            {
+                "selected_goal": list(selected_goal),
+                "navigation_goal": egress_goal.payload(),
+                "navigation": navigation.to_payload(),
+            }
+        )
+        if not navigation.success:
+            return ToolResult(
+                success=False,
+                reason=f"dry_egress_failed:{navigation.reason}",
+                can_retry=navigation.can_retry,
+                next_suggestion=navigation.next_suggestion,
+                metrics=metrics,
+            )
+
+        final_pos = _state_block_pos(self.body.get_state().pos)
+        terminal_stand = self._standable_feet_at(final_pos)
+        metrics["final_pos"] = list(final_pos)
+        metrics["terminal_stand"] = (
+            terminal_stand.to_payload() if isinstance(terminal_stand, ToolResult) else terminal_stand
+        )
+        if isinstance(terminal_stand, ToolResult) or not terminal_stand["standable"]:
+            return ToolResult(
+                success=False,
+                reason="dry_egress_verification_failed",
+                can_retry=True,
+                next_suggestion="rescan a dry shore domain from authoritative world facts",
+                metrics=metrics,
+            )
+        return ToolResult(
+            success=True,
+            reason="dry_egress_reached",
+            can_retry=False,
+            metrics=metrics,
+        )
+
     def go_to_surface(
         self,
         *,
@@ -1414,101 +1535,44 @@ class BlockWork:
                 },
             )
 
-        from minebot.body.navigation import NavigationRunConfig, pure_movement_navigation_config
+        from minebot.body.navigation import NavigationRunConfig
 
         if _surface_requires_lateral_egress(initial):
-            egress_domain = self._find_surface_egress_domain(
-                origin,
-                radius=self.SURFACE_EGRESS_RADIUS,
-                y_below=self.SURFACE_EGRESS_Y_BELOW,
-                y_above=self.SURFACE_EGRESS_Y_ABOVE,
-                max_candidates=self.SURFACE_EGRESS_GOAL_LIMIT,
-            )
-            if isinstance(egress_domain, ToolResult):
+            egress = self.egress_to_dry(current_pos=origin, timeout_s=timeout_s)
+            surface_egress = {"required": True, **dict(egress.metrics or {})}
+            if not egress.success:
+                return ToolResult(
+                    success=False,
+                    reason=f"surface_egress_failed:{egress.reason}",
+                    can_retry=egress.can_retry,
+                    next_suggestion=egress.next_suggestion,
+                    metrics={"origin": list(requested_origin), "surface_egress": surface_egress},
+                )
+            origin = _state_block_pos(self.body.get_state().pos)
+            initial = self._surface_candidate_at(origin, world_top_y=world_top_y)
+            if isinstance(initial, ToolResult):
                 return _with_metric(
-                    egress_domain,
+                    initial,
                     "go_to_surface",
-                    {"origin": list(requested_origin), "phase": "lateral_egress"},
+                    {"origin": list(requested_origin), "surface_egress": surface_egress},
                 )
-            egress_candidates = tuple(tuple(entry["feet_pos"]) for entry in egress_domain["candidates"])
-            surface_egress = {
-                "required": True,
-                "origin": list(origin),
-                "domain": egress_domain,
-                "navigation": None,
-            }
-            if egress_candidates:
-                if self.navigator is None:
-                    return ToolResult(
-                        success=False,
-                        reason="surface_navigation_missing",
-                        can_retry=True,
-                        next_suggestion="attach the shared navigation process before requesting a covered-water exit",
-                        metrics={"origin": list(requested_origin), "surface_egress": surface_egress},
-                    )
-                egress_goal = GoalComposite(tuple(GoalNear(candidate, radius=0) for candidate in egress_candidates))
-                egress_navigation = self.navigator.navigate_to(
-                    egress_goal,
-                    break_context=BreakContext.TRAVEL,
-                    config=pure_movement_navigation_config(
-                        NavigationRunConfig(segment_timeout_s=timeout_s)
-                    ),
-                    arrival_radius=0.25,
+            if _surface_terminal_verified(initial):
+                return ToolResult(
+                    success=True,
+                    reason="surface_reached",
+                    can_retry=False,
+                    metrics={
+                        "origin": list(requested_origin),
+                        "surface_origin": list(origin),
+                        "target_surface": list(origin),
+                        "selected_goal": list(origin),
+                        "final_pos": list(origin),
+                        "terminal_surface": initial,
+                        "terminal_surface_verified": True,
+                        "surface_egress": surface_egress,
+                        "navigation": None,
+                    },
                 )
-                selected_egress = _selected_surface_goal(egress_navigation, egress_candidates)
-                surface_egress.update(
-                    {
-                        "selected_goal": list(selected_egress),
-                        "navigation_goal": egress_goal.payload(),
-                        "navigation": egress_navigation.to_payload(),
-                    }
-                )
-                if not egress_navigation.success:
-                    return ToolResult(
-                        success=False,
-                        reason=f"surface_egress_failed:{egress_navigation.reason}",
-                        can_retry=egress_navigation.can_retry,
-                        next_suggestion=egress_navigation.next_suggestion,
-                        metrics={"origin": list(requested_origin), "surface_egress": surface_egress},
-                    )
-                origin = _state_block_pos(self.body.get_state().pos)
-                dry_stand = self._standable_feet_at(origin)
-                surface_egress["final_pos"] = list(origin)
-                surface_egress["terminal_stand"] = (
-                    dry_stand.to_payload() if isinstance(dry_stand, ToolResult) else dry_stand
-                )
-                if isinstance(dry_stand, ToolResult) or not dry_stand["standable"]:
-                    return ToolResult(
-                        success=False,
-                        reason="surface_egress_verification_failed",
-                        can_retry=True,
-                        next_suggestion="rescan a dry shore domain from authoritative world facts",
-                        metrics={"origin": list(requested_origin), "surface_egress": surface_egress},
-                    )
-                initial = self._surface_candidate_at(origin, world_top_y=world_top_y)
-                if isinstance(initial, ToolResult):
-                    return _with_metric(
-                        initial,
-                        "go_to_surface",
-                        {"origin": list(requested_origin), "surface_egress": surface_egress},
-                    )
-                if _surface_terminal_verified(initial):
-                    return ToolResult(
-                        success=True,
-                        reason="surface_reached",
-                        can_retry=False,
-                        metrics={
-                            "origin": list(requested_origin),
-                            "surface_origin": list(origin),
-                            "target_surface": list(origin),
-                            "selected_goal": list(origin),
-                            "final_pos": list(origin),
-                            "terminal_surface": initial,
-                            "terminal_surface_verified": True,
-                            "surface_egress": surface_egress,
-                            "navigation": None,
-                        },
-                    )
 
         scaffold_counts = _inventory_counts_from_body(self.body)
         if isinstance(scaffold_counts, ToolResult):
@@ -3696,10 +3760,14 @@ def _surface_terminal_verified(surface: dict[str, object]) -> bool:
 
 
 def _surface_requires_lateral_egress(surface: dict[str, object]) -> bool:
-    sky_exposure = surface.get("sky_exposure") or {}
-    return (
-        surface.get("feet_state") == "LIQUID" or surface.get("head_state") == "LIQUID"
-    ) and isinstance(sky_exposure, dict) and not bool(sky_exposure.get("exposed"))
+    return _stand_has_liquid_contact(surface)
+
+
+def _stand_has_liquid_contact(stand: dict[str, object]) -> bool:
+    return any(
+        stand.get(key) == "LIQUID"
+        for key in ("feet_state", "head_state", "support_state")
+    )
 
 
 def _distance_to_block_center(pos: tuple[float, float, float], target: Position) -> float:

@@ -88,6 +88,12 @@ BODY_TRANSACTION_CLOSURE: dict[str, CapabilityClosure] = {
     "BlockWork.go_to_surface": _closure(
         "tool", "go_to_surface", note="Verified natural-surface escape capability."
     ),
+    "BlockWork.egress_to_dry": _closure(
+        "owned",
+        "go_to_surface",
+        "collect_block_domain",
+        note="Bounded pure-movement dry egress is an internal precondition for surface and dry-land resource transactions.",
+    ),
     "BlockWork.search_for_block": _closure(
         "tool", "search_for_block", note="Read-only bounded resource/block candidate perception."
     ),

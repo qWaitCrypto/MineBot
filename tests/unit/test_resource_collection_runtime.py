@@ -104,9 +104,17 @@ class RecordingNavigator:
 class RecordingWork:
     MINE_APPROACH_MAX_BREAK_STEPS = 8
 
-    def __init__(self, outcomes=None):
+    def __init__(self, outcomes=None, egress_outcomes=None):
         self.outcomes = list(outcomes or [])
+        self.egress_outcomes = list(egress_outcomes or [])
         self.calls = []
+        self.egress_calls = []
+
+    def egress_to_dry(self, **kwargs):
+        self.egress_calls.append(kwargs)
+        if self.egress_outcomes:
+            return self.egress_outcomes.pop(0)
+        return ToolResult(True, "dry_stand", False)
 
     def mine_block_collect(self, pos, **kwargs):
         self.calls.append((pos, kwargs))
@@ -164,6 +172,29 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertFalse(config.allow_swim)
         self.assertTrue(config.allow_break)
         self.assertEqual(config.max_break_steps, work.MINE_APPROACH_MAX_BREAK_STEPS)
+        self.assertEqual(work.egress_calls, [{"timeout_s": 15.0}])
+
+    def test_dry_egress_terminal_prevents_resource_search_and_navigation(self):
+        body = ResourceBody([((5, 64, 0), "dirt")])
+        navigator = RecordingNavigator(body, [(5, 65, -1)])
+        work = RecordingWork(
+            egress_outcomes=[ToolResult(False, "dry_egress_unavailable", True)]
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, work)
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "resource_dry_egress_unavailable")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(navigator.calls, [])
+        self.assertEqual(work.calls, [])
+        self.assertEqual(result.metrics["last_failure"]["reason"], "dry_egress_unavailable")
 
     def test_candidate_failure_is_blacklisted_and_remaining_domain_replanned(self):
         first = (5, 64, 0)

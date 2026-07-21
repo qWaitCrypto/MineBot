@@ -355,7 +355,9 @@ def mobility_reason_from_tool_results(results: Any) -> str | None:
         if not isinstance(result, dict):
             continue
         reason = str(result.get("reason") or "")
-        if reason in exact_blocking_reasons or reason.startswith(("navigation_", "mobility_", "stuck", "lost_position")):
+        if reason in exact_blocking_reasons or reason.startswith(
+            ("navigation_", "mobility_", "stuck", "lost_position", "resource_dry_egress")
+        ):
             return reason
     return None
 
