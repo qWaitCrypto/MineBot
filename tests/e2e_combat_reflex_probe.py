@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
-"""Live probe: validate the auto-defensive combat reflex (S6).
+"""Live probe: validate the defensive combat reflex (S6).
 
-An IDLE bot (survival, no brain action) stands near a single REAL NoAI:0 husk
-with Health:1 (low HP). The husk aggros the bot (night + survival), closes, and
-melees -> the bot's hp drops. combat_reflex_scan (hp-drop + nearest_hostile
-within 16) fires: emit underAttack, then auto-engage the NEAREST hostile (the
-husk itself, the only one). The bot one-shots the 1-HP husk -> engageDone/killed.
+An IDLE bot (survival, no brain action) stands near a real husk. The husk
+damages the bot, which emits ``underAttack`` and starts the Body-owned
+``combat_flee`` reflex. The reflex reaches its local escape target, emits its
+terminal event, and releases ownership.
 
-Asserts the reflex's full job: hp dropped (husk landed a hit), underAttack
-emitted, auto-engage started (engageStarted), and the engaged target was killed
-(engageDone/killed). This wires hp-drop -> underAttack -> auto-engage -> kill
-end to end. A single low-HP attacker is used so the reflex engages the SAME mob
-that triggered it (no target-hopping to a 20-HP neighbor) and kills it cleanly.
-
-A husk attacker is used (not a zombie) because a prior run confirmed husks
-reliably melee Carpet fake players; a zombie at range failed to close/aggro.
-The engage's kill mechanics are independently validated in e2e_engage_probe.
+The reflex deliberately does not choose whether to fight or whom to attack:
+that is an Agent decision through the ordinary combat tools. This probe only
+verifies the Body's immediate defensive interruption chain.
 """
 
 from __future__ import annotations
@@ -43,96 +36,87 @@ def _count(rcon, kind: str) -> int:
 def main():
     with connect_or_skip() as rcon:
         for cmd in [
-            "script unload minebot", "script load minebot global",
+            "script unload minebot", "script resume", "script load minebot global",
             "carpet commandPlayer true", "carpet allowSpawningOfflinePlayers true",
             "gamerule doDaylightCycle false", "gamerule doMobSpawning false",
-            "time set 18000", "weather clear",
+            "difficulty normal", "time set 18000", "weather clear",
             f"player {BOT} kill",
             "kill @e[type=zombie]", "kill @e[type=husk]", "kill @e[type=skeleton]",
-            "fill 20 69 20 28 76 28 air",
-            "fill 20 69 20 28 69 28 stone",
+            "fill 10 69 10 36 76 36 air",
+            "fill 10 69 10 36 69 36 stone",
         ]:
             rcon.command(cmd)
             time.sleep(0.05)
         time.sleep(0.3)
 
-        body = ScarpetBody(BOT, rcon)
-        spawn_or_fail(body, (23, 70, 23))
-        rcon.command(f"gamemode survival {BOT}")
-        time.sleep(0.3)
-        # Single low-HP attacker husk 2 blocks south (closes + melees -> reflex;
-        # reflex engages it as the only hostile -> one-shot kill at 1 HP).
-        rcon.command("summon husk 23 70 25 {NoAI:0b,PersistenceRequired:1b,Health:1f}")
-        time.sleep(1.0)
+        try:
+            body = ScarpetBody(BOT, rcon)
+            spawn_or_fail(body, (23, 70, 23))
+            rcon.command(f"gamemode survival {BOT}")
+            time.sleep(0.3)
+            # A single attacker leaves a clear, eight-block flee lane inside the
+            # controlled platform. The reflex must flee, not select an engage goal.
+            rcon.command("summon husk 23 70 25 {NoAI:0b,PersistenceRequired:1b}")
+            time.sleep(1.0)
 
-        print(f"baseline: bot hp={body.get_state().health} husk={_count(rcon,'husk')}")
+            print(f"baseline: bot hp={body.get_state().health} husk={_count(rcon,'husk')}")
 
-        t0 = time.monotonic()
-        hp_dropped = False
-        has_under_attack = False
-        has_engage_started = False
-        has_engage_killed = False
-        engage_done_reasons = []
-        events_all = ""
-        timeline = []
-        while time.monotonic() - t0 < 25.0:
-            st = body.get_state()
-            hp = st.health
-            if hp < 20.0:
-                hp_dropped = True
-            hc = _count(rcon, "husk")
-            timeline.append((round(time.monotonic() - t0, 2), round(hp, 2), hc))
+            t0 = time.monotonic()
+            hp_dropped = False
+            has_under_attack = False
+            combat_flee_triggered = None
+            combat_flee_completed = None
+            timeline = []
+            while time.monotonic() - t0 < 12.0:
+                st = body.get_state()
+                hp = st.health
+                if hp < 20.0:
+                    hp_dropped = True
+                hc = _count(rcon, "husk")
+                timeline.append((round(time.monotonic() - t0, 2), round(hp, 2), hc))
 
-            ev = rcon.command(f"script in minebot run minebot_drain_events('{BOT}')")
-            if ev:
-                events_all += "\n" + ev
-            if '"name":"underAttack"' in ev:
-                has_under_attack = True
-            if '"name":"engageStarted"' in ev:
-                has_engage_started = True
-            if '"name":"engageDone"' in ev:
-                # capture the reason field of the most recent engageDone
-                seg = ev[ev.rfind('"name":"engageDone"'):]
-                import re
-                m = re.search(r'"reason":"([^"]+)"', seg)
-                if m and m.group(1) not in engage_done_reasons:
-                    engage_done_reasons.append(m.group(1))
-                if '"reason":"killed"' in seg:
-                    has_engage_killed = True
+                for event in body.poll_events():
+                    if event.name == "underAttack":
+                        has_under_attack = True
+                    elif event.name == "reflexTriggered" and event.data.get("kind") == "combat_flee":
+                        combat_flee_triggered = event
+                    elif event.name == "reflexCompleted" and event.data.get("kind") == "combat_flee":
+                        combat_flee_completed = event
 
-            if hp_dropped and has_under_attack and has_engage_started and has_engage_killed:
-                break
-            if engage_done_reasons and time.monotonic() - t0 > 2.0:
-                break
-            time.sleep(0.5)
-        elapsed = time.monotonic() - t0
+                if hp_dropped and has_under_attack and combat_flee_triggered and combat_flee_completed:
+                    break
+                time.sleep(0.1)
+            elapsed = time.monotonic() - t0
+            final = body.get_state()
+            owner = rcon.command(
+                f"script in minebot run minebot_event_head('{BOT}', 'combat-reflex-probe')"
+            )
 
-        rcon.command(f"player {BOT} kill"); time.sleep(0.2)
-        rcon.command("kill @e[type=husk]"); rcon.command("kill @e[type=zombie]")
+            print(f"timeline (t, hp, husk): {timeline[:14]}{' ...' if len(timeline) > 14 else ''}")
+            print(f"hp_dropped={hp_dropped} underAttack={has_under_attack} "
+                  f"combat_flee_triggered={combat_flee_triggered is not None} "
+                  f"combat_flee_completed={combat_flee_completed is not None} elapsed={elapsed:.2f}s")
+            print(f"start={timeline[0] if timeline else None} final_pos={final.pos} owner={owner[:180]}")
 
-        print(f"timeline (t, hp, husk): {timeline[:14]}{' ...' if len(timeline) > 14 else ''}")
-        print(f"hp_dropped={hp_dropped} underAttack={has_under_attack} "
-              f"engageStarted={has_engage_started} engageDone(killed)={has_engage_killed} "
-              f"reasons={engage_done_reasons} elapsed={elapsed:.2f}s")
-        # show the non-empty event lines only
-        import json
-        for line in events_all.split("\n"):
-            if '"events":[]' in line or not line.strip():
-                continue
-            print("evt:", line[:300])
-
-        if not hp_dropped:
-            raise AssertionError("attacker husk did not damage the bot (hp never dropped); cannot test reflex")
-        if not has_under_attack:
-            raise AssertionError("no underAttack event emitted by combat reflex")
-        if not has_engage_started:
-            raise AssertionError("reflex did not auto-start an engage (no engageStarted)")
-        if not has_engage_killed:
-            raise AssertionError(
-                f"auto-engage did not kill the husk (engageDone reasons={engage_done_reasons}); "
-                "reflex core (underAttack+engageStarted) confirmed, kill path covered by e2e_engage_probe")
-        print("\nCOMBAT REFLEX CONFIRMED (full chain): attacker hit bot -> underAttack emitted -> "
-              "reflex auto-engaged the attacker -> killed it (engageDone/killed).")
+            if not hp_dropped:
+                raise AssertionError("attacker husk did not damage the bot (hp never dropped); cannot test reflex")
+            if not has_under_attack:
+                raise AssertionError("no underAttack event emitted by combat reflex")
+            if combat_flee_triggered is None:
+                raise AssertionError("combat reflex did not start a combat_flee action")
+            if combat_flee_completed is None or combat_flee_completed.data.get("escaped_hazard") is not True:
+                raise AssertionError(f"combat flee did not complete cleanly: {combat_flee_completed}")
+            if '"owner":null' not in owner:
+                raise AssertionError(f"combat reflex did not release the Body owner: {owner}")
+            if final.pos[2] >= 20.0:
+                raise AssertionError(f"combat flee did not gain distance from the southern attacker: {final.pos}")
+            print("\nCOMBAT REFLEX CONFIRMED: attacker hit bot -> underAttack emitted -> "
+                  "Body fled to a local safe position -> reflex settled and released ownership.")
+        finally:
+            rcon.command(f"player {BOT} kill")
+            rcon.command("kill @e[type=husk]")
+            rcon.command("kill @e[type=zombie]")
+            rcon.command("difficulty peaceful")
 
 
 if __name__ == "__main__":
