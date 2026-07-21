@@ -2754,6 +2754,7 @@ class BlockWorkTests(unittest.TestCase):
         self.assertFalse(config.allow_place)
         self.assertFalse(config.allow_pillar)
         self.assertFalse(config.allow_downward)
+        self.assertTrue(config.aquatic_traversal)
 
     def test_go_to_surface_mobile_egress_leaves_an_already_exposed_island(self):
         remote_surface = (-16, 64, -16)

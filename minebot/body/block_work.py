@@ -1445,13 +1445,13 @@ class BlockWork:
                 metrics=metrics,
             )
 
-        from minebot.body.navigation import NavigationRunConfig, pure_movement_navigation_config
+        from minebot.body.navigation import NavigationRunConfig, aquatic_navigation_config
 
         egress_goal = GoalComposite(tuple(GoalNear(candidate, radius=0) for candidate in egress_candidates))
         navigation = self.navigator.navigate_to(
             egress_goal,
             break_context=BreakContext.TRAVEL,
-            config=pure_movement_navigation_config(NavigationRunConfig(segment_timeout_s=timeout_s)),
+            config=aquatic_navigation_config(NavigationRunConfig(segment_timeout_s=timeout_s)),
             arrival_radius=0.25,
         )
         selected_goal = _selected_surface_goal(navigation, egress_candidates)
