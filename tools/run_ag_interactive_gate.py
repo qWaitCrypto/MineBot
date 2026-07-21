@@ -53,6 +53,12 @@ IDLE_PROMPT = "请暂时不要行动，等待环境中的下一次实质变化�
 _BODY_READY_TIMEOUT_S = 120.0
 _SECOND_SEGMENT_EXIT_GRACE_S = 90.0
 _CAMERA_RUNNING_PHASES = frozenset({"starting", "connecting", "ready", "stopping"})
+_MIN_AG_DURATION_S = 1_800.0
+_MIN_SECOND_SEGMENT_S = 1_020.0
+_IDLE_PROMPT_OFFSET_S = 420.0
+_IDLE_WAKE_OFFSET_S = 870.0
+_IDLE_CLEAR_OFFSET_S = 930.0
+_MATERIAL_RESUME_OFFSET_S = 935.0
 
 
 async def _first_segment(
@@ -101,19 +107,21 @@ async def _second_segment(
         if await wait_until(360):
             await context.set_difficulty("normal")
             await context.spawn_husk_near_bot(distance=2)
-        if await wait_until(420):
+        if await wait_until(_IDLE_PROMPT_OFFSET_S):
             await context.clear_hostiles()
             await context.set_difficulty("peaceful")
-            await context.emit_chat(
+            idle_marker = await context.emit_chat(
                 "AGTester",
                 IDLE_PROMPT,
             )
-        if await wait_until(725):
+            await context.wait_for_idle_quiescence(after_trace_seq=idle_marker)
+        if await wait_until(_IDLE_WAKE_OFFSET_S):
             await context.set_difficulty("normal")
-            await context.spawn_husk_near_bot(distance=2)
-        if await wait_until(785):
+            await context.provoke_husk_attack()
+        if await wait_until(_IDLE_CLEAR_OFFSET_S):
             await context.clear_hostiles()
             await context.set_difficulty("peaceful")
+        if await wait_until(_MATERIAL_RESUME_OFFSET_S):
             await context.emit_chat("AGTester", f"/goal {MATERIAL_GOAL}")
         if await wait_until(max(0.0, duration_s - 80)):
             await context.emit_chat("AGTester", "/cancel gate_cancellation_coverage")
@@ -229,7 +237,7 @@ def _trace_elapsed_s(
 
 
 def _idle_window_summary(events: list[dict[str, object]]) -> dict[str, object] | None:
-    idle_start = next(
+    idle_prompt = next(
         (
             event
             for event in events
@@ -237,70 +245,98 @@ def _idle_window_summary(events: list[dict[str, object]]) -> dict[str, object] |
         ),
         None,
     )
-    if idle_start is None or not isinstance(idle_start.get("ts"), (int, float)):
+    if idle_prompt is None or not isinstance(idle_prompt.get("ts"), (int, float)):
         return None
-    start = float(idle_start["ts"])
-    idle_event = next(
+    prompt_at = float(idle_prompt["ts"])
+    quiescent = next(
         (
             event
             for event in events
-            if event.get("event") == "scenario_husk_spawned"
+            if event.get("event") == "autonomy_decision"
+            and event.get("action") == "park"
+            and event.get("reason") == "checkpoint_wait_event"
+            and isinstance(event.get("ts"), (int, float))
+            and float(event["ts"]) > prompt_at
+        ),
+        None,
+    )
+    if quiescent is None or not isinstance(quiescent.get("ts"), (int, float)):
+        return {"prompt_at": prompt_at, "quiescent_at": None}
+    start = float(quiescent["ts"])
+    scenario_trigger = next(
+        (
+            event
+            for event in events
+            if event.get("event") == "scenario_husk_attack_observed"
             and isinstance(event.get("ts"), (int, float))
             and float(event["ts"]) > start
         ),
         None,
     )
-    if idle_event is None or not isinstance(idle_event.get("ts"), (int, float)):
-        return {"started_at": start, "material_event_at": None}
-    event_at = float(idle_event["ts"])
+    material_event = next(
+        (
+            event
+            for event in events
+            if event.get("event") == "body_event_wake"
+            and isinstance(event.get("ts"), (int, float))
+            and float(event["ts"]) > start
+        ),
+        None,
+    )
+    trigger_at = (
+        None
+        if scenario_trigger is None or not isinstance(scenario_trigger.get("ts"), (int, float))
+        else float(scenario_trigger["ts"])
+    )
+    event_at = (
+        None
+        if material_event is None or not isinstance(material_event.get("ts"), (int, float))
+        else float(material_event["ts"])
+    )
+    window_end = event_at if event_at is not None else trigger_at
+    if window_end is None:
+        return {
+            "prompt_at": prompt_at,
+            "quiescent_at": start,
+            "scenario_triggered_at": None,
+            "material_event_at": None,
+        }
     clear = next(
         (
             event
             for event in events
             if event.get("event") == "scenario_hostiles_cleared"
             and isinstance(event.get("ts"), (int, float))
-            and float(event["ts"]) > event_at
+            and float(event["ts"]) > (trigger_at if trigger_at is not None else window_end)
         ),
         None,
     )
     clear_at = float(clear["ts"]) if clear is not None and isinstance(clear.get("ts"), (int, float)) else None
-    upper_bound = clear_at if clear_at is not None else event_at + 60.0
+    upper_bound = clear_at if clear_at is not None else window_end + 60.0
     idle_model_requests = sum(
         1
         for event in events
         if event.get("event") == "llm_start"
         and isinstance(event.get("ts"), (int, float))
-        and start <= float(event["ts"]) < event_at
+        and start <= float(event["ts"]) < window_end
     )
     wake_model_requests = sum(
         1
         for event in events
         if event.get("event") == "llm_start"
         and isinstance(event.get("ts"), (int, float))
+        and event_at is not None
         and event_at <= float(event["ts"]) < upper_bound
-    )
-    body_events = [
-        event
-        for event in events
-        if event.get("event") == "body_events"
-        and isinstance(event.get("ts"), (int, float))
-        and event_at <= float(event["ts"]) < upper_bound
-    ]
-    body_event_names = sorted(
-        {
-            str(name)
-            for event in body_events
-            for name in event.get("names", [])
-            if isinstance(name, str)
-        }
     )
     return {
-        "started_at": start,
+        "prompt_at": prompt_at,
+        "quiescent_at": start,
+        "scenario_triggered_at": trigger_at,
         "material_event_at": event_at,
         "cleared_at": clear_at,
-        "duration_s": round(event_at - start, 3),
+        "duration_s": round(window_end - start, 3),
         "model_requests_during_idle": idle_model_requests,
-        "body_event_names_after_material_event": body_event_names,
+        "wake_event_name": None if material_event is None else material_event.get("name"),
         "model_requests_after_material_event": wake_model_requests,
     }
 
@@ -399,10 +435,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--restart-after-seconds", type=float, default=600.0)
     parser.add_argument("--no-camera", action="store_true")
     args = parser.parse_args(argv)
-    if args.duration_seconds < 1_080 or args.restart_after_seconds < 180:
-        parser.error("the AG gate requires at least 1080 seconds and a restart after at least 180 seconds")
-    if args.restart_after_seconds > args.duration_seconds - 900:
-        parser.error("restart must leave at least 900 seconds for the reconciliation segment")
+    if args.duration_seconds < _MIN_AG_DURATION_S or args.restart_after_seconds < 180:
+        parser.error("the AG gate requires at least 1800 seconds and a restart after at least 180 seconds")
+    if args.restart_after_seconds > args.duration_seconds - _MIN_SECOND_SEGMENT_S:
+        parser.error("restart must leave at least 1020 seconds for the reconciliation segment")
 
     env_path = discover_runtime_env_path(args.env_file)
     environment = load_runtime_environment(env_path)

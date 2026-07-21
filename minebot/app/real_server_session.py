@@ -84,8 +84,9 @@ class InteractiveScenarioContext:
     bot_name: str
     _rcon: RconClient
     _trace_event: Callable[[str, Mapping[str, object]], None]
+    _trace_snapshot: Callable[[], list[dict[str, object]]] = lambda: []
 
-    async def emit_chat(self, sender: str, message: str) -> None:
+    async def emit_chat(self, sender: str, message: str) -> int:
         _require_minecraft_name(sender)
         text = str(message).strip()
         if not text:
@@ -96,6 +97,40 @@ class InteractiveScenarioContext:
         )
         await asyncio.to_thread(self._rcon.request, command)
         self._trace_event("scenario_chat_emitted", {"sender": sender, "message": text})
+        records = self._trace_snapshot()
+        return max(
+            (int(record.get("seq") or 0) for record in records),
+            default=0,
+        )
+
+    async def wait_for_idle_quiescence(
+        self,
+        *,
+        after_trace_seq: int,
+        timeout_s: float = 120.0,
+    ) -> None:
+        if after_trace_seq < 0:
+            raise ValueError("idle marker sequence must not be negative")
+        if timeout_s <= 0:
+            raise ValueError("idle quiescence timeout must be positive")
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while True:
+            for record in reversed(self._trace_snapshot()):
+                if int(record.get("seq") or 0) <= after_trace_seq:
+                    break
+                if (
+                    record.get("event") == "autonomy_decision"
+                    and record.get("action") == "park"
+                    and record.get("reason") == "checkpoint_wait_event"
+                ):
+                    self._trace_event(
+                        "scenario_idle_quiescent",
+                        {"after_trace_seq": after_trace_seq},
+                    )
+                    return
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError("agent did not enter checkpoint_wait_event quiescence")
+            await asyncio.sleep(0.25)
 
     async def wait_for_body_ready(self, *, timeout_s: float = 60.0) -> None:
         if timeout_s <= 0:
@@ -145,13 +180,21 @@ class InteractiveScenarioContext:
         await asyncio.to_thread(self._rcon.request, f"difficulty {normalized}")
         self._trace_event("scenario_difficulty_set", {"difficulty": normalized})
 
-    async def spawn_husk_near_bot(self, *, distance: int = 2) -> None:
+    async def spawn_husk_near_bot(
+        self,
+        *,
+        distance: int = 2,
+        offset: tuple[int, int] | None = None,
+    ) -> None:
         if distance < 1 or distance > 8:
             raise ValueError("fixture hostile distance must be between 1 and 8")
         state = await self._bot_state()
-        x = round(state.pos[0]) + distance
+        dx, dz = (distance, 0) if offset is None else offset
+        if dx == 0 and dz == 0 or abs(dx) > 8 or abs(dz) > 8:
+            raise ValueError("fixture hostile offset must be non-zero and within 8 blocks")
+        x = round(state.pos[0]) + dx
         y = round(state.pos[1])
-        z = round(state.pos[2])
+        z = round(state.pos[2]) + dz
         await asyncio.to_thread(self._rcon.request, "kill @e[type=minecraft:husk]")
         await asyncio.to_thread(
             self._rcon.request,
@@ -161,6 +204,30 @@ class InteractiveScenarioContext:
             "scenario_husk_spawned",
             {"position": [x, y, z], "distance": distance},
         )
+
+    async def provoke_husk_attack(self, *, timeout_s: float = 45.0) -> None:
+        if timeout_s <= 0:
+            raise ValueError("fixture attack timeout must be positive")
+        baseline = await self._bot_state()
+        baseline_health = baseline.health
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        offsets = ((1, 0), (-1, 0), (0, 1), (0, -1))
+        attempt = 0
+        while asyncio.get_running_loop().time() < deadline:
+            await self.spawn_husk_near_bot(offset=offsets[attempt % len(offsets)])
+            attempt += 1
+            attempt_deadline = min(deadline, asyncio.get_running_loop().time() + 8.0)
+            while asyncio.get_running_loop().time() < attempt_deadline:
+                state = await self._bot_state()
+                if state.health < baseline_health:
+                    self._trace_event(
+                        "scenario_husk_attack_observed",
+                        {"health": state.health, "attempt": attempt},
+                    )
+                    return
+                await asyncio.sleep(0.25)
+            await self.clear_hostiles()
+        raise TimeoutError("fixture husk did not damage the bot")
 
     async def clear_hostiles(self) -> None:
         await asyncio.to_thread(self._rcon.request, "kill @e[type=minecraft:husk]")
@@ -677,6 +744,11 @@ async def run_real_server_interactive(
                 bot_name=config.bot_name,
                 _rcon=rcon,
                 _trace_event=trace_scenario_event,
+                _trace_snapshot=lambda: (
+                    []
+                    if session.parts is None
+                    else session.parts.runtime.trace.snapshot()
+                ),
             )
             scenario_task = asyncio.create_task(scenario_hook(scenario_context))
 

@@ -105,6 +105,36 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             asyncio.run(context.emit_chat("bad name", "hello"))
 
+    def test_interactive_scenario_waits_for_quiescence_after_its_chat_marker(self):
+        trace = []
+        records = [
+            {
+                "seq": 7,
+                "event": "autonomy_decision",
+                "action": "park",
+                "reason": "checkpoint_wait_event",
+            },
+            {
+                "seq": 11,
+                "event": "autonomy_decision",
+                "action": "park",
+                "reason": "checkpoint_wait_event",
+            },
+        ]
+        context = InteractiveScenarioContext(
+            bot_name="Bot1",
+            _rcon=object(),
+            _trace_event=lambda event, fields: trace.append((event, dict(fields))),
+            _trace_snapshot=lambda: records,
+        )
+
+        asyncio.run(context.wait_for_idle_quiescence(after_trace_seq=9, timeout_s=1))
+
+        self.assertEqual(
+            trace,
+            [("scenario_idle_quiescent", {"after_trace_seq": 9})],
+        )
+
     def test_config_requires_explicit_real_server_env(self):
         with self.assertRaises(RealServerConfigError) as ctx:
             real_server_config_from_env({})
