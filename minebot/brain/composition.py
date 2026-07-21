@@ -842,15 +842,21 @@ def resource_plan_for(item: str) -> ResourcePlan:
 
 
 def _default_search_radius(plan: ResourcePlan) -> int:
-    if plan.requested_item in {"log", "logs"}:
+    if _is_tree_resource_plan(plan):
         return 48
     return 16
 
 
 def _max_search_radius(plan: ResourcePlan) -> int:
-    if plan.requested_item in {"log", "logs"}:
+    if _is_tree_resource_plan(plan):
         return 64
     return 48
+
+
+def _is_tree_resource_plan(plan: ResourcePlan) -> bool:
+    return plan.requested_item in {"log", "logs"} or any(
+        block_type.endswith(("_log", "_stem")) for block_type in plan.block_types
+    )
 
 
 def _read_inventory_counts(body: Body, *, page_size: int = 12) -> ToolResult:

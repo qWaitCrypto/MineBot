@@ -1320,6 +1320,21 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(calls[0]["find_limit"], 12)
         self.assertEqual(calls[0]["max_pages"], 2)
 
+    def test_collect_resource_gives_explicit_log_the_tree_search_budget(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, calls = resource_domain_tool(body)
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=24)
+
+        result = collect_resource({"item": "oak_log", "count": 1, "constraints": {"radius": 96}}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(calls[0]["search_radius"], 64)
+        self.assertEqual(calls[0]["find_limit"], 12)
+        self.assertEqual(calls[0]["max_pages"], 2)
+
     def test_collect_resource_counts_equivalent_log_inventory_items(self):
         body = FakeBody()
         body.inventory_counts = {"spruce_log": 32, "birch_log": 32}
