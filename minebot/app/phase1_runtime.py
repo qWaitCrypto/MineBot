@@ -1235,7 +1235,9 @@ def _mine_collect_tool(work: BlockWork) -> RegisteredTool:
             permission="break_collect",
             body_scope=("mine",),
             terminal_truth=("mineDone", "inventory"),
-            timeout_s=12.0,
+            # The Body transaction has its own finite approach, action, and pickup terminals.
+            # An outer runner deadline must not preempt it before those facts settle.
+            timeout_s=None,
         ),
     )
 
