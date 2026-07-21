@@ -985,6 +985,71 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         self.assertEqual([command.kind for command in session.submitted], [SessionCommandKind.QUIT])
 
+    def test_chat_command_reader_survives_cursor_acknowledgement_failure(self):
+        session = RecordingSession()
+
+        class FlakyAcknowledgementChatSource:
+            epoch = "app-1"
+
+            def __init__(self):
+                self.batches = [
+                    [
+                        Event(
+                            seq=1,
+                            tick=10,
+                            bot="Bot1",
+                            name="agentChat",
+                            data={"sender": "Steve", "message": "hello"},
+                        )
+                    ],
+                    [
+                        Event(
+                            seq=2,
+                            tick=11,
+                            bot="Bot1",
+                            name="agentChat",
+                            data={"sender": "Steve", "message": "/quit"},
+                        )
+                    ],
+                ]
+                self.acknowledgements = 0
+
+            def poll_chat_events(self):
+                return self.batches.pop(0) if self.batches else []
+
+            def acknowledge_cursor(self):
+                self.acknowledgements += 1
+                if self.acknowledgements == 1:
+                    raise RuntimeError("temporary cursor write failure")
+
+        chat = FlakyAcknowledgementChatSource()
+
+        async def scenario():
+            reader = asyncio.create_task(_chat_command_reader(session, chat, poll_interval_s=0.01))
+            try:
+                for _ in range(40):
+                    if len(session.submitted) == 2:
+                        return
+                    await asyncio.sleep(0.01)
+                raise AssertionError("chat reader did not process the command after acknowledgement failure")
+            finally:
+                reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reader
+
+        asyncio.run(scenario())
+
+        self.assertEqual(
+            [command.kind for command in session.submitted],
+            [SessionCommandKind.MESSAGE, SessionCommandKind.QUIT],
+        )
+        failures = [
+            event
+            for event in session.parts.runtime.trace.snapshot()
+            if event["event"] == "chat_ingress_failed"
+        ]
+        self.assertEqual([(event["phase"], event["error_type"]) for event in failures], [("acknowledge", "RuntimeError")])
+
     def test_chat_command_reader_does_not_block_event_loop_during_rcon_poll(self):
         session = RecordingSession()
         started = threading.Event()
@@ -2018,7 +2083,7 @@ class RecordingSession:
         self.submitted = []
         self.parts = TraceParts()
 
-    def submit(self, command):
+    def submit(self, command, **_kwargs):
         self.submitted.append(command)
 
 

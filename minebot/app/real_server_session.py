@@ -1128,18 +1128,35 @@ async def _chat_command_reader(session: AgentSession, chat_source: object, *, po
         try:
             events = await asyncio.to_thread(poll)
         except Exception as exc:
-            _trace_chat_poll_failure(session, exc)
+            _trace_chat_ingress_failure(session, phase="poll", exc=exc)
         else:
-            await asyncio.to_thread(
-                _submit_chat_events,
-                session,
-                events,
-                event_epoch=str(getattr(chat_source, "epoch", "") or "") or None,
-            )
-            acknowledge = getattr(chat_source, "acknowledge_cursor", None)
-            if callable(acknowledge):
-                await asyncio.to_thread(acknowledge)
+            try:
+                await asyncio.to_thread(
+                    _submit_chat_events,
+                    session,
+                    events,
+                    event_epoch=str(getattr(chat_source, "epoch", "") or "") or None,
+                )
+            except Exception as exc:
+                _trace_chat_ingress_failure(session, phase="submit", exc=exc)
+            else:
+                acknowledge = getattr(chat_source, "acknowledge_cursor", None)
+                if callable(acknowledge):
+                    try:
+                        await asyncio.to_thread(acknowledge)
+                    except Exception as exc:
+                        _trace_chat_ingress_failure(session, phase="acknowledge", exc=exc)
         await asyncio.sleep(poll_interval_s)
+
+
+def _trace_chat_ingress_failure(session: AgentSession, *, phase: str, exc: Exception) -> None:
+    parts = getattr(session, "parts", None)
+    if parts is not None:
+        parts.runtime.trace.emit(
+            "chat_ingress_failed",
+            phase=phase,
+            error_type=type(exc).__name__,
+        )
 
 
 def parse_session_command(line: str) -> SessionCommand | None:
