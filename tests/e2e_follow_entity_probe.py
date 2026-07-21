@@ -38,7 +38,7 @@ def command(rcon, text, delay=0.05):
 def main():
     with connect_or_skip() as rcon:
         for cmd in [
-            "script unload minebot", "script load minebot global",
+            "script unload minebot", "script resume", "script load minebot global",
             "carpet commandPlayer true", "carpet allowSpawningOfflinePlayers true",
             "gamerule doDaylightCycle false", "time set day", "weather clear",
             f"player {BOT} kill", f"player {TARGET} kill",
@@ -91,7 +91,7 @@ def main():
             raise AssertionError(f"bot did not close to target within keep_distance+tolerance: dist={dist_after:.2f}")
 
         # Phase 2: tp the target away mid-follow, verify the bot tracks the move.
-        command(rcon, f"tp {TARGET} 28 70 20")
+        command(rcon, f"tp {TARGET} 28 70 28")
         time.sleep(0.3)
 
         follow_result2 = {}
@@ -107,8 +107,11 @@ def main():
 
         th2 = threading.Thread(target=follow_moved)
         th2.start()
-        # While following, move the target again so the bot must re-plan mid-pursuit.
-        time.sleep(2.5)
+        # Move while the first pursuit is still active. Waiting until the
+        # keep-distance terminal makes this a static-target test by accident.
+        time.sleep(0.25)
+        if not th2.is_alive():
+            raise AssertionError("follow_entity reached the initial target before the moving-goal fixture ran")
         command(rcon, f"tp {TARGET} 20 70 28")
         th2.join(timeout=14.0)
         if th2.is_alive():
