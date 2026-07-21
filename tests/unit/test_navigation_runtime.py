@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from minebot.body import NavigationRunConfig, NavigationTransactions
+from minebot.body.navigation import aquatic_navigation_config
 from minebot.body.world_read import read_block_cells_tiled, refresh_grid_world_around
 from minebot.game.governance import GovernancePolicy, Region
 from minebot.contract import Action, BodyState, BreakContext, Event, PerceptionResult, Result
@@ -585,6 +586,25 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(action.name, "navigateTo")
         self.assertEqual(action.params["target"], [5, 64, 0])
         self.assertEqual(action.params["goal_radius"], 2)
+
+    def test_aquatic_navigation_is_explicit_and_non_mutating(self):
+        body = FakeBody([state_at((0, 64, 0))])
+        runtime = NavigationTransactions(body, FakeNavigator([]))
+
+        result = runtime.navigate_to(
+            (8, 64, 0),
+            config=aquatic_navigation_config(
+                NavigationRunConfig(max_segments=2, aquatic_replan_attempts=1)
+            ),
+        )
+
+        self.assertTrue(result.success)
+        action = body.actions[0]
+        self.assertTrue(action.params["allow_swim"])
+        self.assertTrue(action.params["aquatic_traversal"])
+        self.assertEqual(action.params["aquatic_replan_attempts"], 1)
+        for key in ("allow_break", "allow_place", "allow_pillar", "allow_downward"):
+            self.assertFalse(action.params[key])
 
     def test_navigate_to_preserves_composite_goal_set_and_server_selection(self):
         class SelectedGoalBody(FakeBody):

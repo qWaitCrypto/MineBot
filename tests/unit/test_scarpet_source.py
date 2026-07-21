@@ -662,6 +662,16 @@ class ScarpetSourceTests(unittest.TestCase):
         ):
             self.assertIn(expected, source)
 
+    def test_server_aquatic_traversal_replans_after_progress_only(self):
+        source = MINEBOT_SC.read_text()
+        self.assertIn("'aquatic_traversal' -> param_bool(params, 'aquatic_traversal', false)", source)
+        self.assertIn("'aquatic_replan_attempts' -> floor(param_number(params, 'aquatic_replan_attempts', 0))", source)
+        self.assertIn("navigation_aquatic_traversal(name) && current_movement_kind(m) == 'swim'", source)
+        self.assertIn("start_pos = if(length(nav) > 25, nav:25, null)", source)
+        self.assertIn("aquatic_progress >= 1.0", source)
+        self.assertIn("params:'aquatic_replan_attempts' = floor(number(params:'aquatic_replan_attempts')) - 1", source)
+        self.assertIn("'aquatic_replan'", source)
+
     def test_delayed_move_cancel_keeps_unsafe_movement_running_until_safe(self):
         source = MINEBOT_SC.read_text()
         request_start = source.index("request_move_cancel(name, reason) -> (")

@@ -49,6 +49,8 @@ class NavigationRunConfig:
     allow_ascend: bool = True
     allow_descend: bool = True
     allow_swim: bool = True
+    aquatic_traversal: bool = False
+    aquatic_replan_attempts: int = 2
     max_safe_fall_depth: int = 3
     max_water_drop_depth: int = 32
     allow_break: bool = True
@@ -100,6 +102,18 @@ def dry_land_navigation_config(
     """Keep a normal land objective from treating a swim route as its default."""
 
     return replace(config or NavigationRunConfig(), allow_swim=False)
+
+
+def aquatic_navigation_config(
+    config: NavigationRunConfig | None = None,
+) -> NavigationRunConfig:
+    """Permit one explicit water crossing without permitting terrain mutation."""
+
+    return replace(
+        pure_movement_navigation_config(config),
+        allow_swim=True,
+        aquatic_traversal=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -167,6 +181,8 @@ class NavigationTransactions:
             raise ValueError("max_safe_fall_depth must be between 0 and 3")
         if cfg.max_water_drop_depth < 1 or cfg.max_water_drop_depth > 64:
             raise ValueError("max_water_drop_depth must be between 1 and 64")
+        if cfg.aquatic_replan_attempts < 0:
+            raise ValueError("aquatic_replan_attempts must be >= 0")
         if cfg.max_break_steps < 0:
             raise ValueError("max_break_steps must be >= 0")
         if cfg.max_place_steps < 0:
@@ -241,6 +257,8 @@ class NavigationTransactions:
                     "allow_ascend": cfg.allow_ascend,
                     "allow_descend": cfg.allow_descend,
                     "allow_swim": cfg.allow_swim,
+                    "aquatic_traversal": cfg.aquatic_traversal,
+                    "aquatic_replan_attempts": max(0, cfg.aquatic_replan_attempts),
                     "max_fall_depth": cfg.max_safe_fall_depth,
                     "max_water_drop_depth": cfg.max_water_drop_depth,
                     "recheck_lookahead": cfg.recheck_lookahead,

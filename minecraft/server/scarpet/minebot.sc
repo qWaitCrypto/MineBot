@@ -1859,20 +1859,29 @@ start_move_cancel_water_egress(name, m, reason) -> (
 request_move_cancel(name, reason) -> (
   m = global_moves:name;
   if(m != null,
-    if(movement_cancel_safe_now(name, m),
-      stop_body(name);
+    if(navigation_aquatic_traversal(name) && current_movement_kind(m) == 'swim' && (reason == 'timeout' || reason == 'stuck' || reason == 'deviated' || reason == 'world_changed'),
       finish_move(name, reason, false)
     ,
-      if(global_move_cancels:name == null,
-        global_move_cancels:name = l(reason, global_tick, movement_cancel_json(m:15));
-        emit('moveCancelDelayed', name, l(m:0, reason, movement_cancel_json(m:15), global_tick))
-      );
-      m = global_moves:name;
-      if(m != null && global_reflexes:name == null,
-        start_move_cancel_water_egress(name, m, global_move_cancels:name:0)
+      if(movement_cancel_safe_now(name, m),
+        stop_body(name);
+        finish_move(name, reason, false)
+      ,
+        if(global_move_cancels:name == null,
+          global_move_cancels:name = l(reason, global_tick, movement_cancel_json(m:15));
+          emit('moveCancelDelayed', name, l(m:0, reason, movement_cancel_json(m:15), global_tick))
+        );
+        m = global_moves:name;
+        if(m != null && global_reflexes:name == null,
+          start_move_cancel_water_egress(name, m, global_move_cancels:name:0)
+        )
       )
     )
   )
+);
+
+navigation_aquatic_traversal(name) -> (
+  nav = global_navigations:name;
+  nav != null && bool(nav:14:'aquatic_traversal')
 );
 
 run_move_cancel_tick(name, m) -> (
@@ -4265,6 +4274,8 @@ navigation_context_from_params(params) -> (
     'allow_ascend' -> param_bool(params, 'allow_ascend', true),
     'allow_descend' -> param_bool(params, 'allow_descend', true),
     'allow_swim' -> param_bool(params, 'allow_swim', true),
+    'aquatic_traversal' -> param_bool(params, 'aquatic_traversal', false),
+    'aquatic_replan_attempts' -> floor(param_number(params, 'aquatic_replan_attempts', 0)),
     'max_fall_depth' -> max_fall_depth,
     'max_water_drop_depth' -> max_water_drop_depth,
     'allow_break' -> param_bool(params, 'allow_break', false),
@@ -4293,11 +4304,13 @@ navigation_default_context() -> (
 );
 
 navigation_context_json(context) -> (
-  str('{"allow_diagonal":%s,"allow_ascend":%s,"allow_descend":%s,"allow_swim":%s,"max_fall_depth":%d,"max_water_drop_depth":%d,"allow_break":%s,"break_budget":%d,"break_timeout_ticks":%d,"break_pickaxe":%s,"break_axe":%s,"break_shovel":%s,"allow_place":%s,"allow_pillar":%s,"pillar_budget":%d,"allow_downward":%s,"downward_budget":%d,"allow_open":%s,"open_budget":%d,"scaffold_item":%s,"scaffold_count":%d,"place_budget":%d}',
+  str('{"allow_diagonal":%s,"allow_ascend":%s,"allow_descend":%s,"allow_swim":%s,"aquatic_traversal":%s,"aquatic_replan_attempts":%d,"max_fall_depth":%d,"max_water_drop_depth":%d,"allow_break":%s,"break_budget":%d,"break_timeout_ticks":%d,"break_pickaxe":%s,"break_axe":%s,"break_shovel":%s,"allow_place":%s,"allow_pillar":%s,"pillar_budget":%d,"allow_downward":%s,"downward_budget":%d,"allow_open":%s,"open_budget":%d,"scaffold_item":%s,"scaffold_count":%d,"place_budget":%d}',
     json_bool(bool(context:'allow_diagonal')),
     json_bool(bool(context:'allow_ascend')),
     json_bool(bool(context:'allow_descend')),
     json_bool(bool(context:'allow_swim')),
+    json_bool(bool(context:'aquatic_traversal')),
+    floor(number(context:'aquatic_replan_attempts')),
     floor(number(context:'max_fall_depth')),
     floor(number(context:'max_water_drop_depth')),
     json_bool(bool(context:'allow_break')),
@@ -5673,7 +5686,7 @@ start_navigate_to(name, action_id, gx, gy, gz, params) -> (
           waypoints += l(wp:0 + 0.5, wp:1, wp:2 + 0.5)
         );
         movement_cancel = navigation_cancel_profile(execution_path);
-        global_navigations:name = l(action_id, gx, gy, gz, plan_status, plan_expanded, length(waypoints), arrival_radius, goals, selected_goal, movement_kinds, fall_depths, cancel_policies, movement_counts, context, context_json, recheck_lookahead, partial_coefficient, partial_distance, mutation_step, mutation_index, params, partial_replans, segment_index, partial_continuation);
+        global_navigations:name = l(action_id, gx, gy, gz, plan_status, plan_expanded, length(waypoints), arrival_radius, goals, selected_goal, movement_kinds, fall_depths, cancel_policies, movement_counts, context, context_json, recheck_lookahead, partial_coefficient, partial_distance, mutation_step, mutation_index, params, partial_replans, segment_index, partial_continuation, l(sx, sy, sz));
         if(length(waypoints) == 0 && mutation_step != null,
           stage_navigation_mutation(name, global_navigations:name);
           true
@@ -5721,36 +5734,47 @@ finish_navigate(name, move_event_data) -> (
     partial_replans = nav:22;
     segment_index = nav:23;
     partial_continuation = nav:24;
+    start_pos = if(length(nav) > 25, nav:25, null);
     goal_count = length(goals);
     p = bot_pos(name);
     goal_dist = if(p != null, navigation_goal_distance(p:0, p:1, p:2, goals), 9999.0);
     move_arrived = move_event_data:1;
     move_reason = move_event_data:5;
+    aquatic_progress = if(p == null || start_pos == null, 0.0, distance_between(p, start_pos));
+    aquatic_replan = bool(nav:14:'aquatic_traversal') && !move_arrived && aquatic_progress >= 1.0 && (move_reason == 'timeout' || move_reason == 'stuck' || move_reason == 'deviated' || move_reason == 'world_changed') && floor(number(params:'aquatic_replan_attempts')) > 0;
     if(nav:19 != null && move_arrived,
       stage_navigation_mutation(name, nav)
     ,
-      if(plan_status == 'partial' && move_arrived && partial_continuation && partial_replans > 0,
-        emit('navigateFinishTrace', name, l(action_id, false, 'partial_continue', p, selected_goal, goal_dist, plan_expanded, plan_waypoints, goal_count, movement_counts, context_json, partial_coefficient, partial_distance));
-        params:'partial_replans' = partial_replans - 1;
+      if(aquatic_replan,
+        emit('navigateFinishTrace', name, l(action_id, false, 'aquatic_replan', p, selected_goal, goal_dist, plan_expanded, plan_waypoints, goal_count, movement_counts, context_json, partial_coefficient, partial_distance));
+        params:'aquatic_replan_attempts' = floor(number(params:'aquatic_replan_attempts')) - 1;
         params:'segment_index' = segment_index + 1;
         global_navigations:name = null;
         start_navigate_to(name, action_id, gx, gy, gz, params)
       ,
-        nav_arrived = move_arrived && plan_status == 'arrived';
-        nav_reason = if(nav_arrived, 'arrived',
-          if(plan_status == 'partial' && move_arrived,
-            if(partial_continuation, 'partial_segment_budget_exhausted', 'partial')
-          ,
-            if(move_reason == 'stuck', 'stuck',
-              if(move_reason == 'timeout', 'timeout',
-                if(move_reason == 'deviated', 'deviated', move_reason)))));
-        recheck_reason = if(nav_reason == 'world_changed', nav_reason, null);
-        emit('navigateFinishTrace', name, l(action_id, nav_arrived, nav_reason, p, selected_goal, goal_dist, plan_expanded, plan_waypoints, goal_count, movement_counts, context_json, partial_coefficient, partial_distance));
-        emit('navigateDone', name, l(action_id, nav_arrived, p, selected_goal, goal_dist, nav_reason, plan_expanded, plan_waypoints, segment_index, nav_reason, move_event_data:6, move_event_data:7, move_event_data:8, move_event_data:9, move_event_data:10, move_event_data:11, move_event_data:12, selected_goal, goal_count, movement_counts, context_json, partial_coefficient, partial_distance, recheck_reason));
-        if(!nav_arrived && (nav_reason == 'stuck' || nav_reason == 'no_path'),
-          emit('mobilityBlocked', name, l(nav_reason, p, selected_goal, plan_expanded))
-        );
-        global_navigations:name = null
+        if(plan_status == 'partial' && move_arrived && partial_continuation && partial_replans > 0,
+          emit('navigateFinishTrace', name, l(action_id, false, 'partial_continue', p, selected_goal, goal_dist, plan_expanded, plan_waypoints, goal_count, movement_counts, context_json, partial_coefficient, partial_distance));
+          params:'partial_replans' = partial_replans - 1;
+          params:'segment_index' = segment_index + 1;
+          global_navigations:name = null;
+          start_navigate_to(name, action_id, gx, gy, gz, params)
+        ,
+          nav_arrived = move_arrived && plan_status == 'arrived';
+          nav_reason = if(nav_arrived, 'arrived',
+            if(plan_status == 'partial' && move_arrived,
+              if(partial_continuation, 'partial_segment_budget_exhausted', 'partial')
+            ,
+              if(move_reason == 'stuck', 'stuck',
+                if(move_reason == 'timeout', 'timeout',
+                  if(move_reason == 'deviated', 'deviated', move_reason)))));
+          recheck_reason = if(nav_reason == 'world_changed', nav_reason, null);
+          emit('navigateFinishTrace', name, l(action_id, nav_arrived, nav_reason, p, selected_goal, goal_dist, plan_expanded, plan_waypoints, goal_count, movement_counts, context_json, partial_coefficient, partial_distance));
+          emit('navigateDone', name, l(action_id, nav_arrived, p, selected_goal, goal_dist, nav_reason, plan_expanded, plan_waypoints, segment_index, nav_reason, move_event_data:6, move_event_data:7, move_event_data:8, move_event_data:9, move_event_data:10, move_event_data:11, move_event_data:12, selected_goal, goal_count, movement_counts, context_json, partial_coefficient, partial_distance, recheck_reason));
+          if(!nav_arrived && (nav_reason == 'stuck' || nav_reason == 'no_path'),
+            emit('mobilityBlocked', name, l(nav_reason, p, selected_goal, plan_expanded))
+          );
+          global_navigations:name = null
+        )
       )
     )
   )

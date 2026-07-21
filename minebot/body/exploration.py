@@ -12,6 +12,7 @@ from typing import Callable, Protocol
 from minebot.body.navigation import (
     NavigationRunConfig,
     NavigationTransactions,
+    aquatic_navigation_config,
     dry_land_navigation_config,
     pure_movement_navigation_config,
 )
@@ -326,6 +327,7 @@ class ExplorationTransactions:
         attempted_this_call: set[tuple[int, int]] = set()
         failures: list[JsonObject] = []
         mutation_blacklist: set[Position] = set()
+        aquatic_attempted = False
         mobility_egress_attempted = False
         evidence_keys: list[str] = []
         covered_this_call: list[list[int]] = []
@@ -491,6 +493,8 @@ class ExplorationTransactions:
                 continue
 
             navigation_failures: list[JsonObject] = []
+            navigation_uncertainty: tuple[JsonObject, ...] = ()
+            fallback_failure_recorded = False
             candidate_stands = stands[:3]
             before = self.body.get_state()
             nav = self.navigator.navigate_to(
@@ -554,6 +558,114 @@ class ExplorationTransactions:
                     can_retry=True,
                 )
             reached = nav.success and _region_key(_block_pos(after.pos)) == region
+            if (
+                not reached
+                and navigation_reason == "no_path"
+                and not aquatic_attempted
+            ):
+                fallback_attempted = True
+                if not mobility_egress_attempted and self.mobility_egress is not None:
+                    egress_before = self.body.get_state()
+                    egress_result = self.mobility_egress(30.0)
+                    egress_after = self.body.get_state()
+                    mobility_egress_attempted = True
+                    distance_consumed += dist(egress_before.pos, egress_after.pos)
+                    navigation_failures[0]["mobility_egress"] = _terminal_result_summary(egress_result)
+                    egress_lifecycle = _body_lifecycle_terminal(egress_after)
+                    if egress_lifecycle is not None:
+                        return _merge_result_context(
+                            egress_lifecycle,
+                            targets=targets,
+                            dimension=dimension,
+                            origin=origin,
+                            max_regions=max_regions,
+                            max_distance=max_distance,
+                            regions_consumed=regions_consumed,
+                            distance_consumed=distance_consumed,
+                            covered_this_call=covered_this_call,
+                            blocks=all_blocks,
+                            entities=all_entities,
+                            failures=[*failures, *navigation_failures],
+                            evidence_keys=evidence_keys,
+                            coverage=prior,
+                        )
+                    after = egress_after
+
+                aquatic_attempted = True
+                aquatic_before = self.body.get_state()
+                aquatic = self.navigator.navigate_to(
+                    GoalComposite(tuple(GoalNear(stand, radius=1) for stand in candidate_stands)),
+                    break_context=BreakContext.TRAVEL,
+                    config=aquatic_navigation_config(
+                        NavigationRunConfig(max_segments=16, segment_timeout_s=12.0)
+                    ),
+                    mutation_blacklist=mutation_blacklist,
+                )
+                aquatic_after = self.body.get_state()
+                distance_consumed += dist(aquatic_before.pos, aquatic_after.pos)
+                navigation_failures.append(
+                    {
+                        "mode": "aquatic_traversal",
+                        "stands": [list(stand) for stand in candidate_stands],
+                        "selected_goal": (aquatic.metrics or {}).get("selected_goal"),
+                        "reason": aquatic.reason,
+                        "success": aquatic.success,
+                        "can_retry": aquatic.can_retry,
+                        "mutation_blacklist_size": len(mutation_blacklist),
+                    }
+                )
+                aquatic_lifecycle = _body_lifecycle_terminal(aquatic_after)
+                if aquatic_lifecycle is not None:
+                    return _merge_result_context(
+                        aquatic_lifecycle,
+                        targets=targets,
+                        dimension=dimension,
+                        origin=origin,
+                        max_regions=max_regions,
+                        max_distance=max_distance,
+                        regions_consumed=regions_consumed,
+                        distance_consumed=distance_consumed,
+                        covered_this_call=covered_this_call,
+                        blocks=all_blocks,
+                        entities=all_entities,
+                        failures=[*failures, *navigation_failures],
+                        evidence_keys=evidence_keys,
+                        coverage=prior,
+                    )
+                if aquatic.reason in {"preempted", "owner_preempted"}:
+                    return self._result(
+                        "preempted",
+                        targets=targets,
+                        dimension=dimension,
+                        origin=origin,
+                        regions_consumed=regions_consumed,
+                        max_regions=max_regions,
+                        max_distance=max_distance,
+                        distance_consumed=distance_consumed,
+                        covered_this_call=covered_this_call,
+                        blocks=all_blocks,
+                        entities=all_entities,
+                        failures=[*failures, *navigation_failures],
+                        evidence_keys=evidence_keys,
+                        coverage=prior,
+                        success=True,
+                        can_retry=True,
+                    )
+                if aquatic.success:
+                    nav = aquatic
+                    after = aquatic_after
+                    navigation_reason = str(aquatic.reason or "mobility_blocked")
+                    reached = _region_key(_block_pos(after.pos)) == region
+                if reached and fallback_attempted:
+                    navigation_uncertainty = tuple(navigation_failures)
+                    failures.append(
+                        {
+                            "region": [region[0], region[1]],
+                            "reason": navigation_reason,
+                            "navigation_attempts": navigation_failures,
+                        }
+                    )
+                    fallback_failure_recorded = True
             if not reached:
                 recovery: JsonObject | None = None
                 recovered = after
@@ -601,36 +713,6 @@ class ExplorationTransactions:
                             evidence_keys=evidence_keys,
                             coverage=prior,
                         )
-                if (
-                    navigation_reason == "no_path"
-                    and not mobility_egress_attempted
-                    and self.mobility_egress is not None
-                    and (recovery is None or recovery["success"] is True)
-                ):
-                    egress_before = self.body.get_state()
-                    egress_result = self.mobility_egress(30.0)
-                    egress_after = self.body.get_state()
-                    mobility_egress_attempted = True
-                    distance_consumed += dist(egress_before.pos, egress_after.pos)
-                    navigation_failures[0]["mobility_egress"] = _terminal_result_summary(egress_result)
-                    egress_lifecycle = _body_lifecycle_terminal(egress_after)
-                    if egress_lifecycle is not None:
-                        return _merge_result_context(
-                            egress_lifecycle,
-                            targets=targets,
-                            dimension=dimension,
-                            origin=origin,
-                            max_regions=max_regions,
-                            max_distance=max_distance,
-                            regions_consumed=regions_consumed,
-                            distance_consumed=distance_consumed,
-                            covered_this_call=covered_this_call,
-                            blocks=all_blocks,
-                            entities=all_entities,
-                            failures=[*failures, *navigation_failures],
-                            evidence_keys=evidence_keys,
-                            coverage=prior,
-                        )
                 status = (
                     CoverageStatus.UNLOADED_BOUNDARY
                     if _is_unloaded_reason(navigation_reason)
@@ -646,13 +728,14 @@ class ExplorationTransactions:
                     uncertainty=tuple(navigation_failures),
                 )
                 prior[region] = record
-                failures.append(
-                    {
-                        "region": [region[0], region[1]],
-                        "reason": navigation_reason,
-                        "navigation_attempts": navigation_failures,
-                    }
-                )
+                if not fallback_failure_recorded:
+                    failures.append(
+                        {
+                            "region": [region[0], region[1]],
+                            "reason": navigation_reason,
+                            "navigation_attempts": navigation_failures,
+                        }
+                    )
                 if recovery is not None and recovery["success"] is not True:
                     return self._result(
                         "mobility_blocked",
@@ -744,6 +827,7 @@ class ExplorationTransactions:
                 region=reached_region,
                 center=final_pos,
                 scan=scan,
+                additional_uncertainty=navigation_uncertainty,
             )
             prior[reached_region] = record
             covered.add(reached_region)
@@ -971,6 +1055,7 @@ class ExplorationTransactions:
         region: tuple[int, int],
         center: Position,
         scan: _ScanResult,
+        additional_uncertainty: tuple[JsonObject, ...] = (),
     ) -> tuple[CoverageRegion, tuple[str, ...]]:
         observations = tuple([*scan.blocks, *scan.entities])
         negative: list[str] = []
@@ -988,7 +1073,7 @@ class ExplorationTransactions:
             reason="target_found" if scan.found else "authoritative_negative_scan",
             observations=observations,
             negative_evidence=tuple(negative),
-            uncertainty=scan.uncertainty,
+            uncertainty=tuple([*scan.uncertainty, *additional_uncertainty]),
         )
         keys = [_coverage_evidence_key(record)]
         keys.extend(_target_evidence_keys(dimension, scan))

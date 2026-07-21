@@ -204,6 +204,24 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertFalse(config.allow_pillar)
         self.assertFalse(config.allow_downward)
 
+    def test_no_path_uses_one_explicit_aquatic_fallback(self):
+        runtime, _, navigator = _runtime(
+            outcomes=[ToolResult(False, "no_path", True), ToolResult(True, "arrived", False)]
+        )
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "budget_exhausted")
+        self.assertGreaterEqual(len(navigator.calls), 2)
+        aquatic_config = navigator.calls[1][1]["config"]
+        self.assertTrue(aquatic_config.allow_swim)
+        self.assertTrue(aquatic_config.aquatic_traversal)
+        self.assertFalse(aquatic_config.allow_break)
+        self.assertFalse(aquatic_config.allow_place)
+        self.assertFalse(aquatic_config.allow_pillar)
+        self.assertFalse(aquatic_config.allow_downward)
+
     def test_no_path_attempts_one_body_owned_mobility_egress_before_next_frontier(self):
         body = ExplorationBody()
         egress_calls = []
