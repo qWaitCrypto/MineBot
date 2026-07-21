@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from minebot.body import BlockWork
@@ -747,6 +748,28 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(navigator.calls, [])
         self.assertEqual(progress.failure_steps, 0)
         progress.require_can_continue("next independent move")
+
+    def test_search_for_block_reports_body_owned_time_budget_exhaustion(self):
+        class SlowStateBody(FakeBody):
+            def get_state(self):
+                time.sleep(0.01)
+                return super().get_state()
+
+        body = SlowStateBody()
+        work = BlockWork(body, GovernancePolicy())
+
+        result = work.search_for_block(
+            block_types=("oak_log",),
+            search_radius=12,
+            timeout_s=0.001,
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "search_budget_exhausted")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(body.perceptions, [])
+        self.assertEqual(result.metrics["pages_read"], 0)
+        self.assertEqual(result.metrics["uncertainty"][0]["reason"], "time_budget")
 
     def test_search_for_block_does_not_chase_extra_find_blocks_pages_by_default(self):
         blocks = {

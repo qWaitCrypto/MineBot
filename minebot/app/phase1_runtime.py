@@ -1194,7 +1194,9 @@ def _search_tool(work: BlockWork) -> RegisteredTool:
             tool_type="perception",
             permission="read_world",
             body_scope=("blocks",),
-            timeout_s=15.0,
+            # The Body search owns its finite page/time terminal. Do not let a
+            # fixed Runner deadline cut a partial perception off mid-transaction.
+            timeout_s=None,
             body_mutating=False,
         ),
     )

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from math import fabs
 from math import floor
 from math import dist
+import time
 from typing import Protocol
 
 from minebot.body.navigation import (
@@ -74,6 +75,7 @@ class NearbyBlockSearch:
     errors: list[str]
     pages_read: int
     total_matches: int
+    budget_exhausted: bool = False
 
 
 def _read_find_blocks_pages(
@@ -84,6 +86,8 @@ def _read_find_blocks_pages(
     y_radius: int,
     limit: int,
     max_pages: int = 32,
+    deadline: float | None = None,
+    timeout_s: float | None = None,
 ) -> dict[str, object] | ToolResult:
     start: int | None = 0
     pages_read = 0
@@ -92,6 +96,16 @@ def _read_find_blocks_pages(
     complete = False
     total_matches = 0
     while start is not None:
+        if deadline is not None and time.monotonic() >= deadline:
+            uncertainty.append({"reason": "time_budget", "timeout_s": timeout_s})
+            return {
+                "blocks": blocks,
+                "complete": False,
+                "uncertainty": uncertainty,
+                "pages_read": pages_read,
+                "total_matches": total_matches,
+                "budget_exhausted": True,
+            }
         found = body.perceive(
             "findBlocks",
             {
@@ -116,6 +130,16 @@ def _read_find_blocks_pages(
         if found.complete or next_start is None:
             complete = found.complete
             break
+        if deadline is not None and time.monotonic() >= deadline:
+            uncertainty.append({"reason": "time_budget", "timeout_s": timeout_s})
+            return {
+                "blocks": blocks,
+                "complete": False,
+                "uncertainty": uncertainty,
+                "pages_read": pages_read,
+                "total_matches": total_matches,
+                "budget_exhausted": True,
+            }
         if pages_read >= max_pages:
             uncertainty.append({"reason": "page_limit", "max_pages": max_pages})
             break
@@ -126,6 +150,7 @@ def _read_find_blocks_pages(
         "uncertainty": uncertainty,
         "pages_read": pages_read,
         "total_matches": total_matches,
+        "budget_exhausted": False,
     }
 
 
@@ -155,7 +180,16 @@ def find_nearby_block_search(
     not_found_reason: str,
     limit: int = 64,
     max_pages: int = 1,
+    timeout_s: float | None = None,
 ) -> NearbyBlockSearch | ToolResult:
+    if timeout_s is not None and timeout_s <= 0:
+        return ToolResult(
+            success=False,
+            reason="invalid_search_timeout",
+            can_retry=False,
+            metrics={"timeout_s": timeout_s},
+        )
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
     state = body.get_state()
     wanted = sorted({normalize_block_type(block_type) for block_type in block_types})
     candidates: list[NearbyBlockTarget] = []
@@ -165,8 +199,13 @@ def find_nearby_block_search(
     truncated = False
     pages_read = 0
     total_matches = 0
+    budget_exhausted = False
     y_radius = _default_find_blocks_y_radius(radius)
     for wanted_type in wanted:
+        if deadline is not None and time.monotonic() >= deadline:
+            uncertainty.append({"reason": "time_budget", "timeout_s": timeout_s})
+            budget_exhausted = True
+            break
         pages = _read_find_blocks_pages(
             body,
             wanted_type=wanted_type,
@@ -174,6 +213,8 @@ def find_nearby_block_search(
             y_radius=y_radius,
             limit=limit,
             max_pages=max_pages,
+            deadline=deadline,
+            timeout_s=timeout_s,
         )
         if isinstance(pages, ToolResult):
             return pages
@@ -181,6 +222,8 @@ def find_nearby_block_search(
         uncertainty.extend(pages["uncertainty"])
         pages_read += int(pages["pages_read"])
         total_matches += int(pages["total_matches"])
+        if bool(pages.get("budget_exhausted")):
+            budget_exhausted = True
         if not pages["complete"]:
             truncated = True
         for item in blocks:
@@ -198,14 +241,31 @@ def find_nearby_block_search(
                     distance=dist(state.pos, (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5)),
                 )
             )
+        if budget_exhausted:
+            break
 
     if not candidates:
+        reason = "search_budget_exhausted" if budget_exhausted else not_found_reason
+        next_suggestion = (
+            "The bounded search budget ended before the scan completed; narrow block_types/search_radius "
+            "or use explore_for for a new frontier."
+            if budget_exhausted
+            else "move closer or expand the search radius before retrying"
+        )
         return ToolResult(
             success=False,
-            reason=not_found_reason,
+            reason=reason,
             can_retry=True,
-            next_suggestion="move closer or expand the search radius before retrying",
-            metrics={"search_radius": radius, "block_types": list(block_types), "limit": limit, "uncertainty": uncertainty},
+            next_suggestion=next_suggestion,
+            metrics={
+                "search_radius": radius,
+                "block_types": list(block_types),
+                "limit": limit,
+                "max_pages": max_pages,
+                "pages_read": pages_read,
+                "timeout_s": timeout_s,
+                "uncertainty": uncertainty,
+            },
         )
     return NearbyBlockSearch(
         targets=sorted(candidates, key=lambda candidate: (candidate.distance, candidate.pos)),
@@ -214,6 +274,7 @@ def find_nearby_block_search(
         errors=errors,
         pages_read=pages_read,
         total_matches=total_matches,
+        budget_exhausted=budget_exhausted,
     )
 
 

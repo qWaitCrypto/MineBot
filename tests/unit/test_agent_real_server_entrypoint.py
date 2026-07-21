@@ -472,6 +472,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(by_name["go_to_surface"]["tool_type"], "navigation")
         self.assertEqual(by_name["read_state"]["source"], "body.perception")
         self.assertEqual(by_name["search_for_block"]["tool_type"], "perception")
+        self.assertIsNone(registry.get("search_for_block").sidecar.timeout_s)
         self.assertEqual(by_name["mine_block_collect"]["tool_type"], "work")
         self.assertIsNone(registry.get("mine_block_collect").sidecar.timeout_s)
         self.assertEqual(by_name["craft_item"]["source"], "body.inventory")

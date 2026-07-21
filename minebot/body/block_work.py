@@ -1852,6 +1852,7 @@ class BlockWork:
             radius=search_radius,
             limit=find_limit,
             max_pages=max(1, int(max_pages)),
+            timeout_s=timeout_s,
             not_found_reason="search_block_not_found",
         )
         if isinstance(search, ToolResult):
@@ -1881,6 +1882,7 @@ class BlockWork:
             "uncertainty": list(search.uncertainty),
             "pages_read": search.pages_read,
             "total_matches": search.total_matches,
+            "budget_exhausted": search.budget_exhausted,
             "line_of_sight_verified": False,
             "interaction_readiness": "unknown",
         }
@@ -1891,9 +1893,12 @@ class BlockWork:
             return ToolResult(
                 success=True,
                 reason="block_in_range",
-                can_retry=False,
+                can_retry=search.budget_exhausted,
                 next_suggestion=(
-                    "Distance alone is not interaction truth. Use collect_resource for count-based acquisition "
+                    "The search was incomplete due to its bounded time budget; refresh with a narrower query "
+                    "before relying on the candidate set."
+                    if search.budget_exhausted
+                    else "Distance alone is not interaction truth. Use collect_resource for count-based acquisition "
                     "or get_to_block for one block-approach objective before choosing an exact-target action."
                 ),
                 metrics={
@@ -1907,9 +1912,12 @@ class BlockWork:
         return ToolResult(
             success=True,
             reason="block_candidates_found",
-            can_retry=False,
+            can_retry=search.budget_exhausted,
             next_suggestion=(
-                "A search hit is not an approach result. Use collect_resource for count-based acquisition or "
+                "The search was incomplete due to its bounded time budget; narrow the query or use explore_for "
+                "before selecting another target."
+                if search.budget_exhausted
+                else "A search hit is not an approach result. Use collect_resource for count-based acquisition or "
                 "get_to_block for one block-approach objective; generic move_to does not prove access."
             ),
             metrics={
