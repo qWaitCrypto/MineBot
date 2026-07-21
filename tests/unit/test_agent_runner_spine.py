@@ -1442,6 +1442,108 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(decision["recent_session_messages"][0]["role"], "assistant")
         self.assertTrue(runtime.last_tool_results[-1]["success"])
 
+    def test_mobility_terminal_refreshes_live_run_context(self):
+        tool = RegisteredTool(
+            name="explore_for",
+            description="Explore",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=lambda _params: ToolResult(
+                False,
+                "mobility_blocked",
+                True,
+                metrics={"candidate_failure_count": 1},
+            ),
+            sidecar=ToolSidecar(
+                progress_key="explore_for",
+                mutating=True,
+                source="body.exploration",
+                tool_type="exploration",
+                permission="explore_world",
+                body_scope=("navigation",),
+            ),
+        )
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        self.addCleanup(runtime.close)
+        profile = ModeRuntime().profile_for(LifecycleState.ACTIVE)
+        runtime.agent_context.observe_profile(profile)
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=profile,
+            trace=runtime.trace,
+            runtime=runtime,
+            instruction_preamble=runtime.agent_context.turn_preamble(
+                include_session_messages=False
+            ),
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        output = asyncio.run(sdk_tool_for(tool).on_invoke_tool(Wrapper(), "{}"))
+
+        self.assertFalse(output["success"])
+        self.assertEqual(runtime_context.profile.situational, "mobility")
+        self.assertIn("situational=mobility", runtime_context.instruction_preamble)
+        instructions = runtime._instructions(Wrapper(), runtime.agent)
+        self.assertIn("Mobility/reachability issue", instructions)
+        self.assertEqual(runtime._pending_mobility_terminal["reason"], "mobility_blocked")
+        self.assertTrue(
+            any(event["event"] == "mobility_terminal_live_handoff" for event in runtime.trace.snapshot())
+        )
+
+    def test_pending_mobility_terminal_survives_bookkeeping_until_next_outer_turn(self):
+        calls = []
+
+        async def fake_runner(agent, input_text, *, context=None, **kwargs):
+            calls.append((context.profile.situational, context.instruction_preamble))
+            return {"ok": True}
+
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=fake_runner,
+        )
+        self.addCleanup(runtime.close)
+        runtime.remember_tool_result(
+            "explore_for",
+            ToolResult(False, "mobility_blocked", True, metrics={"candidate_failure_count": 1}).to_payload(),
+        )
+        for _ in range(13):
+            runtime.remember_tool_result(
+                "read_state",
+                ToolResult(True, "state_read", False).to_payload(),
+            )
+
+        self.assertEqual(len(runtime.last_tool_results), 12)
+        self.assertFalse(any(item["reason"] == "mobility_blocked" for item in runtime.last_tool_results))
+        self.assertEqual(runtime._pending_mobility_terminal["reason"], "mobility_blocked")
+
+        outcome = asyncio.run(runtime.run_turn())
+
+        self.assertEqual(outcome.status, "completed_turn")
+        self.assertEqual(outcome.profile.situational, "mobility")
+        self.assertEqual(calls[0][0], "mobility")
+        self.assertIn("situational=mobility", calls[0][1])
+        self.assertIsNone(runtime._pending_mobility_terminal)
+        self.assertTrue(
+            any(
+                event["event"] == "mobility_terminal_carried_to_outer_turn"
+                for event in runtime.trace.snapshot()
+            )
+        )
+
     def test_sdk_tool_marks_truncated_result_incomplete_for_model(self):
         def callable_(_params):
             return ToolResult(

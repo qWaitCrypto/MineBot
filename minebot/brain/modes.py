@@ -178,7 +178,7 @@ class ModeRuntime:
                 continue
 
             if signal.kind == "tool_results":
-                result_reason = _first_blocking_tool_reason(signal.facts.get("results"))
+                result_reason = mobility_reason_from_tool_results(signal.facts.get("results"))
                 if result_reason:
                     situational_candidates.append(("mobility", result_reason))
 
@@ -340,7 +340,9 @@ def _context_frame(situational: SituationalState) -> str:
     return "Normal autonomous resource collection."
 
 
-def _first_blocking_tool_reason(results: Any) -> str | None:
+def mobility_reason_from_tool_results(results: Any) -> str | None:
+    """Return the first terminal reason that requires a Mobility stance."""
+
     if not isinstance(results, list):
         return None
     exact_blocking_reasons = {"no_path", "budget_exceeded", "move_start_failed"}
@@ -394,6 +396,7 @@ __all__ = [
     "SignalKind",
     "SituationalState",
     "SuspendSlot",
+    "mobility_reason_from_tool_results",
     "signalize_body_state",
     "signalize_events",
 ]

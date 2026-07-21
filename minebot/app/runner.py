@@ -32,6 +32,7 @@ from minebot.brain.modes import (
     AgentSignal,
     ModeRuntime,
     RuntimeProfile,
+    mobility_reason_from_tool_results,
     signalize_body_state,
     signalize_events,
 )
@@ -1089,7 +1090,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             raise BodyRecoveryRequired(_recovery_reason_from_tool_result(result, facts), facts=facts)
 
         if runtime is not None:
-            runtime.remember_tool_result(tool.name, result)
+            runtime.remember_tool_result(tool.name, result, run_context=ctx.context)
             runtime.remember_tool_body_facts(result)
         return finalize(
             result,
@@ -2380,6 +2381,7 @@ class AgentRuntime:
             model="primary",
         )
         self.last_tool_results: list[dict[str, Any]] = []
+        self._pending_mobility_terminal: dict[str, object] | None = None
         self.last_known_body_state: dict[str, object] | None = None
         self.consecutive_transport_errors = 0
         self.execution_lane = SerialExecutionLane(thread_name=f"minebot-{agent_name}")
@@ -2902,17 +2904,74 @@ class AgentRuntime:
         if has_tool_call and not has_content:
             self.trace.emit("assistant_no_content_tool_only")
 
-    def remember_tool_result(self, tool_name: str, result: JsonObject) -> None:
-        self.last_tool_results.append(
-            {
-                "tool": tool_name,
-                "success": bool(result.get("success")),
-                "reason": str(result.get("reason") or ""),
-                "summary": _tool_result_summary(result),
-            }
-        )
+    def remember_tool_result(
+        self,
+        tool_name: str,
+        result: JsonObject,
+        *,
+        run_context: RuntimeRunContext | None = None,
+    ) -> None:
+        tool_result = {
+            "tool": tool_name,
+            "success": bool(result.get("success")),
+            "reason": str(result.get("reason") or ""),
+            "summary": _tool_result_summary(result),
+        }
+        self.last_tool_results.append(tool_result)
         if len(self.last_tool_results) > 12:
             del self.last_tool_results[: len(self.last_tool_results) - 12]
+
+        reason = mobility_reason_from_tool_results([tool_result])
+        if reason is None:
+            return
+        terminal = {
+            "tool": tool_name,
+            "reason": reason,
+            "summary": tool_result["summary"],
+        }
+        self._pending_mobility_terminal = terminal
+        self.trace.emit(
+            "mobility_terminal_preserved",
+            tool=tool_name,
+            reason=reason,
+            summary=tool_result["summary"],
+        )
+        if run_context is not None:
+            self._apply_mobility_terminal_to_live_context(run_context, terminal)
+
+    def _apply_mobility_terminal_to_live_context(
+        self,
+        run_context: RuntimeRunContext,
+        terminal: dict[str, object],
+    ) -> None:
+        reason = str(terminal["reason"])
+        previous = run_context.profile
+        reduction = self.mode_runtime.reduce(
+            [
+                AgentSignal.mobility_blocked(
+                    reason,
+                    tool=str(terminal["tool"]),
+                    source="tool_terminal",
+                )
+            ],
+            self.lifecycle.state,
+            goal_text=self.agent_context.goal_text,
+        )
+        self._apply_lifecycle_request(reduction.requested_lifecycle)
+        profile = self.mode_runtime.profile_for(self.lifecycle.state)
+        self.agent_context.observe_profile(profile)
+        run_context.profile = profile
+        run_context.instruction_preamble = self.agent_context.turn_preamble(
+            include_session_messages=False
+        )
+        self.trace.emit(
+            "mobility_terminal_live_handoff",
+            tool=str(terminal["tool"]),
+            reason=reason,
+            previous_situational=previous.situational,
+            situational=profile.situational,
+            instruction_preamble_refreshed=True,
+        )
 
     def _remember_body_state(self, state: Any) -> None:
         if getattr(state, "missing", False):
@@ -3103,6 +3162,15 @@ class AgentRuntime:
             *signalize_events(events),
             *(extra_signals or []),
         ]
+        pending_mobility_terminal = self._pending_mobility_terminal
+        if pending_mobility_terminal is not None:
+            signals.append(
+                AgentSignal.mobility_blocked(
+                    str(pending_mobility_terminal["reason"]),
+                    tool=str(pending_mobility_terminal["tool"]),
+                    source="deferred_tool_terminal",
+                )
+            )
         if self.last_tool_results:
             signals.append(AgentSignal.tool_results(list(self.last_tool_results)))
 
@@ -3116,6 +3184,13 @@ class AgentRuntime:
         self.agent_context.observe_state(state)
         self.agent_context.observe_profile(profile)
         self.weld_context.goal_text = self.agent_context.goal_text
+        if pending_mobility_terminal is not None:
+            self._pending_mobility_terminal = None
+            self.trace.emit(
+                "mobility_terminal_carried_to_outer_turn",
+                tool=str(pending_mobility_terminal["tool"]),
+                reason=str(pending_mobility_terminal["reason"]),
+            )
         self.trace.emit(
             "turn_profile",
             relationship=profile.relationship,
