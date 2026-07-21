@@ -164,13 +164,14 @@ def _find_blocks_page(*, blocks=(), complete, next_start=None):
     )
 
 
-def _runtime(*, body=None, coverage=None, outcomes=None):
+def _runtime(*, body=None, coverage=None, outcomes=None, mobility_egress=None):
     body = body or ExplorationBody()
     navigator = ExplorationNavigator(body, outcomes=outcomes)
     return ExplorationTransactions(
         body,
         navigator,
         coverage or MemoryExplorationCoverageStore(),
+        mobility_egress=mobility_egress,
     ), body, navigator
 
 
@@ -202,6 +203,36 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertFalse(config.allow_place)
         self.assertFalse(config.allow_pillar)
         self.assertFalse(config.allow_downward)
+
+    def test_no_path_attempts_one_body_owned_mobility_egress_before_next_frontier(self):
+        body = ExplorationBody()
+        egress_calls = []
+
+        def egress(timeout_s):
+            egress_calls.append(timeout_s)
+            body.state = _state((16.0, 64.0, 0.0))
+            return ToolResult(
+                True,
+                "surface_reached",
+                False,
+                metrics={"final_pos": [16, 64, 0], "terminal_surface_verified": True},
+            )
+
+        runtime, _, navigator = _runtime(
+            body=body,
+            outcomes=[ToolResult(False, "no_path", True), ToolResult(True, "arrived", False)],
+            mobility_egress=egress,
+        )
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "budget_exhausted")
+        self.assertEqual(egress_calls, [30.0])
+        self.assertGreaterEqual(len(navigator.calls), 2)
+        egress_result = result.metrics["candidate_failures"][0]["navigation_attempts"][0]["mobility_egress"]
+        self.assertTrue(egress_result["success"])
+        self.assertEqual(egress_result["reason"], "surface_reached")
 
     def test_find_blocks_follows_numeric_cursor_until_complete(self):
         body = PagedFindBlocksBody(

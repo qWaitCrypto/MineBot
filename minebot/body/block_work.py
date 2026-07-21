@@ -1503,8 +1503,16 @@ class BlockWork:
         surface_scan_height: int = 96,
         surface_scan_radius: int = 1,
         world_top_y: int = 320,
+        require_mobility_egress: bool = False,
     ) -> ToolResult:
-        """Reach one bounded, verified surface domain through shared navigation."""
+        """Reach one bounded, verified surface domain through shared navigation.
+
+        ``require_mobility_egress`` is an internal recovery contract used after
+        another Body operation has already established that the current surface
+        stand cannot reach normal terrain. It keeps the public surface tool's
+        ordinary no-op behavior while allowing that caller one bounded lateral
+        search for a different natural surface stand.
+        """
 
         if surface_scan_height < 0:
             raise ValueError("surface_scan_height must be >= 0")
@@ -1519,7 +1527,7 @@ class BlockWork:
         initial = self._surface_candidate_at(origin, world_top_y=world_top_y)
         if isinstance(initial, ToolResult):
             return _with_metric(initial, "go_to_surface", {"origin": list(origin)})
-        if _surface_terminal_verified(initial):
+        if _surface_terminal_verified(initial) and not require_mobility_egress:
             return ToolResult(
                 success=True,
                 reason="surface_reached",
@@ -1558,7 +1566,7 @@ class BlockWork:
                         "go_to_surface",
                         {"origin": list(requested_origin), "surface_egress": surface_egress},
                     )
-                if _surface_terminal_verified(initial):
+                if _surface_terminal_verified(initial) and not require_mobility_egress:
                     return ToolResult(
                         success=True,
                         reason="surface_reached",
@@ -1615,7 +1623,7 @@ class BlockWork:
                 },
             )
         lateral_domain: dict[str, object] | None = None
-        if surface_egress is not None:
+        if surface_egress is not None or require_mobility_egress:
             lateral = self._find_lateral_surface_domain(
                 origin,
                 ring_specs=self.SURFACE_LATERAL_RING_SPECS,
@@ -1637,8 +1645,26 @@ class BlockWork:
                     **domain,
                     "local_candidates": domain["candidates"],
                     "candidates": lateral_domain["candidates"],
-                    "selection": "covered_water_lateral_surface",
+                    "selection": (
+                        "mobility_egress_lateral_surface"
+                        if require_mobility_egress
+                        else "covered_water_lateral_surface"
+                    ),
                 }
+            elif require_mobility_egress:
+                return ToolResult(
+                    success=False,
+                    reason="surface_mobility_egress_unavailable",
+                    can_retry=True,
+                    next_suggestion="continue with a different bounded frontier after the surface egress domain is exhausted",
+                    metrics={
+                        "origin": list(requested_origin),
+                        "surface_origin": list(origin),
+                        "surface_domain": domain,
+                        "surface_lateral_domain": lateral_domain,
+                        "surface_egress": surface_egress,
+                    },
+                )
         candidates = tuple(tuple(entry["feet_pos"]) for entry in domain["candidates"])
         if not candidates:
             return ToolResult(
@@ -1676,10 +1702,14 @@ class BlockWork:
 
         mutation_budget = max_steps if max_steps is not None else max(1, surface_scan_height)
         goal = GoalComposite(tuple(GoalNear(candidate, radius=0) for candidate in candidates))
-        navigation = self.navigator.navigate_to(
-            goal,
-            break_context=BreakContext(context),
-            config=NavigationRunConfig(
+        if require_mobility_egress:
+            from minebot.body.navigation import pure_movement_navigation_config
+
+            navigation_config = pure_movement_navigation_config(
+                NavigationRunConfig(segment_timeout_s=timeout_s)
+            )
+        else:
+            navigation_config = NavigationRunConfig(
                 segment_timeout_s=timeout_s,
                 allow_break=True,
                 max_break_steps=mutation_budget,
@@ -1690,7 +1720,11 @@ class BlockWork:
                 allow_downward=False,
                 max_downward_steps=0,
                 scaffold_blocks=tuple(scaffold_blocks),
-            ),
+            )
+        navigation = self.navigator.navigate_to(
+            goal,
+            break_context=BreakContext(context),
+            config=navigation_config,
             arrival_radius=0.25,
         )
         selected_goal = _selected_surface_goal(navigation, candidates)

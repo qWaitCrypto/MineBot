@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from enum import StrEnum
 from math import dist, floor, hypot
-from typing import Protocol
+from typing import Callable, Protocol
 
 from minebot.body.navigation import (
     NavigationRunConfig,
@@ -267,10 +267,13 @@ class ExplorationTransactions:
         body: Body,
         navigator: NavigationTransactions,
         coverage: ExplorationCoverageStore,
+        *,
+        mobility_egress: Callable[[float], ToolResult] | None = None,
     ) -> None:
         self.body = body
         self.navigator = navigator
         self.coverage = coverage
+        self.mobility_egress = mobility_egress
 
     def explore_for(
         self,
@@ -323,6 +326,7 @@ class ExplorationTransactions:
         attempted_this_call: set[tuple[int, int]] = set()
         failures: list[JsonObject] = []
         mutation_blacklist: set[Position] = set()
+        mobility_egress_attempted = False
         evidence_keys: list[str] = []
         covered_this_call: list[list[int]] = []
         all_blocks: list[JsonObject] = []
@@ -583,6 +587,36 @@ class ExplorationTransactions:
                     if recovery_lifecycle is not None:
                         return _merge_result_context(
                             recovery_lifecycle,
+                            targets=targets,
+                            dimension=dimension,
+                            origin=origin,
+                            max_regions=max_regions,
+                            max_distance=max_distance,
+                            regions_consumed=regions_consumed,
+                            distance_consumed=distance_consumed,
+                            covered_this_call=covered_this_call,
+                            blocks=all_blocks,
+                            entities=all_entities,
+                            failures=[*failures, *navigation_failures],
+                            evidence_keys=evidence_keys,
+                            coverage=prior,
+                        )
+                if (
+                    navigation_reason == "no_path"
+                    and not mobility_egress_attempted
+                    and self.mobility_egress is not None
+                    and (recovery is None or recovery["success"] is True)
+                ):
+                    egress_before = self.body.get_state()
+                    egress_result = self.mobility_egress(30.0)
+                    egress_after = self.body.get_state()
+                    mobility_egress_attempted = True
+                    distance_consumed += dist(egress_before.pos, egress_after.pos)
+                    navigation_failures[0]["mobility_egress"] = egress_result.to_payload()
+                    egress_lifecycle = _body_lifecycle_terminal(egress_after)
+                    if egress_lifecycle is not None:
+                        return _merge_result_context(
+                            egress_lifecycle,
                             targets=targets,
                             dimension=dimension,
                             origin=origin,

@@ -540,13 +540,20 @@ def build_phase1_registry(
     )
     progress = authority or ProgressAuthority()
     navigator = NavigationTransactions.server_side(body, policy, progress=progress)
+    pickup = PickupTransactions(body, navigator)
+    work = BlockWork(body, policy, navigator=navigator, pickup=pickup)
     exploration = ExplorationTransactions(
         body,
         navigator,
         config.exploration_coverage_store or MemoryExplorationCoverageStore(),
+        mobility_egress=lambda timeout_s: work.go_to_surface(
+            context=BreakContext.TRAVEL,
+            timeout_s=timeout_s,
+            surface_scan_height=16,
+            surface_scan_radius=2,
+            require_mobility_egress=True,
+        ),
     )
-    pickup = PickupTransactions(body, navigator)
-    work = BlockWork(body, policy, navigator=navigator, pickup=pickup)
     block_approach = BlockApproachTransactions(body, navigator)
     resource_collection = ResourceCollectionTransactions(body, navigator, work)
     inventory_txn = InventoryTransactions(body, navigator=navigator, governance=policy, work=work)

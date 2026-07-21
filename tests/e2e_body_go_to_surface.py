@@ -22,6 +22,8 @@ from tests.e2e_support import spawn_or_fail
 BOT = "E2ESurfaceBot"
 ORIGIN = (170, 64, 0)
 SURFACE = (171, 65, 0)
+MOBILITY_EGRESS_ORIGIN = (250, 65, 0)
+MOBILITY_EGRESS_SURFACE = (234, 65, -16)
 SKIP_EXIT_CODE = 77
 
 
@@ -221,6 +223,17 @@ def reset_multi_step_staircase_fallback_world(rcon: RconClient) -> None:
     command(rcon, "setblock 172 67 0 air")
     command(rcon, f"tp {BOT} {ORIGIN[0]} {ORIGIN[1]} {ORIGIN[2]} 0 0")
     command(rcon, f"item replace entity {BOT} hotbar.0 with cobblestone 16")
+
+
+def reset_mobility_egress_world(rcon: RconClient) -> None:
+    command(rcon, "script in minebot run minebot_reset()")
+    command(rcon, "fill 220 63 -40 280 80 40 air")
+    command(rcon, "fill 220 63 -40 280 63 40 stone")
+    command(rcon, "fill 232 64 -18 268 64 18 water")
+    command(rcon, "setblock 250 64 0 stone")
+    command(rcon, "setblock 234 64 -16 stone")
+    command(rcon, f"tp {BOT} {MOBILITY_EGRESS_ORIGIN[0]} {MOBILITY_EGRESS_ORIGIN[1]} {MOBILITY_EGRESS_ORIGIN[2]} 0 0")
+    command(rcon, f"effect give {BOT} saturation 30 20 true")
 
 
 def run_same_level_exit_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
@@ -490,6 +503,57 @@ def run_multi_step_staircase_fallback_path(rcon: RconClient, body: ScarpetBody) 
     }
 
 
+def run_mobility_egress_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+    reset_mobility_egress_world(rcon)
+    policy = GovernancePolicy(
+        natural_regions=[Region("mobility_egress", (220, 55, -40), (280, 90, 40))]
+    )
+    navigator = NavigationTransactions.server_side(body, policy)
+    runtime = BlockWork(body, policy, navigator=navigator)
+
+    result = runtime.go_to_surface(
+        current_pos=MOBILITY_EGRESS_ORIGIN,
+        context=BreakContext.TRAVEL,
+        timeout_s=30.0,
+        surface_scan_height=0,
+        surface_scan_radius=1,
+        world_top_y=80,
+        require_mobility_egress=True,
+    )
+    payload = result.to_payload()
+    final = body.get_state()
+    if not result.success or result.reason != "surface_reached":
+        raise AssertionError(f"go_to_surface mobility-egress path failed: {payload} final={final}")
+    if result.metrics.get("target_surface") != list(MOBILITY_EGRESS_SURFACE):
+        raise AssertionError(f"go_to_surface mobility-egress selected wrong shore: {payload}")
+    if result.metrics.get("surface_domain", {}).get("selection") != "mobility_egress_lateral_surface":
+        raise AssertionError(f"go_to_surface mobility-egress used the wrong domain: {payload}")
+    navigation, segments, movement_counts = navigation_facts(result)
+    if navigation.get("success") is not True or navigation.get("reason") != "arrived":
+        raise AssertionError(f"go_to_surface mobility-egress lacks terminal navigation truth: {payload}")
+    if movement_counts["swim"] < 1:
+        raise AssertionError(f"go_to_surface mobility-egress did not cross the water pocket: {payload}")
+    mutation_events = [
+        event
+        for segment in segments
+        for event in segment.get("diagnostics", {}).get("mutation_events") or []
+    ]
+    if mutation_events:
+        raise AssertionError(f"go_to_surface mobility-egress mutated terrain: {mutation_events} result={payload}")
+    terminal = result.metrics.get("terminal_surface") or {}
+    if terminal.get("candidate") is not True:
+        raise AssertionError(f"go_to_surface mobility-egress did not verify the shore: {payload}")
+    if math.dist(final.pos, (MOBILITY_EGRESS_SURFACE[0] + 0.5, MOBILITY_EGRESS_SURFACE[1], MOBILITY_EGRESS_SURFACE[2] + 0.5)) > 1.25:
+        raise AssertionError(f"go_to_surface mobility-egress final body position wrong: final={final.pos} result={payload}")
+    return {
+        "reason": result.reason,
+        "target_surface": result.metrics.get("target_surface"),
+        "final": final.pos,
+        "movement_counts": movement_counts,
+        "mutation_events": mutation_events,
+    }
+
+
 def run_not_found_inverse(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     reset_no_surface_world(rcon)
     runtime = make_runtime(body)
@@ -542,6 +606,7 @@ def main() -> None:
             "route_to_exit": lambda: run_route_to_exit_path(rcon, body),
             "staircase_fallback": lambda: run_staircase_fallback_path(rcon, body),
             "multi_step_staircase_fallback": lambda: run_multi_step_staircase_fallback_path(rcon, body),
+            "mobility_egress": lambda: run_mobility_egress_path(rcon, body),
             "not_found": lambda: run_not_found_inverse(rcon, body),
         }
         default_cases = [
@@ -552,6 +617,7 @@ def main() -> None:
             "route_to_exit",
             "staircase_fallback",
             "multi_step_staircase_fallback",
+            "mobility_egress",
             "not_found",
         ]
         selected_raw = os.environ.get("MINEBOT_SURFACE_CASES")

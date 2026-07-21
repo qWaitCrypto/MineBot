@@ -2732,6 +2732,76 @@ class BlockWorkTests(unittest.TestCase):
         self.assertFalse(config.allow_pillar)
         self.assertFalse(config.allow_downward)
 
+    def test_go_to_surface_mobile_egress_leaves_an_already_exposed_island(self):
+        remote_surface = (-16, 64, -16)
+
+        class MovingNavigator(FakeNavigator):
+            def __init__(self, body):
+                super().__init__(result=True, reason="arrived")
+                self.body = body
+
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                goals = tuple(goal_position(candidate) for candidate in goal.goals)
+                if remote_surface not in goals:
+                    raise AssertionError(f"expected mobility egress target missing from {goals}")
+                self.body.state_pos = tuple(float(value) for value in remote_surface)
+                return ToolResult(
+                    success=True,
+                    reason="arrived",
+                    can_retry=False,
+                    metrics={"goal": list(remote_surface), "selected_goal": list(remote_surface)},
+                )
+
+        blocks = {
+            (0, 63, 0): ("stone", "SOLID"),
+            (-16, 63, -16): ("stone", "SOLID"),
+        }
+        body = FakeBody(blocks=blocks)
+        body.state_pos = (0.5, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("surface", (-40, 0, -40), (40, 120, 40))])
+        navigator = MovingNavigator(body)
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.go_to_surface(
+            timeout_s=1.0,
+            surface_scan_height=0,
+            world_top_y=70,
+            require_mobility_egress=True,
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "surface_reached")
+        self.assertEqual(result.metrics["final_pos"], list(remote_surface))
+        self.assertEqual(result.metrics["surface_domain"]["selection"], "mobility_egress_lateral_surface")
+        self.assertEqual(len(navigator.calls), 1)
+        config = navigator.calls[0][1]["config"]
+        self.assertTrue(config.allow_swim)
+        self.assertFalse(config.allow_break)
+        self.assertFalse(config.allow_place)
+        self.assertFalse(config.allow_pillar)
+        self.assertFalse(config.allow_downward)
+
+    def test_go_to_surface_mobile_egress_refuses_to_relabel_an_island_as_a_surface_exit(self):
+        blocks = {(0, 63, 0): ("stone", "SOLID")}
+        body = FakeBody(blocks=blocks)
+        body.state_pos = (0.5, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("surface", (-40, 0, -40), (40, 120, 40))])
+        navigator = FakeNavigator()
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.go_to_surface(
+            timeout_s=1.0,
+            surface_scan_height=0,
+            world_top_y=70,
+            require_mobility_egress=True,
+        )
+
+        self.assertFalse(result.success, result.to_payload())
+        self.assertEqual(result.reason, "surface_mobility_egress_unavailable")
+        self.assertTrue(result.can_retry)
+        self.assertFalse(navigator.calls)
+
     def test_go_to_surface_uses_sparse_lateral_surface_after_covered_water_egress(self):
         remote_surface = (2, 66, -32)
 
