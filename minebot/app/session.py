@@ -25,6 +25,7 @@ from minebot.app.runtime_state import CheckpointDisposition, CompletionAuthority
 from minebot.app.skills import SkillWorkspace
 from minebot.app.tasks import TaskWorkspace
 from minebot.app.work_queue import (
+    CONTROL_INTENT_KINDS,
     MemoryWorkIntentQueue,
     WorkIntent,
     WorkIntentKind,
@@ -142,7 +143,13 @@ class AgentSession:
             if existing is not None:
                 return existing
         intent_kind = WorkIntentKind(command.kind.value)
-        if self.parts is not None and (self._work_in_flight or always_interrupt):
+        recovery_is_active = (
+            self.parts is not None
+            and self.parts.lifecycle.state is LifecycleState.RECOVERING
+        )
+        if self.parts is not None and (
+            always_interrupt or (self._work_in_flight and not recovery_is_active)
+        ):
             cancellation_reason = f"session_command:{command.kind.value}"
             self.parts.authority.invalidate_generation(cancellation_reason)
             self.parts.runtime.request_execution_cancel(cancellation_reason)
@@ -1414,12 +1421,12 @@ class AgentSession:
                 )
             return _WORK_PREEMPTED
 
-        async def preempt_work():
+        async def preempt_work(reason: str):
             cancellation_task: asyncio.Task[dict[str, object]] | None = None
             if self.parts is not None:
                 cancellation_task = asyncio.create_task(
                     self.parts.runtime.cancel_active_execution_with_facts(
-                        _queued_preemption_reason(self.work_queue, work_kind),
+                        reason,
                         invalidate_generation=False,
                     )
                 )
@@ -1431,14 +1438,20 @@ class AgentSession:
         try:
             while not task.done():
                 if self.work_queue.notification_version != admission_version:
-                    return await preempt_work()
+                    reason = _queued_preemption_reason(self.work_queue, work_kind)
+                    if reason is not None:
+                        return await preempt_work(reason)
+                    admission_version = self.work_queue.notification_version
                 await asyncio.sleep(0.01)
             return task.result()
         except asyncio.CancelledError:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-            if self.work_queue.notification_version != admission_version:
+            if (
+                self.work_queue.notification_version != admission_version
+                and _queued_preemption_reason(self.work_queue, work_kind) is not None
+            ):
                 return await settle_preempted_work(None)
             raise
 
@@ -1493,11 +1506,16 @@ def _queued_quarantine_control(queue: WorkIntentQueue | None) -> WorkIntent | No
     return min(controls, key=lambda intent: (-intent.priority, intent.intent_id))
 
 
-def _queued_preemption_reason(queue: WorkIntentQueue, work_kind: str) -> str:
+def _queued_preemption_reason(queue: WorkIntentQueue, work_kind: str) -> str | None:
     queued = queue.queued_intents()
+    if work_kind == "recovery":
+        queued = [intent for intent in queued if intent.kind in CONTROL_INTENT_KINDS]
     if not queued:
-        return f"session_work_preempted:{work_kind}"
-    intent = queued[0]
+        return None
+    intent = max(
+        enumerate(queued),
+        key=lambda item: (item[1].priority, -item[0]),
+    )[1]
     reason = intent.payload.get("reason")
     if isinstance(reason, str) and reason:
         return reason

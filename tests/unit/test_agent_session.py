@@ -1741,6 +1741,47 @@ class AgentSessionTests(unittest.TestCase):
             any(event["event"] == "session_continue_deferred_during_recovery" for event in session.parts.runtime.trace.snapshot())
         )
 
+    def test_message_during_recovery_is_deferred_without_cancelling_recovery(self):
+        bodies: list[FakeBody] = []
+        calls: list[str] = []
+        recovery_started = threading.Event()
+        release_recovery = threading.Event()
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            parts = build_parts(goal, calls, bodies)
+
+            async def recover(_runtime: AgentRuntime) -> RecoveryOutcome:
+                recovery_started.set()
+                await asyncio.to_thread(release_recovery.wait, 1.0)
+                return RecoveryOutcome(True, "respawned", can_retry=False)
+
+            parts.runtime.recovery_handler = recover
+            return parts
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+        session.parts.lifecycle.enter_recovery()
+
+        async def scenario():
+            recovery = asyncio.create_task(session.step())
+            while not recovery_started.is_set():
+                await asyncio.sleep(0.01)
+            message = session.submit(SessionCommand.message("请继续当前任务"))
+            release_recovery.set()
+            recovery_step = await recovery
+            message_step = await session.step()
+            return message, recovery_step, message_step
+
+        message, recovery_step, message_step = asyncio.run(scenario())
+
+        self.assertEqual(message.kind, WorkIntentKind.MESSAGE)
+        self.assertNotEqual(recovery_step.status, "preempted")
+        self.assertEqual(message_step.status, "completed_turn")
+        self.assertEqual(len(calls), 2, calls)
+        self.assertIn("请继续当前任务", calls[-1])
+        self.assertEqual(bodies[0].interrupt_reasons, [])
+
 
 if __name__ == "__main__":
     unittest.main()
