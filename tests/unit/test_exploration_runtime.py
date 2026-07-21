@@ -10,6 +10,7 @@ from minebot.body import (
     ExplorationTransactions,
     MemoryExplorationCoverageStore,
 )
+from minebot.body.exploration import _frontier_direction, _frontier_regions, _region_key
 from minebot.contract import BodyState, PerceptionResult, ToolResult
 from minebot.game.navigation import GoalComposite, GoalNear
 
@@ -176,6 +177,31 @@ def _runtime(*, body=None, coverage=None, outcomes=None, mobility_egress=None):
 
 
 class ExplorationTransactionsTests(unittest.TestCase):
+    def test_frontier_selector_samples_directions_before_extending_one_strip(self):
+        origin = (-30, 67, -42)
+        origin_region = _region_key((int(origin[0]), int(origin[1]), int(origin[2])))
+        current = origin
+        covered = {origin_region}
+        selected = []
+
+        for _ in range(4):
+            region = _frontier_regions(
+                origin=origin,
+                current=current,
+                max_distance=256,
+                covered=covered,
+                coverage={},
+                excluded=set(selected),
+            )[0]
+            selected.append(region)
+            covered.add(region)
+            current = tuple(
+                float(value) for value in (region[0] * 16 + 8, 67, region[1] * 16 + 8)
+            )
+
+        directions = {_frontier_direction(region, origin_region) for region in selected}
+        self.assertGreaterEqual(len(directions), 3)
+
     def test_initial_region_returns_authoritative_block_match_without_navigation(self):
         body = ExplorationBody(
             blocks={(0, 0): [{"x": 2, "y": 64, "z": 3, "type": "oak_log", "state": "SOLID", "dist2": 13.0}]}

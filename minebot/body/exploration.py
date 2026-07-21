@@ -1243,7 +1243,9 @@ def _frontier_regions(
                     continue
                 frontiers.add(candidate)
 
-    def score(region: tuple[int, int]) -> tuple[float, float, float, int, int]:
+    origin_region = _region_key(origin)
+
+    def score(region: tuple[int, int]) -> tuple[float, float, float, float, int, int]:
         center = _region_center(region, current[1])
         gain = sum(
             (region[0] + dx, region[1] + dz) not in covered
@@ -1252,8 +1254,13 @@ def _frontier_regions(
             if dx != 0 or dz != 0
         )
         failures = 0 if coverage.get(region) is None else coverage[region].failure_count
+        direction = _frontier_direction(region, origin_region)
+        direction_load = sum(
+            _frontier_direction(item, origin_region) == direction for item in covered
+        )
         return (
             float(failures),
+            float(direction_load),
             -float(gain),
             hypot(center[0] - current[0], center[2] - current[2]),
             region[0],
@@ -1302,6 +1309,15 @@ def _region_key(pos: Position) -> tuple[int, int]:
 
 def _region_center(region: tuple[int, int], y: int) -> Position:
     return (region[0] * REGION_SIZE + REGION_SIZE // 2, y, region[1] * REGION_SIZE + REGION_SIZE // 2)
+
+
+def _frontier_direction(
+    region: tuple[int, int], origin_region: tuple[int, int]
+) -> tuple[int, int]:
+    return (
+        (region[0] > origin_region[0]) - (region[0] < origin_region[0]),
+        (region[1] > origin_region[1]) - (region[1] < origin_region[1]),
+    )
 
 
 def _perception_terminal(perception: PerceptionResult, *, allow_partial: bool = False) -> str | None:
