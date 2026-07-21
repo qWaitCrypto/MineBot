@@ -345,7 +345,12 @@ def mobility_reason_from_tool_results(results: Any) -> str | None:
 
     if not isinstance(results, list):
         return None
-    exact_blocking_reasons = {"no_path", "budget_exceeded", "move_start_failed"}
+    exact_blocking_reasons = {
+        "no_path",
+        "budget_exceeded",
+        "move_start_failed",
+        "resource_navigation_no_path",
+    }
     for result in results:
         if not isinstance(result, dict):
             continue

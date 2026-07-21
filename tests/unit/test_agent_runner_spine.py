@@ -1499,6 +1499,44 @@ class AgentRunnerSpineTests(unittest.TestCase):
             any(event["event"] == "mobility_terminal_live_handoff" for event in runtime.trace.snapshot())
         )
 
+    def test_resource_navigation_terminal_alone_refreshes_live_run_context(self):
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        self.addCleanup(runtime.close)
+        profile = ModeRuntime().profile_for(LifecycleState.ACTIVE)
+        runtime.agent_context.observe_profile(profile)
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=profile,
+            trace=runtime.trace,
+            runtime=runtime,
+            instruction_preamble=runtime.agent_context.turn_preamble(include_session_messages=False),
+        )
+
+        runtime.remember_tool_result(
+            "collect_resource",
+            ToolResult(False, "partial_budget_exhausted", True).to_payload(),
+            run_context=runtime_context,
+        )
+        self.assertIsNone(runtime._pending_mobility_terminal)
+
+        runtime.remember_tool_result(
+            "collect_resource",
+            ToolResult(False, "resource_navigation_no_path", True).to_payload(),
+            run_context=runtime_context,
+        )
+
+        self.assertEqual(runtime_context.profile.situational, "mobility")
+        self.assertIn("situational=mobility", runtime_context.instruction_preamble)
+        self.assertEqual(runtime._pending_mobility_terminal["reason"], "resource_navigation_no_path")
+
     def test_pending_mobility_terminal_survives_bookkeeping_until_next_outer_turn(self):
         calls = []
 

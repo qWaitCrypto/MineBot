@@ -1082,6 +1082,8 @@ def _parse_pos(value: object) -> list[int] | None:
 
 
 def _resource_process_reason(reason: str, *, before_count: int, current_count: int) -> str:
+    if reason == "resource_navigation_no_path":
+        return reason
     if reason == "resource_candidates_not_found":
         return "partial_candidate_targets_exhausted" if current_count > before_count else "target_not_found"
     if reason in {"resource_candidate_domain_exhausted", "resource_domain_partial_exhausted"}:

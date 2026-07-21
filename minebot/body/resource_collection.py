@@ -18,7 +18,12 @@ from minebot.body.block_work import (
     _mining_stand_sort_key,
 )
 from minebot.body.interaction_support import NearbyBlockSearch, NearbyBlockTarget, find_nearby_block_search
-from minebot.body.navigation import NavigationRunConfig, NavigationTransactions, SERVER_GOAL_SET_LIMIT
+from minebot.body.navigation import (
+    SERVER_GOAL_SET_LIMIT,
+    NavigationRunConfig,
+    NavigationTransactions,
+    dry_land_navigation_config,
+)
 from minebot.body.world_read import read_block_facts
 from minebot.contract import Body, BreakContext, Position, ToolResult, is_candidate_skip
 from minebot.game.navigation import GoalComposite, GoalNear
@@ -81,6 +86,7 @@ class ResourceCollectionTransactions:
         patch_blacklist: list[Position] = []
         attempts: list[dict[str, object]] = []
         searches: list[dict[str, object]] = []
+        navigation_failures: list[str] = []
 
         while collected < remaining_count:
             if (
@@ -101,6 +107,7 @@ class ResourceCollectionTransactions:
                     searches=searches,
                     config=cfg,
                     started=started,
+                    navigation_failures=navigation_failures,
                 )
 
             candidate_budget_hit = candidate_attempts >= cfg.candidate_budget
@@ -148,6 +155,11 @@ class ResourceCollectionTransactions:
                     )
                 else:
                     terminal_reason = "resource_domain_budget_exhausted"
+                terminal_reason = _candidate_exhaustion_terminal_reason(
+                    terminal_reason,
+                    navigation_failures=navigation_failures,
+                    mutation_attempts=mutation_attempts,
+                )
                 return self._terminal(
                     success=False,
                     reason=terminal_reason,
@@ -162,11 +174,17 @@ class ResourceCollectionTransactions:
                     searches=searches,
                     config=cfg,
                     started=started,
+                    navigation_failures=navigation_failures,
                 )
             if not active:
+                terminal_reason = _candidate_exhaustion_terminal_reason(
+                    "resource_domain_partial_exhausted" if collected > 0 else "resource_candidate_domain_exhausted",
+                    navigation_failures=navigation_failures,
+                    mutation_attempts=mutation_attempts,
+                )
                 return self._terminal(
                     success=False,
-                    reason="resource_domain_partial_exhausted" if collected > 0 else "resource_candidate_domain_exhausted",
+                    reason=terminal_reason,
                     can_retry=True,
                     block_types=normalized_blocks,
                     expected_drops=normalized_drops,
@@ -178,6 +196,7 @@ class ResourceCollectionTransactions:
                     searches=searches,
                     config=cfg,
                     started=started,
+                    navigation_failures=navigation_failures,
                 )
 
             domain = _build_stand_domain(self.body, active, max_goals=cfg.max_goals)
@@ -200,10 +219,12 @@ class ResourceCollectionTransactions:
                 )
 
             goal = GoalComposite(tuple(GoalNear(pos, radius=0) for pos in domain.goals))
-            nav_config = replace(
-                NavigationRunConfig(),
-                segment_timeout_s=cfg.segment_timeout_s,
-                max_break_steps=self.work.MINE_APPROACH_MAX_BREAK_STEPS,
+            nav_config = dry_land_navigation_config(
+                replace(
+                    NavigationRunConfig(),
+                    segment_timeout_s=cfg.segment_timeout_s,
+                    max_break_steps=self.work.MINE_APPROACH_MAX_BREAK_STEPS,
+                )
             )
             navigation = self.navigator.navigate_to(
                 goal,
@@ -243,6 +264,7 @@ class ResourceCollectionTransactions:
 
             if not navigation.success:
                 attempts.append(attempt)
+                navigation_failures.append(navigation.reason)
                 rejected_targets = selected_targets or domain.targets
                 blacklist_size = len(candidate_blacklist)
                 blacklist_candidate_clusters(
@@ -374,6 +396,7 @@ class ResourceCollectionTransactions:
         config: ResourceCollectionConfig,
         started: float,
         last_failure: dict[str, object] | None = None,
+        navigation_failures: list[str] | None = None,
     ) -> ToolResult:
         metrics: dict[str, object] = {
             "block_types": list(block_types),
@@ -398,6 +421,8 @@ class ResourceCollectionTransactions:
         }
         if last_failure is not None:
             metrics["last_failure"] = last_failure
+        if navigation_failures:
+            metrics["navigation_failure_reasons"] = list(navigation_failures)
         return ToolResult(success, reason, can_retry, metrics=metrics)
 
 
@@ -451,6 +476,27 @@ def _active_targets(
         blacklist=candidate_blacklist,
         limit=limit,
     )
+
+
+def _candidate_exhaustion_terminal_reason(
+    fallback_reason: str,
+    *,
+    navigation_failures: list[str],
+    mutation_attempts: int,
+) -> str:
+    """Preserve a route-only resource failure without relabeling other budgets."""
+
+    if (
+        mutation_attempts == 0
+        and navigation_failures
+        and all(_is_no_path_route_failure(reason) for reason in navigation_failures)
+    ):
+        return "resource_navigation_no_path"
+    return fallback_reason
+
+
+def _is_no_path_route_failure(reason: str) -> bool:
+    return reason == "no_path"
 
 
 def _build_stand_domain(

@@ -94,6 +94,14 @@ def pure_movement_navigation_config(
     )
 
 
+def dry_land_navigation_config(
+    config: NavigationRunConfig | None = None,
+) -> NavigationRunConfig:
+    """Keep a normal land objective from treating a swim route as its default."""
+
+    return replace(config or NavigationRunConfig(), allow_swim=False)
+
+
 @dataclass(frozen=True)
 class ExecutedSegment:
     index: int

@@ -146,6 +146,25 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual(work.calls[0][1]["prepositioned"], True)
         self.assertEqual([scope for scope, _params in body.perceptions].count("blockCells"), 1)
 
+    def test_collection_approach_uses_dry_land_profile_without_disabling_governed_clearance(self):
+        body = ResourceBody([((5, 64, 0), "dirt")])
+        navigator = RecordingNavigator(body, [(5, 65, -1)])
+        work = RecordingWork()
+        runtime = ResourceCollectionTransactions(body, navigator, work)
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        config = navigator.calls[0][1]["config"]
+        self.assertFalse(config.allow_swim)
+        self.assertTrue(config.allow_break)
+        self.assertEqual(config.max_break_steps, work.MINE_APPROACH_MAX_BREAK_STEPS)
+
     def test_candidate_failure_is_blacklisted_and_remaining_domain_replanned(self):
         first = (5, 64, 0)
         second = (8, 64, 0)
@@ -233,6 +252,55 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
             [list(far_tree)],
         )
         self.assertEqual(result.metrics["candidate_blacklist"], [list(trunk[0])])
+
+    def test_route_only_no_path_exhaustion_preserves_resource_navigation_terminal(self):
+        first = (5, 64, 0)
+        second = (8, 64, 0)
+        body = ResourceBody([(first, "dirt"), (second, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [(5, 65, -1), (8, 65, -1)],
+            outcomes=[(False, "no_path"), (False, "no_path")],
+        )
+        work = RecordingWork()
+        runtime = ResourceCollectionTransactions(body, navigator, work)
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "resource_navigation_no_path")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(work.calls, [])
+        self.assertEqual(result.metrics["navigation_failure_reasons"], ["no_path", "no_path"])
+        self.assertEqual([call[1]["config"].allow_swim for call in navigator.calls], [False, False])
+
+    def test_navigation_budget_exhaustion_remains_generic_resource_budget_terminal(self):
+        first = (5, 64, 0)
+        second = (8, 64, 0)
+        third = (11, 64, 0)
+        body = ResourceBody([(first, "dirt"), (second, "dirt"), (third, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [(5, 65, -1), (8, 65, -1)],
+            outcomes=[(False, "budget_exceeded"), (False, "budget_exceeded")],
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "resource_domain_budget_exhausted")
+        self.assertNotEqual(result.reason, "resource_navigation_no_path")
 
     def test_candidate_batch_spans_different_spatial_regions(self):
         nearest = (5, 64, 0)

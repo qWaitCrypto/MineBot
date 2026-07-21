@@ -1375,6 +1375,23 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.reason, "partial_budget_exhausted")
         self.assertEqual(result.metrics["collected_delta"], 0)
 
+    def test_collect_resource_preserves_explicit_resource_navigation_terminal(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {"success": False, "reason": "resource_navigation_no_path", "can_retry": True},
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 2}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.reason, "resource_navigation_no_path")
+        self.assertTrue(result.can_retry)
+
     def test_collect_resource_preserves_goal_total_and_log_family(self):
         body = FakeBody()
         body.inventory_counts = {"oak_log": 18}
