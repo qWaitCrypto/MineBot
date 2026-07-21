@@ -92,6 +92,7 @@ class ResourceCollectionTransactions:
         searches: list[dict[str, object]] = []
         navigation_failures: list[str] = []
         mobility_egress_attempted = False
+        pending_targets: tuple[NearbyBlockTarget, ...] = ()
 
         dry_egress = self.work.egress_to_dry(timeout_s=cfg.segment_timeout_s)
         if not dry_egress.success:
@@ -144,22 +145,31 @@ class ResourceCollectionTransactions:
                 max_pages=cfg.max_pages,
             )
             if isinstance(search, ToolResult):
-                reason = "resource_domain_partial_exhausted" if collected > 0 else search.reason
-                return self._terminal(
-                    success=False,
-                    reason=reason,
-                    can_retry=search.can_retry,
-                    block_types=normalized_blocks,
-                    expected_drops=normalized_drops,
-                    remaining_count=remaining_count,
-                    collected=collected,
-                    candidate_blacklist=candidate_blacklist,
-                    patch_blacklist=patch_blacklist,
-                    attempts=attempts,
-                    searches=searches,
-                    config=cfg,
-                    started=started,
-                    last_failure=search.to_payload(),
+                if not pending_targets or search.reason != "resource_candidates_not_found":
+                    reason = "resource_domain_partial_exhausted" if collected > 0 else search.reason
+                    return self._terminal(
+                        success=False,
+                        reason=reason,
+                        can_retry=search.can_retry,
+                        block_types=normalized_blocks,
+                        expected_drops=normalized_drops,
+                        remaining_count=remaining_count,
+                        collected=collected,
+                        candidate_blacklist=candidate_blacklist,
+                        patch_blacklist=patch_blacklist,
+                        attempts=attempts,
+                        searches=searches,
+                        config=cfg,
+                        started=started,
+                        last_failure=search.to_payload(),
+                    )
+                search = NearbyBlockSearch(
+                    targets=[],
+                    truncated=True,
+                    uncertainty=[{"reason": "pending_candidate_reuse", "search_reason": search.reason}],
+                    errors=[search.reason],
+                    pages_read=int((search.metrics or {}).get("pages_read") or 0),
+                    total_matches=0,
                 )
 
             active = _active_targets(
@@ -167,6 +177,7 @@ class ResourceCollectionTransactions:
                 candidate_blacklist=candidate_blacklist,
                 patch_blacklist=patch_blacklist,
                 limit=cfg.find_limit if candidate_budget_hit else max(1, cfg.candidate_budget - candidate_attempts),
+                pending_targets=pending_targets,
             )
             searches.append(_search_metrics(search, active))
             if candidate_budget_hit:
@@ -289,6 +300,8 @@ class ResourceCollectionTransactions:
             if not navigation.success:
                 attempts.append(attempt)
                 navigation_failures.append(navigation.reason)
+                pending_targets = tuple(active)
+                egress_succeeded = False
                 if (
                     navigation.reason == "no_path"
                     and not mobility_egress_attempted
@@ -307,13 +320,16 @@ class ResourceCollectionTransactions:
                         "result": egress.to_payload(),
                     }
                     attempt["mobility_egress"] = egress_payload
-                    if egress.success:
-                        candidate_blacklist.clear()
-                        patch_blacklist.clear()
-                        candidate_attempts = 0
-                        navigation_failures.clear()
-                        continue
+                    egress_succeeded = egress.success
+                    if egress_succeeded:
+                        selected_positions = {target.pos for target in selected_targets}
+                        untried_targets = tuple(
+                            target for target in active if target.pos not in selected_positions
+                        )
+                        pending_targets = untried_targets or tuple(selected_targets)
                 rejected_targets = selected_targets or domain.targets
+                if egress_succeeded and pending_targets == tuple(selected_targets):
+                    rejected_targets = ()
                 blacklist_size = len(candidate_blacklist)
                 blacklist_candidate_clusters(
                     candidate_blacklist,
@@ -347,6 +363,7 @@ class ResourceCollectionTransactions:
 
             candidate_attempts += 1
             mutation_attempts += 1
+            pending_targets = tuple(candidate for candidate in pending_targets if candidate.pos != target.pos)
             mined = self.work.mine_block_collect(
                 target.pos,
                 context=BreakContext.COLLECT,
@@ -510,10 +527,13 @@ def _active_targets(
     candidate_blacklist: set[Position],
     patch_blacklist: list[Position],
     limit: int,
+    pending_targets: tuple[NearbyBlockTarget, ...] = (),
 ) -> tuple[NearbyBlockTarget, ...]:
+    by_position = {target.pos: target for target in pending_targets}
+    by_position.update({target.pos: target for target in search.targets})
     eligible = [
         target
-        for target in search.targets
+        for target in by_position.values()
         if not (
             _is_patch_resource(target.block_type)
             and _in_patch_blacklist(target.pos, patch_blacklist)

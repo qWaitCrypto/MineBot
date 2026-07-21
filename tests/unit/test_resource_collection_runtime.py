@@ -80,6 +80,20 @@ class ResourceBody:
         raise AssertionError(f"unexpected perception scope {scope}")
 
 
+class EgressRepositioningResourceBody(ResourceBody):
+    """The original target batch becomes invisible after a successful egress."""
+
+    def perceive(self, scope, params):
+        if scope == "findBlocks" and self.state_pos[0] > 10:
+            original = self.targets
+            self.targets = []
+            try:
+                return super().perceive(scope, params)
+            finally:
+                self.targets = original
+        return super().perceive(scope, params)
+
+
 class RecordingNavigator:
     def __init__(self, body, selected_goals, outcomes=None):
         self.body = body
@@ -285,6 +299,42 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual(len(navigator.calls), 2)
         self.assertEqual([call[0] for call in work.calls], [target])
         self.assertTrue(result.metrics["attempts"][0]["mobility_egress"]["success"])
+
+    def test_successful_egress_preserves_untried_candidate_domain(self):
+        first = (5, 64, 0)
+        second = (8, 64, 0)
+        body = EgressRepositioningResourceBody([(first, "dirt"), (second, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [(5, 65, -1), (8, 65, -1)],
+            outcomes=[(False, "no_path"), (True, "arrived")],
+        )
+
+        def egress(timeout_s):
+            body.state_pos = (16.5, 65.0, 0.5)
+            return ToolResult(True, "surface_reached", False)
+
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            RecordingWork(),
+            mobility_egress=egress,
+        )
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual([call[0] for call in runtime.work.calls], [second])
+        self.assertEqual(
+            result.metrics["attempts"][1]["selected_targets"],
+            [list(second)],
+        )
+        self.assertIn(list(first), result.metrics["candidate_blacklist"])
 
     def test_navigation_budget_exhaustion_retires_vertical_log_cluster_and_tries_far_tree(self):
         trunk = tuple((5, y, 0) for y in range(64, 68))
