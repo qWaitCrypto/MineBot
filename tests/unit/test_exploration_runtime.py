@@ -234,6 +234,54 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertTrue(egress_result["success"])
         self.assertEqual(egress_result["reason"], "surface_reached")
 
+    def test_persistent_coverage_projects_large_mobility_egress_result(self):
+        body = ExplorationBody()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RuntimeStateStore(Path(tmp) / "state.sqlite3")
+            scope = RuntimeScope("server", "world", "Bot1")
+            coverage = PersistentExplorationCoverageStore(store, scope)
+
+            def egress(_timeout_s):
+                body.state = _state((16.0, 64.0, 0.0))
+                return ToolResult(
+                    True,
+                    "surface_reached",
+                    False,
+                    metrics={
+                        "final_pos": [16, 64, 0],
+                        "terminal_surface_verified": True,
+                        "surface_domain": {
+                            "selection": "mobility_egress_lateral_surface",
+                            "candidate_count": 1,
+                            "candidates": [{"trace": "x" * 20_000}],
+                        },
+                    },
+                )
+
+            runtime, _, _ = _runtime(
+                body=body,
+                coverage=coverage,
+                outcomes=[ToolResult(False, "no_path", True), ToolResult(True, "arrived", False)],
+                mobility_egress=egress,
+            )
+
+            result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+            regions = coverage.list_regions("minecraft:overworld", ExplorationTargets.create(
+                blocks=("dandelion",), entities=()
+            ).query_signature)
+            store.close()
+
+        self.assertTrue(result.success, result.to_payload())
+        egress = next(
+            item["mobility_egress"]
+            for region in regions
+            for item in region.uncertainty
+            if "mobility_egress" in item
+        )
+        self.assertEqual(egress["reason"], "surface_reached")
+        self.assertEqual(egress["final_pos"], [16, 64, 0])
+        self.assertNotIn("candidates", egress.get("surface_domain", {}))
+
     def test_find_blocks_follows_numeric_cursor_until_complete(self):
         body = PagedFindBlocksBody(
             {

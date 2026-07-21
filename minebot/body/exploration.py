@@ -612,7 +612,7 @@ class ExplorationTransactions:
                     egress_after = self.body.get_state()
                     mobility_egress_attempted = True
                     distance_consumed += dist(egress_before.pos, egress_after.pos)
-                    navigation_failures[0]["mobility_egress"] = egress_result.to_payload()
+                    navigation_failures[0]["mobility_egress"] = _terminal_result_summary(egress_result)
                     egress_lifecycle = _body_lifecycle_terminal(egress_after)
                     if egress_lifecycle is not None:
                         return _merge_result_context(
@@ -1261,6 +1261,53 @@ def _body_lifecycle_terminal(state: object) -> ToolResult | None:
     if float(getattr(state, "health", 0.0) or 0.0) <= 0.0:
         return ToolResult(False, "death", True, metrics={"final_pos": list(getattr(state, "pos", ()))})
     return None
+
+
+def _terminal_result_summary(result: ToolResult) -> JsonObject:
+    """Keep durable coverage evidence at terminal-truth granularity.
+
+    Full tool results belong in the observation archive. Exploration coverage only
+    needs enough evidence to explain whether its one internal egress attempt
+    changed mobility, so it must not embed a potentially large surface-domain
+    or navigation trace as a single uncertainty item.
+    """
+
+    metrics = result.metrics or {}
+    summary: JsonObject = {
+        "success": result.success,
+        "reason": result.reason,
+        "can_retry": result.can_retry,
+    }
+    for key in (
+        "origin",
+        "surface_origin",
+        "target_surface",
+        "selected_goal",
+        "final_pos",
+    ):
+        value = metrics.get(key)
+        if isinstance(value, (list, tuple)) and len(value) == 3:
+            summary[key] = list(value)
+    if "terminal_surface_verified" in metrics:
+        summary["terminal_surface_verified"] = bool(metrics["terminal_surface_verified"])
+    surface_domain = metrics.get("surface_domain")
+    if isinstance(surface_domain, dict):
+        domain_summary: JsonObject = {}
+        for key in (
+            "selection",
+            "selection_strategy",
+            "candidate_count",
+            "raw_candidate_count",
+            "complete",
+            "exhaustion_reason",
+            "selected_vertical_effort",
+            "column_count",
+        ):
+            if key in surface_domain:
+                domain_summary[key] = surface_domain[key]
+        if domain_summary:
+            summary["surface_domain"] = domain_summary
+    return summary
 
 
 def _safe_stand(
