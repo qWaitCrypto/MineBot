@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, replace
+from typing import Callable
 
 from minebot.body.block_approach import (
     blacklist_candidate_clusters,
@@ -57,10 +58,13 @@ class ResourceCollectionTransactions:
         body: Body,
         navigator: NavigationTransactions,
         work: BlockWork,
+        *,
+        mobility_egress: Callable[[float], ToolResult] | None = None,
     ) -> None:
         self.body = body
         self.navigator = navigator
         self.work = work
+        self.mobility_egress = mobility_egress
 
     def collect_block_domain(
         self,
@@ -87,6 +91,7 @@ class ResourceCollectionTransactions:
         attempts: list[dict[str, object]] = []
         searches: list[dict[str, object]] = []
         navigation_failures: list[str] = []
+        mobility_egress_attempted = False
 
         dry_egress = self.work.egress_to_dry(timeout_s=cfg.segment_timeout_s)
         if not dry_egress.success:
@@ -284,6 +289,30 @@ class ResourceCollectionTransactions:
             if not navigation.success:
                 attempts.append(attempt)
                 navigation_failures.append(navigation.reason)
+                if (
+                    navigation.reason == "no_path"
+                    and not mobility_egress_attempted
+                    and self.mobility_egress is not None
+                ):
+                    before_egress = self.body.get_state()
+                    mobility_egress_attempted = True
+                    egress = self.mobility_egress(30.0)
+                    after_egress = self.body.get_state()
+                    egress_payload = {
+                        "success": egress.success,
+                        "reason": egress.reason,
+                        "can_retry": egress.can_retry,
+                        "final_pos": list(after_egress.pos),
+                        "distance": _distance_between(before_egress.pos, after_egress.pos),
+                        "result": egress.to_payload(),
+                    }
+                    attempt["mobility_egress"] = egress_payload
+                    if egress.success:
+                        candidate_blacklist.clear()
+                        patch_blacklist.clear()
+                        candidate_attempts = 0
+                        navigation_failures.clear()
+                        continue
                 rejected_targets = selected_targets or domain.targets
                 blacklist_size = len(candidate_blacklist)
                 blacklist_candidate_clusters(
@@ -667,3 +696,7 @@ def _remove_patch_blacklist(blocked: list[Position], target: Position) -> None:
 
 def _normalize_item(item: str) -> str:
     return item.removeprefix("minecraft:").strip().lower()
+
+
+def _distance_between(left: tuple[float, float, float], right: tuple[float, float, float]) -> float:
+    return ((left[0] - right[0]) ** 2 + (left[1] - right[1]) ** 2 + (left[2] - right[2]) ** 2) ** 0.5

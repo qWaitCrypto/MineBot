@@ -250,6 +250,42 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual([call[0] for call in work.calls], [second])
         self.assertIn(list(first), result.metrics["candidate_blacklist"])
 
+    def test_no_path_uses_one_body_mobility_egress_before_replanning(self):
+        target = (5, 64, 0)
+        body = ResourceBody([(target, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [(5, 65, -1), (5, 65, -1)],
+            outcomes=[(False, "no_path"), (True, "arrived")],
+        )
+        egress_calls = []
+
+        def egress(timeout_s):
+            egress_calls.append(timeout_s)
+            body.state_pos = (16.5, 65.0, 0.5)
+            return ToolResult(
+                True,
+                "surface_reached",
+                False,
+                metrics={"final_pos": [16, 65, 0], "terminal_surface_verified": True},
+            )
+
+        work = RecordingWork()
+        runtime = ResourceCollectionTransactions(body, navigator, work, mobility_egress=egress)
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(egress_calls, [30.0])
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertEqual([call[0] for call in work.calls], [target])
+        self.assertTrue(result.metrics["attempts"][0]["mobility_egress"]["success"])
+
     def test_navigation_budget_exhaustion_retires_vertical_log_cluster_and_tries_far_tree(self):
         trunk = tuple((5, y, 0) for y in range(64, 68))
         far_tree = (20, 64, 0)

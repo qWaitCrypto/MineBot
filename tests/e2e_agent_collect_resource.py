@@ -122,7 +122,18 @@ def make_registry(
     )
     navigator = NavigationTransactions.server_side(body, policy)
     work = BlockWork(body, policy, navigator=navigator)
-    resource = ResourceCollectionTransactions(body, navigator, work)
+    resource = ResourceCollectionTransactions(
+        body,
+        navigator,
+        work,
+        mobility_egress=lambda timeout_s: work.go_to_surface(
+            context=BreakContext.TRAVEL,
+            timeout_s=timeout_s,
+            surface_scan_height=16,
+            surface_scan_radius=2,
+            require_mobility_egress=True,
+        ),
+    )
     registry = ToolRegistry()
     register_inventory_tools(registry, body)
     registry.register(
