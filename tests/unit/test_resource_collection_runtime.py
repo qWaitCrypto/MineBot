@@ -195,6 +195,23 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual(work.calls[0][1]["prepositioned"], True)
         self.assertEqual([scope for scope, _params in body.perceptions].count("blockCells"), 1)
 
+    def test_resource_domain_expands_tree_stands_through_interaction_range(self):
+        target = (5, 67, 0)
+        body = ResourceBody([(target, "oak_log")])
+        navigator = RecordingNavigator(body, [(5, 65, -1)])
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("oak_log",),
+            expected_drops=("oak_log",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        goal_positions = {child.pos for child in navigator.calls[0][0].goals}
+        self.assertIn((5, 65, -1), goal_positions)
+
     def test_collection_approach_uses_dry_land_profile_without_disabling_governed_clearance(self):
         body = ResourceBody([((5, 64, 0), "dirt")])
         navigator = RecordingNavigator(body, [(5, 65, -1)])

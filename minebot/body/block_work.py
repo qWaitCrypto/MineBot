@@ -3762,6 +3762,24 @@ def _mining_approach_stand_candidates(pos: Position) -> tuple[Position, ...]:
     return tuple(candidates)
 
 
+def _mining_interaction_stand_candidates(pos: Position) -> tuple[Position, ...]:
+    """Add vertical stand bands that remain inside the mining reach radius."""
+
+    target_center = (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5)
+    candidates = list(_mining_approach_stand_candidates(pos))
+    for offset in range(-4, 6):
+        stand_y = pos[1] + offset
+        if dist(
+            (pos[0] + 1.5, float(stand_y), pos[2] + 0.5),
+            target_center,
+        ) > BlockWork.MINE_INTERACTION_RANGE:
+            continue
+        for candidate in _mining_stand_candidates((pos[0], stand_y, pos[2])):
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return tuple(candidates)
+
+
 def _ranked_mining_stand_candidates(body: Body, pos: Position, current: tuple[float, float, float]) -> list[Position] | ToolResult:
     approach = _mining_approach_stand_candidates(pos)
     wanted: list[Position] = []

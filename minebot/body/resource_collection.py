@@ -14,6 +14,7 @@ from minebot.body.block_work import (
     BlockWork,
     _is_clear_perception,
     _is_solid_support_perception,
+    _mining_interaction_stand_candidates,
     _mining_approach_stand_candidates,
     _mining_reach_distance,
     _mining_stand_sort_key,
@@ -800,10 +801,12 @@ def _build_stand_domain(
 ) -> _StandDomain | ToolResult:
     current = body.get_state().pos
     approaches: dict[Position, tuple[Position, ...]] = {}
+    expanded_approaches: dict[Position, tuple[Position, ...]] = {}
     wanted: list[Position] = []
     for target in targets:
         target_approaches = _mining_approach_stand_candidates(target.pos)
         approaches[target.pos] = target_approaches
+        expanded_approaches[target.pos] = _mining_interaction_stand_candidates(target.pos)
         for stand in target_approaches:
             wanted.extend((stand, (stand[0], stand[1] + 1, stand[2]), (stand[0], stand[1] - 1, stand[2])))
     try:
@@ -817,6 +820,7 @@ def _build_stand_domain(
         )
 
     stands_by_target: dict[Position, list[Position]] = {}
+    expansion_targets: list[NearbyBlockTarget] = []
     for target in targets:
         standable: list[Position] = []
         for stand in approaches[target.pos]:
@@ -827,7 +831,47 @@ def _build_stand_domain(
                 continue
             if _is_clear_perception(feet) and _is_clear_perception(head) and _is_solid_support_perception(support):
                 standable.append(stand)
-        candidates = standable or list(approaches[target.pos])
+        if standable:
+            candidates = standable
+        else:
+            expansion_targets.append(target)
+            candidates = []
+        stands_by_target[target.pos] = list(dict.fromkeys(candidates))
+
+    extra_wanted: list[Position] = []
+    for target in expansion_targets:
+        for stand in expanded_approaches[target.pos]:
+            if stand not in approaches[target.pos]:
+                extra_wanted.extend(
+                    (stand, (stand[0], stand[1] + 1, stand[2]), (stand[0], stand[1] - 1, stand[2]))
+                )
+    if extra_wanted:
+        try:
+            extra_facts = read_block_facts(
+                body,
+                tuple(dict.fromkeys(extra_wanted)),
+                failure_label="resource_stand_domain_vertical",
+            )
+        except ValueError as exc:
+            return ToolResult(
+                False,
+                "perception_failed",
+                True,
+                metrics={"scope": "blockCells", "failure_label": "resource_stand_domain_vertical", "error": str(exc)},
+            )
+        facts.update(extra_facts)
+
+    for target in expansion_targets:
+        standable = []
+        for stand in expanded_approaches[target.pos]:
+            feet = facts.get(stand)
+            head = facts.get((stand[0], stand[1] + 1, stand[2]))
+            support = facts.get((stand[0], stand[1] - 1, stand[2]))
+            if feet is None or head is None or support is None:
+                continue
+            if _is_clear_perception(feet) and _is_clear_perception(head) and _is_solid_support_perception(support):
+                standable.append(stand)
+        candidates = standable or list(expanded_approaches[target.pos])
         candidates.sort(key=lambda stand: _mining_stand_sort_key(current, target.pos, stand))
         stands_by_target[target.pos] = list(dict.fromkeys(candidates))
 
