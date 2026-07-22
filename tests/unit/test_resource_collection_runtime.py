@@ -321,6 +321,36 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual(result.metrics["searches"][1]["active_candidates"], [list(lower)])
         self.assertEqual(result.metrics["candidate_blacklist"], [list(high)])
 
+    def test_failed_tree_retarget_preserves_untried_trunks(self):
+        high = (5, 70, 0)
+        lower_trunks = [(5, y, 0) for y in (64, 65, 66)]
+        body = ScopedTreeResourceBody(
+            primary_targets=[(high, "oak_log")],
+            tree_targets=[(pos, "oak_log") for pos in lower_trunks],
+        )
+        navigator = RecordingNavigator(
+            body,
+            [(5, 71, 0), (5, 65, -1)],
+            outcomes=[(False, "budget_exceeded"), (True, "arrived")],
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("oak_log",),
+            expected_drops=("oak_log",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(len(runtime.work.calls), 1)
+        self.assertIn(runtime.work.calls[0][0], lower_trunks)
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertEqual(
+            result.metrics["attempts"][0]["tree_domain_retarget"]["candidates"],
+            [list(pos) for pos in (lower_trunks[1], lower_trunks[0], lower_trunks[2])],
+        )
+
     def test_empty_tree_domain_preserves_candidate_exhaustion_terminal(self):
         high = (5, 72, 0)
         body = ScopedTreeResourceBody(

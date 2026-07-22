@@ -355,9 +355,11 @@ class ResourceCollectionTransactions:
                     if _is_patch_resource(target.block_type) and _is_patch_blocker(navigation.reason):
                         _add_patch_blacklist(patch_blacklist, target.pos)
                 candidate_attempts += len(candidate_blacklist) - blacklist_size
-                tree_pending_targets = _remove_tree_pending_clusters(
-                    tree_pending_targets,
-                    tuple(target.pos for target in rejected_targets),
+                rejected_positions = {target.pos for target in rejected_targets}
+                tree_pending_targets = tuple(
+                    target
+                    for target in tree_pending_targets
+                    if target.pos not in rejected_positions
                 )
 
                 tree_candidates: tuple[NearbyBlockTarget, ...] = ()
