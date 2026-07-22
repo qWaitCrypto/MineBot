@@ -94,6 +94,33 @@ class EgressRepositioningResourceBody(ResourceBody):
         return super().perceive(scope, params)
 
 
+class ScopedTreeResourceBody(ResourceBody):
+    """Expose authoritative block cells for the tree-domain retarget probe."""
+
+    def __init__(self, primary_targets, tree_targets):
+        super().__init__([*primary_targets, *tree_targets])
+        self.primary_targets = list(primary_targets)
+        self.tree_targets = list(tree_targets)
+
+    def perceive(self, scope, params):
+        if scope == "findBlocks":
+            wanted = str(params["type"]).removeprefix("minecraft:")
+            blocks = [
+                {"x": pos[0], "y": pos[1], "z": pos[2], "type": block_type}
+                for pos, block_type in self.primary_targets
+                if block_type == wanted
+            ]
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope=scope,
+                type="perception",
+                ok=True,
+                complete=True,
+                data={"blocks": blocks, "totalMatches": len(blocks)},
+            )
+        return super().perceive(scope, params)
+
+
 class RecordingNavigator:
     def __init__(self, body, selected_goals, outcomes=None):
         self.body = body
@@ -264,6 +291,63 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual([call[0] for call in work.calls], [second])
         self.assertIn(list(first), result.metrics["candidate_blacklist"])
 
+    def test_navigation_budget_expands_tree_domain_before_candidate_budget_terminal(self):
+        high = (5, 70, 0)
+        lower = (5, 64, 0)
+        body = ScopedTreeResourceBody(
+            primary_targets=[(high, "oak_log")],
+            tree_targets=[(lower, "oak_log")],
+        )
+        navigator = RecordingNavigator(
+            body,
+            [(5, 71, 0), (1, 65, -1)],
+            outcomes=[(False, "budget_exceeded"), (True, "arrived")],
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("oak_log",),
+            expected_drops=("oak_log",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual([call[0] for call in runtime.work.calls], [lower])
+        self.assertEqual(
+            result.metrics["attempts"][0]["tree_domain_retarget"]["candidates"],
+            [list(lower)],
+        )
+        self.assertEqual(result.metrics["searches"][1]["active_candidates"], [list(lower)])
+        self.assertEqual(result.metrics["candidate_blacklist"], [list(high)])
+
+    def test_empty_tree_domain_preserves_candidate_exhaustion_terminal(self):
+        high = (5, 72, 0)
+        body = ScopedTreeResourceBody(
+            primary_targets=[(high, "oak_log")],
+            tree_targets=[],
+        )
+        navigator = RecordingNavigator(
+            body,
+            [(5, 71, 0)],
+            outcomes=[(False, "budget_exceeded")],
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("oak_log",),
+            expected_drops=("oak_log",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "resource_candidate_domain_exhausted")
+        self.assertEqual(runtime.work.calls, [])
+        tree = result.metrics["attempts"][0]["tree_domain_retarget"]
+        self.assertEqual(tree["candidates"], [])
+        self.assertEqual(tree["search_result"]["reason"], "tree_domain_log_not_found")
+
     def test_no_path_uses_one_body_mobility_egress_before_replanning(self):
         target = (5, 64, 0)
         body = ResourceBody([(target, "dirt")])
@@ -341,7 +425,7 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         far_tree = (20, 64, 0)
         targets = [(target, "oak_log") for target in trunk]
         targets.append((far_tree, "oak_log"))
-        body = ResourceBody(targets)
+        body = ScopedTreeResourceBody(targets, [])
         navigator = RecordingNavigator(
             body,
             [(5, 65, -1), (20, 65, -1)],

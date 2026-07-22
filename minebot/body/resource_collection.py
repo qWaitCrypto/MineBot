@@ -18,7 +18,11 @@ from minebot.body.block_work import (
     _mining_reach_distance,
     _mining_stand_sort_key,
 )
-from minebot.body.interaction_support import NearbyBlockSearch, NearbyBlockTarget, find_nearby_block_search
+from minebot.body.interaction_support import (
+    NearbyBlockSearch,
+    NearbyBlockTarget,
+    find_nearby_block_search,
+)
 from minebot.body.navigation import (
     SERVER_GOAL_SET_LIMIT,
     NavigationRunConfig,
@@ -40,6 +44,9 @@ class ResourceCollectionConfig:
     max_pages: int = 1
     max_goals: int = SERVER_GOAL_SET_LIMIT
     segment_timeout_s: float = 15.0
+    tree_domain_search_radius: int = 6
+    tree_domain_target_limit: int = 24
+    tree_domain_max_retargets: int = 4
 
 
 @dataclass(frozen=True)
@@ -93,6 +100,8 @@ class ResourceCollectionTransactions:
         navigation_failures: list[str] = []
         mobility_egress_attempted = False
         pending_targets: tuple[NearbyBlockTarget, ...] = ()
+        tree_pending_targets: tuple[NearbyBlockTarget, ...] = ()
+        tree_retargets_discovered = 0
 
         dry_egress = self.work.egress_to_dry(timeout_s=cfg.segment_timeout_s)
         if not dry_egress.success:
@@ -145,7 +154,10 @@ class ResourceCollectionTransactions:
                 max_pages=cfg.max_pages,
             )
             if isinstance(search, ToolResult):
-                if not pending_targets or search.reason != "resource_candidates_not_found":
+                if (
+                    (not pending_targets and not tree_pending_targets)
+                    or search.reason != "resource_candidates_not_found"
+                ):
                     reason = "resource_domain_partial_exhausted" if collected > 0 else search.reason
                     return self._terminal(
                         success=False,
@@ -178,9 +190,10 @@ class ResourceCollectionTransactions:
                 patch_blacklist=patch_blacklist,
                 limit=cfg.find_limit if candidate_budget_hit else max(1, cfg.candidate_budget - candidate_attempts),
                 pending_targets=pending_targets,
+                priority_targets=tree_pending_targets,
             )
             searches.append(_search_metrics(search, active))
-            if candidate_budget_hit:
+            if candidate_budget_hit and not tree_pending_targets:
                 exhausted = not active
                 if exhausted:
                     terminal_reason = (
@@ -302,6 +315,10 @@ class ResourceCollectionTransactions:
                 navigation_failures.append(navigation.reason)
                 pending_targets = tuple(active)
                 egress_succeeded = False
+                selected_positions = {target.pos for target in selected_targets}
+                tree_pending_targets = tuple(
+                    target for target in tree_pending_targets if target.pos not in selected_positions
+                )
                 if (
                     navigation.reason == "no_path"
                     and not mobility_egress_attempted
@@ -322,7 +339,6 @@ class ResourceCollectionTransactions:
                     attempt["mobility_egress"] = egress_payload
                     egress_succeeded = egress.success
                     if egress_succeeded:
-                        selected_positions = {target.pos for target in selected_targets}
                         untried_targets = tuple(
                             target for target in active if target.pos not in selected_positions
                         )
@@ -339,6 +355,58 @@ class ResourceCollectionTransactions:
                     if _is_patch_resource(target.block_type) and _is_patch_blocker(navigation.reason):
                         _add_patch_blacklist(patch_blacklist, target.pos)
                 candidate_attempts += len(candidate_blacklist) - blacklist_size
+                tree_pending_targets = _remove_tree_pending_clusters(
+                    tree_pending_targets,
+                    tuple(target.pos for target in rejected_targets),
+                )
+
+                tree_candidates: tuple[NearbyBlockTarget, ...] = ()
+                if (
+                    not tree_pending_targets
+                    and tree_retargets_discovered < cfg.tree_domain_max_retargets
+                    and _has_tree_resource(normalized_blocks)
+                    and _is_tree_navigation_failure(navigation.reason)
+                ):
+                    excluded = {target.pos for target in search.targets}
+                    discovered = _probe_tree_domain_targets(
+                        self.body,
+                        selected_targets or domain.targets,
+                        _tree_log_types(normalized_blocks),
+                        cfg.tree_domain_search_radius,
+                        excluded=excluded | selected_positions,
+                        limit=cfg.tree_domain_target_limit,
+                    )
+                    tree_diagnostics: dict[str, object] = {
+                        "original_target": list(selected_targets[0].pos if selected_targets else selected_goal),
+                        "original_failure": navigation.to_payload(),
+                        "search_radius": cfg.tree_domain_search_radius,
+                        "target_limit": cfg.tree_domain_target_limit,
+                        "block_types": list(_tree_log_types(normalized_blocks)),
+                    }
+                    if isinstance(discovered, ToolResult):
+                        tree_diagnostics["search_result"] = discovered.to_payload()
+                    else:
+                        current = self.body.get_state().pos
+                        tree_candidates = tuple(
+                            sorted(
+                                (
+                                    target
+                                    for target in discovered
+                                    if target.pos not in excluded
+                                    and target.pos not in selected_positions
+                                ),
+                                key=lambda target: _tree_domain_target_sort_key(
+                                    current,
+                                    target.pos,
+                                    target.distance,
+                                ),
+                            )[: max(0, cfg.tree_domain_max_retargets - tree_retargets_discovered)]
+                        )
+                        tree_diagnostics["candidate_count"] = len(tree_candidates)
+                        tree_retargets_discovered += len(tree_candidates)
+                    tree_diagnostics["candidates"] = [list(target.pos) for target in tree_candidates]
+                    attempt["tree_domain_retarget"] = tree_diagnostics
+                    tree_pending_targets = tree_candidates
                 continue
 
             target = _selected_target(self.body, selected_targets)
@@ -363,6 +431,7 @@ class ResourceCollectionTransactions:
 
             candidate_attempts += 1
             mutation_attempts += 1
+            tree_pending_targets = tuple(candidate for candidate in tree_pending_targets if candidate.pos != target.pos)
             pending_targets = tuple(candidate for candidate in pending_targets if candidate.pos != target.pos)
             mined = self.work.mine_block_collect(
                 target.pos,
@@ -407,6 +476,7 @@ class ResourceCollectionTransactions:
 
             if is_candidate_skip(mined.reason) or mined.reason == "collect_no_inventory_delta":
                 blacklist_candidate_clusters(candidate_blacklist, (target.pos,))
+                tree_pending_targets = _remove_tree_pending_clusters(tree_pending_targets, (target.pos,))
                 if _is_patch_resource(target.block_type) and _is_patch_blocker(mined.reason):
                     _add_patch_blacklist(patch_blacklist, target.pos)
                 continue
@@ -482,6 +552,9 @@ class ResourceCollectionTransactions:
                 "find_limit": config.find_limit,
                 "max_pages": config.max_pages,
                 "max_goals": config.max_goals,
+                "tree_domain_search_radius": config.tree_domain_search_radius,
+                "tree_domain_target_limit": config.tree_domain_target_limit,
+                "tree_domain_max_retargets": config.tree_domain_max_retargets,
             },
         }
         if last_failure is not None:
@@ -511,6 +584,12 @@ def _validate_request(
         return ToolResult(False, "resource_timeout_invalid", False)
     if config.find_limit <= 0 or config.max_pages <= 0:
         return ToolResult(False, "resource_search_budget_invalid", False)
+    if (
+        config.tree_domain_search_radius <= 0
+        or config.tree_domain_target_limit <= 0
+        or config.tree_domain_max_retargets <= 0
+    ):
+        return ToolResult(False, "resource_tree_domain_budget_invalid", False)
     if config.max_goals <= 0 or config.max_goals > SERVER_GOAL_SET_LIMIT:
         return ToolResult(
             False,
@@ -528,7 +607,22 @@ def _active_targets(
     patch_blacklist: list[Position],
     limit: int,
     pending_targets: tuple[NearbyBlockTarget, ...] = (),
+    priority_targets: tuple[NearbyBlockTarget, ...] = (),
 ) -> tuple[NearbyBlockTarget, ...]:
+    priority: list[NearbyBlockTarget] = []
+    seen_priority: set[Position] = set()
+    for target in priority_targets:
+        if target.pos in seen_priority:
+            continue
+        if _is_patch_resource(target.block_type) and _in_patch_blacklist(target.pos, patch_blacklist):
+            continue
+        seen_priority.add(target.pos)
+        priority.append(target)
+        if len(priority) >= limit:
+            break
+    if priority:
+        return tuple(priority)
+
     by_position = {target.pos: target for target in pending_targets}
     by_position.update({target.pos: target for target in search.targets})
     eligible = [
@@ -543,6 +637,135 @@ def _active_targets(
         eligible,
         blacklist=candidate_blacklist,
         limit=limit,
+    )
+
+
+def _has_tree_resource(block_types: tuple[str, ...]) -> bool:
+    return bool(_tree_log_types(block_types))
+
+
+def _tree_log_types(block_types: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            _normalize_item(block_type)
+            for block_type in block_types
+            if _is_log_block_type(block_type)
+        )
+    )
+
+
+def _is_log_block_type(block_type: str) -> bool:
+    return _normalize_item(block_type).endswith("_log")
+
+
+def _is_tree_navigation_failure(reason: str) -> bool:
+    return reason in {"no_path", "stuck", "deviated", "budget_exceeded"}
+
+
+def _tree_domain_target_sort_key(
+    current: tuple[float, float, float],
+    target: Position,
+    distance: float,
+) -> tuple[float, int, float, float, int, int]:
+    return (
+        abs(float(target[1]) - current[1]),
+        target[1],
+        _mining_reach_distance(current, target),
+        distance,
+        target[0],
+        target[2],
+    )
+
+
+def _probe_tree_domain_targets(
+    body: Body,
+    anchors: tuple[NearbyBlockTarget, ...],
+    block_types: tuple[str, ...],
+    radius: int,
+    *,
+    excluded: set[Position],
+    limit: int,
+) -> list[NearbyBlockTarget] | ToolResult:
+    """Read a bounded vertical tree neighborhood around failed candidates."""
+
+    horizontal_radius = min(2, radius)
+    positions = tuple(
+        dict.fromkeys(
+            (anchor.pos[0] + dx, anchor.pos[1] + dy, anchor.pos[2] + dz)
+            for anchor in anchors
+            for dx in range(-horizontal_radius, horizontal_radius + 1)
+            for dz in range(-horizontal_radius, horizontal_radius + 1)
+            for dy in range(-radius, radius + 1)
+        )
+    )
+    try:
+        facts = read_block_facts(body, positions, failure_label="resource_tree_domain")
+    except ValueError as exc:
+        return ToolResult(
+            False,
+            "tree_domain_probe_failed",
+            True,
+            metrics={
+                "anchor_targets": [list(anchor.pos) for anchor in anchors],
+                "search_radius": radius,
+                "horizontal_radius": horizontal_radius,
+                "requested_cells": len(positions),
+                "error": str(exc),
+            },
+        )
+
+    wanted = set(block_types)
+    current = body.get_state().pos
+    candidates: list[NearbyBlockTarget] = []
+    for pos, perception in facts.items():
+        block_type = _normalize_item(str(perception.data.get("type") or ""))
+        if block_type not in wanted or pos in excluded:
+            continue
+        candidates.append(
+            NearbyBlockTarget(
+                pos=pos,
+                block_type=block_type,
+                distance=_distance_between(
+                    current,
+                    (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5),
+                ),
+            )
+        )
+    if not candidates:
+        return ToolResult(
+            False,
+            "tree_domain_log_not_found",
+            True,
+            next_suggestion="change the tree candidate or use bounded exploration before retrying",
+            metrics={
+                "anchor_targets": [list(anchor.pos) for anchor in anchors],
+                "search_radius": radius,
+                "horizontal_radius": horizontal_radius,
+                "requested_cells": len(positions),
+            },
+        )
+    return sorted(
+        candidates,
+        key=lambda target: _tree_domain_target_sort_key(current, target.pos, target.distance),
+    )[:limit]
+
+
+def _remove_tree_pending_clusters(
+    pending: tuple[NearbyBlockTarget, ...],
+    centers: tuple[Position, ...],
+) -> tuple[NearbyBlockTarget, ...]:
+    return tuple(
+        target
+        for target in pending
+        if not any(_same_candidate_cluster(target.pos, center) for center in centers)
+    )
+
+
+def _same_candidate_cluster(left: Position, right: Position) -> bool:
+    return (
+        abs(left[0] - right[0]) <= 2
+        and abs(left[1] - right[1]) <= 6
+        and abs(left[2] - right[2]) <= 2
     )
 
 
