@@ -420,7 +420,7 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         )
         self.assertIn(list(first), result.metrics["candidate_blacklist"])
 
-    def test_navigation_budget_exhaustion_retires_vertical_log_cluster_and_tries_far_tree(self):
+    def test_navigation_budget_exhaustion_prioritizes_untried_tree_trunk(self):
         trunk = tuple((5, y, 0) for y in range(64, 68))
         far_tree = (20, 64, 0)
         targets = [(target, "oak_log") for target in trunk]
@@ -428,7 +428,7 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         body = ScopedTreeResourceBody(targets, [])
         navigator = RecordingNavigator(
             body,
-            [(5, 65, -1), (20, 65, -1)],
+            [(5, 65, -1), (5, 65, -1)],
             outcomes=[(False, "budget_exceeded"), (True, "arrived")],
         )
         work = RecordingWork()
@@ -443,14 +443,14 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(len(navigator.calls), 2)
-        self.assertEqual([call[0] for call in work.calls], [far_tree])
+        self.assertEqual([call[0] for call in work.calls], [trunk[1]])
         self.assertEqual(
             result.metrics["searches"][0]["active_candidates"],
             [list(trunk[0]), list(far_tree)],
         )
         self.assertEqual(
             result.metrics["searches"][1]["active_candidates"],
-            [list(far_tree)],
+            [list(trunk[1])],
         )
         self.assertEqual(result.metrics["candidate_blacklist"], [list(trunk[0])])
 

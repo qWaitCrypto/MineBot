@@ -367,7 +367,7 @@ class ResourceCollectionTransactions:
                     and _has_tree_resource(normalized_blocks)
                     and _is_tree_navigation_failure(navigation.reason)
                 ):
-                    excluded = {target.pos for target in search.targets}
+                    excluded = set(selected_positions)
                     discovered = _probe_tree_domain_targets(
                         self.body,
                         selected_targets or domain.targets,
