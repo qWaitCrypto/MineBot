@@ -640,6 +640,8 @@ def _active_targets(
         eligible,
         blacklist=candidate_blacklist,
         limit=limit,
+        prefer_lower_vertical=bool(eligible)
+        and all(_is_log_block_type(target.block_type) for target in eligible),
     )
 
 

@@ -431,12 +431,36 @@ def select_spatial_candidate_clusters(
     *,
     blacklist: set[Position],
     limit: int,
+    prefer_lower_vertical: bool = False,
 ) -> tuple[NearbyBlockTarget, ...]:
+    """Keep one bounded representative per spatial cluster.
+
+    Tree collection may prefer the lowest observed log in an already grouped
+    vertical trunk. Other block approaches retain the original first-seen
+    representative, so this remains a narrow resource-domain policy.
+    """
+
     representatives: list[NearbyBlockTarget] = []
     for target in targets:
         if _in_candidate_cluster(target.pos, blacklist):
             continue
-        if _in_candidate_cluster(target.pos, (candidate.pos for candidate in representatives)):
+        existing_index = next(
+            (
+                index
+                for index, candidate in enumerate(representatives)
+                if _in_candidate_cluster(target.pos, (candidate.pos,))
+            ),
+            None,
+        )
+        if existing_index is not None:
+            if prefer_lower_vertical:
+                current = representatives[existing_index]
+                if (target.pos[1], target.distance, target.pos) < (
+                    current.pos[1],
+                    current.distance,
+                    current.pos,
+                ):
+                    representatives[existing_index] = target
             continue
         representatives.append(target)
     if len(representatives) <= limit:

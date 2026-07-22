@@ -308,6 +308,39 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual([call[0] for call in work.calls], [second])
         self.assertIn(list(first), result.metrics["candidate_blacklist"])
 
+    def test_failed_tree_does_not_hide_lower_trunk_in_other_tree(self):
+        first = (5, 64, 0)
+        second_high = (20, 68, 0)
+        second_low = (20, 64, 0)
+        body = ResourceBody(
+            [
+                (first, "oak_log"),
+                (second_high, "oak_log"),
+                (second_low, "oak_log"),
+            ]
+        )
+        navigator = RecordingNavigator(
+            body,
+            [(5, 65, -1), (20, 65, -1)],
+            outcomes=[(False, "budget_exceeded"), (True, "arrived")],
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("oak_log",),
+            expected_drops=("oak_log",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual([call[0] for call in runtime.work.calls], [second_low])
+        self.assertEqual(
+            result.metrics["searches"][1]["active_candidates"],
+            [list(second_low)],
+        )
+        self.assertEqual(result.metrics["candidate_blacklist"], [list(first)])
+
     def test_navigation_budget_expands_tree_domain_before_candidate_budget_terminal(self):
         high = (5, 70, 0)
         lower = (5, 64, 0)
