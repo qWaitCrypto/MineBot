@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from minebot.app.observation_artifacts import PersistentToolObservationArchive
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, _phase1_recovery_handler, _recipe_lookup, _run_smelt_tool, build_phase1_agent_runtime, build_phase1_registry, tool_manifest
-from minebot.app.runner import AgentRuntime
+from minebot.app.runner import AgentRuntime, RuntimeTrace
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController
 from minebot.brain.modes import AgentSignal, ModeRuntime
@@ -21,6 +21,7 @@ from minebot.app.real_server_session import (
     _announce_interactive_terminal,
     _chat_command_reader,
     _interactive_speech_sink,
+    _maybe_trace_idle_body_state,
     _poll_chat_commands,
     _run_interactive_loop,
     InteractiveScenarioContext,
@@ -1110,6 +1111,40 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         self.assertEqual(final.status, "quit")
         self.assertEqual(session.step_count, 2)
+
+    def test_idle_body_state_sampler_emits_authoritative_state_with_rate_limit(self):
+        trace = RuntimeTrace()
+        body = HarnessBody()
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            trace=trace,
+        )
+
+        class Parts:
+            pass
+
+        class Session:
+            pass
+
+        parts = Parts()
+        parts.runtime = runtime
+        session = Session()
+        session.parts = parts
+
+        self.assertTrue(_maybe_trace_idle_body_state(session, body, interval_s=120.0))
+        self.assertFalse(_maybe_trace_idle_body_state(session, body, interval_s=120.0))
+
+        events = [event for event in trace.snapshot() if event["event"] == "body_state"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["source"], "idle_body_state_poll")
+        self.assertEqual(events[0]["pos"], [0.5, 64.0, 0.5])
+        self.assertFalse(events[0]["missing"])
+        self.assertEqual(runtime.last_known_body_state["pos"], [0.5, 64.0, 0.5])
 
     def test_interactive_loop_keeps_open_task_pending_for_external_verification(self):
         store = RuntimeStateStore(":memory:")

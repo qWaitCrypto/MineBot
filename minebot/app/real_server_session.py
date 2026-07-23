@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import threading
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +51,8 @@ from minebot.game import RconClient, ScarpetBody
 from minebot.game.errors import EnvelopeError, RconError
 from minebot.game.protocol import build_state_call, build_watch_call, parse_state
 from minebot.game.rcon import RconConfig
+
+IDLE_BODY_STATE_SAMPLE_INTERVAL_S = 120.0
 
 
 @dataclass(frozen=True)
@@ -1011,6 +1014,7 @@ async def _run_interactive_loop(
                     _trace_body_event_poll_failure(session, exc)
                 else:
                     _trace_body_event_poll(session, poll_result)
+                    _maybe_trace_idle_body_state(session, body)
             await asyncio.sleep(0.25 if body_event_pump is not None else 0.05)
             continue
         last = await session.step()
@@ -1145,6 +1149,60 @@ def _trace_body_event_poll(session: AgentSession, result: object) -> None:
             last_seq=getattr(result, "last_seq", 0),
             epoch=getattr(result, "epoch", ""),
         )
+
+
+def _maybe_trace_idle_body_state(
+    session: AgentSession,
+    body: Body,
+    *,
+    interval_s: float = IDLE_BODY_STATE_SAMPLE_INTERVAL_S,
+) -> bool:
+    parts = getattr(session, "parts", None)
+    if parts is None:
+        return False
+    runtime = getattr(parts, "runtime", None)
+    if runtime is None:
+        return False
+    now = time.monotonic()
+    last = float(getattr(runtime, "_last_idle_body_state_trace_monotonic", 0.0) or 0.0)
+    if last > 0.0 and now - last < interval_s:
+        return False
+    try:
+        state = body.get_state()
+    except Exception as exc:
+        runtime.trace.emit(
+            "idle_body_state_poll_failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        setattr(runtime, "_last_idle_body_state_trace_monotonic", now)
+        return False
+    if getattr(state, "missing", False):
+        runtime.trace.emit(
+            "body_state",
+            source="idle_body_state_poll",
+            bot=getattr(state, "bot", None),
+            pos=list(getattr(state, "pos", ())),
+            health=getattr(state, "health", None),
+            food=getattr(state, "food", None),
+            oxygen=getattr(state, "oxygen", None),
+            inventory_hash=getattr(state, "inventory_hash", None),
+            inventory_counts=dict(getattr(state, "inventory_counts", None) or {}),
+            selected_slot=getattr(state, "selected_slot", None),
+            selected_item=getattr(state, "selected_item", None),
+            offhand_item=getattr(state, "offhand_item", None),
+            body_owner=getattr(state, "body_owner", None),
+            pending_action_count=getattr(state, "pending_action_count", None),
+            dimension=getattr(state, "dimension", None),
+            complete=getattr(state, "complete", False),
+            missing=True,
+        )
+        setattr(runtime, "_last_idle_body_state_trace_monotonic", now)
+        return True
+    runtime._remember_body_state(state)
+    runtime._emit_last_known_body_state_trace(source="idle_body_state_poll")
+    setattr(runtime, "_last_idle_body_state_trace_monotonic", now)
+    return True
 
 
 def _trace_body_event_poll_failure(session: AgentSession, exc: Exception) -> None:
