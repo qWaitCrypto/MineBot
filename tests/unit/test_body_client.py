@@ -3,6 +3,7 @@ import unittest
 
 from minebot.game.body import ScarpetBody
 from minebot.contract import Action
+from minebot.game.errors import ActionReconciliationUnknownError
 
 
 class FakeTransport:
@@ -72,7 +73,154 @@ class ActionThenEventTransport:
         )
 
 
+class MutationFailureTransport:
+    """Drops the first mutation response, then serves reconciliation reads."""
+
+    def __init__(self, *, status_data, perception_type: str | None = None, resend_ok: bool = True):
+        self.status_data = dict(status_data)
+        self.perception_type = perception_type
+        self.resend_ok = resend_ok
+        self.once_commands: list[str] = []
+        self.read_commands: list[str] = []
+        self.reconnects = 0
+        self.action_id: str | None = None
+        self._dropped = False
+
+    def request_once(self, command: str) -> str:
+        self.once_commands.append(command)
+        if "minebot_action" in command and "minebot_action_status" not in command:
+            marker = '"id":"'
+            start = command.index(marker) + len(marker)
+            end = command.index('"', start)
+            self.action_id = command[start:end]
+            if not self._dropped:
+                self._dropped = True
+                raise OSError("socket closed after dispatch")
+            return envelope(
+                {
+                    "type": "result",
+                    "id": self.action_id,
+                    "bot": "Bot1",
+                    "ok": self.resend_ok,
+                    "accepted": self.resend_ok,
+                    "complete": True,
+                    "data": {"action": "mineBlock", "reconciled": "resend"},
+                    "error": None if self.resend_ok else "rejected",
+                }
+            )
+        raise AssertionError(f"unexpected request_once command: {command}")
+
+    def reconnect(self) -> None:
+        self.reconnects += 1
+
+    def request(self, command: str) -> str:
+        self.read_commands.append(command)
+        if "minebot_action_status" in command:
+            return envelope(
+                {
+                    "type": "result",
+                    "id": self.action_id,
+                    "bot": "Bot1",
+                    "ok": True,
+                    "accepted": True,
+                    "complete": True,
+                    "data": self.status_data,
+                    "error": None,
+                }
+            )
+        if "minebot_perceive" in command:
+            return envelope(
+                {
+                    "type": "perception",
+                    "bot": "Bot1",
+                    "scope": "blockAt",
+                    "ok": True,
+                    "complete": True,
+                    "data": {"x": 1, "y": 60, "z": 1, "type": self.perception_type or "minecraft:stone"},
+                    "uncertainty": [],
+                    "next": None,
+                    "error": None,
+                }
+            )
+        raise AssertionError(f"unexpected read command: {command}")
+
+
 class BodyClientTests(unittest.TestCase):
+    def test_mutation_transport_drop_recovers_from_authoritative_terminal(self):
+        action = Action(id="drop-terminal", name="mineBlock", params={"target": [1, 60, 1], "block_type": "stone"})
+        transport = MutationFailureTransport(
+            status_data={
+                "action_id": action.id,
+                "dispatch": {
+                    "type": "result",
+                    "id": action.id,
+                    "bot": "Bot1",
+                    "ok": True,
+                    "accepted": True,
+                    "complete": True,
+                    "data": {"action": "mineBlock"},
+                    "error": None,
+                },
+                "terminal": {
+                    "seq": 7,
+                    "tick": 100,
+                    "bot": "Bot1",
+                    "name": "mineDone",
+                    "data": {
+                        "action_id": action.id,
+                        "success": True,
+                        "target": [1, 60, 1],
+                        "block_now": "minecraft:air",
+                        "block_gone": True,
+                        "stopped_reason": "completed",
+                    },
+                },
+            }
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        result = body.execute(action)
+        terminal = body.await_action_terminal(action.id, timeout_s=1.0, poll_interval_s=0.0)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(terminal.name, "mineDone")
+        self.assertEqual(terminal.data["action_id"], action.id)
+        self.assertTrue(terminal.data["success"])
+        self.assertEqual(transport.reconnects, 1)
+        self.assertEqual(len(transport.once_commands), 1)
+        trace = body.observability_snapshot()["action_traces"][0]
+        self.assertEqual(trace["reconciliation_status"], "applied")
+        self.assertEqual(trace["terminal_event"], "mineDone")
+
+    def test_mutation_transport_drop_probes_block_and_resends_same_action_id(self):
+        action = Action(id="resend-block", name="mineBlock", params={"target": [1, 60, 1], "block_type": "stone"})
+        transport = MutationFailureTransport(status_data={"action_id": action.id, "dispatch": None, "terminal": None}, perception_type="minecraft:stone")
+        body = ScarpetBody("Bot1", transport)
+
+        result = body.execute(action)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(len(transport.once_commands), 2)
+        self.assertIn('"id":"resend-block"', transport.once_commands[0])
+        self.assertIn('"id":"resend-block"', transport.once_commands[1])
+        self.assertEqual(len(transport.read_commands), 3)
+        trace = body._inflight_action_traces[action.id]
+        self.assertEqual(trace["reconciliation_status"], "not_applied")
+        self.assertEqual(trace["reconciliation_evidence"]["block"]["current_type"], "stone")
+
+    def test_mutation_transport_drop_with_no_authoritative_fact_is_typed_unknown(self):
+        action = Action(id="unknown-mutation", name="craftItem", params={"output": {"item": "torch", "count": 1}})
+        transport = MutationFailureTransport(status_data={"action_id": action.id, "dispatch": None, "terminal": None})
+        body = ScarpetBody("Bot1", transport)
+
+        with self.assertRaises(ActionReconciliationUnknownError) as raised:
+            body.execute(action)
+
+        self.assertEqual(raised.exception.diagnostics["status"], "unknown")
+        self.assertEqual(len(transport.once_commands), 1)
+        self.assertEqual(len(transport.read_commands), 2)
+        self.assertEqual(body.observability_snapshot()["action_traces"][0]["reconciliation_status"], "unknown")
+
     def test_event_head_reads_epoch_and_both_cursors(self):
         transport = FakeTransport(
             [

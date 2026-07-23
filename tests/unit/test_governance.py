@@ -101,6 +101,13 @@ class GovernanceTests(unittest.TestCase):
                 self.assertTrue(decision.allowed)
                 self.assertEqual(decision.reason, "allowed_natural")
 
+    def test_collect_context_allows_safe_natural_flower_types(self):
+        for block_type in ("dandelion", "poppy", "blue_orchid", "cornflower"):
+            with self.subTest(block_type=block_type):
+                decision = self.policy.can_break((0, 64, 0), block_type, BreakContext.COLLECT)
+                self.assertTrue(decision.allowed)
+                self.assertEqual(decision.reason, "allowed_natural")
+
     def test_collect_context_rejects_non_target_trash(self):
         decision = self.policy.can_break((0, 64, 0), "stone", BreakContext.COLLECT)
 

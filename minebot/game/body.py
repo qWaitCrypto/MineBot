@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import re
-from typing import Any
+from typing import Any, NoReturn
 
 from minebot.contract import (
     Action,
@@ -16,10 +16,20 @@ from minebot.contract import (
     execution_checkpoint,
     perception_next_cursor,
 )
-from minebot.game.errors import BodyActionTimeoutError
+from minebot.game.action_reconciliation import (
+    ActionReconciliationStatus,
+    block_probe_position,
+    classify_authoritative_block,
+    is_mutating_action,
+    reconciled_terminal_event,
+    terminal_event_is_applied,
+    terminal_event_name,
+)
+from minebot.game.errors import ActionReconciliationUnknownError, BodyActionTimeoutError, BodyProtocolError
 from minebot.game.protocol import (
     RCON_SLOT_PAGE_SIZE,
     build_action_call,
+    build_action_status_call,
     build_chat_drain_call,
     build_despawn_call,
     build_drain_call,
@@ -152,11 +162,12 @@ class ScarpetBody:
         action_id: str | None = None,
         action_name: str | None = None,
         scope: str | None = None,
+        retry: bool = True,
     ) -> str:
         execution_checkpoint()
         started = time.monotonic()
         try:
-            raw = self.transport.request(command)
+            raw = self._transport_request(command, retry=retry)
         except Exception as exc:
             elapsed_ms = (time.monotonic() - started) * 1000.0
             self._record_request(
@@ -184,6 +195,294 @@ class ScarpetBody:
         )
         execution_checkpoint()
         return raw
+
+    def _transport_request(self, command: str, *, retry: bool) -> str:
+        if retry:
+            return self.transport.request(command)
+        request_once = getattr(self.transport, "request_once", None)
+        if callable(request_once):
+            return request_once(command)
+        # Test doubles and transports without a retry policy are already
+        # single-shot; preserving their request boundary keeps the contract
+        # transport-agnostic.
+        return self.transport.request(command)
+
+    def _reconnect_transport(self) -> None:
+        reconnect = getattr(self.transport, "reconnect", None)
+        if callable(reconnect):
+            reconnect()
+
+    def _begin_action_trace(
+        self,
+        action: Action,
+        action_start_seq: int,
+        result: Result | None,
+        *,
+        dispatch_error: str | None = None,
+    ) -> None:
+        self._inflight_action_traces[action.id] = {
+            "action_id": action.id,
+            "action_name": action.name,
+            "params": dict(action.params),
+            "dispatch_ok": bool(result.ok) if result is not None else False,
+            "accepted": bool(result.accepted) if result is not None else False,
+            "dispatch_error": dispatch_error if dispatch_error is not None else (result.error if result else None),
+            "dispatch_result": dict(result.data) if result is not None else {},
+        }
+        self._action_start_seqs[action.id] = action_start_seq
+
+    def _finish_action_without_terminal(self, action_id: str) -> None:
+        trace = dict(self._inflight_action_traces.pop(action_id, {}))
+        self._action_start_seqs.pop(action_id, None)
+        trace.update(
+            {
+                "terminal_event": None,
+                "terminal_seq": None,
+                "terminal_tick": None,
+                "terminal_data": None,
+                "wait_ms": 0.0,
+                "poll_count": 0,
+                "observed_events": 0,
+            }
+        )
+        self._append_completed_action_trace(trace)
+
+    def _status_terminal_event(self, status: Result) -> Event | None:
+        raw = status.data.get("terminal")
+        if not isinstance(raw, dict):
+            return None
+        name = raw.get("name")
+        data = raw.get("data")
+        if not isinstance(name, str) or not isinstance(data, dict):
+            return None
+        try:
+            seq = int(raw.get("seq") or 0)
+            tick = int(raw.get("tick") or 0)
+        except (TypeError, ValueError):
+            return None
+        return Event(
+            seq=seq,
+            tick=tick,
+            bot=str(raw.get("bot") or self.bot_name),
+            name=name,
+            data=dict(data),
+        )
+
+    def _status_dispatch_result(self, status: Result) -> Result | None:
+        raw = status.data.get("dispatch")
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return Result(
+                id=raw.get("id"),
+                bot=str(raw.get("bot") or self.bot_name),
+                type="result",
+                ok=bool(raw.get("ok")),
+                accepted=bool(raw.get("accepted")),
+                complete=bool(raw.get("complete", True)),
+                data=dict(raw.get("data") or {}),
+                error=raw.get("error"),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def _matching_terminal_event(self, action: Action) -> Event | None:
+        expected = terminal_event_name(action.name)
+        if expected is None:
+            return None
+        for event in reversed(self.event_log):
+            if event.name == expected and event.data.get("action_id") == action.id:
+                return event
+        try:
+            for event in self.poll_events():
+                if event.name == expected and event.data.get("action_id") == action.id:
+                    return event
+        except Exception:
+            return None
+        return None
+
+    def _register_reconciled_terminal(self, action: Action, event: Event) -> Event:
+        for existing in reversed(self.event_log):
+            if existing.name == event.name and existing.data.get("action_id") == action.id:
+                return existing
+        seq = int(event.seq)
+        after_seq = self._action_start_seqs.get(action.id, self.last_seq)
+        if seq <= max(self.last_seq, after_seq):
+            seq = max(self.last_seq, after_seq) + 1
+        normalized = Event(
+            seq=seq,
+            tick=event.tick,
+            bot=self.bot_name,
+            name=event.name,
+            data=dict(event.data),
+        )
+        self.event_log.append(normalized)
+        self.last_seq = max(self.last_seq, normalized.seq)
+        return normalized
+
+    def _raise_reconciliation_unknown(
+        self,
+        action: Action,
+        *,
+        evidence: dict[str, object],
+        cause: BaseException | None = None,
+    ) -> NoReturn:
+        trace = self._inflight_action_traces.pop(action.id, {})
+        self._action_start_seqs.pop(action.id, None)
+        trace = dict(trace)
+        trace["reconciliation_status"] = ActionReconciliationStatus.UNKNOWN.value
+        trace["reconciliation_evidence"] = dict(evidence)
+        if cause is not None:
+            trace["reconciliation_error"] = {
+                "type": type(cause).__name__,
+                "message": str(cause),
+            }
+        trace.update(
+            {
+                "terminal_event": None,
+                "terminal_seq": None,
+                "terminal_tick": None,
+                "terminal_data": None,
+                "wait_ms": 0.0,
+                "poll_count": 0,
+                "observed_events": 0,
+            }
+        )
+        self._append_completed_action_trace(trace)
+        diagnostics = {
+            "action_id": action.id,
+            "action_name": action.name,
+            "status": ActionReconciliationStatus.UNKNOWN.value,
+            "evidence": dict(evidence),
+        }
+        if cause is not None:
+            diagnostics["cause_type"] = type(cause).__name__
+            diagnostics["cause"] = str(cause)
+        raise ActionReconciliationUnknownError(
+            f"action outcome unknown after transport failure: {action.name} ({action.id})",
+            diagnostics=diagnostics,
+        ) from cause
+
+    def _reconcile_mutation_dispatch(
+        self,
+        action: Action,
+        action_start_seq: int,
+        dispatch_error: BaseException,
+    ) -> Result:
+        self._begin_action_trace(
+            action,
+            action_start_seq,
+            None,
+            dispatch_error=f"{type(dispatch_error).__name__}: {dispatch_error}",
+        )
+        evidence: dict[str, object] = {
+            "dispatch_failure": {
+                "type": type(dispatch_error).__name__,
+                "message": str(dispatch_error),
+            },
+            "status_lookup": "pending",
+        }
+        try:
+            self._reconnect_transport()
+            status = parse_result(
+                self._timed_request(
+                    build_action_status_call(self.bot_name, action.id, self.app),
+                    kind="action_reconcile_status",
+                    action_id=action.id,
+                    action_name=action.name,
+                    retry=True,
+                )
+            )
+        except Exception as exc:
+            self._raise_reconciliation_unknown(action, evidence=evidence, cause=exc)
+
+        evidence["status_lookup"] = "ok" if status.ok else "rejected"
+        self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
+        remembered = self._status_dispatch_result(status)
+        if remembered is not None:
+            self._inflight_action_traces[action.id]["dispatch_result"] = dict(remembered.data)
+            self._inflight_action_traces[action.id]["dispatch_ok"] = remembered.ok
+            self._inflight_action_traces[action.id]["accepted"] = remembered.accepted
+            self._inflight_action_traces[action.id]["dispatch_error"] = remembered.error
+            if not (remembered.ok and remembered.accepted):
+                self._inflight_action_traces[action.id]["reconciliation_status"] = "not_applied"
+                self._finish_action_without_terminal(action.id)
+                return remembered
+
+        terminal = self._status_terminal_event(status)
+        if terminal is None:
+            terminal = self._matching_terminal_event(action)
+        if terminal is not None:
+            evidence["terminal_event"] = terminal.name
+            if terminal_event_is_applied(terminal):
+                self._inflight_action_traces[action.id]["reconciliation_status"] = "applied"
+                self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
+                self._register_reconciled_terminal(action, terminal)
+                return Result(
+                    id=action.id,
+                    bot=self.bot_name,
+                    type="result",
+                    ok=True,
+                    accepted=True,
+                    complete=True,
+                    data={"action": action.name, "reconciled": "terminal_event"},
+                    error=None,
+                )
+
+        target = block_probe_position(action)
+        if target is not None:
+            try:
+                perception = self.perceive(
+                    "blockAt",
+                    {"x": target[0], "y": target[1], "z": target[2]},
+                )
+                if not perception.ok:
+                    raise BodyProtocolError(perception.error or "block probe rejected")
+                current_type = str(perception.data.get("type") or "unknown")
+                classification = classify_authoritative_block(action, current_type)
+            except Exception as exc:
+                self._raise_reconciliation_unknown(action, evidence=evidence, cause=exc)
+            evidence["block"] = dict(classification.evidence)
+            self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
+            if classification.status is ActionReconciliationStatus.APPLIED:
+                self._inflight_action_traces[action.id]["reconciliation_status"] = "applied"
+                synthetic = reconciled_terminal_event(action, classification)
+                if synthetic is not None:
+                    self._register_reconciled_terminal(action, synthetic)
+                    return Result(
+                        id=action.id,
+                        bot=self.bot_name,
+                        type="result",
+                        ok=True,
+                        accepted=True,
+                        complete=True,
+                        data={"action": action.name, "reconciled": "authoritative_world"},
+                        error=None,
+                    )
+            if classification.status is ActionReconciliationStatus.NOT_APPLIED:
+                try:
+                    resent = parse_result(
+                        self._timed_request(
+                            build_action_call(self.bot_name, action, self.app),
+                            kind="action_dispatch_reconcile_resend",
+                            action_id=action.id,
+                            action_name=action.name,
+                            retry=False,
+                        )
+                    )
+                except Exception as exc:
+                    self._raise_reconciliation_unknown(action, evidence=evidence, cause=exc)
+                self._inflight_action_traces[action.id]["reconciliation_status"] = "not_applied"
+                self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
+                self._inflight_action_traces[action.id]["dispatch_result"] = dict(resent.data)
+                self._inflight_action_traces[action.id]["dispatch_ok"] = resent.ok
+                self._inflight_action_traces[action.id]["accepted"] = resent.accepted
+                self._inflight_action_traces[action.id]["dispatch_error"] = resent.error
+                if not (resent.ok and resent.accepted):
+                    self._finish_action_without_terminal(action.id)
+                return resent
+
+        self._raise_reconciliation_unknown(action, evidence=evidence)
 
     def _append_completed_action_trace(self, trace: dict[str, object]) -> None:
         self.completed_action_traces.append(trace)
@@ -416,42 +715,27 @@ class ScarpetBody:
 
     def execute(self, action: Action) -> Result:
         action_start_seq = self.last_seq
-        result = parse_result(
-            self._timed_request(
-                build_action_call(self.bot_name, action, self.app),
-                kind="action_dispatch",
-                action_id=action.id,
-                action_name=action.name,
+        try:
+            result = parse_result(
+                self._timed_request(
+                    build_action_call(self.bot_name, action, self.app),
+                    kind="action_dispatch",
+                    action_id=action.id,
+                    action_name=action.name,
+                    retry=not is_mutating_action(action.name),
+                )
             )
-        )
-        self._inflight_action_traces[action.id] = {
-            "action_id": action.id,
-            "action_name": action.name,
-            "params": dict(action.params),
-            "dispatch_ok": result.ok,
-            "accepted": result.accepted,
-            "dispatch_error": result.error,
-            "dispatch_result": dict(result.data),
-        }
-        self._action_start_seqs[action.id] = action_start_seq
+        except (OSError, BodyProtocolError) as exc:
+            if is_mutating_action(action.name):
+                return self._reconcile_mutation_dispatch(action, action_start_seq, exc)
+            raise
+        self._begin_action_trace(action, action_start_seq, result)
         if not (result.ok and result.accepted):
-            self._append_completed_action_trace(
-                {
-                    **self._inflight_action_traces.pop(action.id),
-                    "terminal_event": None,
-                    "terminal_seq": None,
-                    "terminal_tick": None,
-                    "terminal_data": None,
-                    "wait_ms": 0.0,
-                    "poll_count": 0,
-                    "observed_events": 0,
-                }
-            )
-            self._action_start_seqs.pop(action.id, None)
+            self._finish_action_without_terminal(action.id)
         elif action.name in RESULT_TERMINAL_ACTIONS:
-            self._append_completed_action_trace(
+            trace = dict(self._inflight_action_traces.pop(action.id))
+            trace.update(
                 {
-                    **self._inflight_action_traces.pop(action.id),
                     "terminal_event": "actionResult",
                     "terminal_seq": None,
                     "terminal_tick": None,
@@ -461,6 +745,7 @@ class ScarpetBody:
                     "observed_events": 0,
                 }
             )
+            self._append_completed_action_trace(trace)
             self._action_start_seqs.pop(action.id, None)
         return result
 
@@ -715,13 +1000,16 @@ class ScarpetBody:
         epoch = str(result.data.get("epoch") or "")
         if not epoch:
             raise ValueError("event head is missing epoch")
-        return {
+        head = {
             "event_seq": int(result.data.get("eventSeq") or 0),
             "chat_seq": int(result.data.get("chatSeq") or 0),
             "tick": int(result.data.get("tick") or 0),
             "epoch": epoch,
             "owner": None if result.data.get("owner") is None else str(result.data["owner"]),
         }
+        if result.data.get("pendingActionCount") is not None:
+            head["pending_action_count"] = int(result.data["pendingActionCount"])
+        return head
 
     def _poll_events_pages(self, *, kind: str, since_seq: int, chat: bool = False) -> list[Event]:
         events: list[Event] = []

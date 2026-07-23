@@ -36,6 +36,7 @@ from minebot.app.local_launcher import (  # noqa: E402
 )
 from minebot.app.observability import sanitize_observation  # noqa: E402
 from minebot.app.real_server_session import (  # noqa: E402
+    AG_FP30_GOAL,
     InteractiveScenarioContext,
     real_server_config_from_env,
     run_real_server_interactive,
@@ -43,11 +44,8 @@ from minebot.app.real_server_session import (  # noqa: E402
 from minebot.camera.config import discover_camera_config_path  # noqa: E402
 
 
-MATERIAL_GOAL = (
-    "请在不破坏玩家建造的前提下，自主收集木头，制作工作台和木镐，"
-    "采集煤炭与铁矿，熔炼铁锭并装备合适工具。遇到不可达目标时使用已有工具探索，"
-    "并基于真实世界结果更新计划或报告类型化原因。"
-)
+# Keep the scenario ingress byte-for-byte aligned with the frozen evaluator.
+MATERIAL_GOAL = AG_FP30_GOAL
 GUIDE_NAME = "MineBotGuide"
 IDLE_PROMPT = "请暂时不要行动，等待环境中的下一次实质变化后再决定如何继续。"
 _BODY_READY_TIMEOUT_S = 120.0
@@ -158,6 +156,7 @@ def _run_child(
                     max_steps=None,
                     camera_config=camera_path,
                     scenario_hook=hook,
+                    terminal_goal=AG_FP30_GOAL,
                 )
             )
         )
@@ -189,6 +188,13 @@ def _trace_summary(path: Path) -> dict[str, object]:
         for event in events
         if event.get("event") == "session_terminal" and isinstance(event.get("terminal_truth"), dict)
     ]
+    canonical_terminal_truths = [
+        truth
+        for truth in terminal_truths
+        if isinstance(truth, dict)
+        and " ".join(str(truth.get("goal") or "").split()).casefold()
+        == " ".join(AG_FP30_GOAL.split()).casefold()
+    ]
     world_ids = sorted(
         {
             str(event.get("world_id"))
@@ -211,6 +217,13 @@ def _trace_summary(path: Path) -> dict[str, object]:
         "scenario_failures": counts["scenario_fixture_failed"],
         "world_ids": world_ids,
         "terminal_truths": terminal_truths,
+        "canonical_terminal_truths": canonical_terminal_truths,
+        "authoritative_satisfied": bool(
+            canonical_terminal_truths
+            and canonical_terminal_truths[-1].get("satisfied") is True
+            and isinstance(canonical_terminal_truths[-1].get("facts"), dict)
+            and canonical_terminal_truths[-1]["facts"].get("terminal_satisfied") is True
+        ),
         "ready_to_terminal_elapsed_s": ready_to_terminal_elapsed_s,
         "idle_window": idle_window,
         "governance_events": sum(
@@ -536,7 +549,8 @@ def main(argv: list[str] | None = None) -> int:
     }
     (run_dir / "gate-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"AG gate report: {run_dir / 'gate-report.json'}")
-    return 0 if first.body_ready and second.body_ready and first.exit_code in {-15, 0} and second.exit_code == 0 else 1
+    terminal_ok = bool(report["trace"].get("authoritative_satisfied"))
+    return 0 if first.body_ready and second.body_ready and first.exit_code in {-15, 0} and second.exit_code == 0 and terminal_ok else 1
 
 
 def _read_diagnostic(path: Path) -> dict[str, object] | None:

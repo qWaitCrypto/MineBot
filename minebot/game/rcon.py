@@ -79,6 +79,32 @@ class RconClient(BodyTransport):
     def request(self, command: str) -> str:
         return self.command(command)
 
+    def request_once(self, command: str) -> str:
+        """Dispatch one command without replaying it after a lost response.
+
+        This is reserved for Body mutation dispatches.  The caller owns the
+        action-level reconciliation decision after a transport failure.
+        """
+
+        with self._lock:
+            if self._sock is None:
+                self.connect()
+            try:
+                return self._request(2, command)
+            except (OSError, RconError):
+                self._transport_failures += 1
+                self._consecutive_failures += 1
+                raise
+
+    def reconnect(self) -> None:
+        """Reset the socket so a caller can perform read-only reconciliation."""
+
+        with self._lock:
+            self.close()
+            self.connect()
+            self._reconnects += 1
+            self._consecutive_failures = 0
+
     def _request(self, kind: int, payload: str) -> str:
         if self._sock is None:
             raise RconError("RCON socket is not connected")

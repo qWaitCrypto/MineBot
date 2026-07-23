@@ -12,10 +12,7 @@ from minebot.body.block_approach import (
 )
 from minebot.body.block_work import (
     BlockWork,
-    _is_clear_perception,
-    _is_solid_support_perception,
-    _mining_interaction_stand_candidates,
-    _mining_approach_stand_candidates,
+    _governance_needs_inspection,
     _mining_reach_distance,
     _mining_stand_sort_key,
 )
@@ -29,7 +26,11 @@ from minebot.body.navigation import (
     NavigationRunConfig,
     NavigationTransactions,
     dry_land_navigation_config,
+    governed_mobility_navigation_config,
+    load_limited_navigation_config,
+    navigation_zero_progress,
 )
+from minebot.body.reach import ReachIntent, block_reach_domains, round_robin_reach_goals
 from minebot.body.world_read import read_block_facts
 from minebot.contract import Body, BreakContext, Position, ToolResult, is_candidate_skip
 from minebot.game.navigation import GoalComposite, GoalNear
@@ -95,10 +96,16 @@ class ResourceCollectionTransactions:
         candidate_attempts = 0
         mutation_attempts = 0
         candidate_blacklist: set[Position] = set()
+        # Some failures invalidate only the exact target that was attempted.
+        # Keep those separate from the spatial-cluster blacklist used for
+        # route/stand failures so an occluded block does not erase a viable
+        # neighboring block in the same vein.
+        exact_candidate_blacklist: set[Position] = set()
         patch_blacklist: list[Position] = []
         attempts: list[dict[str, object]] = []
         searches: list[dict[str, object]] = []
         navigation_failures: list[str] = []
+        inspection_candidates: list[dict[str, object]] = []
         mobility_egress_attempted = False
         pending_targets: tuple[NearbyBlockTarget, ...] = ()
         tree_pending_targets: tuple[NearbyBlockTarget, ...] = ()
@@ -159,7 +166,13 @@ class ResourceCollectionTransactions:
                     (not pending_targets and not tree_pending_targets)
                     or search.reason != "resource_candidates_not_found"
                 ):
-                    reason = "resource_domain_partial_exhausted" if collected > 0 else search.reason
+                    reason = (
+                        "needs_inspection"
+                        if inspection_candidates and search.reason == "resource_candidates_not_found"
+                        else "resource_domain_partial_exhausted"
+                        if collected > 0
+                        else search.reason
+                    )
                     return self._terminal(
                         success=False,
                         reason=reason,
@@ -175,6 +188,7 @@ class ResourceCollectionTransactions:
                         config=cfg,
                         started=started,
                         last_failure=search.to_payload(),
+                        inspection_candidates=inspection_candidates,
                     )
                 search = NearbyBlockSearch(
                     targets=[],
@@ -188,6 +202,7 @@ class ResourceCollectionTransactions:
             active = _active_targets(
                 search,
                 candidate_blacklist=candidate_blacklist,
+                exact_candidate_blacklist=exact_candidate_blacklist,
                 patch_blacklist=patch_blacklist,
                 limit=cfg.find_limit if candidate_budget_hit else max(1, cfg.candidate_budget - candidate_attempts),
                 pending_targets=pending_targets,
@@ -208,6 +223,7 @@ class ResourceCollectionTransactions:
                     terminal_reason,
                     navigation_failures=navigation_failures,
                     mutation_attempts=mutation_attempts,
+                    inspection_pending=bool(inspection_candidates),
                 )
                 return self._terminal(
                     success=False,
@@ -224,12 +240,14 @@ class ResourceCollectionTransactions:
                     config=cfg,
                     started=started,
                     navigation_failures=navigation_failures,
+                    inspection_candidates=inspection_candidates,
                 )
             if not active:
                 terminal_reason = _candidate_exhaustion_terminal_reason(
                     "resource_domain_partial_exhausted" if collected > 0 else "resource_candidate_domain_exhausted",
                     navigation_failures=navigation_failures,
                     mutation_attempts=mutation_attempts,
+                    inspection_pending=bool(inspection_candidates),
                 )
                 return self._terminal(
                     success=False,
@@ -246,6 +264,7 @@ class ResourceCollectionTransactions:
                     config=cfg,
                     started=started,
                     navigation_failures=navigation_failures,
+                    inspection_candidates=inspection_candidates,
                 )
 
             domain = _build_stand_domain(self.body, active, max_goals=cfg.max_goals)
@@ -268,18 +287,19 @@ class ResourceCollectionTransactions:
                 )
 
             goal = GoalComposite(tuple(GoalNear(pos, radius=0) for pos in domain.goals))
-            nav_config = dry_land_navigation_config(
-                replace(
-                    NavigationRunConfig(),
-                    segment_timeout_s=cfg.segment_timeout_s,
-                    max_break_steps=self.work.MINE_APPROACH_MAX_BREAK_STEPS,
-                )
-            )
+            nav_base_config = load_limited_navigation_config(replace(
+                NavigationRunConfig(),
+                segment_timeout_s=cfg.segment_timeout_s,
+                max_break_steps=self.work.MINE_APPROACH_MAX_BREAK_STEPS,
+            ))
+            nav_config = dry_land_navigation_config(nav_base_config)
+            before_navigation = self.body.get_state().pos
             navigation = self.navigator.navigate_to(
                 goal,
                 break_context=BreakContext.COLLECT_APPROACH,
                 config=nav_config,
             )
+            after_navigation = self.body.get_state().pos
             selected_goal = _selected_goal(navigation, domain.goals)
             selected_targets = domain.targets_by_goal.get(selected_goal, ())
             attempt: dict[str, object] = {
@@ -290,7 +310,47 @@ class ResourceCollectionTransactions:
                 "goal_set": [list(pos) for pos in domain.goals],
                 "domain": domain.diagnostics,
                 "navigation": navigation.to_payload(),
+                "navigation_profile": "dry_land",
             }
+
+            if (
+                not navigation.success
+                and navigation.reason in {"no_path", "budget_exceeded"}
+                and navigation_zero_progress(
+                    navigation,
+                    before_navigation,
+                    after_navigation,
+                )
+            ):
+                fallback_config = governed_mobility_navigation_config(nav_base_config)
+                fallback_before = self.body.get_state().pos
+                fallback = self.navigator.navigate_to(
+                    goal,
+                    break_context=BreakContext.COLLECT_APPROACH,
+                    config=fallback_config,
+                )
+                fallback_after = self.body.get_state().pos
+                attempt["navigation_fallback"] = {
+                    "attempted": True,
+                    "profile": "governed_mobility",
+                    "trigger": navigation.reason,
+                    "trigger_zero_progress": True,
+                    "dry_terminal_reason": navigation.reason,
+                    "dry_result": navigation.to_payload(),
+                    "result": fallback.to_payload(),
+                    "fallback_zero_progress": navigation_zero_progress(
+                        fallback,
+                        fallback_before,
+                        fallback_after,
+                    ),
+                }
+                navigation = fallback
+                selected_goal = _selected_goal(navigation, domain.goals)
+                selected_targets = domain.targets_by_goal.get(selected_goal, ())
+                attempt["selected_goal"] = list(selected_goal)
+                attempt["selected_targets"] = [list(target.pos) for target in selected_targets]
+                attempt["navigation"] = navigation.to_payload()
+                attempt["navigation_profile"] = "governed_mobility"
 
             if navigation.reason in {"preempted", "body_missing", "death", "respawned", "progress_yielded"}:
                 attempts.append(attempt)
@@ -444,6 +504,7 @@ class ResourceCollectionTransactions:
                 target_block_types=normalized_blocks,
                 timeout_s=cfg.segment_timeout_s,
                 prepositioned=True,
+                navigation_config=nav_base_config,
             )
             attempt["target"] = list(target.pos)
             attempt["block_type"] = target.block_type
@@ -454,6 +515,7 @@ class ResourceCollectionTransactions:
                 delta = max(0, int((mined.metrics or {}).get("collected_total") or 0))
                 collected += delta
                 candidate_blacklist.discard(target.pos)
+                exact_candidate_blacklist.discard(target.pos)
                 _remove_patch_blacklist(patch_blacklist, target.pos)
                 if delta <= 0:
                     blacklist_candidate_clusters(candidate_blacklist, (target.pos,))
@@ -478,7 +540,19 @@ class ResourceCollectionTransactions:
                 )
 
             if is_candidate_skip(mined.reason) or mined.reason == "collect_no_inventory_delta":
-                blacklist_candidate_clusters(candidate_blacklist, (target.pos,))
+                if _governance_needs_inspection(mined.reason):
+                    inspection_candidates.append(
+                        {
+                            "target": list(target.pos),
+                            "block_type": target.block_type,
+                            "reason": mined.reason,
+                            "metrics": dict(mined.metrics or {}),
+                        }
+                    )
+                if mined.reason == "target_occluded":
+                    exact_candidate_blacklist.add(target.pos)
+                else:
+                    blacklist_candidate_clusters(candidate_blacklist, (target.pos,))
                 tree_pending_targets = _remove_tree_pending_clusters(tree_pending_targets, (target.pos,))
                 if _is_patch_resource(target.block_type) and _is_patch_blocker(mined.reason):
                     _add_patch_blacklist(patch_blacklist, target.pos)
@@ -535,6 +609,7 @@ class ResourceCollectionTransactions:
         started: float,
         last_failure: dict[str, object] | None = None,
         navigation_failures: list[str] | None = None,
+        inspection_candidates: list[dict[str, object]] | None = None,
     ) -> ToolResult:
         metrics: dict[str, object] = {
             "block_types": list(block_types),
@@ -547,6 +622,9 @@ class ResourceCollectionTransactions:
             "patch_blacklist": [list(pos) for pos in patch_blacklist],
             "attempts": attempts,
             "searches": searches,
+            "navigation_fallback_attempts": sum(
+                1 for attempt in attempts if isinstance(attempt.get("navigation_fallback"), dict)
+            ),
             "elapsed_ms": round((time.monotonic() - started) * 1000.0, 3),
             "budget": {
                 "candidate_budget": config.candidate_budget,
@@ -564,6 +642,13 @@ class ResourceCollectionTransactions:
             metrics["last_failure"] = last_failure
         if navigation_failures:
             metrics["navigation_failure_reasons"] = list(navigation_failures)
+        if inspection_candidates:
+            metrics["inspection"] = {
+                "state": "needs_inspection",
+                "candidate_count": len(inspection_candidates),
+                "candidates": inspection_candidates,
+                "next": "supply sparse structural/Vision evidence, then recheck exact target coordinates",
+            }
         return ToolResult(success, reason, can_retry, metrics=metrics)
 
 
@@ -607,6 +692,7 @@ def _active_targets(
     search: NearbyBlockSearch,
     *,
     candidate_blacklist: set[Position],
+    exact_candidate_blacklist: set[Position] | frozenset[Position] = frozenset(),
     patch_blacklist: list[Position],
     limit: int,
     pending_targets: tuple[NearbyBlockTarget, ...] = (),
@@ -616,6 +702,8 @@ def _active_targets(
     seen_priority: set[Position] = set()
     for target in priority_targets:
         if target.pos in seen_priority:
+            continue
+        if target.pos in exact_candidate_blacklist:
             continue
         if _is_patch_resource(target.block_type) and _in_patch_blacklist(target.pos, patch_blacklist):
             continue
@@ -631,6 +719,7 @@ def _active_targets(
     eligible = [
         target
         for target in by_position.values()
+        if target.pos not in exact_candidate_blacklist
         if not (
             _is_patch_resource(target.block_type)
             and _in_patch_blacklist(target.pos, patch_blacklist)
@@ -779,8 +868,15 @@ def _candidate_exhaustion_terminal_reason(
     *,
     navigation_failures: list[str],
     mutation_attempts: int,
+    inspection_pending: bool = False,
 ) -> str:
     """Preserve a route-only resource failure without relabeling other budgets."""
+
+    if inspection_pending and fallback_reason in {
+        "resource_candidate_domain_exhausted",
+        "resource_domain_partial_exhausted",
+    }:
+        return "needs_inspection"
 
     if (
         mutation_attempts == 0
@@ -802,101 +898,56 @@ def _build_stand_domain(
     max_goals: int,
 ) -> _StandDomain | ToolResult:
     current = body.get_state().pos
-    approaches: dict[Position, tuple[Position, ...]] = {}
-    expanded_approaches: dict[Position, tuple[Position, ...]] = {}
-    wanted: list[Position] = []
-    for target in targets:
-        target_approaches = _mining_approach_stand_candidates(target.pos)
-        approaches[target.pos] = target_approaches
-        expanded_approaches[target.pos] = _mining_interaction_stand_candidates(target.pos)
-        for stand in target_approaches:
-            wanted.extend((stand, (stand[0], stand[1] + 1, stand[2]), (stand[0], stand[1] - 1, stand[2])))
-    try:
-        facts = read_block_facts(body, tuple(dict.fromkeys(wanted)), failure_label="resource_stand_domain")
-    except ValueError as exc:
-        return ToolResult(
-            False,
-            "perception_failed",
-            True,
-            metrics={"scope": "blockCells", "failure_label": "resource_stand_domain", "error": str(exc)},
-        )
-
     stands_by_target: dict[Position, list[Position]] = {}
-    expansion_targets: list[NearbyBlockTarget] = []
-    for target in targets:
-        standable: list[Position] = []
-        for stand in approaches[target.pos]:
-            feet = facts.get(stand)
-            head = facts.get((stand[0], stand[1] + 1, stand[2]))
-            support = facts.get((stand[0], stand[1] - 1, stand[2]))
-            if feet is None or head is None or support is None:
-                continue
-            if _is_clear_perception(feet) and _is_clear_perception(head) and _is_solid_support_perception(support):
-                standable.append(stand)
-        if standable:
-            candidates = standable
-        else:
-            expansion_targets.append(target)
-            candidates = []
-        stands_by_target[target.pos] = list(dict.fromkeys(candidates))
-
-    extra_wanted: list[Position] = []
-    for target in expansion_targets:
-        for stand in expanded_approaches[target.pos]:
-            if stand not in approaches[target.pos]:
-                extra_wanted.extend(
-                    (stand, (stand[0], stand[1] + 1, stand[2]), (stand[0], stand[1] - 1, stand[2]))
-                )
-    if extra_wanted:
-        try:
-            extra_facts = read_block_facts(
+    reach_diagnostics: dict[Position, dict[str, object]] = {}
+    intents = tuple(
+        ReachIntent(
+            target=target.pos,
+            interaction_radius=BlockWork.MINE_INTERACTION_RANGE,
+            vertical_offsets=(1, 0, -1),
+            movement_profile="resource_collection",
+            mutation_profile="governed_break",
+            clearance_profile="governed",
+            require_line_of_sight=True,
+            terminal_predicate="resource_stand_domain",
+        )
+        for target in targets
+    )
+    domains = block_reach_domains(body, intents)
+    if isinstance(domains, ToolResult):
+        return domains
+    for target, domain in zip(targets, domains):
+        candidates = list(domain.candidates)
+        if not candidates:
+            expanded = block_reach_domains(
                 body,
-                tuple(dict.fromkeys(extra_wanted)),
-                failure_label="resource_stand_domain_vertical",
+                (
+                    ReachIntent(
+                        target=target.pos,
+                        interaction_radius=BlockWork.MINE_INTERACTION_RANGE,
+                        vertical_offsets=None,
+                        movement_profile="resource_collection",
+                        mutation_profile="governed_break",
+                        clearance_profile="governed",
+                        require_line_of_sight=True,
+                        terminal_predicate="resource_stand_domain_vertical",
+                    ),
+                ),
             )
-        except ValueError as exc:
-            return ToolResult(
-                False,
-                "perception_failed",
-                True,
-                metrics={"scope": "blockCells", "failure_label": "resource_stand_domain_vertical", "error": str(exc)},
-            )
-        facts.update(extra_facts)
-
-    for target in expansion_targets:
-        standable = []
-        for stand in expanded_approaches[target.pos]:
-            feet = facts.get(stand)
-            head = facts.get((stand[0], stand[1] + 1, stand[2]))
-            support = facts.get((stand[0], stand[1] - 1, stand[2]))
-            if feet is None or head is None or support is None:
-                continue
-            if _is_clear_perception(feet) and _is_clear_perception(head) and _is_solid_support_perception(support):
-                standable.append(stand)
-        candidates = standable or list(expanded_approaches[target.pos])
+            if isinstance(expanded, ToolResult):
+                return expanded
+            domain = expanded[0]
+            candidates = list(domain.candidates)
         candidates.sort(key=lambda stand: _mining_stand_sort_key(current, target.pos, stand))
-        stands_by_target[target.pos] = list(dict.fromkeys(candidates))
+        stands_by_target[target.pos] = tuple(dict.fromkeys(candidates))
+        reach_diagnostics[target.pos] = domain.diagnostics
 
-    goals: list[Position] = []
-    targets_by_goal: dict[Position, list[NearbyBlockTarget]] = {}
-    depth = 0
-    pending = True
-    while pending and len(goals) < max_goals:
-        pending = False
-        for target in targets:
-            candidates = stands_by_target[target.pos]
-            if depth >= len(candidates):
-                continue
-            pending = True
-            stand = candidates[depth]
-            if stand not in goals:
-                goals.append(stand)
-            linked = targets_by_goal.setdefault(stand, [])
-            if target not in linked:
-                linked.append(target)
-            if len(goals) >= max_goals:
-                break
-        depth += 1
+    goals, targets_by_goal = round_robin_reach_goals(
+        targets,
+        stands_by_target,
+        max_goals=max_goals,
+        target_position=lambda target: target.pos,
+    )
 
     if not goals:
         return ToolResult(
@@ -907,7 +958,7 @@ def _build_stand_domain(
         )
     return _StandDomain(
         goals=tuple(goals),
-        targets_by_goal={stand: tuple(linked) for stand, linked in targets_by_goal.items()},
+        targets_by_goal=targets_by_goal,
         targets=targets,
         diagnostics={
             "candidate_targets": [
@@ -920,7 +971,10 @@ def _build_stand_domain(
             ],
             "goal_count": len(goals),
             "max_goals": max_goals,
-            "batched_stand_cells": len(facts),
+            "reach_domains": {
+                ":".join(str(value) for value in pos): diagnostics
+                for pos, diagnostics in reach_diagnostics.items()
+            },
         },
     )
 

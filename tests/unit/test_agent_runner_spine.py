@@ -39,7 +39,7 @@ from minebot.contract import (
     execution_checkpoint,
 )
 from minebot.game.body import ScarpetBody
-from minebot.game.errors import BodyActionTimeoutError, RconError
+from minebot.game.errors import ActionReconciliationUnknownError, BodyActionTimeoutError, RconError
 
 
 def body_state(x=0.0):
@@ -2065,6 +2065,46 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertNotIn("metrics", out)
         self.assertEqual(out["summary"]["error_type"], "RconError")
         self.assertTrue(any(event["event"] == "tool_exception" and event["tool"] == "read_state" for event in trace.snapshot()))
+
+    def test_sdk_tool_preserves_action_reconciliation_unknown_reason(self):
+        def callable_(_params):
+            raise ActionReconciliationUnknownError(
+                "mutation outcome unknown",
+                diagnostics={"action_id": "ambiguous-1", "status": "unknown"},
+            )
+
+        tool = RegisteredTool(
+            name="mine_block",
+            description="Mine one block",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(
+                progress_key="mine_block",
+                mutating=True,
+                permission="mine_block",
+                body_scope=("world",),
+                terminal_truth=("mineDone",),
+            ),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        trace = RuntimeTrace()
+        runtime_context = RuntimeRunContext(
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            weld_context=WeldContext(body=FakeBody(), authority=ProgressAuthority(), goal_text="collect"),
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+
+        self.assertFalse(out["success"])
+        self.assertEqual(out["reason"], "action_reconciliation_unknown")
+        self.assertTrue(out["canRetry"])
+        self.assertEqual(out["summary"]["error_type"], "ActionReconciliationUnknownError")
+        self.assertTrue(any(event["event"] == "tool_transport_recovery_candidate" for event in trace.snapshot()))
 
     def test_sdk_tool_invalid_json_uses_same_model_projection_and_full_trace(self):
         def callable_(_params):

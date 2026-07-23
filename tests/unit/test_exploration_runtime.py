@@ -134,6 +134,35 @@ class ExplorationNavigator:
         return result
 
 
+ZERO_PROGRESS_NAVIGATION_METRICS = {
+    "segments": [
+        {
+            "diagnostics": {
+                "path_length": 0,
+                "waypoints": 0,
+                "move_ticks": 0,
+                "partial_distance": 0.0,
+                "movement_counts": {"walk": 0, "swim": 0},
+            }
+        }
+    ]
+}
+
+POSITIVE_PATH_NAVIGATION_METRICS = {
+    "segments": [
+        {
+            "diagnostics": {
+                "path_length": 3,
+                "waypoints": 3,
+                "move_ticks": 12,
+                "partial_distance": 2.0,
+                "movement_counts": {"walk": 3, "swim": 0},
+            }
+        }
+    ]
+}
+
+
 class PagedFindBlocksBody(ExplorationBody):
     def __init__(self, pages):
         super().__init__()
@@ -230,9 +259,12 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertFalse(config.allow_pillar)
         self.assertFalse(config.allow_downward)
 
-    def test_no_path_uses_one_explicit_aquatic_fallback(self):
+    def test_no_path_uses_one_governed_mobility_fallback(self):
         runtime, _, navigator = _runtime(
-            outcomes=[ToolResult(False, "no_path", True), ToolResult(True, "arrived", False)]
+            outcomes=[
+                ToolResult(False, "no_path", True, metrics=ZERO_PROGRESS_NAVIGATION_METRICS),
+                ToolResult(True, "arrived", False),
+            ]
         )
 
         result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
@@ -240,13 +272,48 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.reason, "budget_exhausted")
         self.assertGreaterEqual(len(navigator.calls), 2)
-        aquatic_config = navigator.calls[1][1]["config"]
-        self.assertTrue(aquatic_config.allow_swim)
-        self.assertTrue(aquatic_config.aquatic_traversal)
-        self.assertFalse(aquatic_config.allow_break)
-        self.assertFalse(aquatic_config.allow_place)
-        self.assertFalse(aquatic_config.allow_pillar)
-        self.assertFalse(aquatic_config.allow_downward)
+        # After zero-progress dry failure, exploration escalates to the same
+        # governed-mobility profile resource collection uses: swim plus the
+        # governed place/break/pillar operator union under normal governance.
+        fallback_config = navigator.calls[1][1]["config"]
+        self.assertTrue(fallback_config.allow_swim)
+        self.assertTrue(fallback_config.aquatic_traversal)
+        self.assertTrue(fallback_config.allow_place)
+        self.assertTrue(fallback_config.allow_pillar)
+
+    def test_partial_no_path_does_not_use_aquatic_fallback(self):
+        runtime, _, navigator = _runtime(
+            outcomes=[
+                ToolResult(False, "no_path", True, metrics=POSITIVE_PATH_NAVIGATION_METRICS),
+                ToolResult(True, "arrived", False),
+            ]
+        )
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "budget_exhausted")
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertFalse(navigator.calls[1][1]["config"].aquatic_traversal)
+
+    def test_zero_progress_budget_exceeded_uses_aquatic_fallback(self):
+        runtime, _, navigator = _runtime(
+            outcomes=[
+                ToolResult(
+                    False,
+                    "budget_exceeded",
+                    True,
+                    metrics=ZERO_PROGRESS_NAVIGATION_METRICS,
+                ),
+                ToolResult(True, "arrived", False),
+            ]
+        )
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertGreaterEqual(len(navigator.calls), 2)
+        self.assertTrue(navigator.calls[1][1]["config"].aquatic_traversal)
 
     def test_no_path_attempts_one_body_owned_mobility_egress_before_next_frontier(self):
         body = ExplorationBody()
@@ -264,7 +331,10 @@ class ExplorationTransactionsTests(unittest.TestCase):
 
         runtime, _, navigator = _runtime(
             body=body,
-            outcomes=[ToolResult(False, "no_path", True), ToolResult(True, "arrived", False)],
+            outcomes=[
+                ToolResult(False, "no_path", True, metrics=ZERO_PROGRESS_NAVIGATION_METRICS),
+                ToolResult(True, "arrived", False),
+            ],
             mobility_egress=egress,
         )
 
@@ -305,7 +375,10 @@ class ExplorationTransactionsTests(unittest.TestCase):
             runtime, _, _ = _runtime(
                 body=body,
                 coverage=coverage,
-                outcomes=[ToolResult(False, "no_path", True), ToolResult(True, "arrived", False)],
+                outcomes=[
+                    ToolResult(False, "no_path", True, metrics=ZERO_PROGRESS_NAVIGATION_METRICS),
+                    ToolResult(True, "arrived", False),
+                ],
                 mobility_egress=egress,
             )
 
@@ -601,6 +674,38 @@ class ExplorationTransactionsTests(unittest.TestCase):
         recovery = result.metrics["candidate_failures"][0]["navigation_attempts"][0]["recovery"]
         self.assertFalse(recovery["success"])
         self.assertEqual(recovery["reason"], "no_path")
+
+    def test_failed_later_frontier_preserves_prior_target_facts(self):
+        class LaterFailureNavigator(ExplorationNavigator):
+            def navigate_to(self, goal, **kwargs):
+                call_index = len(self.calls)
+                self.calls.append((goal, kwargs))
+                if call_index == 1:
+                    return ToolResult(False, "timeout", True)
+                if call_index == 2:
+                    return ToolResult(False, "no_path", True)
+                return super().navigate_to(goal, **kwargs)
+
+        body = ExplorationBody(
+            blocks={
+                (-1, -1): [
+                    {"x": -8, "y": 64, "z": -8, "type": "oak_log", "state": "SOLID", "dist2": 1.0}
+                ]
+            }
+        )
+        navigator = LaterFailureNavigator(body)
+        runtime = ExplorationTransactions(body, navigator, MemoryExplorationCoverageStore())
+
+        result = runtime.explore_for(
+            block_targets=("#logs",),
+            max_regions=3,
+            return_policy="region_budget",
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "found")
+        self.assertEqual(result.metrics["blocks"][0]["pos"], [-8, 64, -8])
+        self.assertTrue(result.metrics["candidate_failures"])
 
     def test_frontier_recovery_counts_toward_distance_budget(self):
         class BudgetRecoveryNavigator(ExplorationNavigator):

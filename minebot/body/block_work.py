@@ -21,6 +21,7 @@ from minebot.body.inventory_read import (
 )
 from minebot.body.pickup import PickupConfig, PickupTransactions
 from minebot.body.navigation import SERVER_GOAL_SET_LIMIT
+from minebot.body.reach import ReachIntent, block_reach_domain, block_reach_geometry
 from minebot.body.world_read import read_block_facts, read_surface_columns
 from minebot.contract import (
     Action,
@@ -517,6 +518,7 @@ class BlockWork:
         pickup_timeout_s: float = 1.5,
         timeout_s: float = 30.0,
         prepositioned: bool = False,
+        navigation_config: object | None = None,
     ) -> ToolResult:
         """Mine one target and verify collection by inventory delta.
 
@@ -592,6 +594,7 @@ class BlockWork:
             before=before,
             expected=expected,
             pickup_timeout_s=pickup_timeout_s,
+            navigation_config=navigation_config,
         )
         failed_after = pickup.get("failed")
         if isinstance(failed_after, ToolResult):
@@ -689,13 +692,21 @@ class BlockWork:
         before: dict[str, int],
         expected: tuple[str, ...],
         pickup_timeout_s: float,
+        navigation_config: object | None = None,
     ) -> dict[str, object]:
         return self.pickup._collect_inventory_delta(
             before=before,
             expected=expected,
             minimum_count=1,
             fallback_positions=_pickup_fallback_positions(pos),
-            config=PickupConfig(poll_timeout_s=pickup_timeout_s),
+            # Item entities can settle one block lower between the first scan
+            # and the approach.  Keep the bounded domain, but allow one extra
+            # rescan for that normal server-side drift.
+            config=PickupConfig(
+                poll_timeout_s=pickup_timeout_s,
+                max_scan_rounds=3,
+                navigation_config=navigation_config,
+            ),
         )
 
     def dig_down_one(
@@ -1401,12 +1412,46 @@ class BlockWork:
                 },
             )
         if not _stand_has_liquid_contact(initial_stand):
+            # A mining or workspace-reclaim transaction can leave the fake
+            # player briefly over an empty cell without liquid contact.  Use
+            # the existing bounded surface-domain recovery before declaring
+            # the position stale; the mobility-egress profile is pure
+            # movement and verifies a natural support cell on arrival.
+            recovery = self.go_to_surface(
+                current_pos=origin,
+                context=BreakContext.TRAVEL,
+                timeout_s=timeout_s,
+                surface_scan_height=max(self.SURFACE_EGRESS_Y_ABOVE, 2),
+                surface_scan_radius=1,
+                require_mobility_egress=True,
+            )
+            recovery_metrics = {
+                "origin": list(origin),
+                "initial_stand": initial_stand,
+                "recovery": recovery.to_payload(),
+            }
+            if recovery.success:
+                final_pos = _state_block_pos(self.body.get_state().pos)
+                terminal_stand = self._standable_feet_at(final_pos)
+                recovery_metrics["final_pos"] = list(final_pos)
+                recovery_metrics["terminal_stand"] = (
+                    terminal_stand.to_payload()
+                    if isinstance(terminal_stand, ToolResult)
+                    else terminal_stand
+                )
+                if not isinstance(terminal_stand, ToolResult) and terminal_stand["standable"]:
+                    return ToolResult(
+                        success=True,
+                        reason="dry_egress_recovered",
+                        can_retry=False,
+                        metrics=recovery_metrics,
+                    )
             return ToolResult(
                 success=False,
                 reason="dry_egress_not_liquid",
                 can_retry=True,
                 next_suggestion="re-read the body position before choosing a non-liquid recovery",
-                metrics={"origin": list(origin), "initial_stand": initial_stand},
+                metrics=recovery_metrics,
             )
 
         egress_domain = self._find_surface_egress_domain(
@@ -3091,7 +3136,9 @@ class BlockWork:
     def _recoverable_place_stands(self, target: Position) -> list[dict[str, object]] | ToolResult:
         state = self.body.get_state()
         candidates: list[tuple[float, dict[str, object]]] = []
-        for stand_pos in _mining_stand_candidates(target):
+        for stand_pos in block_reach_geometry(
+            ReachIntent(target=target, vertical_offsets=(0,), terminal_predicate="place_recovery")
+        ):
             stand = self.body.perceive("blockAt", _block_params(stand_pos))
             failed = _perception_failure(stand)
             if failed is not None:
@@ -3131,7 +3178,9 @@ class BlockWork:
     def _recoverable_place_side_pockets(self, target: Position) -> list[dict[str, object]] | ToolResult:
         state = self.body.get_state()
         candidates: list[tuple[float, dict[str, object]]] = []
-        for stand_pos in _mining_stand_candidates(target):
+        for stand_pos in block_reach_geometry(
+            ReachIntent(target=target, vertical_offsets=(0,), terminal_predicate="place_side_pocket_recovery")
+        ):
             stand = self.body.perceive("blockAt", _block_params(stand_pos))
             failed = _perception_failure(stand)
             if failed is not None:
@@ -3347,16 +3396,39 @@ def _acceptance_failure(result: Result, action_name: str, pos: Position) -> Tool
     )
 
 
+_INSPECTION_DECISION_REASONS = frozenset(
+    {
+        "structure_risk_unknown",
+        "structure_assessment_required",
+    }
+)
+
+
+def _governance_needs_inspection(reason: str | None) -> bool:
+    """Identify an action-local uncertainty that needs more evidence."""
+
+    if not reason:
+        return False
+    normalized = str(reason)
+    return normalized.removeprefix("break_denied:").removeprefix("dig_down_denied:") in _INSPECTION_DECISION_REASONS
+
+
 def _denied_result(prefix: str, pos: Position, block_type: str, decision) -> ToolResult:
+    needs_inspection = _governance_needs_inspection(decision.reason)
     return ToolResult(
         success=False,
         reason=f"{prefix}:{decision.reason}",
-        can_retry=False,
-        next_suggestion="choose another target or register a safe work region/provenance before mutating this block",
+        can_retry=needs_inspection,
+        next_suggestion=(
+            "inspect the bounded structure context or choose another candidate before retrying this mutation"
+            if needs_inspection
+            else "choose another target or register a safe work region/provenance before mutating this block"
+        ),
         metrics={
             "target": list(pos),
             "block_type": block_type,
             "legality": _decision_payload(decision),
+            "evidence_state": "needs_inspection" if needs_inspection else "denied",
         },
     )
 
@@ -3734,79 +3806,50 @@ def _offset_pos(pos: Position, offset: Position) -> Position:
     return (pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2])
 
 
-def _mining_stand_candidates(pos: Position) -> tuple[Position, ...]:
-    return (
-        (pos[0], pos[1], pos[2] - 1),
-        (pos[0], pos[1], pos[2] + 1),
-        (pos[0] - 1, pos[1], pos[2]),
-        (pos[0] + 1, pos[1], pos[2]),
-    )
-
-
 def _mining_approach_stand_candidates(pos: Position) -> tuple[Position, ...]:
-    # Stand candidates are *feet* positions.  For a target block at y=N, a
-    # same-level adjacent floor block supports feet at y=N+1; passing y=N to
-    # moveTo asks the body to walk inside the floor block.  Wall/head targets
-    # can also be mined from feet at y=N or y=N-1, so all nearby vertical bands
-    # are offered and the standability check below filters impossible cells.
-    bands = (
-        (pos[0], pos[1] + 1, pos[2]),
-        pos,
-        (pos[0], pos[1] - 1, pos[2]),
+    return block_reach_geometry(
+        ReachIntent(
+            target=pos,
+            interaction_radius=BlockWork.MINE_INTERACTION_RANGE,
+            vertical_offsets=(1, 0, -1),
+            movement_profile="collect_approach",
+            mutation_profile="governed_break",
+            clearance_profile="governed",
+            terminal_predicate="mining_reach",
+        )
     )
-    candidates: list[Position] = []
-    for band in bands:
-        for candidate in _mining_stand_candidates(band):
-            if candidate not in candidates:
-                candidates.append(candidate)
-    return tuple(candidates)
 
 
 def _mining_interaction_stand_candidates(pos: Position) -> tuple[Position, ...]:
-    """Add vertical stand bands that remain inside the mining reach radius."""
-
-    target_center = (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5)
-    candidates = list(_mining_approach_stand_candidates(pos))
-    for offset in range(-4, 6):
-        stand_y = pos[1] + offset
-        if dist(
-            (pos[0] + 1.5, float(stand_y), pos[2] + 0.5),
-            target_center,
-        ) > BlockWork.MINE_INTERACTION_RANGE:
-            continue
-        for candidate in _mining_stand_candidates((pos[0], stand_y, pos[2])):
-            if candidate not in candidates:
-                candidates.append(candidate)
-    return tuple(candidates)
+    return block_reach_geometry(
+        ReachIntent(
+            target=pos,
+            interaction_radius=BlockWork.MINE_INTERACTION_RANGE,
+            vertical_offsets=None,
+            movement_profile="collect_approach",
+            mutation_profile="governed_break",
+            clearance_profile="governed",
+            terminal_predicate="mining_interaction_reach",
+        )
+    )
 
 
 def _ranked_mining_stand_candidates(body: Body, pos: Position, current: tuple[float, float, float]) -> list[Position] | ToolResult:
-    approach = _mining_approach_stand_candidates(pos)
-    wanted: list[Position] = []
-    for candidate in approach:
-        wanted.append(candidate)
-        wanted.append((candidate[0], candidate[1] - 1, candidate[2]))
-        wanted.append((candidate[0], candidate[1] + 1, candidate[2]))
-    try:
-        facts = read_block_facts(body, tuple(wanted), failure_label="mining_stand")
-    except ValueError as exc:
-        return ToolResult(
-            success=False,
-            reason="perception_failed",
-            can_retry=True,
-            next_suggestion="re-perceive the target block before mutating the world",
-            metrics={"scope": "blockCells", "ok": False, "complete": False, "error": str(exc), "uncertainty": None},
-        )
-    standable: list[Position] = []
-    for candidate in approach:
-        stand = facts.get(candidate)
-        head = facts.get((candidate[0], candidate[1] + 1, candidate[2]))
-        below = facts.get((candidate[0], candidate[1] - 1, candidate[2]))
-        if stand is None or head is None or below is None:
-            continue
-        if _is_clear_perception(stand) and _is_solid_support_perception(below) and _is_clear_perception(head):
-            standable.append(candidate)
-    candidates = standable or list(approach)
+    domain = block_reach_domain(
+        body,
+        ReachIntent(
+            target=pos,
+            interaction_radius=BlockWork.MINE_INTERACTION_RANGE,
+            vertical_offsets=(1, 0, -1),
+            movement_profile="collect_approach",
+            mutation_profile="governed_break",
+            clearance_profile="governed",
+            terminal_predicate="mining_stand",
+        ),
+    )
+    if isinstance(domain, ToolResult):
+        return domain
+    candidates = domain.candidates or domain.geometric_candidates
     return sorted(candidates, key=lambda candidate: _mining_stand_sort_key(current, pos, candidate))
 
 

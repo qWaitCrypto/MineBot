@@ -309,7 +309,11 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         last_failure = None
     else:
         result_reason = _resource_process_reason(body_reason, before_count=before_count, current_count=current_count)
-        result_success = _collect_partial_success(before_count, current_count)
+        # Inventory progress is useful resume evidence, but it does not satisfy
+        # a bounded collect objective until the requested terminal count is met.
+        # Keep the Body failure honest so callers cannot treat partial progress
+        # as a completed capability and move on to dependent steps.
+        result_success = False
         can_retry = bool(body_process.get("canRetry", True))
         resume_hint = "reselect_candidates" if can_retry else "body_terminal"
         last_failure = {
@@ -1134,10 +1138,6 @@ def _resource_process_skips(metrics: dict[str, object]) -> list[dict[str, object
             seen.add(tuple(pos))
             skipped.append({"pos": pos, "reason": "body_candidate_blacklist", "skip": True})
     return skipped
-
-
-def _collect_partial_success(before_count: int, current_count: int) -> bool:
-    return current_count > before_count
 
 
 def _collect_result(

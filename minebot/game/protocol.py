@@ -20,6 +20,12 @@ def build_action_call(bot: str, action: Action, app: str = SCARPET_APP) -> str:
     return _script_call(app, "minebot_action", bot, action.to_payload())
 
 
+def build_action_status_call(bot: str, action_id: str, app: str = SCARPET_APP) -> str:
+    """Read action dispatch/terminal state without executing an action."""
+
+    return _script_call(app, "minebot_action_status", bot, action_id)
+
+
 def build_state_call(bot: str, app: str = SCARPET_APP) -> str:
     return _script_call(app, "minebot_state", bot)
 

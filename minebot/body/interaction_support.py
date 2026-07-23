@@ -17,11 +17,16 @@ from minebot.body.navigation import (
 from minebot.contract import Action, Body, PerceptionResult, Position, ToolResult, perception_next_cursor
 from minebot.contract import terminal_event_to_tool_result
 from minebot.body.world_read import read_block_facts
+from minebot.body.reach import (
+    ReachIntent,
+    block_reach_domain,
+    cell_is_clear,
+    cell_is_solid_support,
+)
 from minebot.game.navigation import GoalComposite, GoalLike, GoalNear
 
 
 INTERACTION_RANGE = 4.5
-STAND_OFFSETS = ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1))
 ENTITY_HANDOFF_OFFSET = 0.4
 ENTITY_STAND_ARRIVAL_RADIUS = 0.25
 
@@ -773,10 +778,27 @@ def interaction_stand_points(
     expand_vertical: bool = False,
     interaction_radius: float = INTERACTION_RANGE,
 ) -> list[Position] | ToolResult:
-    same_level = _interaction_stand_points_at_y(body, target, target[1], include_target=include_target)
+    # Preserve the interaction contract's staged search: a valid same-level
+    # stand is authoritative, and lower/expanded levels are only read when
+    # the preceding band has no valid candidate.  The candidate predicate is
+    # still owned by ReachIntent for every band.
+    same_level = _interaction_reach_band(
+        body,
+        target,
+        vertical_offset=0,
+        include_target=include_target,
+        interaction_radius=interaction_radius,
+    )
     if isinstance(same_level, ToolResult) or same_level:
         return same_level
-    one_below = _interaction_stand_points_at_y(body, target, target[1] - 1, include_target=include_target)
+
+    one_below = _interaction_reach_band(
+        body,
+        target,
+        vertical_offset=-1,
+        include_target=include_target,
+        interaction_radius=interaction_radius,
+    )
     if isinstance(one_below, ToolResult) or one_below or not expand_vertical:
         return one_below
 
@@ -787,10 +809,41 @@ def interaction_stand_points(
         current_y=current_y,
     )
     for stand_y in extra_levels:
-        stands = _interaction_stand_points_at_y(body, target, stand_y, include_target=include_target)
+        stands = _interaction_reach_band(
+            body,
+            target,
+            vertical_offset=stand_y - target[1],
+            include_target=include_target,
+            interaction_radius=interaction_radius,
+        )
         if isinstance(stands, ToolResult) or stands:
             return stands
     return []
+
+
+def _interaction_reach_band(
+    body: Body,
+    target: Position,
+    *,
+    vertical_offset: int,
+    include_target: bool,
+    interaction_radius: float,
+) -> list[Position] | ToolResult:
+    domain = block_reach_domain(
+        body,
+        ReachIntent(
+            target=target,
+            interaction_radius=interaction_radius,
+            vertical_offsets=(vertical_offset,),
+            include_target=include_target,
+            movement_profile="pure_movement",
+            mutation_profile="none",
+            terminal_predicate="interaction_range",
+        ),
+    )
+    if isinstance(domain, ToolResult):
+        return domain
+    return list(domain.candidates)
 
 
 def _interaction_vertical_reach_levels(
@@ -813,56 +866,6 @@ def _interaction_vertical_reach_levels(
             levels.append(stand_y)
     levels.sort(key=lambda stand_y: (abs(float(stand_y) - current_y), abs(stand_y - target[1]), stand_y))
     return tuple(levels)
-
-
-def _interaction_stand_points_at_y(
-    body: Body,
-    target: Position,
-    stand_y: int,
-    *,
-    include_target: bool,
-) -> list[Position] | ToolResult:
-    state = body.get_state()
-    offsets = STAND_OFFSETS + ((0, 0, 0),) if include_target else STAND_OFFSETS
-    feet_positions: list[Position] = []
-    seen: set[Position] = set()
-    for dx, dy, dz in offsets:
-        pos = (target[0] + dx, stand_y + dy, target[2] + dz)
-        if pos in seen:
-            continue
-        seen.add(pos)
-        feet_positions.append(pos)
-    wanted: list[Position] = []
-    for pos in feet_positions:
-        wanted.append(pos)
-        wanted.append((pos[0], pos[1] + 1, pos[2]))
-        wanted.append((pos[0], pos[1] - 1, pos[2]))
-    try:
-        facts = read_block_facts(body, tuple(wanted), failure_label="interaction_stand")
-    except ValueError as exc:
-        return ToolResult(
-            success=False,
-            reason="perception_failed",
-            can_retry=True,
-            next_suggestion="refresh world and inventory facts before attempting the interaction",
-            metrics={"scope": "blockCells", "ok": False, "complete": False, "error": str(exc), "uncertainty": None},
-        )
-    candidates: list[tuple[float, Position]] = []
-    for pos in feet_positions:
-        stand = facts.get(pos)
-        head = facts.get((pos[0], pos[1] + 1, pos[2]))
-        below = facts.get((pos[0], pos[1] - 1, pos[2]))
-        if stand is None or head is None or below is None:
-            continue
-        if not _interaction_feet_clear(stand):
-            continue
-        if not _interaction_head_clear(head, head_pos=(pos[0], pos[1] + 1, pos[2]), target=target):
-            continue
-        if not _interaction_support_standable(below):
-            continue
-        candidates.append((dist(state.pos, (pos[0] + 0.5, pos[1], pos[2] + 0.5)), pos))
-    candidates.sort(key=lambda item: (item[0], item[1]))
-    return [pos for _distance, pos in candidates]
 
 
 def entity_stand_points(
@@ -1013,7 +1016,7 @@ def block_type_matches_wanted(block_type: str, wanted: set[str]) -> bool:
 
 
 def _interaction_feet_clear(perception: PerceptionResult) -> bool:
-    return str(perception.data.get("state") or "UNKNOWN") == "CLEAR"
+    return cell_is_clear(perception)
 
 
 def _interaction_head_clear(
@@ -1026,15 +1029,7 @@ def _interaction_head_clear(
 
 
 def _interaction_support_standable(perception: PerceptionResult) -> bool:
-    if str(perception.data.get("state") or "UNKNOWN") != "SOLID":
-        return False
-    block_type = normalize_block_type(str(perception.data.get("type") or "unknown"))
-    properties = {str(key): str(value).lower() for key, value in dict(perception.data.get("properties") or {}).items()}
-    if block_type.endswith("_slab"):
-        return properties.get("type") == "bottom"
-    if block_type.endswith("_stairs"):
-        return properties.get("half", "bottom") == "bottom"
-    return True
+    return cell_is_solid_support(perception)
 
 
 def _entity_metrics(target: NearbyEntityTarget) -> dict[str, object]:

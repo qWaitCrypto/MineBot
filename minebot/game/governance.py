@@ -17,6 +17,32 @@ from minebot.contract.governance import (
 )
 
 
+NATURAL_FLOWER_TYPES = frozenset(
+    {
+        "dandelion",
+        "poppy",
+        "blue_orchid",
+        "allium",
+        "azure_bluet",
+        "red_tulip",
+        "orange_tulip",
+        "white_tulip",
+        "pink_tulip",
+        "oxeye_daisy",
+        "cornflower",
+        "lily_of_the_valley",
+        "sunflower",
+        "lilac",
+        "rose_bush",
+        "peony",
+        "torchflower",
+        "pitcher_plant",
+        "open_eyeblossom",
+        "closed_eyeblossom",
+    }
+)
+
+
 NATURAL_BREAKABLE = frozenset(
     {
         "stone",
@@ -58,7 +84,7 @@ NATURAL_BREAKABLE = frozenset(
         "deepslate_diamond_ore",
         "deepslate_emerald_ore",
     }
-)
+) | NATURAL_FLOWER_TYPES
 
 COLLECT_TARGETS = frozenset(
     {
@@ -91,7 +117,7 @@ COLLECT_TARGETS = frozenset(
         "deepslate_diamond_ore",
         "deepslate_emerald_ore",
     }
-)
+) | NATURAL_FLOWER_TYPES
 
 FARM_TARGETS = frozenset(
     {

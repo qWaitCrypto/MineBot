@@ -1090,6 +1090,15 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(raw_gold.expected_drops, ("raw_gold",))
         self.assertEqual(raw_gold.block_types, ("gold_ore", "deepslate_gold_ore"))
 
+    def test_resource_plan_keeps_exact_flower_items_as_collectable_domains(self):
+        for flower in ("dandelion", "poppy", "blue_orchid"):
+            with self.subTest(flower=flower):
+                plan = resource_plan_for(flower)
+                self.assertEqual(plan.inventory_item, flower)
+                self.assertEqual(plan.inventory_items, (flower,))
+                self.assertEqual(plan.block_types, (flower,))
+                self.assertEqual(plan.expected_drops, (flower,))
+
 
 
 
@@ -1348,7 +1357,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.reason, "already_satisfied")
         self.assertEqual(result.metrics["after_count"], 64)
 
-    def test_collect_resource_reports_authoritative_partial_progress(self):
+    def test_collect_resource_reports_authoritative_partial_progress_as_failure(self):
         body = FakeBody()
         registry = ToolRegistry()
         register_inventory_tools(registry, body)
@@ -1366,7 +1375,7 @@ class AgentCompositionTests(unittest.TestCase):
 
         result = collect_resource({"item": "dirt", "count": 2}, ctx)
 
-        self.assertTrue(result.success, result)
+        self.assertFalse(result.success, result)
         self.assertEqual(result.reason, "partial_budget_exhausted")
         self.assertEqual(result.metrics["after_count"], 1)
         self.assertEqual(result.metrics["collected_delta"], 1)

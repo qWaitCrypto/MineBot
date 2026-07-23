@@ -734,8 +734,10 @@ def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
         "explore_for",
         "Explore safe new world frontiers for one or more block or entity target classes. "
         "Choose WHAT to find; the Body owns frontier selection, navigation, coverage, and "
-        "terminal verification. Resumable results include a typed continuation whose target "
-        "descriptor must remain unchanged.",
+        "terminal verification. If a result includes concrete block coordinates, use "
+        "mine_block_collect for one of those exact positions; collect_resource starts a "
+        "separate count-based local search. Resumable results include a typed continuation "
+        "whose target descriptor must remain unchanged.",
         {
             "type": "object",
             "properties": {

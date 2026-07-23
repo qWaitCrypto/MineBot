@@ -16,8 +16,14 @@ from .furnace import FurnaceTransactions
 from .interaction import InteractionTransactions
 from .inventory import InventoryTransactions
 from .lifecycle import LifecycleTransactions
-from .navigation import NavigationRunConfig, NavigationTransactions
+from .navigation import (
+    NavigationRunConfig,
+    NavigationTransactions,
+    governed_mobility_navigation_config,
+    load_limited_navigation_config,
+)
 from .pickup import PickupConfig, PickupTransactions
+from .reach import ReachDomain, ReachIntent, block_reach_domain, block_reach_domains
 from .resource_collection import ResourceCollectionConfig, ResourceCollectionTransactions
 from .structure_risk import VoxelStructureRiskAssessor
 from .use import UseTransactions
@@ -47,11 +53,17 @@ __all__ = [
     "MemoryExplorationCoverageStore",
     "NavigationRunConfig",
     "NavigationTransactions",
+    "governed_mobility_navigation_config",
+    "load_limited_navigation_config",
     "PickupConfig",
     "PickupTransactions",
+    "ReachDomain",
+    "ReachIntent",
     "ResourceCollectionConfig",
     "ResourceCollectionTransactions",
     "UseTransactions",
     "VoxelStructureRiskAssessor",
     "find_hostiles",
+    "block_reach_domain",
+    "block_reach_domains",
 ]

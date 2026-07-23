@@ -11,7 +11,6 @@ from minebot.body.interaction_support import (
     NearbyBlockTarget,
     block_type_matches_wanted,
     find_nearby_block_search,
-    interaction_stand_points,
     normalize_block_type,
     perception_failure,
 )
@@ -21,6 +20,7 @@ from minebot.body.navigation import (
     NavigationTransactions,
     pure_movement_navigation_config,
 )
+from minebot.body.reach import ReachIntent, block_reach_domains, round_robin_reach_goals
 from minebot.contract import Body, BreakContext, Position, ToolResult
 from minebot.game.navigation import GoalComposite, GoalNear
 
@@ -369,42 +369,34 @@ def _build_block_stand_domain(
     max_goals: int,
     interaction_radius: float,
 ) -> _BlockStandDomain | ToolResult:
-    stands_by_target: dict[Position, list[Position]] = {}
-    for target in targets:
-        stands = interaction_stand_points(
-            body,
-            target.pos,
-            expand_vertical=True,
+    intents = tuple(
+        ReachIntent(
+            target=target.pos,
             interaction_radius=interaction_radius,
+            vertical_offsets=None,
+            movement_profile="pure_movement",
+            mutation_profile="none",
+            terminal_predicate="get_to_block_stand_domain",
         )
-        if isinstance(stands, ToolResult):
-            return stands
-        stands_by_target[target.pos] = list(dict.fromkeys(stands))
-
-    goals: list[Position] = []
-    targets_by_goal: dict[Position, list[NearbyBlockTarget]] = {}
-    depth = 0
-    pending = True
-    while pending and len(goals) < max_goals:
-        pending = False
-        for target in targets:
-            stands = stands_by_target[target.pos]
-            if depth >= len(stands):
-                continue
-            pending = True
-            stand = stands[depth]
-            if stand not in goals:
-                goals.append(stand)
-            linked = targets_by_goal.setdefault(stand, [])
-            if target not in linked:
-                linked.append(target)
-            if len(goals) >= max_goals:
-                break
-        depth += 1
+        for target in targets
+    )
+    domains = block_reach_domains(body, intents)
+    if isinstance(domains, ToolResult):
+        return domains
+    stands_by_target = {
+        target.pos: tuple(dict.fromkeys(domain.candidates))
+        for target, domain in zip(targets, domains)
+    }
+    goals, targets_by_goal = round_robin_reach_goals(
+        targets,
+        stands_by_target,
+        max_goals=max_goals,
+        target_position=lambda target: target.pos,
+    )
 
     return _BlockStandDomain(
         goals=tuple(goals),
-        targets_by_goal={goal: tuple(linked) for goal, linked in targets_by_goal.items()},
+        targets_by_goal=targets_by_goal,
         targets=targets,
         targets_without_stands=tuple(target for target in targets if not stands_by_target[target.pos]),
         diagnostics={

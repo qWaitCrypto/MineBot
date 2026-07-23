@@ -36,6 +36,7 @@ global_missing_notices = {};
 global_agent_chat_events = [];
 global_agent_chat_seq = 0;
 global_action_results = {};
+global_action_terminals = {};
 
 json_bool(v) -> if(v, 'true', 'false');
 
@@ -182,7 +183,7 @@ state_json(name) -> (
   finalize_pending_spawn(name);
   pe = player_entity(name);
   if(pe == null,
-    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":[0.000,0.000,0.000],"yaw":null,"pitch":null,"health":0.000,"food":0,"oxygen":null,"inventory_raw":"","inventory_hash":%s,"effects":null,"time":%d,"weather":null,"dimension":null,"sleeping":null,"missing":true},"error":null}',
+    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":[0.000,0.000,0.000],"yaw":null,"pitch":null,"health":0.000,"food":0,"oxygen":null,"inventory_raw":"","inventory_hash":%s,"effects":null,"time":%d,"weather":null,"dimension":null,"selected_slot":null,"sleeping":null,"missing":true},"error":null}',
       name, json_string(''), floor(number(day_time()) % 24000))
   ,
     p = query(pe, 'pos');
@@ -190,12 +191,13 @@ state_json(name) -> (
     nbt = query(pe, 'nbt');
     food = nbt:'foodLevel';
     air = if(nbt:'Air' == null, null, floor(number(nbt:'Air')));
+    selected_slot = if(nbt:'SelectedItemSlot' == null, null, floor(number(nbt:'SelectedItemSlot')));
     sleep_timer = if(nbt:'SleepTimer' == null, 0, number(nbt:'SleepTimer'));
     sleeping = sleep_timer > 0;
     inv = inventory_get(name);
     raw = str('%s', inv);
-    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":%s,"yaw":null,"pitch":null,"health":%.3f,"food":%d,"oxygen":%s,"inventory_raw":"","inventory_hash":%s,"effects":%s,"time":%d,"weather":null,"dimension":null,"sleeping":%s,"missing":false},"error":null}',
-      name, json_pos(p), health, food, json_int_null(air), json_string(hash_code(raw)), effects_json(pe), floor(number(day_time()) % 24000), json_bool(sleeping))
+    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":%s,"yaw":null,"pitch":null,"health":%.3f,"food":%d,"oxygen":%s,"inventory_raw":"","inventory_hash":%s,"effects":%s,"time":%d,"weather":null,"dimension":null,"selected_slot":%s,"sleeping":%s,"missing":false},"error":null}',
+      name, json_pos(p), health, food, json_int_null(air), json_string(hash_code(raw)), effects_json(pe), floor(number(day_time()) % 24000), json_int_null(selected_slot), json_bool(sleeping))
   )
 );
 
@@ -1335,6 +1337,7 @@ perceive_recipe_data(name, params) -> (
 emit(kind, name, data) -> (
   global_seq += 1;
   global_events += l(l(global_seq, global_tick, kind, name, data));
+  remember_action_terminal(name, kind, data);
   trim_events();
   global_seq
 );
@@ -1386,6 +1389,34 @@ remember_action_result(name, action_id, result) -> (
 
 remembered_action_result(name, action_id) -> (
   global_action_results:(name + ':' + action_id)
+);
+
+action_terminal_kind(kind) -> (
+  kind == 'moveDone' || kind == 'navigateDone' || kind == 'followDone' || kind == 'engageDone' ||
+  kind == 'lookDone' || kind == 'jumpDone' || kind == 'selectSlotDone' || kind == 'selectItemDone' ||
+  kind == 'stopDone' || kind == 'useDone' || kind == 'rangedDone' || kind == 'attackDone' ||
+  kind == 'dropDone' || kind == 'handoffDone' || kind == 'moveItemDone' || kind == 'craftDone' ||
+  kind == 'furnaceDone' || kind == 'containerDone' || kind == 'mineDone' || kind == 'placeDone' ||
+  kind == 'igniteDone' || kind == 'sowDone'
+);
+
+remember_action_terminal(name, kind, data) -> (
+  if(action_terminal_kind(kind) && data != null && length(data) > 0 && data:0 != null,
+    action_id = str('%s', data:0);
+    global_action_terminals:(name + ':' + action_id) = l(global_seq, global_tick, kind, data);
+    keys_list = keys(global_action_terminals);
+    loop(64,
+      if(length(keys_list) > 512,
+        delete(global_action_terminals:(keys_list:0));
+        delete(keys_list:0)
+      )
+    )
+  );
+  true
+);
+
+remembered_action_terminal(name, action_id) -> (
+  global_action_terminals:(name + ':' + action_id)
 );
 
 watch_bot(name) -> (
@@ -1440,6 +1471,26 @@ body_runtime_active(name) -> (
   global_reflexes:name != null ||
   global_pending_reflexes:name != null ||
   global_engages:name != null
+);
+
+body_pending_action_count(name) -> (
+  total = 0;
+  if(global_moves:name != null, total += 1);
+  if(global_navigations:name != null, total += 1);
+  if(global_navigation_mutations:name != null, total += 1);
+  if(global_follows:name != null, total += 1);
+  if(global_mines:name != null, total += 1);
+  if(global_places:name != null, total += 1);
+  if(global_uses:name != null, total += 1);
+  if(global_ignites:name != null, total += 1);
+  if(global_sows:name != null, total += 1);
+  if(global_attacks:name != null, total += 1);
+  if(global_ranged:name != null, total += 1);
+  if(global_drops:name != null, total += 1);
+  if(global_reflexes:name != null, total += 1);
+  if(global_pending_reflexes:name != null, total += 1);
+  if(global_engages:name != null, total += 1);
+  total
 );
 
 release_orphan_owner(name) -> (
@@ -2017,6 +2068,51 @@ find_empty_hotbar_slot(name) -> (
   found
 );
 
+find_empty_inventory_slot(name) -> (
+  found = null;
+  slot = 9;
+  loop(27,
+    stack = inventory_get(name, slot);
+    if(found == null && stack_empty(stack),
+      found = slot
+    );
+    slot += 1
+  );
+  found
+);
+
+find_occupied_hotbar_slot(name) -> (
+  found = null;
+  slot = 0;
+  loop(9,
+    stack = inventory_get(name, slot);
+    if(found == null && !stack_empty(stack),
+      found = slot
+    );
+    slot += 1
+  );
+  found
+);
+
+stage_inventory_item_to_hotbar(name, inv_found) -> (
+  hotbar_slot = find_empty_hotbar_slot(name);
+  if(hotbar_slot == null,
+    displaced_slot = find_occupied_hotbar_slot(name);
+    carry_slot = find_empty_inventory_slot(name);
+    if(displaced_slot == null || carry_slot == null || !copy_full_stack(name, displaced_slot, carry_slot),
+      hotbar_slot = null
+    ,
+      hotbar_slot = displaced_slot
+    )
+  );
+  if(hotbar_slot == null,
+    null
+  ,
+    moved = copy_full_stack(name, inv_found:0, hotbar_slot);
+    if(moved, hotbar_slot, null)
+  )
+);
+
 find_first_hotbar_slot(name, item) -> (
   found = find_hotbar_item(name, item);
   if(found == null, null, found:0)
@@ -2036,14 +2132,12 @@ run_select_item(name, action_id, item) -> (
         release_owner(name, 'selectItem');
         false
       ,
-        hotbar_slot = find_empty_hotbar_slot(name);
+        hotbar_slot = stage_inventory_item_to_hotbar(name, inv_found);
         if(hotbar_slot == null,
           emit('selectItemDone', name, l(action_id, false, inv_found:1, -1, inv_found:2, 'hotbar_full'));
           release_owner(name, 'selectItem');
           false
         ,
-          inventory_set(name, hotbar_slot, inv_found:2, inv_found:1);
-          inventory_set(name, inv_found:0, 0);
           run(str('player %s hotbar %d', name, hotbar_slot + 1));
           emit('selectItemDone', name, l(action_id, true, inv_found:1, hotbar_slot, inv_found:2, 'moved_to_hotbar'));
           release_owner(name, 'selectItem');
@@ -4148,7 +4242,9 @@ navigation_openable_interaction_y(x, y, z) -> (
 );
 
 navigation_lava_unsafe(x, y, z) -> (
-  lava_near_pos(l(x + 0.5, y, z + 0.5)) || is_lava_at(x, y + 1, z)
+  lava_near_pos(l(x + 0.5, y, z + 0.5)) ||
+  is_lava_at(x, y, z) ||
+  is_lava_at(x, y + 1, z)
 );
 
 navigation_adjacent_fluid_break_risk(x, y, z, directly_above) -> (
@@ -5033,14 +5129,16 @@ navigation_select_item(name, item) -> (
     true
   ,
     inv_found = find_inventory_item(name, item);
-    hotbar_slot = find_empty_hotbar_slot(name);
-    if(inv_found == null || hotbar_slot == null,
+    if(inv_found == null,
       false
     ,
-      inventory_set(name, hotbar_slot, inv_found:2, inv_found:1);
-      inventory_set(name, inv_found:0, 0);
-      run(str('player %s hotbar %d', name, hotbar_slot + 1));
-      true
+      hotbar_slot = stage_inventory_item_to_hotbar(name, inv_found);
+      if(hotbar_slot == null,
+        false
+      ,
+        run(str('player %s hotbar %d', name, hotbar_slot + 1));
+        true
+      )
     )
   )
 );
@@ -6220,6 +6318,7 @@ minebot_reset() -> (
   global_missing_notices = {};
   global_agent_chat_events = [];
   global_action_results = {};
+  global_action_terminals = {};
   result_json(null, 'server', true, true, '{}', null)
 );
 
@@ -6266,7 +6365,8 @@ minebot_event_head(name, proposed_epoch) -> (
   if(global_event_epoch == null, global_event_epoch = str('%s', proposed_epoch));
   owner = owner_of(name);
   owner_name = if(owner == null, null, owner:0);
-  data = str('{"eventSeq":%d,"chatSeq":%d,"tick":%d,"epoch":%s,"owner":%s}', global_seq, global_agent_chat_seq, global_tick, json_string(global_event_epoch), json_string(owner_name));
+  pending_action_count = body_pending_action_count(name);
+  data = str('{"eventSeq":%d,"chatSeq":%d,"tick":%d,"epoch":%s,"owner":%s,"pendingActionCount":%d}', global_seq, global_agent_chat_seq, global_tick, json_string(global_event_epoch), json_string(owner_name), pending_action_count);
   result_json(null, name, true, true, data, null)
 );
 
@@ -6382,6 +6482,30 @@ minebot_interrupt(name, payload) -> (
   );
   release_orphan_owner(name);
   result_json(null, name, true, true, '{"action":"interrupt"}', null)
+);
+
+action_terminal_status_json(name, action_id) -> (
+  terminal = remembered_action_terminal(name, action_id);
+  if(terminal == null,
+    'null'
+  ,
+    kind = terminal:2;
+    payload = event_data_json(kind, terminal:3);
+    if(length(payload) > 1800,
+      'null'
+    ,
+      str('{"seq":%d,"tick":%d,"bot":"%s","name":"%s","data":%s}',
+        terminal:0, terminal:1, name, kind, payload)
+    )
+  )
+);
+
+minebot_action_status(name, action_id) -> (
+  dispatch = remembered_action_result(name, action_id);
+  dispatch_json = if(dispatch == null, 'null', dispatch);
+  data = str('{"action_id":%s,"dispatch":%s,"terminal":%s}',
+    json_string(action_id), dispatch_json, action_terminal_status_json(name, action_id));
+  result_json(action_id, name, true, true, data, null)
 );
 
 minebot_action(name, payload) -> (

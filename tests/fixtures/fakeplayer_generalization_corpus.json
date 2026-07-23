@@ -1,0 +1,326 @@
+{
+  "schema_version": 1,
+  "goal_id": "fakeplayer-generalization-ag-closure-20260722",
+  "world_fixture": {
+    "id": "world-golden",
+    "reset_command": "tools/reset-world.sh",
+    "start_contract": {
+      "inventory": "empty",
+      "gamemode": "survival",
+      "body_owner": null,
+      "world_identity_source": "runtime_world_id"
+    }
+  },
+  "evaluators": {
+    "AG-FP30": {
+      "kind": "production_terminal",
+      "active_window_seconds": 1800,
+      "objective": "Start empty-handed in the natural world. Collect 3 flower types, kill a pig, cow and sheep and keep their drops, craft and equip a shield and an iron pickaxe, keep at least 16 torches, and finish with at least 3 iron ingots.",
+      "inventory_requirements": {
+        "flower_distinct_types": {
+          "minimum": 3,
+          "accepted_items": [
+            "dandelion",
+            "poppy",
+            "blue_orchid",
+            "allium",
+            "azure_bluet",
+            "red_tulip",
+            "orange_tulip",
+            "white_tulip",
+            "pink_tulip",
+            "oxeye_daisy",
+            "cornflower",
+            "lily_of_the_valley",
+            "wither_rose",
+            "sunflower",
+            "lilac",
+            "rose_bush",
+            "peony",
+            "torchflower",
+            "pitcher_plant",
+            "open_eyeblossom",
+            "closed_eyeblossom"
+          ]
+        },
+        "torch": {"minimum": 16},
+        "iron_ingot": {"minimum": 3}
+      },
+      "drop_requirements": {
+        "pig": {"accepted_items": ["porkchop"]},
+        "cow": {"accepted_items": ["beef", "leather"]},
+        "sheep": {"accepted_items": ["mutton", "white_wool", "wool"]}
+      },
+      "equipment_requirements": [
+        {"item": "shield", "slot": "offhand"},
+        {"item": "iron_pickaxe", "slot": "mainhand"}
+      ],
+      "authoritative_facts": [
+        "inventory",
+        "equipment_slots",
+        "accepted_drop_families",
+        "body_owner",
+        "pending_action_count",
+        "terminal_satisfied"
+      ],
+      "evaluator_independence": "reads final server facts and does not consume model text, route hints, or tool success flags"
+    },
+    "AG-FP30-X": {
+      "kind": "production_terminal",
+      "active_window_seconds": 1800,
+      "objective": "Start empty-handed. Obtain logs, craft a crafting table and a stone pickaxe, equip the stone pickaxe, obtain and smelt iron, and finish with at least 3 iron ingots.",
+      "excluded_domains": ["flowers", "passive_animals"],
+      "inventory_requirements": {
+        "log_items": {
+          "minimum": 3,
+          "accepted_items": [
+            "oak_log",
+            "spruce_log",
+            "birch_log",
+            "jungle_log",
+            "acacia_log",
+            "dark_oak_log",
+            "mangrove_log",
+            "cherry_log",
+            "pale_oak_log",
+            "crimson_stem",
+            "warped_stem"
+          ]
+        },
+        "crafting_table": {"minimum": 1},
+        "iron_ingot": {"minimum": 3}
+      },
+      "equipment_requirements": [
+        {"item": "stone_pickaxe", "slot": "mainhand"}
+      ],
+      "authoritative_facts": [
+        "inventory",
+        "equipment_slots",
+        "body_owner",
+        "pending_action_count",
+        "terminal_satisfied"
+      ],
+      "evaluator_independence": "uses a separate predicate from AG-FP30 and never accepts the primary goal report"
+    }
+  },
+  "required_mechanisms": [
+    "target_discovery",
+    "candidate_stand_domain",
+    "water_vertical_reachability",
+    "mutation_governance",
+    "entity_combat_pickup",
+    "craft_smelt_equip",
+    "cancellation_recovery",
+    "terminal_verification"
+  ],
+  "scenarios": [
+    {
+      "id": "r24-oak-domain-governance-ambiguity",
+      "source_runs": ["r15", "r24"],
+      "world_fixture": "world-golden",
+      "historical_world_ids": ["39865df"],
+      "start": {"kind": "point", "value": [38, 75, -70], "status": "recorded"},
+      "target": {"kind": "block_domain", "value": "oak_log domain around [38,75,-70]"},
+      "terminal": {
+        "reason": "candidate_domain_exhausted",
+        "secondary_reasons": ["budget_exceeded", "structure_risk_unknown"],
+        "mutation_result": "no_player_block_changed"
+      },
+      "mechanisms": ["target_discovery", "candidate_stand_domain", "mutation_governance", "terminal_verification"],
+      "replay": {"status": "pending", "mode": "direct_body_replay", "debt": "non-blocking historical-parity debt: exact terrain and the full candidate/deny sequence are not restored; current provider reach/governance coverage is supplied by the available compound replays"},
+      "evidence": [
+        "docs/project.md:78-94",
+        "docs/worklog/active/a6-diverse-natural-long-run-20260715.md:183-192",
+        "logs/agentic-runtime/ag-20260721-r30/gate-report.json"
+      ]
+    },
+    {
+      "id": "r37-water-pocket-vertical-egress",
+      "source_runs": ["r37", "r40", "r41"],
+      "world_fixture": "world-golden",
+      "historical_world_ids": ["39865df"],
+      "start": {"kind": "point", "value": [61.7, 60.0, -54.5], "status": "recorded"},
+      "target": {"kind": "dry_stand", "value": [61.5, 63.0, -54.5]},
+      "terminal": {
+        "reason": "water_egress_failed",
+        "secondary_reasons": ["no_path", "escaped_hazard_false", "final_is_dry_stand_false"]
+      },
+      "mechanisms": ["water_vertical_reachability", "cancellation_recovery", "terminal_verification"],
+      "compound": true,
+      "replay": {
+        "status": "available",
+        "mode": "direct_body_replay",
+        "script": "tests/e2e_body_go_to_surface.py",
+        "case": "mobility_egress",
+        "repeat_runs": 2,
+        "observed": {
+          "reason": "surface_reached",
+          "target_surface": [234, 65, -16],
+          "movement_counts": {
+            "walk": 0,
+            "diagonal": 0,
+            "ascend": 1,
+            "descend": 0,
+            "swim": 16,
+            "fall": 0,
+            "break": 0,
+            "place": 0,
+            "pillar": 0
+          },
+          "mutation_events": [],
+          "terminal_surface_verified": true
+        },
+        "debt": "This is a deterministic provider-local egress fixture; it does not claim byte-for-byte historical world parity with r37."
+      },
+      "evidence": [
+        "docs/worklog/active/a6-diverse-natural-long-run-20260715.md:908-964",
+        "docs/worklog/active/a6-diverse-natural-long-run-20260715.md:966-994"
+      ]
+    },
+    {
+      "id": "r45-water-adjacent-tree-approach",
+      "source_runs": ["r45", "r62", "r68", "r69"],
+      "world_fixture": "world-golden",
+      "historical_world_ids": ["world-dda16a49e20c45228898dbf71de202f4", "world-7c5c0b4f11104405829918345860a512"],
+      "start": {"kind": "historical_anchor", "value": "r68 start position", "status": "recorded_in_worklog"},
+      "target": {"kind": "block_domain", "value": "oak logs on higher ground behind a continuous water band"},
+      "terminal": {
+        "reason": "candidate_targets_exhausted",
+        "secondary_reasons": ["budget_exceeded", "stuck"],
+        "mutation_policy": "terrain_mutation_disabled_for_directed_replay"
+      },
+      "mechanisms": ["candidate_stand_domain", "water_vertical_reachability", "mutation_governance", "terminal_verification"],
+      "compound": true,
+      "replay": {"status": "available", "mode": "direct_body_replay", "script": "tests/e2e_fakeplayer_generalization_replay.py", "repeat_runs": 2, "observed": {"water_cells": 30, "tree_cells": 3, "governance_reason": "break_denied:player_structure_risk", "governance_target_after": "stone", "resource_reason": "collected", "dry_terminal_reasons": ["no_path", "budget_exceeded"], "dry_zero_progress": true, "navigation_fallback_attempts": 1, "fallback_profile": "governed_mobility", "fallback_movement_minimums": {"swim": 1, "ascend": 1}, "inventory_oak_log": 1, "owner": null}, "debt": "This is a deterministic co-occurrence replay; it does not claim byte-for-byte historical world parity with r68."},
+      "evidence": [
+        "docs/worklog/active/ag-r64-tree-domain-anchor-20260722.md:142-181",
+        "docs/worklog/active/ag-r64-tree-domain-anchor-20260722.md:183-204",
+        "logs/agentic-runtime/ag-r68-resource-stand-range-20260722/gate-report.json",
+        "logs/agentic-runtime/ag-r69-lower-tree-candidate-20260722/gate-report.json"
+      ]
+    },
+    {
+      "id": "r48-unarmed-stone-capability",
+      "source_runs": ["r48"],
+      "world_fixture": "world-golden",
+      "historical_world_ids": ["world-3a02e46173b3484990d02ac3d5c3dbd1"],
+      "start": {"kind": "point", "value": [0, 58, 0], "status": "recorded"},
+      "target": {"kind": "natural_block", "value": "stone edge in a surface route"},
+      "terminal": {"reason": "break_timeout", "contrast": "wooden_pickaxe_allows_break"},
+      "mechanisms": ["candidate_stand_domain", "mutation_governance", "terminal_verification"],
+      "replay": {"status": "available", "mode": "direct_body_replay", "debt": null},
+      "evidence": [
+        "docs/worklog/active/ag-r48-pickaxe-capability-planner-closure-20260721.md:8-21",
+        "docs/worklog/active/ag-r48-pickaxe-capability-planner-closure-20260721.md:23-50"
+      ]
+    },
+    {
+      "id": "golden-spawn-autonomous-frontier-egress",
+      "source_runs": ["ag-20260723-032420", "ag-20260723-060009"],
+      "world_fixture": "world-golden",
+      "historical_world_ids": ["world-437771f509bd4fa6891943a2d43b9276", "world-1c212fbcba9b4749b2509df6a301d871"],
+      "start": {"kind": "runtime_spawn", "value": [0, 70, 0], "status": "recorded"},
+      "target": {
+        "kind": "autonomous_frontier_egress",
+        "value": "real-model explore_for from spawn through the water/vertical/hazard frontier and recovery"
+      },
+      "terminal": {
+        "reason": "mobility_blocked_after_frontier",
+        "secondary_reasons": ["no_path", "recovery_exhausted", "distance_consumed_near_zero"],
+        "material_result": "no_target_mutation"
+      },
+      "mechanisms": [
+        "target_discovery",
+        "candidate_stand_domain",
+        "water_vertical_reachability",
+        "cancellation_recovery",
+        "terminal_verification"
+      ],
+      "compound": true,
+      "replay": {
+        "status": "pending",
+        "mode": "production_trace_plus_direct_body_probe",
+        "scripts": [
+          "tests/e2e_basin_cross_probe.py",
+          "tests/e2e_i14_predicate_ab_probe.py",
+          "tests/e2e_i14_safe_lane_probe.py",
+          "tests/e2e_i14_reachability_ab_probe.py"
+        ],
+        "observed": {
+          "autonomous_frontier_anchor": [-44.002, 67.0, -25.543],
+          "post_anchor_distance_consumed": [1.19, 0.947],
+          "downstream_governed_probe": "arrived_with_positive_displacement"
+        },
+        "debt": "The production ingress sequence is captured in gate traces, but a clean deterministic spawn-to-frontier replay and machine-readable live probe report are still required before Q0/Q1 can map this entry."
+      },
+      "evidence": [
+        "logs/agentic-runtime/ag-20260723-032420/gate-report.json",
+        "logs/agentic-runtime/ag-20260723-060009/gate-report.json",
+        "tests/e2e_basin_cross_probe.py",
+        "tests/e2e_i14_predicate_ab_probe.py",
+        "tests/e2e_i14_safe_lane_probe.py",
+        "tests/e2e_i14_reachability_ab_probe.py"
+      ]
+    },
+    {
+      "id": "r22-material-chain-partial",
+      "source_runs": ["r22", "r35", "r36"],
+      "world_fixture": "world-golden",
+      "historical_world_ids": ["39865df"],
+      "start": {"kind": "runtime_start", "value": "empty-handed golden-world start", "status": "recorded"},
+      "target": {"kind": "material_chain", "value": "wood -> stone -> coal/torches -> raw iron -> craft/equip"},
+      "terminal": {"reason": "typed_yield", "progress": ["wood", "crafting_table", "wooden_pickaxe", "stone_pickaxe", "coal", "16_torches", "3_raw_iron"], "satisfied": false},
+      "mechanisms": ["craft_smelt_equip", "terminal_verification"],
+      "replay": {"status": "available", "mode": "direct_body_subchain_replay", "debt": "full cross-objective composition still requires an Agent-owned replay"},
+      "evidence": [
+        "docs/project.md:68-76",
+        "docs/worklog/active/a6-diverse-natural-long-run-20260715.md:792-852"
+      ]
+    },
+    {
+      "id": "r22-passive-entity-and-pickup-gap",
+      "source_runs": ["r22", "r24", "r43"],
+      "world_fixture": "world-golden",
+      "historical_world_ids": ["39865df"],
+      "start": {"kind": "runtime_start", "value": "empty-handed golden-world start", "status": "recorded"},
+      "target": {"kind": "entity_domain", "value": "pig, cow, sheep plus accepted drops"},
+      "terminal": {"reason": "entity_combat_not_covered", "secondary_reasons": ["passive_entities_absent_from_fixture", "search_entity_not_found"]},
+      "mechanisms": ["entity_combat_pickup", "terminal_verification"],
+      "replay": {"status": "debt", "mode": "direct_body_replay", "debt": "Q3 entity-combat debt: freeze deterministic passive entities without a second writer, then verify kill and pickup attribution"},
+      "evidence": [
+        "docs/worklog/active/a6-diverse-natural-long-run-20260715.md:348-395",
+        "docs/worklog/active/ag-r43-autonomy-gate-20260720.md:43-57"
+      ]
+    },
+    {
+      "id": "r25b-r27-owner-cancellation-recovery",
+      "source_runs": ["r25b", "r27", "r32"],
+      "world_fixture": "world-golden",
+      "historical_world_ids": ["39865df"],
+      "start": {"kind": "runtime_start", "value": "water-adjacent active movement", "status": "recorded_in_worklog"},
+      "target": {"kind": "body_lifecycle", "value": "cancel, death/respawn, and owner reconciliation"},
+      "terminal": {"reason": "body_action_timeout", "secondary_reasons": ["move_start_failed", "owner_moveTo_stale", "execution_not_idle_after_preempt"]},
+      "mechanisms": ["cancellation_recovery", "terminal_verification"],
+      "replay": {"status": "available", "mode": "direct_body_replay", "debt": null},
+      "evidence": [
+        "docs/worklog/active/a6-diverse-natural-long-run-20260715.md:395-498",
+        "docs/worklog/active/a6-diverse-natural-long-run-20260715.md:698-790"
+      ]
+    },
+    {
+      "id": "r30-scan-page-terminal",
+      "source_runs": ["r30", "r31", "r62"],
+      "world_fixture": "world-golden",
+      "historical_world_ids": ["39865df", "world-1f50452636294a49a542d070d67ee68f"],
+      "start": {"kind": "runtime_start", "value": "exploration state with paged findBlocks result", "status": "recorded_in_worklog"},
+      "target": {"kind": "perception_contract", "value": "positive candidates survive partial scans and complete scans distinguish unloaded boundary"},
+      "terminal": {"reason": "scan_page_limit", "secondary_reasons": ["candidate_targets_exhausted", "budget_exhausted", "unloaded_boundary_misclassification"]},
+      "mechanisms": ["target_discovery", "terminal_verification"],
+      "replay": {"status": "available", "mode": "direct_body_replay", "debt": null},
+      "evidence": [
+        "docs/project.md:42-67",
+        "docs/worklog/active/ag-r62-aquatic-exploration-gate-20260721.md:41-63"
+      ]
+    }
+  ]
+}

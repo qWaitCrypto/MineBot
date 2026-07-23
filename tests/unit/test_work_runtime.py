@@ -975,6 +975,41 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(body.actions, [])
         self.assertEqual(result.metrics["legality"]["allowed"], False)
 
+    def test_mine_block_marks_ambiguous_structure_as_retryable_inspection(self):
+        class AmbiguousRisk:
+            def assess(self, pos, block_type, context):
+                return StructureRiskAssessment(
+                    pos=pos,
+                    block_type=block_type,
+                    level=StructureRiskLevel.AMBIGUOUS,
+                    score=0.4,
+                    complete=True,
+                    sampled_cells=63,
+                    signals=("local_axis_symmetry",),
+                )
+
+        body = FakeBody(
+            PerceptionResult(
+                bot="Bot1",
+                scope="blockAt",
+                type="perception",
+                ok=True,
+                complete=True,
+                data={"x": 100, "y": 64, "z": 100, "type": "stone", "state": "SOLID"},
+            )
+        )
+        policy = GovernancePolicy(
+            structure_risk_assessor=AmbiguousRisk(),
+            require_structure_assessment=True,
+        )
+        result = BlockWork(body, policy).mine_block((100, 64, 100), context=BreakContext.DIRECT)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "break_denied:structure_risk_unknown")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.metrics["evidence_state"], "needs_inspection")
+        self.assertEqual(body.actions, [])
+
     def test_mine_block_executes_when_governance_allows_collect_target(self):
         body = FakeBody(
             PerceptionResult(
@@ -1057,6 +1092,11 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(len(navigator.calls), 1)
         self.assertIsInstance(navigator.calls[0][0], GoalComposite)
         self.assertNotIn("mineBlock", [action.name for action in body.actions])
+
+    def test_target_occluded_is_a_candidate_skip(self):
+        from minebot.contract import is_candidate_skip
+
+        self.assertTrue(is_candidate_skip("target_occluded"))
 
     def test_mine_block_collect_uses_governed_goal_set_break_edge_for_buried_stand(self):
         class GovernedBreakNavigator(FakeNavigator):

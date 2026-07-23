@@ -116,6 +116,18 @@ class RconRuntimeTests(unittest.TestCase):
         self.assertEqual(client.stats_snapshot()["transport_failures"], 1)
         self.assertEqual(client.stats_snapshot()["consecutive_failures"], 0)
 
+    def test_request_once_does_not_replay_after_closed_socket(self):
+        client = ReconnectingRconClient()
+
+        with self.assertRaises(RconError):
+            client.request_once("mutation-dispatch")
+
+        self.assertEqual(client.connected, 1)
+        self.assertEqual(client.requests, 1)
+        self.assertEqual(client.stats_snapshot()["reconnects"], 0)
+        self.assertEqual(client.stats_snapshot()["retry_successes"], 0)
+        self.assertEqual(client.stats_snapshot()["transport_failures"], 1)
+
     def test_normal_command_returns_body_when_resp_id_matches(self):
         # req_id starts at 1; a faithful Carpet echo returns the same id.
         client = _SocketQueueClient([_FakeSock(_packet(1, 2, "ok"))])

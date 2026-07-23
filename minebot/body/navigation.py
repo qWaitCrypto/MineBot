@@ -104,6 +104,49 @@ def dry_land_navigation_config(
     return replace(config or NavigationRunConfig(), allow_swim=False)
 
 
+def governed_mobility_navigation_config(
+    config: NavigationRunConfig | None = None,
+) -> NavigationRunConfig:
+    """Use the provider's governed movement/mutation operator union.
+
+    This is an escalation profile for a dry-first objective.  It does not
+    alter mutation permissions or budgets; it only makes the already-governed
+    aquatic traversal operators visible to the same server-side search.
+    """
+
+    return replace(
+        config or NavigationRunConfig(),
+        allow_swim=True,
+        aquatic_traversal=True,
+    )
+
+
+def load_limited_navigation_config(
+    config: NavigationRunConfig | None = None,
+) -> NavigationRunConfig:
+    """Bound server-side search bursts for resource-domain long approaches.
+
+    Q4t load evidence showed that a 2,500-node Scarpet burst can stall the
+    server tick when a resource approach is far from its selected stand.  This
+    profile keeps the normal operator union and governance intact, but caps
+    the per-search work and the number of partial re-plans.  A caller may pass
+    a stricter configuration; the profile only clamps more permissive values.
+    """
+
+    base = config or NavigationRunConfig()
+    max_segments = min(base.max_segments, 16)
+    partial_segments = base.max_partial_segments
+    if partial_segments is None:
+        partial_segments = max_segments
+    return replace(
+        base,
+        max_segments=max_segments,
+        max_partial_segments=min(partial_segments, 8),
+        server_grid_radius=min(base.server_grid_radius, 48),
+        server_max_expand=min(base.server_max_expand, 1200),
+    )
+
+
 def aquatic_navigation_config(
     config: NavigationRunConfig | None = None,
 ) -> NavigationRunConfig:
@@ -114,6 +157,79 @@ def aquatic_navigation_config(
         allow_swim=True,
         aquatic_traversal=True,
     )
+
+
+def navigation_zero_progress(
+    result: ToolResult,
+    before: Position,
+    after: Position,
+) -> bool:
+    """Return whether a failed route has authoritative zero-progress evidence.
+
+    Dry-first consumers may widen their movement profile only when the failed
+    route produced neither displacement nor a usable path. Missing progress
+    evidence is deliberately not treated as zero progress.
+    """
+
+    if _position_distance(before, after) > 0.25:
+        return False
+    observed = False
+    positive = False
+
+    def visit(value: object) -> None:
+        nonlocal observed, positive
+        if isinstance(value, dict):
+            movement_counts = value.get("movement_counts")
+            if isinstance(movement_counts, dict):
+                observed = True
+                if any(_positive_number(count) for count in movement_counts.values()):
+                    positive = True
+            final_pos = value.get("final_pos")
+            if isinstance(final_pos, (list, tuple)) and len(final_pos) >= 3:
+                try:
+                    final_xyz = (
+                        float(final_pos[0]),
+                        float(final_pos[1]),
+                        float(final_pos[2]),
+                    )
+                    observed = True
+                    if _position_distance(before, final_xyz) > 0.25:
+                        positive = True
+                except (TypeError, ValueError):
+                    pass
+            for key in ("path_length", "waypoints", "move_ticks", "partial_distance"):
+                if key in value and value[key] is not None:
+                    observed = True
+                    if _positive_number(value[key]):
+                        positive = True
+            for nested in value.values():
+                if isinstance(nested, (dict, list, tuple)):
+                    visit(nested)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                if isinstance(nested, (dict, list, tuple)):
+                    visit(nested)
+
+    visit(result.metrics or {})
+    return observed and not positive
+
+
+def _position_distance(
+    before: Position,
+    after: Position,
+) -> float:
+    return (
+        (before[0] - after[0]) ** 2
+        + (before[1] - after[1]) ** 2
+        + (before[2] - after[2]) ** 2
+    ) ** 0.5
+
+
+def _positive_number(value: object) -> bool:
+    try:
+        return float(value) > 0.0
+    except (TypeError, ValueError):
+        return False
 
 
 @dataclass(frozen=True)

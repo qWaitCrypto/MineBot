@@ -860,9 +860,19 @@ class AgentSessionTests(unittest.TestCase):
         started = threading.Event()
         cancelled = threading.Event()
         calls: list[str] = []
+        queued_at_cancellation: list[int] = []
 
         def parts_factory(goal: str) -> AgentRuntimeParts:
             parts = build_parts(goal, [], bodies)
+            original_request_cancel = parts.runtime.request_execution_cancel
+
+            def request_cancel(reason: str) -> int:
+                queued_at_cancellation.append(
+                    len(session.work_queue.queued_intents(WorkIntentKind.MESSAGE))
+                )
+                return original_request_cancel(reason)
+
+            parts.runtime.request_execution_cancel = request_cancel
 
             async def runner(_agent, input_text, **_kwargs):
                 calls.append(input_text)
@@ -900,6 +910,7 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(calls[1], "actually, who are you?")
         self.assertIn(("user", "hello"), session.parts.context.session_messages())
         self.assertEqual(bodies[0].interrupt_reasons, ["user_message"])
+        self.assertEqual(queued_at_cancellation, [1, 1])
 
     def test_chat_control_is_queued_before_a_blocking_body_interrupt_settles(self):
         bodies: list[FakeBody] = []

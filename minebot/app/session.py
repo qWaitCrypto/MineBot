@@ -147,12 +147,12 @@ class AgentSession:
             self.parts is not None
             and self.parts.lifecycle.state is LifecycleState.RECOVERING
         )
+        cancellation_reason: str | None = None
         if self.parts is not None and (
             always_interrupt or (self._work_in_flight and not recovery_is_active)
         ):
             cancellation_reason = f"session_command:{command.kind.value}"
             self.parts.authority.invalidate_generation(cancellation_reason)
-            self.parts.runtime.request_execution_cancel(cancellation_reason)
         superseded = superseded_kinds_for(intent_kind)
         if superseded:
             self.work_queue.supersede(
@@ -165,7 +165,7 @@ class AgentSession:
             if self.parts is None
             else self.parts.authority.current_generation()
         )
-        return self.work_queue.enqueue(
+        intent = self.work_queue.enqueue(
             intent_kind,
             source=command.reason or command.kind.value,
             payload={
@@ -177,6 +177,13 @@ class AgentSession:
             task_id=None if task is None else task.task_id,
             generation=generation,
         )
+        # Publish the preemption intent before cancelling the execution lane.
+        # Otherwise a cooperative Body cancellation can finish in the small
+        # window before _run_supervised observes the queue notification and
+        # surface an uncaught CancelledError instead of a typed preemption.
+        if cancellation_reason is not None and self.parts is not None:
+            self.parts.runtime.request_execution_cancel(cancellation_reason)
+        return intent
 
     @property
     def lifecycle_state(self) -> LifecycleState | None:

@@ -47,7 +47,11 @@ from minebot.contract import (
     ProgressFacts,
     execution_cancellation_scope,
 )
-from minebot.game.errors import BodyActionTimeoutError, BodyProtocolError
+from minebot.game.errors import (
+    ActionReconciliationUnknownError,
+    BodyActionTimeoutError,
+    BodyProtocolError,
+)
 
 RunnerCallable = Callable[..., Awaitable[Any]]
 StreamingRunnerCallable = Callable[..., Any]
@@ -1052,8 +1056,15 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                     message=str(exc),
                     await_diagnostics=result.get("metrics", {}).get("await_diagnostics"),
                 )
-            if result.get("reason") == "transport_error":
-                ctx.context.weld_context.authority.invalidate_generation(f"transport_error:{tool.name}")
+            # An action-level reconciliation unknown is still caused by a
+            # transport boundary, so it must invalidate the generation and
+            # participate in the existing bounded transport recovery. Keep a
+            # distinct public reason so the Agent can observe that the socket
+            # recovered without proving whether the mutation landed.
+            if result.get("reason") in {"transport_error", "action_reconciliation_unknown"}:
+                ctx.context.weld_context.authority.invalidate_generation(
+                    f"{result['reason']}:{tool.name}"
+                )
                 ctx.context.trace and ctx.context.trace.emit(
                     "tool_transport_recovery_candidate",
                     tool_call_id=tool_call_id,
@@ -1215,6 +1226,8 @@ def _tool_exception_payload(exc: Exception) -> JsonObject:
         reason = "tool_timeout"
     elif isinstance(exc, BodyActionTimeoutError):
         reason = "body_action_timeout"
+    elif isinstance(exc, ActionReconciliationUnknownError):
+        reason = "action_reconciliation_unknown"
     else:
         reason = "transport_error" if isinstance(exc, (BodyProtocolError, OSError, TimeoutError)) else "tool_runtime_error"
     diagnostics = getattr(exc, "diagnostics", None)
@@ -1249,6 +1262,11 @@ def _tool_exception_next_suggestion(reason: str) -> str:
         return (
             "Refresh Body state before retrying; server-owner cleanup was requested "
             "for the timed-out action."
+        )
+    if reason == "action_reconciliation_unknown":
+        return (
+            "The Body transport recovered but the mutation outcome is unknown; "
+            "observe authoritative state or replan before mutating again."
         )
     return "retry after refreshing state; choose a different action if the same failure repeats"
 

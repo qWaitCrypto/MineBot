@@ -65,6 +65,7 @@ class BodyState:
     complete: bool
     sleeping: bool | None = None
     missing: bool = False
+    selected_slot: int | None = None
 
     @classmethod
     def from_envelope_data(cls, bot: str, complete: bool, data: JsonObject) -> "BodyState":
@@ -90,6 +91,7 @@ class BodyState:
             complete=complete,
             sleeping=None if "sleeping" not in data or data.get("sleeping") is None else bool(data.get("sleeping")),
             missing=bool(data.get("missing", False)),
+            selected_slot=_maybe_int(data.get("selected_slot")),
         )
 
 
@@ -185,6 +187,11 @@ CANDIDATE_SKIP_REASONS: frozenset[str] = frozenset(
         "search_block_no_stand_point",
         "search_block_out_of_range",
         "search_block_target_lost",
+        # The target can become occluded after navigation (for example when
+        # a neighboring block remains in the aim ray).  This invalidates only
+        # the selected candidate; resource orchestration must try another
+        # authoritative stand/target before declaring the domain exhausted.
+        "target_occluded",
     }
 )
 

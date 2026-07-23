@@ -614,6 +614,8 @@ class InventoryTransactions:
                 temporary_table_context=temporary_table_context,
                 approach_timeout_s=approach_timeout_s,
                 place_timeout_s=place_timeout_s,
+                protected_slots={int(entry["slot"]) for entry in plan.inputs} | {plan.output_slot},
+                inventory_slots=slots,
             )
             if isinstance(workspace, ToolResult):
                 return merge_context(
@@ -656,7 +658,7 @@ class InventoryTransactions:
             )
 
         equip = None
-        if craft.success and auto_equip and _infer_equip_target(plan.item) != "mainhand":
+        if craft.success and auto_equip:
             equip = self.equip_item(item=plan.item, target="auto", timeout_s=craft_timeout_s)
 
         metrics = {
@@ -713,6 +715,8 @@ class InventoryTransactions:
         temporary_table_context: PlaceContext | str,
         approach_timeout_s: float,
         place_timeout_s: float,
+        protected_slots: set[int] | None = None,
+        inventory_slots: list[InventorySlot] | None = None,
     ) -> dict[str, object] | ToolResult:
         attempted: list[dict[str, object]] = []
         if self.governance is not None:
@@ -773,6 +777,26 @@ class InventoryTransactions:
                 metrics={"item": item, "crafting_table_item": crafting_table_item, "attempted_targets": attempted},
             )
 
+        prepare = _prepare_hotbar_slot_for_item(
+            self.body,
+            crafting_table_item,
+            timeout_s=place_timeout_s,
+            protected_slots=protected_slots or set(),
+            slots=inventory_slots,
+        )
+        if not prepare.success:
+            return ToolResult(
+                success=False,
+                reason=f"crafting_table_select_failed:{prepare.reason}",
+                can_retry=prepare.can_retry,
+                next_suggestion=prepare.next_suggestion,
+                metrics={
+                    "item": item,
+                    "crafting_table_item": crafting_table_item,
+                    "attempted_targets": attempted,
+                    "prepare_hotbar": prepare.to_payload(),
+                },
+            )
         select = _dispatch_select_item(self.body, crafting_table_item, timeout_s=place_timeout_s)
         if not select.success:
             return ToolResult(
@@ -780,7 +804,12 @@ class InventoryTransactions:
                 reason=f"crafting_table_select_failed:{select.reason}",
                 can_retry=select.can_retry,
                 next_suggestion=select.next_suggestion,
-                metrics={"item": item, "crafting_table_item": crafting_table_item, "attempted_targets": attempted},
+                metrics={
+                    "item": item,
+                    "crafting_table_item": crafting_table_item,
+                    "attempted_targets": attempted,
+                    "prepare_hotbar": prepare.to_payload(),
+                },
             )
         place = self.work.place_here(
             crafting_table_item,
@@ -799,6 +828,7 @@ class InventoryTransactions:
                     "item": item,
                     "crafting_table_item": crafting_table_item,
                     "attempted_targets": attempted,
+                    "prepare_hotbar": prepare.to_payload(),
                     "select": select.to_payload(),
                     "place": place.to_payload(),
                 },
@@ -815,6 +845,7 @@ class InventoryTransactions:
                     "item": item,
                     "crafting_table_item": crafting_table_item,
                     "attempted_targets": attempted,
+                    "prepare_hotbar": prepare.to_payload(),
                     "select": select.to_payload(),
                     "place": place.to_payload(),
                 },
@@ -823,6 +854,7 @@ class InventoryTransactions:
             "mode": "temporary_table",
             "table_pos": list(target),
             "table_type": "crafting_table",
+            "prepare_hotbar": prepare.to_payload(),
             "select": select.to_payload(),
             "place": place.to_payload(),
             "attempted_targets": attempted,
@@ -1758,6 +1790,102 @@ def _dispatch_select_item(body: Body, item: str, *, timeout_s: float) -> ToolRes
     if rejected is not None:
         return rejected
     return ToolResult(success=False, reason="body_rejected", can_retry=True, metrics={"action": "selectItem", "item": item})
+
+
+def _prepare_hotbar_slot_for_item(
+    body: Body,
+    item: str,
+    *,
+    timeout_s: float,
+    protected_slots: set[int],
+    slots: list[InventorySlot] | None = None,
+) -> ToolResult:
+    """Make room to select an inventory item without invalidating a craft plan."""
+
+    if slots is None:
+        inventory = _read_inventory(body)
+        failed = _perception_failure(inventory)
+        if failed is not None:
+            return failed
+        slots = [InventorySlot.from_payload(slot) for slot in inventory.data.get("slots") or []]
+    matching = [slot for slot in slots if _same_item(slot.item, item) and not slot.empty]
+    if not matching:
+        return ToolResult(
+            success=False,
+            reason="not_in_inventory",
+            can_retry=False,
+            next_suggestion="craft or collect the workstation item before retrying",
+            metrics={"item": item},
+        )
+    if any(0 <= slot.slot <= 8 for slot in matching):
+        return ToolResult(success=True, reason="already_hotbar", can_retry=False, metrics={"item": item})
+
+    source = next(
+        (
+            slot
+            for slot in reversed(slots)
+            if 0 <= slot.slot <= 8 and not slot.empty and slot.slot not in protected_slots
+        ),
+        None,
+    )
+    if source is None:
+        return ToolResult(
+            success=False,
+            reason="hotbar_full",
+            can_retry=True,
+            next_suggestion="free a non-recipe hotbar slot before selecting the workstation",
+            metrics={"item": item, "protected_slots": sorted(protected_slots)},
+        )
+    occupied = {slot.slot: slot for slot in slots}
+    destination = next(
+        (
+            slot_index
+            for slot_index in range(9, 36)
+            if slot_index not in protected_slots
+            and (occupied.get(slot_index) is None or occupied[slot_index].empty)
+        ),
+        None,
+    )
+    if destination is None:
+        return ToolResult(
+            success=False,
+            reason="carry_full",
+            can_retry=True,
+            next_suggestion="free a carry slot before selecting the workstation",
+            metrics={"item": item, "protected_slots": sorted(protected_slots)},
+        )
+    moved = _execute_move_item(
+        body,
+        from_slot=source.slot,
+        to_slot=destination,
+        count=None,
+        timeout_s=timeout_s,
+    )
+    if not moved.success:
+        return ToolResult(
+            success=False,
+            reason=f"hotbar_stage_failed:{moved.reason}",
+            can_retry=moved.can_retry,
+            next_suggestion=moved.next_suggestion,
+            metrics={
+                "item": item,
+                "source_slot": source.slot,
+                "destination_slot": destination,
+                "move": moved.to_payload(),
+            },
+        )
+    return ToolResult(
+        success=True,
+        reason="hotbar_slot_freed",
+        can_retry=False,
+        metrics={
+            "item": item,
+            "source_slot": source.slot,
+            "destination_slot": destination,
+            "moved_item": source.item,
+            "moved_count": source.count,
+        },
+    )
 
 
 def _body_rejected(result: Result, metrics: dict[str, object]) -> ToolResult | None:

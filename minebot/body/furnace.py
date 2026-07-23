@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from dataclasses import dataclass
 import time
 from math import ceil
@@ -662,11 +662,65 @@ class FurnaceTransactions:
                 },
             )
 
+        # The output slot was selected before the furnace lifecycle ran.  A
+        # placement transaction or a late item pickup can legally change that
+        # slot while the furnace is smelting, so re-read inventory truth before
+        # issuing the named-slot transfer and choose a compatible destination.
+        current_inventory = _read_inventory(self.body)
+        failed = _perception_failure(current_inventory)
+        if failed is not None:
+            return _smelt_failure(
+                "smelt_output_inventory_read_failed",
+                failed,
+                plan,
+                executed,
+                polls=polls,
+            )
+        current_slots = _slots(current_inventory)
+        destination = plan.output_slot
+        destination_slot = _slot_by_index(current_slots, destination)
+        if (
+            destination_slot is not None
+            and not destination_slot.empty
+            and (
+                not _same_item(destination_slot.item, plan.output_item)
+                or destination_slot.count + plan.output_count > 64
+            )
+        ):
+            replacement = _find_output_slot(
+                current_slots,
+                plan.output_item,
+                plan.output_count,
+                exclude={plan.input_slot, plan.fuel_slot},
+            )
+            if replacement is None:
+                no_space = ToolResult(
+                    success=False,
+                    reason="smelt_output_no_space",
+                    can_retry=True,
+                    next_suggestion="free an empty inventory slot or merge compatible output stacks",
+                    metrics={
+                        "furnace_pos": list(pos),
+                        "output_item": plan.output_item,
+                        "output_count": plan.output_count,
+                        "planned_output_slot": plan.output_slot,
+                    },
+                )
+                return _smelt_failure(
+                    "smelt_output_destination_failed",
+                    no_space,
+                    plan,
+                    executed,
+                    polls=polls,
+                )
+            destination = replacement
+            plan = replace(plan, output_slot=destination)
+
         output_move = self.transfer_slot(
             pos,
             direction="furnace_to_bot",
             furnace_slot="output",
-            bot_slot=plan.output_slot,
+            bot_slot=destination,
             count=plan.output_count,
             timeout_s=transfer_timeout_s,
         )

@@ -385,7 +385,18 @@ class ScarpetSourceTests(unittest.TestCase):
             self.assertIn(expected, source)
 
         self.assertIn("navigation_lava_unsafe(x, y, z) -> (", source)
-        self.assertIn("lava_near_pos(l(x + 0.5, y, z + 0.5)) || is_lava_at(x, y + 1, z)", source)
+        # Reflex-exact hazard predicate: reject a cell only where the survival
+        # reflex actually fires (lava_near_pos of the feet box) or the body makes
+        # direct lava contact at feet/head. It must NOT prune liquid cells merely
+        # because lava is in the wider head-layer neighborhood -- that walled safe
+        # swim lanes and produced plan-time no_path (see ag r64 worklog I15).
+        self.assertIn("lava_near_pos(l(x + 0.5, y, z + 0.5)) ||", source)
+        self.assertIn("is_lava_at(x, y, z) ||", source)
+        self.assertIn("is_lava_at(x, y + 1, z)", source)
+        self.assertNotIn(
+            "((feet_kind == 'LIQUID' || head_kind == 'LIQUID') && lava_near_pos(l(x + 0.5, y + 1, z + 0.5)))",
+            source,
+        )
         probe_body = source[source.index("probe_walkability(x, y, z) -> ("):source.index("probe_heuristic(")]
         self.assertIn("if(navigation_lava_unsafe(x, y, z),", probe_body)
         self.assertIn("feet_kind != 'SOLID' && head_kind != 'SOLID' && !navigation_lava_unsafe(x, y, z)", source)
@@ -1050,8 +1061,8 @@ class ScarpetSourceTests(unittest.TestCase):
             "find_empty_hotbar_slot",
             "item_matches",
             "inventory_get(name, slot)",
-            "inventory_set(name, hotbar_slot",
-            "inventory_set(name, inv_found:0, 0)",
+            "copy_full_stack(name, displaced_slot, carry_slot)",
+            "copy_full_stack(name, inv_found:0, hotbar_slot)",
             "player %s hotbar %d",
             "not_in_inventory",
             "hotbar_full",

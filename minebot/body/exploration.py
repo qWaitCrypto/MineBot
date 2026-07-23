@@ -12,8 +12,9 @@ from typing import Callable, Protocol
 from minebot.body.navigation import (
     NavigationRunConfig,
     NavigationTransactions,
-    aquatic_navigation_config,
     dry_land_navigation_config,
+    governed_mobility_navigation_config,
+    navigation_zero_progress,
     pure_movement_navigation_config,
 )
 from minebot.body.world_read import read_block_facts
@@ -495,6 +496,7 @@ class ExplorationTransactions:
             navigation_failures: list[JsonObject] = []
             navigation_uncertainty: tuple[JsonObject, ...] = ()
             fallback_failure_recorded = False
+            fallback_attempted = False
             candidate_stands = stands[:3]
             before = self.body.get_state()
             nav = self.navigator.navigate_to(
@@ -560,7 +562,8 @@ class ExplorationTransactions:
             reached = nav.success and _region_key(_block_pos(after.pos)) == region
             if (
                 not reached
-                and navigation_reason == "no_path"
+                and navigation_reason in {"no_path", "budget_exceeded"}
+                and navigation_zero_progress(nav, before.pos, after.pos)
                 and not aquatic_attempted
             ):
                 fallback_attempted = True
@@ -596,7 +599,7 @@ class ExplorationTransactions:
                 aquatic = self.navigator.navigate_to(
                     GoalComposite(tuple(GoalNear(stand, radius=1) for stand in candidate_stands)),
                     break_context=BreakContext.TRAVEL,
-                    config=aquatic_navigation_config(
+                    config=governed_mobility_navigation_config(
                         NavigationRunConfig(max_segments=16, segment_timeout_s=12.0)
                     ),
                     mutation_blacklist=mutation_blacklist,
@@ -605,12 +608,14 @@ class ExplorationTransactions:
                 distance_consumed += dist(aquatic_before.pos, aquatic_after.pos)
                 navigation_failures.append(
                     {
-                        "mode": "aquatic_traversal",
+                        "mode": "governed_mobility",
                         "stands": [list(stand) for stand in candidate_stands],
                         "selected_goal": (aquatic.metrics or {}).get("selected_goal"),
                         "reason": aquatic.reason,
                         "success": aquatic.success,
                         "can_retry": aquatic.can_retry,
+                        "trigger": navigation_reason,
+                        "trigger_zero_progress": True,
                         "mutation_blacklist_size": len(mutation_blacklist),
                     }
                 )
@@ -670,8 +675,29 @@ class ExplorationTransactions:
                 recovery: JsonObject | None = None
                 recovered = after
                 verified_goal = GoalNear(_block_pos(before.pos), radius=1)
+                # Only retreat to the pre-attempt position when the attempt made
+                # no useful forward progress. A governed-mobility fallback that
+                # succeeded (e.g. bridged a hazard-flanked water choke) and left
+                # the body meaningfully closer to the target region must not be
+                # dragged back: the pure-movement recovery cannot re-cross that
+                # choke and would both strand the body and discard real progress.
+                # Stray drift during a *failed* navigation is not progress and
+                # still retreats, preserving the existing recovery contract.
+                region_center = _region_center(region, _block_pos(before.pos)[1])
+                before_gap = hypot(
+                    region_center[0] - before.pos[0], region_center[2] - before.pos[2]
+                )
+                after_gap = hypot(
+                    region_center[0] - after.pos[0], region_center[2] - after.pos[2]
+                )
+                governed_advance = (
+                    fallback_attempted
+                    and nav.success
+                    and before_gap - after_gap > 2.0
+                )
                 if (
                     navigation_reason != "progress_yielded"
+                    and not governed_advance
                     and not verified_goal.is_satisfied(_block_pos(after.pos))
                 ):
                     recovery_result = self.navigator.navigate_to(
@@ -737,8 +763,13 @@ class ExplorationTransactions:
                         }
                     )
                 if recovery is not None and recovery["success"] is not True:
+                    # A failed return-to-last-verified-position must not erase
+                    # target facts already collected earlier in this bounded
+                    # call.  The caller can act on those exact coordinates;
+                    # only a call with no target facts remains mobility-blocked.
+                    found = bool(all_blocks or all_entities)
                     return self._result(
-                        "mobility_blocked",
+                        "found" if found else "mobility_blocked",
                         targets=targets,
                         dimension=dimension,
                         origin=origin,
@@ -752,8 +783,8 @@ class ExplorationTransactions:
                         failures=failures,
                         evidence_keys=evidence_keys,
                         coverage=prior,
-                        success=False,
-                        can_retry=True,
+                        success=found,
+                        can_retry=not found,
                     )
                 if navigation_reason == "progress_yielded":
                     return self._result(

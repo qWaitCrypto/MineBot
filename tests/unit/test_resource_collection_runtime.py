@@ -1,6 +1,11 @@
 import unittest
 
-from minebot.body.resource_collection import ResourceCollectionConfig, ResourceCollectionTransactions
+from minebot.body.interaction_support import NearbyBlockSearch, NearbyBlockTarget
+from minebot.body.resource_collection import (
+    ResourceCollectionConfig,
+    ResourceCollectionTransactions,
+    _active_targets,
+)
 from minebot.contract import BodyState, PerceptionResult, ToolResult
 from minebot.game.navigation import GoalComposite
 
@@ -55,10 +60,23 @@ class ResourceBody:
                 target_type = next((block for target, block in self.targets if target == pos), None)
                 if target_type is not None:
                     block_type, state = target_type, "SOLID"
-                elif pos[1] == 64:
-                    block_type, state = "stone", "SOLID"
                 else:
-                    block_type, state = "air", "CLEAR"
+                    high_target_support = {
+                        (target[0][0] + dx, target[0][1] - 2, target[0][2] + dz)
+                        for target in self.targets
+                        if target[0][1] >= 68
+                        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                    }
+                    low_target_support = {
+                        (target[0][0] + dx, target[0][1], target[0][2] + dz)
+                        for target in self.targets
+                        if target[0][1] < 64
+                        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                    }
+                    if pos[1] == 64 or pos in high_target_support or pos in low_target_support:
+                        block_type, state = "stone", "SOLID"
+                    else:
+                        block_type, state = "air", "CLEAR"
                 cells.append(
                     {
                         "x": pos[0],
@@ -122,10 +140,11 @@ class ScopedTreeResourceBody(ResourceBody):
 
 
 class RecordingNavigator:
-    def __init__(self, body, selected_goals, outcomes=None):
+    def __init__(self, body, selected_goals, outcomes=None, metrics=None):
         self.body = body
         self.selected_goals = list(selected_goals)
         self.outcomes = list(outcomes or [])
+        self.metrics = list(metrics or [])
         self.calls = []
 
     def navigate_to(self, goal, **kwargs):
@@ -134,12 +153,54 @@ class RecordingNavigator:
         success, reason = self.outcomes.pop(0) if self.outcomes else (True, "arrived")
         if success and reason == "arrived":
             self.body.state_pos = (selected[0] + 0.5, float(selected[1]), selected[2] + 0.5)
+        result_metrics = {"selected_goal": list(selected), "goal_set_preserved": True}
+        if self.metrics:
+            result_metrics.update(self.metrics.pop(0))
         return ToolResult(
             success,
             reason,
             not success,
-            metrics={"selected_goal": list(selected), "goal_set_preserved": True},
+            metrics=result_metrics,
         )
+
+
+ZERO_PROGRESS_NAVIGATION_METRICS = {
+    "segments": [
+        {
+            "diagnostics": {
+                "path_length": 0,
+                "waypoints": 0,
+                "move_ticks": 0,
+                "partial_distance": 0.0,
+                "movement_counts": {
+                    "walk": 0,
+                    "diagonal": 0,
+                    "ascend": 0,
+                    "descend": 0,
+                    "swim": 0,
+                    "fall": 0,
+                    "break": 0,
+                    "place": 0,
+                    "pillar": 0,
+                },
+            }
+        }
+    ]
+}
+
+POSITIVE_PATH_NAVIGATION_METRICS = {
+    "segments": [
+        {
+            "diagnostics": {
+                "path_length": 3,
+                "waypoints": 3,
+                "move_ticks": 12,
+                "partial_distance": 2.0,
+                "movement_counts": {"walk": 3, "swim": 0},
+            }
+        }
+    ]
+}
 
 
 class RecordingWork:
@@ -165,6 +226,29 @@ class RecordingWork:
 
 
 class ResourceCollectionRuntimeTests(unittest.TestCase):
+    def test_exact_blacklist_filters_priority_targets_without_erasing_neighboring_cluster(self):
+        occluded = NearbyBlockTarget((5, 64, 0), "iron_ore", 5.0)
+        neighbor = NearbyBlockTarget((6, 64, 0), "iron_ore", 6.0)
+        search = NearbyBlockSearch(
+            targets=[occluded, neighbor],
+            truncated=False,
+            uncertainty=[],
+            errors=[],
+            pages_read=1,
+            total_matches=2,
+        )
+
+        active = _active_targets(
+            search,
+            candidate_blacklist=set(),
+            exact_candidate_blacklist={occluded.pos},
+            patch_blacklist=[],
+            limit=2,
+            priority_targets=(occluded, neighbor),
+        )
+
+        self.assertEqual(active, (neighbor,))
+
     def test_planner_selects_target_and_stand_from_one_combined_domain(self):
         body = ResourceBody(
             [
@@ -212,6 +296,47 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         goal_positions = {child.pos for child in navigator.calls[0][0].goals}
         self.assertIn((5, 65, -1), goal_positions)
 
+    def test_resource_domain_does_not_navigate_on_unverified_geometric_fallback(self):
+        class NoStandFactsBody(ResourceBody):
+            def perceive(self, scope, params):
+                if scope == "blockCells":
+                    cells = [
+                        {
+                            "x": int(raw[0]),
+                            "y": int(raw[1]),
+                            "z": int(raw[2]),
+                            "type": "air",
+                            "state": "CLEAR",
+                            "properties": {},
+                        }
+                        for raw in params.get("cells") or []
+                    ]
+                    return PerceptionResult(
+                        bot=self.bot_name,
+                        scope=scope,
+                        type="perception",
+                        ok=True,
+                        complete=True,
+                        data={"cells": cells, "count": len(cells), "total": len(cells), "next": None},
+                    )
+                return super().perceive(scope, params)
+
+        target = (5, 64, 0)
+        body = NoStandFactsBody([(target, "dirt")])
+        navigator = RecordingNavigator(body, [(5, 65, -1)])
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertFalse(result.success, result.to_payload())
+        self.assertEqual(result.reason, "resource_candidate_domain_exhausted")
+        self.assertEqual(navigator.calls, [])
+
     def test_collection_approach_uses_dry_land_profile_without_disabling_governed_clearance(self):
         body = ResourceBody([((5, 64, 0), "dirt")])
         navigator = RecordingNavigator(body, [(5, 65, -1)])
@@ -230,7 +355,186 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertFalse(config.allow_swim)
         self.assertTrue(config.allow_break)
         self.assertEqual(config.max_break_steps, work.MINE_APPROACH_MAX_BREAK_STEPS)
+        self.assertEqual(config.server_max_expand, 1200)
+        self.assertEqual(config.server_grid_radius, 48)
+        self.assertEqual(config.max_segments, 16)
+        self.assertEqual(config.max_partial_segments, 8)
         self.assertEqual(work.egress_calls, [{"timeout_s": 15.0}])
+        self.assertEqual(result.metrics["navigation_fallback_attempts"], 0)
+
+    def test_zero_progress_no_path_upgrades_to_governed_mobility_once(self):
+        target = (5, 64, 0)
+        selected = (5, 65, -1)
+        body = ResourceBody([(target, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [selected, selected],
+            outcomes=[(False, "no_path"), (True, "arrived")],
+            metrics=[ZERO_PROGRESS_NAVIGATION_METRICS],
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(len(navigator.calls), 2)
+        dry_config = navigator.calls[0][1]["config"]
+        fallback_config = navigator.calls[1][1]["config"]
+        self.assertFalse(dry_config.allow_swim)
+        self.assertTrue(fallback_config.allow_swim)
+        self.assertTrue(fallback_config.aquatic_traversal)
+        for field in ("allow_break", "allow_place", "allow_pillar", "allow_downward"):
+            self.assertTrue(getattr(fallback_config, field))
+        self.assertEqual(
+            fallback_config.max_break_steps,
+            dry_config.max_break_steps,
+        )
+        self.assertEqual(result.metrics["navigation_fallback_attempts"], 1)
+        fallback = result.metrics["attempts"][0]["navigation_fallback"]
+        self.assertEqual(fallback["profile"], "governed_mobility")
+        self.assertEqual(fallback["dry_terminal_reason"], "no_path")
+        self.assertEqual(fallback["dry_result"]["reason"], "no_path")
+
+    def test_zero_progress_budget_exceeded_upgrades_to_governed_mobility(self):
+        target = (5, 64, 0)
+        selected = (5, 65, -1)
+        body = ResourceBody([(target, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [selected, selected],
+            outcomes=[(False, "budget_exceeded"), (True, "arrived")],
+            metrics=[ZERO_PROGRESS_NAVIGATION_METRICS],
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertFalse(navigator.calls[0][1]["config"].allow_swim)
+        self.assertTrue(navigator.calls[1][1]["config"].allow_swim)
+        self.assertTrue(navigator.calls[1][1]["config"].aquatic_traversal)
+        self.assertEqual(result.metrics["navigation_fallback_attempts"], 1)
+
+    def test_navigation_progress_does_not_trigger_governed_mobility_fallback(self):
+        target = (5, 64, 0)
+        selected = (5, 65, -1)
+        body = ResourceBody([(target, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [selected],
+            outcomes=[(False, "budget_exceeded")],
+            metrics=[POSITIVE_PATH_NAVIGATION_METRICS],
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertEqual(result.metrics["navigation_fallback_attempts"], 0)
+        self.assertNotIn("navigation_fallback", result.metrics["attempts"][0])
+
+    def test_governed_mobility_fallback_failure_remains_honest(self):
+        target = (5, 64, 0)
+        selected = (5, 65, -1)
+        body = ResourceBody([(target, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [selected, selected],
+            outcomes=[(False, "no_path"), (False, "budget_exceeded")],
+            metrics=[ZERO_PROGRESS_NAVIGATION_METRICS],
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.metrics["navigation_fallback_attempts"], 1)
+        self.assertEqual(result.metrics["attempts"][0]["navigation_profile"], "governed_mobility")
+        self.assertFalse(result.metrics["attempts"][0]["navigation_fallback"]["result"]["success"])
+
+    def test_ambiguous_governance_replans_to_an_alternative_candidate(self):
+        first = (5, 64, 0)
+        second = (12, 64, 0)
+        body = ResourceBody([(first, "dirt"), (second, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [(5, 65, -1), (12, 65, -1)],
+        )
+        work = RecordingWork(
+            [
+                ToolResult(False, "break_denied:structure_risk_unknown", True),
+                ToolResult(True, "collected", False, metrics={"collected_total": 1}),
+            ]
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, work)
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=2),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(len(work.calls), 2)
+        self.assertEqual(work.calls[0][0], first)
+        self.assertEqual(work.calls[1][0], second)
+        self.assertNotIn("inspection", result.metrics)
+
+    def test_ambiguous_governance_skips_candidates_then_requests_inspection(self):
+        target = (5, 64, 0)
+        selected = (5, 65, -1)
+        body = ResourceBody([(target, "dirt")])
+        navigator = RecordingNavigator(body, [selected])
+        work = RecordingWork(
+            [
+                ToolResult(
+                    False,
+                    "break_denied:structure_risk_unknown",
+                    True,
+                    metrics={"evidence_state": "needs_inspection"},
+                )
+            ]
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, work)
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=2),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "needs_inspection")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.metrics["inspection"]["state"], "needs_inspection")
+        self.assertEqual(result.metrics["inspection"]["candidate_count"], 1)
+        self.assertEqual(result.metrics["inspection"]["candidates"][0]["target"], list(target))
+        self.assertEqual(len(work.calls), 1)
+        self.assertEqual(work.calls[0][0], target)
 
     def test_dry_egress_terminal_prevents_resource_search_and_navigation(self):
         body = ResourceBody([((5, 64, 0), "dirt")])

@@ -5,11 +5,14 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 from math import floor
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from minebot.body.inventory_read import read_inventory_counts
 from minebot.contract import Body, BreakContext, Position, ToolResult
 from minebot.game.navigation import GoalComposite, GoalNear
+
+if TYPE_CHECKING:
+    from minebot.body.navigation import NavigationRunConfig
 
 
 class PickupNavigator(Protocol):
@@ -28,6 +31,9 @@ class PickupConfig:
     segment_timeout_s: float = 6.0
     max_segments: int = 3
     arrival_radius: float = 0.25
+    # Resource collection may supply its provider-local, load-limited profile
+    # so the post-mutation pickup route does not reopen an unbounded A* path.
+    navigation_config: "NavigationRunConfig | None" = None
 
 
 @dataclass(frozen=True)
@@ -127,16 +133,32 @@ class PickupTransactions:
             return _pickup_outcome(after, deltas, collected_total, assist, "pickup_navigation_unavailable")
 
         blacklist: set[str] = set()
-        fallback = tuple(
+        # A dropped entity can drift between perception and arrival.  Keep the
+        # no-delta blacklist tied to the position that was actually attempted;
+        # the same entity at a new position is a new reach candidate.
+        blacklist_positions: dict[str, Position] = {}
+        fallback = list(
             _PickupCandidate(key=f"fallback:{pos[0]}:{pos[1]}:{pos[2]}", pos=pos, entity_id=None)
             for pos in _unique_positions(fallback_positions)
         )
+        # Keep neighborhoods derived from an observed entity separate from
+        # the caller's origin fallbacks. Once an entity was actually found,
+        # its local stand domain is stronger evidence than returning to the
+        # original block position after a failed route.
+        dynamic_fallback: list[_PickupCandidate] = []
         for scan_round in range(config.max_scan_rounds):
             if time.monotonic() - started >= config.max_wall_s:
                 return _pickup_outcome(after, deltas, collected_total, assist, "pickup_budget_exhausted")
             assist["scan_rounds"] = scan_round + 1
-            scanned, scan_metrics = self._scan_candidates(config)
+            scanned, scan_metrics = self._scan_candidates(config, expected_items)
             assist.setdefault("scans", []).append(scan_metrics)
+            # The entity's cell is not necessarily a legal feet cell: item
+            # drops commonly settle on top of a solid block or straddle a
+            # block boundary.  Keep the entity as the primary candidate on
+            # the first pass; after any rejected candidate, expose the
+            # bounded local stand neighborhoods in the next combined domain.
+            if blacklist:
+                _append_fallback_neighbors(dynamic_fallback, scanned)
             if not scanned and not fallback and scan_metrics["ok"] is not True:
                 failure = ToolResult(
                     success=False,
@@ -154,30 +176,44 @@ class PickupTransactions:
                     assist,
                     "pickup_candidate_domain_incomplete",
                 )
-            scanned_candidates = [candidate for candidate in scanned if candidate.key not in blacklist]
-            fallback_candidates = [candidate for candidate in fallback if candidate.key not in blacklist]
-            candidates = scanned_candidates if scanned_candidates else fallback_candidates
+            scanned_candidates = [
+                candidate
+                for candidate in scanned
+                if candidate.key not in blacklist
+                or blacklist_positions.get(candidate.key) != candidate.pos
+            ]
+            fallback_candidates = [
+                candidate
+                for candidate in fallback
+                if candidate.key not in blacklist
+                or blacklist_positions.get(candidate.key) != candidate.pos
+            ]
+            dynamic_candidates = [
+                candidate
+                for candidate in dynamic_fallback
+                if candidate.key not in blacklist
+                or blacklist_positions.get(candidate.key) != candidate.pos
+            ]
+            if blacklist and (scanned_candidates or dynamic_candidates):
+                candidates = scanned_candidates + dynamic_candidates
+            else:
+                candidates = scanned_candidates if scanned_candidates else fallback_candidates
             candidates = _unique_candidates(candidates)[: config.max_goals]
             if not candidates:
                 reason = "pickup_partial_candidate_exhausted" if collected_total > 0 else "pickup_candidate_domain_exhausted"
                 return _pickup_outcome(after, deltas, collected_total, assist, reason)
 
             goals = tuple(candidate.pos for candidate in candidates)
-            from minebot.body.navigation import NavigationRunConfig
+            from minebot.body.navigation import NavigationRunConfig, pure_movement_navigation_config
 
-            nav_config = replace(
-                NavigationRunConfig(),
-                max_segments=config.max_segments,
-                max_partial_segments=config.max_segments,
-                segment_timeout_s=config.segment_timeout_s,
-                allow_break=False,
-                max_break_steps=0,
-                allow_place=False,
-                max_place_steps=0,
-                allow_pillar=False,
-                max_pillar_steps=0,
-                allow_downward=False,
-                max_downward_steps=0,
+            base_navigation = config.navigation_config or NavigationRunConfig()
+            nav_config = pure_movement_navigation_config(
+                replace(
+                    base_navigation,
+                    max_segments=config.max_segments,
+                    max_partial_segments=config.max_segments,
+                    segment_timeout_s=config.segment_timeout_s,
+                )
             )
             goal = GoalComposite(tuple(GoalNear(pos, radius=0) for pos in goals))
             navigation = self.navigator.navigate_to(
@@ -210,6 +246,10 @@ class PickupTransactions:
                 if not selected_candidates or int(assist["candidate_attempts"]) >= config.candidate_budget:
                     return _pickup_outcome(after, deltas, collected_total, assist, f"pickup_navigation_{navigation.reason}")
                 blacklist.update(candidate.key for candidate in selected_candidates)
+                blacklist_positions.update(
+                    {candidate.key: candidate.pos for candidate in selected_candidates}
+                )
+                _append_fallback_neighbors(dynamic_fallback, selected_candidates)
                 assist["candidate_blacklist"] = sorted(blacklist)
                 continue
 
@@ -224,6 +264,10 @@ class PickupTransactions:
             if collected_total >= minimum_count:
                 return _pickup_outcome(after, deltas, collected_total, assist, "pickup_collected")
             blacklist.update(candidate.key for candidate in selected_candidates)
+            blacklist_positions.update(
+                {candidate.key: candidate.pos for candidate in selected_candidates}
+            )
+            _append_fallback_neighbors(dynamic_fallback, selected_candidates)
             assist["candidate_blacklist"] = sorted(blacklist)
             if int(assist["candidate_attempts"]) >= config.candidate_budget:
                 return _pickup_outcome(after, deltas, collected_total, assist, "pickup_budget_exhausted")
@@ -231,7 +275,11 @@ class PickupTransactions:
         reason = "pickup_partial_candidate_exhausted" if collected_total > 0 else "pickup_candidate_domain_exhausted"
         return _pickup_outcome(after, deltas, collected_total, assist, reason)
 
-    def _scan_candidates(self, config: PickupConfig) -> tuple[tuple[_PickupCandidate, ...], dict[str, object]]:
+    def _scan_candidates(
+        self,
+        config: PickupConfig,
+        expected_items: tuple[str, ...] = (),
+    ) -> tuple[tuple[_PickupCandidate, ...], dict[str, object]]:
         nearby = self.body.perceive(
             "nearbyEntities",
             {"radius": config.radius, "limit": config.entity_limit, "types": ["item"]},
@@ -245,17 +293,25 @@ class PickupTransactions:
         if not nearby.ok:
             return (), metrics
         candidates: list[_PickupCandidate] = []
+        filtered_count = 0
         for entity in nearby.data.get("entities") or []:
             if str(entity.get("type") or "") not in {"item", "minecraft:item"}:
+                continue
+            if expected_items and not _entity_matches_expected(entity, expected_items):
+                filtered_count += 1
                 continue
             raw = entity.get("pos") or []
             if len(raw) != 3:
                 continue
-            pos = (floor(float(raw[0])), floor(float(raw[1])), floor(float(raw[2])))
+            # Item entities can drift across a block boundary after the drop
+            # event.  Route to the nearest cell so a coordinate such as
+            # z=-0.029 does not select the obstructed cell below it.
+            pos = _nearest_block_cell(raw)
             entity_id = str(entity.get("id") or "") or None
             key = f"entity:{entity_id}" if entity_id is not None else f"pos:{pos[0]}:{pos[1]}:{pos[2]}"
             candidates.append(_PickupCandidate(key=key, pos=pos, entity_id=entity_id))
         metrics["candidate_count"] = len(candidates)
+        metrics["filtered_count"] = filtered_count
         metrics["candidates"] = [
             {"key": candidate.key, "entity_id": candidate.entity_id, "pos": list(candidate.pos)}
             for candidate in candidates
@@ -307,6 +363,29 @@ def _normalize_items(items) -> tuple[str, ...]:
     return tuple(dict.fromkeys(str(item).removeprefix("minecraft:") for item in items if str(item)))
 
 
+def _entity_matches_expected(entity: dict[str, object], expected_items: tuple[str, ...]) -> bool:
+    """Keep unknown item names, but skip known entities from other item domains."""
+
+    raw_name = str(entity.get("name") or "").strip().lower()
+    if not raw_name:
+        return True
+    name = raw_name.removeprefix("minecraft:").replace("_", " ")
+    aliases = tuple(item.replace("_", " ").lower() for item in expected_items)
+    return any(name == alias or alias in name for alias in aliases)
+
+
+def _nearest_block_cell(raw) -> Position:
+    """Map an entity's floating-point position to its nearest block cell.
+
+    ``round`` is deliberately avoided because its tie handling is
+    implementation-defined for this use (and uses bankers rounding in
+    Python).  Flooring after adding half a block gives deterministic nearest
+    cell semantics for both positive and negative coordinates.
+    """
+
+    return tuple(floor(float(value) + 0.5) for value in raw)  # type: ignore[return-value]
+
+
 def _selected_goal(result: ToolResult, goals: tuple[Position, ...]) -> Position:
     raw = (result.metrics or {}).get("selected_goal", (result.metrics or {}).get("goal"))
     if isinstance(raw, (list, tuple)) and len(raw) >= 3:
@@ -318,6 +397,35 @@ def _selected_goal(result: ToolResult, goals: tuple[Position, ...]) -> Position:
 
 def _unique_positions(positions: tuple[Position, ...]) -> tuple[Position, ...]:
     return tuple(dict.fromkeys((int(pos[0]), int(pos[1]), int(pos[2])) for pos in positions))
+
+
+def _pickup_neighbor_positions(pos: Position) -> tuple[Position, ...]:
+    """Return bounded alternative feet cells around a dropped-item cell."""
+
+    x, y, z = pos
+    return (
+        (x, y + 1, z),
+        (x - 1, y, z - 1),
+        (x + 1, y, z - 1),
+        (x - 1, y, z + 1),
+        (x + 1, y, z + 1),
+        (x - 1, y, z),
+        (x + 1, y, z),
+        (x, y, z - 1),
+        (x, y, z + 1),
+        (x, y - 1, z),
+    )
+
+
+def _append_fallback_neighbors(
+    fallback: list[_PickupCandidate],
+    candidates: tuple[_PickupCandidate, ...] | list[_PickupCandidate],
+) -> None:
+    for candidate in candidates:
+        for pos in _pickup_neighbor_positions(candidate.pos):
+            key = f"fallback:{pos[0]}:{pos[1]}:{pos[2]}"
+            if all(existing.key != key for existing in fallback):
+                fallback.append(_PickupCandidate(key=key, pos=pos, entity_id=None))
 
 
 def _unique_candidates(candidates: list[_PickupCandidate]) -> list[_PickupCandidate]:

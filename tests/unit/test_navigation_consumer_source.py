@@ -138,10 +138,11 @@ class NavigationConsumerSourceTests(unittest.TestCase):
         pickup = function_body(PICKUP, "_collect_inventory_delta")
         self.assertIn("GoalComposite(", pickup)
         self.assertEqual(pickup.count("self.navigator.navigate_to("), 1)
-        self.assertIn("allow_break=False", pickup)
-        self.assertIn("allow_place=False", pickup)
-        self.assertIn("allow_pillar=False", pickup)
-        self.assertIn("allow_downward=False", pickup)
+        self.assertIn("pure_movement_navigation_config(", pickup)
+        self.assertNotIn("allow_break=False", pickup)
+        self.assertNotIn("allow_place=False", pickup)
+        self.assertNotIn("allow_pillar=False", pickup)
+        self.assertNotIn("allow_downward=False", pickup)
         self.assertNotRegex(pickup, r"for .*target.*:\n\s+.*navigate_to\(")
 
     def test_move_away_submits_the_complete_bounded_escape_domain(self):

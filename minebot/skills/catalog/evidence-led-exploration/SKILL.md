@@ -31,9 +31,11 @@ exhausted without a materially different strategy.
 2. Set finite distance and region budgets. Ask for target predicates, never
    invent reconnaissance coordinates or steer movement step by step.
 3. On `found`, use the returned block positions or entity identities to choose a
-   governed material operation such as `mine_block_collect`, `collect_resource`,
-   or `engage_entity`. The discovery itself is not completion of that material
-   objective.
+   governed material operation. For a concrete block position, prefer
+   `mine_block_collect(pos=...)` (and use `engage_entity` for a concrete entity);
+   `collect_resource` is a fresh local candidate transaction and does not consume
+   coordinates returned by `explore_for`. The discovery itself is not completion
+   of that material objective.
 4. On `budget_exhausted`, retain the resume cursor and coverage evidence. Continue
    only when the active durable task, checkpoint budget, and new evidence justify
    another model-authored commitment.

@@ -15,7 +15,7 @@ import re
 import sys
 import threading
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
@@ -45,7 +45,7 @@ from minebot.app.runner import RuntimeTrace
 from minebot.app.session import DEFAULT_RUNAWAY_STEP_LIMIT, AgentSession, SessionCommand, SessionCommandKind, SessionStep
 from minebot.brain.lifecycle import LifecycleState
 from minebot.brain.composition import resource_plan_for
-from minebot.contract import Body, Region
+from minebot.contract import Body, InventorySlot, Region
 from minebot.game import RconClient, ScarpetBody
 from minebot.game.errors import EnvelopeError, RconError
 from minebot.game.protocol import build_state_call, build_watch_call, parse_state
@@ -70,6 +70,47 @@ class RealServerConfigError(RuntimeError):
 
 
 _MINECRAFT_NAME_RE = re.compile(r"[A-Za-z0-9_]{1,16}")
+
+# This is the frozen primary material objective from the FakePlayer
+# generalization corpus.  It is deliberately kept here as a literal so the
+# production ingress and terminal evaluator share one exact contract without
+# importing test-only fixtures.
+AG_FP30_GOAL_ID = "AG-FP30"
+AG_FP30_GOAL = (
+    "Start empty-handed in the natural world. Collect 3 flower types, kill a pig, "
+    "cow and sheep and keep their drops, craft and equip a shield and an iron pickaxe, "
+    "keep at least 16 torches, and finish with at least 3 iron ingots."
+)
+AG_FP30_ACCEPTED_FLOWERS = frozenset(
+    {
+        "dandelion",
+        "poppy",
+        "blue_orchid",
+        "allium",
+        "azure_bluet",
+        "red_tulip",
+        "orange_tulip",
+        "white_tulip",
+        "pink_tulip",
+        "oxeye_daisy",
+        "cornflower",
+        "lily_of_the_valley",
+        "wither_rose",
+        "sunflower",
+        "lilac",
+        "rose_bush",
+        "peony",
+        "torchflower",
+        "pitcher_plant",
+        "open_eyeblossom",
+        "closed_eyeblossom",
+    }
+)
+AG_FP30_DROP_FAMILIES = {
+    "pig": frozenset({"porkchop"}),
+    "cow": frozenset({"beef", "leather"}),
+    "sheep": frozenset({"mutton", "white_wool", "wool"}),
+}
 
 
 @dataclass(frozen=True)
@@ -385,24 +426,37 @@ class GoalTarget:
 
 
 @dataclass(frozen=True)
+class CompositeGoalTarget:
+    kind: str
+    goal_id: str
+
+
+@dataclass(frozen=True)
 class TerminalTruth:
     goal: str
-    target: GoalTarget | CollectTarget | None
+    target: GoalTarget | CollectTarget | CompositeGoalTarget | None
     inventory_count: int | None
     satisfied: bool
     status: str
     lifecycle: str
     exit_code: int
+    facts: dict[str, object] = field(default_factory=dict)
 
     def to_trace(self) -> dict[str, object]:
         target_payload: dict[str, object] | None = None
         if self.target is not None:
-            target_payload = {
-                "kind": getattr(self.target, "kind", "collect"),
-                "item": self.target.item,
-                "count": self.target.count,
-                "inventory_items": list(self.target.inventory_items),
-            }
+            if isinstance(self.target, CompositeGoalTarget):
+                target_payload = {
+                    "kind": self.target.kind,
+                    "goal_id": self.target.goal_id,
+                }
+            else:
+                target_payload = {
+                    "kind": getattr(self.target, "kind", "collect"),
+                    "item": self.target.item,
+                    "count": self.target.count,
+                    "inventory_items": list(self.target.inventory_items),
+                }
         return {
             "goal": self.goal,
             "target": target_payload,
@@ -411,6 +465,7 @@ class TerminalTruth:
             "status": self.status,
             "lifecycle": self.lifecycle,
             "exit_code": self.exit_code,
+            "facts": dict(self.facts),
         }
 
 
@@ -573,8 +628,15 @@ async def run_real_server_interactive(
     max_steps: int | None,
     camera_config: Path | None = None,
     scenario_hook: InteractiveScenarioHook | None = None,
+    terminal_goal: str | None = None,
 ) -> int:
-    """Run one persistent real-server session with stdin as the user channel."""
+    """Run one persistent real-server session with stdin as the user channel.
+
+    ``terminal_goal`` is an optional evaluator contract for production
+    scenarios that inject/replace goals through the live ingress.  It is never
+    submitted to the Agent automatically; it only keeps final verification
+    anchored after cancellation or ``/quit`` clears the active goal.
+    """
     provider = provider_registry_from_env()
     rcon = RconClient(config.rcon)
     try:
@@ -772,7 +834,7 @@ async def run_real_server_interactive(
         try:
             final = await _run_interactive_loop(
                 session,
-                fallback_goal=goal,
+                fallback_goal=terminal_goal or goal,
                 body=body,
                 max_steps=max_steps,
                 body_event_pump=body_event_pump,
@@ -780,8 +842,8 @@ async def run_real_server_interactive(
             )
             if scenario_task is not None and scenario_task.done():
                 scenario_task.result()
-            terminal_goal = _session_goal(session, goal)
-            truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
+            evaluated_goal = _session_goal(session, terminal_goal or goal)
+            truth = safe_evaluate_terminal_truth(body, evaluated_goal, final, session=session)
             _announce_interactive_terminal(body, truth)
             if session.parts is not None:
                 session.parts.runtime.trace.emit(
@@ -885,7 +947,11 @@ def _announce_interactive_terminal(body: object, truth: TerminalTruth) -> bool:
 
 def _terminal_announcement(truth: TerminalTruth) -> str | None:
     if truth.satisfied:
-        if truth.target is not None and truth.inventory_count is not None:
+        if (
+            truth.target is not None
+            and not isinstance(truth.target, CompositeGoalTarget)
+            and truth.inventory_count is not None
+        ):
             return f"done: {truth.target.item} {truth.inventory_count}/{truth.target.count}"
         return "done"
     if truth.status == "yielded" or truth.lifecycle == "yielded":
@@ -1095,8 +1161,6 @@ def _session_goal(session: AgentSession, fallback: str | None) -> str:
     current = getattr(session, "current_goal", None)
     if current:
         return current
-    if getattr(session, "parts", None) is not None:
-        return ""
     return fallback or ""
 
 
@@ -1226,7 +1290,227 @@ def _command_tail(text: str, command: str) -> str:
     return ""
 
 
+def _normalize_goal_text(goal: str) -> str:
+    return " ".join(str(goal).strip().split()).casefold()
+
+
+def is_ag_fp30_goal(goal: str) -> bool:
+    """Return whether ``goal`` is the frozen primary AG-FP30 objective."""
+
+    return _normalize_goal_text(goal) == _normalize_goal_text(AG_FP30_GOAL)
+
+
+def _ag_fp30_target(goal: str) -> CompositeGoalTarget | None:
+    if not is_ag_fp30_goal(goal):
+        return None
+    return CompositeGoalTarget(kind="production_terminal", goal_id=AG_FP30_GOAL_ID)
+
+
+def _read_authoritative_inventory_slots(
+    body: Body,
+    *,
+    page_size: int = 12,
+) -> tuple[list[InventorySlot], str | None]:
+    """Read every inventory page, preserving an explicit failure reason."""
+
+    slots: list[InventorySlot] = []
+    start: int | None = 0
+    while start is not None:
+        try:
+            perception = body.perceive("inventory", {"start": start, "limit": page_size})
+        except Exception as exc:
+            return [], f"{type(exc).__name__}: {exc}"
+        if not perception.ok:
+            return [], perception.error or "inventory_perception_failed"
+        try:
+            slots.extend(
+                InventorySlot.from_payload(payload)
+                for payload in perception.data.get("slots") or []
+                if isinstance(payload, dict)
+            )
+        except (TypeError, ValueError, KeyError) as exc:
+            return [], f"invalid_inventory_slot: {exc}"
+        next_value = perception.data.get("nextStart")
+        if next_value is None:
+            next_value = perception.next
+        if next_value is None:
+            if not perception.complete:
+                return [], perception.error or "inventory_page_incomplete"
+            start = None
+        else:
+            try:
+                next_start = int(next_value)
+            except (TypeError, ValueError):
+                return [], "invalid_inventory_cursor"
+            if next_start <= start:
+                return [], "inventory_cursor_did_not_advance"
+            start = next_start
+    if not slots:
+        # An empty inventory is a valid authoritative result, so this is not
+        # an error.  The terminal predicates below will simply remain false.
+        return [], None
+    return slots, None
+
+
+def _item_name(item: str | None) -> str | None:
+    if item is None:
+        return None
+    return str(item).removeprefix("minecraft:").lower()
+
+
+def evaluate_ag_fp30_terminal_truth(
+    body: Body,
+    goal: str,
+    final: SessionStep,
+) -> TerminalTruth:
+    """Evaluate AG-FP30 from independent server-authoritative Body facts.
+
+    The predicate intentionally reads inventory/equipment and the server-side
+    owner head directly.  It never consumes model text, tool success flags, or
+    the Agent's claimed plan.  A missing fact is an honest false result with a
+    typed ``facts.error`` entry.
+    """
+
+    target = _ag_fp30_target(goal)
+    if target is None:
+        raise ValueError("evaluate_ag_fp30_terminal_truth requires the canonical AG-FP30 goal")
+
+    facts: dict[str, object] = {
+        "evaluator": AG_FP30_GOAL_ID,
+        "goal_match": True,
+        "inventory": {"ok": False},
+        "flowers": {"distinct_items": [], "minimum": 3, "satisfied": False},
+        "drops": {},
+        "equipment": {
+            "offhand": {"item": None, "required": "shield", "satisfied": False},
+            "mainhand": {"item": None, "required": "iron_pickaxe", "selected_slot": None, "satisfied": False},
+        },
+        "body_owner": None,
+        "pending_action_count": None,
+        "terminal_satisfied": False,
+    }
+    slots, inventory_error = _read_authoritative_inventory_slots(body)
+    if inventory_error is not None:
+        facts["error"] = inventory_error
+    else:
+        counts: dict[str, int] = {}
+        by_slot: dict[int, str] = {}
+        slot_labels: dict[str, str] = {}
+        for slot in slots:
+            item = _item_name(slot.item)
+            if item is None or slot.empty or slot.count <= 0:
+                continue
+            counts[item] = counts.get(item, 0) + slot.count
+            by_slot[slot.slot] = item
+            if slot.slot_label:
+                slot_labels[slot.slot_label] = item
+
+        flowers = sorted(item for item in AG_FP30_ACCEPTED_FLOWERS if counts.get(item, 0) > 0)
+        facts["inventory"] = {
+            "ok": True,
+            "counts": {
+                item: counts.get(item, 0)
+                for item in sorted(
+                    set(AG_FP30_ACCEPTED_FLOWERS)
+                    | {"torch", "iron_ingot", "shield", "iron_pickaxe"}
+                    | set().union(*AG_FP30_DROP_FAMILIES.values())
+                )
+                if counts.get(item, 0) > 0
+            },
+            "slot_count": len(slots),
+        }
+        facts["flowers"] = {
+            "distinct_items": flowers,
+            "minimum": 3,
+            "satisfied": len(flowers) >= 3,
+        }
+        for entity, accepted in AG_FP30_DROP_FAMILIES.items():
+            matched = sorted(item for item in accepted if counts.get(item, 0) > 0)
+            facts["drops"][entity] = {
+                "accepted_items": sorted(accepted),
+                "matched_items": matched,
+                "satisfied": bool(matched),
+            }
+        offhand = _item_name(slot_labels.get("offhand") or by_slot.get(40))
+        facts["equipment"]["offhand"] = {
+            "item": offhand,
+            "required": "shield",
+            "satisfied": offhand == "shield",
+        }
+        try:
+            state = body.get_state()
+            selected_slot = state.selected_slot
+        except Exception as exc:
+            selected_slot = None
+            facts["equipment"]["mainhand"]["error"] = f"{type(exc).__name__}: {exc}"
+        mainhand = None if selected_slot is None else by_slot.get(int(selected_slot))
+        facts["equipment"]["mainhand"] = {
+            "item": mainhand,
+            "required": "iron_pickaxe",
+            "selected_slot": selected_slot,
+            "satisfied": mainhand == "iron_pickaxe",
+        }
+        facts["inventory"]["torch_count"] = counts.get("torch", 0)
+        facts["inventory"]["iron_ingot_count"] = counts.get("iron_ingot", 0)
+
+    try:
+        head = body.event_head(f"terminal-{AG_FP30_GOAL_ID}")
+        owner = head.get("owner")
+        pending_count = head.get("pending_action_count")
+        if pending_count is None:
+            # The Body contract has one physical writer.  When the server
+            # reports no owner there can be no pending physical action; retain
+            # this fallback for older Scarpet versions that do not expose the
+            # optional count field yet.
+            pending_count = 0 if owner is None else 1
+        facts["body_owner"] = owner
+        facts["pending_action_count"] = int(pending_count)
+    except Exception as exc:
+        facts["owner_error"] = f"{type(exc).__name__}: {exc}"
+
+    flowers_ok = bool(facts["flowers"].get("satisfied")) if isinstance(facts["flowers"], dict) else False
+    drops_ok = (
+        isinstance(facts["drops"], dict)
+        and all(isinstance(value, dict) and bool(value.get("satisfied")) for value in facts["drops"].values())
+    )
+    equipment = facts["equipment"]
+    equipment_ok = (
+        isinstance(equipment, dict)
+        and all(isinstance(value, dict) and bool(value.get("satisfied")) for value in equipment.values())
+    )
+    inventory = facts["inventory"]
+    inventory_ok = (
+        isinstance(inventory, dict)
+        and bool(inventory.get("ok"))
+        and int(inventory.get("torch_count", 0)) >= 16
+        and int(inventory.get("iron_ingot_count", 0)) >= 3
+    )
+    lifecycle_ok = final.lifecycle not in {
+        LifecycleState.YIELDED,
+        LifecycleState.INTERRUPTED,
+        LifecycleState.RECOVERING,
+    }
+    status_ok = final.status not in {"failed", "yielded"}
+    owner_ok = facts["body_owner"] is None and facts["pending_action_count"] == 0
+    satisfied = bool(flowers_ok and drops_ok and equipment_ok and inventory_ok and lifecycle_ok and status_ok and owner_ok)
+    facts["terminal_satisfied"] = satisfied
+    exit_code = _exit_code_for(final, satisfied=satisfied, has_target=True)
+    return TerminalTruth(
+        goal=goal,
+        target=target,
+        inventory_count=None,
+        satisfied=satisfied,
+        status=final.status,
+        lifecycle=final.lifecycle.value,
+        exit_code=exit_code,
+        facts=facts,
+    )
+
+
 def evaluate_terminal_truth(body: Body, goal: str, final: SessionStep) -> TerminalTruth:
+    ag_target = _ag_fp30_target(goal)
+    if ag_target is not None:
+        return evaluate_ag_fp30_terminal_truth(body, goal, final)
     target = parse_goal_target(goal)
     count: int | None = None
     satisfied = False
@@ -1267,7 +1551,7 @@ def safe_evaluate_terminal_truth(
             )
         return TerminalTruth(
             goal=goal,
-            target=parse_goal_target(goal),
+            target=_ag_fp30_target(goal) or parse_goal_target(goal),
             inventory_count=None,
             satisfied=False,
             status=final.status,
@@ -1417,12 +1701,16 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "AG_FP30_GOAL",
+    "AG_FP30_GOAL_ID",
     "InteractiveScenarioContext",
     "InteractiveScenarioHook",
     "RealServerConfig",
     "RealServerConfigError",
     "env_required",
+    "evaluate_ag_fp30_terminal_truth",
     "evaluate_terminal_truth",
+    "is_ag_fp30_goal",
     "main",
     "parse_goal_target",
     "parse_collect_target",

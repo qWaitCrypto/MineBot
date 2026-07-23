@@ -633,6 +633,28 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertEqual(body.actions[0].params["inputs"], [{"slot": 0, "item": "minecraft:oak_log", "count": 1}])
         self.assertEqual(body.actions[0].params["output"], {"slot": 1, "item": "minecraft:oak_planks", "count": 4})
 
+    def test_craft_recipe_auto_equip_selects_mainhand_outputs(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0, "minecraft:oak_planks", 2), slot(1), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:oak_planks", 2), slot(1), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:oak_planks", 2), slot(1), slot(41), slot(42)]),
+                perception([slot(0), slot(1), slot(2, "minecraft:stick", 4), slot(41), slot(42)]),
+                perception([slot(0), slot(1), slot(2, "minecraft:stick", 4), slot(41), slot(42)]),
+                perception([slot(0), slot(1), slot(2, "minecraft:stick", 4), slot(41), slot(42)]),
+            ],
+            recipe_data={
+                "minecraft:stick": "[[[[stick, 4]], [[oak_planks], [oak_planks]], [shaped, 1, 2]]]"
+            },
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.craft_recipe(item="minecraft:stick", count=4, output_slot=2, auto_equip=True)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["equip"]["reason"], "completed")
+        self.assertEqual([action.name for action in body.actions], ["craftItem", "selectItem"])
+
     def test_craft_recipe_treats_select_item_sync_rejection_as_terminal_for_temporary_table(self):
         body = FakeInventoryBody(
             [

@@ -130,9 +130,9 @@ class BlockApproachTransactionsTests(unittest.TestCase):
         domain = result.metrics["attempts"][0]["domain"]
         self.assertTrue(domain["candidate_targets"][0]["expanded_vertical"])
         self.assertIn(lower_stand, tuple(goal.pos for goal in navigator.calls[0][0].goals))
-        self.assertGreaterEqual(
+        self.assertEqual(
             [scope for scope, _params in body.perceptions].count("blockCells"),
-            3,
+            1,
         )
 
     def test_navigation_failure_blacklists_selected_candidate_and_replans(self):
