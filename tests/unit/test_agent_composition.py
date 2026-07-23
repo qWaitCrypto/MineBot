@@ -17,6 +17,7 @@ from minebot.brain.progress import FAILURE_STORM_LIMIT, ProgressAbort, ProgressA
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
 from minebot.brain.lifecycle import LifecycleState
 from minebot.contract import BodyState, PerceptionResult, Result, ToolResult
+from minebot.contract.tool_trace import canonical_args_hash, tool_tactic_signature
 
 
 def state(inventory_hash="inv"):
@@ -1135,7 +1136,7 @@ class AgentCompositionTests(unittest.TestCase):
         register_inventory_tools(registry, body)
         domain, calls = resource_domain_tool(body)
         registry.register(domain)
-        ctx, _trace_events = composition_context(body, registry)
+        ctx, trace_events = composition_context(body, registry)
         register_collect_resource_tool(registry, ctx)
 
         result = execute_tool(
@@ -1154,6 +1155,13 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertFalse(registry.get("collect_resource").sidecar.mutating)
         self.assertTrue(registry.get("collect_resource").sidecar.can_mutate_body)
         self.assertIsNone(ctx.weld_context.writer.holder)
+        invoke = next(
+            event
+            for event in trace_events
+            if event["event"] == "tool_invoke" and event["tool"] == "collect_block_domain"
+        )
+        self.assertEqual(invoke["args_hash"], canonical_args_hash(calls[0]))
+        self.assertEqual(invoke["tactic_signature"], tool_tactic_signature("collect_block_domain", calls[0]))
 
     def test_collect_resource_framework_contract_exposes_the_full_collect_n_process(self):
         body = FakeBody()

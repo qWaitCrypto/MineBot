@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from hashlib import sha256
 import json
 import threading
 import time
@@ -47,6 +46,11 @@ from minebot.contract import (
     ProgressAbort,
     ProgressFacts,
     execution_cancellation_scope,
+)
+from minebot.contract.tool_trace import (
+    canonical_args_hash_from_json as _shared_canonical_args_hash_from_json,
+    canonical_tool_arguments_from_json as _shared_canonical_tool_arguments_from_json,
+    tool_tactic_signature_from_json as _shared_tool_tactic_signature_from_json,
 )
 from minebot.game.errors import (
     ActionReconciliationUnknownError,
@@ -1109,7 +1113,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
 
         if runtime is not None:
             runtime.remember_tool_result(tool.name, result, run_context=ctx.context)
-            runtime.remember_tool_body_facts(result)
+            runtime.remember_tool_body_facts(result, trace=trace)
         return finalize(
             result,
             progress_steps=progress_steps,
@@ -3022,44 +3026,84 @@ class AgentRuntime:
             "dimension": getattr(state, "dimension", None),
             "inventory_hash": getattr(state, "inventory_hash", None),
             "inventory_counts": getattr(state, "inventory_counts", None),
+            "selected_slot": getattr(state, "selected_slot", None),
             "selected_item": getattr(state, "selected_item", None),
             "offhand_item": getattr(state, "offhand_item", None),
             "body_owner": getattr(state, "body_owner", None),
             "pending_action_count": getattr(state, "pending_action_count", None),
         }
 
-    def remember_tool_body_facts(self, result: JsonObject) -> None:
+    def remember_tool_body_facts(self, result: JsonObject, *, trace: RuntimeTrace | None = None) -> None:
         metrics = result.get("metrics") if isinstance(result, dict) else None
         if not isinstance(metrics, dict):
-            return
-        pos = metrics.get("pos")
-        if not (isinstance(pos, list) and len(pos) == 3):
             return
         if metrics.get("missing") is True:
             return
         previous = dict(self.last_known_body_state or {})
-        previous.update(
-            {
-                "bot": metrics.get("bot", previous.get("bot")),
-                "pos": list(pos),
-                "yaw": metrics.get("yaw", previous.get("yaw")),
-                "pitch": metrics.get("pitch", previous.get("pitch")),
-                "health": metrics.get("health", previous.get("health")),
-                "food": metrics.get("food", previous.get("food")),
-                "oxygen": metrics.get("oxygen", previous.get("oxygen")),
-                "dimension": metrics.get("dimension", previous.get("dimension")),
-                "inventory_hash": metrics.get("inventory_hash", previous.get("inventory_hash")),
-                "inventory_counts": metrics.get("inventory_counts", previous.get("inventory_counts")),
-                "selected_item": metrics.get("selected_item", previous.get("selected_item")),
-                "offhand_item": metrics.get("offhand_item", previous.get("offhand_item")),
-                "body_owner": metrics.get("body_owner", previous.get("body_owner")),
-                "pending_action_count": metrics.get(
-                    "pending_action_count",
-                    previous.get("pending_action_count"),
-                ),
-            }
-        )
+        updated = False
+        pos = metrics.get("pos")
+        if isinstance(pos, list) and len(pos) == 3:
+            previous["pos"] = list(pos)
+            updated = True
+        counts = metrics.get("inventory_counts")
+        if not isinstance(counts, dict):
+            counts = metrics.get("counts")
+        if isinstance(counts, dict):
+            previous["inventory_counts"] = dict(counts)
+            updated = True
+        for key in (
+            "bot",
+            "yaw",
+            "pitch",
+            "health",
+            "food",
+            "oxygen",
+            "dimension",
+            "inventory_hash",
+            "selected_slot",
+            "selected_item",
+            "offhand_item",
+            "body_owner",
+            "pending_action_count",
+            "complete",
+        ):
+            if key in metrics:
+                previous[key] = metrics.get(key)
+                updated = True
+        if not updated:
+            return
         self.last_known_body_state = previous
+        self._emit_last_known_body_state_trace(source="tool_result_metrics", trace=trace)
+
+    def _emit_last_known_body_state_trace(self, *, source: str, trace: RuntimeTrace | None = None) -> None:
+        state = self.last_known_body_state
+        if not isinstance(state, dict):
+            return
+        pos = state.get("pos")
+        if not (isinstance(pos, list) and len(pos) == 3):
+            return
+        inventory_counts = state.get("inventory_counts")
+        (trace or self.trace).emit(
+            "body_state",
+            source=source,
+            bot=state.get("bot"),
+            pos=list(pos),
+            yaw=state.get("yaw"),
+            pitch=state.get("pitch"),
+            health=state.get("health"),
+            food=state.get("food"),
+            oxygen=state.get("oxygen"),
+            inventory_hash=state.get("inventory_hash"),
+            inventory_counts=dict(inventory_counts) if isinstance(inventory_counts, dict) else {},
+            selected_slot=state.get("selected_slot"),
+            selected_item=state.get("selected_item"),
+            offhand_item=state.get("offhand_item"),
+            body_owner=state.get("body_owner"),
+            pending_action_count=state.get("pending_action_count"),
+            dimension=state.get("dimension"),
+            complete=bool(state.get("complete", True)),
+            missing=False,
+        )
 
     def _yield_from_progress_abort(self, exc: ProgressAbort) -> AgentTurnOutcome:
         facts = exc.facts or self.authority.facts(self.agent_context.goal_text)
@@ -3625,31 +3669,15 @@ _TACTIC_POSITION_KEYS = frozenset(
 
 
 def _canonical_args_hash_from_json(input_json: str) -> str:
-    return sha256(_canonical_tool_arguments(input_json).encode("utf-8")).hexdigest()
+    return _shared_canonical_args_hash_from_json(input_json)
 
 
 def _canonical_tool_arguments(input_json: str) -> str:
-    if not input_json:
-        return "{}"
-    try:
-        parsed = json.loads(input_json)
-    except json.JSONDecodeError:
-        return f"invalid:{input_json}"
-    return json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return _shared_canonical_tool_arguments_from_json(input_json)
 
 
 def _tool_tactic_signature_from_json(tool_name: str, input_json: str) -> str:
-    if not input_json:
-        payload: object = {}
-    else:
-        try:
-            payload = json.loads(input_json)
-        except json.JSONDecodeError:
-            payload = {"invalid_json": True}
-    semantic = _semantic_tactic_payload(payload)
-    canonical = json.dumps(semantic, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    digest = sha256(canonical.encode("utf-8")).hexdigest()[:16]
-    return f"{tool_name}:{digest}"
+    return _shared_tool_tactic_signature_from_json(tool_name, input_json)
 
 
 def _semantic_tactic_payload(value: object, *, key: str | None = None) -> object:

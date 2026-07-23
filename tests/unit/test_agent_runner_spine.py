@@ -2283,6 +2283,13 @@ class AgentRunnerSpineTests(unittest.TestCase):
                     "oxygen": 300,
                     "dimension": "overworld",
                     "inventory_hash": "inv2",
+                    "inventory_counts": {"oak_log": 2},
+                    "selected_slot": 1,
+                    "selected_item": "stone_pickaxe",
+                    "offhand_item": "shield",
+                    "body_owner": "read_state",
+                    "pending_action_count": 0,
+                    "complete": True,
                     "missing": False,
                 },
             )
@@ -2320,6 +2327,71 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(runtime.last_known_body_state["health"], 13.0)
         self.assertEqual(runtime.last_known_body_state["oxygen"], 300)
         self.assertEqual(runtime.last_known_body_state["inventory_hash"], "inv2")
+        body_state_event = next(event for event in runtime_context.trace.snapshot() if event["event"] == "body_state")
+        self.assertEqual(body_state_event["source"], "tool_result_metrics")
+        self.assertEqual(body_state_event["pos"], [4.5, 70.0, -2.25])
+        self.assertEqual(body_state_event["inventory_counts"], {"oak_log": 2})
+        self.assertEqual(body_state_event["selected_item"], "stone_pickaxe")
+        self.assertEqual(body_state_event["offhand_item"], "shield")
+        self.assertEqual(body_state_event["body_owner"], "read_state")
+        self.assertEqual(body_state_event["pending_action_count"], 0)
+
+    def test_sdk_tool_inventory_metrics_emit_body_state_with_cached_position(self):
+        def callable_(_params):
+            return ToolResult(
+                True,
+                "inventory_counted",
+                False,
+                metrics={"counts": {"oak_log": 1, "torch": 16}},
+            )
+
+        tool = RegisteredTool(
+            name="read_inventory",
+            description="Read",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(progress_key="read_inventory", mutating=False, tool_type="state"),
+        )
+        sdk_tool = sdk_tool_for(tool)
+        trace = RuntimeTrace()
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            trace=trace,
+        )
+        runtime.last_known_body_state = {
+            "bot": "Bot",
+            "pos": [0.5, 70.0, 0.5],
+            "health": 20.0,
+            "food": 20,
+            "oxygen": 300,
+            "dimension": "overworld",
+            "inventory_counts": {},
+            "pending_action_count": 0,
+        }
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
+            runtime=runtime,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+
+        self.assertEqual(runtime.last_known_body_state["inventory_counts"], {"oak_log": 1, "torch": 16})
+        body_state_events = [event for event in trace.snapshot() if event["event"] == "body_state"]
+        self.assertEqual(len(body_state_events), 1)
+        self.assertEqual(body_state_events[0]["source"], "tool_result_metrics")
+        self.assertEqual(body_state_events[0]["pos"], [0.5, 70.0, 0.5])
+        self.assertEqual(body_state_events[0]["inventory_counts"], {"oak_log": 1, "torch": 16})
 
     def test_sdk_tool_preempts_body_missing_camel_case_event(self):
         def callable_(_params):

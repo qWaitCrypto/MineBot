@@ -16,6 +16,7 @@ from minebot.brain.modes import RuntimeProfile
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
 from minebot.contract import Body, InventorySlot, JsonObject, ToolResult, perception_next_cursor
 from minebot.contract.harvest import PICKAXE_BY_TIER, best_owned_pickaxe, required_pickaxe_tier, tier_satisfies
+from minebot.contract.tool_trace import canonical_args_hash, tool_tactic_signature
 
 
 @dataclass(frozen=True)
@@ -607,6 +608,8 @@ def _emit_tool_invoke(
     tool: RegisteredTool,
     tool_input: JsonObject,
 ) -> None:
+    args_hash = canonical_args_hash(tool_input)
+    tactic_signature = tool_tactic_signature(tool.name, tool_input)
     _emit_trace(
         context,
         "tool_invoke",
@@ -621,6 +624,8 @@ def _emit_tool_invoke(
             "terminal_truth": list(tool.sidecar.terminal_truth),
             "situational": context.runtime_profile.situational,
             "lifecycle": context.runtime_profile.lifecycle,
+            "args_hash": args_hash,
+            "tactic_signature": tactic_signature,
             "driver": f"composition:{phase}",
             "arguments_summary": _summarize_composition_arguments(tool_input),
         },
