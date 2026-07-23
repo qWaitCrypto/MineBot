@@ -134,6 +134,52 @@ class AutonomyQualityTests(unittest.TestCase):
         self.assertEqual(report["signals"]["effective_output"]["points"], 4)
         self.assertEqual(report["signals"]["recovery"]["verdict"], "pass")
 
+    def test_ag_fp30_counts_prerequisite_chain_as_effective_output(self):
+        early = {"oak_log": 2, "oak_planks": 5, "stick": 4}
+        tools = {**early, "crafting_table": 1, "wooden_pickaxe": 1, "cobblestone": 4}
+        later = {**tools, "coal": 1, "raw_iron": 2}
+        counts_by_ts = {
+            0: {},
+            120: {"oak_log": 2},
+            240: early,
+            360: {**early, "crafting_table": 1},
+            480: {**early, "crafting_table": 1, "wooden_pickaxe": 1},
+            600: tools,
+            720: tools,
+            840: tools,
+            960: tools,
+            1080: tools,
+            1200: tools,
+            1320: later,
+            1440: later,
+            1560: later,
+            1680: later,
+            1800: later,
+        }
+        states = [
+            _body_state(index + 1, ts, x=index * 2.0, counts=counts)
+            for index, (ts, counts) in enumerate(counts_by_ts.items())
+        ]
+        events = _coverage_events(states=states)
+        events.extend(
+            [
+                _invoke(100, 250, "explore_for", "args-a", "explore:targets", mutating=True),
+                _result(101, 300, "explore_for", "args-a", "explore:targets", success=False, reason="no_path"),
+                _invoke(102, 360, "mine_block_collect", "args-b", "mine:stone", mutating=True),
+                _result(103, 430, "mine_block_collect", "args-b", "mine:stone", success=True, reason="collected"),
+            ]
+        )
+
+        report = evaluate_autonomy_quality(sorted(events, key=lambda event: (event["ts"], event["seq"])), active_window_s=1800)
+
+        output = report["signals"]["effective_output"]
+        self.assertEqual(report["verdict"], "pass")
+        self.assertGreaterEqual(output["points"], output["required_points"])
+        self.assertGreater(output["yardstick"]["families"]["logs"]["points"], 0)
+        self.assertGreater(output["yardstick"]["families"]["cobblestone"]["points"], 0)
+        self.assertGreater(output["yardstick"]["families"]["coal_or_charcoal"]["points"], 0)
+        self.assertFalse(output["yardstick"]["families"]["flowers"]["observed"])
+
     def test_material_complete_does_not_mask_repeated_failure_loop(self):
         events = _healthy_material_incomplete_trace()
         for state in events:

@@ -28,6 +28,34 @@ class AutonomyQualityThresholds:
 
 DEFAULT_THRESHOLDS = AutonomyQualityThresholds()
 
+LOG_ITEMS = (
+    "oak_log",
+    "spruce_log",
+    "birch_log",
+    "jungle_log",
+    "acacia_log",
+    "dark_oak_log",
+    "mangrove_log",
+    "cherry_log",
+    "pale_oak_log",
+    "crimson_stem",
+    "warped_stem",
+)
+
+PLANK_ITEMS = (
+    "oak_planks",
+    "spruce_planks",
+    "birch_planks",
+    "jungle_planks",
+    "acacia_planks",
+    "dark_oak_planks",
+    "mangrove_planks",
+    "cherry_planks",
+    "pale_oak_planks",
+    "crimson_planks",
+    "warped_planks",
+)
+
 
 @dataclass(frozen=True)
 class InventoryProgressFamily:
@@ -57,6 +85,19 @@ class MaterialYardstick:
 AG_FP30_YARDSTICK = MaterialYardstick(
     goal_id="AG-FP30",
     inventory_families=(
+        # Target-adjacent prerequisite chain.  These do not make the material
+        # checklist a hard gate; they let the quality evaluator count genuine
+        # server-authoritative progress such as wood -> tools -> stone -> fuel
+        # while the final flowers/drops/iron/torch checklist remains only the
+        # stronger output yardstick.
+        InventoryProgressFamily("logs", LOG_ITEMS, minimum=3, max_points=3),
+        InventoryProgressFamily("planks", PLANK_ITEMS, minimum=4, score_unit=4, max_points=2),
+        InventoryProgressFamily("sticks", ("stick",), minimum=4, score_unit=4, max_points=2),
+        InventoryProgressFamily("crafting_table", ("crafting_table",)),
+        InventoryProgressFamily("wooden_pickaxe", ("wooden_pickaxe",)),
+        InventoryProgressFamily("cobblestone", ("cobblestone",), minimum=3, max_points=3),
+        InventoryProgressFamily("coal_or_charcoal", ("coal", "charcoal"), minimum=1, max_points=4),
+        InventoryProgressFamily("raw_iron", ("raw_iron",), minimum=7, max_points=7),
         InventoryProgressFamily(
             "flowers",
             (
@@ -92,6 +133,7 @@ AG_FP30_YARDSTICK = MaterialYardstick(
         InventoryProgressFamily("iron_ingots", ("iron_ingot",), minimum=3, max_points=3),
     ),
     equipment=(
+        EquipmentProgressRequirement("stone_pickaxe_equipped", "stone_pickaxe", "mainhand"),
         EquipmentProgressRequirement("shield_equipped", "shield", "offhand"),
         EquipmentProgressRequirement("iron_pickaxe_equipped", "iron_pickaxe", "mainhand"),
     ),
@@ -102,19 +144,7 @@ AG_FP30_X_YARDSTICK = MaterialYardstick(
     inventory_families=(
         InventoryProgressFamily(
             "logs",
-            (
-                "oak_log",
-                "spruce_log",
-                "birch_log",
-                "jungle_log",
-                "acacia_log",
-                "dark_oak_log",
-                "mangrove_log",
-                "cherry_log",
-                "pale_oak_log",
-                "crimson_stem",
-                "warped_stem",
-            ),
+            LOG_ITEMS,
             minimum=3,
             max_points=3,
         ),
