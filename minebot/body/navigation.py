@@ -33,6 +33,7 @@ from minebot.game.navigation import (
 
 
 SERVER_GOAL_SET_LIMIT = 32
+SURVIVAL_REFLEX_OWNERS = frozenset({"lavaReflex", "fireReflex", "waterReflex", "combatReflex"})
 
 
 @dataclass(frozen=True)
@@ -261,6 +262,25 @@ class ExecutedSegment:
     diagnostics: dict[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class SurvivalReflexSettle:
+    state: BodyState
+    idle: bool
+    owner: str | None
+    pending_action_count: int | None
+    waited_s: float
+    events: tuple[dict[str, object], ...] = ()
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "idle": self.idle,
+            "owner": self.owner,
+            "pending_action_count": self.pending_action_count,
+            "waited_s": round(self.waited_s, 3),
+            "events": list(self.events),
+        }
+
+
 class NavigationTransactions:
     """Executes navigation objectives through the Body navigation controller.
 
@@ -342,10 +362,26 @@ class NavigationTransactions:
         generation = self.progress.current_generation()
         executed: list[ExecutedSegment] = []
         nav_goal = normalize_goal(goal)
-        state = self.body.get_state()
+        settle = _wait_for_survival_reflex_idle(
+            self.body,
+            timeout_s=_survival_reflex_settle_timeout(cfg.segment_timeout_s),
+        )
+        state = settle.state
         start = _block_pos(state)
         break_policy_context = BreakContext(break_context)
         goal_anchor = nav_goal.representative(start)
+        if not settle.idle:
+            return _result(
+                False,
+                "survival_reflex_active",
+                True,
+                goal_anchor,
+                executed,
+                {
+                    "navigation_goal": nav_goal.payload(),
+                    "survival_reflex_settle": settle.to_payload(),
+                },
+            )
         server_goals, goal_set_preserved = _server_goal_set(nav_goal, start)
         gx, gy, gz = int(goal_anchor[0]), int(goal_anchor[1]), int(goal_anchor[2])
         ar = cfg.movement_arrival_radius or 0.75
@@ -821,7 +857,14 @@ class NavigationTransactions:
         )
         accepted = self.body.execute(decision_action)
         if not (accepted.ok and accepted.accepted):
-            raise RuntimeError(f"navigation mutation decision rejected: {accepted.error or accepted.data}")
+            # A survival reflex may preempt a waiting navigation mutation while
+            # Python is still collecting the authoritative governance evidence
+            # for the proposal.  In that case Scarpet has already emitted the
+            # mutation/navigation terminal truth and rejects this late decision
+            # because no matching proposal is waiting anymore.  Do not turn
+            # that race into a Python exception; keep draining the Body events
+            # so the caller receives the typed ``preempted``/reflex terminal.
+            return
 
 
     def follow_entity(
@@ -857,6 +900,24 @@ class NavigationTransactions:
         except ProgressAbort as exc:
             return _result(False, "progress_yielded", True, _block_pos(self.body.get_state()), [], {"error": str(exc), "target_spec": target_spec})
 
+        settle = _wait_for_survival_reflex_idle(
+            self.body,
+            timeout_s=_survival_reflex_settle_timeout(timeout_s),
+        )
+        start = _block_pos(settle.state)
+        if not settle.idle:
+            return _result(
+                False,
+                "survival_reflex_active",
+                True,
+                start,
+                [],
+                {
+                    "target_spec": target_spec,
+                    "survival_reflex_settle": settle.to_payload(),
+                },
+            )
+
         action = Action.create(
             "followEntity",
             {
@@ -878,7 +939,6 @@ class NavigationTransactions:
             },
         )
         result = self.body.execute(action)
-        start = _block_pos(self.body.get_state())
         if not (result.ok and result.accepted):
             return _result(False, "body_rejected", True, start, [], {"error": result.error, "target_spec": target_spec})
 
@@ -1145,7 +1205,7 @@ class NavigationTransactions:
 
 
 def _block_pos(state: BodyState) -> Position:
-    return (round(state.pos[0]), round(state.pos[1]), round(state.pos[2]))
+    return (floor(state.pos[0]), floor(state.pos[1]), floor(state.pos[2]))
 
 
 def _server_goal_set(goal, start: Position) -> tuple[tuple[tuple[int, int, int, int], ...], bool]:
@@ -1358,6 +1418,39 @@ def _wait_for_reflex_completion(body: Body, *, timeout_s: float) -> Event | None
                 return event
         sleep(0.05)
     return None
+
+
+def _survival_reflex_settle_timeout(segment_timeout_s: float) -> float:
+    return min(5.0, max(0.25, segment_timeout_s / 3.0))
+
+
+def _survival_reflex_active(state: BodyState) -> bool:
+    return state.body_owner in SURVIVAL_REFLEX_OWNERS
+
+
+def _wait_for_survival_reflex_idle(body: Body, *, timeout_s: float) -> SurvivalReflexSettle:
+    started = monotonic()
+    deadline = started + timeout_s
+    events: list[dict[str, object]] = []
+    state = body.get_state()
+    while _survival_reflex_active(state):
+        if monotonic() >= deadline:
+            break
+        for event in body.poll_events():
+            if event.name in {"reflexStarted", "reflexCompleted", "ownerPreempted", "death", "bodyMissing", "respawned"}:
+                events.append({"event": event.name, "seq": event.seq, "tick": event.tick, "data": dict(event.data)})
+        if monotonic() >= deadline:
+            break
+        sleep(min(0.05, max(0.0, deadline - monotonic())))
+        state = body.get_state()
+    return SurvivalReflexSettle(
+        state=state,
+        idle=not _survival_reflex_active(state),
+        owner=state.body_owner,
+        pending_action_count=state.pending_action_count,
+        waited_s=monotonic() - started,
+        events=tuple(events),
+    )
 
 
 

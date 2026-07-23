@@ -1541,8 +1541,10 @@ class ScarpetSourceTests(unittest.TestCase):
             "head_in_water_now(name)",
             "water_reflex_should_trigger(name)",
             "active_move_owns_water_egress(name)",
+            "active_move_owns_lava_egress(name)",
             "current_cancel_policy(m) != 'egress_to_dry'",
             "m:8 < movement_water_escape_ticks(m)",
+            "m:8 < movement_lava_escape_ticks(m)",
             "is_dry_stand_cell(floor(target:0), floor(target:1), floor(target:2))",
             "air_risk = head_in_water_now(name) && air != null && air <= global_water_reflex_air_threshold;",
             "damage_risk = global_water_reflex_health_baselines:name - hp >= global_water_reflex_damage_budget",
@@ -1581,6 +1583,7 @@ class ScarpetSourceTests(unittest.TestCase):
         hazard = re.search(r"hazard_kind_near_name\(name\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(hazard, "hazard_kind_near_name function not found")
         self.assertIn("water_reflex_should_trigger(name)", hazard.group(1))
+        self.assertIn("if(active_move_owns_lava_egress(name), null, 'lava')", hazard.group(1))
         self.assertIn("if(active_move_owns_water_egress(name), null, 'water')", hazard.group(1))
         self.assertNotIn("if(in_water_now(name),", hazard.group(1))
         escape = re.search(r"water_escape_target\(p\) -> \((.*?)\n\);", source, re.S)
@@ -1607,12 +1610,38 @@ class ScarpetSourceTests(unittest.TestCase):
 
         escape = re.search(r"safe_escape_target\(p\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(escape, "safe_escape_target function not found")
-        self.assertIn("is_reflex_escape_cell(tx, by, tz)", escape.group(1))
+        self.assertIn("candidates = safe_escape_candidate_offsets();", escape.group(1))
+        self.assertIn("y_offsets = l(0, 1, -1, 2, -2, 3, -3);", escape.group(1))
+        self.assertIn("sy = by + y_offsets:_;", escape.group(1))
+        self.assertIn("is_reflex_escape_cell(tx, sy, tz)", escape.group(1))
+        self.assertIn("!navigation_lava_unsafe(tx, sy, tz)", escape.group(1))
         candidate = re.search(r"is_reflex_escape_cell\(x, y, z\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(candidate, "is_reflex_escape_cell function not found")
         self.assertIn("here_kind != 'SOLID' && head_kind != 'SOLID'", candidate.group(1))
         self.assertIn("here != 'lava' && here != 'minecraft:lava'", candidate.group(1))
         self.assertIn("is_solid_floor(x, y, z)", candidate.group(1))
+
+        offsets = re.search(r"safe_escape_candidate_offsets\(\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(offsets, "safe_escape_candidate_offsets function not found")
+        self.assertIn("loop(8,", offsets.group(1))
+
+    def test_navigation_only_relaxes_lava_near_predicate_when_source_is_already_hazardous(self):
+        source = MINEBOT_SC.read_text()
+
+        exact = re.search(r"navigation_exact_walkability\(x, y, z\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(exact, "navigation_exact_walkability function not found")
+        self.assertIn("is_lava_at(x, y, z) || is_lava_at(x, y + 1, z)", exact.group(1))
+        self.assertIn("floor_kind == 'CLEAR' || floor_kind == 'LIQUID'", exact.group(1))
+
+        escape = re.search(r"navigation_hazard_escape_kind\(source_kind, target_kind, x, y, z\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(escape, "navigation_hazard_escape_kind function not found")
+        self.assertIn("source_kind == 'LAVA' && target_kind == 'LAVA'", escape.group(1))
+        self.assertIn("navigation_exact_walkability(x, y, z)", escape.group(1))
+
+        neighbors = re.search(r"navigation_neighbors\(x, y, z, context\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(neighbors, "navigation_neighbors function not found")
+        self.assertIn("effective_flat = navigation_hazard_escape_kind(source_kind, flat, nx, y, nz)", neighbors.group(1))
+        self.assertIn("if(flat == 'LAVA', 6.0, 1.0)", neighbors.group(1))
 
     def test_survival_reflex_cancels_waiting_navigation_mutations(self):
         source = MINEBOT_SC.read_text()

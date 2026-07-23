@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from minebot.body import NavigationRunConfig, NavigationTransactions
-from minebot.body.navigation import aquatic_navigation_config
+from minebot.body.navigation import _block_pos, aquatic_navigation_config
 from minebot.body.world_read import read_block_cells_tiled, refresh_grid_world_around
 from minebot.game.governance import GovernancePolicy, Region
 from minebot.contract import Action, BodyState, BreakContext, Event, PerceptionResult, Result
@@ -22,7 +22,7 @@ from minebot.game.navigation import (
 )
 
 
-def state_at(pos):
+def state_at(pos, *, body_owner=None, pending_action_count=None):
     return BodyState(
         bot="Bot1",
         pos=(float(pos[0]), float(pos[1]), float(pos[2])),
@@ -38,6 +38,8 @@ def state_at(pos):
         weather=None,
         dimension="overworld",
         complete=True,
+        body_owner=body_owner,
+        pending_action_count=pending_action_count,
     )
 
 
@@ -268,6 +270,23 @@ class MutationNavigationBody(InventoryNavigationBody):
             name=name,
             data={"action_id": action_id, **dict(raw_data)},
         )
+
+
+class RejectingMutationDecisionBody(MutationNavigationBody):
+    def execute(self, action: Action) -> Result:
+        if action.name == "navigationMutationDecision":
+            self.actions.append(action)
+            return Result(
+                id=action.id,
+                bot="Bot1",
+                type="result",
+                ok=False,
+                accepted=False,
+                complete=True,
+                data={"action": action.name},
+                error="invalid_navigation_mutation_decision",
+            )
+        return super().execute(action)
 
 
 def inventory_page(slots, *, complete: bool, next_start=None, ok: bool = True):
@@ -987,6 +1006,81 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(body.actions[0].params["break_budget"], 2)
         self.assertEqual(body.actions[2].params["break_budget"], 1)
         self.assertIn(("blockAt", {"x": 1, "y": 65, "z": 0}), body.perceptions)
+
+    def test_late_rejected_navigation_mutation_decision_preserves_preempted_terminal(self):
+        break_pos = (1, 65, 0)
+        body = RejectingMutationDecisionBody(
+            [state_at((0, 64, 0)), state_at((0, 64, 0))],
+            [inventory_page([], complete=True)],
+            [
+                (
+                    "navigateMutationProposed",
+                    {
+                        "proposal_id": "proposal-preempted",
+                        "kind": "break",
+                        "pos": list(break_pos),
+                        "source": [0, 64, 0],
+                        "block_type": "stone",
+                        "before_type": "stone",
+                        "purpose": "headroom",
+                    },
+                ),
+                (
+                    "navigateMutationDone",
+                    {
+                        "proposal_id": "proposal-preempted",
+                        "kind": "break",
+                        "pos": list(break_pos),
+                        "block_type": "stone",
+                        "success": False,
+                        "reason": "preempted",
+                        "block_now": "stone",
+                        "decision_reason": None,
+                    },
+                ),
+                (
+                    "navigateDone",
+                    {
+                        "reason": "preempted",
+                        "nav_reason": "preempted",
+                        "arrived": False,
+                    },
+                ),
+            ],
+            blocks={break_pos: ("stone", "SOLID")},
+            poll_events=[
+                [
+                    Event(
+                        seq=99,
+                        tick=20,
+                        bot="Bot1",
+                        name="reflexCompleted",
+                        data={"kind": "lava", "escaped_hazard": False},
+                    )
+                ]
+            ],
+        )
+        policy = GovernancePolicy(
+            natural_regions=[Region("natural-corridor", (-4, 0, -4), (8, 100, 4))]
+        )
+        runtime = NavigationTransactions.server_side(body, policy)
+
+        result = runtime.navigate_to(
+            (4, 64, 0),
+            break_context=BreakContext.TRAVEL,
+            config=NavigationRunConfig(max_segments=1, max_break_steps=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "reflex_failed")
+        self.assertEqual(
+            [action.name for action in body.actions],
+            ["navigateTo", "navigationMutationDecision"],
+        )
+        self.assertEqual(body.actions[1].params["proposal_id"], "proposal-preempted")
+
+    def test_block_pos_uses_minecraft_floor_for_negative_half_coordinates(self):
+        self.assertEqual(_block_pos(state_at((-42.5, 64.0, -25.5))), (-43, 64, -26))
 
     def test_navigate_to_authorizes_pillar_and_records_scaffold_ledger(self):
         pillar_pos = (0, 64, 0)
@@ -1714,6 +1808,64 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "arrived")
         self.assertEqual(len(body.actions), 2)
+
+    def test_navigate_to_waits_for_active_survival_reflex_before_dispatch(self):
+        nav = FakeNavigator([])
+        body = FakeBody(
+            [
+                state_at((0, 64, 0), body_owner="lavaReflex", pending_action_count=1),
+                state_at((1, 64, 0), body_owner=None, pending_action_count=0),
+                state_at((2, 64, 0), body_owner=None, pending_action_count=0),
+            ],
+            terminal_reasons=["arrived"],
+            poll_events=[
+                [
+                    Event(
+                        seq=12,
+                        tick=24,
+                        bot="Bot1",
+                        name="reflexCompleted",
+                        data={"kind": "lava", "escaped_hazard": True, "final_is_dry_stand": True},
+                    )
+                ],
+            ],
+        )
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((2, 64, 0), config=NavigationRunConfig(max_segments=1, segment_timeout_s=0.1))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "arrived")
+        self.assertEqual([action.name for action in body.actions], ["navigateTo"])
+
+    def test_navigate_to_returns_typed_failure_when_survival_reflex_does_not_settle(self):
+        nav = FakeNavigator([])
+        body = FakeBody(
+            [state_at((0, 64, 0), body_owner="lavaReflex", pending_action_count=1)],
+            terminal_reasons=["arrived"],
+        )
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((2, 64, 0), config=NavigationRunConfig(max_segments=1, segment_timeout_s=0.01))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "survival_reflex_active")
+        self.assertEqual(body.actions, [])
+        self.assertEqual(result.metrics["survival_reflex_settle"]["owner"], "lavaReflex")
+
+    def test_navigate_to_does_not_wait_for_non_reflex_owner(self):
+        nav = FakeNavigator([])
+        body = FakeBody(
+            [state_at((0, 64, 0), body_owner="moveTo", pending_action_count=1)],
+            accept=False,
+        )
+        runtime = NavigationTransactions(body, nav)
+
+        result = runtime.navigate_to((2, 64, 0), config=NavigationRunConfig(max_segments=1, segment_timeout_s=0.01))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "body_rejected")
+        self.assertEqual([action.name for action in body.actions], ["navigateTo"])
 
     def test_navigate_to_fails_when_reflex_completed_without_escape(self):
         nav = FakeNavigator([])

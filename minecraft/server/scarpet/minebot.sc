@@ -3173,13 +3173,34 @@ active_move_owns_water_egress(name) -> (
   )
 );
 
+movement_lava_escape_ticks(m) -> (
+  max(10, min(40, floor(m:10 / 3)))
+);
+
+active_move_owns_lava_egress(name) -> (
+  m = global_moves:name;
+  if(m == null,
+    false
+  ,
+    points = m:13;
+    if(points == null || length(points) == 0,
+      false
+    ,
+      target = normalize_waypoint_point(points:(length(points) - 1));
+      is_dry_stand_cell(floor(target:0), floor(target:1), floor(target:2)) &&
+      !navigation_lava_unsafe(floor(target:0), floor(target:1), floor(target:2)) &&
+      m:8 < movement_lava_escape_ticks(m)
+    )
+  )
+);
+
 hazard_kind_near_name(name) -> (
   p = bot_pos(name);
   if(p == null,
     null
   ,
     if(lava_near_pos(p),
-      'lava'
+      if(active_move_owns_lava_egress(name), null, 'lava')
     ,
       if(on_fire_now(name),
         'fire'
@@ -3194,18 +3215,40 @@ hazard_kind_near_name(name) -> (
   )
 );
 
+safe_escape_candidate_offsets() -> (
+  candidates = l();
+  loop(8,
+    radius = _ + 1;
+    loop(radius * 2 + 1,
+      delta = _ - radius;
+      candidates += l(radius, delta);
+      candidates += l(-radius, delta)
+    );
+    loop(radius * 2 - 1,
+      delta = _ - radius + 1;
+      candidates += l(delta, radius);
+      candidates += l(delta, -radius)
+    )
+  );
+  candidates
+);
+
 safe_escape_target(p) -> (
   bx = floor(p:0);
   by = floor(p:1);
   bz = floor(p:2);
-  candidates = l(l(1, 0), l(-1, 0), l(0, 1), l(0, -1), l(2, 0), l(-2, 0), l(0, 2), l(0, -2));
+  candidates = safe_escape_candidate_offsets();
+  y_offsets = l(0, 1, -1, 2, -2, 3, -3);
   best = null;
-  loop(length(candidates),
-    c = candidates:_;
-    tx = bx + c:0;
-    tz = bz + c:1;
-    if(best == null && is_reflex_escape_cell(tx, by, tz),
-      best = l(tx + 0.5, by, tz + 0.5)
+  loop(length(y_offsets),
+    sy = by + y_offsets:_;
+    loop(length(candidates),
+      c = candidates:_;
+      tx = bx + c:0;
+      tz = bz + c:1;
+      if(best == null && is_reflex_escape_cell(tx, sy, tz) && !navigation_lava_unsafe(tx, sy, tz),
+        best = l(tx + 0.5, sy, tz + 0.5)
+      )
     )
   );
   best
@@ -3606,7 +3649,7 @@ run_reflex_tick(name, r) -> (
   water_target_is_shore = kind == 'water' && is_dry_stand_cell(floor(r:0), floor(r:1), floor(r:2));
   water_on_dry_stand = kind == 'water' && is_dry_stand_cell(floor(p:0), floor(p:1), floor(p:2));
   water_surface_reached = kind == 'water' && !water_target_is_shore && dist <= 0.9 && clear_of_hazard;
-  escaped = if(kind == 'water', water_target_is_shore && dist <= 0.9 && water_on_dry_stand, dist <= 0.9 && clear_of_hazard);
+  escaped = if(kind == 'water', water_target_is_shore && dist <= 0.9 && water_on_dry_stand, dist <= 0.9 && clear_of_hazard && reflex_target_is_dry_stand(p));
   retarget = null;
   if(water_surface_reached,
     retarget = water_escape_target(p)
@@ -4309,6 +4352,37 @@ probe_walkability(x, y, z) -> (
   )
 );
 
+navigation_exact_walkability(x, y, z) -> (
+  feet_kind = navigation_block_kind_at(x, y, z);
+  head_kind = navigation_block_kind_at(x, y + 1, z);
+  floor_kind = navigation_block_kind_at(x, y - 1, z);
+  if(is_lava_at(x, y, z) || is_lava_at(x, y + 1, z),
+    'LAVA'
+  ,
+    if(feet_kind == 'SOLID' || head_kind == 'SOLID',
+      'SOLID'
+    ,
+      if(feet_kind == 'LIQUID' || head_kind == 'LIQUID',
+        'LIQUID'
+      ,
+        if(floor_kind == 'CLEAR' || floor_kind == 'LIQUID',
+          'NO_FLOOR'
+        ,
+          'WALK'
+        )
+      )
+    )
+  )
+);
+
+navigation_hazard_escape_kind(source_kind, target_kind, x, y, z) -> (
+  if(source_kind == 'LAVA' && target_kind == 'LAVA',
+    navigation_exact_walkability(x, y, z)
+  ,
+    target_kind
+  )
+);
+
 probe_heuristic(x, y, z, gx, gy, gz) -> (
   abs(x - gx) + abs(y - gy) + abs(z - gz)
 );
@@ -4566,7 +4640,8 @@ navigation_neighbors(x, y, z, context) -> (
     nx = x + dx;
     nz = z + dz;
     flat = probe_walkability(nx, y, nz);
-    if(flat == 'SOLID',
+    effective_flat = navigation_hazard_escape_kind(source_kind, flat, nx, y, nz);
+    if(effective_flat == 'SOLID',
       feet_type = '' + block(nx, y, nz);
       head_type = '' + block(nx, y + 1, nz);
       support_kind = block_kind('' + block(nx, y - 1, nz));
@@ -4615,13 +4690,13 @@ navigation_neighbors(x, y, z, context) -> (
         )
       )
     ,
-      if(flat == 'WALK',
-        neighbors += navigation_candidate(nx, y, nz, 'walk', 1.0, 0, 'immediate')
+      if(effective_flat == 'WALK',
+        neighbors += navigation_candidate(nx, y, nz, 'walk', if(flat == 'LAVA', 6.0, 1.0), 0, if(flat == 'LAVA', 'after_step', 'immediate'))
       ,
-        if(flat == 'LIQUID' && bool(context:'allow_swim'),
-          neighbors += navigation_candidate(nx, y, nz, 'swim', 3.0, 0, 'egress_to_dry')
+        if(effective_flat == 'LIQUID' && bool(context:'allow_swim'),
+          neighbors += navigation_candidate(nx, y, nz, 'swim', if(flat == 'LAVA', 8.0, 3.0), 0, 'egress_to_dry')
         ,
-          if(flat == 'NO_FLOOR',
+          if(effective_flat == 'NO_FLOOR',
             fall = navigation_fall_candidate(nx, y, nz, context);
             if(fall != null, neighbors += fall);
             support_type = '' + block(nx, y - 1, nz);
