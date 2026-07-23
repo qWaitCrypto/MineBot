@@ -17,7 +17,9 @@ from minebot.app.runner import (
     RuntimeTrace,
     SerialExecutionLane,
     ToolExecutionTimeout,
+    _canonical_args_hash_from_json,
     _model_tool_payload,
+    _tool_tactic_signature_from_json,
     extract_model_response_observations,
     extract_run_observations,
     sdk_tool_for,
@@ -173,6 +175,22 @@ class AgentRunnerSpineTests(unittest.TestCase):
         )
 
         self.assertIn("Use Chinese", parts.context.system_prompt)
+
+    def test_tool_args_hash_is_canonical_but_tactic_ignores_position_and_budget_knobs(self):
+        first = '{"pos":[1,64,2],"timeout_s":30,"radius":8,"item":"oak_log"}'
+        reordered = '{"item":"oak_log","radius":8,"timeout_s":30,"pos":[1,64,2]}'
+        moved = '{"pos":[9,64,9],"timeout_s":120,"radius":32,"item":"oak_log"}'
+        changed_item = '{"pos":[9,64,9],"timeout_s":120,"radius":32,"item":"spruce_log"}'
+
+        self.assertEqual(_canonical_args_hash_from_json(first), _canonical_args_hash_from_json(reordered))
+        self.assertEqual(
+            _tool_tactic_signature_from_json("collect_resource", first),
+            _tool_tactic_signature_from_json("collect_resource", moved),
+        )
+        self.assertNotEqual(
+            _tool_tactic_signature_from_json("collect_resource", first),
+            _tool_tactic_signature_from_json("collect_resource", changed_item),
+        )
 
     def test_parse_collect_goal_extracts_common_terminal_goal_shapes(self):
         self.assertEqual(parse_collect_goal("collect 3 dirt"), ("dirt", 3))
@@ -395,10 +413,12 @@ class AgentRunnerSpineTests(unittest.TestCase):
         sdk_tool = sdk_tool_for(tool)
         agent_context = AgentContext(system_prompt="sys", goal_text="collect")
         authority = ProgressAuthority()
+        trace = RuntimeTrace()
         runtime_context = RuntimeRunContext(
             agent_context=agent_context,
             weld_context=WeldContext(body=body, authority=authority, goal_text="collect"),
             profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
         )
 
         class Wrapper:
@@ -414,6 +434,11 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertIsNone(runtime_context.weld_context.writer.holder)
         self.assertIsNone(sdk_tool._failure_error_function)
         self.assertFalse(sdk_tool._use_default_failure_error_function)
+        invoke_event = next(event for event in trace.snapshot() if event["event"] == "tool_invoke")
+        result_event = next(event for event in trace.snapshot() if event["event"] == "tool_result")
+        self.assertEqual(invoke_event["args_hash"], _canonical_args_hash_from_json(json.dumps({"dx": 2})))
+        self.assertEqual(result_event["args_hash"], invoke_event["args_hash"])
+        self.assertEqual(result_event["tactic_signature"], invoke_event["tactic_signature"])
 
     def test_sdk_tool_body_work_does_not_block_event_loop(self):
         body = FakeBody()

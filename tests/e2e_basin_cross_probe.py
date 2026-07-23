@@ -15,6 +15,8 @@ This is a directed probe; it is not the AG-FP30 gate.
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import sys
 import time
@@ -35,6 +37,7 @@ from tests.e2e_support import SKIP_EXIT_CODE  # noqa: E402
 
 BOT = "BasinCrossProbe"
 START = (-40, 63, -27)
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def command(rcon: RconClient, text: str, delay: float = 0.05) -> str:
@@ -45,6 +48,10 @@ def command(rcon: RconClient, text: str, delay: float = 0.05) -> str:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+
     config = RconConfig()
     try:
         rcon = RconClient(config)
@@ -64,6 +71,7 @@ def main() -> int:
             "gamerule doDaylightCycle false",
             "time set day",
             "weather clear",
+            "kill @e[type=minecraft:item]",
             f"player {BOT} kill",
         ]:
             command(rcon, cmd)
@@ -79,7 +87,6 @@ def main() -> int:
         time.sleep(0.3)
         before = body.get_state()
         bx, by, bz = before.pos
-        print(f"spawned at {(round(bx,1), round(by,1), round(bz,1))}")
 
         region = Region("basin", (-160, 0, -160), (160, 128, 160))
         registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=region))
@@ -105,17 +112,62 @@ def main() -> int:
         ax, ay, az = after.pos
         displacement = ((ax - bx) ** 2 + (az - bz) ** 2) ** 0.5
         metrics = payload.get("metrics") or {}
-        print(f"explore_for -> success={payload.get('success')} reason={payload.get('reason')} elapsed={round(dt,1)}s")
-        print(f"final pos {(round(ax,1), round(ay,1), round(az,1))} | horizontal displacement={round(displacement,1)}")
-        print(f"blocks_found={len(metrics.get('blocks') or [])} distance_consumed={round(float(metrics.get('budget',{}).get('distance_consumed',0) if isinstance(metrics.get('budget'),dict) else 0),1)}")
-        # show governed-mobility fallback traces if any
-        for f in (metrics.get("candidate_failures") or [])[:4]:
+        candidate_summaries = []
+        for f in (metrics.get("candidate_failures") or [])[:8]:
+            if not isinstance(f, dict):
+                continue
             navs = f.get("navigation_attempts") or []
             modes = [n.get("mode") for n in navs if isinstance(n, dict) and n.get("mode")]
-            print("  region", f.get("region"), "reason", f.get("reason"), "modes", modes)
+            candidate_summaries.append(
+                {
+                    "region": f.get("region"),
+                    "reason": f.get("reason"),
+                    "modes": modes,
+                    "attempt_reasons": [
+                        n.get("reason") for n in navs if isinstance(n, dict)
+                    ],
+                }
+            )
+        progressed = displacement > 18 or bool(metrics.get("blocks"))
+        report = {
+            "schema_version": 1,
+            "scope": "Q1_hard_basin_cross_probe",
+            "bounded": True,
+            "formal_gate": False,
+            "bot": BOT,
+            "world_fixture": "world-golden",
+            "start": list(START),
+            "actual_start_pos": [round(bx, 3), round(by, 3), round(bz, 3)],
+            "final_pos": [round(ax, 3), round(ay, 3), round(az, 3)],
+            "horizontal_displacement": round(displacement, 3),
+            "elapsed_s": round(dt, 3),
+            "tool": "explore_for",
+            "tool_result": {
+                "success": payload.get("success"),
+                "reason": payload.get("reason"),
+                "canRetry": payload.get("canRetry"),
+            },
+            "budget": metrics.get("budget") if isinstance(metrics.get("budget"), dict) else {},
+            "blocks_found": len(metrics.get("blocks") or []),
+            "candidate_failures": candidate_summaries,
+            "classification": {
+                "verdict": "pass" if progressed else "fail",
+                "reason": "crossed_or_found_target" if progressed else "still_walled",
+            },
+            "evidence_limits": [
+                "This is a directed Body mechanism probe, not an AG-FP30/Q4/Q5 gate.",
+                "It starts at the historical basin/frontier and gives scaffold/pickaxe to isolate mobility capability, so it is supporting evidence rather than production ingress proof.",
+                "STILL_WALLED is a typed Q1 blocker and must not be counted as a pass.",
+            ],
+        }
+        output = args.output or ROOT / "logs" / "agentic-runtime" / f"q1-basin-cross-{int(time.time())}.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        command(rcon, f"clear {BOT}", delay=0.05)
         command(rcon, f"player {BOT} kill")
-    print(f"\nVERDICT: {'CROSSED/PROGRESSED' if displacement > 18 or (metrics.get('blocks')) else 'STILL_WALLED (<=18 blocks, honest)'}")
-    return 0
+        command(rcon, "kill @e[type=minecraft:item]", delay=0.05)
+    return 0 if report["classification"]["verdict"] == "pass" else 1
 
 
 if __name__ == "__main__":

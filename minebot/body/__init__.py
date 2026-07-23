@@ -21,6 +21,7 @@ from .navigation import (
     NavigationTransactions,
     governed_mobility_navigation_config,
     load_limited_navigation_config,
+    navigation_governed_mobility_upgrade_reason,
 )
 from .pickup import PickupConfig, PickupTransactions
 from .reach import ReachDomain, ReachIntent, block_reach_domain, block_reach_domains
@@ -55,6 +56,7 @@ __all__ = [
     "NavigationTransactions",
     "governed_mobility_navigation_config",
     "load_limited_navigation_config",
+    "navigation_governed_mobility_upgrade_reason",
     "PickupConfig",
     "PickupTransactions",
     "ReachDomain",

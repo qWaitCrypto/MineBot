@@ -238,9 +238,10 @@
       ],
       "compound": true,
       "replay": {
-        "status": "pending",
+        "status": "available",
         "mode": "production_trace_plus_direct_body_probe",
         "scripts": [
+          "tests/e2e_golden_spawn_frontier_replay.py",
           "tests/e2e_basin_cross_probe.py",
           "tests/e2e_i14_predicate_ab_probe.py",
           "tests/e2e_i14_safe_lane_probe.py",
@@ -249,13 +250,40 @@
         "observed": {
           "autonomous_frontier_anchor": [-44.002, 67.0, -25.543],
           "post_anchor_distance_consumed": [1.19, 0.947],
-          "downstream_governed_probe": "arrived_with_positive_displacement"
+          "spawn_frontier_replay": {
+            "report": "logs/agentic-runtime/q1-spawn-frontier-replay-current.json",
+            "verdict": "pass",
+            "calls": 2,
+            "target_descriptor": {
+              "block_targets": ["#logs", "#flowers"],
+              "entity_targets": ["pig", "cow", "sheep"]
+            },
+            "observed_anchor": [-44.196, 67.0, -25.512],
+            "anchor_distance": 0.196,
+            "historical_frontier_region": [-4, -2],
+            "terminal_reasons": ["budget_exhausted", "mobility_blocked"],
+            "owner": null,
+            "pending_action_count": 0,
+            "mutation_events": 0
+          },
+          "downstream_governed_probe": {
+            "report": "logs/agentic-runtime/q1-basin-cross-current.json",
+            "verdict": "pass",
+            "trigger_reason": "recovery_exhausted:no_path",
+            "fallback_profile": "governed_mobility",
+            "horizontal_displacement": 18.445,
+            "tool_reason": "mobility_blocked",
+            "blocks_found": 0
+          }
         },
-        "debt": "The production ingress sequence is captured in gate traces, but a clean deterministic spawn-to-frontier replay and machine-readable live probe report are still required before Q0/Q1 can map this entry."
+        "debt": null
       },
       "evidence": [
         "logs/agentic-runtime/ag-20260723-032420/gate-report.json",
         "logs/agentic-runtime/ag-20260723-060009/gate-report.json",
+        "logs/agentic-runtime/q1-spawn-frontier-replay-current.json",
+        "logs/agentic-runtime/q1-basin-cross-current.json",
+        "tests/e2e_golden_spawn_frontier_replay.py",
         "tests/e2e_basin_cross_probe.py",
         "tests/e2e_i14_predicate_ab_probe.py",
         "tests/e2e_i14_safe_lane_probe.py",

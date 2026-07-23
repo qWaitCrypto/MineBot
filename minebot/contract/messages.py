@@ -66,6 +66,15 @@ class BodyState:
     sleeping: bool | None = None
     missing: bool = False
     selected_slot: int | None = None
+    # Compact authoritative facts used by the autonomy-quality trace.  These
+    # fields are optional for compatibility with older Body providers; the
+    # production Scarpet provider emits them from the same server-side state
+    # read as the position and inventory hash.
+    inventory_counts: dict[str, int] | None = None
+    selected_item: str | None = None
+    offhand_item: str | None = None
+    body_owner: str | None = None
+    pending_action_count: int | None = None
 
     @classmethod
     def from_envelope_data(cls, bot: str, complete: bool, data: JsonObject) -> "BodyState":
@@ -92,6 +101,11 @@ class BodyState:
             sleeping=None if "sleeping" not in data or data.get("sleeping") is None else bool(data.get("sleeping")),
             missing=bool(data.get("missing", False)),
             selected_slot=_maybe_int(data.get("selected_slot")),
+            inventory_counts=_inventory_counts(data.get("inventory_counts")),
+            selected_item=_maybe_string(data.get("selected_item")),
+            offhand_item=_maybe_string(data.get("offhand_item")),
+            body_owner=_maybe_string(data.get("body_owner")),
+            pending_action_count=_maybe_int(data.get("pending_action_count")),
         )
 
 
@@ -223,3 +237,24 @@ def _maybe_float(value: Any) -> float | None:
 
 def _maybe_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+def _maybe_string(value: Any) -> str | None:
+    return None if value is None else str(value).removeprefix("minecraft:")
+
+
+def _inventory_counts(value: Any) -> dict[str, int] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for key, count in value.items():
+        try:
+            clean_count = int(count)
+        except (TypeError, ValueError):
+            continue
+        if clean_count <= 0:
+            continue
+        counts[str(key).removeprefix("minecraft:")] = clean_count
+    return counts

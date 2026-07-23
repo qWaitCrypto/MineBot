@@ -281,6 +281,27 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertTrue(fallback_config.allow_place)
         self.assertTrue(fallback_config.allow_pillar)
 
+    def test_recovery_exhausted_no_path_uses_governed_mobility_fallback(self):
+        runtime, _, navigator = _runtime(
+            outcomes=[
+                ToolResult(False, "recovery_exhausted:no_path", True, metrics=ZERO_PROGRESS_NAVIGATION_METRICS),
+                ToolResult(True, "arrived", False),
+            ]
+        )
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertGreaterEqual(len(navigator.calls), 2)
+        fallback_config = navigator.calls[1][1]["config"]
+        self.assertTrue(fallback_config.allow_swim)
+        self.assertTrue(fallback_config.aquatic_traversal)
+        self.assertTrue(fallback_config.allow_place)
+        self.assertTrue(fallback_config.allow_pillar)
+        attempts = result.metrics["candidate_failures"][0]["navigation_attempts"]
+        self.assertEqual(attempts[0]["reason"], "recovery_exhausted:no_path")
+        self.assertEqual(attempts[1]["mode"], "governed_mobility")
+
     def test_partial_no_path_does_not_use_aquatic_fallback(self):
         runtime, _, navigator = _runtime(
             outcomes=[

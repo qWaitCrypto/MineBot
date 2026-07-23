@@ -34,6 +34,7 @@ from minebot.app.local_launcher import (  # noqa: E402
     load_runtime_environment,
     preflight_runtime_environment,
 )
+from minebot.app.autonomy_quality import AG_FP30_YARDSTICK, evaluate_autonomy_quality  # noqa: E402
 from minebot.app.observability import sanitize_observation  # noqa: E402
 from minebot.app.real_server_session import (  # noqa: E402
     AG_FP30_GOAL,
@@ -52,6 +53,7 @@ _BODY_READY_TIMEOUT_S = 120.0
 _SECOND_SEGMENT_EXIT_GRACE_S = 90.0
 _CAMERA_RUNNING_PHASES = frozenset({"starting", "connecting", "ready", "stopping"})
 _MIN_AG_DURATION_S = 1_800.0
+_MAX_AG_DURATION_S = 3_600.0
 _MIN_SECOND_SEGMENT_S = 1_020.0
 _IDLE_PROMPT_OFFSET_S = 420.0
 _IDLE_WAKE_OFFSET_S = 870.0
@@ -74,6 +76,19 @@ async def _first_segment(
     await context.emit_chat("AGTester", "/continue")
     while True:
         await asyncio.sleep(60)
+
+
+async def _quality_segment(
+    context: InteractiveScenarioContext,
+    duration_s: float,
+    mark_ready: Callable[[], None],
+) -> None:
+    await context.wait_for_body_ready(timeout_s=60)
+    mark_ready()
+    started = time.monotonic()
+    await context.emit_chat("AGTester", f"/goal {MATERIAL_GOAL}")
+    await asyncio.sleep(max(0.0, duration_s - (time.monotonic() - started)))
+    await context.emit_chat("AGTester", "/quit ag_quality_gate_complete")
 
 
 async def _second_segment(
@@ -144,7 +159,9 @@ def _run_child(
     try:
         config = real_server_config_from_env()
         camera_path = discover_camera_config_path(environ=os.environ) if camera else None
-        if segment == "first":
+        if segment == "quality":
+            hook = lambda context: _quality_segment(context, duration_s, ready_event.set)
+        elif segment == "first":
             hook = lambda context: _first_segment(context, ready_event.set)
         else:
             hook = lambda context: _second_segment(context, duration_s, ready_event.set)
@@ -176,7 +193,7 @@ def _run_child(
         raise
 
 
-def _trace_summary(path: Path) -> dict[str, object]:
+def _trace_summary(path: Path, *, active_elapsed_s: float | None = None) -> dict[str, object]:
     events: list[dict[str, object]] = []
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -207,6 +224,11 @@ def _trace_summary(path: Path) -> dict[str, object]:
     ) if path.exists() else 0
     ready_to_terminal_elapsed_s = _trace_elapsed_s(events, "scenario_body_ready", "session_terminal")
     idle_window = _idle_window_summary(events)
+    quality = evaluate_autonomy_quality(
+        events,
+        yardstick=AG_FP30_YARDSTICK,
+        active_window_s=active_elapsed_s,
+    )
     return {
         "trace_records": len(events),
         "event_counts": dict(sorted(counts.items())),
@@ -224,6 +246,7 @@ def _trace_summary(path: Path) -> dict[str, object]:
             and isinstance(canonical_terminal_truths[-1].get("facts"), dict)
             and canonical_terminal_truths[-1]["facts"].get("terminal_satisfied") is True
         ),
+        "autonomy_quality": quality,
         "ready_to_terminal_elapsed_s": ready_to_terminal_elapsed_s,
         "idle_window": idle_window,
         "governance_events": sum(
@@ -446,11 +469,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-dir", type=Path, help="Local directory for trace and report.")
     parser.add_argument("--duration-seconds", type=float, default=1800.0)
     parser.add_argument("--restart-after-seconds", type=float, default=600.0)
+    parser.add_argument(
+        "--runtime-matrix",
+        action="store_true",
+        help="Run the legacy restart/idle/follow/combat/cancel regression scenario instead of the scored quality window.",
+    )
     parser.add_argument("--no-camera", action="store_true")
     args = parser.parse_args(argv)
-    if args.duration_seconds < _MIN_AG_DURATION_S or args.restart_after_seconds < 180:
-        parser.error("the AG gate requires at least 1800 seconds and a restart after at least 180 seconds")
-    if args.restart_after_seconds > args.duration_seconds - _MIN_SECOND_SEGMENT_S:
+    if args.duration_seconds < _MIN_AG_DURATION_S or args.duration_seconds > _MAX_AG_DURATION_S:
+        parser.error("the AG quality gate requires 1800-3600 seconds")
+    if args.runtime_matrix and args.restart_after_seconds < 180:
+        parser.error("the runtime matrix requires a restart after at least 180 seconds")
+    if args.runtime_matrix and args.restart_after_seconds > args.duration_seconds - _MIN_SECOND_SEGMENT_S:
         parser.error("restart must leave at least 1020 seconds for the reconciliation segment")
 
     env_path = discover_runtime_env_path(args.env_file)
@@ -477,6 +507,45 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.time()
     process_context = multiprocessing.get_context("spawn")
+    if not args.runtime_matrix:
+        diagnostic = run_dir / "quality-segment-diagnostic.json"
+        quality_segment = _run_segment(
+            process_context,
+            environment,
+            "quality",
+            args.duration_seconds,
+            camera=not args.no_camera,
+            hard_stop=False,
+            diagnostic_path=diagnostic,
+        )
+        final_camera_cleanup = _stop_gate_camera(camera_path)
+        report = {
+            "started_at": started,
+            "mode": "autonomy_quality",
+            "duration_seconds": args.duration_seconds,
+            "segment": quality_segment.__dict__,
+            "diagnostic": _read_diagnostic(diagnostic),
+            "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+            "coverage": {
+                "active_elapsed_s": quality_segment.active_elapsed_s,
+                "configured_duration_s": args.duration_seconds,
+                "active_duration_met": quality_segment.active_elapsed_s >= args.duration_seconds,
+            },
+            "trace": _trace_summary(run_dir / "trace.jsonl", active_elapsed_s=quality_segment.active_elapsed_s),
+            "camera": {
+                "initial": camera_initial,
+                "after_gate": final_camera_cleanup,
+            },
+        }
+        (run_dir / "gate-report.json").write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(f"AG quality gate report: {run_dir / 'gate-report.json'}")
+        quality = report["trace"].get("autonomy_quality")
+        quality_pass = isinstance(quality, dict) and quality.get("verdict") == "pass"
+        return 0 if quality_segment.body_ready and quality_segment.exit_code == 0 and quality_pass else 1
+
     first_diagnostic = run_dir / "first-segment-diagnostic.json"
     first = _run_segment(
         process_context,
@@ -501,7 +570,7 @@ def main(argv: list[str] | None = None) -> int:
                 else "fixture_first_segment_exited_early"
             ),
             "diagnostic": _read_diagnostic(first_diagnostic),
-            "trace": _trace_summary(run_dir / "trace.jsonl"),
+            "trace": _trace_summary(run_dir / "trace.jsonl", active_elapsed_s=first.active_elapsed_s),
             "camera": {
                 "initial": camera_initial,
                 "after_first_segment": first_camera_cleanup,
@@ -528,6 +597,7 @@ def main(argv: list[str] | None = None) -> int:
     active_elapsed_s = round(first.active_elapsed_s + second.active_elapsed_s, 3)
     report = {
         "started_at": started,
+        "mode": "runtime_matrix",
         "duration_seconds": args.duration_seconds,
         "restart_after_seconds": args.restart_after_seconds,
         "first_segment": first.__dict__,
@@ -540,7 +610,7 @@ def main(argv: list[str] | None = None) -> int:
             "configured_duration_s": args.duration_seconds,
             "active_duration_met": active_elapsed_s >= args.duration_seconds,
         },
-        "trace": _trace_summary(run_dir / "trace.jsonl"),
+        "trace": _trace_summary(run_dir / "trace.jsonl", active_elapsed_s=active_elapsed_s),
         "camera": {
             "initial": camera_initial,
             "after_first_segment": first_camera_cleanup,

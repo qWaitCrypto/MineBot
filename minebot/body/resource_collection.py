@@ -28,6 +28,7 @@ from minebot.body.navigation import (
     dry_land_navigation_config,
     governed_mobility_navigation_config,
     load_limited_navigation_config,
+    navigation_governed_mobility_upgrade_reason,
     navigation_zero_progress,
 )
 from minebot.body.reach import ReachIntent, block_reach_domains, round_robin_reach_goals
@@ -315,7 +316,7 @@ class ResourceCollectionTransactions:
 
             if (
                 not navigation.success
-                and navigation.reason in {"no_path", "budget_exceeded"}
+                and navigation_governed_mobility_upgrade_reason(navigation.reason)
                 and navigation_zero_progress(
                     navigation,
                     before_navigation,

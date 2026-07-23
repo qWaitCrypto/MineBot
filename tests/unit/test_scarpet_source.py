@@ -871,6 +871,22 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn('"eventSeq":%d,"chatSeq":%d,"tick":%d,"epoch":%s', source)
         self.assertIn("owner_name = if(owner == null, null, owner:0);", source)
 
+    def test_state_json_exposes_quality_evaluator_authoritative_fields(self):
+        source = MINEBOT_SC.read_text()
+
+        for expected in (
+            '"inventory_counts":%s',
+            '"selected_item":%s',
+            '"offhand_item":%s',
+            '"body_owner":%s',
+            '"pending_action_count":%d',
+            "inventory_counts_json(name)",
+            "selected_item = if(stack_empty(selected_stack), null, stack_item(selected_stack));",
+            "offhand_item = if(stack_empty(offhand_stack), null, stack_item(offhand_stack));",
+            "pending_action_count = body_pending_action_count(name);",
+        ):
+            self.assertIn(expected, source)
+
     def test_event_drains_are_char_budgeted_and_pageable(self):
         source = MINEBOT_SC.read_text()
 

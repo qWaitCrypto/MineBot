@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from hashlib import sha256
 import json
 import threading
 import time
@@ -818,6 +819,8 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             )
         )
         arguments_summary = _tool_arguments_summary_from_json(input_json)
+        args_hash = _canonical_args_hash_from_json(input_json)
+        tactic_signature = _tool_tactic_signature_from_json(tool.name, input_json)
 
         def finalize(
             result: JsonObject,
@@ -833,6 +836,8 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 trace=trace,
                 tool_call_id=tool_call_id,
                 runtime=runtime,
+                args_hash=args_hash,
+                tactic_signature=tactic_signature,
             )
             if epoch_adapter is not None and epoch_member is not None:
                 abort = epoch_adapter.settle(
@@ -874,6 +879,8 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 terminal_truth=list(tool.sidecar.terminal_truth),
                 situational=ctx.context.profile.situational,
                 lifecycle=ctx.context.profile.lifecycle,
+                args_hash=args_hash,
+                tactic_signature=tactic_signature,
                 arguments_summary=arguments_summary,
             )
         if epoch_member is not None and epoch_member.conflict:
@@ -1166,6 +1173,8 @@ def _finalize_tool_payload(
     trace: RuntimeTrace | None,
     tool_call_id: str,
     runtime: "AgentRuntime | None" = None,
+    args_hash: str | None = None,
+    tactic_signature: str | None = None,
 ) -> JsonObject:
     observation_handle = _persist_tool_observation(
         runtime,
@@ -1184,6 +1193,8 @@ def _finalize_tool_payload(
             "tool_result",
             tool_call_id=tool_call_id,
             tool=tool.name,
+            args_hash=args_hash,
+            tactic_signature=tactic_signature,
             reason=str(result.get("reason")),
             success=bool(result.get("success")),
             full_result=result,
@@ -3010,6 +3021,11 @@ class AgentRuntime:
             "oxygen": getattr(state, "oxygen", None),
             "dimension": getattr(state, "dimension", None),
             "inventory_hash": getattr(state, "inventory_hash", None),
+            "inventory_counts": getattr(state, "inventory_counts", None),
+            "selected_item": getattr(state, "selected_item", None),
+            "offhand_item": getattr(state, "offhand_item", None),
+            "body_owner": getattr(state, "body_owner", None),
+            "pending_action_count": getattr(state, "pending_action_count", None),
         }
 
     def remember_tool_body_facts(self, result: JsonObject) -> None:
@@ -3033,6 +3049,14 @@ class AgentRuntime:
                 "oxygen": metrics.get("oxygen", previous.get("oxygen")),
                 "dimension": metrics.get("dimension", previous.get("dimension")),
                 "inventory_hash": metrics.get("inventory_hash", previous.get("inventory_hash")),
+                "inventory_counts": metrics.get("inventory_counts", previous.get("inventory_counts")),
+                "selected_item": metrics.get("selected_item", previous.get("selected_item")),
+                "offhand_item": metrics.get("offhand_item", previous.get("offhand_item")),
+                "body_owner": metrics.get("body_owner", previous.get("body_owner")),
+                "pending_action_count": metrics.get(
+                    "pending_action_count",
+                    previous.get("pending_action_count"),
+                ),
             }
         )
         self.last_known_body_state = previous
@@ -3171,6 +3195,12 @@ class AgentRuntime:
             food=state.food,
             oxygen=state.oxygen,
             inventory_hash=state.inventory_hash,
+            inventory_counts=dict(state.inventory_counts or {}),
+            selected_slot=state.selected_slot,
+            selected_item=state.selected_item,
+            offhand_item=state.offhand_item,
+            body_owner=state.body_owner,
+            pending_action_count=state.pending_action_count,
             dimension=state.dimension,
             complete=state.complete,
             missing=state.missing,
@@ -3180,6 +3210,16 @@ class AgentRuntime:
             count=len(events),
             names=[event.name for event in events],
             seqs=[event.seq for event in events],
+            events=[
+                {
+                    "seq": event.seq,
+                    "tick": event.tick,
+                    "bot": event.bot,
+                    "name": event.name,
+                    "data": dict(event.data or {}),
+                }
+                for event in events
+            ],
         )
         signals = [
             *signalize_body_state(state),
@@ -3539,6 +3579,102 @@ def _tool_arguments_summary_from_json(input_json: str) -> str | None:
     except json.JSONDecodeError:
         return _shorten(input_json, limit=500)
     return _summarize_tool_arguments(parsed)
+
+
+_TACTIC_NUMERIC_KNOBS = frozenset(
+    {
+        "budget",
+        "count",
+        "deadline",
+        "distance",
+        "find_limit",
+        "grid_radius",
+        "limit",
+        "max_distance",
+        "max_pages",
+        "max_regions",
+        "max_steps",
+        "page_limit",
+        "radius",
+        "scan_radius",
+        "search_radius",
+        "start",
+        "timeout",
+        "timeout_s",
+        "y_radius",
+        "yRadius",
+    }
+)
+_TACTIC_POSITION_KEYS = frozenset(
+    {
+        "block",
+        "center",
+        "destination",
+        "from",
+        "goal",
+        "origin",
+        "pos",
+        "position",
+        "target",
+        "to",
+        "x",
+        "y",
+        "z",
+    }
+)
+
+
+def _canonical_args_hash_from_json(input_json: str) -> str:
+    return sha256(_canonical_tool_arguments(input_json).encode("utf-8")).hexdigest()
+
+
+def _canonical_tool_arguments(input_json: str) -> str:
+    if not input_json:
+        return "{}"
+    try:
+        parsed = json.loads(input_json)
+    except json.JSONDecodeError:
+        return f"invalid:{input_json}"
+    return json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _tool_tactic_signature_from_json(tool_name: str, input_json: str) -> str:
+    if not input_json:
+        payload: object = {}
+    else:
+        try:
+            payload = json.loads(input_json)
+        except json.JSONDecodeError:
+            payload = {"invalid_json": True}
+    semantic = _semantic_tactic_payload(payload)
+    canonical = json.dumps(semantic, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    digest = sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"{tool_name}:{digest}"
+
+
+def _semantic_tactic_payload(value: object, *, key: str | None = None) -> object:
+    if isinstance(value, dict):
+        semantic: dict[str, object] = {}
+        for item_key, item_value in sorted(value.items()):
+            clean_key = str(item_key)
+            if _is_tactic_knob_key(clean_key):
+                continue
+            semantic[clean_key] = _semantic_tactic_payload(item_value, key=clean_key)
+        return semantic
+    if isinstance(value, list):
+        if key is not None and _is_tactic_knob_key(key):
+            return []
+        return [_semantic_tactic_payload(item, key=key) for item in value]
+    if isinstance(value, (int, float)) and key is not None and _is_tactic_knob_key(key):
+        return None
+    return value
+
+
+def _is_tactic_knob_key(key: str) -> bool:
+    lowered = key.casefold()
+    if lowered in _TACTIC_POSITION_KEYS or lowered in _TACTIC_NUMERIC_KNOBS:
+        return True
+    return lowered.endswith(("_pos", "_position", "_radius", "_limit", "_timeout", "_timeout_s"))
 
 
 def _extract_observations_from_new_items(new_items: list[Any]) -> list[dict[str, object]]:

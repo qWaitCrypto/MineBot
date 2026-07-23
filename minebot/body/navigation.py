@@ -214,6 +214,24 @@ def navigation_zero_progress(
     return observed and not positive
 
 
+def navigation_governed_mobility_upgrade_reason(reason: object) -> bool:
+    """Return whether a dry-first zero-progress failure may widen mobility.
+
+    Navigation recovery wraps the underlying route terminal as
+    ``recovery_exhausted:<terminal>``. Dry-first consumers must classify that by
+    reason family, not by the literal outer string; otherwise a genuine no-path
+    route can bypass the governed swim/place/break/pillar escalation that exists
+    precisely for compound terrain.
+    """
+
+    value = str(reason or "")
+    if value in {"no_path", "budget_exceeded"}:
+        return True
+    if value.startswith("recovery_exhausted:"):
+        return value.split(":", 1)[1] in {"no_path", "budget_exceeded"}
+    return False
+
+
 def _position_distance(
     before: Position,
     after: Position,

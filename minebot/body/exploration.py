@@ -14,6 +14,7 @@ from minebot.body.navigation import (
     NavigationTransactions,
     dry_land_navigation_config,
     governed_mobility_navigation_config,
+    navigation_governed_mobility_upgrade_reason,
     navigation_zero_progress,
     pure_movement_navigation_config,
 )
@@ -562,7 +563,7 @@ class ExplorationTransactions:
             reached = nav.success and _region_key(_block_pos(after.pos)) == region
             if (
                 not reached
-                and navigation_reason in {"no_path", "budget_exceeded"}
+                and navigation_governed_mobility_upgrade_reason(navigation_reason)
                 and navigation_zero_progress(nav, before.pos, after.pos)
                 and not aquatic_attempted
             ):

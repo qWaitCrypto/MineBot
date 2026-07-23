@@ -183,7 +183,7 @@ state_json(name) -> (
   finalize_pending_spawn(name);
   pe = player_entity(name);
   if(pe == null,
-    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":[0.000,0.000,0.000],"yaw":null,"pitch":null,"health":0.000,"food":0,"oxygen":null,"inventory_raw":"","inventory_hash":%s,"effects":null,"time":%d,"weather":null,"dimension":null,"selected_slot":null,"sleeping":null,"missing":true},"error":null}',
+    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":[0.000,0.000,0.000],"yaw":null,"pitch":null,"health":0.000,"food":0,"oxygen":null,"inventory_raw":"","inventory_hash":%s,"inventory_counts":{},"effects":null,"time":%d,"weather":null,"dimension":null,"selected_slot":null,"selected_item":null,"offhand_item":null,"body_owner":null,"pending_action_count":0,"sleeping":null,"missing":true},"error":null}',
       name, json_string(''), floor(number(day_time()) % 24000))
   ,
     p = query(pe, 'pos');
@@ -196,8 +196,15 @@ state_json(name) -> (
     sleeping = sleep_timer > 0;
     inv = inventory_get(name);
     raw = str('%s', inv);
-    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":%s,"yaw":null,"pitch":null,"health":%.3f,"food":%d,"oxygen":%s,"inventory_raw":"","inventory_hash":%s,"effects":%s,"time":%d,"weather":null,"dimension":null,"selected_slot":%s,"sleeping":%s,"missing":false},"error":null}',
-      name, json_pos(p), health, food, json_int_null(air), json_string(hash_code(raw)), effects_json(pe), floor(number(day_time()) % 24000), json_int_null(selected_slot), json_bool(sleeping))
+    selected_stack = if(selected_slot == null, 0, inventory_get(name, selected_slot));
+    selected_item = if(stack_empty(selected_stack), null, stack_item(selected_stack));
+    offhand_stack = inventory_get(name, 40);
+    offhand_item = if(stack_empty(offhand_stack), null, stack_item(offhand_stack));
+    owner = owner_of(name);
+    owner_name = if(owner == null, null, owner:0);
+    pending_action_count = body_pending_action_count(name);
+    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":%s,"yaw":null,"pitch":null,"health":%.3f,"food":%d,"oxygen":%s,"inventory_raw":"","inventory_hash":%s,"inventory_counts":%s,"effects":%s,"time":%d,"weather":null,"dimension":null,"selected_slot":%s,"selected_item":%s,"offhand_item":%s,"body_owner":%s,"pending_action_count":%d,"sleeping":%s,"missing":false},"error":null}',
+      name, json_pos(p), health, food, json_int_null(air), json_string(hash_code(raw)), inventory_counts_json(name), effects_json(pe), floor(number(day_time()) % 24000), json_int_null(selected_slot), json_string(selected_item), json_string(offhand_item), json_string(owner_name), pending_action_count, json_bool(sleeping))
   )
 );
 

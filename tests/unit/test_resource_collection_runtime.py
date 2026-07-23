@@ -426,6 +426,35 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertTrue(navigator.calls[1][1]["config"].aquatic_traversal)
         self.assertEqual(result.metrics["navigation_fallback_attempts"], 1)
 
+    def test_recovery_exhausted_no_path_upgrades_to_governed_mobility(self):
+        target = (5, 64, 0)
+        selected = (5, 65, -1)
+        body = ResourceBody([(target, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [selected, selected],
+            outcomes=[(False, "recovery_exhausted:no_path"), (True, "arrived")],
+            metrics=[ZERO_PROGRESS_NAVIGATION_METRICS],
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(len(navigator.calls), 2)
+        fallback_config = navigator.calls[1][1]["config"]
+        self.assertTrue(fallback_config.allow_swim)
+        self.assertTrue(fallback_config.aquatic_traversal)
+        self.assertEqual(result.metrics["navigation_fallback_attempts"], 1)
+        fallback = result.metrics["attempts"][0]["navigation_fallback"]
+        self.assertEqual(fallback["dry_terminal_reason"], "recovery_exhausted:no_path")
+        self.assertEqual(fallback["profile"], "governed_mobility")
+
     def test_navigation_progress_does_not_trigger_governed_mobility_fallback(self):
         target = (5, 64, 0)
         selected = (5, 65, -1)

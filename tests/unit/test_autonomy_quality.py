@@ -1,0 +1,267 @@
+import unittest
+
+from minebot.app.autonomy_quality import (
+    AG_FP30_YARDSTICK,
+    AG_FP30_X_YARDSTICK,
+    evaluate_autonomy_quality,
+)
+
+
+def _body_state(seq, ts, *, x=0.0, counts=None, selected_item=None, offhand_item=None, owner=None, pending=0):
+    return {
+        "event": "body_state",
+        "seq": seq,
+        "ts": float(ts),
+        "bot": "Bot",
+        "pos": [float(x), 64.0, 0.0],
+        "health": 20.0,
+        "food": 20,
+        "oxygen": 300,
+        "inventory_hash": f"inv-{seq}",
+        "inventory_counts": dict(counts or {}),
+        "selected_item": selected_item,
+        "offhand_item": offhand_item,
+        "body_owner": owner,
+        "pending_action_count": pending,
+        "dimension": "overworld",
+        "complete": True,
+        "missing": False,
+    }
+
+
+def _body_events(seq, ts, events=None):
+    payloads = list(events or [])
+    return {
+        "event": "body_events",
+        "seq": seq,
+        "ts": float(ts),
+        "count": len(payloads),
+        "names": [event["name"] for event in payloads],
+        "seqs": [event["seq"] for event in payloads],
+        "events": payloads,
+    }
+
+
+def _invoke(seq, ts, tool, args_hash, tactic, *, mutating=True):
+    return {
+        "event": "tool_invoke",
+        "seq": seq,
+        "ts": float(ts),
+        "tool": tool,
+        "args_hash": args_hash,
+        "tactic_signature": tactic,
+        "mutating": mutating,
+    }
+
+
+def _result(seq, ts, tool, args_hash, tactic, *, success, reason):
+    return {
+        "event": "tool_result",
+        "seq": seq,
+        "ts": float(ts),
+        "tool": tool,
+        "args_hash": args_hash,
+        "tactic_signature": tactic,
+        "success": success,
+        "reason": reason,
+    }
+
+
+def _coverage_events(*, states):
+    events = []
+    for index, state in enumerate(states):
+        events.append(state)
+        events.append(_body_events(10_000 + index, state["ts"]))
+        if int(state["ts"]) % 240 == 0:
+            events.append({"event": "llm_start", "seq": 20_000 + index, "ts": state["ts"] + 1.0})
+    events.append({"event": "session_terminal", "seq": 30_000, "ts": 1800.0})
+    return events
+
+
+def _healthy_material_incomplete_trace(include_obstacle=True):
+    counts_by_ts = {
+        0: {},
+        120: {"oak_log": 1},
+        240: {"oak_log": 1},
+        360: {"oak_log": 1},
+        480: {"oak_log": 2},
+        600: {"oak_log": 2},
+        720: {"oak_log": 2},
+        840: {"oak_log": 2},
+        960: {"oak_log": 3},
+        1080: {"oak_log": 3},
+        1200: {"oak_log": 3},
+        1320: {"oak_log": 3, "crafting_table": 1},
+        1440: {"oak_log": 3, "crafting_table": 1},
+        1560: {"oak_log": 3, "crafting_table": 1},
+        1680: {"oak_log": 3, "crafting_table": 1},
+        1800: {"oak_log": 3, "crafting_table": 1},
+    }
+    states = [
+        _body_state(index + 1, ts, x=index * 2.0, counts=counts)
+        for index, (ts, counts) in enumerate(counts_by_ts.items())
+    ]
+    events = _coverage_events(states=states)
+    if include_obstacle:
+        events.extend(
+            [
+                _invoke(100, 250, "explore_for", "args-a", "explore:targets", mutating=True),
+                _result(
+                    101,
+                    300,
+                    "explore_for",
+                    "args-a",
+                    "explore:targets",
+                    success=False,
+                    reason="mobility_blocked:no_path",
+                ),
+                _invoke(102, 360, "collect_resource", "args-b", "collect:logs", mutating=True),
+                _result(103, 430, "collect_resource", "args-b", "collect:logs", success=True, reason="collected"),
+            ]
+        )
+    return sorted(events, key=lambda event: (event["ts"], event["seq"]))
+
+
+class AutonomyQualityTests(unittest.TestCase):
+    def test_material_incomplete_but_healthy_output_can_pass(self):
+        report = evaluate_autonomy_quality(
+            _healthy_material_incomplete_trace(),
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        self.assertEqual(report["verdict"], "pass")
+        self.assertEqual(report["signals"]["effective_output"]["points"], 4)
+        self.assertEqual(report["signals"]["recovery"]["verdict"], "pass")
+
+    def test_material_complete_does_not_mask_repeated_failure_loop(self):
+        events = _healthy_material_incomplete_trace()
+        for state in events:
+            if state.get("event") == "body_state":
+                state["inventory_counts"] = {
+                    "dandelion": 1,
+                    "poppy": 1,
+                    "blue_orchid": 1,
+                    "porkchop": 1,
+                    "beef": 1,
+                    "mutton": 1,
+                    "torch": 16,
+                    "iron_ingot": 3,
+                }
+                state["selected_item"] = "iron_pickaxe"
+                state["offhand_item"] = "shield"
+        events.extend(
+            [
+                _result(900, 500, "move_to", "same", "move:point", success=False, reason="no_path"),
+                _result(901, 520, "move_to", "same", "move:point", success=False, reason="no_path"),
+                _result(902, 540, "move_to", "same", "move:point", success=False, reason="no_path"),
+                _result(903, 560, "move_to", "same", "move:point", success=False, reason="no_path"),
+            ]
+        )
+
+        report = evaluate_autonomy_quality(events, yardstick=AG_FP30_YARDSTICK, active_window_s=1800)
+
+        self.assertEqual(report["verdict"], "fail")
+        self.assertEqual(report["signals"]["process_health"]["repeated_failure"]["streak"], 4)
+
+    def test_zero_output_is_failure_not_honest_success(self):
+        states = [_body_state(index + 1, ts, x=index * 3.0) for index, ts in enumerate(range(0, 1801, 120))]
+        events = _coverage_events(states=states)
+        events.extend(
+            [
+                _invoke(100, 250, "explore_for", "args-a", "explore:targets", mutating=True),
+                _result(101, 300, "explore_for", "args-a", "explore:targets", success=False, reason="no_path"),
+                _invoke(102, 360, "go_to_surface", "args-b", "surface:up", mutating=True),
+                _result(103, 420, "go_to_surface", "args-b", "surface:up", success=True, reason="surface_reached"),
+            ]
+        )
+
+        report = evaluate_autonomy_quality(events, yardstick=AG_FP30_X_YARDSTICK, active_window_s=1800)
+
+        self.assertEqual(report["verdict"], "fail")
+        self.assertIn("output_points_below_threshold", report["signals"]["effective_output"]["failures"])
+
+    def test_no_natural_obstacle_episode_is_insufficient_evidence(self):
+        report = evaluate_autonomy_quality(
+            _healthy_material_incomplete_trace(include_obstacle=False),
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        self.assertEqual(report["verdict"], "insufficient_evidence")
+        self.assertEqual(report["signals"]["recovery"]["reason"], "no_natural_obstacle_episode")
+
+    def test_sparse_body_state_trace_is_insufficient_evidence(self):
+        states = [
+            _body_state(1, 0, x=0, counts={}),
+            _body_state(2, 600, x=10, counts={"oak_log": 3, "crafting_table": 1}),
+            _body_state(3, 1800, x=20, counts={"oak_log": 3, "crafting_table": 1}),
+        ]
+        events = _coverage_events(states=states)
+        events.extend(
+            [
+                _result(100, 300, "explore_for", "args-a", "explore:targets", success=False, reason="no_path"),
+                _invoke(101, 360, "collect_resource", "args-b", "collect:logs", mutating=True),
+            ]
+        )
+
+        report = evaluate_autonomy_quality(events, yardstick=AG_FP30_X_YARDSTICK, active_window_s=1800)
+
+        self.assertEqual(report["verdict"], "insufficient_evidence")
+        self.assertIn("body_state_sample_gap", report["coverage"]["missing"])
+
+    def test_legacy_trace_shape_without_required_fields_is_insufficient(self):
+        events = [
+            {
+                "event": "body_state",
+                "seq": 1,
+                "ts": 0.0,
+                "pos": [0, 64, 0],
+                "inventory_hash": "old",
+                "missing": False,
+            },
+            {
+                "event": "body_state",
+                "seq": 2,
+                "ts": 120.0,
+                "pos": [1, 64, 0],
+                "inventory_hash": "old2",
+                "missing": False,
+            },
+            {"event": "body_events", "seq": 3, "ts": 0.0, "count": 0, "names": [], "seqs": []},
+            {"event": "tool_invoke", "seq": 4, "ts": 10.0, "tool": "move_to"},
+            {"event": "tool_result", "seq": 5, "ts": 20.0, "tool": "move_to", "success": False, "reason": "no_path"},
+            {"event": "session_terminal", "seq": 6, "ts": 1800.0},
+        ]
+
+        report = evaluate_autonomy_quality(events, active_window_s=1800)
+
+        self.assertEqual(report["verdict"], "insufficient_evidence")
+        self.assertIn("body_events.payload", report["coverage"]["missing"])
+        self.assertIn("tool_invoke.args_hash", report["coverage"]["missing"])
+
+    def test_060009_style_choke_stall_is_negative_sample(self):
+        states = [_body_state(index + 1, ts, x=0.1, counts={}) for index, ts in enumerate(range(0, 1801, 120))]
+        events = _coverage_events(states=states)
+        events.extend(
+            [
+                _invoke(100, 240, "explore_for", "same", "explore:primary", mutating=True),
+                _result(101, 300, "explore_for", "same", "explore:primary", success=False, reason="mobility_blocked:no_path"),
+                _invoke(102, 420, "explore_for", "same", "explore:primary", mutating=True),
+                _result(103, 480, "explore_for", "same", "explore:primary", success=False, reason="mobility_blocked:no_path"),
+                _invoke(104, 600, "explore_for", "same", "explore:primary", mutating=True),
+                _result(105, 660, "explore_for", "same", "explore:primary", success=False, reason="mobility_blocked:no_path"),
+                _invoke(106, 780, "explore_for", "same", "explore:primary", mutating=True),
+                _result(107, 840, "explore_for", "same", "explore:primary", success=False, reason="mobility_blocked:no_path"),
+            ]
+        )
+
+        report = evaluate_autonomy_quality(events, yardstick=AG_FP30_YARDSTICK, active_window_s=1800)
+
+        self.assertEqual(report["verdict"], "fail")
+        self.assertIn("deadlock_window", report["signals"]["process_health"]["failures"])
+        self.assertEqual(report["signals"]["effective_output"]["points"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
