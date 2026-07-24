@@ -54,7 +54,7 @@ from .progress import (
     STAGNATION_LIMIT,
     STALL_LIMIT,
 )
-from .results import terminal_event_to_tool_result
+from .results import body_rejection_to_tool_result, terminal_event_to_tool_result
 
 __all__ = [
     "Action",
@@ -97,4 +97,5 @@ __all__ = [
     "required_pickaxe_tier",
     "tier_satisfies",
     "terminal_event_to_tool_result",
+    "body_rejection_to_tool_result",
 ]

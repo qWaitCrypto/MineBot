@@ -853,7 +853,7 @@ class ScarpetSourceTests(unittest.TestCase):
         ):
             self.assertIn(expected, source)
 
-    def test_reset_does_not_rewind_event_cursors(self):
+    def test_reset_does_not_rewind_event_cursors_but_rotates_action_epoch(self):
         source = MINEBOT_SC.read_text()
         match = re.search(r"minebot_reset\(\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(match, "minebot_reset function not found")
@@ -863,6 +863,7 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("global_agent_chat_events = [];", body)
         self.assertNotIn("global_seq = 0;", body)
         self.assertNotIn("global_agent_chat_seq = 0;", body)
+        self.assertIn("global_event_epoch = null;", body)
 
     def test_event_head_exposes_reload_epoch_and_both_monotonic_cursors(self):
         source = MINEBOT_SC.read_text()
@@ -882,12 +883,24 @@ class ScarpetSourceTests(unittest.TestCase):
             '"offhand_item":%s',
             '"body_owner":%s',
             '"pending_action_count":%d',
+            '"hazard_unresolved":%s',
             "inventory_counts_json(name)",
             "selected_item = if(stack_empty(selected_stack), null, stack_item(selected_stack));",
             "offhand_item = if(stack_empty(offhand_stack), null, stack_item(offhand_stack));",
             "pending_action_count = body_pending_action_count(name);",
+            "hazard = hazard_unresolved_json(name);",
         ):
             self.assertIn(expected, source)
+
+    def test_failed_survival_reflex_latches_hazard_and_gates_ordinary_actions(self):
+        source = MINEBOT_SC.read_text()
+
+        self.assertIn("hazard_unresolved(name) -> (", source)
+        self.assertIn("hazard_action_allowed(name, action_name, params) -> (", source)
+        self.assertIn("'survival_recovery' -> param_bool(params, 'survival_recovery', false)", source)
+        self.assertIn("'hazard_unresolved'", source)
+        self.assertIn('"reason":"hazard_unresolved"', source)
+        self.assertIn("global_navigations:name:14:'survival_recovery'", source)
 
     def test_event_drains_are_char_budgeted_and_pageable(self):
         source = MINEBOT_SC.read_text()

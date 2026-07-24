@@ -294,6 +294,7 @@ def _state_payload(state: BodyState) -> dict[str, object]:
         "oxygen": state.oxygen,
         "inventory_hash": state.inventory_hash,
         "dimension": state.dimension,
+        "hazard_unresolved": state.hazard_unresolved,
         "complete": state.complete,
         "missing": state.missing,
     }

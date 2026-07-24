@@ -566,11 +566,28 @@ def _recovery_signal(
             continue
         switch_ts = float(switched.get("ts", 0.0))
         recovered_at = next((ts for ts in output_ts if switch_ts <= ts <= obstacle_ts + thresholds.recovery_window_s), None)
-        attempts = sum(
-            1
-            for result in results
-            if obstacle_ts < float(result.get("ts", 0.0)) <= (recovered_at or obstacle_ts + thresholds.recovery_window_s)
-        )
+        attempt_end = recovered_at or obstacle_ts + thresholds.recovery_window_s
+        # ``A`` is a bound on semantic physical attempts, not on every trace
+        # record.  Read-only observations are often necessary after an
+        # obstacle and composition layers may emit several results for one
+        # Body action; counting those records made healthy observe-then-switch
+        # recovery look like retry abuse.  The production trace marks the
+        # physical boundary on ``tool_invoke.mutating``.
+        attempt_invokes = [
+            event
+            for event in invokes
+            if obstacle_ts < float(event.get("ts", 0.0)) <= attempt_end
+            and event.get("mutating") is True
+        ]
+        seen_attempts: set[str] = set()
+        attempt_refs: list[str] = []
+        for event in attempt_invokes:
+            identity = str(event.get("tool_call_id") or _ref(event))
+            if identity in seen_attempts:
+                continue
+            seen_attempts.add(identity)
+            attempt_refs.append(_ref(event))
+        attempts = len(attempt_refs)
         if recovered_at is None:
             failed += 1
             episodes.append(
@@ -580,6 +597,7 @@ def _recovery_signal(
                     "obstacle": _episode_obstacle(obstacle),
                     "switch": _episode_switch(switched),
                     "attempts": attempts,
+                    "attempt_refs": attempt_refs,
                 }
             )
             continue
@@ -592,6 +610,7 @@ def _recovery_signal(
                     "obstacle": _episode_obstacle(obstacle),
                     "switch": _episode_switch(switched),
                     "attempts": attempts,
+                    "attempt_refs": attempt_refs,
                     "recovered_at": recovered_at,
                 }
             )
@@ -603,6 +622,7 @@ def _recovery_signal(
                 "obstacle": _episode_obstacle(obstacle),
                 "switch": _episode_switch(switched),
                 "attempts": attempts,
+                "attempt_refs": attempt_refs,
                 "recovered_at": recovered_at,
             }
         )

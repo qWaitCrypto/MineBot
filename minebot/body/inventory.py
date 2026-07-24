@@ -14,7 +14,7 @@ from minebot.body.interaction_support import (
 )
 
 from minebot.contract import Body
-from minebot.contract import terminal_event_to_tool_result
+from minebot.contract import body_rejection_to_tool_result, terminal_event_to_tool_result
 from minebot.contract import Action, BreakContext, InteractionContext, InventorySlot, PerceptionResult, PlaceContext, Result, ToolResult, perception_next_cursor
 from minebot.game.governance import GovernancePolicy
 
@@ -1789,7 +1789,10 @@ def _dispatch_select_item(body: Body, item: str, *, timeout_s: float) -> ToolRes
     rejected = _body_rejected(accepted, {"action": "selectItem", "params": {"item": item}})
     if rejected is not None:
         return rejected
-    return ToolResult(success=False, reason="body_rejected", can_retry=True, metrics={"action": "selectItem", "item": item})
+    return body_rejection_to_tool_result(
+        accepted,
+        {"action": "selectItem", "item": item},
+    )
 
 
 def _prepare_hotbar_slot_for_item(
@@ -1889,13 +1892,4 @@ def _prepare_hotbar_slot_for_item(
 
 
 def _body_rejected(result: Result, metrics: dict[str, object]) -> ToolResult | None:
-    if result.ok and result.accepted:
-        return None
-    merged = dict(metrics)
-    merged["accepted"] = {
-        "ok": result.ok,
-        "accepted": result.accepted,
-        "error": result.error,
-        "data": result.data,
-    }
-    return ToolResult(success=False, reason="body_rejected", can_retry=True, metrics=merged)
+    return body_rejection_to_tool_result(result, metrics)

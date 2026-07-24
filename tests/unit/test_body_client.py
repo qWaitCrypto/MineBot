@@ -145,6 +145,205 @@ class MutationFailureTransport:
         raise AssertionError(f"unexpected read command: {command}")
 
 
+class RunningNavigationTransport(MutationFailureTransport):
+    """Keep a dropped composite navigation action active until its terminal."""
+
+    def __init__(self, action_id: str):
+        super().__init__(status_data={"action_id": action_id, "dispatch": None, "terminal": None})
+        self.status_reads = 0
+        self.event_reads = 0
+        self.state_reads = 0
+        self.head_reads = 0
+
+    def request(self, command: str) -> str:
+        self.read_commands.append(command)
+        if "minebot_action_status" in command:
+            self.status_reads += 1
+            terminal = None
+            if self.status_reads >= 2:
+                terminal = {
+                    "seq": 7,
+                    "tick": 120,
+                    "bot": "Bot1",
+                    "name": "navigateDone",
+                    "data": {
+                        "action_id": self.action_id,
+                        "arrived": False,
+                        "reason": "no_path",
+                    },
+                }
+            return envelope(
+                {
+                    "type": "result",
+                    "id": self.action_id,
+                    "bot": "Bot1",
+                    "ok": True,
+                    "accepted": True,
+                    "complete": True,
+                    "data": {
+                        "action_id": self.action_id,
+                        "dispatch": {
+                            "type": "result",
+                            "id": self.action_id,
+                            "bot": "Bot1",
+                            "ok": True,
+                            "accepted": True,
+                            "complete": True,
+                            "data": {"action": "navigateTo"},
+                            "error": None,
+                        },
+                        "terminal": terminal,
+                    },
+                    "error": None,
+                }
+            )
+        if "minebot_events_since" in command:
+            self.event_reads += 1
+            return envelope(
+                {
+                    "type": "events",
+                    "bot": "Bot1",
+                    "ok": True,
+                    "complete": True,
+                    "next": None,
+                    "events": [],
+                    "error": None,
+                }
+            )
+        if "minebot_event_head" in command:
+            self.head_reads += 1
+            return envelope(
+                {
+                    "type": "result",
+                    "id": None,
+                    "bot": "Bot1",
+                    "ok": True,
+                    "accepted": True,
+                    "complete": True,
+                    "data": {
+                        "eventSeq": 0,
+                        "chatSeq": 0,
+                        "tick": 120,
+                        "epoch": "test-epoch",
+                        "owner": "moveTo",
+                        "pendingActionCount": 1,
+                    },
+                    "error": None,
+                }
+            )
+        if "minebot_state" in command:
+            self.state_reads += 1
+            return envelope(
+                {
+                    "type": "state",
+                    "bot": "Bot1",
+                    "ok": True,
+                    "complete": True,
+                    "data": {
+                        "pos": [0.0, 64.0, 0.0],
+                        "yaw": None,
+                        "pitch": None,
+                        "health": 20.0,
+                        "food": 20,
+                        "oxygen": None,
+                        "inventory_raw": "[]",
+                        "inventory_hash": "inv",
+                        "inventory_counts": {},
+                        "effects": None,
+                        "time": 0,
+                        "weather": None,
+                        "dimension": "overworld",
+                        "selected_slot": 0,
+                        "selected_item": None,
+                        "offhand_item": None,
+                        "body_owner": "moveTo",
+                        "pending_action_count": 1,
+                        "hazard_unresolved": None,
+                        "sleeping": None,
+                        "missing": False,
+                    },
+                    "error": None,
+                }
+            )
+        raise AssertionError(f"unexpected read command: {command}")
+
+
+class LateTerminalNavigationTransport(MutationFailureTransport):
+    """Publish the terminal after owner cleanup, but before the grace window ends."""
+
+    def __init__(self, action_id: str):
+        super().__init__(status_data={"action_id": action_id, "dispatch": None, "terminal": None})
+        self.event_reads = 0
+        self.head_reads = 0
+
+    def request(self, command: str) -> str:
+        self.read_commands.append(command)
+        if "minebot_action_status" in command:
+            return envelope(
+                {
+                    "type": "result",
+                    "id": self.action_id,
+                    "bot": "Bot1",
+                    "ok": True,
+                    "accepted": True,
+                    "complete": True,
+                    "data": self.status_data,
+                    "error": None,
+                }
+            )
+        if "minebot_event_head" in command:
+            self.head_reads += 1
+            return envelope(
+                {
+                    "type": "result",
+                    "id": None,
+                    "bot": "Bot1",
+                    "ok": True,
+                    "accepted": True,
+                    "complete": True,
+                    "data": {
+                        "eventSeq": 1,
+                        "chatSeq": 0,
+                        "tick": 120,
+                        "epoch": "test-epoch",
+                        "owner": None,
+                        "pendingActionCount": 0,
+                    },
+                    "error": None,
+                }
+            )
+        if "minebot_events_since" in command:
+            self.event_reads += 1
+            events = []
+            if self.event_reads >= 2:
+                events = [
+                    {
+                        "type": "event",
+                        "seq": 1,
+                        "tick": 121,
+                        "bot": "Bot1",
+                        "name": "navigateDone",
+                        "data": {
+                            "action_id": self.action_id,
+                            "arrived": False,
+                            "reason": "no_path",
+                        },
+                    }
+                ]
+            return envelope(
+                {
+                    "type": "events",
+                    "bot": "Bot1",
+                    "ok": True,
+                    "complete": True,
+                    "next": None,
+                    "events": events,
+                    "error": None,
+                }
+            )
+        raise AssertionError(f"unexpected read command: {command}")
+
+
 class BodyClientTests(unittest.TestCase):
     def test_mutation_transport_drop_recovers_from_authoritative_terminal(self):
         action = Action(id="drop-terminal", name="mineBlock", params={"target": [1, 60, 1], "block_type": "stone"})
@@ -194,8 +393,17 @@ class BodyClientTests(unittest.TestCase):
 
     def test_mutation_transport_drop_probes_block_and_resends_same_action_id(self):
         action = Action(id="resend-block", name="mineBlock", params={"target": [1, 60, 1], "block_type": "stone"})
-        transport = MutationFailureTransport(status_data={"action_id": action.id, "dispatch": None, "terminal": None}, perception_type="minecraft:stone")
+        transport = MutationFailureTransport(
+            status_data={
+                "action_id": action.id,
+                "dispatch": None,
+                "terminal": None,
+                "epoch": "test-epoch",
+            },
+            perception_type="minecraft:stone",
+        )
         body = ScarpetBody("Bot1", transport)
+        body._server_epoch = "test-epoch"
 
         result = body.execute(action)
 
@@ -203,7 +411,9 @@ class BodyClientTests(unittest.TestCase):
         self.assertEqual(len(transport.once_commands), 2)
         self.assertIn('"id":"resend-block"', transport.once_commands[0])
         self.assertIn('"id":"resend-block"', transport.once_commands[1])
-        self.assertEqual(len(transport.read_commands), 3)
+        # Reconciliation now reads the event stream and active Body state
+        # before the authoritative block probe.
+        self.assertEqual(len(transport.read_commands), 5)
         trace = body._inflight_action_traces[action.id]
         self.assertEqual(trace["reconciliation_status"], "not_applied")
         self.assertEqual(trace["reconciliation_evidence"]["block"]["current_type"], "stone")
@@ -218,8 +428,145 @@ class BodyClientTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.diagnostics["status"], "unknown")
         self.assertEqual(len(transport.once_commands), 1)
-        self.assertEqual(len(transport.read_commands), 2)
+        self.assertEqual(len(transport.read_commands), 4)
         self.assertEqual(body.observability_snapshot()["action_traces"][0]["reconciliation_status"], "unknown")
+
+    def test_navigation_transport_drop_resends_only_when_server_proves_not_seen(self):
+        action = Action(
+            id="not-seen-navigation",
+            name="navigateTo",
+            params={"target": [4, 64, 0], "timeout_ticks": 100},
+        )
+        transport = MutationFailureTransport(
+            status_data={
+                "action_id": action.id,
+                "dispatch": None,
+                "terminal": None,
+                "epoch": "test-epoch",
+                "dispatch_state": "not_seen",
+                "seen": False,
+                "retention_complete": True,
+            }
+        )
+        body = ScarpetBody("Bot1", transport)
+        body._server_epoch = "test-epoch"
+
+        result = body.execute(action)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(len(transport.once_commands), 2)
+        self.assertIn("action_dispatch_reconcile_resend_not_seen", [entry["kind"] for entry in body.request_history])
+        trace = body._inflight_action_traces[action.id]
+        self.assertEqual(trace["reconciliation_status"], "not_applied")
+        self.assertEqual(trace["reconciliation_evidence"]["dispatch_state"], "not_seen")
+
+    def test_navigation_transport_drop_does_not_replay_across_server_epoch(self):
+        action = Action(
+            id="epoch-mismatch-navigation",
+            name="navigateTo",
+            params={"target": [4, 64, 0], "timeout_ticks": 100},
+        )
+        transport = MutationFailureTransport(
+            status_data={
+                "action_id": action.id,
+                "dispatch": None,
+                "terminal": None,
+                "epoch": "new-server-epoch",
+                "dispatch_state": "not_seen",
+                "seen": False,
+                "retention_complete": True,
+            }
+        )
+        body = ScarpetBody("Bot1", transport)
+        body._server_epoch = "old-server-epoch"
+
+        with self.assertRaises(ActionReconciliationUnknownError):
+            body.execute(action)
+
+        self.assertEqual(len(transport.once_commands), 1)
+        evidence = body.observability_snapshot()["action_traces"][0]["reconciliation_evidence"]
+        self.assertFalse(evidence["epoch_match"])
+
+    def test_navigation_transport_drop_settles_from_compact_terminal_summary(self):
+        action = Action(
+            id="compact-terminal-navigation",
+            name="navigateTo",
+            params={"target": [4, 64, 0], "timeout_ticks": 100},
+        )
+        transport = MutationFailureTransport(
+            status_data={
+                "action_id": action.id,
+                "dispatch": None,
+                "terminal": {
+                    "seq": None,
+                    "tick": None,
+                    "bot": "Bot1",
+                    "name": "navigateDone",
+                    "data": {
+                        "action_id": action.id,
+                        "arrived": False,
+                        "reason": "no_path",
+                        "nav_reason": "no_path",
+                        "terminal_payload_complete": False,
+                        "terminal_payload_chars": 2865,
+                    },
+                },
+                "dispatch_state": "seen",
+                "seen": True,
+                "retention_complete": True,
+            }
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        result = body.execute(action)
+        terminal = body.await_action_terminal(action.id, timeout_s=1.0, poll_interval_s=0.0)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(terminal.name, "navigateDone")
+        self.assertEqual(terminal.data["reason"], "no_path")
+        self.assertFalse(terminal.data["terminal_payload_complete"])
+        self.assertEqual(len(transport.once_commands), 1)
+
+    def test_navigation_transport_drop_waits_for_active_terminal_without_replay(self):
+        action = Action(
+            id="running-navigation",
+            name="navigateTo",
+            params={"target": [4, 64, 0], "timeout_ticks": 100},
+        )
+        transport = RunningNavigationTransport(action.id)
+        body = ScarpetBody("Bot1", transport)
+
+        result = body.execute(action)
+        terminal = body.await_action_terminal(action.id, timeout_s=1.0, poll_interval_s=0.0)
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.accepted)
+        self.assertEqual(terminal.name, "navigateDone")
+        self.assertEqual(terminal.data["reason"], "no_path")
+        self.assertEqual(len(transport.once_commands), 1)
+        self.assertGreaterEqual(transport.status_reads, 2)
+        self.assertGreaterEqual(transport.head_reads, 1)
+        self.assertEqual(body.observability_snapshot()["action_traces"][0]["reconciliation_status"], "applied")
+
+    def test_navigation_transport_drop_waits_for_terminal_after_owner_cleanup(self):
+        action = Action(
+            id="late-terminal-navigation",
+            name="navigateTo",
+            params={"target": [4, 64, 0], "timeout_ticks": 100},
+        )
+        transport = LateTerminalNavigationTransport(action.id)
+        body = ScarpetBody("Bot1", transport)
+
+        result = body.execute(action)
+        terminal = body.await_action_terminal(action.id, timeout_s=1.0, poll_interval_s=0.0)
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.accepted)
+        self.assertEqual(terminal.name, "navigateDone")
+        self.assertEqual(terminal.data["reason"], "no_path")
+        self.assertEqual(len(transport.once_commands), 1)
+        self.assertGreaterEqual(transport.event_reads, 2)
+        self.assertEqual(body.observability_snapshot()["action_traces"][0]["reconciliation_status"], "applied")
 
     def test_event_head_reads_epoch_and_both_cursors(self):
         transport = FakeTransport(

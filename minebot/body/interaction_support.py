@@ -14,7 +14,7 @@ from minebot.body.navigation import (
     NavigationRunConfig,
     pure_movement_navigation_config,
 )
-from minebot.contract import Action, Body, PerceptionResult, Position, ToolResult, perception_next_cursor
+from minebot.contract import Action, Body, PerceptionResult, Position, ToolResult, body_rejection_to_tool_result, perception_next_cursor
 from minebot.contract import terminal_event_to_tool_result
 from minebot.body.world_read import read_block_facts
 from minebot.body.reach import (
@@ -586,21 +586,13 @@ def move_to_block_center(
     )
     accepted = body.execute(action)
     if not (accepted.ok and accepted.accepted):
-        return ToolResult(
-            success=False,
-            reason="body_rejected",
-            can_retry=True,
-            metrics={
+        return body_rejection_to_tool_result(
+            accepted,
+            {
                 "action_id": action.id,
                 "stand": list(stand),
                 "center": list(center),
                 "center_radius": precise_radius,
-                "accepted": {
-                    "ok": accepted.ok,
-                    "accepted": accepted.accepted,
-                    "error": accepted.error,
-                    "data": accepted.data,
-                },
             },
         )
     terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
@@ -630,19 +622,9 @@ def _stop_body_controls(body: Body, *, timeout_s: float) -> ToolResult:
     action = Action.create("stop", {})
     accepted = body.execute(action)
     if not (accepted.ok and accepted.accepted):
-        return ToolResult(
-            success=False,
-            reason="body_rejected",
-            can_retry=True,
-            metrics={
-                "action_id": action.id,
-                "accepted": {
-                    "ok": accepted.ok,
-                    "accepted": accepted.accepted,
-                    "error": accepted.error,
-                    "data": accepted.data,
-                },
-            },
+        return body_rejection_to_tool_result(
+            accepted,
+            {"action_id": action.id},
         )
     terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
     result = terminal_event_to_tool_result(terminal)

@@ -78,6 +78,7 @@ TERMINAL_EVENT_BY_ACTION = {
 
 
 _CLEAR_BLOCKS = frozenset({"air", "cave_air", "void_air"})
+_BLOCK_TERMINAL_ACTIONS = frozenset({"mineBlock", "placeBlock", "igniteBlock", "sowCrop"})
 
 
 def is_mutating_action(action_name: str) -> bool:
@@ -91,6 +92,11 @@ def terminal_event_name(action_name: str) -> str | None:
 def block_probe_position(action: Action) -> Position | None:
     """Return the block cell whose terminal state settles a block action."""
 
+    if action.name not in _BLOCK_TERMINAL_ACTIONS:
+        # Composite navigation may mutate several cells and has no single
+        # target block whose current type can settle the action.  Probing its
+        # goal here creates false evidence and an unnecessary transport read.
+        return None
     target = _position(action.params.get("target"))
     if target is None:
         return None

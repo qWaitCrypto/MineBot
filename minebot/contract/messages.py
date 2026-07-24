@@ -75,6 +75,10 @@ class BodyState:
     offhand_item: str | None = None
     body_owner: str | None = None
     pending_action_count: int | None = None
+    # Server-owned survival state.  A non-null value means the last survival
+    # reflex could not resolve its hazard; ordinary physical actions must stay
+    # blocked until a recovery transaction clears it.
+    hazard_unresolved: JsonObject | None = None
 
     @classmethod
     def from_envelope_data(cls, bot: str, complete: bool, data: JsonObject) -> "BodyState":
@@ -106,6 +110,11 @@ class BodyState:
             offhand_item=_maybe_string(data.get("offhand_item")),
             body_owner=_maybe_string(data.get("body_owner")),
             pending_action_count=_maybe_int(data.get("pending_action_count")),
+            hazard_unresolved=(
+                dict(data["hazard_unresolved"])
+                if isinstance(data.get("hazard_unresolved"), dict)
+                else None
+            ),
         )
 
 

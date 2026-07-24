@@ -36,6 +36,7 @@ from minebot.contract import (
     Position,
     Result,
     ToolResult,
+    body_rejection_to_tool_result,
     PICKAXE_BY_TIER,
     best_owned_pickaxe,
     required_pickaxe_tier,
@@ -158,6 +159,7 @@ class BlockWork:
         context: BreakContext | str = BreakContext.DIRECT,
         timeout_s: float = 30.0,
         approach: bool = True,
+        explicit_target: bool = False,
     ) -> ToolResult:
         block = self.body.perceive("blockAt", {"x": pos[0], "y": pos[1], "z": pos[2]})
         failed = _perception_failure(block)
@@ -165,7 +167,12 @@ class BlockWork:
             return failed
 
         block_type = str(block.data.get("type") or "unknown")
-        decision = self.governance.can_break(pos, block_type, context)
+        decision = self.governance.can_break(
+            pos,
+            block_type,
+            context,
+            explicit_target=explicit_target,
+        )
         if not decision.allowed:
             return _denied_result("break_denied", pos, block_type, decision)
 
@@ -333,6 +340,7 @@ class BlockWork:
         settle_s: float = 0.2,
         timeout_s: float = 30.0,
         prepositioned: bool = False,
+        explicit_target: bool = False,
     ) -> ToolResult:
         """Mine one target after preserving the old dry-mining liquid guard.
 
@@ -351,7 +359,13 @@ class BlockWork:
         block_type = str(target.data.get("type") or "unknown")
         block_state = str(target.data.get("state") or "UNKNOWN")
         if not _is_ore_block(block_type):
-            result = self.mine_block(pos, context=context, timeout_s=timeout_s, approach=not prepositioned)
+            result = self.mine_block(
+                pos,
+                context=context,
+                timeout_s=timeout_s,
+                approach=not prepositioned,
+                explicit_target=explicit_target,
+            )
             return _with_metric(result, "dry_mining", {"required": False, "block_state": block_state})
 
         liquid_touch = self._liquid_contact_positions(pos)
@@ -494,7 +508,13 @@ class BlockWork:
                 },
             )
 
-        mined = self.mine_block(pos, context=context, timeout_s=timeout_s, approach=not prepositioned)
+        mined = self.mine_block(
+            pos,
+            context=context,
+            timeout_s=timeout_s,
+            approach=not prepositioned,
+            explicit_target=explicit_target,
+        )
         return _with_metric(
             mined,
             "dry_mining",
@@ -547,9 +567,20 @@ class BlockWork:
                     "target_block_types": list(allowed_targets),
                 },
             )
-        break_context = BreakContext.COLLECT_APPROACH if allowed_targets else context
+        # The target-type allow-list identifies the block we intend to collect;
+        # it must not change the governance context for the final mutation.
+        # ``COLLECT_APPROACH`` belongs only to the stand/obstruction search in
+        # ``mine_block``.  Using it here makes an ordinary natural target
+        # inherit the stricter approach policy and can reject the actual
+        # resource as ``structure_risk_unknown``.
+        break_context = BreakContext(context)
 
-        decision = self.governance.can_break(pos, block_type, break_context)
+        decision = self.governance.can_break(
+            pos,
+            block_type,
+            break_context,
+            explicit_target=bool(allowed_targets),
+        )
         if not decision.allowed:
             return _denied_result("break_denied", pos, block_type, decision)
 
@@ -573,9 +604,16 @@ class BlockWork:
                 settle_s=settle_s,
                 timeout_s=timeout_s,
                 prepositioned=prepositioned,
+                explicit_target=bool(allowed_targets),
             )
         else:
-            mined = self.mine_block(pos, context=break_context, timeout_s=timeout_s, approach=not prepositioned)
+            mined = self.mine_block(
+                pos,
+                context=break_context,
+                timeout_s=timeout_s,
+                approach=not prepositioned,
+                explicit_target=bool(allowed_targets),
+            )
         if not mined.success:
             collect_metrics = {
                 "target": list(pos),
@@ -1500,7 +1538,9 @@ class BlockWork:
         navigation = self.navigator.navigate_to(
             egress_goal,
             break_context=BreakContext.TRAVEL,
-            config=aquatic_navigation_config(NavigationRunConfig(segment_timeout_s=timeout_s)),
+            config=aquatic_navigation_config(
+                NavigationRunConfig(segment_timeout_s=timeout_s, survival_recovery=True)
+            ),
             arrival_radius=0.25,
         )
         selected_goal = _selected_surface_goal(navigation, egress_candidates)
@@ -1787,11 +1827,12 @@ class BlockWork:
             from minebot.body.navigation import aquatic_navigation_config
 
             navigation_config = aquatic_navigation_config(
-                NavigationRunConfig(segment_timeout_s=timeout_s)
+                NavigationRunConfig(segment_timeout_s=timeout_s, survival_recovery=True)
             )
         else:
             navigation_config = NavigationRunConfig(
                 segment_timeout_s=timeout_s,
+                survival_recovery=True,
                 allow_break=True,
                 max_break_steps=mutation_budget,
                 allow_place=True,
@@ -3391,13 +3432,9 @@ def _perception_failure(perception: PerceptionResult) -> ToolResult | None:
 
 
 def _acceptance_failure(result: Result, action_name: str, pos: Position) -> ToolResult | None:
-    if result.ok and result.accepted:
-        return None
-    return ToolResult(
-        success=False,
-        reason="body_rejected",
-        can_retry=True,
-        metrics={
+    return body_rejection_to_tool_result(
+        result,
+        {
             "action": action_name,
             "target": list(pos),
             "ok": result.ok,
@@ -3464,11 +3501,9 @@ def _dispatch_select_item(body: Body, item: str, *, timeout_s: float) -> ToolRes
             pass
         else:
             return terminal_event_to_tool_result(terminal)
-    return ToolResult(
-        success=False,
-        reason="body_rejected",
-        can_retry=True,
-        metrics={
+    return body_rejection_to_tool_result(
+        accepted,
+        {
             "action": "selectItem",
             "item": item,
             "ok": accepted.ok,

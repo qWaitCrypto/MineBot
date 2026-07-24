@@ -1069,10 +1069,16 @@ class BlockWorkTests(unittest.TestCase):
         policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
         runtime = BlockWork(body, policy)
 
-        result = runtime.mine_block_collect((0, 66, 2), context=BreakContext.COLLECT, timeout_s=1.0)
+        result = runtime.mine_block_collect(
+            (0, 66, 2),
+            context=BreakContext.COLLECT,
+            target_block_types=("spruce_log",),
+            timeout_s=1.0,
+        )
 
         self.assertTrue(result.success, result)
         self.assertEqual([action.name for action in body.actions], ["mineBlock"])
+        self.assertEqual(body.actions[0].params["context"], BreakContext.COLLECT.value)
         self.assertNotIn("mine_approach", result.metrics["mine_result"]["metrics"])
 
     def test_mine_block_collect_classifies_unreachable_approach_as_candidate_skip(self):

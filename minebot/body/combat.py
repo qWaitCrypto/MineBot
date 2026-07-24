@@ -17,6 +17,7 @@ from minebot.contract import (
     ProgressAbort,
     ProgressController,
     ToolResult,
+    body_rejection_to_tool_result,
 )
 
 
@@ -88,7 +89,18 @@ class CombatTransactions:
         result = self.body.execute(action)
         start = _pos(self.body.get_state())
         if not (result.ok and result.accepted):
-            return _result(False, "body_rejected", True, start, {"error": result.error, "target_spec": target_spec})
+            rejected = body_rejection_to_tool_result(
+                result,
+                {"error": result.error, "target_spec": target_spec},
+            )
+            if rejected is not None:
+                return ToolResult(
+                    success=rejected.success,
+                    reason=rejected.reason,
+                    can_retry=rejected.can_retry,
+                    next_suggestion=rejected.next_suggestion,
+                    metrics={"pos": list(start), **dict(rejected.metrics or {})},
+                )
 
         terminal = self.body.await_action_terminal(
             action.id,

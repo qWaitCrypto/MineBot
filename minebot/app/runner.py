@@ -1114,6 +1114,15 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
         if runtime is not None:
             runtime.remember_tool_result(tool.name, result, run_context=ctx.context)
             runtime.remember_tool_body_facts(result, trace=trace)
+            if tool.sidecar.body_scope and result.get("reason") not in {
+                "transport_error",
+                "action_reconciliation_unknown",
+            }:
+                # The recovery limit is a consecutive-failure guard, not a
+                # lifetime error budget.  A successful authoritative Body
+                # boundary proves the transport recovered and lets a later,
+                # unrelated socket fault start a fresh bounded streak.
+                runtime.note_transport_success()
         return finalize(
             result,
             progress_steps=progress_steps,
@@ -1259,6 +1268,32 @@ def _tool_exception_payload(exc: Exception) -> JsonObject:
         "nextSuggestion": _tool_exception_next_suggestion(reason),
         "metrics": metrics,
     }
+
+
+def _transport_error_incident_key(
+    result: JsonObject,
+    *,
+    tool_call_id: str,
+) -> str:
+    """Identify one physical transport incident across composition wrappers.
+
+    Action-level reconciliation diagnostics carry the immutable Body action
+    id, which is the correct identity when the same exception is rethrown by
+    nested composition tools.  Generic transport failures have no shared
+    physical id, so retain the tool call id and let each call count normally.
+    """
+
+    metrics = result.get("metrics")
+    if isinstance(metrics, dict):
+        diagnostics = metrics.get("await_diagnostics")
+        if isinstance(diagnostics, dict):
+            action_id = diagnostics.get("action_id")
+            if isinstance(action_id, str) and action_id:
+                return f"action:{action_id}:{result.get('reason') or 'transport_error'}"
+        error_type = metrics.get("error_type")
+    else:
+        error_type = None
+    return f"call:{tool_call_id}:{error_type or 'transport_error'}:{result.get('reason') or 'transport_error'}"
 
 
 def _tool_timeout_cancellation_reason(tool_name: str, exc: TimeoutError) -> str:
@@ -2419,6 +2454,11 @@ class AgentRuntime:
         self._last_traced_body_event_seq = 0
         self._body_event_trace_lock = threading.Lock()
         self.consecutive_transport_errors = 0
+        # A single Body dispatch can surface through several composition
+        # layers (for example collect_block_domain -> collect_resource ->
+        # ensure_tool_for).  Count physical transport incidents, not each
+        # wrapper's copy of the same exception.
+        self._transport_error_incidents: set[str] = set()
         self.execution_lane = SerialExecutionLane(thread_name=f"minebot-{agent_name}")
         self.context_refreshers: list[Callable[[AgentContext], None]] = []
 
@@ -3033,6 +3073,7 @@ class AgentRuntime:
             "offhand_item": getattr(state, "offhand_item", None),
             "body_owner": getattr(state, "body_owner", None),
             "pending_action_count": getattr(state, "pending_action_count", None),
+            "hazard_unresolved": getattr(state, "hazard_unresolved", None),
         }
 
     def trace_body_events(self, events: object, *, source: str = "turn_boundary") -> None:
@@ -3116,6 +3157,7 @@ class AgentRuntime:
             "offhand_item",
             "body_owner",
             "pending_action_count",
+            "hazard_unresolved",
             "complete",
         ):
             if key in metrics:
@@ -3151,6 +3193,7 @@ class AgentRuntime:
             offhand_item=state.get("offhand_item"),
             body_owner=state.get("body_owner"),
             pending_action_count=state.get("pending_action_count"),
+            hazard_unresolved=state.get("hazard_unresolved"),
             dimension=state.get("dimension"),
             complete=bool(state.get("complete", True)),
             missing=False,
@@ -3208,19 +3251,28 @@ class AgentRuntime:
         tool_call_id: str,
         raise_on_limit: bool = True,
     ) -> ProgressAbort | None:
-        self.consecutive_transport_errors += 1
         metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+        incident_key = _transport_error_incident_key(
+            result,
+            tool_call_id=tool_call_id,
+        )
+        duplicate = incident_key in self._transport_error_incidents
+        if not duplicate:
+            self._transport_error_incidents.add(incident_key)
+            self.consecutive_transport_errors += 1
         self.trace.emit(
             "body_transport_error",
             tool=tool_name,
             tool_call_id=tool_call_id,
             count=self.consecutive_transport_errors,
             threshold=BODY_TRANSPORT_RECOVERY_LIMIT,
+            duplicate=duplicate,
+            incident_key=incident_key,
             error_type=metrics.get("error_type"),
             reason=str(result.get("reason") or ""),
             await_diagnostics=metrics.get("await_diagnostics"),
         )
-        if self.consecutive_transport_errors >= BODY_TRANSPORT_RECOVERY_LIMIT:
+        if not duplicate and self.consecutive_transport_errors >= BODY_TRANSPORT_RECOVERY_LIMIT:
             facts = self.authority.facts(self.agent_context.goal_text)
             facts.recent_events.append(
                 "body_transport_unstable:"
@@ -3242,6 +3294,12 @@ class AgentRuntime:
         if self.consecutive_transport_errors:
             self.trace.emit("body_transport_recovered", count=self.consecutive_transport_errors)
         self.consecutive_transport_errors = 0
+        self._transport_error_incidents.clear()
+
+    def note_transport_success(self) -> None:
+        """Reset the bounded transport-failure streak after a Body success."""
+
+        self._reset_transport_errors()
 
     def _yield_with_facts(
         self,
@@ -3296,6 +3354,7 @@ class AgentRuntime:
             offhand_item=state.offhand_item,
             body_owner=state.body_owner,
             pending_action_count=state.pending_action_count,
+            hazard_unresolved=state.hazard_unresolved,
             dimension=state.dimension,
             complete=state.complete,
             missing=state.missing,

@@ -1,6 +1,6 @@
 import unittest
 
-from minebot.contract import BodyState
+from minebot.contract import Action, BodyState, Result, body_rejection_to_tool_result
 
 
 class BodyStateMessageTests(unittest.TestCase):
@@ -27,6 +27,7 @@ class BodyStateMessageTests(unittest.TestCase):
                 "offhand_item": "minecraft:shield",
                 "body_owner": "moveTo",
                 "pending_action_count": 1,
+                "hazard_unresolved": {"kind": "water", "pos": [1, 64, 2], "tick": 42},
             },
         )
 
@@ -35,6 +36,26 @@ class BodyStateMessageTests(unittest.TestCase):
         self.assertEqual(state.offhand_item, "shield")
         self.assertEqual(state.body_owner, "moveTo")
         self.assertEqual(state.pending_action_count, 1)
+        self.assertEqual(state.hazard_unresolved["kind"], "water")
+
+    def test_hazard_rejection_stays_typed_and_non_retryable(self):
+        result = body_rejection_to_tool_result(
+            Result(
+                id=Action.create("moveTo").id,
+                bot="Bot",
+                type="result",
+                ok=True,
+                accepted=False,
+                complete=True,
+                data={"reason": "hazard_unresolved"},
+                error="hazard_unresolved",
+            ),
+            {"action": "moveTo"},
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.reason, "survival_hazard_unresolved")
+        self.assertFalse(result.can_retry)
 
 
 if __name__ == "__main__":

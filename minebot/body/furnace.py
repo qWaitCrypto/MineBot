@@ -19,7 +19,7 @@ from minebot.body.interaction_support import (
     normalize_block_type,
     perception_failure as shared_perception_failure,
 )
-from minebot.contract import Body, InteractionContext
+from minebot.contract import Body, InteractionContext, body_rejection_to_tool_result
 from minebot.contract import terminal_event_to_tool_result
 from minebot.contract import Action, BreakContext, InventorySlot, PerceptionResult, PlaceContext, Position, Result, ToolResult, perception_next_cursor
 from minebot.game.governance import GovernancePolicy
@@ -1297,20 +1297,9 @@ def _dispatch(body: Body, action_name: str, params: dict[str, object], *, timeou
     action = Action.create(action_name, params)
     accepted = body.execute(action)
     if not (accepted.ok and accepted.accepted):
-        return ToolResult(
-            success=False,
-            reason="body_rejected",
-            can_retry=True,
-            metrics={
-                "action": action_name,
-                "action_id": action.id,
-                "accepted": {
-                    "ok": accepted.ok,
-                    "accepted": accepted.accepted,
-                    "error": accepted.error,
-                    "data": accepted.data,
-                },
-            },
+        return body_rejection_to_tool_result(
+            accepted,
+            {"action": action_name, "action_id": action.id},
         )
     terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
     result = terminal_event_to_tool_result(terminal)
@@ -1490,7 +1479,7 @@ def _acceptance_failure(
         "error": result.error,
         "data": result.data,
     }
-    return ToolResult(success=False, reason="body_rejected", can_retry=True, metrics=metrics)
+    return body_rejection_to_tool_result(result, metrics)
 
 
 def _plan_metrics(plan: FurnaceClearPlan) -> dict[str, object]:

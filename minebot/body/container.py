@@ -13,7 +13,7 @@ from minebot.body.interaction_support import (
     normalize_block_type,
     perception_failure as shared_perception_failure,
 )
-from minebot.contract import Action, Body, InteractionContext, InventorySlot, PerceptionResult, Position, Result, ToolResult, perception_next_cursor
+from minebot.contract import Action, Body, InteractionContext, InventorySlot, PerceptionResult, Position, Result, ToolResult, body_rejection_to_tool_result, perception_next_cursor
 from minebot.contract import terminal_event_to_tool_result
 from minebot.game.governance import GovernancePolicy
 from minebot.game.protocol import RCON_SLOT_PAGE_SIZE
@@ -420,7 +420,7 @@ def _acceptance_failure(
         "error": result.error,
         "data": result.data,
     }
-    return ToolResult(success=False, reason="body_rejected", can_retry=True, metrics=metrics)
+    return body_rejection_to_tool_result(result, metrics)
 
 
 def _plan_metrics(pos: Position, plan: ContainerTransferPlan) -> dict[str, object]:

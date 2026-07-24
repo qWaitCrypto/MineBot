@@ -38,6 +38,13 @@ global_agent_chat_events = [];
 global_agent_chat_seq = 0;
 global_action_results = {};
 global_action_terminals = {};
+// A bounded receive ledger distinguishes a command that was never seen from
+// one whose dispatch/terminal cache is unavailable. Once it evicts an entry,
+// absence is no longer evidence of anything.
+global_action_seen = {};
+// Until the event-head handshake establishes the current app epoch, absence
+// from this volatile ledger is not proof that an old dispatch was never seen.
+global_action_seen_complete = false;
 
 json_bool(v) -> if(v, 'true', 'false');
 
@@ -184,7 +191,7 @@ state_json(name) -> (
   finalize_pending_spawn(name);
   pe = player_entity(name);
   if(pe == null,
-    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":[0.000,0.000,0.000],"yaw":null,"pitch":null,"health":0.000,"food":0,"oxygen":null,"inventory_raw":"","inventory_hash":%s,"inventory_counts":{},"effects":null,"time":%d,"weather":null,"dimension":null,"selected_slot":null,"selected_item":null,"offhand_item":null,"body_owner":null,"pending_action_count":0,"sleeping":null,"missing":true},"error":null}',
+    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":[0.000,0.000,0.000],"yaw":null,"pitch":null,"health":0.000,"food":0,"oxygen":null,"inventory_raw":"","inventory_hash":%s,"inventory_counts":{},"effects":null,"time":%d,"weather":null,"dimension":null,"selected_slot":null,"selected_item":null,"offhand_item":null,"body_owner":null,"pending_action_count":0,"hazard_unresolved":null,"sleeping":null,"missing":true},"error":null}',
       name, json_string(''), floor(number(day_time()) % 24000))
   ,
     p = query(pe, 'pos');
@@ -204,8 +211,9 @@ state_json(name) -> (
     owner = owner_of(name);
     owner_name = if(owner == null, null, owner:0);
     pending_action_count = body_pending_action_count(name);
-    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":%s,"yaw":null,"pitch":null,"health":%.3f,"food":%d,"oxygen":%s,"inventory_raw":"","inventory_hash":%s,"inventory_counts":%s,"effects":%s,"time":%d,"weather":null,"dimension":null,"selected_slot":%s,"selected_item":%s,"offhand_item":%s,"body_owner":%s,"pending_action_count":%d,"sleeping":%s,"missing":false},"error":null}',
-      name, json_pos(p), health, food, json_int_null(air), json_string(hash_code(raw)), inventory_counts_json(name), effects_json(pe), floor(number(day_time()) % 24000), json_int_null(selected_slot), json_string(selected_item), json_string(offhand_item), json_string(owner_name), pending_action_count, json_bool(sleeping))
+    hazard = hazard_unresolved_json(name);
+    str('{"type":"state","bot":"%s","ok":true,"complete":true,"data":{"pos":%s,"yaw":null,"pitch":null,"health":%.3f,"food":%d,"oxygen":%s,"inventory_raw":"","inventory_hash":%s,"inventory_counts":%s,"effects":%s,"time":%d,"weather":null,"dimension":null,"selected_slot":%s,"selected_item":%s,"offhand_item":%s,"body_owner":%s,"pending_action_count":%d,"hazard_unresolved":%s,"sleeping":%s,"missing":false},"error":null}',
+      name, json_pos(p), health, food, json_int_null(air), json_string(hash_code(raw)), inventory_counts_json(name), effects_json(pe), floor(number(day_time()) % 24000), json_int_null(selected_slot), json_string(selected_item), json_string(offhand_item), json_string(owner_name), pending_action_count, hazard, json_bool(sleeping))
   )
 );
 
@@ -1393,6 +1401,19 @@ remember_action_result(name, action_id, result) -> (
     )
   );
   result
+);
+
+remember_action_seen(name, action_id) -> (
+  global_action_seen:(name + ':' + action_id) = true;
+  keys_list = keys(global_action_seen);
+  loop(64,
+    if(length(keys_list) > 4096,
+      delete(global_action_seen:(keys_list:0));
+      delete(keys_list:0);
+      global_action_seen_complete = false
+    )
+  );
+  true
 );
 
 remembered_action_result(name, action_id) -> (
@@ -3388,13 +3409,41 @@ reflex_failure_latched(name, kind, p) -> (
     dx = p:0 - latch:1;
     dy = p:1 - latch:2;
     dz = p:2 - latch:3;
-    moved = sqrt(dx*dx + dy*dy + dz*dz) > 1.5;
-    if(!same_kind || moved || !reflex_hazard_present(name, kind, p),
+    if(!same_kind || !reflex_hazard_present(name, kind, p),
       global_reflex_failure_latches:name = null;
       false
     ,
       true
     )
+  )
+);
+
+hazard_unresolved(name) -> (
+  latch = global_reflex_failure_latches:name;
+  if(latch == null,
+    false
+  ,
+    p = bot_pos(name);
+    p != null && reflex_hazard_present(name, latch:0, p)
+  )
+);
+
+hazard_unresolved_json(name) -> (
+  latch = global_reflex_failure_latches:name;
+  if(!hazard_unresolved(name),
+    'null'
+  ,
+    str('{"kind":"%s","pos":%s,"tick":%d}', latch:0, json_pos(l(latch:1, latch:2, latch:3)), floor(number(latch:4)))
+  )
+);
+
+hazard_action_allowed(name, action_name, params) -> (
+  if(!hazard_unresolved(name),
+    true
+  ,
+    action_name == 'stop' || action_name == 'interrupt' ||
+    (action_name == 'navigateTo' && params != null && bool(params:'survival_recovery')) ||
+    (action_name == 'navigationMutationDecision' && global_navigations:name != null && bool(global_navigations:name:14:'survival_recovery'))
   )
 );
 
@@ -4504,6 +4553,7 @@ navigation_context_from_params(params) -> (
     'allow_descend' -> param_bool(params, 'allow_descend', true),
     'allow_swim' -> param_bool(params, 'allow_swim', true),
     'aquatic_traversal' -> param_bool(params, 'aquatic_traversal', false),
+    'survival_recovery' -> param_bool(params, 'survival_recovery', false),
     'aquatic_replan_attempts' -> floor(param_number(params, 'aquatic_replan_attempts', 0)),
     'max_fall_depth' -> max_fall_depth,
     'max_water_drop_depth' -> max_water_drop_depth,
@@ -4533,12 +4583,13 @@ navigation_default_context() -> (
 );
 
 navigation_context_json(context) -> (
-  str('{"allow_diagonal":%s,"allow_ascend":%s,"allow_descend":%s,"allow_swim":%s,"aquatic_traversal":%s,"aquatic_replan_attempts":%d,"max_fall_depth":%d,"max_water_drop_depth":%d,"allow_break":%s,"break_budget":%d,"break_timeout_ticks":%d,"break_pickaxe":%s,"break_axe":%s,"break_shovel":%s,"allow_place":%s,"allow_pillar":%s,"pillar_budget":%d,"allow_downward":%s,"downward_budget":%d,"allow_open":%s,"open_budget":%d,"scaffold_item":%s,"scaffold_count":%d,"place_budget":%d}',
+  str('{"allow_diagonal":%s,"allow_ascend":%s,"allow_descend":%s,"allow_swim":%s,"aquatic_traversal":%s,"survival_recovery":%s,"aquatic_replan_attempts":%d,"max_fall_depth":%d,"max_water_drop_depth":%d,"allow_break":%s,"break_budget":%d,"break_timeout_ticks":%d,"break_pickaxe":%s,"break_axe":%s,"break_shovel":%s,"allow_place":%s,"allow_pillar":%s,"pillar_budget":%d,"allow_downward":%s,"downward_budget":%d,"allow_open":%s,"open_budget":%d,"scaffold_item":%s,"scaffold_count":%d,"place_budget":%d}',
     json_bool(bool(context:'allow_diagonal')),
     json_bool(bool(context:'allow_ascend')),
     json_bool(bool(context:'allow_descend')),
     json_bool(bool(context:'allow_swim')),
     json_bool(bool(context:'aquatic_traversal')),
+    json_bool(bool(context:'survival_recovery')),
     floor(number(context:'aquatic_replan_attempts')),
     floor(number(context:'max_fall_depth')),
     floor(number(context:'max_water_drop_depth')),
@@ -6458,6 +6509,11 @@ minebot_reset() -> (
   global_agent_chat_events = [];
   global_action_results = {};
   global_action_terminals = {};
+  // Reset clears the volatile action ledger. Rotate the epoch so a client
+  // cannot treat a post-reset "not_seen" as proof about a pre-reset action.
+  global_event_epoch = null;
+  global_action_seen = {};
+  global_action_seen_complete = false;
   result_json(null, 'server', true, true, '{}', null)
 );
 
@@ -6501,7 +6557,10 @@ minebot_say(name, text) -> (
 minebot_state(name) -> state_json(name);
 
 minebot_event_head(name, proposed_epoch) -> (
-  if(global_event_epoch == null, global_event_epoch = str('%s', proposed_epoch));
+  if(global_event_epoch == null,
+    global_event_epoch = str('%s', proposed_epoch);
+    global_action_seen_complete = true
+  );
   owner = owner_of(name);
   owner_name = if(owner == null, null, owner:0);
   pending_action_count = body_pending_action_count(name);
@@ -6631,7 +6690,7 @@ action_terminal_status_json(name, action_id) -> (
     kind = terminal:2;
     payload = event_data_json(kind, terminal:3);
     if(length(payload) > 1800,
-      'null'
+      terminal_payload_summary_json(name, kind, terminal:3, length(payload))
     ,
       str('{"seq":%d,"tick":%d,"bot":"%s","name":"%s","data":%s}',
         terminal:0, terminal:1, name, kind, payload)
@@ -6639,11 +6698,35 @@ action_terminal_status_json(name, action_id) -> (
   )
 );
 
+terminal_payload_summary_json(name, kind, data, payload_chars) -> (
+  // Preserve the fields needed to settle a recovered action while marking
+  // that verbose diagnostics were intentionally omitted.
+  if(kind == 'navigateDone',
+    str('{"seq":null,"tick":null,"bot":"%s","name":"%s","data":{"action_id":"%s","arrived":%s,"final_pos":%s,"goal":%s,"reason":"%s","nav_reason":"%s","terminal_payload_complete":false,"terminal_payload_chars":%d}}',
+      name, kind, data:0, json_bool(data:1), json_pos(data:2), json_pos(data:3), data:5, data:7, payload_chars)
+  ,
+    if(kind == 'moveDone',
+      str('{"seq":null,"tick":null,"bot":"%s","name":"%s","data":{"action_id":"%s","arrived":%s,"final_pos":%s,"target":%s,"stopped_reason":"%s","terminal_payload_complete":false,"terminal_payload_chars":%d}}',
+        name, kind, data:0, json_bool(data:1), json_pos(data:2), json_pos(data:3), data:5, payload_chars)
+    ,
+      str('{"seq":null,"tick":null,"bot":"%s","name":"%s","data":{"action_id":"%s","terminal_payload_complete":false,"terminal_payload_chars":%d}}',
+        name, kind, data:0, payload_chars)
+    )
+  )
+);
+
 minebot_action_status(name, action_id) -> (
   dispatch = remembered_action_result(name, action_id);
   dispatch_json = if(dispatch == null, 'null', dispatch);
-  data = str('{"action_id":%s,"dispatch":%s,"terminal":%s}',
-    json_string(action_id), dispatch_json, action_terminal_status_json(name, action_id));
+  seen = global_action_seen:(name + ':' + action_id);
+  dispatch_state = if(dispatch != null || seen == true,
+    'seen'
+  ,
+    if(global_action_seen_complete, 'not_seen', 'unknown')
+  );
+  seen_json = if(dispatch_state == 'seen', 'true', if(dispatch_state == 'not_seen', 'false', 'null'));
+  data = str('{"action_id":%s,"epoch":%s,"dispatch":%s,"terminal":%s,"dispatch_state":"%s","seen":%s,"retention_complete":%s}',
+    json_string(action_id), json_string(global_event_epoch), dispatch_json, action_terminal_status_json(name, action_id), dispatch_state, seen_json, json_bool(global_action_seen_complete));
   result_json(action_id, name, true, true, data, null)
 );
 
@@ -6655,11 +6738,17 @@ minebot_action(name, payload) -> (
     action_id = action:'id';
     action_name = action:'name';
     params = action:'params';
+    remember_action_seen(name, action_id);
     remembered = remembered_action_result(name, action_id);
     if(remembered != null,
       remembered
     ,
-      out = result_json(action_id, name, false, false, '{}', 'unknown action');
+      allowed = hazard_action_allowed(name, action_name, params);
+      out = if(allowed,
+        result_json(action_id, name, false, false, '{}', 'unknown action'),
+        result_json(action_id, name, true, false, str('{"action":"blocked","reason":"hazard_unresolved","hazard":%s}', hazard_unresolved_json(name)), 'hazard_unresolved')
+      );
+      if(allowed,
       if(action_name == 'moveTo',
         target = params:'target';
         ok = start_move_to(name, action_id, number(target:0), number(target:1), number(target:2), params);
@@ -6762,6 +6851,7 @@ minebot_action(name, payload) -> (
         target = params:'target';
         ok = start_sow_crop(name, action_id, floor(number(target:0)), floor(number(target:1)), floor(number(target:2)), params);
         out = result_json(action_id, name, true, ok, '{"action":"sowCrop"}', null)
+      );
       );
       remember_action_result(name, action_id, out)
     );

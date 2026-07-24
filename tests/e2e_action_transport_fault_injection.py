@@ -108,6 +108,7 @@ def main() -> None:
             spawn_or_fail(body, (0, 64, 0), timeout_s=10.0)
             command(rcon, f"gamemode survival {BOT}")
             command(rcon, f"item replace entity {BOT} weapon.mainhand with diamond_pickaxe")
+            body.event_head(f"q4t-dispatch-{uuid4()}")
             body.poll_events()
 
             action = Action(

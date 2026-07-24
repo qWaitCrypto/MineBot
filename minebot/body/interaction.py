@@ -35,6 +35,7 @@ from minebot.contract import (
     Position,
     Result,
     ToolResult,
+    body_rejection_to_tool_result,
     terminal_event_to_tool_result,
 )
 from minebot.game.governance import GovernancePolicy
@@ -1818,21 +1819,7 @@ def _target_metrics(target: NearbyEntityTarget) -> dict[str, object]:
 
 
 def _acceptance_failure(result: Result) -> ToolResult | None:
-    if result.ok and result.accepted:
-        return None
-    return ToolResult(
-        success=False,
-        reason="body_rejected",
-        can_retry=True,
-        metrics={
-            "accepted": {
-                "ok": result.ok,
-                "accepted": result.accepted,
-                "error": result.error,
-                "data": result.data,
-            }
-        },
-    )
+    return body_rejection_to_tool_result(result)
 
 
 def _pickup_receipt(event: Event, receiver_name: str, item: str) -> HandoffReceipt | None:
@@ -2196,21 +2183,13 @@ def _move_to_bed_use_stance(
     )
     accepted = body.execute(action)
     if not (accepted.ok and accepted.accepted):
-        return ToolResult(
-            success=False,
-            reason="body_rejected",
-            can_retry=True,
-            metrics={
+        return body_rejection_to_tool_result(
+            accepted,
+            {
                 "action_id": action.id,
                 "stand": list(stand),
                 "center": list(target),
                 "center_radius": precise_radius,
-                "accepted": {
-                    "ok": accepted.ok,
-                    "accepted": accepted.accepted,
-                    "error": accepted.error,
-                    "data": accepted.data,
-                },
             },
         )
     terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)

@@ -21,6 +21,7 @@ from minebot.contract import (
     ProgressAbort,
     ProgressController,
     ToolResult,
+    body_rejection_to_tool_result,
     perception_next_cursor,
 )
 from minebot.game.navigation import (
@@ -51,6 +52,9 @@ class NavigationRunConfig:
     allow_descend: bool = True
     allow_swim: bool = True
     aquatic_traversal: bool = False
+    # Set only for a Body-owned escape transaction.  Scarpet uses this marker
+    # to keep an unresolved survival hazard from accepting ordinary actions.
+    survival_recovery: bool = False
     aquatic_replan_attempts: int = 2
     max_safe_fall_depth: int = 3
     max_water_drop_depth: int = 32
@@ -77,6 +81,10 @@ class NavigationRunConfig:
     recovery_detour_offsets: tuple[tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
     recovery_detour_y_offsets: tuple[int, ...] = (0, 1, -1)
     movement_arrival_radius: float | None = None
+    # Production FakePlayer navigation is load-limited by default.  A caller
+    # may disable this only for a bounded diagnostic/baseline probe; ordinary
+    # Body consumers must not silently reintroduce the 2,500-node burst.
+    load_limited: bool = True
 
 
 def pure_movement_navigation_config(
@@ -143,6 +151,26 @@ def load_limited_navigation_config(
         base,
         max_segments=max_segments,
         max_partial_segments=min(partial_segments, 8),
+        server_grid_radius=min(base.server_grid_radius, 48),
+        server_max_expand=min(base.server_max_expand, 1200),
+    )
+
+
+def server_load_limited_navigation_config(
+    config: NavigationRunConfig | None = None,
+) -> NavigationRunConfig:
+    """Cap one Scarpet search burst without changing route retry semantics.
+
+    The full ``load_limited_navigation_config`` profile is appropriate for
+    bounded resource-domain transactions, where the total number of partial
+    replans is part of the measured load envelope.  The provider-wide default
+    must still preserve each consumer's route/retry budget; otherwise a load
+    fix silently turns a long but progressing route into an early terminal.
+    """
+
+    base = config or NavigationRunConfig()
+    return replace(
+        base,
         server_grid_radius=min(base.server_grid_radius, 48),
         server_max_expand=min(base.server_max_expand, 1200),
     )
@@ -382,6 +410,8 @@ class NavigationTransactions:
         mutation_blacklist: set[Position] | None = None,
     ) -> ToolResult:
         cfg = config or NavigationRunConfig()
+        if cfg.load_limited:
+            cfg = server_load_limited_navigation_config(cfg)
         if cfg.recheck_lookahead < 0:
             raise ValueError("recheck_lookahead must be >= 0")
         if cfg.max_safe_fall_depth < 0 or cfg.max_safe_fall_depth > 3:
@@ -435,6 +465,19 @@ class NavigationTransactions:
                     "survival_reflex_settle": settle.to_payload(),
                 },
             )
+        if state.hazard_unresolved is not None and not cfg.survival_recovery:
+            return _result(
+                False,
+                "survival_hazard_unresolved",
+                False,
+                goal_anchor,
+                executed,
+                {
+                    "navigation_goal": nav_goal.payload(),
+                    "hazard_unresolved": dict(state.hazard_unresolved),
+                    "next_action": "survival_recovery",
+                },
+            )
         server_goals, goal_set_preserved = _server_goal_set(nav_goal, start)
         gx, gy, gz = int(goal_anchor[0]), int(goal_anchor[1]), int(goal_anchor[2])
         ar = cfg.movement_arrival_radius or 0.75
@@ -481,6 +524,7 @@ class NavigationTransactions:
                     "allow_descend": cfg.allow_descend,
                     "allow_swim": cfg.allow_swim,
                     "aquatic_traversal": cfg.aquatic_traversal,
+                    "survival_recovery": cfg.survival_recovery,
                     "aquatic_replan_attempts": max(0, cfg.aquatic_replan_attempts),
                     "max_fall_depth": cfg.max_safe_fall_depth,
                     "max_water_drop_depth": cfg.max_water_drop_depth,
@@ -520,7 +564,16 @@ class NavigationTransactions:
                     terminal_reason="body_rejected", success=False, action_id=action.id,
                     diagnostics={"error": result.error, "data": result.data},
                 ))
-                return _result(False, "body_rejected", True, goal_anchor, executed, {"error": result.error})
+                rejected = body_rejection_to_tool_result(result, {"error": result.error})
+                if rejected is not None:
+                    return _result(
+                        False,
+                        rejected.reason,
+                        rejected.can_retry,
+                        goal_anchor,
+                        executed,
+                        {**dict(rejected.metrics or {}), "next_suggestion": rejected.next_suggestion},
+                    )
 
             navigation_events: list[dict[str, object]] = []
             mutation_events: list[dict[str, object]] = []
@@ -993,7 +1046,20 @@ class NavigationTransactions:
         )
         result = self.body.execute(action)
         if not (result.ok and result.accepted):
-            return _result(False, "body_rejected", True, start, [], {"error": result.error, "target_spec": target_spec})
+            rejected = body_rejection_to_tool_result(
+                result,
+                {"error": result.error, "target_spec": target_spec},
+            )
+            if rejected is None:
+                return _result(False, "body_rejected", True, start, [], {"error": result.error, "target_spec": target_spec})
+            return _result(
+                False,
+                rejected.reason,
+                rejected.can_retry,
+                start,
+                [],
+                {**dict(rejected.metrics or {}), "target_spec": target_spec},
+            )
 
         terminal = self.body.await_action_terminal(
             action.id,

@@ -145,6 +145,46 @@ class AutonomyQualityTests(unittest.TestCase):
         self.assertEqual(report["signals"]["effective_output"]["points"], 4)
         self.assertEqual(report["signals"]["recovery"]["verdict"], "pass")
 
+    def test_recovery_attempt_limit_ignores_read_only_observation(self):
+        events = _healthy_material_incomplete_trace()
+        # Recovery commonly re-reads state, inventory, and nearby facts before
+        # selecting a different physical tactic.  Those observations must not
+        # consume the semantic physical-attempt budget A.
+        for index in range(6):
+            ts = 305 + index * 5
+            events.extend(
+                [
+                    _invoke(
+                        10_000 + index * 2,
+                        ts,
+                        "read_state",
+                        f"read-{index}",
+                        "read_state:refresh",
+                        mutating=False,
+                    ),
+                    _result(
+                        10_001 + index * 2,
+                        ts + 1,
+                        "read_state",
+                        f"read-{index}",
+                        "read_state:refresh",
+                        success=True,
+                        reason="state_read",
+                    ),
+                ]
+            )
+
+        report = evaluate_autonomy_quality(
+            sorted(events, key=lambda event: (event["ts"], event["seq"])),
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        self.assertEqual(report["signals"]["recovery"]["verdict"], "pass")
+        episode = report["signals"]["recovery"]["episodes"][0]
+        self.assertEqual(episode["attempts"], 1)
+        self.assertEqual(len(episode["attempt_refs"]), 1)
+
     def test_ag_fp30_counts_prerequisite_chain_as_effective_output(self):
         early = {"oak_log": 2, "oak_planks": 5, "stick": 4}
         tools = {**early, "crafting_table": 1, "wooden_pickaxe": 1, "cobblestone": 4}

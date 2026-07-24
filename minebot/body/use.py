@@ -23,7 +23,7 @@ from minebot.body.interaction_support import (
     refresh_entity_target,
 )
 from minebot.body.inventory import InventoryTransactions
-from minebot.contract import Action, Body, InventorySlot, PerceptionResult, Result, ToolResult, perception_next_cursor
+from minebot.contract import Action, Body, InventorySlot, PerceptionResult, Result, ToolResult, body_rejection_to_tool_result, perception_next_cursor
 from minebot.contract import terminal_event_to_tool_result
 
 
@@ -1085,21 +1085,7 @@ def _perception_failure(perception: PerceptionResult) -> ToolResult | None:
 
 
 def _acceptance_failure(result: Result) -> ToolResult | None:
-    if result.ok and result.accepted:
-        return None
-    return ToolResult(
-        success=False,
-        reason="body_rejected",
-        can_retry=True,
-        metrics={
-            "accepted": {
-                "ok": result.ok,
-                "accepted": result.accepted,
-                "error": result.error,
-                "data": result.data,
-            }
-        },
-    )
+    return body_rejection_to_tool_result(result)
 
 
 def _count_item(perception: PerceptionResult, item: str) -> int:

@@ -263,7 +263,23 @@ class GovernancePolicy:
             bot=bot,
         )
 
-    def can_break(self, pos: Position, block_type: str, context: BreakContext | str) -> LegalityDecision:
+    def can_break(
+        self,
+        pos: Position,
+        block_type: str,
+        context: BreakContext | str,
+        *,
+        explicit_target: bool = False,
+    ) -> LegalityDecision:
+        """Authorize one break while keeping target and approach semantics separate.
+
+        An explicit target-type allow-list can authorize a natural block that
+        is not one of the default collect targets (for example stone that
+        drops cobblestone).  That fact belongs to the final ``COLLECT``
+        mutation and must not silently inherit ``COLLECT_APPROACH``'s more
+        conservative structure-risk prior, which is reserved for clearing a
+        route to a target.
+        """
         context = BreakContext(context)
         block_type = normalize_block_type(block_type)
         protected_region = self._region_containing(self.protected_regions, pos)
@@ -313,7 +329,7 @@ class GovernancePolicy:
         if context == BreakContext.RECOVERY and block_type in COLLECT_TARGETS:
             return LegalityDecision(allowed=False, reason="recovery_no_resource_break", natural_region=region_name)
 
-        if context == BreakContext.COLLECT and block_type not in COLLECT_TARGETS:
+        if context == BreakContext.COLLECT and block_type not in COLLECT_TARGETS and not explicit_target:
             return LegalityDecision(allowed=False, reason="collect_target_required", natural_region=region_name)
 
         if context == BreakContext.BOT_CLEANUP:

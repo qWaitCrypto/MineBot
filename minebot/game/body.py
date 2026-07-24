@@ -22,7 +22,6 @@ from minebot.game.action_reconciliation import (
     classify_authoritative_block,
     is_mutating_action,
     reconciled_terminal_event,
-    terminal_event_is_applied,
     terminal_event_name,
 )
 from minebot.game.errors import ActionReconciliationUnknownError, BodyActionTimeoutError, BodyProtocolError
@@ -81,6 +80,12 @@ GLOBAL_TERMINAL_EVENTS = {
     "interrupted",
 }
 RESULT_TERMINAL_ACTIONS = {"navigationMutationDecision"}
+ACTION_RECONCILIATION_POLL_S = 0.50
+ACTION_RECONCILIATION_MAX_WAIT_S = 60.0
+# A server can release the action owner one tick before its terminal event is
+# visible to the event drain.  Keep a short read-only settle window so that
+# race is not reported as an outcome-unknown dispatch.
+ACTION_RECONCILIATION_SETTLE_GRACE_S = 3.0
 MAX_MINECRAFT_USERNAME_LENGTH = 16
 CHAT_TEXT_LIMIT = 220
 _MINECRAFT_FORMATTING_RE = re.compile(r"§.")
@@ -116,6 +121,10 @@ class ScarpetBody:
         self._inflight_action_traces: dict[str, dict[str, object]] = {}
         self._action_start_seqs: dict[str, int] = {}
         self._await_consumed_event_seqs: set[int] = set()
+        # Same-ID replay is only safe inside the server's current receive
+        # ledger epoch. The event-head handshake establishes this value;
+        # an app reload/reset makes an old dispatch ambiguous.
+        self._server_epoch: str | None = None
 
     def _record_request(
         self,
@@ -219,6 +228,7 @@ class ScarpetBody:
         result: Result | None,
         *,
         dispatch_error: str | None = None,
+        dispatch_epoch: str | None = None,
     ) -> None:
         self._inflight_action_traces[action.id] = {
             "action_id": action.id,
@@ -228,6 +238,7 @@ class ScarpetBody:
             "accepted": bool(result.accepted) if result is not None else False,
             "dispatch_error": dispatch_error if dispatch_error is not None else (result.error if result else None),
             "dispatch_result": dict(result.data) if result is not None else {},
+            "dispatch_epoch": dispatch_epoch,
         }
         self._action_start_seqs[action.id] = action_start_seq
 
@@ -285,6 +296,25 @@ class ScarpetBody:
             )
         except (AttributeError, TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _status_proves_not_seen(status: Result, expected_epoch: str | None) -> bool:
+        """Return true only for an explicit, bounded server receive verdict.
+
+        A missing dispatch cache is otherwise ambiguous: the action may have
+        been accepted and its cache may have been evicted.  The Scarpet status
+        endpoint emits ``not_seen`` only while its bounded receive ledger is
+        complete, so this predicate is the sole path that permits a same-ID
+        resend without an authoritative world probe.
+        """
+
+        return (
+            expected_epoch is not None
+            and status.data.get("epoch") == expected_epoch
+            and status.data.get("dispatch_state") == "not_seen"
+            and status.data.get("seen") is False
+            and status.data.get("retention_complete") is True
+        )
 
     def _matching_terminal_event(self, action: Action) -> Event | None:
         expected = terminal_event_name(action.name)
@@ -368,12 +398,14 @@ class ScarpetBody:
         action: Action,
         action_start_seq: int,
         dispatch_error: BaseException,
+        dispatch_epoch: str | None,
     ) -> Result:
         self._begin_action_trace(
             action,
             action_start_seq,
             None,
             dispatch_error=f"{type(dispatch_error).__name__}: {dispatch_error}",
+            dispatch_epoch=dispatch_epoch,
         )
         evidence: dict[str, object] = {
             "dispatch_failure": {
@@ -397,6 +429,14 @@ class ScarpetBody:
             self._raise_reconciliation_unknown(action, evidence=evidence, cause=exc)
 
         evidence["status_lookup"] = "ok" if status.ok else "rejected"
+        status_epoch = status.data.get("epoch")
+        evidence["dispatch_epoch"] = dispatch_epoch
+        evidence["status_epoch"] = status_epoch
+        evidence["epoch_match"] = (
+            dispatch_epoch is not None
+            and isinstance(status_epoch, str)
+            and status_epoch == dispatch_epoch
+        )
         self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
         remembered = self._status_dispatch_result(status)
         if remembered is not None:
@@ -409,25 +449,57 @@ class ScarpetBody:
                 self._finish_action_without_terminal(action.id)
                 return remembered
 
-        terminal = self._status_terminal_event(status)
-        if terminal is None:
-            terminal = self._matching_terminal_event(action)
+            # A result-terminal action has no follow-up event.  The dispatch
+            # cache is its authoritative terminal fact, so an accepted cached
+            # result is already a settled action.
+            if action.name in RESULT_TERMINAL_ACTIONS:
+                self._inflight_action_traces[action.id]["reconciliation_status"] = "applied"
+                self._finish_action_without_terminal(action.id)
+                return remembered
+
+        if self._status_proves_not_seen(status, dispatch_epoch):
+            evidence["dispatch_state"] = "not_seen"
+            self._inflight_action_traces[action.id]["reconciliation_status"] = "not_applied"
+            self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
+            try:
+                resent = parse_result(
+                    self._timed_request(
+                        build_action_call(self.bot_name, action, self.app),
+                        kind="action_dispatch_reconcile_resend_not_seen",
+                        action_id=action.id,
+                        action_name=action.name,
+                        retry=False,
+                    )
+                )
+            except Exception as exc:
+                self._raise_reconciliation_unknown(action, evidence=evidence, cause=exc)
+            self._inflight_action_traces[action.id]["dispatch_result"] = dict(resent.data)
+            self._inflight_action_traces[action.id]["dispatch_ok"] = resent.ok
+            self._inflight_action_traces[action.id]["accepted"] = resent.accepted
+            self._inflight_action_traces[action.id]["dispatch_error"] = resent.error
+            if not (resent.ok and resent.accepted):
+                self._finish_action_without_terminal(action.id)
+            return resent
+
+        terminal = self._wait_for_reconciled_terminal(action, status, evidence)
         if terminal is not None:
             evidence["terminal_event"] = terminal.name
-            if terminal_event_is_applied(terminal):
-                self._inflight_action_traces[action.id]["reconciliation_status"] = "applied"
-                self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
-                self._register_reconciled_terminal(action, terminal)
-                return Result(
-                    id=action.id,
-                    bot=self.bot_name,
-                    type="result",
-                    ok=True,
-                    accepted=True,
-                    complete=True,
-                    data={"action": action.name, "reconciled": "terminal_event"},
-                    error=None,
-                )
+            # A matching terminal, including an honest failure terminal, is a
+            # settled dispatch.  It must not be replayed merely because its
+            # outcome was unsuccessful.
+            self._inflight_action_traces[action.id]["reconciliation_status"] = "applied"
+            self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
+            self._register_reconciled_terminal(action, terminal)
+            return Result(
+                id=action.id,
+                bot=self.bot_name,
+                type="result",
+                ok=True,
+                accepted=True,
+                complete=True,
+                data={"action": action.name, "reconciled": "terminal_event"},
+                error=None,
+            )
 
         target = block_probe_position(action)
         if target is not None:
@@ -460,6 +532,12 @@ class ScarpetBody:
                         error=None,
                     )
             if classification.status is ActionReconciliationStatus.NOT_APPLIED:
+                # A block fact can prove the target is currently unchanged,
+                # but it cannot prove an old dispatch from a different server
+                # epoch was cancelled.  Preserve exactly-once across reloads:
+                # only resend when the receive ledger epoch also matches.
+                if evidence.get("epoch_match") is not True:
+                    self._raise_reconciliation_unknown(action, evidence=evidence)
                 try:
                     resent = parse_result(
                         self._timed_request(
@@ -483,6 +561,136 @@ class ScarpetBody:
                 return resent
 
         self._raise_reconciliation_unknown(action, evidence=evidence)
+
+    def _wait_for_reconciled_terminal(
+        self,
+        action: Action,
+        status: Result,
+        evidence: dict[str, object],
+    ) -> Event | None:
+        """Observe an in-flight action without issuing another mutation.
+
+        A lost dispatch response is not evidence that a composite Body action
+        stopped.  The action-id cache, event stream, and Body activity state
+        are read-only sources.  While the Body still reports an owner or a
+        pending action, keep observing until the matching terminal appears.
+        If the action is no longer active and no terminal is authoritative,
+        the caller remains fail-closed and returns ``unknown``.
+        """
+
+        deadline = time.monotonic() + self._action_reconciliation_wait_s(action)
+        inactive_since: float | None = None
+        current_status = status
+        while True:
+            terminal = self._status_terminal_event(current_status)
+            if terminal is None:
+                terminal = self._matching_terminal_event(action)
+            if terminal is not None:
+                return terminal
+
+            active, state_evidence = self._action_activity_snapshot(action.id)
+            evidence["active_state"] = state_evidence
+            if active is False:
+                # Owner cleanup and event publication are separate server-side
+                # steps.  A terminal can therefore become visible just after
+                # the first drain observes owner=null.  Keep observing for a
+                # short, bounded, read-only grace period instead of turning
+                # that ordering race into a false unknown.
+                if inactive_since is None:
+                    inactive_since = time.monotonic()
+                    evidence["inactive_settle_started"] = True
+                event_seq = state_evidence.get("event_seq")
+                try:
+                    event_seq_value = int(event_seq) if event_seq is not None else 0
+                except (TypeError, ValueError):
+                    event_seq_value = 0
+                if event_seq_value > self.last_seq:
+                    late_terminal = self._matching_terminal_event(action)
+                    if late_terminal is not None:
+                        return late_terminal
+                if time.monotonic() - inactive_since >= ACTION_RECONCILIATION_SETTLE_GRACE_S:
+                    evidence["inactive_settle_timeout"] = True
+                    return None
+            elif active is None:
+                # A failed authoritative read cannot distinguish an active
+                # action from a stopped one.  Preserve the fail-closed
+                # unknown instead of inventing liveness or replaying.
+                return None
+            if time.monotonic() >= deadline:
+                evidence["active_state_timeout"] = True
+                return None
+
+            time.sleep(ACTION_RECONCILIATION_POLL_S)
+            try:
+                current_status = parse_result(
+                    self._timed_request(
+                        build_action_status_call(self.bot_name, action.id, self.app),
+                        kind="action_reconcile_status_poll",
+                        action_id=action.id,
+                        action_name=action.name,
+                        retry=True,
+                    )
+                )
+            except Exception as exc:
+                errors = evidence.setdefault("status_poll_errors", [])
+                if isinstance(errors, list):
+                    errors.append({"type": type(exc).__name__, "message": str(exc)})
+                # A failed read cannot establish that the action stopped. Keep
+                # the wait bounded, then yield typed unknown.
+                if time.monotonic() >= deadline:
+                    return None
+
+    def _action_activity_snapshot(self, action_id: str) -> tuple[bool | None, dict[str, object]]:
+        try:
+            head = self.event_head(f"action-reconcile-{action_id}")
+        except Exception as head_exc:
+            head = None
+            head_error = f"{type(head_exc).__name__}: {head_exc}"
+        else:
+            head_error = None
+        if head is not None:
+            owner = head.get("owner")
+            pending = head.get("pending_action_count")
+            active = owner is not None or (pending is not None and int(pending) > 0)
+            evidence: dict[str, object] = {
+                "source": "event_head",
+                "event_seq": head.get("event_seq"),
+                "body_owner": owner,
+                "pending_action_count": pending,
+            }
+            if head_error is not None:
+                evidence["fallback_error"] = head_error
+            return active, evidence
+        try:
+            state = self.get_state()
+        except Exception as exc:
+            return None, {
+                "source": "state",
+                "read_error": f"{type(exc).__name__}: {exc}",
+                "event_head_error": head_error,
+            }
+        pending = state.pending_action_count
+        active = state.body_owner is not None or (pending is not None and pending > 0)
+        return active, {
+            "source": "state",
+            "event_seq": None,
+            "body_owner": state.body_owner,
+            "pending_action_count": pending,
+            "health": state.health,
+            "missing": state.missing,
+            "event_head_error": head_error,
+        }
+
+    @staticmethod
+    def _action_reconciliation_wait_s(action: Action) -> float:
+        raw_ticks = action.params.get("timeout_ticks")
+        try:
+            timeout_ticks = float(raw_ticks)
+        except (TypeError, ValueError):
+            timeout_ticks = 0.0
+        if timeout_ticks > 0:
+            return min(ACTION_RECONCILIATION_MAX_WAIT_S, max(5.0, timeout_ticks / 20.0 + 5.0))
+        return 15.0
 
     def _append_completed_action_trace(self, trace: dict[str, object]) -> None:
         self.completed_action_traces.append(trace)
@@ -560,6 +768,7 @@ class ScarpetBody:
         requests = self.request_history[-max_requests:] if max_requests > 0 else self.request_history
         return {
             "bot": self.bot_name,
+            "server_epoch": self._server_epoch,
             "events": [
                 {
                     "seq": event.seq,
@@ -715,6 +924,7 @@ class ScarpetBody:
 
     def execute(self, action: Action) -> Result:
         action_start_seq = self.last_seq
+        dispatch_epoch = self._server_epoch
         try:
             result = parse_result(
                 self._timed_request(
@@ -727,9 +937,9 @@ class ScarpetBody:
             )
         except (OSError, BodyProtocolError) as exc:
             if is_mutating_action(action.name):
-                return self._reconcile_mutation_dispatch(action, action_start_seq, exc)
+                return self._reconcile_mutation_dispatch(action, action_start_seq, exc, dispatch_epoch)
             raise
-        self._begin_action_trace(action, action_start_seq, result)
+        self._begin_action_trace(action, action_start_seq, result, dispatch_epoch=dispatch_epoch)
         if not (result.ok and result.accepted):
             self._finish_action_without_terminal(action.id)
         elif action.name in RESULT_TERMINAL_ACTIONS:
@@ -1000,6 +1210,7 @@ class ScarpetBody:
         epoch = str(result.data.get("epoch") or "")
         if not epoch:
             raise ValueError("event head is missing epoch")
+        self._server_epoch = epoch
         head = {
             "event_seq": int(result.data.get("eventSeq") or 0),
             "chat_seq": int(result.data.get("chatSeq") or 0),

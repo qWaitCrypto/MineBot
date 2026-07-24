@@ -550,6 +550,94 @@ def run_water_reflex_honest_failure(rcon, body: ScarpetBody) -> None:
     assert_post_reflex_stop_release(body)
 
 
+def run_water_unresolved_action_gate(rcon, body: ScarpetBody) -> None:
+    """A failed water reflex must gate ordinary actions until recovery clears it."""
+
+    arm_trapped_water_reflex_fixture(rcon)
+    # Isolate the action-gate lifecycle from oxygen expiry; the navigation
+    # transport/load budget is a separate Q4 signal and is not this probe's
+    # subject.
+    command(rcon, f"effect give {BOT} minecraft:water_breathing 30 0 true")
+    command(rcon, "script in minebot run global_water_reflex_air_threshold = 301")
+    event_start = len(body.event_log)
+    trigger_water_reflex(rcon, expect_started=False)
+    completed = next(
+        (event for event in body.event_log[event_start:] if event.name == "reflexCompleted"),
+        None,
+    )
+    if completed is None:
+        completed = wait_for_event(body, "reflexCompleted", timeout_s=3.0)
+    if completed.data.get("escaped_hazard") is not False:
+        raise AssertionError(f"expected an honest trapped-water failure: {completed.data}")
+
+    state = body.get_state()
+    if not isinstance(state.hazard_unresolved, dict) or state.hazard_unresolved.get("kind") != "water":
+        raise AssertionError(f"failed water reflex did not expose unresolved hazard state: {state}")
+
+    recovery_target = [BASE[0] + 1, BASE[1] + 1, BASE[2]]
+    ordinary = body.execute(Action.create("moveTo", {"target": recovery_target}))
+    if ordinary.accepted or ordinary.error != "hazard_unresolved":
+        raise AssertionError(f"ordinary move escaped unresolved-hazard gate: {ordinary}")
+
+    # Keep the failure latch, but replace the sealed room with the existing
+    # bounded water corridor.  This isolates recovery permission from the
+    # separate ascend/settle-on-support cancellation path.
+    arm_water_reflex_fixture(rcon)
+    x, y, z = BASE
+    command(rcon, f"effect give {BOT} minecraft:water_breathing 30 0 true")
+    command(rcon, "script in minebot run global_water_reflex_air_threshold = 301")
+    recovery_target = [x + 5, y, z]
+    recovery = Action.create(
+        "navigateTo",
+        {
+            "target": recovery_target,
+            "goals": [recovery_target],
+            "grid_radius": 8,
+            "max_expand": 120,
+            "y_below": 2,
+            "y_above": 2,
+            "arrival_radius": 0.25,
+            "goal_radius": 0,
+            "recheck_lookahead": 0,
+            "timeout_ticks": 120,
+            "no_progress_ticks": 60,
+            "min_partial_progress": 1,
+            "partial_replans": 0,
+            "segment_index": 0,
+            "allow_diagonal": False,
+            "allow_ascend": True,
+            "allow_descend": False,
+            "allow_swim": True,
+            "aquatic_traversal": True,
+            "survival_recovery": True,
+            "max_fall_depth": 0,
+            "max_water_drop_depth": 4,
+            "allow_break": False,
+            "allow_place": False,
+            "allow_pillar": False,
+            "allow_downward": False,
+            "allow_open": False,
+            "denied_mutations": [],
+        },
+    )
+    dispatched = body.execute(recovery)
+    if not dispatched.accepted:
+        raise AssertionError(f"survival-recovery navigation was rejected: {dispatched}")
+    terminal = body.await_action_terminal(
+        recovery.id,
+        timeout_s=15.0,
+        terminal_events={"navigateDone", "death", "bodyMissing", "respawned"},
+        intermediate_events={"navigateStartTrace", "moveDone"},
+    )
+    if terminal.name != "navigateDone" or terminal.data.get("reason") not in {"arrived", "stuck"}:
+        raise AssertionError(f"survival-recovery navigation did not settle honestly: {terminal}")
+    final = body.get_state()
+    if final.hazard_unresolved is not None:
+        raise AssertionError(f"hazard state remained after survival recovery: {final}")
+    if final.health <= 0 or final.pending_action_count not in (None, 0) or final.body_owner is not None:
+        raise AssertionError(f"survival recovery left unsafe lifecycle state: {final}")
+
+
 def run_lava_reflex_honest_failure_releases_owner(rcon, body: ScarpetBody) -> None:
     arm_lava_no_escape_fixture(rcon)
     event_start = len(body.event_log)

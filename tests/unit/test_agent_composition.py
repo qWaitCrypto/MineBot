@@ -561,6 +561,7 @@ def resource_domain_tool(body, *outcomes):
             bool(outcome.pop("success")),
             str(outcome.pop("reason")),
             bool(outcome.pop("can_retry", False)),
+            next_suggestion=outcome.pop("next_suggestion", None),
             metrics=metrics,
         )
 
@@ -1228,6 +1229,37 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.can_retry)
         self.assertEqual(result.metrics["after_count"], 0)
         self.assertEqual(result.metrics["resume_hint"], "reselect_candidates")
+
+    def test_collect_resource_preserves_nested_body_suggestion(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "resource_candidates_not_found",
+                "can_retry": True,
+                "metrics": {
+                    "last_failure": {
+                        "success": False,
+                        "reason": "resource_candidates_not_found",
+                        "canRetry": True,
+                        "nextSuggestion": "move closer or expand the search radius before retrying",
+                    }
+                },
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource({"item": "logs", "count": 1}, ctx)
+
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.next_suggestion,
+            "move closer or expand the search radius before retrying",
+        )
 
     def test_collect_resource_keeps_body_candidate_exhaustion_truth(self):
         body = FakeBody()

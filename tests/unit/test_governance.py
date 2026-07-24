@@ -114,6 +114,17 @@ class GovernanceTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "collect_target_required")
 
+    def test_collect_context_allows_explicit_non_default_target(self):
+        decision = self.policy.can_break(
+            (0, 64, 0),
+            "stone",
+            BreakContext.COLLECT,
+            explicit_target=True,
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed_natural")
+
     def test_collect_approach_allows_encasing_stone_outside_declared_region(self):
         # The dig-through root cause fix: to reach a BURIED collect target the
         # navigator must clear the natural blocks ON THE WAY (e.g. encasing

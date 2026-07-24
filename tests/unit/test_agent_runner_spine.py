@@ -2763,6 +2763,74 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertFalse(any(event["event"] == "body_recovery_required" for event in trace))
         self.assertTrue(any(event["event"] == "progress_yielded" for event in trace))
 
+    def test_nested_wrappers_count_one_action_reconciliation_once(self):
+        body = FakeBody()
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=lambda *_args, **_kwargs: None,
+        )
+
+        result = {
+            "success": False,
+            "reason": "action_reconciliation_unknown",
+            "metrics": {
+                "error_type": "ActionReconciliationUnknownError",
+                "await_diagnostics": {"action_id": "same-action"},
+            },
+        }
+        try:
+            # The same Body exception is observed at three composition
+            # layers, each with a different wrapper tool/call id.
+            for tool_name, call_id in (
+                ("collect_block_domain", "inner"),
+                ("collect_resource", "middle"),
+                ("ensure_tool_for", "outer"),
+            ):
+                self.assertIsNone(
+                    runtime.record_transport_error(
+                        tool_name,
+                        result,
+                        tool_call_id=call_id,
+                    )
+                )
+            self.assertEqual(runtime.consecutive_transport_errors, 1)
+            errors = [
+                event
+                for event in runtime.trace.snapshot()
+                if event["event"] == "body_transport_error"
+            ]
+            self.assertEqual(len(errors), 3)
+            self.assertEqual([event["duplicate"] for event in errors], [False, True, True])
+        finally:
+            runtime.close()
+
+    def test_successful_body_boundary_resets_transport_failure_streak(self):
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=lambda *_args, **_kwargs: None,
+        )
+
+        runtime.consecutive_transport_errors = 2
+        runtime._transport_error_incidents.update({"first", "second"})
+        runtime.note_transport_success()
+
+        self.assertEqual(runtime.consecutive_transport_errors, 0)
+        self.assertEqual(runtime._transport_error_incidents, set())
+        self.assertTrue(
+            any(event["event"] == "body_transport_recovered" for event in runtime.trace.snapshot())
+        )
+        runtime.close()
+
     def test_body_recovery_required_wrapped_by_sdk_user_error_enters_recovering(self):
         body = FakeBody()
 

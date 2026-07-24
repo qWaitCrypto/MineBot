@@ -328,6 +328,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         result_success = True
         can_retry = False
         resume_hint = "complete"
+        next_suggestion = None
         last_failure = None
     else:
         result_reason = _resource_process_reason(body_reason, before_count=before_count, current_count=current_count)
@@ -338,6 +339,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         result_success = False
         can_retry = bool(body_process.get("canRetry", True))
         resume_hint = "reselect_candidates" if can_retry else "body_terminal"
+        next_suggestion = _tool_result_next_suggestion(body_process)
         last_failure = {
             "phase": "collect_domain",
             "reason": body_reason,
@@ -367,6 +369,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         attempts,
         skipped,
         resume_hint,
+        next_suggestion=next_suggestion,
         last_failure=last_failure,
         budget=budget,
         requested_count=requested_count,
@@ -1081,6 +1084,33 @@ def _tool_result_diagnostics(result: dict[str, Any]) -> dict[str, object]:
     return out
 
 
+def _tool_result_next_suggestion(result: dict[str, object], *, _depth: int = 0) -> str | None:
+    """Keep the first actionable suggestion across composed result envelopes.
+
+    Body processes commonly put the actionable failure one level below the
+    outer result (``metrics.last_failure``).  A composition tool must not turn
+    that useful contract field into ``null`` merely because it rewrites the
+    terminal reason.  The depth bound keeps this projection defensive if a
+    malformed result contains a recursive-looking payload.
+    """
+
+    if _depth > 3:
+        return None
+    direct = result.get("nextSuggestion")
+    if isinstance(direct, str) and direct.strip():
+        return direct
+    metrics = result.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    for key in ("last_failure", "body_process", "result"):
+        nested = metrics.get(key)
+        if isinstance(nested, dict):
+            suggestion = _tool_result_next_suggestion(nested, _depth=_depth + 1)
+            if suggestion:
+                return suggestion
+    return None
+
+
 def _segment_diagnostics(segment: dict[str, Any]) -> dict[str, object]:
     out: dict[str, object] = {}
     for key in ("index", "status", "terminal_reason", "success", "target"):
@@ -1183,6 +1213,7 @@ def _collect_result(
     skipped: list[dict[str, object]],
     resume_hint: str,
     *,
+    next_suggestion: str | None = None,
     last_failure: dict[str, object] | None = None,
     budget: CompositionBudget | None = None,
     requested_count: int | None = None,
@@ -1216,7 +1247,7 @@ def _collect_result(
             "max_mutating_calls": budget.max_mutating_calls,
             "max_wall_s": budget.max_wall_s,
         }
-    return ToolResult(success, reason, can_retry, metrics=metrics)
+    return ToolResult(success, reason, can_retry, next_suggestion=next_suggestion, metrics=metrics)
 
 
 def _ensure_target_for(resource: str) -> str:

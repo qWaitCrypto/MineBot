@@ -22,7 +22,7 @@ from minebot.game.navigation import (
 )
 
 
-def state_at(pos, *, body_owner=None, pending_action_count=None):
+def state_at(pos, *, body_owner=None, pending_action_count=None, hazard_unresolved=None):
     return BodyState(
         bot="Bot1",
         pos=(float(pos[0]), float(pos[1]), float(pos[2])),
@@ -40,6 +40,7 @@ def state_at(pos, *, body_owner=None, pending_action_count=None):
         complete=True,
         body_owner=body_owner,
         pending_action_count=pending_action_count,
+        hazard_unresolved=hazard_unresolved,
     )
 
 
@@ -568,6 +569,39 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(body.actions[0].name, "navigateTo")
         self.assertEqual(body.actions[0].params["target"], [3, 64, 0])
         self.assertEqual(body.actions[0].params["goal_radius"], 0)
+
+    def test_provider_applies_load_limited_profile_by_default(self):
+        body = FakeBody([state_at((0, 64, 0))])
+        runtime = NavigationTransactions.server_side(
+            body,
+            GovernancePolicy(natural_regions=[Region("work", (-128, 0, -128), (128, 160, 128))]),
+        )
+
+        result = runtime.navigate_to((64, 70, -64), config=NavigationRunConfig(max_segments=32))
+
+        self.assertEqual(result.reason, "arrived")
+        action = next(action for action in body.actions if action.name == "navigateTo")
+        self.assertEqual(action.params["grid_radius"], 48)
+        self.assertEqual(action.params["max_expand"], 1200)
+        self.assertEqual(action.params["partial_replans"], 31)
+
+    def test_unbounded_navigation_requires_explicit_diagnostic_opt_out(self):
+        body = FakeBody([state_at((0, 64, 0))])
+        runtime = NavigationTransactions.server_side(
+            body,
+            GovernancePolicy(natural_regions=[Region("work", (-128, 0, -128), (128, 160, 128))]),
+        )
+
+        result = runtime.navigate_to(
+            (64, 70, -64),
+            config=NavigationRunConfig(max_segments=32, load_limited=False),
+        )
+
+        self.assertEqual(result.reason, "arrived")
+        action = next(action for action in body.actions if action.name == "navigateTo")
+        self.assertEqual(action.params["grid_radius"], 64)
+        self.assertEqual(action.params["max_expand"], 2500)
+        self.assertEqual(action.params["partial_replans"], 31)
         self.assertEqual(
             {
                 key: body.actions[0].params[key]
@@ -621,9 +655,41 @@ class NavigationRuntimeTests(unittest.TestCase):
         action = body.actions[0]
         self.assertTrue(action.params["allow_swim"])
         self.assertTrue(action.params["aquatic_traversal"])
+        self.assertFalse(action.params["survival_recovery"])
         self.assertEqual(action.params["aquatic_replan_attempts"], 1)
         for key in ("allow_break", "allow_place", "allow_pillar", "allow_downward"):
             self.assertFalse(action.params[key])
+
+    def test_survival_recovery_marker_is_carried_into_server_navigation(self):
+        body = FakeBody([state_at((0, 64, 0))])
+        runtime = NavigationTransactions(body, FakeNavigator([]))
+
+        result = runtime.navigate_to(
+            (2, 64, 0),
+            config=NavigationRunConfig(max_segments=1, survival_recovery=True),
+        )
+
+        self.assertTrue(result.success)
+        self.assertTrue(body.actions[0].params["survival_recovery"])
+
+    def test_navigate_to_fails_closed_when_survival_hazard_is_unresolved(self):
+        body = FakeBody(
+            [
+                state_at(
+                    (0, 64, 0),
+                    hazard_unresolved={"kind": "water", "pos": [0, 64, 0], "tick": 42},
+                )
+            ]
+        )
+        runtime = NavigationTransactions(body, FakeNavigator([]))
+
+        result = runtime.navigate_to((2, 64, 0), config=NavigationRunConfig(max_segments=1))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "survival_hazard_unresolved")
+        self.assertFalse(result.can_retry)
+        self.assertEqual(result.metrics["next_action"], "survival_recovery")
+        self.assertEqual(body.actions, [])
 
     def test_navigate_to_preserves_composite_goal_set_and_server_selection(self):
         class SelectedGoalBody(FakeBody):
@@ -2195,7 +2261,7 @@ class WorldRefreshNavigationIntegrationTests(unittest.TestCase):
         result = runtime.navigate_to(
             (64, 70, -64),
             timeout_s=80.0,
-            config=NavigationRunConfig(max_segments=8),
+            config=NavigationRunConfig(max_segments=8, load_limited=False),
         )
 
         self.assertEqual(result.reason, "arrived")

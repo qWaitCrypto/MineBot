@@ -291,6 +291,9 @@ def main() -> None:
                 allow_swim=True,
                 aquatic_traversal=True,
                 recovery_attempts=0,
+                # This probe intentionally measures the unbounded baseline
+                # before the optional load-limited profile is applied.
+                load_limited=False,
             )
         )
         if arguments.load_limited:
