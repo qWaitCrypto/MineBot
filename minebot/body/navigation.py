@@ -196,6 +196,24 @@ def navigation_governed_mobility_upgrade_reason(reason: object) -> bool:
     return False
 
 
+def navigation_surface_egress_fallback_allowed(reason: object) -> bool:
+    """Return whether a dry egress terminal may enter the governed profile.
+
+    ``egress_to_dry`` deliberately tries a pure aquatic route first.  A lack
+    of a nearby dry stand is therefore a recoverable capability handoff, not a
+    terminal resource or exploration failure.  Keep this classification next
+    to the navigation profile predicates so consumers cannot invent their own
+    reason-family rules.
+    """
+
+    value = str(reason or "")
+    if value == "dry_egress_unavailable":
+        return True
+    if value.startswith("dry_egress_failed:"):
+        return navigation_governed_mobility_upgrade_reason(value.split(":", 1)[1])
+    return False
+
+
 def navigation_governed_mobility_upgrade_allowed(
     result: ToolResult,
     before: Position,

@@ -587,6 +587,40 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual(work.calls, [])
         self.assertEqual(result.metrics["last_failure"]["reason"], "dry_egress_unavailable")
 
+    def test_initial_dry_egress_uses_governed_mobility_before_resource_search(self):
+        target = (5, 64, 0)
+        body = ResourceBody([(target, "dirt")])
+        navigator = RecordingNavigator(body, [(5, 65, -1)])
+        work = RecordingWork(
+            egress_outcomes=[ToolResult(False, "dry_egress_unavailable", True)]
+        )
+        egress_calls = []
+
+        def egress(timeout_s):
+            egress_calls.append(timeout_s)
+            body.state_pos = (2.5, 65.0, 0.5)
+            return ToolResult(
+                True,
+                "surface_reached",
+                False,
+                metrics={"final_pos": [2, 65, 0], "terminal_surface_verified": True},
+            )
+
+        runtime = ResourceCollectionTransactions(body, navigator, work, mobility_egress=egress)
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1, segment_timeout_s=7.0),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(egress_calls, [7.0])
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertEqual(work.calls[0][0], target)
+        self.assertEqual(result.metrics["initial_egress"]["selected_profile"], "governed_mobility")
+
     def test_candidate_failure_is_blacklisted_and_remaining_domain_replanned(self):
         first = (5, 64, 0)
         second = (8, 64, 0)

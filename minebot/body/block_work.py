@@ -20,7 +20,10 @@ from minebot.body.inventory_read import (
     read_inventory_slots as _read_inventory_slots,
 )
 from minebot.body.pickup import PickupConfig, PickupTransactions
-from minebot.body.navigation import SERVER_GOAL_SET_LIMIT
+from minebot.body.navigation import (
+    SERVER_GOAL_SET_LIMIT,
+    navigation_surface_egress_fallback_allowed,
+)
 from minebot.body.reach import ReachIntent, block_reach_domain, block_reach_geometry
 from minebot.body.world_read import read_block_facts, read_surface_columns
 from minebot.contract import (
@@ -1596,7 +1599,9 @@ class BlockWork:
             egress = self.egress_to_dry(current_pos=origin, timeout_s=timeout_s)
             surface_egress = {"required": True, **dict(egress.metrics or {})}
             if not egress.success:
-                surface_egress_needs_governed_mobility = _surface_egress_can_fall_through(egress)
+                surface_egress_needs_governed_mobility = navigation_surface_egress_fallback_allowed(
+                    egress.reason
+                )
                 if not surface_egress_needs_governed_mobility:
                     return ToolResult(
                         success=False,
@@ -1778,7 +1783,7 @@ class BlockWork:
 
         mutation_budget = max_steps if max_steps is not None else max(1, surface_scan_height)
         goal = GoalComposite(tuple(GoalNear(candidate, radius=0) for candidate in candidates))
-        if require_mobility_egress:
+        if require_mobility_egress and not surface_egress_needs_governed_mobility:
             from minebot.body.navigation import aquatic_navigation_config
 
             navigation_config = aquatic_navigation_config(
@@ -3901,26 +3906,6 @@ def _surface_terminal_verified(surface: dict[str, object]) -> bool:
 
 def _surface_requires_lateral_egress(surface: dict[str, object]) -> bool:
     return _stand_has_liquid_contact(surface)
-
-
-def _surface_egress_can_fall_through(result: ToolResult) -> bool:
-    """Keep surface recovery alive when the first shore route is merely blocked.
-
-    A failed pure-movement shore search is not a terminal surface failure.  The
-    caller still owns a bounded vertical/surface-domain search that can combine
-    swimming with its already-governed break/place/pillar operators.  Transport,
-    world-read, and body-lifecycle failures must remain typed terminal results.
-    """
-
-    reason = str(result.reason or "")
-    if reason == "dry_egress_unavailable":
-        return True
-    if not reason.startswith("dry_egress_failed:"):
-        return False
-    navigation_reason = reason.split(":", 1)[1]
-    from minebot.body.navigation import navigation_governed_mobility_upgrade_reason
-
-    return navigation_governed_mobility_upgrade_reason(navigation_reason)
 
 
 def _stand_has_liquid_contact(stand: dict[str, object]) -> bool:

@@ -2820,6 +2820,48 @@ class BlockWorkTests(unittest.TestCase):
         self.assertFalse(config.allow_downward)
         self.assertEqual(body.actions, [])
 
+    def test_go_to_surface_mobile_egress_promotes_governed_profile_after_dry_failure(self):
+        class MovingNavigator(FakeNavigator):
+            def __init__(self, body):
+                super().__init__(result=True, reason="arrived")
+                self.body = body
+
+            def navigate_to(self, goal, **kwargs):
+                result = super().navigate_to(goal, **kwargs)
+                selected = goal_position(goal)
+                self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
+                return result
+
+        blocks = {
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 64, 0): ("water", "LIQUID"),
+            (0, 65, 0): ("stone", "SOLID"),
+        }
+        body = FakeBody(blocks=blocks)
+        body.state_pos = (0.5, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("surface", (-20, 0, -20), (20, 120, 20))])
+        navigator = MovingNavigator(body)
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.go_to_surface(
+            timeout_s=1.0,
+            scaffold_blocks=(),
+            surface_scan_height=2,
+            world_top_y=70,
+            require_mobility_egress=True,
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "surface_reached")
+        self.assertTrue(result.metrics["surface_egress"]["fallback"] == "surface_domain_governed_mobility")
+        self.assertEqual(len(navigator.calls), 1)
+        config = navigator.calls[0][1]["config"]
+        self.assertTrue(config.allow_swim)
+        self.assertTrue(config.aquatic_traversal)
+        self.assertTrue(config.allow_break)
+        self.assertTrue(config.allow_place)
+        self.assertTrue(config.allow_pillar)
+
     def test_egress_to_dry_leaves_an_open_water_surface_without_mutation(self):
         class EgressNavigator(FakeNavigator):
             def __init__(self, body):

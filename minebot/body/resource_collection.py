@@ -29,6 +29,7 @@ from minebot.body.navigation import (
     governed_mobility_navigation_config,
     load_limited_navigation_config,
     navigation_governed_mobility_upgrade_reason,
+    navigation_surface_egress_fallback_allowed,
     navigation_zero_progress,
 )
 from minebot.body.reach import ReachIntent, block_reach_domains, round_robin_reach_goals
@@ -111,32 +112,63 @@ class ResourceCollectionTransactions:
         pending_targets: tuple[NearbyBlockTarget, ...] = ()
         tree_pending_targets: tuple[NearbyBlockTarget, ...] = ()
         tree_retargets_discovered = 0
+        initial_egress: dict[str, object] | None = None
+
+        def terminal(**kwargs: object) -> ToolResult:
+            return self._terminal(initial_egress=initial_egress, **kwargs)
 
         dry_egress = self.work.egress_to_dry(timeout_s=cfg.segment_timeout_s)
         if not dry_egress.success:
-            return self._terminal(
-                success=False,
-                reason=f"resource_{dry_egress.reason}",
-                can_retry=dry_egress.can_retry,
-                block_types=normalized_blocks,
-                expected_drops=normalized_drops,
-                remaining_count=remaining_count,
-                collected=collected,
-                candidate_blacklist=candidate_blacklist,
-                patch_blacklist=patch_blacklist,
-                attempts=attempts,
-                searches=searches,
-                config=cfg,
-                started=started,
-                last_failure=dry_egress.to_payload(),
-            )
+            initial_egress = {"dry": dry_egress.to_payload()}
+            if self.mobility_egress is not None and navigation_surface_egress_fallback_allowed(
+                dry_egress.reason
+            ):
+                mobility_egress = self.mobility_egress(cfg.segment_timeout_s)
+                mobility_egress_attempted = True
+                initial_egress["mobility"] = mobility_egress.to_payload()
+                if mobility_egress.success:
+                    initial_egress["selected_profile"] = "governed_mobility"
+                else:
+                    return terminal(
+                        success=False,
+                        reason=f"resource_{dry_egress.reason}",
+                        can_retry=dry_egress.can_retry,
+                        block_types=normalized_blocks,
+                        expected_drops=normalized_drops,
+                        remaining_count=remaining_count,
+                        collected=collected,
+                        candidate_blacklist=candidate_blacklist,
+                        patch_blacklist=patch_blacklist,
+                        attempts=attempts,
+                        searches=searches,
+                        config=cfg,
+                        started=started,
+                        last_failure=initial_egress,
+                    )
+            else:
+                return terminal(
+                    success=False,
+                    reason=f"resource_{dry_egress.reason}",
+                    can_retry=dry_egress.can_retry,
+                    block_types=normalized_blocks,
+                    expected_drops=normalized_drops,
+                    remaining_count=remaining_count,
+                    collected=collected,
+                    candidate_blacklist=candidate_blacklist,
+                    patch_blacklist=patch_blacklist,
+                    attempts=attempts,
+                    searches=searches,
+                    config=cfg,
+                    started=started,
+                    last_failure=dry_egress.to_payload(),
+                )
 
         while collected < remaining_count:
             if (
                 mutation_attempts >= cfg.mutation_budget
                 or time.monotonic() - started >= cfg.max_wall_s
             ):
-                return self._terminal(
+                return terminal(
                     success=False,
                     reason="resource_domain_budget_exhausted",
                     can_retry=True,
@@ -174,7 +206,7 @@ class ResourceCollectionTransactions:
                         if collected > 0
                         else search.reason
                     )
-                    return self._terminal(
+                    return terminal(
                         success=False,
                         reason=reason,
                         can_retry=search.can_retry,
@@ -226,7 +258,7 @@ class ResourceCollectionTransactions:
                     mutation_attempts=mutation_attempts,
                     inspection_pending=bool(inspection_candidates),
                 )
-                return self._terminal(
+                return terminal(
                     success=False,
                     reason=terminal_reason,
                     can_retry=True,
@@ -250,7 +282,7 @@ class ResourceCollectionTransactions:
                     mutation_attempts=mutation_attempts,
                     inspection_pending=bool(inspection_candidates),
                 )
-                return self._terminal(
+                return terminal(
                     success=False,
                     reason=terminal_reason,
                     can_retry=True,
@@ -270,7 +302,7 @@ class ResourceCollectionTransactions:
 
             domain = _build_stand_domain(self.body, active, max_goals=cfg.max_goals)
             if isinstance(domain, ToolResult):
-                return self._terminal(
+                return terminal(
                     success=False,
                     reason=domain.reason,
                     can_retry=domain.can_retry,
@@ -355,7 +387,7 @@ class ResourceCollectionTransactions:
 
             if navigation.reason in {"preempted", "body_missing", "death", "respawned", "progress_yielded"}:
                 attempts.append(attempt)
-                return self._terminal(
+                return terminal(
                     success=False,
                     reason=f"resource_navigation_{navigation.reason}",
                     can_retry=True,
@@ -476,7 +508,7 @@ class ResourceCollectionTransactions:
             target = _selected_target(self.body, selected_targets)
             if target is None:
                 attempts.append(attempt)
-                return self._terminal(
+                return terminal(
                     success=False,
                     reason="resource_selected_goal_unmapped",
                     can_retry=False,
@@ -523,7 +555,7 @@ class ResourceCollectionTransactions:
                 continue
 
             if mined.reason == "missing_required_tool" or mined.reason.startswith("tool_equip_failed:"):
-                return self._terminal(
+                return terminal(
                     success=False,
                     reason=mined.reason,
                     can_retry=mined.can_retry,
@@ -559,7 +591,7 @@ class ResourceCollectionTransactions:
                     _add_patch_blacklist(patch_blacklist, target.pos)
                 continue
 
-            return self._terminal(
+            return terminal(
                 success=False,
                 reason=f"resource_collect_failed:{mined.reason}",
                 can_retry=mined.can_retry,
@@ -576,7 +608,7 @@ class ResourceCollectionTransactions:
                 last_failure=mined.to_payload(),
             )
 
-        return self._terminal(
+        return terminal(
             success=True,
             reason="resource_domain_collected",
             can_retry=False,
@@ -611,6 +643,7 @@ class ResourceCollectionTransactions:
         last_failure: dict[str, object] | None = None,
         navigation_failures: list[str] | None = None,
         inspection_candidates: list[dict[str, object]] | None = None,
+        initial_egress: dict[str, object] | None = None,
     ) -> ToolResult:
         metrics: dict[str, object] = {
             "block_types": list(block_types),
@@ -641,6 +674,8 @@ class ResourceCollectionTransactions:
         }
         if last_failure is not None:
             metrics["last_failure"] = last_failure
+        if initial_egress is not None:
+            metrics["initial_egress"] = initial_egress
         if navigation_failures:
             metrics["navigation_failure_reasons"] = list(navigation_failures)
         if inspection_candidates:
