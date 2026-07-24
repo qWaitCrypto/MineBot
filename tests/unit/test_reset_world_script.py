@@ -40,6 +40,13 @@ class ResetWorldScriptTests(unittest.TestCase):
         self.assertNotIn("type=!minecraft:player,type=!minecraft:item", source)
         self.assertIn("for entity_type in hostile_types:", source)
 
+    def test_reset_force_stops_a_server_stuck_in_rcon_shutdown(self):
+        source = RESET_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("signal.SIGTERM", source)
+        self.assertIn("signal.SIGKILL", source)
+        self.assertIn("including forced cleanup", source)
+
 
 if __name__ == "__main__":
     unittest.main()

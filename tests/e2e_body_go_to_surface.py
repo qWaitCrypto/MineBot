@@ -24,6 +24,8 @@ ORIGIN = (170, 64, 0)
 SURFACE = (171, 65, 0)
 MOBILITY_EGRESS_ORIGIN = (250, 65, 0)
 MOBILITY_EGRESS_SURFACE = (234, 65, -16)
+DEEP_WATER_ORIGIN = (250, 64, 0)
+DEEP_WATER_SURFACES = ((234, 64, 0), (266, 64, 0), (226, 64, 0), (274, 64, 0))
 SKIP_EXIT_CODE = 77
 
 
@@ -233,6 +235,31 @@ def reset_mobility_egress_world(rcon: RconClient) -> None:
     command(rcon, "setblock 250 64 0 stone")
     command(rcon, "setblock 234 64 -16 stone")
     command(rcon, f"tp {BOT} {MOBILITY_EGRESS_ORIGIN[0]} {MOBILITY_EGRESS_ORIGIN[1]} {MOBILITY_EGRESS_ORIGIN[2]} 0 0")
+    command(rcon, f"effect give {BOT} saturation 30 20 true")
+
+
+def reset_deep_water_governed_break_world(rcon: RconClient) -> None:
+    command(rcon, "script in minebot run minebot_reset()")
+    command(rcon, "forceload add 220 -10 280 10")
+    command(rcon, "fill 220 62 -10 280 70 10 air")
+    command(rcon, "fill 220 63 -10 280 63 10 stone")
+    command(rcon, "setblock 250 63 0 stone")
+    # The body starts inside a sealed natural-stone water shaft.  Dry stands
+    # outside the lateral walls are visible to the bounded surface domain, but
+    # no pure aquatic route can enter them; governed mobility must break a wall
+    # from the water before walking onto the floor.
+    command(rcon, "fill 250 64 0 250 66 0 water")
+    command(rcon, "fill 249 64 -1 249 67 1 stone")
+    command(rcon, "fill 251 64 -1 251 67 1 stone")
+    command(rcon, "fill 250 64 -1 250 67 -1 stone")
+    command(rcon, "fill 250 64 1 250 67 1 stone")
+    command(rcon, "fill 249 67 -1 251 67 1 stone")
+    command(rcon, f"tp {BOT} {DEEP_WATER_ORIGIN[0]} {DEEP_WATER_ORIGIN[1]} {DEEP_WATER_ORIGIN[2]} 0 0")
+    command(rcon, f"clear {BOT}")
+    command(rcon, f"item replace entity {BOT} hotbar.0 with stone_pickaxe 1")
+    # Keep this corpus focused on liquid-to-break reachability.  Survival
+    # reflex/drowning recovery is covered by the dedicated water egress cases.
+    command(rcon, f"effect give {BOT} water_breathing 60 0 true")
     command(rcon, f"effect give {BOT} saturation 30 20 true")
 
 
@@ -554,6 +581,72 @@ def run_mobility_egress_path(rcon: RconClient, body: ScarpetBody) -> dict[str, o
     }
 
 
+def run_deep_water_governed_break_path(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
+    reset_deep_water_governed_break_world(rcon)
+    policy = GovernancePolicy(
+        natural_regions=[Region("deep_water_governed_break", (220, 55, -10), (280, 80, 10))]
+    )
+    navigator = NavigationTransactions.server_side(body, policy)
+    runtime = BlockWork(body, policy, navigator=navigator)
+
+    result = runtime.go_to_surface(
+        current_pos=DEEP_WATER_ORIGIN,
+        context=BreakContext.DIRECT,
+        scaffold_blocks=(),
+        timeout_s=20.0,
+        max_steps=4,
+        surface_scan_height=0,
+        surface_scan_radius=1,
+        world_top_y=70,
+        require_mobility_egress=True,
+    )
+    payload = result.to_payload()
+    final = body.get_state()
+    if not result.success or result.reason != "surface_reached":
+        raise AssertionError(f"deep-water governed break path failed: {payload} final={final}")
+    target_surface = tuple(result.metrics.get("target_surface") or ())
+    if target_surface not in set(DEEP_WATER_SURFACES):
+        raise AssertionError(f"deep-water path selected wrong surface: {payload}")
+    navigation, segments, movement_counts = navigation_facts(result)
+    if navigation.get("success") is not True or navigation.get("reason") != "arrived":
+        raise AssertionError(f"deep-water path lacks terminal navigation truth: {payload}")
+    has_swim = any(
+        int((segment.get("diagnostics", {}).get("movement_counts") or {}).get("swim", 0)) > 0
+        or any(
+            int((event.get("data", {}).get("movement_counts") or {}).get("swim", 0)) > 0
+            for event in segment.get("diagnostics", {}).get("navigation_events") or []
+        )
+        for segment in segments
+    )
+    if not has_swim:
+        raise AssertionError(f"deep-water path did not traverse liquid before reaching dry land: {payload}")
+    mutation_events = [
+        event
+        for segment in segments
+        for event in segment.get("diagnostics", {}).get("mutation_events") or []
+    ]
+    if not any(
+        event.get("event") == "navigateMutationDone"
+        and event.get("data", {}).get("kind") == "break"
+        and event.get("data", {}).get("success") is True
+        for event in mutation_events
+    ):
+        raise AssertionError(f"deep-water path has no authoritative break terminal: {payload}")
+    wall_x = 251 if target_surface[0] > DEEP_WATER_ORIGIN[0] else 249
+    wall = body.perceive("blockAt", {"x": wall_x, "y": 64, "z": 0})
+    if wall.data.get("type") in {"stone", "minecraft:stone"}:
+        raise AssertionError(f"deep-water path did not open the natural wall: {wall.data} result={payload}")
+    if math.dist(final.pos, (target_surface[0] + 0.5, target_surface[1], target_surface[2] + 0.5)) > 1.25:
+        raise AssertionError(f"deep-water path final position is wrong: final={final.pos} result={payload}")
+    return {
+        "reason": result.reason,
+        "target_surface": list(target_surface),
+        "final": final.pos,
+        "movement_counts": movement_counts,
+        "mutation_events": mutation_events,
+    }
+
+
 def run_not_found_inverse(rcon: RconClient, body: ScarpetBody) -> dict[str, object]:
     reset_no_surface_world(rcon)
     runtime = make_runtime(body)
@@ -607,6 +700,7 @@ def main() -> None:
             "staircase_fallback": lambda: run_staircase_fallback_path(rcon, body),
             "multi_step_staircase_fallback": lambda: run_multi_step_staircase_fallback_path(rcon, body),
             "mobility_egress": lambda: run_mobility_egress_path(rcon, body),
+            "deep_water_governed_break": lambda: run_deep_water_governed_break_path(rcon, body),
             "not_found": lambda: run_not_found_inverse(rcon, body),
         }
         default_cases = [

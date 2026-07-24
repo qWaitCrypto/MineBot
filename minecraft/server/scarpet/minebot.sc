@@ -4637,6 +4637,10 @@ navigation_break_available(context, block_type) -> (
   )
 );
 
+navigation_break_from_liquid_allowed(context) -> (
+  bool(context:'allow_swim') && bool(context:'aquatic_traversal')
+);
+
 navigation_fall_candidate(x, start_y, z, context) -> (
   result = null;
   clear = true;
@@ -4713,7 +4717,7 @@ navigation_neighbors(x, y, z, context) -> (
           neighbors += navigation_mutation_candidate(nx, y, nz, 'open', 4.0, 'finish_or_abort_controller', mutation)
         )
       ,
-        if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && support_kind == 'SOLID' && source_kind != 'LIQUID',
+        if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && support_kind == 'SOLID' && (source_kind != 'LIQUID' || navigation_break_from_liquid_allowed(context)),
           if(block_kind(head_type) == 'SOLID' && navigation_break_available(context, head_type) && !navigation_mutation_denied(context, nx, y + 1, nz),
             mutation = {
               'kind' -> 'break',
@@ -4777,7 +4781,7 @@ navigation_neighbors(x, y, z, context) -> (
       if(source_head_blocked || source_cap_blocked,
         source_clearance_y = if(source_head_blocked, y + 1, y + 2);
         source_clearance_type = if(source_head_blocked, source_head_type, source_cap_type);
-        if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && source_kind != 'LIQUID' && navigation_break_available(context, source_clearance_type) && !navigation_mutation_denied(context, x, source_clearance_y, z),
+        if(bool(context:'allow_break') && floor(number(context:'break_budget')) > 0 && (source_kind != 'LIQUID' || navigation_break_from_liquid_allowed(context)) && navigation_break_available(context, source_clearance_type) && !navigation_mutation_denied(context, x, source_clearance_y, z),
           mutation = {
             'kind' -> 'break',
             'pos' -> l(x, source_clearance_y, z),

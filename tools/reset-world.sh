@@ -120,7 +120,37 @@ PY
   done
 fi
 if server_running; then
-  echo "server did not stop within ${STOP_TIMEOUT_S}s" >&2
+  # A stuck RCON client can leave the JVM blocked in DedicatedServer shutdown
+  # after SIGTERM.  A clean world reset must not depend on that thread
+  # eventually unwinding: force-stop only the server process we identified by
+  # its dedicated working directory, then verify that it is gone.
+  python3 - "$SERVER_DIR" <<'PY'
+import os
+import signal
+import sys
+from pathlib import Path
+
+server_dir = Path(sys.argv[1]).resolve()
+for proc in Path("/proc").iterdir():
+    if not proc.name.isdigit():
+        continue
+    try:
+        cwd = proc.joinpath("cwd").resolve()
+        cmdline = proc.joinpath("cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        continue
+    if cwd == server_dir and "fabric-server-launch.jar" in cmdline and "nogui" in cmdline:
+        os.kill(int(proc.name), signal.SIGKILL)
+PY
+  for _ in {1..10}; do
+    if ! server_running; then
+      break
+    fi
+    sleep 1
+  done
+fi
+if server_running; then
+  echo "server did not stop within ${STOP_TIMEOUT_S}s (including forced cleanup)" >&2
   exit 3
 fi
 

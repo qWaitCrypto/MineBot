@@ -411,7 +411,9 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("depth <= floor(number(context:'max_water_drop_depth'))", fall_body)
         neighbors_body = source[source.index("navigation_neighbors(x, y, z, context)"):source.index("navigation_edge_valid(")]
         self.assertIn("source_kind = probe_walkability(x, y, z)", neighbors_body)
-        self.assertGreaterEqual(neighbors_body.count("source_kind != 'LIQUID'"), 2)
+        self.assertIn("navigation_break_from_liquid_allowed(context) -> (", source)
+        self.assertIn("bool(context:'allow_swim') && bool(context:'aquatic_traversal')", source)
+        self.assertGreaterEqual(neighbors_body.count("navigation_break_from_liquid_allowed(context)"), 2)
         self.assertIn(
             "if(up == 'NO_FLOOR' && navigation_body_clear(x, y + 1, z), neighbors += navigation_candidate(x, y + 1, z, 'swim', 3.0, 0, 'egress_to_dry'))",
             neighbors_body,
