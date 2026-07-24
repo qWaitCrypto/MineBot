@@ -486,6 +486,33 @@ class ExplorationTransactions:
             candidate_attempts += 1
             stands, stand_error = self._safe_frontier_stands(region, current_y=current[1])
             if stand_error is not None or not stands:
+                mobility_egress: JsonObject | None = None
+                if (
+                    stand_error is None
+                    and not stands
+                    and not mobility_egress_attempted
+                    and self.mobility_egress is not None
+                ):
+                    egress_before = self.body.get_state()
+                    mobility_egress_attempted = True
+                    egress_result = self.mobility_egress(30.0)
+                    egress_after = self.body.get_state()
+                    distance_consumed += dist(egress_before.pos, egress_after.pos)
+                    mobility_egress = _terminal_result_summary(egress_result)
+                    if egress_result.success:
+                        # The region was uninspectable from the old position,
+                        # not permanently unreachable. Re-evaluate it from the
+                        # authoritative post-egress position.
+                        failures.append(
+                            {
+                                "region": [region[0], region[1]],
+                                "reason": "frontier_stands_unavailable",
+                                "candidate_stands": 0,
+                                "mobility_egress": mobility_egress,
+                            }
+                        )
+                        attempted_this_call.discard(region)
+                        continue
                 status = (
                     CoverageStatus.UNLOADED_BOUNDARY
                     if stand_error is not None
@@ -502,13 +529,14 @@ class ExplorationTransactions:
                     uncertainty=({"reason": stand_error},) if stand_error else (),
                 )
                 prior[region] = record
-                failures.append(
-                    {
-                        "region": [region[0], region[1]],
-                        "reason": reason,
-                        "candidate_stands": len(stands),
-                    }
-                )
+                failure: JsonObject = {
+                    "region": [region[0], region[1]],
+                    "reason": reason,
+                    "candidate_stands": len(stands),
+                }
+                if mobility_egress is not None:
+                    failure["mobility_egress"] = mobility_egress
+                failures.append(failure)
                 continue
 
             navigation_failures: list[JsonObject] = []

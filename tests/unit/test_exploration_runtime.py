@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 from minebot.app.exploration import PersistentExplorationCoverageStore
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
@@ -489,6 +490,43 @@ class ExplorationTransactionsTests(unittest.TestCase):
         egress_result = result.metrics["candidate_failures"][0]["navigation_attempts"][0]["mobility_egress"]
         self.assertTrue(egress_result["success"])
         self.assertEqual(egress_result["reason"], "surface_reached")
+
+    def test_empty_frontier_stands_attempt_one_body_owned_mobility_egress(self):
+        runtime, body, _navigator = _runtime()
+        stand_probe_calls = 0
+
+        def stand_probe(*_args, **_kwargs):
+            nonlocal stand_probe_calls
+            stand_probe_calls += 1
+            return ((), None) if stand_probe_calls == 1 else (((16, 64, 0),), None)
+
+        stand_probe = Mock(side_effect=stand_probe)
+        runtime._safe_frontier_stands = stand_probe
+        egress_calls = []
+
+        def egress(timeout_s):
+            egress_calls.append(timeout_s)
+            body.state = _state((16.0, 64.0, 0.0))
+            return ToolResult(
+                True,
+                "surface_reached",
+                False,
+                metrics={"final_pos": [16, 64, 0], "terminal_surface_verified": True},
+            )
+
+        runtime.mobility_egress = egress
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertEqual(egress_calls, [30.0])
+        self.assertGreaterEqual(stand_probe.call_count, 2)
+        self.assertTrue(
+            any(
+                failure.get("mobility_egress", {}).get("reason") == "surface_reached"
+                for failure in result.metrics["candidate_failures"]
+            ),
+            result.to_payload(),
+        )
 
     def test_persistent_coverage_projects_large_mobility_egress_result(self):
         body = ExplorationBody()
