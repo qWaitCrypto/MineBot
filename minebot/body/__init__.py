@@ -21,6 +21,7 @@ from .navigation import (
     NavigationTransactions,
     governed_mobility_navigation_config,
     load_limited_navigation_config,
+    navigation_governed_mobility_upgrade_allowed,
     navigation_governed_mobility_upgrade_reason,
 )
 from .pickup import PickupConfig, PickupTransactions
@@ -56,6 +57,7 @@ __all__ = [
     "NavigationTransactions",
     "governed_mobility_navigation_config",
     "load_limited_navigation_config",
+    "navigation_governed_mobility_upgrade_allowed",
     "navigation_governed_mobility_upgrade_reason",
     "PickupConfig",
     "PickupTransactions",

@@ -750,7 +750,8 @@ def _tree_log_types(block_types: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _is_log_block_type(block_type: str) -> bool:
-    return _normalize_item(block_type).endswith("_log")
+    normalized = _normalize_item(block_type)
+    return normalized.endswith("_log") or normalized.endswith("_stem")
 
 
 def _is_tree_navigation_failure(reason: str) -> bool:

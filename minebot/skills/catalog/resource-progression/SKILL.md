@@ -27,7 +27,12 @@ observations.
 
 1. Read the durable task and current authoritative inventory before planning.
 2. Query live recipe data for exact ingredients and station requirements. Do
-   not infer recipe counts from general knowledge or Wiki prose.
+   not infer recipe counts from general knowledge or Wiki prose. If a recipe
+   ingredient group accepts interchangeable materials, keep that equivalence:
+   request `collect_resource(item="logs")` for any log/stem instead of picking
+   `oak_log` as a representative, then craft the concrete plank/item variant
+   matching the owned material. Use exact species only when the task or recipe
+   output truly requires that species.
 3. Check whether the target block requires a tool tier before breaking it.
    Prefer `ensure_tool_for` when the missing prerequisite is itself a bounded
    acquisition chain; use finer tools when the situation needs explicit control.

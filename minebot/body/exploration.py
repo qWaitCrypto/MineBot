@@ -14,7 +14,7 @@ from minebot.body.navigation import (
     NavigationTransactions,
     dry_land_navigation_config,
     governed_mobility_navigation_config,
-    navigation_governed_mobility_upgrade_reason,
+    navigation_governed_mobility_upgrade_allowed,
     navigation_zero_progress,
     pure_movement_navigation_config,
 )
@@ -37,7 +37,23 @@ DEFAULT_VERTICAL_RADIUS = 20
 MAX_REQUESTED_TARGETS = 32
 MAX_EXPANDED_TARGETS = 64
 FRONTIER_FAILURE_LIMIT = 2
-FRONTIER_COLUMN_OFFSETS = ((0, 0), (-4, 0), (4, 0), (0, -4), (0, 4))
+MAX_GOVERNED_MOBILITY_FALLBACKS = 4
+# Sample the region interior, not just its center cross.  Golden-world frontier
+# failures repeatedly occur on uneven water/lava/vertical boundaries where a
+# region center can be unsafe while an interior corner/edge column is a valid
+# Body stand.  This remains a provider-local generic stand-domain expansion:
+# no seed, coordinate, target, or terrain-specific route knowledge is encoded.
+FRONTIER_COLUMN_OFFSETS = (
+    (0, 0),
+    (-4, 0),
+    (4, 0),
+    (0, -4),
+    (0, 4),
+    (-6, -6),
+    (-6, 6),
+    (6, -6),
+    (6, 6),
+)
 FIND_BLOCK_PAGE_SIZE = 32
 FIND_BLOCK_MAX_PAGES = 4
 
@@ -329,7 +345,8 @@ class ExplorationTransactions:
         attempted_this_call: set[tuple[int, int]] = set()
         failures: list[JsonObject] = []
         mutation_blacklist: set[Position] = set()
-        aquatic_attempted = False
+        governed_mobility_fallback_regions: set[tuple[int, int]] = set()
+        governed_mobility_fallbacks_used = 0
         mobility_egress_attempted = False
         evidence_keys: list[str] = []
         covered_this_call: list[list[int]] = []
@@ -559,15 +576,19 @@ class ExplorationTransactions:
                     coverage=prior,
                     success=True,
                     can_retry=True,
-                )
+            )
             reached = nav.success and _region_key(_block_pos(after.pos)) == region
+            dry_after = after.pos
+            trigger_zero_progress = navigation_zero_progress(nav, before.pos, dry_after)
             if (
                 not reached
-                and navigation_governed_mobility_upgrade_reason(navigation_reason)
-                and navigation_zero_progress(nav, before.pos, after.pos)
-                and not aquatic_attempted
+                and navigation_governed_mobility_upgrade_allowed(nav, before.pos, after.pos)
+                and region not in governed_mobility_fallback_regions
+                and governed_mobility_fallbacks_used < min(MAX_GOVERNED_MOBILITY_FALLBACKS, max_regions)
             ):
                 fallback_attempted = True
+                governed_mobility_fallback_regions.add(region)
+                governed_mobility_fallbacks_used += 1
                 if not mobility_egress_attempted and self.mobility_egress is not None:
                     egress_before = self.body.get_state()
                     egress_result = self.mobility_egress(30.0)
@@ -595,7 +616,6 @@ class ExplorationTransactions:
                         )
                     after = egress_after
 
-                aquatic_attempted = True
                 aquatic_before = self.body.get_state()
                 aquatic = self.navigator.navigate_to(
                     GoalComposite(tuple(GoalNear(stand, radius=1) for stand in candidate_stands)),
@@ -616,7 +636,12 @@ class ExplorationTransactions:
                         "success": aquatic.success,
                         "can_retry": aquatic.can_retry,
                         "trigger": navigation_reason,
-                        "trigger_zero_progress": True,
+                        "trigger_zero_progress": trigger_zero_progress,
+                        "trigger_partial_progress": not trigger_zero_progress,
+                        "fallback_budget": {
+                            "used": governed_mobility_fallbacks_used,
+                            "limit": min(MAX_GOVERNED_MOBILITY_FALLBACKS, max_regions),
+                        },
                         "mutation_blacklist_size": len(mutation_blacklist),
                     }
                 )
@@ -657,11 +682,13 @@ class ExplorationTransactions:
                         success=True,
                         can_retry=True,
                     )
-                if aquatic.success:
-                    nav = aquatic
-                    after = aquatic_after
-                    navigation_reason = str(aquatic.reason or "mobility_blocked")
-                    reached = _region_key(_block_pos(after.pos)) == region
+                # The fallback is the latest authoritative attempt even when it
+                # ends in a typed failure.  Keep its final position so recovery
+                # cannot erase useful partial progress from the widened profile.
+                nav = aquatic
+                after = aquatic_after
+                navigation_reason = str(aquatic.reason or "mobility_blocked")
+                reached = aquatic.success and _region_key(_block_pos(after.pos)) == region
                 if reached and fallback_attempted:
                     navigation_uncertainty = tuple(navigation_failures)
                     failures.append(
@@ -693,8 +720,7 @@ class ExplorationTransactions:
                 )
                 governed_advance = (
                     fallback_attempted
-                    and nav.success
-                    and before_gap - after_gap > 2.0
+                    and before_gap - after_gap > 0.25
                 )
                 if (
                     navigation_reason != "progress_yielded"

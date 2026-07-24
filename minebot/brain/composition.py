@@ -46,6 +46,19 @@ class ResourcePlan:
 
 
 COMPOSITION_WORKSTATION_SEARCH_RADIUS = 64
+LOG_RESOURCE_ITEMS = (
+    "oak_log",
+    "spruce_log",
+    "birch_log",
+    "jungle_log",
+    "acacia_log",
+    "dark_oak_log",
+    "mangrove_log",
+    "cherry_log",
+    "pale_oak_log",
+    "crimson_stem",
+    "warped_stem",
+)
 
 
 def register_inventory_tools(registry: ToolRegistry, body: Body) -> None:
@@ -81,12 +94,20 @@ def register_collect_resource_tool(registry: ToolRegistry, context: CompositionC
                 "For collect-N goals, prefer this over manually chaining search_for_block, move_to, "
                 "get_to_block, or mine_block_collect: the Body owns candidate discovery and blacklisting, "
                 "stand-point selection, navigation, governed mining, pickup, and authoritative inventory "
-                "completion truth."
+                "completion truth. When a recipe or goal accepts any equivalent material family, request "
+                "the family name, e.g. item='logs' for any log/stem; use an exact species such as "
+                "item='oak_log' only when that exact species is part of the goal or known recipe output."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "item": {"type": "string"},
+                    "item": {
+                        "type": "string",
+                        "description": (
+                            "Resource item or family. Use 'logs' for any log/stem when species is interchangeable; "
+                            "use exact names like 'oak_log' only for exact-species objectives."
+                        ),
+                    },
                     "count": {"type": "integer", "minimum": 1},
                     "constraints": {
                         "type": "object",
@@ -815,13 +836,13 @@ def _resource_plan(item: str) -> ResourcePlan:
     aliases: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
         "log": (
             "oak_log",
-            ("oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log"),
-            ("oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log"),
+            LOG_RESOURCE_ITEMS,
+            LOG_RESOURCE_ITEMS,
         ),
         "logs": (
             "oak_log",
-            ("oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log"),
-            ("oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log"),
+            LOG_RESOURCE_ITEMS,
+            LOG_RESOURCE_ITEMS,
         ),
         "coal": ("coal", ("coal_ore", "deepslate_coal_ore"), ("coal",)),
         "iron": ("raw_iron", ("iron_ore", "deepslate_iron_ore"), ("raw_iron",)),
@@ -864,7 +885,7 @@ def _max_search_radius(plan: ResourcePlan) -> int:
 
 def _is_tree_resource_plan(plan: ResourcePlan) -> bool:
     return plan.requested_item in {"log", "logs"} or any(
-        block_type.endswith(("_log", "_stem")) for block_type in plan.block_types
+        _is_log_like_item(block_type) for block_type in plan.block_types
     )
 
 
@@ -1086,8 +1107,13 @@ def _segment_diagnostics(segment: dict[str, Any]) -> dict[str, object]:
 
 def _is_log_plan(plan: ResourcePlan) -> bool:
     return plan.requested_item in {"log", "logs"} or any(
-        _normalize_item(block_type).endswith("_log") for block_type in plan.block_types
+        _is_log_like_item(block_type) for block_type in plan.block_types
     )
+
+
+def _is_log_like_item(item: str) -> bool:
+    normalized = _normalize_item(item)
+    return normalized.endswith("_log") or normalized.endswith("_stem")
 
 
 def _parse_pos(value: object) -> list[int] | None:
@@ -1277,7 +1303,14 @@ def _execute_acquisition_step(
 def _acquisition_step_inventory_count(context: CompositionContext, step: AcquisitionStep) -> int | None:
     if step.kind == "equip":
         return step.count
-    inventory = _read_count(context, (step.item,))
+    items = (step.item,)
+    if step.kind == "collect":
+        expected_drops = step.detail.get("expected_drops")
+        if isinstance(expected_drops, (list, tuple)):
+            items = tuple(_normalize_item(item) for item in expected_drops if item)
+        if not items:
+            items = (step.item,)
+    inventory = _read_count(context, items)
     if not inventory.success:
         return None
     return int((inventory.metrics or {}).get("count") or 0)

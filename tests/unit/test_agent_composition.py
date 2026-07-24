@@ -12,6 +12,7 @@ from minebot.brain.composition import (
     resource_plan_for,
 )
 from minebot.brain.acquisition import RecipeVariant
+from minebot.brain.acquisition import resolve_acquisition
 from minebot.brain.modes import ModeRuntime
 from minebot.brain.progress import FAILURE_STORM_LIMIT, ProgressAbort, ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
@@ -607,7 +608,8 @@ def register_fake_acquisition_leaf_tools(registry, body, *, fail_tool=None):
         if name == "collect_resource":
             item = str(params["item"]).removeprefix("minecraft:")
             count = int(params.get("count") or 1)
-            body.inventory_counts[item] = body.inventory_counts.get(item, 0) + count
+            stored_item = "oak_log" if item == "logs" else item
+            body.inventory_counts[stored_item] = body.inventory_counts.get(stored_item, 0) + count
         elif name == "craft_item":
             item = str(params["item"]).removeprefix("minecraft:")
             count = int(params.get("count") or 1)
@@ -1176,7 +1178,20 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertIn("stand-point selection", tool.description)
         self.assertIn("pickup", tool.description)
         self.assertIn("authoritative inventory completion truth", tool.description)
+        self.assertIn("item='logs'", tool.description)
+        self.assertIn("exact species", tool.description)
+        self.assertIn("logs", tool.input_schema["properties"]["item"]["description"])
         self.assertEqual(tool.framework_view()["description"], tool.description)
+
+    def test_resource_plan_log_family_matches_exploration_yardstick_family(self):
+        logs = resource_plan_for("logs")
+
+        self.assertIn("mangrove_log", logs.block_types)
+        self.assertIn("cherry_log", logs.block_types)
+        self.assertIn("pale_oak_log", logs.block_types)
+        self.assertIn("crimson_stem", logs.block_types)
+        self.assertIn("warped_stem", logs.block_types)
+        self.assertEqual(logs.block_types, logs.expected_drops)
 
     def test_collect_resource_passes_bounded_domain_budgets(self):
         body = FakeBody()
@@ -1354,7 +1369,7 @@ class AgentCompositionTests(unittest.TestCase):
 
     def test_collect_resource_counts_equivalent_log_inventory_items(self):
         body = FakeBody()
-        body.inventory_counts = {"spruce_log": 32, "birch_log": 32}
+        body.inventory_counts = {"spruce_log": 32, "birch_log": 31, "cherry_log": 1}
         registry = ToolRegistry()
         register_inventory_tools(registry, body)
         ctx, _trace_events = composition_context(body, registry)
@@ -1364,6 +1379,28 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.success, result)
         self.assertEqual(result.reason, "already_satisfied")
         self.assertEqual(result.metrics["after_count"], 64)
+
+    def test_acquisition_collects_generic_logs_without_oak_narrowing(self):
+        plan = resolve_acquisition("logs", 4, {}, acquisition_recipe_lookup)
+
+        self.assertIsInstance(plan, list)
+        self.assertEqual(plan[0].kind, "collect")
+        self.assertEqual(plan[0].item, "logs")
+        self.assertIn("spruce_log", plan[0].detail["expected_drops"])
+        self.assertIn("cherry_log", plan[0].detail["expected_drops"])
+
+    def test_acquisition_existing_non_oak_logs_satisfy_generic_route(self):
+        plan = resolve_acquisition("logs", 4, {"spruce_log": 4}, acquisition_recipe_lookup)
+
+        self.assertEqual(plan, [])
+
+    def test_acquisition_keeps_exact_oak_log_exact(self):
+        plan = resolve_acquisition("oak_log", 4, {}, acquisition_recipe_lookup)
+
+        self.assertIsInstance(plan, list)
+        self.assertEqual(plan[0].kind, "collect")
+        self.assertEqual(plan[0].item, "oak_log")
+        self.assertEqual(plan[0].detail["expected_drops"], ["oak_log"])
 
     def test_collect_resource_reports_authoritative_partial_progress_as_failure(self):
         body = FakeBody()
@@ -1445,10 +1482,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.metrics["target_count"], 64)
         self.assertEqual(result.metrics["remaining_count"], 46)
         self.assertEqual(result.metrics["requested_item"], "logs")
-        self.assertEqual(
-            calls[0]["block_types"],
-            ["oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log"],
-        )
+        self.assertEqual(calls[0]["block_types"], list(resource_plan_for("logs").block_types))
 
     def test_collect_resource_does_not_widen_specific_log_goal(self):
         body = FakeBody()

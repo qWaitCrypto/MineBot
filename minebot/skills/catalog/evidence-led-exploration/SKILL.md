@@ -27,7 +27,9 @@ exhausted without a materially different strategy.
 
 1. Read current task context and authoritative Body state. Choose target classes
    that answer the active objective, grouping compatible block and entity targets
-   into one `explore_for` call instead of rewalking the same area.
+   into one `explore_for` call instead of rewalking the same area. Use supported
+   groups such as `#logs` and `#flowers` when any family member satisfies the
+   objective; use exact block names only when the exact species is required.
 2. Set finite distance and region budgets. Ask for target predicates, never
    invent reconnaissance coordinates or steer movement step by step.
 3. On `found`, use the returned block positions or entity identities to choose a

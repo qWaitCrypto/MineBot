@@ -1427,7 +1427,9 @@ def _read_nearby_entities_tool(body: Body) -> RegisteredTool:
 def _read_recipe_tool(body: Body) -> RegisteredTool:
     return _tool(
         "read_recipe",
-        "Read native runtime recipe variants for an item so the model can reason about prerequisites before crafting.",
+        "Read native runtime recipe variants for an item so the model can reason about prerequisites before crafting. "
+        "When a recipe ingredient group lists interchangeable options, do not collapse it to the first option; "
+        "collect a matching material family such as logs, then craft the concrete output matching the owned ingredient.",
         _object_schema(
             {
                 "item": {"type": "string", "minLength": 1},

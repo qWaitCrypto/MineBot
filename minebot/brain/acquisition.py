@@ -45,6 +45,11 @@ LOG_ITEMS = (
     "jungle_log",
     "acacia_log",
     "dark_oak_log",
+    "mangrove_log",
+    "cherry_log",
+    "pale_oak_log",
+    "crimson_stem",
+    "warped_stem",
 )
 PLANK_ITEMS = (
     "oak_planks",
@@ -53,6 +58,11 @@ PLANK_ITEMS = (
     "jungle_planks",
     "acacia_planks",
     "dark_oak_planks",
+    "mangrove_planks",
+    "cherry_planks",
+    "pale_oak_planks",
+    "crimson_planks",
+    "warped_planks",
 )
 PLANK_FROM_LOG = dict(zip(PLANK_ITEMS, LOG_ITEMS, strict=True))
 
@@ -108,14 +118,19 @@ class _SmeltRoute:
 
 
 COLLECT_ROUTES: dict[str, _CollectRoute] = {
-    "log": _CollectRoute("oak_log", "oak_log", LOG_ITEMS, LOG_ITEMS),
-    "logs": _CollectRoute("oak_log", "oak_log", LOG_ITEMS, LOG_ITEMS),
+    "log": _CollectRoute("oak_log", "logs", LOG_ITEMS, LOG_ITEMS),
+    "logs": _CollectRoute("oak_log", "logs", LOG_ITEMS, LOG_ITEMS),
     "oak_log": _CollectRoute("oak_log", "oak_log", ("oak_log",), ("oak_log",)),
     "spruce_log": _CollectRoute("spruce_log", "spruce_log", ("spruce_log",), ("spruce_log",)),
     "birch_log": _CollectRoute("birch_log", "birch_log", ("birch_log",), ("birch_log",)),
     "jungle_log": _CollectRoute("jungle_log", "jungle_log", ("jungle_log",), ("jungle_log",)),
     "acacia_log": _CollectRoute("acacia_log", "acacia_log", ("acacia_log",), ("acacia_log",)),
     "dark_oak_log": _CollectRoute("dark_oak_log", "dark_oak_log", ("dark_oak_log",), ("dark_oak_log",)),
+    "mangrove_log": _CollectRoute("mangrove_log", "mangrove_log", ("mangrove_log",), ("mangrove_log",)),
+    "cherry_log": _CollectRoute("cherry_log", "cherry_log", ("cherry_log",), ("cherry_log",)),
+    "pale_oak_log": _CollectRoute("pale_oak_log", "pale_oak_log", ("pale_oak_log",), ("pale_oak_log",)),
+    "crimson_stem": _CollectRoute("crimson_stem", "crimson_stem", ("crimson_stem",), ("crimson_stem",)),
+    "warped_stem": _CollectRoute("warped_stem", "warped_stem", ("warped_stem",), ("warped_stem",)),
     "cobblestone": _CollectRoute("cobblestone", "cobblestone", ("stone", "cobblestone"), ("cobblestone",)),
     "coal": _CollectRoute("coal", "coal", ("coal_ore", "deepslate_coal_ore"), ("coal",)),
     "raw_iron": _CollectRoute("raw_iron", "raw_iron", ("iron_ore", "deepslate_iron_ore"), ("raw_iron",)),
@@ -186,7 +201,8 @@ class _Planner:
         route: _CollectRoute,
         chain: tuple[str, ...],
     ) -> AcquisitionError | None:
-        missing = max(0, count - self.counts.get(route.inventory_item, 0))
+        owned = sum(self.counts.get(item, 0) for item in route.expected_drops)
+        missing = max(0, count - owned)
         required_tier = _strongest_required_tier(route.block_types)
         if required_tier is not None:
             best = best_owned_pickaxe(self.counts)

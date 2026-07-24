@@ -174,6 +174,59 @@ def navigation_zero_progress(
 
     if _position_distance(before, after) > 0.25:
         return False
+    observed, positive = _navigation_progress_evidence(result, before)
+    return observed and not positive
+
+
+def navigation_governed_mobility_upgrade_reason(reason: object) -> bool:
+    """Return whether a dry-first zero-progress failure may widen mobility.
+
+    Navigation recovery wraps the underlying route terminal as
+    ``recovery_exhausted:<terminal>``. Dry-first consumers must classify that by
+    reason family, not by the literal outer string; otherwise a genuine no-path
+    route can bypass the governed swim/place/break/pillar escalation that exists
+    precisely for compound terrain.
+    """
+
+    value = str(reason or "")
+    if value in {"no_path", "budget_exceeded"}:
+        return True
+    if value.startswith("recovery_exhausted:"):
+        return value.split(":", 1)[1] in {"no_path", "budget_exceeded"}
+    return False
+
+
+def navigation_governed_mobility_upgrade_allowed(
+    result: ToolResult,
+    before: Position,
+    after: Position,
+) -> bool:
+    """Decide whether a dry-first terminal may enter governed mobility.
+
+    A zero-progress terminal is the original escalation case.  A route that
+    actually advanced toward its goal before ending in ``no_path`` or
+    ``budget_exceeded`` is also eligible, but only when both pieces of evidence
+    agree: the authoritative body moved and the navigation result reports a
+    positive path/movement diagnostic.  This prevents a stale or merely
+    hypothetical partial path from widening every ordinary failed route.
+    """
+
+    if result.success or not navigation_governed_mobility_upgrade_reason(result.reason):
+        return False
+    if navigation_zero_progress(result, before, after):
+        return True
+    if _position_distance(before, after) <= 0.25:
+        return False
+    _observed, positive = _navigation_progress_evidence(result, before)
+    return positive
+
+
+def _navigation_progress_evidence(
+    result: ToolResult,
+    before: Position,
+) -> tuple[bool, bool]:
+    """Return ``(observed, positive)`` path evidence from a navigation result."""
+
     observed = False
     positive = False
 
@@ -212,25 +265,7 @@ def navigation_zero_progress(
                     visit(nested)
 
     visit(result.metrics or {})
-    return observed and not positive
-
-
-def navigation_governed_mobility_upgrade_reason(reason: object) -> bool:
-    """Return whether a dry-first zero-progress failure may widen mobility.
-
-    Navigation recovery wraps the underlying route terminal as
-    ``recovery_exhausted:<terminal>``. Dry-first consumers must classify that by
-    reason family, not by the literal outer string; otherwise a genuine no-path
-    route can bypass the governed swim/place/break/pillar escalation that exists
-    precisely for compound terrain.
-    """
-
-    value = str(reason or "")
-    if value in {"no_path", "budget_exceeded"}:
-        return True
-    if value.startswith("recovery_exhausted:"):
-        return value.split(":", 1)[1] in {"no_path", "budget_exceeded"}
-    return False
+    return observed, positive
 
 
 def _position_distance(

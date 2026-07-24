@@ -178,6 +178,64 @@ class PagedFindBlocksBody(ExplorationBody):
         return self.pages[start]
 
 
+class CornerOnlyFrontierBody(ExplorationBody):
+    def __init__(self, *, safe_columns, blocks=None):
+        super().__init__(blocks=blocks)
+        self.safe_columns = set(safe_columns)
+
+    def perceive(self, scope, params):
+        if scope != "blockCells":
+            return super().perceive(scope, params)
+        self.perceptions.append((scope, dict(params)))
+        cells = list(params.get("cells") or ())
+        start = int(params.get("start") or 0)
+        limit = int(params.get("limit") or 128)
+        page = cells[start : start + limit]
+        facts = []
+        for pos in page:
+            x, y, z = int(pos[0]), int(pos[1]), int(pos[2])
+            safe_column = (x, z) in self.safe_columns
+            if safe_column and y == 63:
+                block_type = "stone"
+                state = "SOLID"
+            elif safe_column and y in {64, 65}:
+                block_type = "air"
+                state = "CLEAR"
+            elif y == 63:
+                block_type = "water"
+                state = "CLEAR"
+            else:
+                block_type = "air"
+                state = "CLEAR"
+            facts.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "z": z,
+                    "type": block_type,
+                    "state": state,
+                    "properties": {},
+                }
+            )
+        next_start = start + len(page)
+        complete = next_start >= len(cells)
+        return PerceptionResult(
+            bot="Bot1",
+            scope=scope,
+            type="perception",
+            ok=True,
+            complete=complete,
+            data={
+                "cells": facts,
+                "count": len(facts),
+                "total": len(cells),
+                "nextStart": None if complete else next_start,
+            },
+            next=None if complete else str(next_start),
+            uncertainty=[] if complete else [{"reason": "limit_exceeded"}],
+        )
+
+
 def _find_blocks_page(*, blocks=(), complete, next_start=None):
     return PerceptionResult(
         bot="Bot1",
@@ -316,6 +374,69 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertEqual(result.reason, "budget_exhausted")
         self.assertEqual(len(navigator.calls), 2)
         self.assertFalse(navigator.calls[1][1]["config"].aquatic_traversal)
+
+    def test_partial_no_path_with_authoritative_displacement_uses_governed_fallback(self):
+        class PartialProgressNavigator(ExplorationNavigator):
+            def navigate_to(self, goal, **kwargs):
+                call_index = len(self.calls)
+                if call_index == 0:
+                    self.calls.append((goal, kwargs))
+                    self.body.state = _state((8.0, 64.0, 0.0))
+                    return ToolResult(
+                        False,
+                        "no_path",
+                        True,
+                        metrics=POSITIVE_PATH_NAVIGATION_METRICS,
+                    )
+                return super().navigate_to(goal, **kwargs)
+
+        body = ExplorationBody()
+        navigator = PartialProgressNavigator(
+            body,
+            outcomes=[ToolResult(True, "arrived", False)],
+        )
+        runtime = ExplorationTransactions(body, navigator, MemoryExplorationCoverageStore())
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertGreaterEqual(len(navigator.calls), 2)
+        self.assertTrue(navigator.calls[1][1]["config"].aquatic_traversal)
+        attempts = result.metrics["candidate_failures"][0]["navigation_attempts"]
+        self.assertFalse(attempts[0].get("trigger_zero_progress", False))
+        self.assertTrue(attempts[1]["trigger_partial_progress"])
+
+    def test_governed_fallback_is_local_to_frontiers_and_has_a_call_cap(self):
+        class CappedFallbackNavigator(ExplorationNavigator):
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                config = kwargs["config"]
+                if config.aquatic_traversal:
+                    target = goal.representative(
+                        (int(self.body.state.pos[0]), 64, int(self.body.state.pos[2]))
+                    )
+                    self.body.state = _state(tuple(float(value) for value in target))
+                    return ToolResult(True, "arrived", False)
+                if config.recovery_attempts == 0:
+                    return ToolResult(False, "no_path", True)
+                return ToolResult(
+                    False,
+                    "no_path",
+                    True,
+                    metrics=ZERO_PROGRESS_NAVIGATION_METRICS,
+                )
+
+        body = ExplorationBody()
+        navigator = CappedFallbackNavigator(body)
+        runtime = ExplorationTransactions(body, navigator, MemoryExplorationCoverageStore())
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=6)
+
+        fallback_calls = [
+            call for call in navigator.calls if call[1]["config"].aquatic_traversal
+        ]
+        self.assertEqual(len(fallback_calls), 4)
+        self.assertTrue(result.reason in {"mobility_blocked", "budget_exhausted"})
 
     def test_zero_progress_budget_exceeded_uses_aquatic_fallback(self):
         runtime, _, navigator = _runtime(
@@ -569,6 +690,26 @@ class ExplorationTransactionsTests(unittest.TestCase):
         block_cell_requests = [params for scope, params in body.perceptions if scope == "blockCells"]
         self.assertTrue(block_cell_requests)
         self.assertTrue(all(len(params["cells"]) <= 64 for params in block_cell_requests))
+
+    def test_frontier_stand_domain_samples_region_corners_not_only_center_cross(self):
+        body = CornerOnlyFrontierBody(
+            safe_columns={(-14, -14)},
+            blocks={
+                (-1, -1): [
+                    {"x": -8, "y": 64, "z": -8, "type": "spruce_log", "state": "SOLID", "dist2": 1.0}
+                ]
+            },
+        )
+        runtime, _, navigator = _runtime(body=body)
+
+        result = runtime.explore_for(block_targets=("#logs",), max_regions=2)
+
+        self.assertEqual(result.reason, "found", result.to_payload())
+        self.assertEqual(result.metrics["blocks"][0]["pos"], [-8, 64, -8])
+        self.assertTrue(navigator.calls)
+        first_goal = navigator.calls[0][0]
+        self.assertIsInstance(first_goal, GoalComposite)
+        self.assertEqual(first_goal.goals[0].pos, (-14, 64, -14))
 
     def test_query_scoped_negative_coverage_is_not_rewalked(self):
         coverage = MemoryExplorationCoverageStore()

@@ -734,7 +734,9 @@ def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
         "explore_for",
         "Explore safe new world frontiers for one or more block or entity target classes. "
         "Choose WHAT to find; the Body owns frontier selection, navigation, coverage, and "
-        "terminal verification. If a result includes concrete block coordinates, use "
+        "terminal verification. Use supported target groups such as '#logs' and '#flowers' "
+        "when any member of that family satisfies the objective; reserve exact block names "
+        "such as 'oak_log' for exact-species goals. If a result includes concrete block coordinates, use "
         "mine_block_collect for one of those exact positions; collect_resource starts a "
         "separate count-based local search. Resumable results include a typed continuation "
         "whose target descriptor must remain unchanged.",
@@ -744,6 +746,10 @@ def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
                 "block_targets": {
                     "type": "array",
                     "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "description": (
+                        "Block target names or supported groups. Use '#logs' for any log/stem "
+                        "and '#flowers' for any flower when the exact member is interchangeable."
+                    ),
                     "maxItems": 32,
                 },
                 "entity_targets": {
@@ -1178,7 +1184,8 @@ def _search_tool(work: BlockWork) -> RegisteredTool:
         "search_for_block",
         "Read nearby block candidates without moving. A hit verifies block identity and geometric "
         "distance only; it does not verify line of sight, a usable stand point, or interaction readiness. "
-        "Use get_to_block for one block-approach objective and collect_resource for count-based acquisition.",
+        "Use get_to_block for one block-approach objective and collect_resource for count-based acquisition. "
+        "For interchangeable material families, pass the full accepted block list rather than a representative species.",
         {
             "type": "object",
             "properties": {
