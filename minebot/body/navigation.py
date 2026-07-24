@@ -382,6 +382,11 @@ class NavigationTransactions:
         self.body = body
         self.progress = progress or LocalProgressController()
         self.governance = governance or getattr(getattr(conformance_model, "costs", None), "governance", None)
+        # A failed survival reflex is a provider-wide precondition, not a
+        # consumer-specific navigation error.  Keep one bounded recovery
+        # signature so a still-unchanged hazard cannot turn a frontier loop
+        # into repeated recovery attempts.
+        self._last_survival_recovery_signature: tuple[object, ...] | None = None
 
     @classmethod
     def server_side(
@@ -397,6 +402,102 @@ class NavigationTransactions:
             body,
             progress=progress,
             governance=governance,
+        )
+
+    def _recover_survival_hazard(
+        self,
+        state: BodyState,
+        parent_config: NavigationRunConfig,
+    ) -> ToolResult:
+        """Run one bounded provider-owned recovery from an unresolved hazard.
+
+        Scarpet is the authority for the hazard predicate and supplies a
+        recovery target derived from that same predicate.  Python must not
+        reconstruct a lava/water safety rule from a stale local map; it only
+        dispatches the target with the explicit recovery marker and verifies
+        the authoritative postcondition afterward.
+        """
+
+        hazard = dict(state.hazard_unresolved or {})
+        raw_target = hazard.get("recovery_target")
+        if not isinstance(raw_target, (list, tuple)) or len(raw_target) != 3:
+            return ToolResult(
+                False,
+                "survival_recovery_target_unavailable",
+                False,
+                next_suggestion="observe the Body hazard state again before attempting ordinary actions",
+                metrics={
+                    "attempted": False,
+                    "hazard_unresolved": hazard,
+                    "provider_target": raw_target,
+                },
+            )
+        try:
+            target = (int(raw_target[0]), int(raw_target[1]), int(raw_target[2]))
+        except (TypeError, ValueError):
+            return ToolResult(
+                False,
+                "survival_recovery_target_invalid",
+                False,
+                next_suggestion="observe the Body hazard state again before attempting ordinary actions",
+                metrics={
+                    "attempted": False,
+                    "hazard_unresolved": hazard,
+                    "provider_target": raw_target,
+                },
+            )
+
+        kind = str(hazard.get("kind") or "unknown")
+        recovery_config = pure_movement_navigation_config(
+            NavigationRunConfig(
+                max_segments=max(1, min(parent_config.max_segments, 8)),
+                max_partial_segments=max(1, min(
+                    parent_config.max_partial_segments
+                    if parent_config.max_partial_segments is not None
+                    else parent_config.max_segments,
+                    4,
+                )),
+                segment_timeout_s=max(1.0, min(parent_config.segment_timeout_s, 15.0)),
+                server_grid_radius=min(parent_config.server_grid_radius, 32),
+                server_max_expand=min(parent_config.server_max_expand, 800),
+                recheck_lookahead=parent_config.recheck_lookahead,
+                allow_swim=True,
+                aquatic_traversal=kind == "water",
+                survival_recovery=True,
+                recovery_attempts=0,
+                # Recovery targets are provider-verified block centers.  The
+                # ordinary 0.75 arrival radius can stop in the adjacent cell,
+                # which may still be inside the hazard neighborhood.
+                movement_arrival_radius=0.25,
+                load_limited=parent_config.load_limited,
+            )
+        )
+        navigation = self.navigate_to(
+            GoalNear(target, radius=0),
+            break_context=BreakContext.RECOVERY,
+            config=recovery_config,
+        )
+        after = self.body.get_state()
+        cleared = after.hazard_unresolved is None
+        metrics = {
+            "attempted": True,
+            "kind": kind,
+            "hazard_unresolved": hazard,
+            "recovery_target": list(target),
+            "navigation": navigation.to_payload(),
+            "final_pos": list(after.pos),
+            "hazard_cleared": cleared,
+            "owner": after.body_owner,
+            "pending_action_count": after.pending_action_count,
+        }
+        if cleared:
+            return ToolResult(True, "survival_recovered", False, metrics=metrics)
+        return ToolResult(
+            False,
+            "survival_recovery_incomplete",
+            False,
+            next_suggestion="the provider-owned recovery did not clear the hazard; keep ordinary actions blocked",
+            metrics=metrics,
         )
 
     def navigate_to(
@@ -466,18 +567,47 @@ class NavigationTransactions:
                 },
             )
         if state.hazard_unresolved is not None and not cfg.survival_recovery:
-            return _result(
-                False,
-                "survival_hazard_unresolved",
-                False,
-                goal_anchor,
-                executed,
-                {
-                    "navigation_goal": nav_goal.payload(),
-                    "hazard_unresolved": dict(state.hazard_unresolved),
-                    "next_action": "survival_recovery",
-                },
-            )
+            hazard = dict(state.hazard_unresolved)
+            signature = _survival_recovery_signature(state)
+            recovery: ToolResult | None = None
+            if signature != self._last_survival_recovery_signature:
+                self._last_survival_recovery_signature = signature
+                recovery = self._recover_survival_hazard(state, cfg)
+                if recovery.success:
+                    refreshed = self.body.get_state()
+                    if refreshed.hazard_unresolved is None:
+                        self._last_survival_recovery_signature = None
+                        state = refreshed
+                        start = _block_pos(state)
+                        goal_anchor = nav_goal.representative(start)
+                    else:
+                        recovery = ToolResult(
+                            False,
+                            "survival_recovery_incomplete",
+                            False,
+                            metrics={
+                                **dict(recovery.metrics or {}),
+                                "hazard_unresolved_after": dict(refreshed.hazard_unresolved),
+                            },
+                        )
+            if recovery is None or not recovery.success:
+                return _result(
+                    False,
+                    "survival_hazard_unresolved",
+                    False,
+                    goal_anchor,
+                    executed,
+                    {
+                        "navigation_goal": nav_goal.payload(),
+                        "hazard_unresolved": hazard,
+                        "next_action": "survival_recovery",
+                        "survival_recovery": (
+                            dict(recovery.metrics or {}) | {"reason": recovery.reason}
+                            if recovery is not None
+                            else {"attempted": False, "reason": "unchanged_hazard_signature"}
+                        ),
+                    },
+                )
         server_goals, goal_set_preserved = _server_goal_set(nav_goal, start)
         gx, gy, gz = int(goal_anchor[0]), int(goal_anchor[1]), int(goal_anchor[2])
         ar = cfg.movement_arrival_radius or 0.75
@@ -1325,6 +1455,24 @@ class NavigationTransactions:
 
 def _block_pos(state: BodyState) -> Position:
     return (floor(state.pos[0]), floor(state.pos[1]), floor(state.pos[2]))
+
+
+def _survival_recovery_signature(state: BodyState) -> tuple[object, ...]:
+    hazard = state.hazard_unresolved or {}
+    raw_pos = hazard.get("pos") if isinstance(hazard, dict) else None
+    raw_target = hazard.get("recovery_target") if isinstance(hazard, dict) else None
+
+    def xyz(value: object) -> tuple[object, ...]:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            return ()
+        return tuple(value)
+
+    return (
+        str(hazard.get("kind") or "unknown") if isinstance(hazard, dict) else "unknown",
+        xyz(raw_pos),
+        xyz(raw_target),
+        _block_pos(state),
+    )
 
 
 def _server_goal_set(goal, start: Position) -> tuple[tuple[tuple[int, int, int, int], ...], bool]:

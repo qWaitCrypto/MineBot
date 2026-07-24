@@ -132,7 +132,7 @@ class AutonomyQualityTests(unittest.TestCase):
         )
 
         self.assertEqual(report["schema_version"], AUTONOMY_QUALITY_SCHEMA_VERSION)
-        self.assertEqual(report["schema_version"], "autonomy-quality-v2")
+        self.assertEqual(report["schema_version"], "autonomy-quality-v3")
 
     def test_material_incomplete_but_healthy_output_can_pass(self):
         report = evaluate_autonomy_quality(
@@ -261,6 +261,76 @@ class AutonomyQualityTests(unittest.TestCase):
         self.assertEqual(output["authoritative_progress_events"], 1)
         self.assertIn("seq:77", output["authoritative_progress_refs"])
 
+    def test_initial_inventory_and_equipment_are_not_run_output(self):
+        events = _healthy_material_incomplete_trace()
+        for event in events:
+            if event.get("event") == "body_state":
+                event["inventory_counts"] = {"minecraft:oak_log": 3}
+                event["selected_item"] = "minecraft:wooden_pickaxe"
+                event["offhand_item"] = "minecraft:shield"
+
+        report = evaluate_autonomy_quality(
+            events,
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        output = report["signals"]["effective_output"]
+        self.assertEqual(output["points"], 0)
+        self.assertEqual(output["yardstick"]["families"]["logs"]["points"], 0)
+        self.assertFalse(output["yardstick"]["equipment"]["stone_pickaxe_equipped"]["satisfied"])
+
+    def test_position_is_required_for_fail_closed_process_health(self):
+        events = _healthy_material_incomplete_trace()
+        for event in events:
+            if event.get("event") == "body_state":
+                event.pop("pos", None)
+
+        report = evaluate_autonomy_quality(
+            events,
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        self.assertEqual(report["verdict"], "insufficient_evidence")
+        self.assertIn("body_state.pos", report["coverage"]["missing"])
+
+    def test_terminal_event_is_required_for_evidence(self):
+        events = [event for event in _healthy_material_incomplete_trace() if event.get("event") != "session_terminal"]
+
+        report = evaluate_autonomy_quality(
+            events,
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        self.assertEqual(report["verdict"], "insufficient_evidence")
+        self.assertIn("session_terminal", report["coverage"]["missing"])
+
+    def test_terminal_owner_or_pending_action_is_a_hard_failure(self):
+        events = _healthy_material_incomplete_trace()
+        final_state = next(
+            event
+            for event in reversed(events)
+            if event.get("event") == "body_state"
+        )
+        final_state["body_owner"] = "Bot"
+        final_state["pending_action_count"] = 1
+
+        report = evaluate_autonomy_quality(
+            events,
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        cleanup = report["hard_invariants"]["terminal_cleanup"]
+        self.assertEqual(report["verdict"], "fail")
+        self.assertEqual(cleanup["verdict"], "fail")
+        self.assertEqual(
+            cleanup["failures"],
+            ["body_owner_not_released", "pending_actions_not_empty"],
+        )
+
     def test_repeated_body_event_observation_does_not_mint_duplicate_output(self):
         states = [_body_state(index + 1, ts, x=index * 2.0, counts={}) for index, ts in enumerate(range(0, 1801, 120))]
         events = _coverage_events(states=states)
@@ -348,6 +418,45 @@ class AutonomyQualityTests(unittest.TestCase):
 
         self.assertEqual(report["verdict"], "fail")
         self.assertEqual(report["signals"]["process_health"]["repeated_failure"]["streak"], 4)
+
+    def test_read_only_failure_does_not_reset_physical_failure_streak(self):
+        events = _healthy_material_incomplete_trace()
+        events.extend(
+            [
+                _invoke(900, 500, "move_to", "same", "move:point", mutating=True),
+                _result(901, 510, "move_to", "same", "move:point", success=False, reason="no_path"),
+                _invoke(902, 520, "read_state", "read", "read_state:refresh", mutating=False),
+                {
+                    "event": "tool_result",
+                    "seq": 903,
+                    "ts": 530.0,
+                    "tool": "read_state",
+                    "tool_call_id": "read-call",
+                    "args_hash": "read",
+                    "tactic_signature": "read_state:refresh",
+                    "success": False,
+                    "reason": "state_unavailable",
+                    "mutating": False,
+                },
+                _invoke(904, 540, "move_to", "same", "move:point", mutating=True),
+                _result(905, 550, "move_to", "same", "move:point", success=False, reason="no_path"),
+                _invoke(906, 560, "move_to", "same", "move:point", mutating=True),
+                _result(907, 570, "move_to", "same", "move:point", success=False, reason="no_path"),
+                _invoke(908, 580, "move_to", "same", "move:point", mutating=True),
+                _result(909, 590, "move_to", "same", "move:point", success=False, reason="no_path"),
+            ]
+        )
+
+        report = evaluate_autonomy_quality(
+            sorted(events, key=lambda event: (event["ts"], event["seq"])),
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        repeated = report["signals"]["process_health"]["repeated_failure"]
+        self.assertEqual(report["verdict"], "fail")
+        self.assertIsNotNone(repeated)
+        self.assertEqual(repeated["streak"], 4)
 
     def test_zero_output_is_failure_not_honest_success(self):
         states = [_body_state(index + 1, ts, x=index * 3.0) for index, ts in enumerate(range(0, 1801, 120))]

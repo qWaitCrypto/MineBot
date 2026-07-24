@@ -14,12 +14,13 @@ from minebot.game.transport import BodyTransport
 
 T = TypeVar("T")
 
-# A single RCON packet's payload is capped at 4096 by the protocol; Carpet
-# honors this. Any response whose declared size exceeds this ceiling is the
-# signature of a stream desync (leftover bytes from a truncated/fragmented
-# prior response being read as this request's 4-byte size prefix) — reading
-# that many bytes would hang the socket until timeout. Cap and reconnect.
-MAX_PACKET_BYTES = 8192
+# Minecraft's RCON implementation splits a command response every 4096 Java
+# string characters, with no end marker. UTF-8 encoding can make one such
+# chunk larger than 4096 bytes, so the framing guard must allow the protocol's
+# real upper bound while still rejecting implausible stream-desync sizes.
+RCON_RESPONSE_CHUNK_CHARS = 4096
+MAX_PACKET_BYTES = (RCON_RESPONSE_CHUNK_CHARS * 3) + 10
+RCON_RESPONSE_DRAIN_TIMEOUT_S = 0.25
 _DESYNC_SIZE = "RCON response size above ceiling: stream desynced"
 _DESYNC_ID = "RCON response id mismatch: stream desynced"
 
@@ -32,6 +33,7 @@ class RconConfig:
     timeout_s: float = 20.0
     reconnect_attempts: int = 1
     reconnect_backoff_s: float = 0.05
+    response_drain_timeout_s: float = RCON_RESPONSE_DRAIN_TIMEOUT_S
 
 
 class RconClient(BodyTransport):
@@ -114,24 +116,97 @@ class RconClient(BodyTransport):
         self._req_id += 1
         body = struct.pack("<ii", req_id, kind) + payload.encode("utf-8") + b"\x00\x00"
         self._sock.sendall(struct.pack("<i", len(body)) + body)
-        size = struct.unpack("<i", self._recv_exact(4))[0]
-        # Desync guard: a leftover packet from a truncated/fragmented prior
-        # response would be read here as this request's size prefix, often as
-        # an implausible value. Reject before _recv_exact hangs the socket.
-        if size < 0 or size > MAX_PACKET_BYTES:
+        response_parts: list[str] = []
+        packet = self._read_response_packet()
+        while True:
+            _size, resp_id, _resp_kind, text = packet
+            if resp_id == -1:
+                raise RconError("RCON authentication failed")
+            # Carpet echoes the request id on every response. A mismatch means
+            # an older packet was already left in the stream; reconnect before
+            # parsing it as a new logical response.
+            if kind == 2 and resp_id != req_id:
+                raise RconError(_DESYNC_ID)
+            response_parts.append(text)
+
+            # Minecraft sends no response terminator. A short packet is the
+            # final chunk; a full chunk may have a continuation, so probe for
+            # one with a bounded read timeout. This consumes all packets before
+            # returning, preventing a large read-only response from poisoning
+            # the next request while preserving request_once's no-replay rule.
+            if len(text) < RCON_RESPONSE_CHUNK_CHARS:
+                break
+            packet = self._read_optional_response_packet()
+            if packet is None:
+                break
+            # Continue with the next packet; a short packet terminates the
+            # loop, while another full packet asks for one more bounded probe.
+        return "".join(response_parts)
+
+    def _read_response_packet(self) -> tuple[int, int, int, str]:
+        header = self._recv_exact(4)
+        return self._decode_response_packet(header)
+
+    def _decode_response_packet(self, header: bytes) -> tuple[int, int, int, str]:
+        size = struct.unpack("<i", header)[0]
+        # Desync guard: a leftover packet's bytes read as this request's size
+        # prefix can be implausible. Reject before _recv_exact hangs the socket.
+        if size < 10 or size > MAX_PACKET_BYTES:
             raise RconError(_DESYNC_SIZE)
         data = self._recv_exact(size)
-        resp_id, _resp_kind = struct.unpack("<ii", data[:8])
-        if resp_id == -1:
-            raise RconError("RCON authentication failed")
-        # Desync guard: Carpet echoes the request id on every response (live
-        # verified). A mismatch means this packet belongs to a previous request
-        # whose bytes were left in the stream — reconnect rather than parse
-        # garbage (which would surface as a protocol-envelope misalignment like
-        # "expected state, got perception").
-        if kind == 2 and resp_id != req_id:
-            raise RconError(_DESYNC_ID)
-        return data[8:-2].decode("utf-8", errors="replace")
+        resp_id, resp_kind = struct.unpack("<ii", data[:8])
+        if data[-2:] != b"\x00\x00":
+            raise RconError("RCON response missing terminator")
+        return size, resp_id, resp_kind, data[8:-2].decode("utf-8", errors="replace")
+
+    def _read_optional_response_packet(self) -> tuple[int, int, int, str] | None:
+        if self._sock is None:
+            raise RconError("RCON socket is not connected")
+        try:
+            self._sock.settimeout(
+                min(
+                    self.config.timeout_s,
+                    max(0.001, self.config.response_drain_timeout_s),
+                )
+            )
+            # A timeout before reading any byte means the full previous packet
+            # was the final chunk. Once a header byte has arrived, however,
+            # timeout is a partial packet and must fail closed; discarding it
+            # would leave the stream misframed for the next request.
+            header = self._recv_optional_exact(4)
+            if header is None:
+                return None
+            return self._decode_response_packet(header)
+        except socket.timeout as exc:
+            raise RconError("RCON response drain timed out mid-packet") from exc
+        finally:
+            # Keep the configured timeout for the next logical request.
+            if self._sock is not None:
+                try:
+                    self._sock.settimeout(self.config.timeout_s)
+                except OSError:
+                    # The peer may have closed the socket while the optional
+                    # read was in flight; preserve the original transport
+                    # error for the caller instead of masking it here.
+                    pass
+
+    def _recv_optional_exact(self, n: int) -> bytes | None:
+        if self._sock is None:
+            raise RconError("RCON socket is not connected")
+        chunks: list[bytes] = []
+        remaining = n
+        while remaining:
+            try:
+                chunk = self._sock.recv(remaining)
+            except socket.timeout:
+                if not chunks:
+                    return None
+                raise
+            if not chunk:
+                raise RconError("RCON socket closed")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
     def _recv_exact(self, n: int) -> bytes:
         if self._sock is None:

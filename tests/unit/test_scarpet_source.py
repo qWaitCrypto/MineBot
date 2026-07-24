@@ -189,11 +189,11 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("release_owner(name, 'moveTo')", source)
 
     def test_list_perceptions_have_char_budget_guard_against_rcon_truncation(self):
-        # RCON silently truncates at 4096 chars and a truncated list response can
-        # desync the stream. The three list-style perceptions must cap their `out`
-        # string at a char budget (well under 4096) and fall to the existing
-        # `limit_exceeded` overflow path. Pinned in source; the actual <4096
-        # behavior is validated live by the collect-64 rerun.
+        # Vanilla RCON frames responses in 4096-character packets, while the
+        # logical Body contract still uses a conservative application budget.
+        # The three list-style perceptions must cap their `out` string well below
+        # that boundary and fall to the existing `limit_exceeded` path. Pinned
+        # in source; the actual bounded behavior is validated live by collect-64.
         source = MINEBOT_SC.read_text()
 
         self.assertIn("global_response_char_budget = 2000;", source)
@@ -901,6 +901,14 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("'hazard_unresolved'", source)
         self.assertIn('"reason":"hazard_unresolved"', source)
         self.assertIn("global_navigations:name:14:'survival_recovery'", source)
+        self.assertIn('"recovery_target"', source)
+        self.assertIn("length(latch) > 5", source)
+        self.assertIn("recovery_target = if(kind == 'water', water_escape_target(p), safe_escape_target(p));", source)
+        self.assertIn("reflex_recovery_target(name, latch)", source)
+        self.assertIn("global_reflex_recovery_probe_ticks = {};", source)
+        self.assertIn("global_reflex_recovery_probe_interval = 10;", source)
+        self.assertIn("reflex_recovery_target_valid(kind, existing)", source)
+        self.assertIn("global_reflex_recovery_probe_ticks:name = global_tick", source)
 
     def test_event_drains_are_char_budgeted_and_pageable(self):
         source = MINEBOT_SC.read_text()

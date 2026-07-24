@@ -9,7 +9,11 @@ from typing import Any
 from minebot.game.errors import EnvelopeError, IncompletePayloadError, TruncatedPayloadError
 from minebot.contract import Action, BodyState, Event, PerceptionResult, Result
 
-RCON_TRUNCATION_LIMIT = 4096
+RCON_APPLICATION_BUDGET = 4096
+# Kept as an import-compatible alias for callers that used the old name. The
+# adapter now assembles vanilla's multi-packet response before this logical
+# budget is applied.
+RCON_TRUNCATION_LIMIT = RCON_APPLICATION_BUDGET
 RCON_SLOT_PAGE_SIZE = 12
 SCARPET_APP = "minebot"
 _SCRIPT_PREFIX_RE = re.compile(r"^\s*=\s*")
@@ -188,8 +192,8 @@ def _scarpet_string_arg(value: str) -> str:
 
 
 def _parse_envelope(raw: str) -> dict[str, Any]:
-    if len(raw) >= RCON_TRUNCATION_LIMIT:
-        raise TruncatedPayloadError("RCON response reached the known 4096-char truncation boundary")
+    if len(raw) >= RCON_APPLICATION_BUDGET:
+        raise TruncatedPayloadError("RCON logical response reached the 4096-char application budget")
     text = _SCRIPT_PREFIX_RE.sub("", raw.strip())
     text = _SCARPET_TIMING_TOKEN_RE.sub(" ", text).strip()
     decoder = json.JSONDecoder()

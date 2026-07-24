@@ -20,6 +20,10 @@ global_owners = {};
 global_reflexes = {};
 global_pending_reflexes = {};
 global_reflex_failure_latches = {};
+// A failed reflex may become recoverable after the world changes.  Keep the
+// provider-owned target probe bounded instead of rescanning on every state poll.
+global_reflex_recovery_probe_ticks = {};
+global_reflex_recovery_probe_interval = 10;
 global_watched = {};
 global_reflex_scan = true;
 global_water_reflex_air_threshold = 80;
@@ -1546,6 +1550,7 @@ clear_body_runtime(name) -> (
   global_reflexes:name = null;
   global_pending_reflexes:name = null;
   global_reflex_failure_latches:name = null;
+  global_reflex_recovery_probe_ticks:name = null;
   global_engages:name = null;
   global_water_reflex_health_baselines:name = null;
   global_combat_health_baselines:name = null;
@@ -3433,7 +3438,41 @@ hazard_unresolved_json(name) -> (
   if(!hazard_unresolved(name),
     'null'
   ,
-    str('{"kind":"%s","pos":%s,"tick":%d}', latch:0, json_pos(l(latch:1, latch:2, latch:3)), floor(number(latch:4)))
+    recovery_target = reflex_recovery_target(name, latch);
+    latch = global_reflex_failure_latches:name;
+    recovery_target_json = if(recovery_target == null, 'null', json_pos(recovery_target));
+    str('{"kind":"%s","pos":%s,"tick":%d,"recovery_target":%s}', latch:0, json_pos(l(latch:1, latch:2, latch:3)), floor(number(latch:4)), recovery_target_json)
+  )
+);
+
+reflex_recovery_target_valid(kind, target) -> (
+  target != null &&
+  reflex_target_is_dry_stand(target) &&
+  (kind == 'water' || !navigation_lava_unsafe(floor(target:0), floor(target:1), floor(target:2)))
+);
+
+reflex_recovery_target(name, latch) -> (
+  if(latch == null,
+    null
+  ,
+    kind = latch:0;
+    existing = if(length(latch) > 5, latch:5, null);
+    if(reflex_recovery_target_valid(kind, existing),
+      existing
+    ,
+      last_probe = global_reflex_recovery_probe_ticks:name;
+      if(existing == null && last_probe != null && global_tick - floor(number(last_probe)) < global_reflex_recovery_probe_interval,
+        null
+      ,
+        global_reflex_recovery_probe_ticks:name = global_tick;
+        p = bot_pos(name);
+        candidate = if(p == null, null, if(kind == 'water', water_escape_target(p), safe_escape_target(p)));
+        if(candidate != null,
+          global_reflex_failure_latches:name = l(latch:0, latch:1, latch:2, latch:3, latch:4, candidate)
+        );
+        candidate
+      )
+    )
   )
 );
 
@@ -3449,14 +3488,19 @@ hazard_action_allowed(name, action_name, params) -> (
 
 remember_reflex_failure(name, kind, p) -> (
   if(p != null,
-    global_reflex_failure_latches:name = l(kind, p:0, p:1, p:2, global_tick)
+    recovery_target = if(kind == 'water', water_escape_target(p), safe_escape_target(p));
+    global_reflex_failure_latches:name = l(kind, p:0, p:1, p:2, global_tick, recovery_target);
+    global_reflex_recovery_probe_ticks:name = global_tick
   );
   true
 );
 
 clear_reflex_failure(name, kind) -> (
   latch = global_reflex_failure_latches:name;
-  if(latch != null && latch:0 == kind, global_reflex_failure_latches:name = null);
+  if(latch != null && latch:0 == kind,
+    global_reflex_failure_latches:name = null;
+    global_reflex_recovery_probe_ticks:name = null
+  );
   true
 );
 
@@ -6496,6 +6540,7 @@ minebot_reset() -> (
   global_reflexes = {};
   global_pending_reflexes = {};
   global_reflex_failure_latches = {};
+  global_reflex_recovery_probe_ticks = {};
   global_watched = {};
   global_reflex_scan = true;
   global_water_reflex_air_threshold = 80;

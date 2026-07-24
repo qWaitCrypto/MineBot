@@ -256,6 +256,29 @@ def _trace_summary(path: Path, *, active_elapsed_s: float | None = None) -> dict
     }
 
 
+def _quality_gate_passes(
+    segment: "SegmentResult",
+    quality: object,
+    *,
+    active_duration_met: bool,
+) -> bool:
+    """Keep the configured active-window duration part of the gate.
+
+    The child can exit cleanly before the deadline (for example after a
+    provider/runtime failure).  A clean exit and a passing short trace are not
+    evidence for a 30-60 minute gate, so the duration check must be an explicit
+    exit-code input rather than report-only metadata.
+    """
+
+    return bool(
+        segment.body_ready
+        and segment.exit_code == 0
+        and active_duration_met
+        and isinstance(quality, dict)
+        and quality.get("verdict") == "pass"
+    )
+
+
 def _trace_elapsed_s(
     events: list[dict[str, object]],
     start_event: str,
@@ -543,8 +566,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"AG quality gate report: {run_dir / 'gate-report.json'}")
         quality = report["trace"].get("autonomy_quality")
-        quality_pass = isinstance(quality, dict) and quality.get("verdict") == "pass"
-        return 0 if quality_segment.body_ready and quality_segment.exit_code == 0 and quality_pass else 1
+        return 0 if _quality_gate_passes(
+            quality_segment,
+            quality,
+            active_duration_met=bool(report["coverage"].get("active_duration_met")),
+        ) else 1
 
     first_diagnostic = run_dir / "first-segment-diagnostic.json"
     first = _run_segment(

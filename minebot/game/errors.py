@@ -22,7 +22,7 @@ class BodyActionTimeoutError(TimeoutError):
 
 
 class TruncatedPayloadError(BodyProtocolError):
-    """RCON returned a payload at or above the known truncation boundary."""
+    """A logical RCON payload reached MineBot's application budget."""
 
 
 class IncompletePayloadError(BodyProtocolError):

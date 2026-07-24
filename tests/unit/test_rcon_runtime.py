@@ -1,6 +1,7 @@
+import socket
 import struct
-from unittest import mock
 import unittest
+from unittest import mock
 
 from minebot.game.errors import RconError
 from minebot.game.rcon import MAX_PACKET_BYTES, RconClient, RconConfig
@@ -15,14 +16,17 @@ def _packet(resp_id: int, kind: int, body: str) -> bytes:
 class _FakeSock:
     """Serves a fixed byte buffer as if it were a connected RCON socket."""
 
-    def __init__(self, buf: bytes):
+    def __init__(self, buf: bytes, *, timeout_when_empty: bool = False):
         self._buf = buf
+        self._timeout_when_empty = timeout_when_empty
 
     def sendall(self, _data: bytes) -> None:
         pass
 
     def recv(self, n: int) -> bytes:
         if not self._buf:
+            if self._timeout_when_empty:
+                raise socket.timeout()
             # Mimic a closed socket so _recv_exact raises RconError("RCON socket closed").
             return b""
         chunk = self._buf[:n]
@@ -162,6 +166,50 @@ class RconRuntimeTests(unittest.TestCase):
         with self.assertRaises(RconError) as cm:
             client.command("list")
         self.assertIn("size above ceiling", str(cm.exception))
+
+    def test_command_consumes_all_packets_for_a_split_response(self):
+        first = "a" * 4096
+        tail = "b" * 17
+        sock = _FakeSock(
+            _packet(1, 2, first) + _packet(1, 2, tail),
+            timeout_when_empty=True,
+        )
+        client = _SocketQueueClient([sock], reconnect_attempts=0)
+
+        self.assertEqual(client.command("large-read"), first + tail)
+        self.assertEqual(client.stats_snapshot()["reconnects"], 0)
+
+    def test_full_final_packet_uses_bounded_probe_without_failing(self):
+        full = "a" * 4096
+        sock = _FakeSock(_packet(1, 2, full), timeout_when_empty=True)
+        client = _SocketQueueClient([sock], reconnect_attempts=0)
+
+        self.assertEqual(client.command("exactly-full"), full)
+
+    def test_partial_next_packet_timeout_fails_closed(self):
+        full = "a" * 4096
+        partial_header = struct.pack("<i", 20)[:2]
+        sock = _FakeSock(
+            _packet(1, 2, full) + partial_header,
+            timeout_when_empty=True,
+        )
+        client = _SocketQueueClient([sock], reconnect_attempts=0)
+
+        with self.assertRaises(RconError) as cm:
+            client.command("partial-tail")
+        self.assertIn("mid-packet", str(cm.exception))
+
+    def test_split_response_does_not_poison_the_following_request(self):
+        first = _FakeSock(
+            _packet(1, 2, "a" * 4096)
+            + _packet(1, 2, "tail")
+            + _packet(2, 2, "next"),
+            timeout_when_empty=True,
+        )
+        client = _SocketQueueClient([first], reconnect_attempts=0)
+
+        self.assertEqual(client.command("large-read"), "a" * 4096 + "tail")
+        self.assertEqual(client.command("next-read"), "next")
 
 
 if __name__ == "__main__":

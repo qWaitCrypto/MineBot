@@ -691,6 +691,59 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(result.metrics["next_action"], "survival_recovery")
         self.assertEqual(body.actions, [])
 
+    def test_navigate_to_recovers_once_from_provider_target_before_ordinary_route(self):
+        hazard = {
+            "kind": "lava",
+            "pos": [0, 64, 0],
+            "tick": 42,
+            "recovery_target": [4, 64, 0],
+        }
+        body = FakeBody(
+            [
+                state_at((0, 64, 0), hazard_unresolved=hazard),
+                state_at((0, 64, 0), hazard_unresolved=hazard),
+                state_at((4, 64, 0)),
+                state_at((4, 64, 0)),
+            ]
+        )
+        runtime = NavigationTransactions(body, FakeNavigator([]))
+
+        result = runtime.navigate_to((10, 64, 0), config=NavigationRunConfig(max_segments=1))
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual([action.params["target"] for action in body.actions], [[4, 64, 0], [10, 64, 0]])
+        self.assertTrue(body.actions[0].params["survival_recovery"])
+        self.assertEqual(body.actions[0].params["arrival_radius"], 0.25)
+        self.assertFalse(body.actions[1].params["survival_recovery"])
+
+    def test_navigate_to_does_not_repeat_unchanged_hazard_recovery(self):
+        hazard = {
+            "kind": "lava",
+            "pos": [0, 64, 0],
+            "tick": 42,
+            "recovery_target": [4, 64, 0],
+        }
+        body = FakeBody(
+            [
+                state_at((0, 64, 0), hazard_unresolved=hazard),
+                state_at((0, 64, 0), hazard_unresolved=hazard),
+                state_at((0, 64, 0), hazard_unresolved=hazard),
+                state_at((0, 64, 0), hazard_unresolved=hazard),
+                state_at((0, 64, 0), hazard_unresolved=hazard),
+            ],
+            terminal_success=False,
+            terminal_reasons=["no_path"],
+        )
+        runtime = NavigationTransactions(body, FakeNavigator([]))
+
+        first = runtime.navigate_to((10, 64, 0), config=NavigationRunConfig(max_segments=1))
+        second = runtime.navigate_to((11, 64, 0), config=NavigationRunConfig(max_segments=1))
+
+        self.assertFalse(first.success)
+        self.assertFalse(second.success)
+        self.assertEqual(len(body.actions), 1)
+        self.assertEqual(second.metrics["survival_recovery"]["reason"], "unchanged_hazard_signature")
+
     def test_navigate_to_preserves_composite_goal_set_and_server_selection(self):
         class SelectedGoalBody(FakeBody):
             def await_action_terminal(self, action_id: str, timeout_s: float = 15.0, **kwargs) -> Event:

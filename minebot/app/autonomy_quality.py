@@ -10,7 +10,7 @@ from typing import Any, Literal
 JsonObject = dict[str, Any]
 Verdict = Literal["pass", "fail", "insufficient_evidence"]
 
-AUTONOMY_QUALITY_SCHEMA_VERSION = "autonomy-quality-v2"
+AUTONOMY_QUALITY_SCHEMA_VERSION = "autonomy-quality-v3"
 
 
 @dataclass(frozen=True)
@@ -188,7 +188,12 @@ def evaluate_autonomy_quality(
         end_ts=end_ts,
         output_events=output.get("output_events") if isinstance(output.get("output_events"), list) else [],
     )
-    verdict = _overall_verdict(coverage, output, health, recovery)
+    terminal_cleanup = _terminal_cleanup_signal(
+        ordered,
+        start_ts=start_ts,
+        end_ts=end_ts,
+    )
+    verdict = _overall_verdict(coverage, output, health, recovery, terminal_cleanup)
     return {
         "schema_version": AUTONOMY_QUALITY_SCHEMA_VERSION,
         "goal_id": yardstick.goal_id,
@@ -204,6 +209,9 @@ def evaluate_autonomy_quality(
             "effective_output": output,
             "process_health": health,
             "recovery": recovery,
+        },
+        "hard_invariants": {
+            "terminal_cleanup": terminal_cleanup,
         },
     }
 
@@ -238,12 +246,21 @@ def _coverage(
     ]
     if len(states) < 2:
         missing.append("body_state_time_series")
-    required_state_fields = ("inventory_counts", "selected_item", "offhand_item", "body_owner", "pending_action_count")
+    required_state_fields = (
+        "pos",
+        "inventory_counts",
+        "selected_item",
+        "offhand_item",
+        "body_owner",
+        "pending_action_count",
+    )
     for state in states:
         for field in required_state_fields:
             if field not in state:
                 missing.append(f"body_state.{field}")
                 break
+        if _pos(state) is None:
+            missing.append("body_state.pos")
         if not isinstance(state.get("inventory_counts"), dict):
             missing.append("body_state.inventory_counts_dict")
     if states:
@@ -259,6 +276,14 @@ def _coverage(
         for event in events
         if event.get("event") == "body_events" and _in_window(event, start_ts=start_ts, end_ts=end_ts)
     ]
+    terminal_events = [
+        event
+        for event in events
+        if event.get("event") == "session_terminal"
+        and _in_window(event, start_ts=start_ts, end_ts=end_ts)
+    ]
+    if not terminal_events:
+        missing.append("session_terminal")
     if not body_events:
         missing.append("body_events_time_series")
     for event in body_events:
@@ -295,6 +320,47 @@ def _coverage(
     }
 
 
+def _terminal_cleanup_signal(
+    events: list[JsonObject],
+    *,
+    start_ts: float,
+    end_ts: float,
+) -> JsonObject:
+    states = [
+        event
+        for event in events
+        if event.get("event") == "body_state"
+        and _in_window(event, start_ts=start_ts, end_ts=end_ts)
+        and event.get("missing") is not True
+    ]
+    if not states:
+        return {
+            "verdict": "insufficient_evidence",
+            "reason": "no_authoritative_terminal_body_state",
+        }
+    final = states[-1]
+    owner = final.get("body_owner")
+    pending = final.get("pending_action_count")
+    failures: list[str] = []
+    if owner not in (None, ""):
+        failures.append("body_owner_not_released")
+    if not isinstance(pending, int) or isinstance(pending, bool):
+        return {
+            "verdict": "insufficient_evidence",
+            "reason": "pending_action_count_not_authoritative",
+            "evidence_ref": _ref(final),
+        }
+    if pending != 0:
+        failures.append("pending_actions_not_empty")
+    return {
+        "verdict": "pass" if not failures else "fail",
+        "failures": failures,
+        "body_owner": owner,
+        "pending_action_count": pending,
+        "evidence_ref": _ref(final),
+    }
+
+
 def _effective_output_signal(
     events: list[JsonObject],
     *,
@@ -312,9 +378,17 @@ def _effective_output_signal(
         and event.get("missing") is not True
         and isinstance(event.get("inventory_counts"), dict)
     ]
+    # State samples are observations of the current world, not deltas.  Keep
+    # the first authoritative sample as the baseline so pre-existing inventory
+    # or equipment cannot be minted as output for this run.  Body terminal
+    # events remain positive deltas even when a later state sample has already
+    # consumed the produced item.
+    baseline_counts: dict[str, int] = {}
     highwater: dict[str, int] = {}
     event_totals: dict[str, int] = {}
     equipped: set[tuple[str, str]] = set()
+    baseline_equipment: dict[str, str | None] = {}
+    saw_first_state = False
     previous_score = 0
     output_events: list[JsonObject] = []
     authoritative_events = _authoritative_progress_events(
@@ -334,16 +408,23 @@ def _effective_output_signal(
     observations.sort(key=lambda item: (item[0], item[1]))
     for timestamp, _sequence, kind, observation in observations:
         if kind == "body_state":
-            for item, count in dict(observation.get("inventory_counts") or {}).items():
+            counts = dict(observation.get("inventory_counts") or {})
+            for item, count in counts.items():
                 clean_item = _item_name(item)
                 clean_count = _int(count)
-                if clean_item and clean_count > highwater.get(clean_item, 0):
-                    highwater[clean_item] = clean_count
+                if clean_item:
+                    if not saw_first_state:
+                        baseline_counts[clean_item] = clean_count
+                    if clean_count > highwater.get(clean_item, 0):
+                        highwater[clean_item] = clean_count
             selected = _item_name(observation.get("selected_item"))
             offhand = _item_name(observation.get("offhand_item"))
-            if selected:
+            if not saw_first_state:
+                baseline_equipment = {"mainhand": selected, "offhand": offhand}
+                saw_first_state = True
+            if selected and selected != baseline_equipment.get("mainhand"):
                 equipped.add(("mainhand", selected))
-            if offhand:
+            if offhand and offhand != baseline_equipment.get("offhand"):
                 equipped.add(("offhand", offhand))
         else:
             item = _item_name(observation.get("item"))
@@ -356,7 +437,15 @@ def _effective_output_signal(
                 # unbounded output.
                 event_totals[item] = event_totals.get(item, 0) + count
                 highwater[item] = max(highwater.get(item, 0), event_totals[item])
-        score, detail = _yardstick_score(highwater, equipped, yardstick)
+        progress_counts = {
+            item: max(
+                0,
+                highwater.get(item, 0) - baseline_counts.get(item, 0),
+                event_totals.get(item, 0),
+            )
+            for item in set(highwater) | set(event_totals)
+        }
+        score, detail = _yardstick_score(progress_counts, equipped, yardstick)
         final_detail = detail
         if score > previous_score:
             output_events.append(
@@ -700,6 +789,11 @@ def _repeated_failure(
     start_ts: float,
     end_ts: float,
 ) -> JsonObject | None:
+    mutating_by_call_id = {
+        str(event.get("tool_call_id")): bool(event.get("mutating"))
+        for event in events
+        if event.get("event") == "tool_invoke" and event.get("tool_call_id")
+    }
     current: tuple[str, str, str] | None = None
     streak = 0
     refs: list[str] = []
@@ -707,6 +801,14 @@ def _repeated_failure(
         if event.get("event") != "tool_result" or not _in_window(event, start_ts=start_ts, end_ts=end_ts):
             continue
         if event.get("success") is not False:
+            continue
+        # A failed read-only observation between two failed physical attempts
+        # must not reset the loop detector.  Prefer the explicit result field
+        # when present, otherwise join it to its invoke record by call id.
+        call_id = event.get("tool_call_id")
+        if event.get("mutating") is False or (
+            call_id is not None and mutating_by_call_id.get(str(call_id)) is False
+        ):
             continue
         signature = (
             str(event.get("tool") or ""),
