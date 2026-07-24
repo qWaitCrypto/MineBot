@@ -10,7 +10,7 @@ from typing import Any, Literal
 JsonObject = dict[str, Any]
 Verdict = Literal["pass", "fail", "insufficient_evidence"]
 
-AUTONOMY_QUALITY_SCHEMA_VERSION = "autonomy-quality-v1"
+AUTONOMY_QUALITY_SCHEMA_VERSION = "autonomy-quality-v2"
 
 
 @dataclass(frozen=True)
@@ -265,6 +265,17 @@ def _coverage(
         if not isinstance(event.get("events"), list):
             missing.append("body_events.payload")
             break
+        for nested in event["events"]:
+            if (
+                not isinstance(nested, dict)
+                or _int(nested.get("seq")) <= 0
+                or not isinstance(nested.get("name"), str)
+                or not isinstance(nested.get("data"), dict)
+            ):
+                missing.append("body_events.event_payload")
+                break
+        if "body_events.event_payload" in missing:
+            break
 
     for event in events:
         if event.get("event") in {"tool_invoke", "tool_result"} and _in_window(event, start_ts=start_ts, end_ts=end_ts):
@@ -302,32 +313,59 @@ def _effective_output_signal(
         and isinstance(event.get("inventory_counts"), dict)
     ]
     highwater: dict[str, int] = {}
+    event_totals: dict[str, int] = {}
     equipped: set[tuple[str, str]] = set()
     previous_score = 0
     output_events: list[JsonObject] = []
+    authoritative_events = _authoritative_progress_events(
+        events,
+        start_ts=start_ts,
+        end_ts=end_ts,
+    )
     final_detail: JsonObject = {"total_points": 0, "families": {}, "equipment": {}}
-    for state in states:
-        for item, count in dict(state.get("inventory_counts") or {}).items():
-            clean_item = _item_name(item)
-            clean_count = _int(count)
-            if clean_item and clean_count > highwater.get(clean_item, 0):
-                highwater[clean_item] = clean_count
-        selected = _item_name(state.get("selected_item"))
-        offhand = _item_name(state.get("offhand_item"))
-        if selected:
-            equipped.add(("mainhand", selected))
-        if offhand:
-            equipped.add(("offhand", offhand))
+    observations: list[tuple[float, int, str, JsonObject]] = [
+        (float(state["ts"]), _int(state.get("seq")), "body_state", state)
+        for state in states
+    ]
+    observations.extend(
+        (float(item["ts"]), _int(item.get("seq")), "body_event", item)
+        for item in authoritative_events
+    )
+    observations.sort(key=lambda item: (item[0], item[1]))
+    for timestamp, _sequence, kind, observation in observations:
+        if kind == "body_state":
+            for item, count in dict(observation.get("inventory_counts") or {}).items():
+                clean_item = _item_name(item)
+                clean_count = _int(count)
+                if clean_item and clean_count > highwater.get(clean_item, 0):
+                    highwater[clean_item] = clean_count
+            selected = _item_name(observation.get("selected_item"))
+            offhand = _item_name(observation.get("offhand_item"))
+            if selected:
+                equipped.add(("mainhand", selected))
+            if offhand:
+                equipped.add(("offhand", offhand))
+        else:
+            item = _item_name(observation.get("item"))
+            count = _int(observation.get("count"))
+            if item and count > 0:
+                # Body events are authoritative deltas, but a later state
+                # sample may contain the same inventory change.  Merge them
+                # through an item high-water mark and cap at the yardstick's
+                # family limits, so duplicate trace observations cannot mint
+                # unbounded output.
+                event_totals[item] = event_totals.get(item, 0) + count
+                highwater[item] = max(highwater.get(item, 0), event_totals[item])
         score, detail = _yardstick_score(highwater, equipped, yardstick)
         final_detail = detail
         if score > previous_score:
             output_events.append(
                 {
-                    "ts": float(state["ts"]),
-                    "seq": state.get("seq"),
+                    "ts": timestamp,
+                    "seq": observation.get("seq"),
                     "delta_points": score - previous_score,
                     "total_points": score,
-                    "evidence_ref": _ref(state),
+                    "evidence_ref": _ref(observation),
                 }
             )
             previous_score = score
@@ -349,8 +387,74 @@ def _effective_output_signal(
         "failures": failures,
         "yardstick": final_detail,
         "output_events": output_events,
+        "authoritative_progress_events": len(authoritative_events),
+        "authoritative_progress_refs": [_ref(event) for event in authoritative_events[:16]],
         "evidence_refs": [event["evidence_ref"] for event in output_events[:8]],
     }
+
+
+def _authoritative_progress_events(
+    events: list[JsonObject],
+    *,
+    start_ts: float,
+    end_ts: float,
+) -> list[JsonObject]:
+    """Flatten positive inventory-producing Body terminals into a deduped ledger.
+
+    A Body event is only useful here when the server emitted a successful
+    terminal with an item/count delta.  Movement, reads, and mutation success
+    without an inventory result are intentionally excluded.  Event sequence
+    numbers are authoritative and may appear in several non-consuming trace
+    observations, so they are the deduplication key.
+    """
+
+    progress: list[JsonObject] = []
+    seen: set[tuple[int, str, str]] = set()
+    for sample in events:
+        if sample.get("event") != "body_events" or not _in_window(sample, start_ts=start_ts, end_ts=end_ts):
+            continue
+        for nested in sample.get("events") or ():
+            if not isinstance(nested, dict):
+                continue
+            name = str(nested.get("name") or "")
+            data = nested.get("data")
+            if not isinstance(data, dict):
+                continue
+            sequence = _int(nested.get("seq"))
+            action_id = str(data.get("action_id") or "")
+            identity = (sequence, name, action_id)
+            if sequence > 0 and identity in seen:
+                continue
+            if sequence > 0:
+                seen.add(identity)
+            item: object = None
+            count = 0
+            if name == "itemPickup":
+                item = data.get("item")
+                count = _int(data.get("count"))
+            elif name == "craftDone" and data.get("success") is True:
+                item = data.get("item")
+                count = _int(data.get("count"))
+            elif (
+                name in {"furnaceDone", "containerDone"}
+                and data.get("success") is True
+                and str(data.get("direction") or "") in {"furnace_to_bot", "container_to_bot"}
+            ):
+                item = data.get("item")
+                count = _int(data.get("count"))
+            if count <= 0 or _item_name(item) is None:
+                continue
+            progress.append(
+                {
+                    "event": name,
+                    "seq": sequence if sequence > 0 else sample.get("seq"),
+                    "ts": sample.get("ts"),
+                    "item": item,
+                    "count": count,
+                    "action_id": action_id or None,
+                }
+            )
+    return sorted(progress, key=lambda event: (float(event.get("ts", 0.0)), _int(event.get("seq"))))
 
 
 def _process_health_signal(

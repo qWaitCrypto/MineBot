@@ -3,6 +3,7 @@ import unittest
 from minebot.app.autonomy_quality import (
     AG_FP30_YARDSTICK,
     AG_FP30_X_YARDSTICK,
+    AUTONOMY_QUALITY_SCHEMA_VERSION,
     evaluate_autonomy_quality,
 )
 
@@ -123,6 +124,16 @@ def _healthy_material_incomplete_trace(include_obstacle=True):
 
 
 class AutonomyQualityTests(unittest.TestCase):
+    def test_report_binds_authoritative_progress_ledger_schema(self):
+        report = evaluate_autonomy_quality(
+            _healthy_material_incomplete_trace(),
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        self.assertEqual(report["schema_version"], AUTONOMY_QUALITY_SCHEMA_VERSION)
+        self.assertEqual(report["schema_version"], "autonomy-quality-v2")
+
     def test_material_incomplete_but_healthy_output_can_pass(self):
         report = evaluate_autonomy_quality(
             _healthy_material_incomplete_trace(),
@@ -179,6 +190,94 @@ class AutonomyQualityTests(unittest.TestCase):
         self.assertGreater(output["yardstick"]["families"]["cobblestone"]["points"], 0)
         self.assertGreater(output["yardstick"]["families"]["coal_or_charcoal"]["points"], 0)
         self.assertFalse(output["yardstick"]["families"]["flowers"]["observed"])
+
+    def test_authoritative_body_events_count_when_state_sample_lags(self):
+        states = [_body_state(index + 1, ts, x=index * 2.0, counts={}) for index, ts in enumerate(range(0, 1801, 120))]
+        events = _coverage_events(states=states)
+        sample = next(event for event in events if event.get("event") == "body_events" and event.get("ts") == 120.0)
+        sample["events"] = [
+            {
+                "seq": 77,
+                "name": "itemPickup",
+                "data": {"player": "Bot", "item": "minecraft:oak_log", "count": 3},
+            }
+        ]
+        sample["count"] = 1
+        sample["names"] = ["itemPickup"]
+        sample["seqs"] = [77]
+        events.extend(
+            [
+                _invoke(100, 250, "explore_for", "args-a", "explore:targets", mutating=True),
+                _result(101, 300, "explore_for", "args-a", "explore:targets", success=False, reason="no_path"),
+                _invoke(102, 360, "craft_item", "args-b", "craft:table", mutating=True),
+                _result(103, 430, "craft_item", "args-b", "craft:table", success=True, reason="crafted"),
+            ]
+        )
+
+        report = evaluate_autonomy_quality(events, active_window_s=1800)
+
+        output = report["signals"]["effective_output"]
+        self.assertGreaterEqual(output["points"], 3)
+        self.assertEqual(output["authoritative_progress_events"], 1)
+        self.assertIn("seq:77", output["authoritative_progress_refs"])
+
+    def test_repeated_body_event_observation_does_not_mint_duplicate_output(self):
+        states = [_body_state(index + 1, ts, x=index * 2.0, counts={}) for index, ts in enumerate(range(0, 1801, 120))]
+        events = _coverage_events(states=states)
+        pickup = {
+            "seq": 88,
+            "name": "itemPickup",
+            "data": {"player": "Bot", "item": "minecraft:oak_log", "count": 3},
+        }
+        for index, sample in enumerate(
+            event for event in events if event.get("event") == "body_events" and event.get("ts") in {120.0, 240.0, 360.0}
+        ):
+            sample["events"] = [pickup]
+            sample["count"] = 1
+            sample["names"] = ["itemPickup"]
+            sample["seqs"] = [88]
+        report = evaluate_autonomy_quality(events, active_window_s=1800)
+
+        output = report["signals"]["effective_output"]
+        self.assertEqual(output["authoritative_progress_events"], 1)
+        self.assertEqual(output["points"], 3)
+
+    def test_outbound_container_or_furnace_transfer_is_not_positive_output(self):
+        states = [_body_state(index + 1, ts, x=index * 2.0, counts={}) for index, ts in enumerate(range(0, 1801, 120))]
+        events = _coverage_events(states=states)
+        sample = next(event for event in events if event.get("event") == "body_events" and event.get("ts") == 120.0)
+        sample["events"] = [
+            {
+                "seq": 89,
+                "name": "containerDone",
+                "data": {"success": True, "direction": "bot_to_container", "item": "minecraft:oak_log", "count": 3},
+            },
+            {
+                "seq": 90,
+                "name": "furnaceDone",
+                "data": {"success": True, "direction": "bot_to_furnace", "item": "minecraft:coal", "count": 1},
+            },
+        ]
+        sample["count"] = 2
+        sample["names"] = ["containerDone", "furnaceDone"]
+        sample["seqs"] = [89, 90]
+
+        report = evaluate_autonomy_quality(events, active_window_s=1800)
+
+        output = report["signals"]["effective_output"]
+        self.assertEqual(output["authoritative_progress_events"], 0)
+        self.assertEqual(output["points"], 0)
+
+    def test_malformed_authoritative_event_payload_fails_closed(self):
+        states = [_body_state(index + 1, ts, x=index * 2.0, counts={}) for index, ts in enumerate(range(0, 1801, 120))]
+        events = _coverage_events(states=states)
+        sample = next(event for event in events if event.get("event") == "body_events" and event.get("ts") == 120.0)
+        sample["events"] = [{"name": "itemPickup", "data": {"item": "oak_log", "count": 3}}]
+
+        report = evaluate_autonomy_quality(events, active_window_s=1800)
+
+        self.assertEqual(report["verdict"], "insufficient_evidence")
+        self.assertIn("body_events.event_payload", report["coverage"]["missing"])
 
     def test_material_complete_does_not_mask_repeated_failure_loop(self):
         events = _healthy_material_incomplete_trace()
