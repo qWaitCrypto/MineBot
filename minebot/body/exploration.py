@@ -999,6 +999,7 @@ class ExplorationTransactions:
         blocks: list[JsonObject] = []
         entities: list[JsonObject] = []
         uncertainty: list[JsonObject] = []
+        block_page_limited = False
         if targets.blocks:
             start = 0
             for page_index in range(FIND_BLOCK_MAX_PAGES):
@@ -1068,12 +1069,14 @@ class ExplorationTransactions:
                             "next_start": next_start,
                         }
                     )
-                    return _ScanResult(
-                        tuple(blocks),
-                        (),
-                        tuple(uncertainty),
-                        "scan_page_limit",
-                    )
+                    # A dense block domain must not starve a second target
+                    # domain (for example, nearby entities) or frontier
+                    # traversal.  Keep the uncertainty and partial matches,
+                    # then let the caller decide whether the positive facts
+                    # are sufficient to continue.  Single-domain block
+                    # searches retain the historical typed terminal below.
+                    block_page_limited = True
+                    break
                 start = next_start
         if targets.entities:
             perception = self.body.perceive(
@@ -1094,7 +1097,10 @@ class ExplorationTransactions:
                 if entity_type in targets.entities:
                     entities.append(_normalized_entity_match(item))
             uncertainty.extend(_uncertainty(perception))
-        return _ScanResult(tuple(blocks), tuple(entities), tuple(uncertainty))
+        terminal_reason = None
+        if block_page_limited and (not targets.entities or not (blocks or entities)):
+            terminal_reason = "scan_page_limit"
+        return _ScanResult(tuple(blocks), tuple(entities), tuple(uncertainty), terminal_reason)
 
     def _scan_terminal(
         self,
@@ -1231,6 +1237,11 @@ class ExplorationTransactions:
     ) -> ToolResult:
         final_state = self.body.get_state()
         latest_revision = max((item.revision for item in coverage.values()), default=0)
+        uncertainty: list[JsonObject] = []
+        for record in coverage.values():
+            for item in record.uncertainty:
+                if item not in uncertainty:
+                    uncertainty.append(dict(item))
         resumable = reason in {"budget_exhausted", "mobility_blocked", "unloaded_boundary", "preempted"}
         resume_cursor = (
             {
@@ -1263,6 +1274,7 @@ class ExplorationTransactions:
                 "entities": entities,
                 "candidate_failures": failures,
                 "evidence_keys": list(dict.fromkeys(evidence_keys)),
+                "uncertainty": uncertainty,
                 "resume_cursor": resume_cursor,
                 "continuation": continuation,
                 "complete": reason in {"found", "frontier_exhausted"},

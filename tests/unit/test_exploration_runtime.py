@@ -686,6 +686,65 @@ class ExplorationTransactionsTests(unittest.TestCase):
             (),
         )
 
+    def test_mixed_scan_page_limit_does_not_starve_entity_domain(self):
+        pages = {
+            start: _find_blocks_page(
+                blocks=({"x": 3, "y": 64, "z": 4, "type": "stone"},)
+                if start == 0
+                else (),
+                complete=False,
+                next_start=start + 1,
+            )
+            for start in range(4)
+        }
+        body = PagedFindBlocksBody(pages)
+        body.entities[(0, 0)] = (
+            {"id": "pig-1", "type": "pig", "pos": [2.0, 64.0, 3.0], "dist2": 5.0},
+        )
+        coverage = MemoryExplorationCoverageStore()
+        runtime, _, navigator = _runtime(body=body, coverage=coverage)
+
+        result = runtime.explore_for(
+            block_targets=("stone",),
+            entity_targets=("pig",),
+            max_regions=1,
+            return_policy="region_budget",
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "found")
+        self.assertEqual(result.metrics["entities"][0]["type"], "pig")
+        self.assertEqual(result.metrics["blocks"][0]["type"], "stone")
+        self.assertTrue(any(item.get("reason") == "scan_page_limit" for item in result.metrics["uncertainty"]))
+        regions = coverage.list_regions("minecraft:overworld", result.metrics["targets"]["query_signature"])
+        self.assertTrue(any(item.get("reason") == "scan_page_limit" for item in regions[0].uncertainty))
+        self.assertFalse(navigator.calls)
+
+    def test_mixed_scan_page_limit_with_positive_block_continues_frontier(self):
+        pages = {
+            start: _find_blocks_page(
+                blocks=({"x": 3, "y": 64, "z": 4, "type": "stone"},)
+                if start == 0
+                else (),
+                complete=False,
+                next_start=start + 1,
+            )
+            for start in range(4)
+        }
+        body = PagedFindBlocksBody(pages)
+        runtime, _, navigator = _runtime(body=body)
+
+        result = runtime.explore_for(
+            block_targets=("stone",),
+            entity_targets=("pig",),
+            max_regions=2,
+            return_policy="region_budget",
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "found")
+        self.assertTrue(navigator.calls)
+
     def test_true_chunk_unloaded_remains_unloaded_boundary(self):
         coverage = MemoryExplorationCoverageStore()
         runtime, _, _ = _runtime(
