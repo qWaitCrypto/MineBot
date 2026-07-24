@@ -958,6 +958,7 @@ class ScarpetSourceTests(unittest.TestCase):
             "global_drops:name = null",
             "global_reflexes:name = null",
             "global_pending_reflexes:name = null",
+            "global_reflex_failure_latches:name = null",
             "global_engages:name = null",
             "global_owners:name = null",
         ):
@@ -1583,8 +1584,8 @@ class ScarpetSourceTests(unittest.TestCase):
         hazard = re.search(r"hazard_kind_near_name\(name\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(hazard, "hazard_kind_near_name function not found")
         self.assertIn("water_reflex_should_trigger(name)", hazard.group(1))
-        self.assertIn("if(active_move_owns_lava_egress(name), null, 'lava')", hazard.group(1))
-        self.assertIn("if(active_move_owns_water_egress(name), null, 'water')", hazard.group(1))
+        self.assertIn("active_move_owns_lava_egress(name) || reflex_failure_latched(name, 'lava', p)", hazard.group(1))
+        self.assertIn("active_move_owns_water_egress(name) || reflex_failure_latched(name, 'water', p)", hazard.group(1))
         self.assertNotIn("if(in_water_now(name),", hazard.group(1))
         escape = re.search(r"water_escape_target\(p\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(escape, "water_escape_target function not found")
@@ -1617,9 +1618,16 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("!navigation_lava_unsafe(tx, sy, tz)", escape.group(1))
         candidate = re.search(r"is_reflex_escape_cell\(x, y, z\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(candidate, "is_reflex_escape_cell function not found")
-        self.assertIn("here_kind != 'SOLID' && head_kind != 'SOLID'", candidate.group(1))
-        self.assertIn("here != 'lava' && here != 'minecraft:lava'", candidate.group(1))
-        self.assertIn("is_solid_floor(x, y, z)", candidate.group(1))
+        self.assertIn("is_dry_stand_cell(x, y, z)", candidate.group(1))
+
+        for expected in (
+            "global_reflex_failure_latches = {}",
+            "reflex_hazard_present(name, kind, p)",
+            "remember_reflex_failure(name, kind, p)",
+            "clear_reflex_failure(name, kind)",
+            "!reflex_failure_latched(name, pending_kind, bot_pos(name))",
+        ):
+            self.assertIn(expected, source)
 
         offsets = re.search(r"safe_escape_candidate_offsets\(\) -> \((.*?)\n\);", source, re.S)
         self.assertIsNotNone(offsets, "safe_escape_candidate_offsets function not found")

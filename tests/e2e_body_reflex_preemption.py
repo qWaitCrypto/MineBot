@@ -60,10 +60,15 @@ def wait_for_event(body: ScarpetBody, name: str, *, timeout_s: float = 8.0):
 
 def arm_lava_reflex_fixture(rcon) -> None:
     x, y, z = BASE
-    command(rcon, f"fill {x-2} {y} {z-2} {x+16} {y+6} {z+3} air")
-    command(rcon, f"fill {x-2} {y-1} {z-2} {x+16} {y-1} {z+3} stone")
-    command(rcon, f"setblock {x+1} {y-1} {z} lava")
     command(rcon, f"tp {BOT} {x} {y} {z} -90 0")
+    time.sleep(0.2)
+    command(rcon, f"fill {x-3} {y-1} {z-3} {x+3} {y+6} {z+3} air")
+    command(rcon, f"fill {x-3} {y-1} {z-3} {x+3} {y-1} {z+3} stone")
+    command(rcon, f"fill {x-3} {y} {z-3} {x-3} {y+6} {z+3} stone")
+    command(rcon, f"fill {x+3} {y} {z-3} {x+3} {y+6} {z+3} stone")
+    command(rcon, f"fill {x-3} {y} {z-3} {x+3} {y+6} {z-3} stone")
+    command(rcon, f"fill {x-3} {y} {z+3} {x+3} {y+6} {z+3} stone")
+    command(rcon, f"setblock {x+1} {y-1} {z} lava")
     command(rcon, f"gamemode survival {BOT}")
     command(rcon, f"player {BOT} stop")
 
@@ -85,22 +90,34 @@ def arm_lava_reflex_blocked_first_candidate_fixture(rcon) -> None:
 
 def arm_persistent_lava_reflex_fixture(rcon) -> None:
     x, y, z = BASE
-    command(rcon, f"fill {x-2} {y} {z-2} {x+16} {y+6} {z+3} air")
-    command(rcon, f"fill {x-2} {y-1} {z-2} {x+16} {y-1} {z+3} stone")
+    command(rcon, f"tp {BOT} {x} {y} {z} -90 0")
+    time.sleep(0.2)
+    command(rcon, f"fill {x-3} {y-1} {z-3} {x+3} {y+6} {z+3} air")
+    command(rcon, f"fill {x-3} {y-1} {z-3} {x+3} {y-1} {z+3} stone")
+    command(rcon, f"fill {x-3} {y} {z-3} {x-3} {y+6} {z+3} stone")
+    command(rcon, f"fill {x+3} {y} {z-3} {x+3} {y+6} {z+3} stone")
+    command(rcon, f"fill {x-3} {y} {z-3} {x+3} {y+6} {z-3} stone")
+    command(rcon, f"fill {x-3} {y} {z+3} {x+3} {y+6} {z+3} stone")
     command(rcon, f"setblock {x+1} {y-1} {z} lava")
     command(rcon, f"setblock {x+1} {y} {z} stone")
-    command(rcon, f"tp {BOT} {x} {y} {z} -90 0")
+    command(rcon, f"setblock {x} {y} {z} air")
+    command(rcon, f"setblock {x} {y+1} {z} air")
     command(rcon, f"gamemode survival {BOT}")
     command(rcon, f"player {BOT} stop")
 
 
 def arm_fire_reflex_fixture(rcon) -> None:
     x, y, z = BASE
-    command(rcon, f"fill {x-2} {y} {z-2} {x+16} {y+6} {z+3} air")
-    command(rcon, f"fill {x-2} {y-1} {z-2} {x+16} {y-1} {z+3} stone")
+    command(rcon, f"tp {BOT} {x} {y} {z} -90 0")
+    time.sleep(0.2)
+    command(rcon, f"fill {x-3} {y-1} {z-3} {x+3} {y+6} {z+3} air")
+    command(rcon, f"fill {x-3} {y-1} {z-3} {x+3} {y-1} {z+3} stone")
+    command(rcon, f"fill {x-3} {y} {z-3} {x-3} {y+6} {z+3} stone")
+    command(rcon, f"fill {x+3} {y} {z-3} {x+3} {y+6} {z+3} stone")
+    command(rcon, f"fill {x-3} {y} {z-3} {x+3} {y+6} {z-3} stone")
+    command(rcon, f"fill {x-3} {y} {z+3} {x+3} {y+6} {z+3} stone")
     command(rcon, f"setblock {x} {y-1} {z} netherrack")
     command(rcon, f"setblock {x} {y} {z} fire")
-    command(rcon, f"tp {BOT} {x} {y} {z} -90 0")
     command(rcon, f"gamemode survival {BOT}")
     command(rcon, f"player {BOT} stop")
 
@@ -136,13 +153,18 @@ def arm_trapped_water_reflex_fixture(rcon) -> None:
 
 def arm_lava_no_escape_fixture(rcon) -> None:
     x, y, z = BASE
-    command(rcon, f"fill {x-3} {y-1} {z-3} {x+3} {y+3} {z+3} air")
+    command(rcon, f"tp {BOT} {x} {y} {z} -90 0")
+    time.sleep(0.2)
+    command(rcon, f"fill {x-9} {y-1} {z-9} {x+9} {y+3} {z+9} air")
+    command(rcon, f"fill {x-9} {y-1} {z-9} {x+9} {y-1} {z+9} stone")
+    command(rcon, f"fill {x-9} {y} {z-9} {x-9} {y+3} {z+9} stone")
+    command(rcon, f"fill {x+9} {y} {z-9} {x+9} {y+3} {z+9} stone")
+    command(rcon, f"fill {x-9} {y} {z-9} {x+9} {y+3} {z-9} stone")
+    command(rcon, f"fill {x-9} {y} {z+9} {x+9} {y+3} {z+9} stone")
+    command(rcon, f"fill {x-8} {y-1} {z-8} {x+8} {y-1} {z+8} lava")
     command(rcon, f"setblock {x} {y-1} {z} stone")
-    command(rcon, f"fill {x-2} {y} {z} {x+2} {y+1} {z} lava")
-    command(rcon, f"fill {x} {y} {z-2} {x} {y+1} {z+2} lava")
     command(rcon, f"setblock {x} {y} {z} air")
     command(rcon, f"setblock {x} {y+1} {z} air")
-    command(rcon, f"tp {BOT} {x} {y} {z} -90 0")
     command(rcon, f"gamemode survival {BOT}")
     command(rcon, f"effect give {BOT} minecraft:fire_resistance 20 0 true")
     command(rcon, f"player {BOT} stop")
@@ -172,10 +194,19 @@ def assert_neutral_preempted(body: ScarpetBody, terminal, *, action_name: str, e
     owner_preempted = next((event for event in recent_events if event.name == "ownerPreempted"), None)
     if owner_preempted is None:
         owner_preempted = wait_for_event(body, "ownerPreempted", timeout_s=3.0)
-    reflex_owner = triggered.data.get("kind", "lava") + "Reflex"
-    if owner_preempted.data.get("previous_owner") != action_name or owner_preempted.data.get("new_owner") != reflex_owner:
+    reflex_owner = owner_preempted.data.get("new_owner")
+    matching_trigger = next(
+        (
+            event
+            for event in recent_events
+            if event.name == "reflexTriggered"
+            and f"{event.data.get('kind', '')}Reflex" == reflex_owner
+        ),
+        triggered,
+    )
+    if owner_preempted.data.get("previous_owner") != action_name or matching_trigger is None:
         raise AssertionError(f"{action_name} owner handoff drifted: {owner_preempted.data}")
-    if completed.data.get("escaped_hazard") is not True:
+    if completed.data.get("kind") != matching_trigger.data.get("kind") or completed.data.get("escaped_hazard") is not True:
         raise AssertionError(f"{action_name} reflex did not escape hazard: {completed.data}")
 
 
@@ -548,9 +579,9 @@ def run_lava_reflex_skips_non_standable_candidate(rcon, body: ScarpetBody) -> No
     if not isinstance(target, list) or len(target) != 3:
         raise AssertionError(f"lava reflex target is not a position: {triggered.data}")
     target_cell = tuple(math.floor(float(axis)) for axis in target)
-    expected = (BASE[0] - 1, BASE[1], BASE[2])
-    if target_cell != expected:
-        raise AssertionError(f"lava reflex did not skip blocked first candidate: target={target} expected={expected}")
+    blocked_first_candidate = (BASE[0] + 1, BASE[2] - 1)
+    if target_cell == blocked_first_candidate:
+        raise AssertionError(f"lava reflex selected the blocked first candidate: target={target}")
     recent_events = body.event_log[event_start:]
     completed = next((event for event in recent_events if event.name == "reflexCompleted"), None)
     if completed is None:
@@ -562,6 +593,72 @@ def run_lava_reflex_skips_non_standable_candidate(rcon, body: ScarpetBody) -> No
     raw = command(rcon, f"script in minebot run is_dry_stand_cell({x},{y},{z})", delay=0.0)
     if "true" not in raw:
         raise AssertionError(f"lava reflex final position is not a dry stand: final={final.pos} raw={raw}")
+
+
+def run_auto_lava_failure_latch(rcon, body: ScarpetBody) -> None:
+    """A persistent hazard may fail once, then must release and stay quiescent."""
+
+    command(rcon, "kill @e[type=!player]")
+    command(rcon, "difficulty peaceful")
+    command(rcon, f"data merge entity {BOT} {{Health:20.0f}}")
+    arm_lava_no_escape_fixture(rcon)
+    event_start = len(body.event_log)
+    set_reflex_scan(rcon, True)
+    deadline = time.monotonic() + 12.0
+    while time.monotonic() < deadline:
+        body.poll_events()
+        completed = [event for event in body.event_log[event_start:] if event.name == "reflexCompleted"]
+        if completed:
+            break
+        time.sleep(0.1)
+    body.poll_events()
+    events = body.event_log[event_start:]
+    completed = [event for event in events if event.name == "reflexCompleted"]
+    triggered = [event for event in events if event.name == "reflexTriggered"]
+    if not completed:
+        raise AssertionError(f"automatic persistent lava reflex did not settle: {events}")
+    if len(triggered) > 1:
+        raise AssertionError(f"persistent lava hazard reacquired reflex repeatedly: {events}")
+    if completed[0].data.get("kind") != "lava" or completed[0].data.get("escaped_hazard") is not False:
+        raise AssertionError(f"persistent lava reflex did not fail honestly: {completed[0].data}")
+    time.sleep(2.0)
+    body.poll_events()
+    events = body.event_log[event_start:]
+    if len([event for event in events if event.name == "reflexTriggered"]) > 1:
+        raise AssertionError(f"persistent lava hazard retriggered after failure: {events}")
+    state = body.get_state()
+    if state.body_owner is not None or state.pending_action_count != 0:
+        raise AssertionError(f"failed automatic reflex leaked owner/pending state: {state}")
+    latch = command(rcon, f"script in minebot run global_reflex_failure_latches:'{BOT}'", delay=0.0)
+    if "lava" not in latch:
+        raise AssertionError(f"failed automatic reflex did not leave a hazard latch: {latch}")
+
+    # A materially different hazard position clears the local latch and permits
+    # a fresh reflex; this exercises lifecycle recovery rather than a permanent
+    # provider-wide disable.
+    set_reflex_scan(rcon, False)
+    x, y, z = BASE[0] + 40, BASE[1], BASE[2]
+    command(rcon, f"gamemode creative {BOT}")
+    command(rcon, f"tp {BOT} {x} {y} {z} -90 0")
+    time.sleep(0.3)
+    cleared = command(rcon, f"script in minebot run reflex_failure_latched('{BOT}', 'lava', bot_pos('{BOT}'))", delay=0.0)
+    if "false" not in cleared:
+        raise AssertionError(f"moving away did not clear the local reflex latch: {cleared}")
+    arm_lava_reflex_fixture(rcon)
+    command(rcon, f"gamemode survival {BOT}")
+    event_start = len(body.event_log)
+    raw = command(rcon, f"script in minebot run start_lava_reflex('{BOT}')", delay=0.2)
+    if "true" not in raw:
+        raise AssertionError(f"new hazard did not permit a fresh reflex after movement: {raw}")
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        body.poll_events()
+        if any(event.name == "reflexTriggered" for event in body.event_log[event_start:]):
+            break
+        time.sleep(0.1)
+    body.poll_events()
+    if not any(event.name == "reflexTriggered" for event in body.event_log[event_start:]):
+        raise AssertionError("fresh reflex did not emit a triggered event after movement")
 
 
 def main() -> int:
@@ -583,6 +680,7 @@ def main() -> int:
             run_water_reflex_honest_failure(rcon, body)
             run_lava_reflex_honest_failure_releases_owner(rcon, body)
             run_lava_reflex_skips_non_standable_candidate(rcon, body)
+            run_auto_lava_failure_latch(rcon, body)
         finally:
             command(rcon, "script in minebot run global_reflex_scan = false", delay=0.0)
             command(rcon, "script in minebot run global_water_reflex_air_threshold = 80", delay=0.0)

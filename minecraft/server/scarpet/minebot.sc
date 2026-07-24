@@ -19,6 +19,7 @@ global_drops = {};
 global_owners = {};
 global_reflexes = {};
 global_pending_reflexes = {};
+global_reflex_failure_latches = {};
 global_watched = {};
 global_reflex_scan = true;
 global_water_reflex_air_threshold = 80;
@@ -1523,6 +1524,7 @@ clear_body_runtime(name) -> (
   global_drops:name = null;
   global_reflexes:name = null;
   global_pending_reflexes:name = null;
+  global_reflex_failure_latches:name = null;
   global_engages:name = null;
   global_water_reflex_health_baselines:name = null;
   global_combat_health_baselines:name = null;
@@ -3060,14 +3062,7 @@ is_solid_floor(x, y, z) -> (
 );
 
 is_reflex_escape_cell(x, y, z) -> (
-  here = '' + block(x, y, z);
-  head = '' + block(x, y + 1, z);
-  here_kind = block_kind(here);
-  head_kind = block_kind(head);
-  here != 'lava' && here != 'minecraft:lava' &&
-  head != 'lava' && head != 'minecraft:lava' &&
-  here_kind != 'SOLID' && head_kind != 'SOLID' &&
-  is_solid_floor(x, y, z)
+  is_dry_stand_cell(x, y, z)
 );
 
 is_dry_stand_cell(x, y, z) -> (
@@ -3200,13 +3195,13 @@ hazard_kind_near_name(name) -> (
     null
   ,
     if(lava_near_pos(p),
-      if(active_move_owns_lava_egress(name), null, 'lava')
+      if(active_move_owns_lava_egress(name) || reflex_failure_latched(name, 'lava', p), null, 'lava')
     ,
       if(on_fire_now(name),
-        'fire'
+        if(reflex_failure_latched(name, 'fire', p), null, 'fire')
       ,
         if(water_reflex_should_trigger(name),
-          if(active_move_owns_water_egress(name), null, 'water')
+          if(active_move_owns_water_egress(name) || reflex_failure_latched(name, 'water', p), null, 'water')
         ,
           null
         )
@@ -3368,6 +3363,54 @@ reflex_target_below_type(target) -> (
   if(target == null, 'null', '' + block(floor(target:0), floor(target:1) - 1, floor(target:2)))
 );
 
+reflex_hazard_present(name, kind, p) -> (
+  if(p == null,
+    false
+  ,
+    if(kind == 'lava',
+      lava_near_pos(p)
+    ,
+      if(kind == 'fire',
+        on_fire_now(name)
+      ,
+        kind == 'water' && in_water_now(name) && water_reflex_should_trigger(name)
+      )
+    )
+  )
+);
+
+reflex_failure_latched(name, kind, p) -> (
+  latch = global_reflex_failure_latches:name;
+  if(latch == null || p == null,
+    false
+  ,
+    same_kind = latch:0 == kind;
+    dx = p:0 - latch:1;
+    dy = p:1 - latch:2;
+    dz = p:2 - latch:3;
+    moved = sqrt(dx*dx + dy*dy + dz*dz) > 1.5;
+    if(!same_kind || moved || !reflex_hazard_present(name, kind, p),
+      global_reflex_failure_latches:name = null;
+      false
+    ,
+      true
+    )
+  )
+);
+
+remember_reflex_failure(name, kind, p) -> (
+  if(p != null,
+    global_reflex_failure_latches:name = l(kind, p:0, p:1, p:2, global_tick)
+  );
+  true
+);
+
+clear_reflex_failure(name, kind) -> (
+  latch = global_reflex_failure_latches:name;
+  if(latch != null && latch:0 == kind, global_reflex_failure_latches:name = null);
+  true
+);
+
 water_hazard_clear(name) -> (
   p = bot_pos(name);
   if(p == null,
@@ -3381,7 +3424,7 @@ water_hazard_clear(name) -> (
 queue_immediate_lava_reflex(name) -> (
   if(global_reflex_scan && global_reflexes:name == null,
     p = bot_pos(name);
-    if(p != null && lava_near_pos(p),
+    if(p != null && lava_near_pos(p) && !reflex_failure_latched(name, 'lava', p),
       global_pending_reflexes:name = 'lava'
     )
   );
@@ -3390,7 +3433,8 @@ queue_immediate_lava_reflex(name) -> (
 
 queue_immediate_fire_reflex(name) -> (
   if(global_reflex_scan && global_reflexes:name == null,
-    if(on_fire_now(name),
+    p = bot_pos(name);
+    if(p != null && on_fire_now(name) && !reflex_failure_latched(name, 'fire', p),
       global_pending_reflexes:name = 'fire'
     )
   );
@@ -3399,7 +3443,8 @@ queue_immediate_fire_reflex(name) -> (
 
 queue_immediate_water_reflex(name) -> (
   if(global_reflex_scan && global_reflexes:name == null,
-    if(water_reflex_should_trigger(name),
+    p = bot_pos(name);
+    if(p != null && water_reflex_should_trigger(name) && !reflex_failure_latched(name, 'water', p),
       global_pending_reflexes:name = 'water'
     )
   );
@@ -3415,6 +3460,7 @@ movement_water_escape_should_trigger(name, m, stuck_ticks) -> (
   global_reflexes:name == null &&
   in_water_now(name) &&
   water_reflex_should_trigger(name) &&
+  !reflex_failure_latched(name, 'water', bot_pos(name)) &&
   stuck_ticks >= movement_water_escape_ticks(m)
 );
 
@@ -3492,6 +3538,7 @@ start_hazard_reflex(name, kind) -> (
     cancel_sow_preempted(name);
     if(target == null,
       emit('reflexCompleted', name, l(p, 0.0, 0, false, kind, l(0, 0, 0), false, false, 'null', 'null'));
+      remember_reflex_failure(name, kind, p);
       release_owner(name, owner_name);
       false
     ,
@@ -3665,6 +3712,7 @@ run_reflex_tick(name, r) -> (
     stop_body(name);
     target = l(r:0, r:1, r:2);
     emit('reflexCompleted', name, l(p, dist, ticks, false, kind, target, reflex_target_is_dry_stand(target), false, reflex_target_block_type(target), reflex_target_below_type(target)));
+    remember_reflex_failure(name, kind, p);
     global_reflexes:name = null;
     if(move_cancel_egress,
       emit('moveCancelEgress', name, l(global_moves:name:0, global_move_cancels:name:0, 'unavailable', p, target, false));
@@ -3677,6 +3725,7 @@ run_reflex_tick(name, r) -> (
     stop_body(name);
     target = l(r:0, r:1, r:2);
     emit('reflexCompleted', name, l(p, dist, ticks, true, kind, target, reflex_target_is_dry_stand(target), if(kind == 'water', water_on_dry_stand, reflex_target_is_dry_stand(p)), reflex_target_block_type(target), reflex_target_below_type(target)));
+    clear_reflex_failure(name, kind);
     global_reflexes:name = null;
     if(move_cancel_egress,
       finish_move(name, global_move_cancels:name:0, false)
@@ -3688,6 +3737,7 @@ run_reflex_tick(name, r) -> (
       stop_body(name);
       target = l(r:0, r:1, r:2);
       emit('reflexCompleted', name, l(p, dist, ticks, false, kind, target, reflex_target_is_dry_stand(target), if(kind == 'water', water_on_dry_stand, reflex_target_is_dry_stand(p)), reflex_target_block_type(target), reflex_target_below_type(target)));
+      remember_reflex_failure(name, kind, p);
       global_reflexes:name = null;
       if(move_cancel_egress,
         emit('moveCancelEgress', name, l(global_moves:name:0, global_move_cancels:name:0, 'failed', p, target, water_on_dry_stand));
@@ -4076,7 +4126,9 @@ tick_bot(name) -> (
   if(global_pending_reflexes:name != null && global_reflexes:name == null,
     pending_kind = global_pending_reflexes:name;
     global_pending_reflexes:name = null;
-    start_hazard_reflex(name, pending_kind)
+    if(!reflex_failure_latched(name, pending_kind, bot_pos(name)),
+      start_hazard_reflex(name, pending_kind)
+    )
   );
   if(global_reflex_scan && global_reflexes:name == null,
     hazard_kind = hazard_kind_near_name(name);
@@ -6388,6 +6440,7 @@ minebot_reset() -> (
   global_owners = {};
   global_reflexes = {};
   global_pending_reflexes = {};
+  global_reflex_failure_latches = {};
   global_watched = {};
   global_reflex_scan = true;
   global_water_reflex_air_threshold = 80;
