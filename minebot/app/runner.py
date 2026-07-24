@@ -2416,6 +2416,8 @@ class AgentRuntime:
         self.last_tool_results: list[dict[str, Any]] = []
         self._pending_mobility_terminal: dict[str, object] | None = None
         self.last_known_body_state: dict[str, object] | None = None
+        self._last_traced_body_event_seq = 0
+        self._body_event_trace_lock = threading.Lock()
         self.consecutive_transport_errors = 0
         self.execution_lane = SerialExecutionLane(thread_name=f"minebot-{agent_name}")
         self.context_refreshers: list[Callable[[AgentContext], None]] = []
@@ -3033,6 +3035,55 @@ class AgentRuntime:
             "pending_action_count": getattr(state, "pending_action_count", None),
         }
 
+    def trace_body_events(self, events: object, *, source: str = "turn_boundary") -> None:
+        """Emit a complete, non-consuming Body-event observation.
+
+        Body transactions and the idle event pump may already have consumed
+        events from the provider.  This method records the payload at the
+        point it is observed and de-duplicates by the authoritative sequence
+        number, so telemetry never competes with the single event consumer.
+        An empty list is still a meaningful heartbeat: it distinguishes a
+        covered interval with no event from a missing event observation.
+        """
+
+        with self._body_event_trace_lock:
+            payload: list[JsonObject] = []
+            max_seq = self._last_traced_body_event_seq
+            for event in events or ():
+                if isinstance(event, dict):
+                    seq = int(event.get("seq") or 0)
+                    tick = int(event.get("tick") or 0)
+                    bot = event.get("bot")
+                    name = event.get("name")
+                    data = event.get("data")
+                else:
+                    seq = int(getattr(event, "seq", 0) or 0)
+                    tick = int(getattr(event, "tick", 0) or 0)
+                    bot = getattr(event, "bot", None)
+                    name = getattr(event, "name", None)
+                    data = getattr(event, "data", None)
+                if seq <= self._last_traced_body_event_seq:
+                    continue
+                payload.append(
+                    {
+                        "seq": seq,
+                        "tick": tick,
+                        "bot": bot,
+                        "name": name,
+                        "data": dict(data or {}) if isinstance(data, dict) else {},
+                    }
+                )
+                max_seq = max(max_seq, seq)
+            self.trace.emit(
+                "body_events",
+                source=source,
+                count=len(payload),
+                names=[item["name"] for item in payload],
+                seqs=[item["seq"] for item in payload],
+                events=payload,
+            )
+            self._last_traced_body_event_seq = max_seq
+
     def remember_tool_body_facts(self, result: JsonObject, *, trace: RuntimeTrace | None = None) -> None:
         metrics = result.get("metrics") if isinstance(result, dict) else None
         if not isinstance(metrics, dict):
@@ -3249,22 +3300,7 @@ class AgentRuntime:
             complete=state.complete,
             missing=state.missing,
         )
-        self.trace.emit(
-            "body_events",
-            count=len(events),
-            names=[event.name for event in events],
-            seqs=[event.seq for event in events],
-            events=[
-                {
-                    "seq": event.seq,
-                    "tick": event.tick,
-                    "bot": event.bot,
-                    "name": event.name,
-                    "data": dict(event.data or {}),
-                }
-                for event in events
-            ],
-        )
+        self.trace_body_events(events)
         signals = [
             *signalize_body_state(state),
             *signalize_events(events),

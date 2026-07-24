@@ -2718,6 +2718,66 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.metrics["surface_egress"]["final_pos"], [2, 65, 0])
         self.assertTrue(result.metrics["surface_egress"]["terminal_stand"]["standable"])
 
+    def test_go_to_surface_promotes_wrapped_egress_no_path_to_governed_search(self):
+        class RecoveryNavigator(FakeNavigator):
+            def __init__(self, body):
+                super().__init__(result=True, reason="arrived")
+                self.body = body
+                self.outcomes = [
+                    ToolResult(
+                        success=False,
+                        reason="recovery_exhausted:no_path",
+                        can_retry=True,
+                        metrics={"selected_goal": [2, 65, 0]},
+                    ),
+                    ToolResult(
+                        success=True,
+                        reason="arrived",
+                        can_retry=False,
+                        metrics={"selected_goal": [2, 65, 0]},
+                    ),
+                ]
+
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                result = self.outcomes.pop(0)
+                if result.success:
+                    selected = goal_position(goal)
+                    self.body.state_pos = tuple(float(value) for value in selected)
+                return result
+
+        blocks = {
+            (0, 63, 0): ("stone", "SOLID"),
+            (0, 64, 0): ("water", "LIQUID"),
+            (0, 67, 0): ("stone", "SOLID"),
+            (1, 64, 0): ("water", "LIQUID"),
+            (2, 64, 0): ("stone", "SOLID"),
+        }
+        body = FakeBody(blocks=blocks)
+        body.state_pos = (0.5, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("surface", (-20, 0, -20), (20, 120, 20))])
+        navigator = RecoveryNavigator(body)
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.go_to_surface(
+            timeout_s=1.0,
+            surface_scan_height=2,
+            surface_scan_radius=2,
+            world_top_y=70,
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "surface_reached")
+        self.assertEqual(len(navigator.calls), 2)
+        egress_config = navigator.calls[0][1]["config"]
+        self.assertFalse(egress_config.allow_break)
+        self.assertTrue(egress_config.allow_swim)
+        surface_config = navigator.calls[1][1]["config"]
+        self.assertTrue(surface_config.allow_break)
+        self.assertTrue(surface_config.allow_swim)
+        self.assertTrue(surface_config.aquatic_traversal)
+        self.assertEqual(result.metrics["surface_egress"]["fallback"], "surface_domain_governed_mobility")
+
     def test_go_to_surface_falls_back_when_no_nearby_dry_egress_exists(self):
         class MovingNavigator(FakeNavigator):
             def __init__(self, body):
@@ -2755,6 +2815,8 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(len(navigator.calls), 1)
         config = navigator.calls[0][1]["config"]
         self.assertTrue(config.allow_break)
+        self.assertTrue(config.allow_swim)
+        self.assertTrue(config.aquatic_traversal)
         self.assertFalse(config.allow_downward)
         self.assertEqual(body.actions, [])
 

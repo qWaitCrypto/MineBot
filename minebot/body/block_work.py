@@ -1570,6 +1570,7 @@ class BlockWork:
         requested_origin = current_pos or _state_block_pos(self.body.get_state().pos)
         origin = requested_origin
         surface_egress: dict[str, object] | None = None
+        surface_egress_needs_governed_mobility = False
         initial = self._surface_candidate_at(origin, world_top_y=world_top_y)
         if isinstance(initial, ToolResult):
             return _with_metric(initial, "go_to_surface", {"origin": list(origin)})
@@ -1595,7 +1596,8 @@ class BlockWork:
             egress = self.egress_to_dry(current_pos=origin, timeout_s=timeout_s)
             surface_egress = {"required": True, **dict(egress.metrics or {})}
             if not egress.success:
-                if egress.reason != "dry_egress_unavailable":
+                surface_egress_needs_governed_mobility = _surface_egress_can_fall_through(egress)
+                if not surface_egress_needs_governed_mobility:
                     return ToolResult(
                         success=False,
                         reason=f"surface_egress_failed:{egress.reason}",
@@ -1603,6 +1605,7 @@ class BlockWork:
                         next_suggestion=egress.next_suggestion,
                         metrics={"origin": list(requested_origin), "surface_egress": surface_egress},
                     )
+                surface_egress["fallback"] = "surface_domain_governed_mobility"
             else:
                 origin = _state_block_pos(self.body.get_state().pos)
                 initial = self._surface_candidate_at(origin, world_top_y=world_top_y)
@@ -1794,6 +1797,10 @@ class BlockWork:
                 max_downward_steps=0,
                 scaffold_blocks=tuple(scaffold_blocks),
             )
+            if surface_egress_needs_governed_mobility:
+                from minebot.body.navigation import governed_mobility_navigation_config
+
+                navigation_config = governed_mobility_navigation_config(navigation_config)
         navigation = self.navigator.navigate_to(
             goal,
             break_context=BreakContext(context),
@@ -3894,6 +3901,26 @@ def _surface_terminal_verified(surface: dict[str, object]) -> bool:
 
 def _surface_requires_lateral_egress(surface: dict[str, object]) -> bool:
     return _stand_has_liquid_contact(surface)
+
+
+def _surface_egress_can_fall_through(result: ToolResult) -> bool:
+    """Keep surface recovery alive when the first shore route is merely blocked.
+
+    A failed pure-movement shore search is not a terminal surface failure.  The
+    caller still owns a bounded vertical/surface-domain search that can combine
+    swimming with its already-governed break/place/pillar operators.  Transport,
+    world-read, and body-lifecycle failures must remain typed terminal results.
+    """
+
+    reason = str(result.reason or "")
+    if reason == "dry_egress_unavailable":
+        return True
+    if not reason.startswith("dry_egress_failed:"):
+        return False
+    navigation_reason = reason.split(":", 1)[1]
+    from minebot.body.navigation import navigation_governed_mobility_upgrade_reason
+
+    return navigation_governed_mobility_upgrade_reason(navigation_reason)
 
 
 def _stand_has_liquid_contact(stand: dict[str, object]) -> bool:

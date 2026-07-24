@@ -409,7 +409,12 @@ def _recovery_signal(
         for event in events
         if event.get("event") == "tool_result" and _in_window(event, start_ts=start_ts, end_ts=end_ts)
     ]
-    obstacles = [event for event in results if event.get("success") is False and _is_natural_obstacle(event.get("reason"))]
+    obstacles = [
+        event
+        for event in results
+        if event.get("success") is False
+        and _is_natural_obstacle(event.get("reason"), tool=event.get("tool"))
+    ]
     if not obstacles:
         return {
             "verdict": "insufficient_evidence",
@@ -690,9 +695,30 @@ def _has_material_body_event(event: JsonObject) -> bool:
     return False
 
 
-def _is_natural_obstacle(reason: object) -> bool:
+def _is_natural_obstacle(reason: object, *, tool: object = None) -> bool:
     text = str(reason or "").casefold()
     if not text:
+        return False
+    tool_name = str(tool or "").casefold()
+    # These are agent/runtime contract failures, not world episodes.  Counting
+    # them would let a failed skill lookup or local planning call manufacture
+    # recovery evidence without the Body ever encountering an obstacle.
+    if tool_name in {"load_skill", "update_plan", "read_state", "read_inventory", "read_block", "read_recipe"}:
+        return False
+    if any(
+        text == marker or text.startswith(f"{marker}:")
+        for marker in (
+            "skill_not_found",
+            "task_plan_update_rejected",
+            "missing_required_tool",
+            "tool_runtime_error",
+            "invalid_tool",
+            "invalid_input",
+            "body_batch_conflict",
+            "body_rejected",
+            "transport_error",
+        )
+    ):
         return False
     if any(
         marker in text

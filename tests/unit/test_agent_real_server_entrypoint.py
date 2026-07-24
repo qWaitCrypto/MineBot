@@ -22,6 +22,7 @@ from minebot.app.real_server_session import (
     _chat_command_reader,
     _interactive_speech_sink,
     _maybe_trace_idle_body_state,
+    _trace_active_body_state_loop,
     _poll_chat_commands,
     _run_interactive_loop,
     InteractiveScenarioContext,
@@ -1146,6 +1147,52 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertFalse(events[0]["missing"])
         self.assertEqual(runtime.last_known_body_state["pos"], [0.5, 64.0, 0.5])
 
+    def test_active_body_state_sampler_runs_during_long_turns(self):
+        trace = RuntimeTrace()
+        body = HarnessBody()
+        body.event_log = [Event(seq=7, tick=42, bot="Bot", name="moveDone", data={"arrived": True})]
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            trace=trace,
+        )
+
+        class Parts:
+            pass
+
+        class Session:
+            pass
+
+        parts = Parts()
+        parts.runtime = runtime
+        session = Session()
+        session.parts = parts
+
+        async def run_sampler():
+            sampler = asyncio.create_task(
+                _trace_active_body_state_loop(session, body, interval_s=0.01)
+            )
+            try:
+                await asyncio.sleep(0.04)
+            finally:
+                sampler.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sampler
+
+        asyncio.run(run_sampler())
+
+        events = [event for event in trace.snapshot() if event["event"] == "body_state"]
+        self.assertGreaterEqual(len(events), 1)
+        self.assertEqual(events[0]["source"], "active_body_state_poll")
+        body_events = [event for event in trace.snapshot() if event["event"] == "body_events"]
+        self.assertTrue(body_events)
+        self.assertEqual(body_events[0]["events"][0]["name"], "moveDone")
+        self.assertEqual(body_events[0]["events"][0]["data"], {"arrived": True})
+
     def test_interactive_loop_keeps_open_task_pending_for_external_verification(self):
         store = RuntimeStateStore(":memory:")
         workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
@@ -1927,6 +1974,7 @@ class HarnessBody:
 
     def __init__(self):
         self.spoken = []
+        self.event_log = []
 
     def spawn(self, *args, **kwargs):
         return Result(None, self.bot_name, "result", True, True, True)

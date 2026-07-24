@@ -278,12 +278,15 @@ def main() -> None:
         }
         final_oak_logs = sum(1 for block_type in final_tree.values() if block_type == "oak_log")
         fallback_count = body_process_metrics.get("navigation_fallback_attempts")
+        dry_reason = str(navigation_attempts[0].get("dry_reason") or "") if navigation_attempts else ""
+        if dry_reason.startswith("recovery_exhausted:"):
+            dry_reason = dry_reason.split(":", 1)[1]
         if (
             payload.get("success") is not True
             or payload.get("reason") != "collected"
             or fallback_count != 1
             or len(navigation_attempts) != 1
-            or navigation_attempts[0].get("dry_reason") not in {"no_path", "budget_exceeded"}
+            or dry_reason not in {"no_path", "budget_exceeded"}
             or navigation_attempts[0].get("fallback_attempted") is not True
             or int((navigation_attempts[0].get("dry_navigation") or {}).get("path_length") or 0) != 0
             or any(

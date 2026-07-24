@@ -237,6 +237,32 @@ class AutonomyQualityTests(unittest.TestCase):
         self.assertEqual(report["verdict"], "insufficient_evidence")
         self.assertEqual(report["signals"]["recovery"]["reason"], "no_natural_obstacle_episode")
 
+    def test_runtime_contract_failure_does_not_count_as_natural_recovery_episode(self):
+        events = _healthy_material_incomplete_trace(include_obstacle=False)
+        events.extend(
+            [
+                _invoke(100, 250, "load_skill", "skill-a", "load_skill:water", mutating=True),
+                _result(
+                    101,
+                    300,
+                    "load_skill",
+                    "skill-a",
+                    "load_skill:water",
+                    success=False,
+                    reason="skill_not_found",
+                ),
+            ]
+        )
+
+        report = evaluate_autonomy_quality(
+            sorted(events, key=lambda event: (event["ts"], event["seq"])),
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        self.assertEqual(report["verdict"], "insufficient_evidence")
+        self.assertEqual(report["signals"]["recovery"]["reason"], "no_natural_obstacle_episode")
+
     def test_sparse_body_state_trace_is_insufficient_evidence(self):
         states = [
             _body_state(1, 0, x=0, counts={}),

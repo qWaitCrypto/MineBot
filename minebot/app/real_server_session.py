@@ -976,80 +976,112 @@ async def _run_interactive_loop(
 ) -> SessionStep:
     last = None
     remaining = max_steps
-    while remaining is None or remaining > 0:
-        if iteration_hook is not None:
-            iteration_hook()
-        _poll_chat_commands(session, chat_source)
-        if not getattr(session, "has_pending_work", True):
-            if body_event_pump is not None:
-                try:
-                    task_workspace = getattr(session, "task_workspace", None)
-                    task = None if task_workspace is None else task_workspace.current_task
-                    task_waiting = task is not None and task.status is TaskStatus.WAITING_EVENT
-                    checkpoint = (
-                        None
-                        if task is None or not task_waiting
-                        else task_workspace.store.get_latest_checkpoint(task.task_id)
+    state_sampler = asyncio.create_task(_trace_active_body_state_loop(session, body))
+    try:
+        while remaining is None or remaining > 0:
+            if iteration_hook is not None:
+                iteration_hook()
+            _poll_chat_commands(session, chat_source)
+            if not getattr(session, "has_pending_work", True):
+                if body_event_pump is not None:
+                    try:
+                        task_workspace = getattr(session, "task_workspace", None)
+                        task = None if task_workspace is None else task_workspace.current_task
+                        task_waiting = task is not None and task.status is TaskStatus.WAITING_EVENT
+                        checkpoint = (
+                            None
+                            if task is None or not task_waiting
+                            else task_workspace.store.get_latest_checkpoint(task.task_id)
+                        )
+                        task_wakeable = task is not None and task.status in {
+                            TaskStatus.RUNNING,
+                            TaskStatus.WAITING_EVENT,
+                        }
+                        checkpoint_generation = None
+                        if checkpoint is not None and checkpoint.body_fingerprint is not None:
+                            raw_generation = checkpoint.body_fingerprint.get("generation")
+                            if raw_generation is not None:
+                                checkpoint_generation = int(raw_generation)
+                        poll_result = await asyncio.to_thread(
+                            body_event_pump.poll_once,
+                            task_id=task.task_id if task_wakeable else None,
+                            generation=checkpoint_generation,
+                            task_waiting=task_waiting,
+                            wait_checkpoint_id=(
+                                checkpoint.checkpoint_id if checkpoint is not None else None
+                            ),
+                            wait_for=() if checkpoint is None else checkpoint.wait_for,
+                        )
+                    except Exception as exc:
+                        _trace_body_event_poll_failure(session, exc)
+                    else:
+                        _trace_body_event_poll(session, poll_result)
+                        _maybe_trace_idle_body_state(session, body)
+                        _maybe_trace_body_events(session, body, source="idle_body_event_poll")
+                await asyncio.sleep(0.25 if body_event_pump is not None else 0.05)
+                continue
+            last = await session.step()
+            if last.status == "quit":
+                return last
+            truth = safe_evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last, session=session)
+            if truth.satisfied:
+                completed = session.complete_current_goal("terminal_truth_satisfied")
+                completed_truth = safe_evaluate_terminal_truth(body, truth.goal, completed, session=session)
+                _announce_interactive_terminal(body, completed_truth)
+                last = completed
+            elif (
+                truth.target is None
+                and getattr(session, "task_workspace", None) is not None
+                and session.task_workspace.completion_requested
+            ):
+                parts = getattr(session, "parts", None)
+                if parts is not None:
+                    checkpoint = session.task_workspace.store.get_latest_checkpoint(
+                        session.task_workspace.current_task.task_id
                     )
-                    task_wakeable = task is not None and task.status in {
-                        TaskStatus.RUNNING,
-                        TaskStatus.WAITING_EVENT,
-                    }
-                    checkpoint_generation = None
-                    if checkpoint is not None and checkpoint.body_fingerprint is not None:
-                        raw_generation = checkpoint.body_fingerprint.get("generation")
-                        if raw_generation is not None:
-                            checkpoint_generation = int(raw_generation)
-                    poll_result = await asyncio.to_thread(
-                        body_event_pump.poll_once,
-                        task_id=task.task_id if task_wakeable else None,
-                        generation=checkpoint_generation,
-                        task_waiting=task_waiting,
-                        wait_checkpoint_id=(
-                            checkpoint.checkpoint_id if checkpoint is not None else None
+                    parts.runtime.trace.emit(
+                        "task_completion_pending_verification",
+                        goal=truth.goal,
+                        checkpoint_id=(
+                            None if checkpoint is None else checkpoint.checkpoint_id
                         ),
-                        wait_for=() if checkpoint is None else checkpoint.wait_for,
+                        evidence=[] if checkpoint is None else list(checkpoint.evidence),
+                        required_authority="human_or_typed_verifier",
                     )
-                except Exception as exc:
-                    _trace_body_event_poll_failure(session, exc)
-                else:
-                    _trace_body_event_poll(session, poll_result)
-                    _maybe_trace_idle_body_state(session, body)
-            await asyncio.sleep(0.25 if body_event_pump is not None else 0.05)
-            continue
-        last = await session.step()
-        if last.status == "quit":
-            return last
-        truth = safe_evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last, session=session)
-        if truth.satisfied:
-            completed = session.complete_current_goal("terminal_truth_satisfied")
-            completed_truth = safe_evaluate_terminal_truth(body, truth.goal, completed, session=session)
-            _announce_interactive_terminal(body, completed_truth)
-            last = completed
-        elif (
-            truth.target is None
-            and getattr(session, "task_workspace", None) is not None
-            and session.task_workspace.completion_requested
-        ):
-            parts = getattr(session, "parts", None)
-            if parts is not None:
-                checkpoint = session.task_workspace.store.get_latest_checkpoint(
-                    session.task_workspace.current_task.task_id
-                )
-                parts.runtime.trace.emit(
-                    "task_completion_pending_verification",
-                    goal=truth.goal,
-                    checkpoint_id=(
-                        None if checkpoint is None else checkpoint.checkpoint_id
-                    ),
-                    evidence=[] if checkpoint is None else list(checkpoint.evidence),
-                    required_authority="human_or_typed_verifier",
-                )
-        if remaining is not None:
-            remaining -= 1
-        await asyncio.sleep(0)
-    assert last is not None
-    return last
+            if remaining is not None:
+                remaining -= 1
+            await asyncio.sleep(0)
+        assert last is not None
+        return last
+    finally:
+        state_sampler.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await state_sampler
+
+
+async def _trace_active_body_state_loop(
+    session: AgentSession,
+    body: Body,
+    *,
+    interval_s: float = IDLE_BODY_STATE_SAMPLE_INTERVAL_S,
+) -> None:
+    """Keep authoritative position/inventory coverage alive during long turns."""
+
+    while True:
+        await asyncio.sleep(interval_s)
+        await asyncio.to_thread(
+            _maybe_trace_idle_body_state,
+            session,
+            body,
+            interval_s=interval_s,
+            source="active_body_state_poll",
+        )
+        await asyncio.to_thread(
+            _maybe_trace_body_events,
+            session,
+            body,
+            source="active_body_event_poll",
+        )
 
 
 def _poll_chat_commands(session: AgentSession, chat_source: object | None) -> int:
@@ -1156,6 +1188,7 @@ def _maybe_trace_idle_body_state(
     body: Body,
     *,
     interval_s: float = IDLE_BODY_STATE_SAMPLE_INTERVAL_S,
+    source: str = "idle_body_state_poll",
 ) -> bool:
     parts = getattr(session, "parts", None)
     if parts is None:
@@ -1180,7 +1213,7 @@ def _maybe_trace_idle_body_state(
     if getattr(state, "missing", False):
         runtime.trace.emit(
             "body_state",
-            source="idle_body_state_poll",
+            source=source,
             bot=getattr(state, "bot", None),
             pos=list(getattr(state, "pos", ())),
             health=getattr(state, "health", None),
@@ -1200,8 +1233,32 @@ def _maybe_trace_idle_body_state(
         setattr(runtime, "_last_idle_body_state_trace_monotonic", now)
         return True
     runtime._remember_body_state(state)
-    runtime._emit_last_known_body_state_trace(source="idle_body_state_poll")
+    runtime._emit_last_known_body_state_trace(source=source)
     setattr(runtime, "_last_idle_body_state_trace_monotonic", now)
+    return True
+
+
+def _maybe_trace_body_events(
+    session: AgentSession,
+    body: Body,
+    *,
+    source: str,
+) -> bool:
+    """Record already-observed Body events without draining the provider.
+
+    ScarpetBody keeps a local event log whenever a transaction or the idle
+    pump consumes events.  Reading that log is safe for telemetry and avoids
+    racing the action terminal waiter by calling ``poll_events`` a second
+    time.  Other Body providers may omit the log; they still get an explicit
+    empty heartbeat and therefore fail closed only on missing state fields,
+    not by silently inventing event coverage.
+    """
+
+    parts = getattr(session, "parts", None)
+    runtime = getattr(parts, "runtime", None) if parts is not None else None
+    if runtime is None:
+        return False
+    runtime.trace_body_events(list(getattr(body, "event_log", ()) or ()), source=source)
     return True
 
 
