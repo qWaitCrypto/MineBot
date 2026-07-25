@@ -1,11 +1,19 @@
+import json
 import unittest
+from dataclasses import asdict
+from pathlib import Path
 
 from minebot.app.autonomy_quality import (
     AG_FP30_YARDSTICK,
     AG_FP30_X_YARDSTICK,
     AUTONOMY_QUALITY_SCHEMA_VERSION,
+    DEFAULT_THRESHOLDS,
     evaluate_autonomy_quality,
 )
+
+
+ROOT = Path(__file__).resolve().parents[2]
+THRESHOLD_FREEZE = ROOT / "tests" / "fixtures" / "autonomy_quality_thresholds.json"
 
 
 def _body_state(seq, ts, *, x=0.0, counts=None, selected_item=None, offhand_item=None, owner=None, pending=0):
@@ -124,6 +132,15 @@ def _healthy_material_incomplete_trace(include_obstacle=True):
 
 
 class AutonomyQualityTests(unittest.TestCase):
+    def test_default_thresholds_match_q0_freeze_fixture(self):
+        freeze = json.loads(THRESHOLD_FREEZE.read_text(encoding="utf-8"))
+
+        self.assertEqual(freeze["status"], "frozen")
+        self.assertEqual(freeze["evaluator_schema_version"], AUTONOMY_QUALITY_SCHEMA_VERSION)
+        self.assertEqual(freeze["source_symbol"], "minebot.app.autonomy_quality.DEFAULT_THRESHOLDS")
+        self.assertEqual(len(freeze["thresholds"]), 9)
+        self.assertEqual(freeze["thresholds"], asdict(DEFAULT_THRESHOLDS))
+
     def test_report_binds_authoritative_progress_ledger_schema(self):
         report = evaluate_autonomy_quality(
             _healthy_material_incomplete_trace(),
