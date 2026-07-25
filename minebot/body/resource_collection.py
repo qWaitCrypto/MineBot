@@ -27,8 +27,9 @@ from minebot.body.navigation import (
     NavigationTransactions,
     dry_land_navigation_config,
     governed_mobility_navigation_config,
-    load_limited_navigation_config,
     navigation_governed_mobility_upgrade_reason,
+    navigation_governed_mobility_upgrade_allowed,
+    load_limited_navigation_config,
     navigation_surface_egress_fallback_allowed,
     navigation_zero_progress,
 )
@@ -98,6 +99,7 @@ class ResourceCollectionTransactions:
         candidate_attempts = 0
         mutation_attempts = 0
         candidate_blacklist: set[Position] = set()
+        navigation_mutation_blacklist: set[Position] = set()
         # Some failures invalidate only the exact target that was attempted.
         # Keep those separate from the spatial-cluster blacklist used for
         # route/stand failures so an occluded block does not erase a viable
@@ -320,17 +322,36 @@ class ResourceCollectionTransactions:
                 )
 
             goal = GoalComposite(tuple(GoalNear(pos, radius=0) for pos in domain.goals))
-            nav_base_config = load_limited_navigation_config(replace(
-                NavigationRunConfig(),
-                segment_timeout_s=cfg.segment_timeout_s,
-                max_break_steps=self.work.MINE_APPROACH_MAX_BREAK_STEPS,
-            ))
+            nav_base_config = load_limited_navigation_config(
+                replace(
+                    NavigationRunConfig(),
+                    segment_timeout_s=cfg.segment_timeout_s,
+                    max_break_steps=self.work.MINE_APPROACH_MAX_BREAK_STEPS,
+                )
+            )
+            navigation_budget = _candidate_navigation_budget(
+                config=cfg,
+                started=started,
+                active_candidates=len(active),
+                max_segments=nav_base_config.max_segments,
+                max_partial_segments=nav_base_config.max_partial_segments or nav_base_config.max_segments,
+                min_segment_timeout_s=max(1.0, nav_base_config.server_no_progress_ticks / 20.0),
+            )
+            navigation_slice_s = float(navigation_budget["segment_timeout_s"])
+            nav_base_config = replace(
+                nav_base_config,
+                segment_timeout_s=navigation_slice_s,
+                max_segments=int(navigation_budget["max_segments"]),
+                max_partial_segments=int(navigation_budget["max_partial_segments"]),
+            )
             nav_config = dry_land_navigation_config(nav_base_config)
             before_navigation = self.body.get_state().pos
+            navigation_mutation_blacklist_before = set(navigation_mutation_blacklist)
             navigation = self.navigator.navigate_to(
                 goal,
                 break_context=BreakContext.COLLECT_APPROACH,
                 config=nav_config,
+                mutation_blacklist=navigation_mutation_blacklist,
             )
             after_navigation = self.body.get_state().pos
             selected_goal = _selected_goal(navigation, domain.goals)
@@ -344,12 +365,25 @@ class ResourceCollectionTransactions:
                 "domain": domain.diagnostics,
                 "navigation": navigation.to_payload(),
                 "navigation_profile": "dry_land",
+                "navigation_time_slice_s": navigation_slice_s,
+                "navigation_candidate_wall_s": navigation_budget["candidate_wall_s"],
+                "navigation_max_segments": navigation_budget["max_segments"],
+                "navigation_mutation_blacklist_before": [
+                    list(pos) for pos in sorted(navigation_mutation_blacklist_before)
+                ],
+                "navigation_mutation_blacklist_after": [
+                    list(pos) for pos in sorted(navigation_mutation_blacklist)
+                ],
             }
 
+            trigger_zero_progress = navigation_zero_progress(
+                navigation,
+                before_navigation,
+                after_navigation,
+            )
             if (
                 not navigation.success
-                and navigation_governed_mobility_upgrade_reason(navigation.reason)
-                and navigation_zero_progress(
+                and navigation_governed_mobility_upgrade_allowed(
                     navigation,
                     before_navigation,
                     after_navigation,
@@ -357,17 +391,20 @@ class ResourceCollectionTransactions:
             ):
                 fallback_config = governed_mobility_navigation_config(nav_base_config)
                 fallback_before = self.body.get_state().pos
+                fallback_mutation_blacklist_before = set(navigation_mutation_blacklist)
                 fallback = self.navigator.navigate_to(
                     goal,
                     break_context=BreakContext.COLLECT_APPROACH,
                     config=fallback_config,
+                    mutation_blacklist=navigation_mutation_blacklist,
                 )
                 fallback_after = self.body.get_state().pos
                 attempt["navigation_fallback"] = {
                     "attempted": True,
                     "profile": "governed_mobility",
                     "trigger": navigation.reason,
-                    "trigger_zero_progress": True,
+                    "trigger_zero_progress": trigger_zero_progress,
+                    "trigger_partial_progress": not trigger_zero_progress,
                     "dry_terminal_reason": navigation.reason,
                     "dry_result": navigation.to_payload(),
                     "result": fallback.to_payload(),
@@ -376,6 +413,12 @@ class ResourceCollectionTransactions:
                         fallback_before,
                         fallback_after,
                     ),
+                    "mutation_blacklist_before": [
+                        list(pos) for pos in sorted(fallback_mutation_blacklist_before)
+                    ],
+                    "mutation_blacklist_after": [
+                        list(pos) for pos in sorted(navigation_mutation_blacklist)
+                    ],
                 }
                 navigation = fallback
                 selected_goal = _selected_goal(navigation, domain.goals)
@@ -384,8 +427,18 @@ class ResourceCollectionTransactions:
                 attempt["selected_targets"] = [list(target.pos) for target in selected_targets]
                 attempt["navigation"] = navigation.to_payload()
                 attempt["navigation_profile"] = "governed_mobility"
+                attempt["navigation_mutation_blacklist_after"] = [
+                    list(pos) for pos in sorted(navigation_mutation_blacklist)
+                ]
 
-            if navigation.reason in {"preempted", "body_missing", "death", "respawned", "progress_yielded"}:
+            if navigation.reason in {
+                "preempted",
+                "body_missing",
+                "death",
+                "respawned",
+                "progress_yielded",
+                "survival_hazard_unresolved",
+            }:
                 attempts.append(attempt)
                 return terminal(
                     success=False,
@@ -407,6 +460,14 @@ class ResourceCollectionTransactions:
             if not navigation.success:
                 attempts.append(attempt)
                 navigation_failures.append(navigation.reason)
+                route_progress_terminal = _route_progress_navigation_terminal(
+                    navigation,
+                    before_navigation,
+                    self.body.get_state().pos,
+                    mutation_attempts=mutation_attempts,
+                )
+                candidate_blacklist_before_route_progress = set(candidate_blacklist)
+                patch_blacklist_before_route_progress = list(patch_blacklist)
                 pending_targets = tuple(active)
                 egress_succeeded = False
                 selected_positions = {target.pos for target in selected_targets}
@@ -503,6 +564,29 @@ class ResourceCollectionTransactions:
                     tree_diagnostics["candidates"] = [list(target.pos) for target in tree_candidates]
                     attempt["tree_domain_retarget"] = tree_diagnostics
                     tree_pending_targets = tree_candidates
+                if tree_pending_targets:
+                    continue
+                if route_progress_terminal is not None:
+                    candidate_blacklist.clear()
+                    candidate_blacklist.update(candidate_blacklist_before_route_progress)
+                    patch_blacklist[:] = patch_blacklist_before_route_progress
+                    return terminal(
+                        success=False,
+                        reason=route_progress_terminal,
+                        can_retry=True,
+                        block_types=normalized_blocks,
+                        expected_drops=normalized_drops,
+                        remaining_count=remaining_count,
+                        collected=collected,
+                        candidate_blacklist=candidate_blacklist,
+                        patch_blacklist=patch_blacklist,
+                        attempts=attempts,
+                        searches=searches,
+                        config=cfg,
+                        started=started,
+                        last_failure=navigation.to_payload(),
+                        navigation_failures=navigation_failures,
+                    )
                 continue
 
             target = _selected_target(self.body, selected_targets)
@@ -622,6 +706,7 @@ class ResourceCollectionTransactions:
             searches=searches,
             config=cfg,
             started=started,
+            navigation_failures=navigation_failures,
         )
 
     def _terminal(
@@ -789,8 +874,29 @@ def _is_log_block_type(block_type: str) -> bool:
     return normalized.endswith("_log") or normalized.endswith("_stem")
 
 
+_NAVIGATION_MUTATION_TIMEOUT_REASONS = frozenset(
+    {
+        "break_timeout",
+        "downward_timeout",
+        "open_timeout",
+        "pillar_timeout",
+        "place_timeout",
+    }
+)
+
+
 def _is_tree_navigation_failure(reason: str) -> bool:
-    return reason in {"no_path", "stuck", "deviated", "budget_exceeded"}
+    if reason in {
+        "no_path",
+        "stuck",
+        "deviated",
+        "budget_exceeded",
+        "segment_budget_exhausted",
+        "partial_segment_budget_exhausted",
+        "timeout",
+    }:
+        return True
+    return reason in _NAVIGATION_MUTATION_TIMEOUT_REASONS
 
 
 def _tree_domain_target_sort_key(
@@ -924,8 +1030,75 @@ def _candidate_exhaustion_terminal_reason(
     return fallback_reason
 
 
+def _route_progress_navigation_terminal(
+    navigation: ToolResult,
+    before: tuple[float, float, float],
+    after: tuple[float, float, float],
+    *,
+    mutation_attempts: int,
+) -> str | None:
+    if mutation_attempts > 0 or navigation.success:
+        return None
+    if _distance_between(before, after) <= 0.25:
+        return None
+    reason = str(navigation.reason or "")
+    if reason in {"segment_budget_exhausted", "partial_segment_budget_exhausted", "timeout"}:
+        return f"resource_navigation_{reason}"
+    if reason in _NAVIGATION_MUTATION_TIMEOUT_REASONS:
+        return f"resource_navigation_{reason}"
+    if reason.startswith("recovery_exhausted:"):
+        inner = reason.split(":", 1)[1]
+        if inner in {"budget_exceeded", "timeout"}:
+            return f"resource_navigation_{inner}"
+    return None
+
+
+def _candidate_navigation_budget(
+    *,
+    config: ResourceCollectionConfig,
+    started: float,
+    active_candidates: int,
+    max_segments: int,
+    max_partial_segments: int,
+    min_segment_timeout_s: float,
+) -> dict[str, float | int]:
+    """Bound one resource approach so a single far route cannot consume the domain.
+
+    ``max_wall_s`` is the transaction budget, while ``segment_timeout_s`` is a
+    caller-requested upper bound for one server segment.  Resource collection
+    also has a candidate budget, so each candidate must receive a fair slice of
+    the remaining wall time instead of letting the first distant tree spend the
+    entire objective before another candidate can be tried.
+    """
+
+    remaining_wall_s = max(0.1, config.max_wall_s - (time.monotonic() - started))
+    remaining_candidates = max(1, active_candidates)
+    candidate_wall_s = remaining_wall_s / remaining_candidates
+    segment_cap_s = max(0.1, config.segment_timeout_s)
+    functional_min_s = min(segment_cap_s, max(0.1, min_segment_timeout_s))
+    if candidate_wall_s < functional_min_s:
+        segment_count = 1
+    else:
+        segment_count = max(1, min(max_segments, int(candidate_wall_s // functional_min_s)))
+    segment_timeout_s = min(segment_cap_s, max(0.1, candidate_wall_s / segment_count))
+    return {
+        "segment_timeout_s": segment_timeout_s,
+        "max_segments": segment_count,
+        "max_partial_segments": max(1, min(max_partial_segments, segment_count)),
+        "candidate_wall_s": candidate_wall_s,
+        "min_segment_timeout_s": functional_min_s,
+    }
+
+
 def _is_no_path_route_failure(reason: str) -> bool:
-    return reason == "no_path"
+    if reason == "no_path":
+        return True
+    if not navigation_governed_mobility_upgrade_reason(reason):
+        return False
+    value = str(reason or "")
+    if value.startswith("recovery_exhausted:"):
+        return value.split(":", 1)[1] == "no_path"
+    return False
 
 
 def _build_stand_domain(
@@ -1017,7 +1190,25 @@ def _build_stand_domain(
 
 
 def _selected_goal(result: ToolResult, goals: tuple[Position, ...]) -> Position:
-    raw = (result.metrics or {}).get("selected_goal", (result.metrics or {}).get("goal"))
+    raw = (result.metrics or {}).get("selected_goal")
+    if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+        selected = (int(raw[0]), int(raw[1]), int(raw[2]))
+        if selected in goals:
+            return selected
+    segments = (result.metrics or {}).get("segments")
+    if isinstance(segments, list):
+        for segment in reversed(segments):
+            if not isinstance(segment, dict):
+                continue
+            for candidate in (
+                ((segment.get("diagnostics") or {}).get("selected_goal") if isinstance(segment.get("diagnostics"), dict) else None),
+                segment.get("target"),
+            ):
+                if isinstance(candidate, (list, tuple)) and len(candidate) >= 3:
+                    selected = (int(candidate[0]), int(candidate[1]), int(candidate[2]))
+                    if selected in goals:
+                        return selected
+    raw = (result.metrics or {}).get("goal")
     if isinstance(raw, (list, tuple)) and len(raw) >= 3:
         selected = (int(raw[0]), int(raw[1]), int(raw[2]))
         if selected in goals:

@@ -2906,6 +2906,37 @@ class BlockWorkTests(unittest.TestCase):
         self.assertFalse(config.allow_downward)
         self.assertTrue(config.aquatic_traversal)
 
+    def test_egress_to_dry_preserves_non_liquid_surface_navigation_terminal(self):
+        class FailingSurfaceNavigator(FakeNavigator):
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                return ToolResult(
+                    False,
+                    "budget_exceeded",
+                    True,
+                    metrics={"selected_goal": list(goal_position(goal)), "goal_dist": 11.0},
+                )
+
+        blocks = {
+            (0, 63, 0): ("air", "CLEAR"),
+            (0, 64, 0): ("air", "CLEAR"),
+            (0, 65, 0): ("air", "CLEAR"),
+            (1, 64, 0): ("stone", "SOLID"),
+        }
+        body = FakeBody(blocks=blocks)
+        body.state_pos = (0.5, 64.0, 0.5)
+        policy = GovernancePolicy(natural_regions=[Region("surface", (-20, 0, -20), (20, 120, 20))])
+        navigator = FailingSurfaceNavigator()
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.egress_to_dry(timeout_s=1.0)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "dry_egress_failed:budget_exceeded")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.metrics["recovery"]["reason"], "surface_navigation_failed:budget_exceeded")
+        self.assertEqual(len(navigator.calls), 1)
+
     def test_go_to_surface_mobile_egress_leaves_an_already_exposed_island(self):
         remote_surface = (-16, 64, -16)
 

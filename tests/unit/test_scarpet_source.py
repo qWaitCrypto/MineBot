@@ -498,9 +498,11 @@ class ScarpetSourceTests(unittest.TestCase):
         self.assertIn("if(mutation:'kind' == 'break' ||", cancel.group(1))
         self.assertIn("finish_navigation_mutation(name, false, reason)", cancel.group(1))
 
-    def test_server_navigation_only_plans_pickaxe_edges_with_the_required_tier(self):
+    def test_server_navigation_only_requires_pickaxe_for_tiered_blocks(self):
         source = MINEBOT_SC.read_text()
         neighbors = source[source.index("navigation_neighbors(x, y, z, context)"):source.index("navigation_edge_valid(")]
+        required = re.search(r"navigation_required_pickaxe_tier\(block_type\) -> \((.*?)\n\);", source, re.S)
+        self.assertIsNotNone(required, "navigation_required_pickaxe_tier function not found")
 
         for expected in (
             "navigation_pickaxe_tier(item) -> (",
@@ -508,11 +510,12 @@ class ScarpetSourceTests(unittest.TestCase):
             "block_tags(block_type, 'needs_diamond_tool')",
             "block_tags(block_type, 'needs_iron_tool')",
             "block_tags(block_type, 'needs_stone_tool')",
-            "block_tags(block_type, 'mineable/pickaxe')",
             "navigation_break_available(context, block_type) -> (",
             "if(tool == null, false, navigation_pickaxe_tier(tool) >= required)",
         ):
             self.assertIn(expected, source)
+        self.assertIn("if(required == null,", source)
+        self.assertNotIn("block_tags(block_type, 'mineable/pickaxe')", required.group(1))
 
         self.assertEqual(neighbors.count("navigation_break_available(context,"), 5)
 

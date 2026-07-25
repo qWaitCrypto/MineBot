@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from minebot.app.autonomy_quality import AG_FP30_YARDSTICK  # noqa: E402
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, _recipe_lookup, build_phase1_registry  # noqa: E402
+from minebot.app.runner import _collapsed_epoch_progress_steps, _tool_exception_payload  # noqa: E402
 from minebot.app.runtime_identity import ensure_world_identity  # noqa: E402
 from minebot.brain.composition import (  # noqa: E402
     CompositionContext,
@@ -45,7 +46,7 @@ from minebot.brain.composition import (  # noqa: E402
 from minebot.brain.lifecycle import LifecycleState  # noqa: E402
 from minebot.brain.modes import ModeRuntime  # noqa: E402
 from minebot.brain.progress import ProgressAuthority  # noqa: E402
-from minebot.brain.registry import WeldContext, execute_tool  # noqa: E402
+from minebot.brain.registry import RegisteredTool, WeldContext, execute_tool  # noqa: E402
 from minebot.contract import ProgressAbort, Region  # noqa: E402
 from minebot.game import RconClient, ScarpetBody  # noqa: E402
 from minebot.game.rcon import RconConfig  # noqa: E402
@@ -243,6 +244,9 @@ def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
         "candidate_failures",
         "resume_cursor",
         "continuation",
+        "error_type",
+        "message",
+        "await_diagnostics",
     ):
         if key in metrics:
             compact_metrics[key] = _limit_payload(metrics[key])
@@ -370,11 +374,19 @@ def _run_tool(
     before_state = _state_payload(body)
     before_counts = _inventory_counts(body)
     before_equipment = _equipment(body)
+    before_fingerprint = weld.authority.fingerprint(body.get_state())
     started = time.monotonic()
     progress_abort: dict[str, Any] | None = None
     exception: dict[str, Any] | None = None
+    progress_commit: dict[str, Any] | None = None
+    registered_tool = registry.get(tool)
     try:
-        result = execute_tool(registry.get(tool), params, weld)
+        result, progress_commit = _run_tool_with_probe_epoch(
+            registered_tool,
+            params,
+            weld,
+            before_fingerprint=before_fingerprint,
+        )
         payload = _as_payload(result)
     except ProgressAbort as exc:
         progress_abort = {"type": type(exc).__name__, "message": str(exc)}
@@ -384,13 +396,14 @@ def _run_tool(
             "canRetry": True,
             "metrics": {"facts": _limit_payload(getattr(exc, "facts", None))},
         }
-    except Exception as exc:  # keep Debug Reset evidence typed
-        exception = {"type": type(exc).__name__, "message": str(exc)}
-        payload = {
-            "success": False,
-            "reason": "probe_exception",
-            "canRetry": False,
-            "metrics": exception,
+    except Exception as exc:  # keep Debug Reset evidence typed and production-aligned
+        payload = _tool_exception_payload(exc)
+        metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+        exception = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "mapped_reason": str(payload.get("reason") or ""),
+            "metrics": _limit_payload(metrics),
         }
     elapsed_s = time.monotonic() - started
     after_state = _state_payload(body)
@@ -414,10 +427,79 @@ def _run_tool(
         "yardstick_after": after_yardstick,
         "target_fact_count": _target_fact_count(payload),
         "candidate_failure_reasons": _candidate_failure_reasons(payload),
+        "progress_commit": progress_commit,
         "progress_abort": progress_abort,
         "exception": exception,
         "result": _compact_result(payload),
     }
+
+
+def _run_tool_with_probe_epoch(
+    tool: RegisteredTool,
+    params: dict[str, Any],
+    weld: WeldContext,
+    *,
+    before_fingerprint: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Execute one probe tool with production-like progress epoch semantics.
+
+    The real Agent runner captures inner Body progress steps for each SDK tool
+    batch and commits a collapsed epoch once the batch settles.  This bounded
+    probe calls tools directly, so without this local epoch shim a sequence of
+    diagnostic calls can trip the failure-storm guard before the probe has
+    classified the post-frontier handoff.  The shim preserves fail-closed
+    ProgressAbort behavior while keeping the evidence path aligned with the
+    production runner's progress accounting.
+    """
+
+    pending_abort: ProgressAbort | None = None
+    with weld.authority.capture_steps() as captured:
+        try:
+            result = execute_tool(tool, params, weld)
+        except ProgressAbort as exc:
+            pending_abort = exc
+            result = {
+                "success": False,
+                "reason": "progress_yielded",
+                "canRetry": True,
+                "metrics": {"facts": _limit_payload(getattr(exc, "facts", None))},
+            }
+    payload = _as_payload(result)
+    committed = _collapsed_epoch_progress_steps(
+        [
+            type(
+                "ProbeProgressMember",
+                (),
+                {"progress_steps": tuple(captured)},
+            )()
+        ]
+    )
+    after_fingerprint = weld.authority.fingerprint(weld.body.get_state())
+    material_changed = bool(before_fingerprint and after_fingerprint and before_fingerprint != after_fingerprint)
+    try:
+        weld.authority.commit_steps(
+            committed,
+            weld.goal_text,
+            material_changed=material_changed,
+        )
+    except ProgressAbort as exc:
+        if pending_abort is None:
+            pending_abort = exc
+    commit = {
+        "captured_progress_step_count": len(captured),
+        "committed_progress_step_count": len(committed),
+        "material_changed": material_changed,
+        "pending_abort": None
+        if pending_abort is None
+        else {
+            "type": type(pending_abort).__name__,
+            "message": str(pending_abort),
+            "facts": _limit_payload(getattr(pending_abort, "facts", None)),
+        },
+    }
+    if pending_abort is not None and payload.get("reason") != "progress_yielded":
+        raise pending_abort
+    return payload, commit
 
 
 def _nearest_blocks(body: ScarpetBody, *, label: str, params: dict[str, Any]) -> dict[str, Any]:

@@ -207,6 +207,46 @@ class ModeRuntimeTests(unittest.TestCase):
         self.assertEqual(explicit.reason, "resource_navigation_no_path")
         self.assertEqual(generic.profile.situational, "normal")
 
+    def test_resource_navigation_progress_terminal_enters_mobility_profile(self):
+        reduction = ModeRuntime().reduce(
+            [
+                AgentSignal.tool_results(
+                    [
+                        {
+                            "tool": "collect_resource",
+                            "reason": "resource_navigation_segment_budget_exhausted",
+                        }
+                    ]
+                )
+            ],
+            LifecycleState.ACTIVE,
+            goal_text="collect 64 logs",
+        )
+
+        self.assertEqual(reduction.profile.situational, "mobility")
+        self.assertEqual(reduction.reason, "resource_navigation_segment_budget_exhausted")
+
+    def test_resource_survival_hazard_terminal_enters_survival_without_lifecycle_recovery(self):
+        reduction = ModeRuntime().reduce(
+            [
+                AgentSignal.tool_results(
+                    [
+                        {
+                            "tool": "collect_resource",
+                            "reason": "resource_navigation_survival_hazard_unresolved",
+                        }
+                    ]
+                )
+            ],
+            LifecycleState.ACTIVE,
+            goal_text="collect 64 logs",
+        )
+
+        self.assertEqual(reduction.profile.situational, "survival")
+        self.assertEqual(reduction.reason, "resource_navigation_survival_hazard_unresolved")
+        self.assertIsNone(reduction.requested_lifecycle)
+        self.assertIn("survival", reduction.profile.tool_focus)
+
     def test_death_recovery_priority_beats_same_turn_user_interrupt(self):
         modes = ModeRuntime()
 

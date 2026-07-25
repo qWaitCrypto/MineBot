@@ -35,6 +35,7 @@ from minebot.brain.modes import (
     mobility_reason_from_tool_results,
     signalize_body_state,
     signalize_events,
+    survival_reason_from_tool_results,
 )
 from minebot.brain.progress import ProgressAuthority, ProgressStep
 from minebot.brain.registry import RegisteredTool, ToolRegistry, WeldContext, execute_tool
@@ -1376,7 +1377,12 @@ def _is_body_recovery_reason(value: object) -> bool:
         "bodymissing",
         "bodytransportunstable",
         "transportunstable",
-    } or normalized.startswith(("death", "missingbody", "bodymissing", "bodytransport"))
+    } or normalized.startswith((
+        "death",
+        "missingbody",
+        "bodymissing",
+        "bodytransport",
+    ))
 
 
 def _recovery_facts_from_tool(tool_name: str, result: JsonObject) -> dict[str, object]:
@@ -3002,6 +3008,22 @@ class AgentRuntime:
         if len(self.last_tool_results) > 12:
             del self.last_tool_results[: len(self.last_tool_results) - 12]
 
+        survival_reason = survival_reason_from_tool_results([tool_result])
+        if survival_reason is not None:
+            terminal = {
+                "tool": tool_name,
+                "reason": survival_reason,
+                "summary": tool_result["summary"],
+            }
+            self.trace.emit(
+                "survival_terminal_preserved",
+                tool=tool_name,
+                reason=survival_reason,
+                summary=tool_result["summary"],
+            )
+            if run_context is not None:
+                self._apply_survival_terminal_to_live_context(run_context, terminal)
+
         reason = mobility_reason_from_tool_results([tool_result])
         if reason is None:
             return
@@ -3019,6 +3041,44 @@ class AgentRuntime:
         )
         if run_context is not None:
             self._apply_mobility_terminal_to_live_context(run_context, terminal)
+
+    def _apply_survival_terminal_to_live_context(
+        self,
+        run_context: RuntimeRunContext,
+        terminal: dict[str, object],
+    ) -> None:
+        reason = str(terminal["reason"])
+        previous = run_context.profile
+        reduction = self.mode_runtime.reduce(
+            [
+                AgentSignal.tool_results(
+                    [
+                        {
+                            "tool": str(terminal["tool"]),
+                            "reason": reason,
+                            "summary": terminal["summary"],
+                        }
+                    ]
+                )
+            ],
+            self.lifecycle.state,
+            goal_text=self.agent_context.goal_text,
+        )
+        self._apply_lifecycle_request(reduction.requested_lifecycle)
+        profile = self.mode_runtime.profile_for(self.lifecycle.state)
+        self.agent_context.observe_profile(profile)
+        run_context.profile = profile
+        run_context.instruction_preamble = self.agent_context.turn_preamble(
+            include_session_messages=False
+        )
+        self.trace.emit(
+            "survival_terminal_live_handoff",
+            tool=str(terminal["tool"]),
+            reason=reason,
+            previous_situational=previous.situational,
+            situational=profile.situational,
+            instruction_preamble_refreshed=True,
+        )
 
     def _apply_mobility_terminal_to_live_context(
         self,

@@ -733,12 +733,11 @@ class ExplorationTransactions:
                 verified_goal = GoalNear(_block_pos(before.pos), radius=1)
                 # Only retreat to the pre-attempt position when the attempt made
                 # no useful forward progress. A governed-mobility fallback that
-                # succeeded (e.g. bridged a hazard-flanked water choke) and left
-                # the body meaningfully closer to the target region must not be
-                # dragged back: the pure-movement recovery cannot re-cross that
-                # choke and would both strand the body and discard real progress.
-                # Stray drift during a *failed* navigation is not progress and
-                # still retreats, preserving the existing recovery contract.
+                # successfully changed the stand domain and left the body
+                # meaningfully closer to the target region must not be dragged
+                # back: pure-movement recovery might not re-cross that choke.
+                # Drift from a failed fallback is not a verified exploration
+                # anchor and still retreats.
                 region_center = _region_center(region, _block_pos(before.pos)[1])
                 before_gap = hypot(
                     region_center[0] - before.pos[0], region_center[2] - before.pos[2]
@@ -748,6 +747,7 @@ class ExplorationTransactions:
                 )
                 governed_advance = (
                     fallback_attempted
+                    and nav.success
                     and before_gap - after_gap > 0.25
                 )
                 if (

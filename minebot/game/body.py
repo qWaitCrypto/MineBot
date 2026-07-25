@@ -82,6 +82,7 @@ GLOBAL_TERMINAL_EVENTS = {
 RESULT_TERMINAL_ACTIONS = {"navigationMutationDecision"}
 ACTION_RECONCILIATION_POLL_S = 0.50
 ACTION_RECONCILIATION_MAX_WAIT_S = 60.0
+ACTION_RECONCILIATION_MAX_NOT_SEEN_RESENDS = 2
 # A server can release the action owner one tick before its terminal event is
 # visible to the event drain.  Keep a short read-only settle window so that
 # race is not reported as an outcome-unknown dispatch.
@@ -461,25 +462,133 @@ class ScarpetBody:
             evidence["dispatch_state"] = "not_seen"
             self._inflight_action_traces[action.id]["reconciliation_status"] = "not_applied"
             self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
-            try:
-                resent = parse_result(
-                    self._timed_request(
-                        build_action_call(self.bot_name, action, self.app),
-                        kind="action_dispatch_reconcile_resend_not_seen",
-                        action_id=action.id,
-                        action_name=action.name,
-                        retry=False,
+            resend_error: BaseException | None = None
+            for attempt in range(1, ACTION_RECONCILIATION_MAX_NOT_SEEN_RESENDS + 1):
+                evidence["same_id_resend_attempt"] = attempt
+                self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
+                try:
+                    resent = parse_result(
+                        self._timed_request(
+                            build_action_call(self.bot_name, action, self.app),
+                            kind="action_dispatch_reconcile_resend_not_seen",
+                            action_id=action.id,
+                            action_name=action.name,
+                            retry=False,
+                        )
                     )
-                )
-            except Exception as exc:
-                self._raise_reconciliation_unknown(action, evidence=evidence, cause=exc)
-            self._inflight_action_traces[action.id]["dispatch_result"] = dict(resent.data)
-            self._inflight_action_traces[action.id]["dispatch_ok"] = resent.ok
-            self._inflight_action_traces[action.id]["accepted"] = resent.accepted
-            self._inflight_action_traces[action.id]["dispatch_error"] = resent.error
-            if not (resent.ok and resent.accepted):
-                self._finish_action_without_terminal(action.id)
-            return resent
+                except Exception as exc:
+                    resend_error = exc
+                    failures = evidence.setdefault("same_id_resend_failures", [])
+                    if isinstance(failures, list):
+                        failures.append({"attempt": attempt, "type": type(exc).__name__, "message": str(exc)})
+                    try:
+                        self._reconnect_transport()
+                        resend_status = parse_result(
+                            self._timed_request(
+                                build_action_status_call(self.bot_name, action.id, self.app),
+                                kind="action_reconcile_status_after_resend_failure",
+                                action_id=action.id,
+                                action_name=action.name,
+                                retry=True,
+                            )
+                        )
+                    except Exception as status_exc:
+                        self._raise_reconciliation_unknown(action, evidence=evidence, cause=status_exc)
+
+                    evidence["status_lookup_after_resend_failure"] = "ok" if resend_status.ok else "rejected"
+                    resend_status_epoch = resend_status.data.get("epoch")
+                    evidence["status_epoch_after_resend_failure"] = resend_status_epoch
+                    evidence["epoch_match_after_resend_failure"] = (
+                        dispatch_epoch is not None
+                        and isinstance(resend_status_epoch, str)
+                        and resend_status_epoch == dispatch_epoch
+                    )
+                    self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
+
+                    terminal = self._status_terminal_event(resend_status)
+                    if terminal is None:
+                        terminal = self._matching_terminal_event(action)
+                    if terminal is not None:
+                        evidence["terminal_event"] = terminal.name
+                        self._inflight_action_traces[action.id]["reconciliation_status"] = "applied"
+                        self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
+                        self._register_reconciled_terminal(action, terminal)
+                        return Result(
+                            id=action.id,
+                            bot=self.bot_name,
+                            type="result",
+                            ok=True,
+                            accepted=True,
+                            complete=True,
+                            data={"action": action.name, "reconciled": "terminal_event_after_resend_failure"},
+                            error=None,
+                        )
+
+                    remembered_after_resend = self._status_dispatch_result(resend_status)
+                    if remembered_after_resend is not None:
+                        self._inflight_action_traces[action.id]["dispatch_result"] = dict(
+                            remembered_after_resend.data
+                        )
+                        self._inflight_action_traces[action.id]["dispatch_ok"] = remembered_after_resend.ok
+                        self._inflight_action_traces[action.id]["accepted"] = remembered_after_resend.accepted
+                        self._inflight_action_traces[action.id]["dispatch_error"] = remembered_after_resend.error
+                        if not (remembered_after_resend.ok and remembered_after_resend.accepted):
+                            self._inflight_action_traces[action.id]["reconciliation_status"] = "not_applied"
+                            self._finish_action_without_terminal(action.id)
+                            return remembered_after_resend
+                        if action.name in RESULT_TERMINAL_ACTIONS:
+                            self._inflight_action_traces[action.id]["reconciliation_status"] = "applied"
+                            self._finish_action_without_terminal(action.id)
+                            return remembered_after_resend
+                        terminal = self._wait_for_reconciled_terminal(action, resend_status, evidence)
+                        if terminal is not None:
+                            evidence["terminal_event"] = terminal.name
+                            self._inflight_action_traces[action.id]["reconciliation_status"] = "applied"
+                            self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
+                            self._register_reconciled_terminal(action, terminal)
+                            return Result(
+                                id=action.id,
+                                bot=self.bot_name,
+                                type="result",
+                                ok=True,
+                                accepted=True,
+                                complete=True,
+                                data={"action": action.name, "reconciled": "terminal_event_after_resend_failure"},
+                                error=None,
+                            )
+                        self._raise_reconciliation_unknown(action, evidence=evidence, cause=exc)
+
+                    if self._status_proves_not_seen(resend_status, dispatch_epoch):
+                        evidence["dispatch_state"] = "not_seen"
+                        evidence["same_id_resend_status"] = "not_seen_after_response_loss"
+                        continue
+
+                    terminal = self._wait_for_reconciled_terminal(action, resend_status, evidence)
+                    if terminal is not None:
+                        evidence["terminal_event"] = terminal.name
+                        self._inflight_action_traces[action.id]["reconciliation_status"] = "applied"
+                        self._inflight_action_traces[action.id]["reconciliation_evidence"] = dict(evidence)
+                        self._register_reconciled_terminal(action, terminal)
+                        return Result(
+                            id=action.id,
+                            bot=self.bot_name,
+                            type="result",
+                            ok=True,
+                            accepted=True,
+                            complete=True,
+                            data={"action": action.name, "reconciled": "terminal_event_after_resend_failure"},
+                            error=None,
+                        )
+                    self._raise_reconciliation_unknown(action, evidence=evidence, cause=exc)
+
+                self._inflight_action_traces[action.id]["dispatch_result"] = dict(resent.data)
+                self._inflight_action_traces[action.id]["dispatch_ok"] = resent.ok
+                self._inflight_action_traces[action.id]["accepted"] = resent.accepted
+                self._inflight_action_traces[action.id]["dispatch_error"] = resent.error
+                if not (resent.ok and resent.accepted):
+                    self._finish_action_without_terminal(action.id)
+                return resent
+            self._raise_reconciliation_unknown(action, evidence=evidence, cause=resend_error)
 
         terminal = self._wait_for_reconciled_terminal(action, status, evidence)
         if terminal is not None:
@@ -924,6 +1033,8 @@ class ScarpetBody:
 
     def execute(self, action: Action) -> Result:
         action_start_seq = self.last_seq
+        if is_mutating_action(action.name):
+            self._ensure_server_epoch(action.id)
         dispatch_epoch = self._server_epoch
         try:
             result = parse_result(
@@ -958,6 +1069,19 @@ class ScarpetBody:
             self._append_completed_action_trace(trace)
             self._action_start_seqs.pop(action.id, None)
         return result
+
+    def _ensure_server_epoch(self, action_id: str) -> None:
+        if self._server_epoch is not None:
+            return
+        if not callable(getattr(self.transport, "request_once", None)):
+            return
+        proposed = f"action-dispatch-{action_id}"
+        try:
+            self.event_head(proposed)
+        except Exception:
+            # Dispatch can still proceed, but a lost mutation response will
+            # remain fail-closed because same-id replay needs epoch evidence.
+            return
 
     def _dispatch_action_and_await(
         self,

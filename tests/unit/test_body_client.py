@@ -115,6 +115,26 @@ class MutationFailureTransport:
 
     def request(self, command: str) -> str:
         self.read_commands.append(command)
+        if "minebot_event_head" in command and "action-dispatch-" in command:
+            return envelope(
+                {
+                    "type": "result",
+                    "id": None,
+                    "bot": "Bot1",
+                    "ok": True,
+                    "accepted": True,
+                    "complete": True,
+                    "data": {
+                        "eventSeq": 0,
+                        "chatSeq": 0,
+                        "tick": 100,
+                        "epoch": self.status_data.get("epoch") or "test-epoch",
+                        "owner": None,
+                        "pendingActionCount": 0,
+                    },
+                    "error": None,
+                }
+            )
         if "minebot_action_status" in command:
             return envelope(
                 {
@@ -143,6 +163,48 @@ class MutationFailureTransport:
                 }
             )
         raise AssertionError(f"unexpected read command: {command}")
+
+
+class RepeatedNotSeenResendTransport(MutationFailureTransport):
+    """Drop dispatch and configurable same-id replays, then prove not-seen again."""
+
+    def __init__(self, *, action_id: str, drops: int = 2):
+        super().__init__(
+            status_data={
+                "action_id": action_id,
+                "dispatch": None,
+                "terminal": None,
+                "epoch": "test-epoch",
+                "dispatch_state": "not_seen",
+                "seen": False,
+                "retention_complete": True,
+            }
+        )
+        self._drops_remaining = drops
+
+    def request_once(self, command: str) -> str:
+        self.once_commands.append(command)
+        if "minebot_action" in command and "minebot_action_status" not in command:
+            marker = '"id":"'
+            start = command.index(marker) + len(marker)
+            end = command.index('"', start)
+            self.action_id = command[start:end]
+            if self._drops_remaining > 0:
+                self._drops_remaining -= 1
+                raise OSError("socket closed after dispatch")
+            return envelope(
+                {
+                    "type": "result",
+                    "id": self.action_id,
+                    "bot": "Bot1",
+                    "ok": True,
+                    "accepted": True,
+                    "complete": True,
+                    "data": {"action": "navigateTo", "reconciled": "resend"},
+                    "error": None,
+                }
+            )
+        raise AssertionError(f"unexpected request_once command: {command}")
 
 
 class RunningNavigationTransport(MutationFailureTransport):
@@ -428,7 +490,8 @@ class BodyClientTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.diagnostics["status"], "unknown")
         self.assertEqual(len(transport.once_commands), 1)
-        self.assertEqual(len(transport.read_commands), 4)
+        self.assertEqual(len(transport.read_commands), 5)
+        self.assertIn("minebot_event_head", transport.read_commands[0])
         self.assertEqual(body.observability_snapshot()["action_traces"][0]["reconciliation_status"], "unknown")
 
     def test_navigation_transport_drop_resends_only_when_server_proves_not_seen(self):
@@ -459,6 +522,90 @@ class BodyClientTests(unittest.TestCase):
         trace = body._inflight_action_traces[action.id]
         self.assertEqual(trace["reconciliation_status"], "not_applied")
         self.assertEqual(trace["reconciliation_evidence"]["dispatch_state"], "not_seen")
+
+    def test_navigation_transport_drop_preflights_epoch_before_safe_same_id_replay(self):
+        action = Action(
+            id="not-seen-navigation-preflight",
+            name="navigateTo",
+            params={"target": [4, 64, 0], "timeout_ticks": 100},
+        )
+        transport = MutationFailureTransport(
+            status_data={
+                "action_id": action.id,
+                "dispatch": None,
+                "terminal": None,
+                "epoch": "test-epoch",
+                "dispatch_state": "not_seen",
+                "seen": False,
+                "retention_complete": True,
+            }
+        )
+        body = ScarpetBody("Bot1", transport)
+
+        result = body.execute(action)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(body._server_epoch, "test-epoch")
+        self.assertEqual(len(transport.once_commands), 2)
+        self.assertIn("minebot_event_head", transport.read_commands[0])
+        self.assertIn(
+            "action_dispatch_reconcile_resend_not_seen",
+            [entry["kind"] for entry in body.request_history],
+        )
+        trace = body._inflight_action_traces[action.id]
+        self.assertEqual(trace["dispatch_epoch"], "test-epoch")
+        self.assertTrue(trace["reconciliation_evidence"]["epoch_match"])
+        self.assertEqual(trace["reconciliation_evidence"]["dispatch_state"], "not_seen")
+
+    def test_navigation_same_id_replay_retries_when_resend_response_is_lost_and_still_not_seen(self):
+        action = Action(
+            id="not-seen-navigation-repeated",
+            name="navigateTo",
+            params={"target": [4, 64, 0], "timeout_ticks": 100},
+        )
+        transport = RepeatedNotSeenResendTransport(action_id=action.id)
+        body = ScarpetBody("Bot1", transport)
+
+        result = body.execute(action)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(len(transport.once_commands), 3)
+        kinds = [entry["kind"] for entry in body.request_history]
+        self.assertEqual(kinds.count("action_dispatch_reconcile_resend_not_seen"), 2)
+        self.assertIn("action_reconcile_status_after_resend_failure", kinds)
+        trace = body._inflight_action_traces[action.id]
+        self.assertEqual(trace["dispatch_epoch"], "test-epoch")
+        self.assertEqual(trace["dispatch_result"]["reconciled"], "resend")
+        evidence = trace["reconciliation_evidence"]
+        self.assertTrue(evidence["epoch_match"])
+        self.assertTrue(evidence["epoch_match_after_resend_failure"])
+        self.assertEqual(evidence["same_id_resend_status"], "not_seen_after_response_loss")
+        self.assertEqual(evidence["same_id_resend_attempt"], 2)
+
+    def test_navigation_same_id_replay_stays_unknown_when_all_bounded_resends_are_lost(self):
+        action = Action(
+            id="not-seen-navigation-all-resends-lost",
+            name="navigateTo",
+            params={"target": [4, 64, 0], "timeout_ticks": 100},
+        )
+        transport = RepeatedNotSeenResendTransport(action_id=action.id, drops=3)
+        body = ScarpetBody("Bot1", transport)
+
+        with self.assertRaises(ActionReconciliationUnknownError) as raised:
+            body.execute(action)
+
+        self.assertEqual(raised.exception.diagnostics["status"], "unknown")
+        self.assertEqual(len(transport.once_commands), 3)
+        kinds = [entry["kind"] for entry in body.request_history]
+        self.assertEqual(kinds.count("action_dispatch_reconcile_resend_not_seen"), 2)
+        self.assertEqual(kinds.count("action_reconcile_status_after_resend_failure"), 2)
+        trace = body.observability_snapshot()["action_traces"][0]
+        evidence = trace["reconciliation_evidence"]
+        self.assertEqual(trace["reconciliation_status"], "unknown")
+        self.assertEqual(evidence["dispatch_state"], "not_seen")
+        self.assertEqual(evidence["same_id_resend_attempt"], 2)
+        self.assertEqual(evidence["same_id_resend_status"], "not_seen_after_response_loss")
+        self.assertEqual(len(evidence["same_id_resend_failures"]), 2)
 
     def test_navigation_transport_drop_does_not_replay_across_server_epoch(self):
         action = Action(

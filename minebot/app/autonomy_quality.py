@@ -326,6 +326,9 @@ def _terminal_cleanup_signal(
     start_ts: float,
     end_ts: float,
 ) -> JsonObject:
+    terminal = _terminal_cleanup_from_session_terminal(events, start_ts=start_ts, end_ts=end_ts)
+    if terminal is not None:
+        return terminal
     states = [
         event
         for event in events
@@ -358,6 +361,52 @@ def _terminal_cleanup_signal(
         "body_owner": owner,
         "pending_action_count": pending,
         "evidence_ref": _ref(final),
+    }
+
+
+def _terminal_cleanup_from_session_terminal(
+    events: list[JsonObject],
+    *,
+    start_ts: float,
+    end_ts: float,
+) -> JsonObject | None:
+    terminals = [
+        event
+        for event in events
+        if event.get("event") == "session_terminal"
+        and _in_window(event, start_ts=start_ts, end_ts=end_ts)
+        and isinstance(event.get("terminal_truth"), dict)
+    ]
+    if not terminals:
+        return None
+    terminal = terminals[-1]
+    truth = terminal["terminal_truth"]
+    facts = truth.get("facts")
+    if not isinstance(facts, dict):
+        return None
+    if "body_owner" not in facts and "pending_action_count" not in facts:
+        return None
+    owner = facts.get("body_owner")
+    pending = facts.get("pending_action_count")
+    failures: list[str] = []
+    if owner not in (None, ""):
+        failures.append("body_owner_not_released")
+    if not isinstance(pending, int) or isinstance(pending, bool):
+        return {
+            "verdict": "insufficient_evidence",
+            "reason": "pending_action_count_not_authoritative",
+            "evidence_ref": _ref(terminal),
+            "source": "session_terminal",
+        }
+    if pending != 0:
+        failures.append("pending_actions_not_empty")
+    return {
+        "verdict": "pass" if not failures else "fail",
+        "failures": failures,
+        "body_owner": owner,
+        "pending_action_count": pending,
+        "evidence_ref": _ref(terminal),
+        "source": "session_terminal",
     }
 
 

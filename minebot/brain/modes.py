@@ -178,6 +178,9 @@ class ModeRuntime:
                 continue
 
             if signal.kind == "tool_results":
+                survival_reason = survival_reason_from_tool_results(signal.facts.get("results"))
+                if survival_reason:
+                    situational_candidates.append(("survival", survival_reason))
                 result_reason = mobility_reason_from_tool_results(signal.facts.get("results"))
                 if result_reason:
                     situational_candidates.append(("mobility", result_reason))
@@ -355,9 +358,43 @@ def mobility_reason_from_tool_results(results: Any) -> str | None:
         if not isinstance(result, dict):
             continue
         reason = str(result.get("reason") or "")
+        if reason in {
+            "resource_navigation_survival_hazard_unresolved",
+        }:
+            continue
         if reason in exact_blocking_reasons or reason.startswith(
-            ("navigation_", "mobility_", "stuck", "lost_position", "resource_dry_egress")
+            (
+                "navigation_",
+                "mobility_",
+                "stuck",
+                "lost_position",
+                "resource_dry_egress",
+                "resource_navigation_",
+            )
         ):
+            return reason
+    return None
+
+
+def survival_reason_from_tool_results(results: Any) -> str | None:
+    """Return the first terminal reason that requires a survival stance."""
+
+    if not isinstance(results, list):
+        return None
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        reason = str(result.get("reason") or "")
+        normalized = "".join(ch for ch in reason.lower() if ch.isalnum())
+        if normalized in {
+            "resourcesurvivalhazardunresolved",
+            "resourcenavigationsurvivalhazardunresolved",
+            "survivalhazardunresolved",
+        } or normalized.startswith((
+            "resourcesurvivalhazardunresolved",
+            "resourcenavigationsurvivalhazardunresolved",
+            "survivalhazardunresolved",
+        )):
             return reason
     return None
 
@@ -406,4 +443,5 @@ __all__ = [
     "mobility_reason_from_tool_results",
     "signalize_body_state",
     "signalize_events",
+    "survival_reason_from_tool_results",
 ]

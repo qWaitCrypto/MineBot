@@ -331,6 +331,39 @@ class AutonomyQualityTests(unittest.TestCase):
             ["body_owner_not_released", "pending_actions_not_empty"],
         )
 
+    def test_session_terminal_truth_takes_precedence_over_late_body_state(self):
+        events = _healthy_material_incomplete_trace()
+        final_state = next(
+            event
+            for event in reversed(events)
+            if event.get("event") == "body_state"
+        )
+        final_state["body_owner"] = "Bot"
+        final_state["pending_action_count"] = 2
+        terminal = next(event for event in events if event.get("event") == "session_terminal")
+        terminal["terminal_truth"] = {
+            "exit_code": 0,
+            "facts": {"body_owner": None, "pending_action_count": 0},
+            "goal": "goal",
+            "inventory_count": None,
+            "lifecycle": "idle",
+            "satisfied": False,
+            "status": "quit",
+            "target": {"goal_id": "AG-FP30", "kind": "production_terminal"},
+        }
+
+        report = evaluate_autonomy_quality(
+            events,
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        cleanup = report["hard_invariants"]["terminal_cleanup"]
+        self.assertEqual(cleanup["verdict"], "pass")
+        self.assertEqual(cleanup["source"], "session_terminal")
+        self.assertEqual(cleanup["body_owner"], None)
+        self.assertEqual(cleanup["pending_action_count"], 0)
+
     def test_repeated_body_event_observation_does_not_mint_duplicate_output(self):
         states = [_body_state(index + 1, ts, x=index * 2.0, counts={}) for index, ts in enumerate(range(0, 1801, 120))]
         events = _coverage_events(states=states)

@@ -911,6 +911,76 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertFalse(recovery_config.allow_pillar)
         self.assertFalse(recovery_config.allow_downward)
 
+    def test_failed_governed_fallback_recovers_to_pre_attempt_verified_position(self):
+        class FailedGovernedFallbackNavigator(ExplorationNavigator):
+            def navigate_to(self, goal, **kwargs):
+                call_index = len(self.calls)
+                self.calls.append((goal, kwargs))
+                config = kwargs["config"]
+                if call_index == 0:
+                    return ToolResult(
+                        False,
+                        "no_path",
+                        True,
+                        metrics=ZERO_PROGRESS_NAVIGATION_METRICS,
+                    )
+                if config.aquatic_traversal:
+                    self.body.state = _state((-4.0, 59.0, -4.0))
+                    return ToolResult(False, "break_timeout", False)
+                target = goal.representative(
+                    (int(self.body.state.pos[0]), int(self.body.state.pos[1]), int(self.body.state.pos[2]))
+                )
+                self.body.state = _state(tuple(float(value) for value in target))
+                return ToolResult(True, "arrived", False)
+
+        body = ExplorationBody()
+        navigator = FailedGovernedFallbackNavigator(body)
+        runtime = ExplorationTransactions(body, navigator, MemoryExplorationCoverageStore())
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "budget_exhausted")
+        attempts = result.metrics["candidate_failures"][0]["navigation_attempts"]
+        self.assertEqual(attempts[1]["reason"], "break_timeout")
+        self.assertEqual(attempts[0]["recovery"]["target"], [0, 64, 0])
+        self.assertEqual(attempts[0]["recovery"]["final_pos"], [0.0, 64.0, 0.0])
+        self.assertGreaterEqual(body.state.pos[1], 64.0)
+
+    def test_successful_governed_fallback_preserves_forward_anchor(self):
+        class SuccessfulGovernedFallbackNavigator(ExplorationNavigator):
+            def navigate_to(self, goal, **kwargs):
+                call_index = len(self.calls)
+                self.calls.append((goal, kwargs))
+                config = kwargs["config"]
+                if call_index == 0:
+                    return ToolResult(
+                        False,
+                        "no_path",
+                        True,
+                        metrics=ZERO_PROGRESS_NAVIGATION_METRICS,
+                    )
+                if config.aquatic_traversal:
+                    self.body.state = _state((-7.0, 64.0, -7.0))
+                    return ToolResult(True, "partial_progress", True)
+                target = goal.representative(
+                    (int(self.body.state.pos[0]), int(self.body.state.pos[1]), int(self.body.state.pos[2]))
+                )
+                self.body.state = _state(tuple(float(value) for value in target))
+                return ToolResult(True, "arrived", False)
+
+        body = ExplorationBody()
+        navigator = SuccessfulGovernedFallbackNavigator(body)
+        runtime = ExplorationTransactions(body, navigator, MemoryExplorationCoverageStore())
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "budget_exhausted")
+        attempts = result.metrics["candidate_failures"][0]["navigation_attempts"]
+        self.assertNotIn("recovery", attempts[0])
+        self.assertEqual(_region(body.state.pos), (-1, -1))
+
     def test_failed_frontier_stops_when_verified_position_recovery_fails(self):
         class FailedRecoveryNavigator(ExplorationNavigator):
             def navigate_to(self, goal, **kwargs):

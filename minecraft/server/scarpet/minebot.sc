@@ -4715,9 +4715,7 @@ navigation_pickaxe_tier(item) -> (
 navigation_required_pickaxe_tier(block_type) -> (
   if(block_tags(block_type, 'needs_diamond_tool'), 3,
     if(block_tags(block_type, 'needs_iron_tool'), 2,
-      if(block_tags(block_type, 'needs_stone_tool'), 1,
-        if(block_tags(block_type, 'mineable/pickaxe'), 0, null)
-      )
+      if(block_tags(block_type, 'needs_stone_tool'), 1, null)
     )
   )
 );

@@ -1487,6 +1487,14 @@ class BlockWork:
                         can_retry=False,
                         metrics=recovery_metrics,
                     )
+            if str(recovery.reason or "").startswith("surface_navigation_failed:"):
+                return ToolResult(
+                    success=False,
+                    reason="dry_egress_failed:" + str(recovery.reason).split(":", 1)[1],
+                    can_retry=recovery.can_retry,
+                    next_suggestion=recovery.next_suggestion,
+                    metrics=recovery_metrics,
+                )
             return ToolResult(
                 success=False,
                 reason="dry_egress_not_liquid",

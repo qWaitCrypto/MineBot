@@ -101,7 +101,7 @@ def build_interrupt_call(bot: str, reason: str | None = None, app: str = SCARPET
 
 
 def parse_result(raw: str) -> Result:
-    envelope = _parse_envelope(raw)
+    envelope = _parse_envelope(raw, expected_type="result")
     _require_type(envelope, "result")
     _require_complete(envelope)
     return Result(
@@ -117,7 +117,7 @@ def parse_result(raw: str) -> Result:
 
 
 def parse_state(raw: str) -> BodyState:
-    envelope = _parse_envelope(raw)
+    envelope = _parse_envelope(raw, expected_type="state")
     _require_type(envelope, "state")
     _require_complete(envelope)
     data = dict(envelope.get("data") or {})
@@ -129,7 +129,7 @@ def parse_state(raw: str) -> BodyState:
 
 
 def parse_perception(raw: str) -> PerceptionResult:
-    envelope = _parse_envelope(raw)
+    envelope = _parse_envelope(raw, expected_type="perception")
     _require_type(envelope, "perception")
     return PerceptionResult(
         bot=str(envelope["bot"]),
@@ -149,7 +149,7 @@ def parse_events(raw: str) -> list[Event]:
 
 
 def parse_events_page(raw: str) -> tuple[list[Event], str | None]:
-    envelope = _parse_envelope(raw)
+    envelope = _parse_envelope(raw, expected_type="events")
     _require_type(envelope, "events")
     _require_complete(envelope)
     events = []
@@ -191,7 +191,7 @@ def _scarpet_string_arg(value: str) -> str:
     return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
-def _parse_envelope(raw: str) -> dict[str, Any]:
+def _parse_envelope(raw: str, *, expected_type: str | None = None) -> dict[str, Any]:
     if len(raw) >= RCON_APPLICATION_BUDGET:
         raise TruncatedPayloadError("RCON logical response reached the 4096-char application budget")
     text = _SCRIPT_PREFIX_RE.sub("", raw.strip())
@@ -210,10 +210,45 @@ def _parse_envelope(raw: str) -> dict[str, Any]:
             raise EnvelopeError(f"response is not JSON envelope: {raw[:120]!r}") from nested_exc
     trailing = text[end:].strip()
     if trailing:
-        raise EnvelopeError(f"unexpected content after JSON envelope: {trailing[:80]!r}")
+        extra = _extra_assignment_envelopes(trailing)
+        if extra is None:
+            raise EnvelopeError(f"unexpected content after JSON envelope: {trailing[:80]!r}")
+        if expected_type is not None:
+            candidates = [payload, *extra]
+            for candidate in candidates:
+                if isinstance(candidate, dict) and candidate.get("type") == expected_type:
+                    payload = candidate
+                    break
     if not isinstance(payload, dict):
         raise EnvelopeError(f"response envelope must be object, got {type(payload).__name__}")
     return payload
+
+
+def _extra_assignment_envelopes(text: str) -> list[dict[str, Any]] | None:
+    """Return complete extra Scarpet assignment envelopes, or ``None`` for junk.
+
+    Under high-frequency polling Carpet can occasionally return more than one
+    script assignment output in a single logical RCON response.  Callers still
+    choose by expected envelope type; arbitrary trailing text fails closed.
+    """
+
+    decoder = json.JSONDecoder()
+    payloads: list[dict[str, Any]] = []
+    remainder = _SCARPET_TIMING_TOKEN_RE.sub(" ", text).strip()
+    while remainder:
+        before = remainder
+        remainder = _SCRIPT_PREFIX_RE.sub("", remainder).strip()
+        if remainder == before:
+            return None
+        try:
+            payload, end = decoder.raw_decode(remainder)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payloads.append(payload)
+        remainder = _SCARPET_TIMING_TOKEN_RE.sub(" ", remainder[end:]).strip()
+    return payloads
 
 
 def _require_type(envelope: dict[str, Any], expected: str) -> None:

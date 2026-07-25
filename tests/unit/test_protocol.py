@@ -105,6 +105,46 @@ class ProtocolTests(unittest.TestCase):
         self.assertIsNone(result.id)
         self.assertEqual(result.bot, "Bot1")
 
+    def test_parse_result_ignores_extra_complete_assignment_envelope(self):
+        first = (
+            '{"type":"result","id":"a1","bot":"Bot1","ok":true,"accepted":true,'
+            '"complete":true,"data":{"action":"state"},"error":null}'
+        )
+        second = (
+            '{"type":"state","bot":"Bot1","ok":true,"complete":true,'
+            '"data":{"pos":[1,2,3],"health":20,"food":20},"error":null}'
+        )
+
+        result = parse_result(" = " + first + ' (123µs) = ' + second + " (456µs)")
+
+        self.assertEqual(result.id, "a1")
+        self.assertEqual(result.data["action"], "state")
+
+    def test_parse_events_selects_expected_type_from_extra_assignment_envelope(self):
+        first = (
+            '{"type":"state","bot":"Bot1","ok":true,"complete":true,'
+            '"data":{"pos":[1,2,3],"health":20,"food":20},"error":null}'
+        )
+        second = (
+            '{"type":"events","bot":"Bot1","ok":true,"complete":true,'
+            '"next":null,"events":[{"type":"event","seq":7,"tick":99,"bot":"Bot1",'
+            '"name":"moveDone","data":{"reason":"arrived"}}],"error":null}'
+        )
+
+        events = parse_events(" = " + first + ' (123µs) = ' + second + " (456µs)")
+
+        self.assertEqual([event.seq for event in events], [7])
+        self.assertEqual(events[0].name, "moveDone")
+
+    def test_parse_result_still_rejects_non_envelope_trailing_text(self):
+        raw = (
+            '{"type":"result","id":"a1","bot":"Bot1","ok":true,"accepted":true,'
+            '"complete":true,"data":{},"error":null} stray'
+        )
+
+        with self.assertRaises(EnvelopeError):
+            parse_result(raw)
+
 
     def test_parse_state_hashes_inventory_when_missing_hash(self):
         raw = json.dumps(

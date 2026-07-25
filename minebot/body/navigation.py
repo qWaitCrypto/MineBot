@@ -31,9 +31,11 @@ from minebot.game.navigation import (
     GoalNear,
     normalize_goal,
 )
+from minebot.game.protocol import build_action_call
 
 
 SERVER_GOAL_SET_LIMIT = 32
+RCON_MUTATION_COMMAND_TARGET_CHARS = 1400
 SURVIVAL_REFLEX_OWNERS = frozenset({"lavaReflex", "fireReflex", "waterReflex", "combatReflex"})
 
 
@@ -176,6 +178,71 @@ def server_load_limited_navigation_config(
     )
 
 
+def _compact_navigate_action_params(params: dict[str, object]) -> dict[str, object]:
+    """Drop Scarpet-default or inactive fields from a navigateTo action payload."""
+
+    compact = dict(params)
+    defaults: dict[str, object] = {
+        "y_below": 8,
+        "y_above": 8,
+        "arrival_radius": 0.75,
+        "goal_radius": 0,
+        "min_partial_progress": 5,
+        "segment_index": 0,
+        "allow_diagonal": True,
+        "allow_ascend": True,
+        "allow_descend": True,
+        "allow_swim": True,
+        "aquatic_traversal": False,
+        "survival_recovery": False,
+        "aquatic_replan_attempts": 0,
+        "max_fall_depth": 3,
+        "max_water_drop_depth": 32,
+        "recheck_lookahead": 5,
+        "allow_break": False,
+        "break_budget": 0,
+        "break_timeout_ticks": 300,
+        "allow_place": False,
+        "allow_pillar": False,
+        "pillar_budget": 0,
+        "allow_downward": False,
+        "downward_budget": 0,
+        "allow_open": False,
+        "open_budget": 0,
+        "scaffold_count": 0,
+        "place_budget": 0,
+    }
+    for key, default in defaults.items():
+        if compact.get(key) == default:
+            compact.pop(key, None)
+
+    if compact.get("partial_replans") in (None, 0):
+        compact.pop("partial_replans", None)
+    if not compact.get("allow_break"):
+        compact.pop("break_budget", None)
+    if not (compact.get("allow_break") or compact.get("allow_downward")):
+        for key in ("break_timeout_ticks", "break_pickaxe", "break_axe", "break_shovel"):
+            compact.pop(key, None)
+    if not (compact.get("allow_place") or compact.get("allow_pillar")):
+        for key in ("scaffold_item", "scaffold_count", "place_budget", "pillar_budget"):
+            compact.pop(key, None)
+    if not compact.get("allow_place"):
+        compact.pop("place_budget", None)
+    if not compact.get("allow_pillar"):
+        compact.pop("pillar_budget", None)
+    if not compact.get("allow_downward"):
+        compact.pop("downward_budget", None)
+    if not compact.get("allow_open"):
+        compact.pop("open_budget", None)
+    if compact.get("denied_mutations") == []:
+        compact.pop("denied_mutations", None)
+    for key in ("break_pickaxe", "break_axe", "break_shovel", "scaffold_item"):
+        if compact.get(key) is None:
+            compact.pop(key, None)
+
+    return compact
+
+
 def aquatic_navigation_config(
     config: NavigationRunConfig | None = None,
 ) -> NavigationRunConfig:
@@ -235,7 +302,7 @@ def navigation_surface_egress_fallback_allowed(reason: object) -> bool:
     """
 
     value = str(reason or "")
-    if value == "dry_egress_unavailable":
+    if value in {"dry_egress_unavailable", "dry_egress_not_liquid"}:
         return True
     if value.startswith("dry_egress_failed:"):
         return navigation_governed_mobility_upgrade_reason(value.split(":", 1)[1])
@@ -433,7 +500,11 @@ class NavigationTransactions:
                 },
             )
         try:
-            target = (int(raw_target[0]), int(raw_target[1]), int(raw_target[2]))
+            target = (
+                floor(float(raw_target[0])),
+                floor(float(raw_target[1])),
+                floor(float(raw_target[2])),
+            )
         except (TypeError, ValueError):
             return ToolResult(
                 False,
@@ -633,8 +704,7 @@ class NavigationTransactions:
             except ProgressAbort as exc:
                 return _result(False, "progress_yielded", True, goal_anchor, executed, {"error": str(exc)})
 
-            action = Action.create(
-                "navigateTo",
+            action_params = _compact_navigate_action_params(
                 {
                     "target": [gx, gy, gz],
                     "goals": [list(candidate) for candidate in server_goals],
@@ -685,8 +755,10 @@ class NavigationTransactions:
                     "allow_open": bool(cfg.allow_open and cfg.max_open_steps > open_steps),
                     "open_budget": max(0, cfg.max_open_steps - open_steps),
                     "denied_mutations": [list(pos) for pos in sorted(denied_mutations)],
-                },
+                }
             )
+            action = Action.create("navigateTo", action_params)
+            action_command_len = len(build_action_call(getattr(self.body, "bot_name", ""), action))
             result = self.body.execute(action)
             if not (result.ok and result.accepted):
                 executed.append(ExecutedSegment(
@@ -769,6 +841,7 @@ class NavigationTransactions:
             if not self.progress.generation_current(generation):
                 return _result(False, "preempted", True, goal_anchor, executed, {"generation_current": False})
 
+            action_start_seq = getattr(self.body, "_action_start_seqs", {}).get(action.id, 0)
             td = terminal.data
             raw_nav_reason = td.get("reason") or td.get("nav_reason") or td.get("stopped_reason") or terminal.name
             nav_reason = "preempted" if terminal.name == "ownerPreempted" else raw_nav_reason
@@ -803,6 +876,8 @@ class NavigationTransactions:
                     "selected_goal": list(selected_goal),
                     "goal_count": len(server_goals),
                     "goal_set_preserved": goal_set_preserved,
+                    "action_command_len": action_command_len,
+                    "action_command_target_chars": RCON_MUTATION_COMMAND_TARGET_CHARS,
                 },
             ))
 
@@ -835,6 +910,7 @@ class NavigationTransactions:
                 reflex = _wait_for_reflex_completion(
                     self.body,
                     timeout_s=min(5.0, max(1.0, cfg.segment_timeout_s / 3.0)),
+                    after_seq=action_start_seq,
                 )
                 if reflex is not None and reflex.name == "reflexCompleted":
                     if executed:
@@ -921,6 +997,7 @@ class NavigationTransactions:
                     original_goal=goal_anchor,
                     original_reason=str(nav_reason),
                     cfg=cfg,
+                    mutation_blacklist=denied_mutations,
                 )
                 recovery_attempts.append(recovery.to_payload())
                 executed[-1].diagnostics["recovery"] = recovery.to_payload()
@@ -966,6 +1043,7 @@ class NavigationTransactions:
         original_goal: Position,
         original_reason: str,
         cfg: NavigationRunConfig,
+        mutation_blacklist: set[Position],
     ) -> ToolResult:
         origin = _block_pos(self.body.get_state())
         candidates = _recovery_goal_candidates(
@@ -993,6 +1071,7 @@ class NavigationTransactions:
             goal,
             break_context=BreakContext.RECOVERY,
             config=recovery_config,
+            mutation_blacklist=mutation_blacklist,
         )
         metrics = dict(result.metrics or {})
         metrics.update(
@@ -1675,15 +1754,36 @@ def _executed_payload(segment: ExecutedSegment) -> dict[str, object]:
 
 
 
-def _wait_for_reflex_completion(body: Body, *, timeout_s: float) -> Event | None:
+def _wait_for_reflex_completion(
+    body: Body,
+    *,
+    timeout_s: float,
+    after_seq: int | None = None,
+) -> Event | None:
     deadline = monotonic() + timeout_s
+    buffered = _match_reflex_completion(getattr(body, "event_log", ()), after_seq=after_seq)
+    if buffered is not None:
+        return buffered
     while monotonic() < deadline:
-        for event in body.poll_events():
-            if event.name == "reflexCompleted":
-                return event
-            if event.name in {"death", "bodyMissing", "respawned"}:
-                return event
+        buffered = _match_reflex_completion(body.poll_events(), after_seq=after_seq)
+        if buffered is not None:
+            return buffered
         sleep(0.05)
+    return None
+
+
+def _match_reflex_completion(
+    events: list[Event] | tuple[Event, ...],
+    *,
+    after_seq: int | None = None,
+) -> Event | None:
+    for event in events:
+        if after_seq is not None and event.seq <= after_seq:
+            continue
+        if event.name == "reflexCompleted":
+            return event
+        if event.name in {"death", "bodyMissing", "respawned"}:
+            return event
     return None
 
 

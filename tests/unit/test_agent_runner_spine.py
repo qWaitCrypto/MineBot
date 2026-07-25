@@ -1562,6 +1562,43 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertIn("situational=mobility", runtime_context.instruction_preamble)
         self.assertEqual(runtime._pending_mobility_terminal["reason"], "resource_navigation_no_path")
 
+    def test_resource_survival_terminal_refreshes_live_run_context_without_recovery(self):
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        self.addCleanup(runtime.close)
+        profile = ModeRuntime().profile_for(LifecycleState.ACTIVE)
+        runtime.agent_context.observe_profile(profile)
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=profile,
+            trace=runtime.trace,
+            runtime=runtime,
+            instruction_preamble=runtime.agent_context.turn_preamble(include_session_messages=False),
+        )
+
+        runtime.remember_tool_result(
+            "collect_resource",
+            {
+                "success": False,
+                "reason": "resource_navigation_survival_hazard_unresolved",
+                "canRetry": True,
+                "metrics": {"hazard_unresolved": {"kind": "lava"}},
+            },
+            run_context=runtime_context,
+        )
+
+        self.assertEqual(runtime_context.profile.situational, "survival")
+        self.assertIn("situational=survival", runtime_context.instruction_preamble)
+        self.assertIsNone(runtime._pending_mobility_terminal)
+        self.assertTrue(any(event["event"] == "survival_terminal_live_handoff" for event in runtime.trace.snapshot()))
+
     def test_pending_mobility_terminal_survives_bookkeeping_until_next_outer_turn(self):
         calls = []
 
