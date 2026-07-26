@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
 
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
 from minebot.app.work_queue import WorkIntentKind, WorkIntentQueue, WorkIntentState
+from minebot.brain.volition import StanceWakeGate
 from minebot.contract import Event
+
+
+def _gate_clock(now: float | None) -> float:
+    return time.monotonic() if now is None else now
 
 
 ALWAYS_MATERIAL_BODY_EVENTS = {
@@ -77,11 +83,16 @@ class BodyEventPump:
         queue: WorkIntentQueue,
         store: RuntimeStateStore,
         scope: RuntimeScope,
+        stance_gate: StanceWakeGate | None = None,
     ) -> None:
         self.body = body
         self.queue = queue
         self.store = store
         self.scope = scope
+        # F4: None (default) means no ambient wake sources at all — exactly
+        # today's behavior. A gate is installed only when an owner grants a
+        # stance (brain-cognitive-framework.md §7.4).
+        self.stance_gate = stance_gate
         head = body.event_head(f"app-{uuid4().hex}")
         self.epoch = str(head["epoch"])
         self.initial_owner = None if head.get("owner") is None else str(head["owner"])
@@ -122,6 +133,7 @@ class BodyEventPump:
             events,
             task_waiting=task_waiting,
             wait_for=wait_for,
+            stance_gate=self.stance_gate,
         )
         enqueued = 0
         for event in selected:
@@ -176,7 +188,18 @@ def _coalesce_material_events(
     *,
     task_waiting: bool = False,
     wait_for: tuple[str, ...] = (),
+    stance_gate: StanceWakeGate | None = None,
+    now: float | None = None,
 ) -> list[Event]:
+    """Select material events.
+
+    F4 stance grants can add ambient wake sources (`stance_gate`); with no
+    grant the gate declines everything and selection is byte-identical to the
+    pre-stance behavior. Already-material events are never gated — throttling
+    death, bodyMissing, or an awaited terminal would suppress survival and
+    terminal truth.
+    """
+
     selected: dict[tuple[str, str], Event] = {}
     for event in events:
         always_material = event.name in ALWAYS_MATERIAL_BODY_EVENTS
@@ -185,7 +208,13 @@ def _coalesce_material_events(
             and event.name in TASK_TERMINAL_BODY_EVENTS
             and event_matches_wait_conditions(event, wait_for)
         )
-        if not always_material and not task_terminal:
+        stance_wake = False
+        if not always_material and not task_terminal and stance_gate is not None:
+            decision = stance_gate.decide(event.name, now=_gate_clock(now))
+            if decision.allow:
+                stance_gate.record(now=_gate_clock(now))
+                stance_wake = True
+        if not always_material and not task_terminal and not stance_wake:
             continue
         action_id = str(event.data.get("action_id") or "")
         key = (event.name, action_id)
