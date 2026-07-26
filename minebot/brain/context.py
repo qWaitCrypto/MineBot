@@ -19,6 +19,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 
+from minebot.brain.context_compiler import (
+    CompiledContext,
+    ContextBudget,
+    ContextFacts,
+    compile_context,
+)
 from minebot.brain.modes import RuntimeProfile
 from minebot.contract import BodyState
 
@@ -263,6 +269,53 @@ class AgentContext:
         """True on the first turn and every Nth turn thereafter."""
         return self._turn <= 1 or (self._turn - 1) % self.goal_reinject_every == 0
 
+    def snapshot_facts(
+        self,
+        *,
+        include_goal: bool = True,
+        include_session_messages: bool = True,
+    ) -> ContextFacts:
+        """Immutable snapshot of everything observed, for the F2 compiler."""
+        return ContextFacts(
+            goal_text=self.goal_text,
+            turn=self._turn,
+            language=self.language,
+            include_goal=include_goal,
+            include_session_messages=include_session_messages,
+            session_messages=tuple(self._session_messages),
+            task_artifact=self._task_artifact,
+            conversation_summary=self._conversation_summary,
+            body_state=self._last_state,
+            profile=self._last_profile,
+            resume_facts=self._resume_facts,
+        )
+
+    def compile(
+        self,
+        profile: str = "full",
+        *,
+        include_goal: bool = True,
+        include_session_messages: bool = True,
+        budget: ContextBudget | None = None,
+    ) -> CompiledContext:
+        """Compile the turn preamble through the F2 section pipeline.
+
+        The one-shot resume frame is consumed only when it was actually
+        rendered, so a profile or budget that omits it cannot silently
+        destroy the fact.
+        """
+        compiled = compile_context(
+            profile,
+            self.snapshot_facts(
+                include_goal=include_goal,
+                include_session_messages=include_session_messages,
+            ),
+            budget,
+        )
+        if "resume_facts" in compiled.sections:
+            self._resume_facts = None
+        return compiled
+
     def turn_preamble(
         self,
         *,
@@ -273,67 +326,14 @@ class AgentContext:
 
         The goal line is always available in Phase 1. Cadence remains available
         as metadata for future compression policy, but SDK dynamic-instructions
-        callback cadence must never hide the goal from the model.
+        callback cadence must never hide the goal from the model. Delegates to
+        the F2 compiler's ``full`` profile (golden-locked byte compatibility).
         """
-        parts: list[str] = []
-        if include_goal and self.goal_text.strip():
-            parts.append(f"GOAL: {self.goal_text}")
-        parts.append(f"SESSION: turn={self._turn} language={self.language}")
-        if include_session_messages and self._session_messages:
-            parts.append(self._session_window_line())
-        if self._task_artifact is not None:
-            parts.append(
-                "TASK_ARTIFACT: "
-                + json.dumps(self._task_artifact, ensure_ascii=False, sort_keys=True)
-            )
-            task = self._task_artifact.get("task")
-            if isinstance(task, dict) and task.get("status") == "running":
-                parts.append(
-                    "TASK_RUNTIME_CONTRACT: A durable task spans finite SDK runs only "
-                    "through checkpoint_task. Before final output, record exactly one "
-                    "explicit disposition: continue with a structured continuation when "
-                    "the unfinished goal remains actionable; wait_event only for a named "
-                    "material wake condition; yield only for a grounded bounded blocker; "
-                    "complete only with authoritative evidence."
-                )
-        if self._conversation_summary is not None and self._conversation_summary.get("compacted_turns", 0):
-            parts.append(
-                "CONVERSATION_SUMMARY: "
-                + json.dumps(self._conversation_summary, ensure_ascii=False, sort_keys=True)
-            )
-        if self._last_state is not None:
-            parts.append(self._state_line(self._last_state))
-        if self._last_profile is not None:
-            parts.append(self._profile_line(self._last_profile))
-        if self._resume_facts is not None:
-            parts.append(self._resume_line(self._resume_facts))
-            self._resume_facts = None
-        return "\n".join(parts)
-
-    @staticmethod
-    def _state_line(state: BodyState) -> str:
-        pos = ", ".join(f"{value:.1f}" for value in state.pos)
-        return (
-            f"STATE: pos=({pos}) health={state.health:.1f} food={state.food} "
-            f"dim={state.dimension or 'overworld'}"
-        )
-
-    @staticmethod
-    def _profile_line(profile: RuntimeProfile) -> str:
-        focus = ",".join(profile.tool_focus)
-        tags = ",".join(profile.policy_tags)
-        return (
-            f"PROFILE: relationship={profile.relationship} situational={profile.situational} "
-            f"lifecycle={profile.lifecycle} focus={focus} model={profile.model_route} "
-            f"effort={profile.effort} policy={tags} frame={profile.context_frame}"
-        )
-
-    @staticmethod
-    def _resume_line(facts: dict[str, object]) -> str:
-        reason = facts.get("reason") or "resume"
-        goal = facts.get("goal") or ""
-        progress = facts.get("last_progress") or {}
-        return f"RESUME: reason={reason} goal={goal} last_progress={progress}"
+        return self.compile(
+            "full",
+            include_goal=include_goal,
+            include_session_messages=include_session_messages,
+        ).text
 
     def _append_session_message(self, role: str, text: str) -> str:
         clean = " ".join(text.strip().split())
@@ -366,10 +366,5 @@ class AgentContext:
             )
             return f"MINECRAFT_CHAT: {payload}"
         return f"USER_MESSAGE: {text}" if prefixed else text
-
-    def _session_window_line(self) -> str:
-        chunks = [f"{role}: {text}" for role, text in self._session_messages]
-        return "SESSION_MESSAGES: " + " | ".join(chunks)
-
 
 __all__ = ["AgentContext", "DEFAULT_GOAL_REINJECT_EVERY"]
