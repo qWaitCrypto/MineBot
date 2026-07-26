@@ -7,16 +7,12 @@ autonomy-quality evaluator's trace vocabulary continuously, and reports the
 three-signal verdict — effective output, process health, recovery. This is
 the gate's judge, not a rigid pass/fail assertion.
 
-Two drivers decide WHAT each step:
-
-- ``model``  — a real LLM chooses objectives through the Java tools. This is
-  the formal AG-style run; it needs a valid model provider. It does NOT run
-  without one (no fabricated key, no silent fallback).
-- ``scripted`` — a deterministic objective sequence. A scripted run is
-  DIRECTED BODY mechanism evidence: it validates the whole pipeline and the
-  Body's sustained output/health/recovery, but per the closure rules it is
-  NOT a substitute for the model Agent composition gate. The report is
-  labelled accordingly.
+The driver is a deterministic scripted objective sequence, making this
+DIRECTED BODY mechanism evidence: it soaks the whole pipeline and the Body's
+sustained output/health/recovery without model cost. Per the closure rules it
+is NOT a substitute for the model Agent composition gate — the real formal
+run goes through the production entrypoint (tools/run_ag_interactive_gate.py)
+with the hybrid Java Body registry.
 
 The Body is driven only through the shared registry tools; every mutation is
 answered by the real production governance.
@@ -229,7 +225,7 @@ def run(args: argparse.Namespace) -> int:
     registry = ToolRegistry()
     register_java_body_tools(registry, client)
 
-    driver = _build_model_driver(start_pos) if args.driver == "model" else ScriptedDriver(start_pos)
+    driver = ScriptedDriver(start_pos)
 
     t0 = time.time()
     clock = lambda: time.time() - t0
@@ -243,7 +239,7 @@ def run(args: argparse.Namespace) -> int:
     successes = 0
     respawns = 0
     consecutive_fail = 0
-    print(f"[longrun] driver={args.driver} target={args.duration_s}s start={start_pos}", flush=True)
+    print(f"[longrun] driver=scripted target={args.duration_s}s start={start_pos}", flush=True)
     while time.time() - t0 < args.duration_s:
         # Upkeep: a drowned/despawned FakePlayer is respawned so the long run
         # continues; each respawn is an honest death recorded below.
@@ -262,8 +258,6 @@ def run(args: argparse.Namespace) -> int:
             from minebot.contract import ToolResult
             result = ToolResult(success=False, reason=f"harness_error:{type(error).__name__}", can_retry=True)
         recorder.tool_result(tool, params, tactic, call_id, result)
-        if hasattr(driver, "report_result"):
-            driver.report_result(tool, params, result)
         tool_calls += 1
         if result.success:
             successes += 1
@@ -300,15 +294,13 @@ def run(args: argparse.Namespace) -> int:
                                        active_window_s=args.active_window_s or None)
     artifact = {
         "scope": "java_body_longrun",
-        "formal_gate": args.driver == "model",
-        "driver": args.driver,
-        "directed_body_evidence": args.driver != "model",
+        "formal_gate": False,
+        "driver": "scripted",
+        "directed_body_evidence": True,
         "duration_s": round(time.time() - t0, 1),
         "tool_calls": tool_calls,
         "successes": successes,
         "respawns": respawns,
-        "model_calls": getattr(driver, "model_calls", 0),
-        "model_fallbacks": getattr(driver, "model_failures", 0),
         "start_pos": start_pos,
         "verdict": report["verdict"],
         "signals": {
@@ -330,162 +322,8 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
-# Responses-API function tools (flat shape: no nested "function" wrapper).
-_LLM_TOOLS = [
-    {
-        "type": "function",
-        "name": "collect_block",
-        "description": "Search for and collect one block of any listed type near the bot "
-                       "(mines it under governance and verifies the inventory gain).",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "block_types": {"type": "array", "items": {"type": "string"},
-                                "description": "exact namespaced block ids, e.g. minecraft:oak_log, minecraft:stone"},
-                "search_radius": {"type": "integer", "minimum": 4, "maximum": 64},
-            },
-            "required": ["block_types"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "navigate_to",
-        "description": "Walk or swim toward a target column to explore or reposition. "
-                       "kind='xz' targets a far column; 'near' ends within range of a cell.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "x": {"type": "integer"},
-                "z": {"type": "integer"},
-                "kind": {"type": "string", "enum": ["xz", "near"]},
-                "y": {"type": "integer"},
-                "range": {"type": "number"},
-            },
-            "required": ["x", "z"],
-        },
-    },
-]
-
-_LLM_SYSTEM = (
-    "You are the strategic brain of a Minecraft survival bot. Its body can only "
-    "navigate and collect blocks so far. Keep the bot productive for the whole "
-    "session: gather resources and, when a target is unreachable or exhausted, "
-    "switch to a different resource or explore a new area to recover. Always "
-    "respond with exactly one tool call, never plain text. Use EXACT namespaced "
-    "block ids only, for example minecraft:oak_log, minecraft:birch_log, "
-    "minecraft:stone, minecraft:dirt, minecraft:sand, minecraft:gravel. Vary "
-    "your objectives so you keep making progress."
-)
-
-_BLOCK_ALIAS = {
-    "oak logs": "minecraft:oak_log", "oak log": "minecraft:oak_log", "wood": "minecraft:oak_log",
-    "logs": "minecraft:oak_log", "log": "minecraft:oak_log", "stone": "minecraft:stone",
-    "dirt": "minecraft:dirt", "sand": "minecraft:sand", "gravel": "minecraft:gravel",
-    "grass": "minecraft:grass_block",
-}
-
-
-def _normalize_block_id(value: str) -> str:
-    v = str(value).strip().lower()
-    if ":" in v:
-        return v
-    if v in _BLOCK_ALIAS:
-        return _BLOCK_ALIAS[v]
-    return "minecraft:" + v.replace(" ", "_")
-
-
-class ModelDriver:
-    """Real LLM (Responses API) tool-use loop deciding the next Java Body
-    objective, with multi-turn input threading so the model stays aware of
-    what happened. Retry/backoff degrades a flaky gateway gracefully: if the
-    model cannot be reached for a decision, a recorded fallback keeps the
-    session alive rather than stalling."""
-
-    def __init__(self, model: str, base_url: str, api_key: str, start_pos: list[float]) -> None:
-        self._model = model
-        self._url = base_url.rstrip("/") + "/v1/responses"
-        self._key = api_key
-        self._input = [
-            {"role": "system", "content": _LLM_SYSTEM},
-            {"role": "user", "content": f"You start near {start_pos}. Begin gathering resources; "
-                                        f"decide your first objective."},
-        ]
-        self._fallback = ScriptedDriver(start_pos)
-        self._pending_call_id = None
-        self.model_calls = 0
-        self.model_failures = 0
-
-    def report_result(self, tool: str, params: dict, result) -> None:
-        summary = f"{tool} -> {'ok' if result.success else 'fail'}/{result.reason}"
-        if result.metrics and result.metrics.get("inventory_delta"):
-            summary += f" delta={result.metrics['inventory_delta']}"
-        if self._pending_call_id is not None:
-            self._input.append({"type": "function_call_output", "call_id": self._pending_call_id, "output": summary})
-            self._pending_call_id = None
-        else:
-            self._input.append({"role": "user", "content": summary})
-        # Bound the threaded context: keep the two seed items + last 20 items.
-        if len(self._input) > 24:
-            self._input = self._input[:2] + self._input[-20:]
-
-    def next_objective(self, ctx: dict) -> tuple[str, dict, str]:
-        decision = self._decide()
-        if decision is None:
-            self.model_failures += 1
-            tool, params, _ = self._fallback.next_objective(ctx)
-            return tool, params, f"fallback:{tool}"
-        call_id, tool, params = decision
-        self._pending_call_id = call_id
-        if tool == "collect_block":
-            params["block_types"] = [_normalize_block_id(b) for b in params.get("block_types") or ["minecraft:oak_log"]]
-            tactic = "collect:" + ",".join(params["block_types"])[:40]
-        else:
-            tactic = f"navigate:{params.get('x')}_{params.get('z')}"
-        return tool, params, tactic
-
-    def _decide(self):
-        import urllib.request
-
-        body = json.dumps({
-            "model": self._model,
-            "input": self._input,
-            "tools": _LLM_TOOLS,
-            "tool_choice": "required",
-        }).encode()
-        for _attempt in range(5):
-            self.model_calls += 1
-            req = urllib.request.Request(self._url, data=body, headers={
-                "Authorization": f"Bearer {self._key}", "Content-Type": "application/json"})
-            try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    data = json.loads(resp.read().decode())
-                for item in data.get("output", []):
-                    if item.get("type") == "function_call" and item.get("name") in ("collect_block", "navigate_to"):
-                        self._input.append(item)  # thread the call back for context
-                        args = json.loads(item.get("arguments") or "{}")
-                        return item.get("call_id"), item.get("name"), args
-                return None
-            except Exception:  # noqa: BLE001 — flaky gateway; retry then fall back
-                time.sleep(3)
-        return None
-
-
-def _build_model_driver(start_pos: list[float]) -> "ModelDriver":
-    import os
-
-    key = os.environ.get("MINEBOT_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    base = os.environ.get("MINEBOT_LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
-    model = os.environ.get("MINEBOT_LLM_MODEL", "gpt-5.6-luna")
-    if not key or not base:
-        print("[longrun] model driver needs MINEBOT_LLM_API_KEY + MINEBOT_LLM_BASE_URL (or OPENAI_*). Aborting.",
-              file=sys.stderr)
-        raise SystemExit(3)
-    return ModelDriver(model, base, key, start_pos)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--driver", choices=("scripted", "model"), default="scripted")
     parser.add_argument("--duration-s", type=float, default=1800.0, dest="duration_s")
     parser.add_argument("--active-window-s", type=float, default=0.0, dest="active_window_s")
     parser.add_argument("--url", default="ws://127.0.0.1:8767")

@@ -68,6 +68,7 @@ class RealServerConfig:
     server_id: str
     world_id_override: str | None
     state_db_path: Path
+    java_body_url: str | None = None
 
 
 class RealServerConfigError(RuntimeError):
@@ -495,6 +496,7 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
     server_id = (env.get("MINEBOT_REAL_SERVER_ID") or f"{host}:{port}").strip()
     world_id_override = (env.get("MINEBOT_REAL_WORLD_ID") or "").strip() or None
     state_db_path = Path(env.get("MINEBOT_AGENT_STATE_DB") or DEFAULT_RUNTIME_STATE_DB)
+    java_body_url = (env.get("MINEBOT_JAVA_BODY_URL") or "").strip() or None
     return RealServerConfig(
         rcon=RconConfig(host=host, port=port, password=password, timeout_s=timeout_s),
         bot_name=bot_name,
@@ -505,6 +507,7 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
         server_id=server_id,
         world_id_override=world_id_override,
         state_db_path=state_db_path,
+        java_body_url=java_body_url,
     )
 
 
@@ -578,6 +581,7 @@ async def run_real_server_goal(
                 model_provider=provider,
                 config=Phase1RuntimeConfig(
                     natural_region=config.natural_region,
+                    java_body_url=config.java_body_url,
                     recovery_respawn_pos=config.recovery_respawn_pos,
                     recovery_gamemode="survival",
                 ),
@@ -747,6 +751,7 @@ async def run_real_server_interactive(
                 model_provider=provider,
                 config=Phase1RuntimeConfig(
                     natural_region=config.natural_region,
+                    java_body_url=config.java_body_url,
                     recovery_respawn_pos=config.recovery_respawn_pos,
                     recovery_gamemode="survival",
                     speech_sink=speech_sink,

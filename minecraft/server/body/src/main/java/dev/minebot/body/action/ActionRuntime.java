@@ -140,4 +140,9 @@ public final class ActionRuntime {
     public List<String> runningExecutorActionIds() {
         return new ArrayList<>(executors.keySet());
     }
+
+    /** The bot's current physical owner, or null when idle. */
+    public FakePlayerActionOwner.Owner currentOwner(String botName) {
+        return owner.current(botName);
+    }
 }

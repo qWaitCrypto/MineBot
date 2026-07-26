@@ -155,6 +155,10 @@ class JavaBodyProtocol:
         self._require_capability("RESUME_EVENTS")
         return self._request("RESUME_EVENTS", {"bot_name": bot_name, "after_seq": after_seq})
 
+    def body_state(self, bot_name: str) -> dict:
+        self._require_capability("BODY_STATE")
+        return self._request("BODY_STATE", {"bot_name": bot_name})
+
     def collect_block(
         self,
         bot_name: str,

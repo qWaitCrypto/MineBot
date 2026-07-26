@@ -40,6 +40,22 @@ def register_java_body_tools(
     registry.register(_collect_block_tool(client, default_search_radius))
 
 
+def _ensure_connected(client: JavaBodyClient) -> ToolResult | None:
+    """Lazy-connect so registry construction never blocks on the Body being up;
+    an unreachable Java Body is a typed retryable failure, not a crash."""
+    try:
+        if not client.negotiated:
+            client.connect()
+        return None
+    except Exception as error:  # noqa: BLE001 — transport-level unavailability
+        return ToolResult(
+            success=False,
+            reason="java_body_unavailable",
+            can_retry=True,
+            metrics={"error": type(error).__name__},
+        )
+
+
 def _navigate_to_tool(client: JavaBodyClient) -> RegisteredTool:
     def run(params: JsonObject) -> ToolResult:
         kind = str(params.get("kind", "near"))
@@ -51,7 +67,14 @@ def _navigate_to_tool(client: JavaBodyClient) -> RegisteredTool:
         if "range" in params and params["range"] is not None:
             goal["range"] = float(params["range"])
         timeout_ticks = params.get("timeout_ticks")
-        return client.navigate(goal, timeout_ticks=int(timeout_ticks) if timeout_ticks is not None else None)
+        unavailable = _ensure_connected(client)
+        if unavailable is not None:
+            return unavailable
+        try:
+            return client.navigate(goal, timeout_ticks=int(timeout_ticks) if timeout_ticks is not None else None)
+        except Exception as error:  # noqa: BLE001
+            return ToolResult(success=False, reason="java_body_unavailable", can_retry=True,
+                              metrics={"error": type(error).__name__})
 
     return RegisteredTool(
         "navigate_to",
@@ -93,12 +116,19 @@ def _collect_block_tool(client: JavaBodyClient, default_radius: int) -> Register
             return ToolResult(success=False, reason="no_block_types", can_retry=False)
         radius = int(params.get("search_radius", default_radius))
         timeout_ticks = params.get("timeout_ticks")
-        return client.collect_block(
-            list(block_types),
-            radius=radius,
-            vertical_radius=int(params["vertical_radius"]) if params.get("vertical_radius") is not None else None,
-            timeout_ticks=int(timeout_ticks) if timeout_ticks is not None else None,
-        )
+        unavailable = _ensure_connected(client)
+        if unavailable is not None:
+            return unavailable
+        try:
+            return client.collect_block(
+                list(block_types),
+                radius=radius,
+                vertical_radius=int(params["vertical_radius"]) if params.get("vertical_radius") is not None else None,
+                timeout_ticks=int(timeout_ticks) if timeout_ticks is not None else None,
+            )
+        except Exception as error:  # noqa: BLE001
+            return ToolResult(success=False, reason="java_body_unavailable", can_retry=True,
+                              metrics={"error": type(error).__name__})
 
     return RegisteredTool(
         "collect_block",

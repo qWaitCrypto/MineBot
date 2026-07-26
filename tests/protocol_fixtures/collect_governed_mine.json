@@ -3,7 +3,10 @@
   "description": "COLLECT_BLOCK is acknowledged; the server proposes the exact mutation, the client answers a verdict (fire-and-forget), and the single terminal carries the inventory-delta truth.",
   "steps": [
     {
-      "send": {"builder": "hello", "args": {}},
+      "send": {
+        "builder": "hello",
+        "args": {}
+      },
       "expect_message": {
         "channel": "fakeplayer-body",
         "protocol": "fakeplayer-body/1",
@@ -20,12 +23,28 @@
         "minecraft_version": "26.1.2",
         "max_request_bytes": 16384,
         "max_requests_per_second": 40,
-        "request_types": ["CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS", "HELLO", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS"],
+        "request_types": [
+          "BODY_STATE",
+          "CANCEL_ACTION",
+          "COLLECT_BLOCK",
+          "FIND_BLOCKS",
+          "HELLO",
+          "MUTATION_VERDICT",
+          "NAVIGATE",
+          "QUERY_ACTION",
+          "RESUME_EVENTS"
+        ],
         "seq": 1,
         "server_tick": 600,
         "sent_at_ms": 1785000006000
       },
-      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+      "expect": [
+        {
+          "kind": "response",
+          "type": "HELLO_ACK",
+          "request_type": "HELLO"
+        }
+      ]
     },
     {
       "send": {
@@ -33,7 +52,10 @@
         "args": {
           "bot_name": "MineBot_1",
           "action_id": "collect-0001",
-          "block_ids": ["minecraft:oak_log", "minecraft:spruce_log"],
+          "block_ids": [
+            "minecraft:oak_log",
+            "minecraft:spruce_log"
+          ],
           "radius": 48,
           "timeout_ticks": 2400
         }
@@ -45,7 +67,10 @@
         "request_id": "r-2",
         "bot_name": "MineBot_1",
         "action_id": "collect-0001",
-        "block_ids": ["minecraft:oak_log", "minecraft:spruce_log"],
+        "block_ids": [
+          "minecraft:oak_log",
+          "minecraft:spruce_log"
+        ],
         "radius": 48,
         "timeout_ticks": 2400
       }
@@ -63,7 +88,15 @@
         "sent_at_ms": 1785000006100
       },
       "expect": [
-        {"kind": "response", "type": "COLLECT_BLOCK_ACK", "request_type": "COLLECT_BLOCK", "payload_contains": {"state": "accepted", "candidates": 5}}
+        {
+          "kind": "response",
+          "type": "COLLECT_BLOCK_ACK",
+          "request_type": "COLLECT_BLOCK",
+          "payload_contains": {
+            "state": "accepted",
+            "candidates": 5
+          }
+        }
       ]
     },
     {
@@ -75,9 +108,18 @@
         "tick": 601,
         "event": "owner_acquired",
         "action_id": "collect-0001",
-        "data": {"type": "COLLECT_BLOCK", "priority": "ACTION"}
+        "data": {
+          "type": "COLLECT_BLOCK",
+          "priority": "ACTION"
+        }
       },
-      "expect": [{"kind": "event", "name": "owner_acquired", "seq": 1}]
+      "expect": [
+        {
+          "kind": "event",
+          "name": "owner_acquired",
+          "seq": 1
+        }
+      ]
     },
     {
       "recv": {
@@ -86,19 +128,37 @@
         "proposal_id": "mp-1",
         "bot": "MineBot_1",
         "action_id": "collect-0001",
-        "mutation": {"kind": "break", "x": 61, "y": 69, "z": -50, "block_id": "minecraft:oak_log"},
+        "mutation": {
+          "kind": "break",
+          "x": 61,
+          "y": 69,
+          "z": -50,
+          "block_id": "minecraft:oak_log"
+        },
         "seq": 3,
         "server_tick": 640,
         "sent_at_ms": 1785000006800
       },
       "expect": [
-        {"kind": "proposal", "proposal_id": "mp-1", "block_id": "minecraft:oak_log", "mutation_kind": "break", "x": 61, "y": 69, "z": -50}
+        {
+          "kind": "proposal",
+          "proposal_id": "mp-1",
+          "block_id": "minecraft:oak_log",
+          "mutation_kind": "break",
+          "x": 61,
+          "y": 69,
+          "z": -50
+        }
       ]
     },
     {
       "send": {
         "builder": "mutation_verdict",
-        "args": {"proposal_id": "mp-1", "allow": true, "reason": "natural_terrain_allow"}
+        "args": {
+          "proposal_id": "mp-1",
+          "allow": true,
+          "reason": "natural_terrain_allow"
+        }
       },
       "expect_message": {
         "channel": "fakeplayer-body",
@@ -118,9 +178,18 @@
         "tick": 641,
         "event": "mutation_allowed",
         "action_id": "collect-0001",
-        "data": {"proposal_id": "mp-1", "reason": "natural_terrain_allow"}
+        "data": {
+          "proposal_id": "mp-1",
+          "reason": "natural_terrain_allow"
+        }
       },
-      "expect": [{"kind": "event", "name": "mutation_allowed", "seq": 2}]
+      "expect": [
+        {
+          "kind": "event",
+          "name": "mutation_allowed",
+          "seq": 2
+        }
+      ]
     },
     {
       "recv": {
@@ -131,9 +200,19 @@
         "tick": 700,
         "event": "mutation_verified",
         "action_id": "collect-0001",
-        "data": {"block_id": "minecraft:oak_log", "now": "minecraft:air", "break_ticks": 59}
+        "data": {
+          "block_id": "minecraft:oak_log",
+          "now": "minecraft:air",
+          "break_ticks": 59
+        }
       },
-      "expect": [{"kind": "event", "name": "mutation_verified", "seq": 3}]
+      "expect": [
+        {
+          "kind": "event",
+          "name": "mutation_verified",
+          "seq": 3
+        }
+      ]
     },
     {
       "recv": {
@@ -147,17 +226,39 @@
         "data": {
           "classification": "completed",
           "reason": "collected",
-          "inventory_delta": {"item_id": "minecraft:oak_log", "before": 0, "after": 1},
-          "mined_block": {"x": 61, "y": 69, "z": -50, "block_id": "minecraft:oak_log"},
+          "inventory_delta": {
+            "item_id": "minecraft:oak_log",
+            "before": 0,
+            "after": 1
+          },
+          "mined_block": {
+            "x": 61,
+            "y": 69,
+            "z": -50,
+            "block_id": "minecraft:oak_log"
+          },
           "elapsed_ticks": 144,
           "candidates_tried": 1,
           "replans": 0
         }
       },
       "expect": [
-        {"kind": "event", "name": "action_terminal", "seq": 4, "data_contains": {"classification": "completed", "reason": "collected"}}
+        {
+          "kind": "event",
+          "name": "action_terminal",
+          "seq": 4,
+          "data_contains": {
+            "classification": "completed",
+            "reason": "collected"
+          }
+        }
       ]
     }
   ],
-  "final": {"pending_requests": 0, "last_seq": {"MineBot_1": 4}}
+  "final": {
+    "pending_requests": 0,
+    "last_seq": {
+      "MineBot_1": 4
+    }
+  }
 }

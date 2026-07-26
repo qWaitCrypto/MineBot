@@ -1,0 +1,99 @@
+{
+  "name": "body_state",
+  "description": "BODY_STATE returns the authoritative server-side snapshot the neutral Body contract's get_state() maps; a missing bot is a typed missing snapshot, never fabricated state.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS", "HELLO", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS"],
+        "seq": 1,
+        "server_tick": 700,
+        "sent_at_ms": 1785000007000
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {"builder": "body_state", "args": {"bot_name": "MineBot_1"}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "BODY_STATE",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "BODY_STATE_RESULT",
+        "request_id": "r-2",
+        "bot": "MineBot_1",
+        "missing": false,
+        "position": {"x": 59.5, "y": 63.0, "z": -53.5},
+        "yaw": 180.0,
+        "pitch": 12.5,
+        "health": 20.0,
+        "food": 20,
+        "air": 300,
+        "dimension": "minecraft:overworld",
+        "game_time": 991223,
+        "inventory_counts": {"minecraft:oak_log": 2, "minecraft:dirt": 5},
+        "selected_item": null,
+        "offhand_item": null,
+        "body_owner": null,
+        "seq": 2,
+        "server_tick": 701,
+        "sent_at_ms": 1785000007100
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "BODY_STATE_RESULT",
+          "request_type": "BODY_STATE",
+          "payload_contains": {"missing": false, "health": 20.0, "dimension": "minecraft:overworld", "body_owner": null}
+        }
+      ]
+    },
+    {
+      "send": {"builder": "body_state", "args": {"bot_name": "GhostBot"}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "BODY_STATE",
+        "request_id": "r-3",
+        "bot_name": "GhostBot"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "BODY_STATE_RESULT",
+        "request_id": "r-3",
+        "bot": "GhostBot",
+        "missing": true,
+        "seq": 3,
+        "server_tick": 702,
+        "sent_at_ms": 1785000007200
+      },
+      "expect": [
+        {"kind": "response", "type": "BODY_STATE_RESULT", "request_type": "BODY_STATE", "payload_contains": {"missing": true}}
+      ]
+    }
+  ],
+  "final": {"pending_requests": 0}
+}

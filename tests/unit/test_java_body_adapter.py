@@ -120,8 +120,9 @@ class FakeBodyServer:
                 "max_request_bytes": 16384,
                 "max_requests_per_second": 40,
                 "request_types": [
-                    "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS", "HELLO",
-                    "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS",
+                    "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS",
+                    "HELLO", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION",
+                    "RESUME_EVENTS",
                 ],
             })
         elif kind == "NAVIGATE":
@@ -132,6 +133,20 @@ class FakeBodyServer:
             self._handle_verdict(message)
         elif kind == "QUERY_ACTION":
             self._handle_query(message, rid)
+        elif kind == "BODY_STATE":
+            self._emit_response(rid, "BODY_STATE_RESULT", {
+                "bot": message.get("bot_name"),
+                "missing": False,
+                "position": {"x": 10.5, "y": 64.0, "z": -3.5},
+                "yaw": 90.0, "pitch": 0.0,
+                "health": 18.0, "food": 17, "air": 300,
+                "dimension": "minecraft:overworld",
+                "game_time": 123456,
+                "inventory_counts": {"minecraft:oak_log": 3},
+                "selected_item": "minecraft:oak_log",
+                "offhand_item": None,
+                "body_owner": None,
+            })
 
     def _handle_navigate(self, message: dict, rid: str) -> None:
         action = message["action_id"]
@@ -307,3 +322,66 @@ def test_transport_drop_reconciles_via_query_action() -> None:
     assert result.success is True
     assert result.reason == "arrived"
     assert reconnects["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# JavaBody: the neutral Body-contract face over the client.
+# ---------------------------------------------------------------------------
+
+from minebot.contract import Action
+from minebot.game.java_body import JavaBody
+
+
+def test_java_body_get_state_maps_authoritative_wire_state() -> None:
+    client = _client(FakeBodyServer())
+    body = JavaBody(client, "Bot")
+
+    state = body.get_state()
+
+    assert state.missing is False
+    assert state.pos == (10.5, 64.0, -3.5)
+    assert state.health == 18.0
+    assert state.food == 17
+    assert state.oxygen == 300
+    assert state.dimension == "minecraft:overworld"
+    assert state.inventory_counts == {"minecraft:oak_log": 3}
+    assert state.selected_item == "minecraft:oak_log"
+    assert state.body_owner is None
+
+
+def test_java_body_perceive_supports_find_blocks_and_gaps_the_rest() -> None:
+    client = _client(FakeBodyServer())
+    body = JavaBody(client, "Bot")
+
+    gap = body.perceive("nearbyEntities", {})
+    assert gap.ok is False
+    assert gap.error == "capability_unavailable:nearbyEntities"
+
+
+def test_java_body_execute_delegates_whole_objectives() -> None:
+    client = _client(FakeBodyServer())
+    client.connect()
+    body = JavaBody(client, "Bot")
+
+    result = body.execute(Action.create("navigate", {"goal": {"kind": "near", "x": 10, "y": 64, "z": 0, "range": 1.5}}))
+    assert result.ok is True
+    assert result.data["replans"] == 2
+
+    gap = body.execute(Action.create("openContainer", {}))
+    assert gap.ok is False
+    assert gap.error == "capability_unavailable:openContainer"
+
+
+def test_java_body_poll_events_drains_contract_events() -> None:
+    client = _client(FakeBodyServer())
+    client.connect()
+    body = JavaBody(client, "Bot")
+    body.execute(Action.create("navigate", {"goal": {"kind": "near", "x": 10, "y": 64, "z": 0, "range": 1.5}}))
+
+    events = body.poll_events()
+
+    names = [event.name for event in events]
+    assert "owner_acquired" in names
+    assert "action_terminal" in names
+    assert all(event.bot == "Bot" for event in events)
+    assert body.poll_events() == []

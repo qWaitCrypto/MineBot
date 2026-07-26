@@ -42,8 +42,8 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String CHANNEL = "fakeplayer-body";
     public static final String PROTOCOL = "fakeplayer-body/1";
     private static final Set<String> REQUEST_TYPES = Set.of(
-        "HELLO", "FIND_BLOCKS", "NAVIGATE", "COLLECT_BLOCK", "MUTATION_VERDICT",
-        "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
+        "HELLO", "FIND_BLOCKS", "BODY_STATE", "NAVIGATE", "COLLECT_BLOCK",
+        "MUTATION_VERDICT", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
     );
     private static final int MAX_RADIUS = 128;
     private static final int MAX_VERTICAL_RADIUS = 64;
@@ -115,6 +115,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         switch (type) {
             case "HELLO" -> handleHello(connection, request, serverTick);
             case "FIND_BLOCKS" -> handleFindBlocks(connection, request, serverTick);
+            case "BODY_STATE" -> handleBodyState(connection, request, serverTick);
             case "NAVIGATE" -> handleNavigate(connection, request, serverTick);
             case "COLLECT_BLOCK" -> handleCollectBlock(connection, request, serverTick);
             case "MUTATION_VERDICT" -> handleMutationVerdict(request);
@@ -201,6 +202,58 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     return;
                 }
             }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        }
+    }
+
+    /** Authoritative body-state snapshot: the Java Body's read of the same
+     * server truth the neutral Body contract's get_state() promises. */
+    private void handleBodyState(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            JsonObject response = baseResponse(request, "BODY_STATE_RESULT");
+            response.addProperty("bot", botName);
+            response.addProperty("server_tick", serverTick);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                response.addProperty("missing", true);
+                connection.send(response, serverTick);
+                return;
+            }
+            response.addProperty("missing", false);
+            JsonObject position = new JsonObject();
+            position.addProperty("x", player.getX());
+            position.addProperty("y", player.getY());
+            position.addProperty("z", player.getZ());
+            response.add("position", position);
+            response.addProperty("yaw", player.getYRot());
+            response.addProperty("pitch", player.getXRot());
+            response.addProperty("health", player.getHealth());
+            response.addProperty("food", player.getFoodData().getFoodLevel());
+            response.addProperty("air", player.getAirSupply());
+            response.addProperty("dimension", level.dimension().identifier().toString());
+            response.addProperty("game_time", level.getGameTime());
+            JsonObject inventoryCounts = new JsonObject();
+            var inventory = player.getInventory();
+            for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+                ItemStack stack = inventory.getItem(slot);
+                if (!stack.isEmpty()) {
+                    String itemId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+                    int existing = inventoryCounts.has(itemId) ? inventoryCounts.get(itemId).getAsInt() : 0;
+                    inventoryCounts.addProperty(itemId, existing + stack.getCount());
+                }
+            }
+            response.add("inventory_counts", inventoryCounts);
+            ItemStack selected = player.getMainHandItem();
+            ItemStack offhand = player.getOffhandItem();
+            response.addProperty("selected_item", selected.isEmpty()
+                ? null : BuiltInRegistries.ITEM.getKey(selected.getItem()).toString());
+            response.addProperty("offhand_item", offhand.isEmpty()
+                ? null : BuiltInRegistries.ITEM.getKey(offhand.getItem()).toString());
+            var owner = runtime.currentOwner(botName);
+            response.addProperty("body_owner", owner == null ? null : owner.actionId());
             connection.send(response, serverTick);
         } catch (IllegalArgumentException error) {
             sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);

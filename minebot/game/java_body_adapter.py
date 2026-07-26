@@ -114,6 +114,7 @@ class JavaBodyClient:
         self._action_counter = 0
         self._event_gaps: list[EventGap] = []
         self._last_events: list[BotEvent] = []
+        self._event_buffer: list[BotEvent] = []
 
     # -- lifecycle ------------------------------------------------------
 
@@ -129,8 +130,35 @@ class JavaBodyClient:
             self._transport = None
 
     @property
+    def negotiated(self) -> bool:
+        return self._transport is not None and self._protocol.negotiated
+
+    @property
+    def protocol(self) -> JavaBodyProtocol:
+        return self._protocol
+
+    @property
     def event_gaps(self) -> list[EventGap]:
         return list(self._event_gaps)
+
+    def request_response(self, build) -> Response | ErrorResponse:
+        """One read-side request/response exchange.
+
+        ``build`` is a callable ``(JavaBodyProtocol) -> dict`` so the request
+        is always constructed against the current protocol epoch — a reconnect
+        gets a fresh, correctly-registered request instead of a stale one.
+        """
+        if self._transport is None or not self._protocol.negotiated:
+            self.connect()
+        message = build(self._protocol)
+        self._send(message)
+        return self._await_response(message["type"])
+
+    def drain_events(self) -> list[BotEvent]:
+        """Buffered pushed events since the last drain, in per-bot order."""
+        drained = self._event_buffer
+        self._event_buffer = []
+        return drained
 
     @property
     def last_action_events(self) -> list[BotEvent]:
@@ -302,6 +330,8 @@ class JavaBodyClient:
             elif isinstance(item, EventGap):
                 self._event_gaps.append(item)
             else:
+                if isinstance(item, BotEvent):
+                    self._event_buffer.append(item)
                 out.append(item)
         return out
 

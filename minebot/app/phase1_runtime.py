@@ -83,6 +83,11 @@ class Phase1RuntimeConfig:
     skill_workspace: SkillWorkspace | None = None
     wiki_knowledge: WikiKnowledge | None = None
     exploration_coverage_store: ExplorationCoverageStore | None = None
+    # Java Body provider weld (fakeplayer-java-body.md migration map): when a
+    # WebSocket URL is configured, navigate_to/collect_block register on the
+    # same shared registry, delegating to the Java Body under the same
+    # GovernancePolicy instance. None keeps the registry Scarpet-only.
+    java_body_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -608,6 +613,23 @@ def build_phase1_registry(
         resource_collection=resource_collection,
         use=use_txn,
     )
+    if config.java_body_url:
+        # Hybrid migration posture: the Java Body owns navigate/collect on the
+        # same registry, answering every mutation proposal through the SAME
+        # GovernancePolicy instance built above (single mutation authority).
+        from minebot.app.java_body_tools import register_java_body_tools
+        from minebot.game.java_body_adapter import (
+            GovernanceAnswerer,
+            JavaBodyClient,
+            websocket_transport,
+        )
+
+        java_client = JavaBodyClient(
+            body.bot_name,
+            websocket_transport(config.java_body_url),
+            GovernanceAnswerer(policy),
+        )
+        register_java_body_tools(registry, java_client)
     return registry
 
 
