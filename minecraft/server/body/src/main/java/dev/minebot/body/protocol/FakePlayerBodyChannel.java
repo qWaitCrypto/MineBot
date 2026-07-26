@@ -6,18 +6,22 @@ import dev.minebot.server.common.transport.MineBotChannel;
 import dev.minebot.server.common.transport.MineBotChannelRouter;
 import dev.minebot.server.common.transport.MineBotConnection;
 import dev.minebot.server.common.transport.MineBotWebSocketServer;
-import dev.minebot.body.search.LoadedBlockIndex;
+import dev.minebot.body.search.LoadedBlockScanner;
 import dev.minebot.body.search.LoadedSearchResult;
 import dev.minebot.body.search.SearchMatch;
 import dev.minebot.body.search.SearchSnapshotStore;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.block.Block;
 
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public final class FakePlayerBodyChannel implements MineBotChannel {
@@ -29,12 +33,11 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     private static final int MAX_PAGE_LIMIT = 128;
 
     private final MinecraftServer server;
-    private final LoadedBlockIndex blockIndex;
+    private final LoadedBlockScanner scanner = new LoadedBlockScanner();
     private final SearchSnapshotStore snapshots = new SearchSnapshotStore();
 
-    public FakePlayerBodyChannel(MinecraftServer server, LoadedBlockIndex blockIndex) {
+    public FakePlayerBodyChannel(MinecraftServer server) {
         this.server = server;
-        this.blockIndex = blockIndex;
     }
 
     @Override
@@ -80,25 +83,24 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
                 return;
             }
-            Set<String> blockIds = requiredBlockIds(request);
+            Map<Block, String> requestedBlocks = requiredBlocks(request);
             int radius = boundedInt(request, "radius", 0, MAX_RADIUS);
             int verticalRadius = boundedOptionalInt(request, "vertical_radius", Math.min(radius, 16), 0, MAX_VERTICAL_RADIUS);
             int limit = boundedOptionalInt(request, "limit", 32, 1, MAX_PAGE_LIMIT);
-            String fingerprint = fingerprint(player, blockIds, radius, verticalRadius);
+            String fingerprint = fingerprint(player, requestedBlocks.values(), radius, verticalRadius);
             String cursor = MineBotChannelRouter.stringField(request, "cursor");
             if (cursor != null) {
-                SearchSnapshotStore.ResumeResult resumed = snapshots.resume(cursor, fingerprint, blockIndex.generation(), limit);
+                SearchSnapshotStore.ResumeResult resumed = snapshots.resume(cursor, fingerprint, limit);
                 if (resumed.error() != null) {
                     sendError(connection, request, serverTick, resumed.error(), "search cursor is no longer usable", true);
                     return;
                 }
-                sendPage(connection, request, serverTick, resumed.page(), 0, 0, blockIndex.generation());
+                sendPage(connection, request, serverTick, resumed.page());
                 return;
             }
             BlockPos center = player.blockPosition();
-            LoadedSearchResult result = blockIndex.search(level, center, blockIds, radius, verticalRadius);
-            SearchSnapshotStore.Page page = snapshots.first(fingerprint, result, limit);
-            sendPage(connection, request, serverTick, page, result.unloadedChunkCount(), result.pendingChunkCount(), result.generation());
+            LoadedSearchResult result = scanner.scan(level, center, requestedBlocks, radius, verticalRadius, serverTick);
+            sendPage(connection, request, serverTick, snapshots.first(fingerprint, result, limit));
         } catch (IllegalArgumentException error) {
             sendError(connection, request, serverTick, "invalid_request", error.getMessage(), false);
         } catch (RuntimeException error) {
@@ -110,16 +112,12 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         MineBotConnection connection,
         JsonObject request,
         int serverTick,
-        SearchSnapshotStore.Page page,
-        int unloadedChunkCount,
-        int pendingChunkCount,
-        long generation
+        SearchSnapshotStore.Page page
     ) {
         JsonObject response = baseResponse(request, "FIND_BLOCKS_RESULT");
-        response.addProperty("index_generation", generation);
+        response.addProperty("index_generation", page.generation());
         response.addProperty("coverage_complete", page.coverageComplete());
-        response.addProperty("unloaded_chunk_count", unloadedChunkCount);
-        response.addProperty("pending_chunk_count", pendingChunkCount);
+        response.addProperty("unloaded_chunk_count", page.unloadedChunkCount());
         response.addProperty("result_capped", page.resultCapped());
         if (page.nextCursor() == null) {
             response.add("next_cursor", com.google.gson.JsonNull.INSTANCE);
@@ -140,11 +138,11 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         connection.send(response, serverTick);
     }
 
-    private static Set<String> requiredBlockIds(JsonObject request) {
+    private static Map<Block, String> requiredBlocks(JsonObject request) {
         if (!request.has("block_ids") || !request.get("block_ids").isJsonArray()) {
             throw new IllegalArgumentException("block_ids must be a nonempty array");
         }
-        Set<String> blockIds = new LinkedHashSet<>();
+        Map<Block, String> blocks = new LinkedHashMap<>();
         for (var element : request.getAsJsonArray("block_ids")) {
             if (!element.isJsonPrimitive()) {
                 throw new IllegalArgumentException("block_ids must contain strings");
@@ -153,12 +151,19 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             if (!blockId.matches("[a-z0-9_.-]+:[a-z0-9_/.-]+")) {
                 throw new IllegalArgumentException("block_ids contains an invalid identifier");
             }
-            blockIds.add(blockId);
+            Identifier location = Identifier.tryParse(blockId);
+            Block block = location == null
+                ? null
+                : BuiltInRegistries.BLOCK.getOptional(location).orElse(null);
+            if (block == null) {
+                throw new IllegalArgumentException("unknown block id: " + blockId);
+            }
+            blocks.put(block, blockId);
         }
-        if (blockIds.isEmpty() || blockIds.size() > 16) {
+        if (blocks.isEmpty() || blocks.size() > 16) {
             throw new IllegalArgumentException("block_ids must contain 1 to 16 identifiers");
         }
-        return Set.copyOf(blockIds);
+        return Map.copyOf(blocks);
     }
 
     private static String requiredString(JsonObject request, String name, int maxLength) {
@@ -188,8 +193,9 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         return request.has(name) ? boundedInt(request, name, min, max) : fallback;
     }
 
-    private static String fingerprint(ServerPlayer player, Set<String> blockIds, int radius, int verticalRadius) {
-        List<String> sortedIds = new ArrayList<>(blockIds);
+    private static String fingerprint(ServerPlayer player, Iterable<String> blockIds, int radius, int verticalRadius) {
+        List<String> sortedIds = new ArrayList<>();
+        blockIds.forEach(sortedIds::add);
         sortedIds.sort(String::compareTo);
         return player.getUUID() + "|" + player.level().dimension().identifier() + "|" + String.join(",", sortedIds) + "|" + radius + "|" + verticalRadius;
     }

@@ -6,10 +6,9 @@ public record LoadedSearchResult(
     long generation,
     List<SearchMatch> matches,
     int unloadedChunkCount,
-    int pendingChunkCount,
     boolean resultCapped
 ) {
     public boolean coverageComplete() {
-        return unloadedChunkCount == 0 && pendingChunkCount == 0;
+        return unloadedChunkCount == 0;
     }
 }

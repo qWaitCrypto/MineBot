@@ -8,48 +8,100 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class SearchSnapshotStoreTest {
+    private static LoadedSearchResult result(long generation, int unloadedChunks, SearchMatch... matches) {
+        return new LoadedSearchResult(generation, List.of(matches), unloadedChunks, false);
+    }
+
+    private static SearchMatch match(int x, double distanceSquared) {
+        return new SearchMatch(x, 64, x, "minecraft:oak_log", distanceSquared);
+    }
+
     @Test
     void pagesResumeWithoutRebuildingTheSearchResult() {
         SearchSnapshotStore store = new SearchSnapshotStore();
-        LoadedSearchResult result = new LoadedSearchResult(
-            7,
-            List.of(
-                new SearchMatch(1, 64, 1, "minecraft:oak_log", 2),
-                new SearchMatch(2, 64, 2, "minecraft:oak_log", 8),
-                new SearchMatch(3, 64, 3, "minecraft:oak_log", 18)
-            ),
-            0,
-            0,
-            false
+        SearchSnapshotStore.Page first = store.first(
+            "query",
+            result(7, 0, match(1, 2), match(2, 8), match(3, 18)),
+            2
         );
-
-        SearchSnapshotStore.Page first = store.first("query", result, 2);
 
         assertEquals(2, first.matches().size());
         assertNotNull(first.nextCursor());
-        SearchSnapshotStore.ResumeResult resumed = store.resume(first.nextCursor(), "query", 7, 2);
+        SearchSnapshotStore.ResumeResult resumed = store.resume(first.nextCursor(), "query", 2);
         assertNull(resumed.error());
         assertEquals(1, resumed.page().matches().size());
         assertNull(resumed.page().nextCursor());
     }
 
     @Test
-    void generationChangeRejectsTheCursorRatherThanMixingSnapshots() {
+    void snapshotPagesSurviveIndexGenerationAdvances() {
+        // Pages come from one immutable snapshot; staleness is reported through
+        // the snapshot generation, never enforced by cursor invalidation.
         SearchSnapshotStore store = new SearchSnapshotStore();
         SearchSnapshotStore.Page first = store.first(
             "query",
-            new LoadedSearchResult(7, List.of(
-                new SearchMatch(1, 64, 1, "minecraft:oak_log", 2),
-                new SearchMatch(2, 64, 2, "minecraft:oak_log", 8)
-            ), 0, 0, false),
+            result(7, 0, match(1, 2), match(2, 8)),
             1
         );
 
-        SearchSnapshotStore.ResumeResult resumed = store.resume(first.nextCursor(), "query", 8, 1);
+        SearchSnapshotStore.ResumeResult resumed = store.resume(first.nextCursor(), "query", 1);
 
-        assertEquals("cursor_stale", resumed.error());
-        assertFalse(resumed.page() != null);
+        assertNull(resumed.error());
+        assertEquals(7, resumed.page().generation());
+        assertEquals(List.of(match(2, 8)), resumed.page().matches());
+    }
+
+    @Test
+    void coverageFactsSurviveResume() {
+        SearchSnapshotStore store = new SearchSnapshotStore();
+        SearchSnapshotStore.Page first = store.first(
+            "query",
+            result(11, 3, match(1, 2), match(2, 8)),
+            1
+        );
+
+        assertFalse(first.coverageComplete());
+        assertEquals(3, first.unloadedChunkCount());
+        SearchSnapshotStore.ResumeResult resumed = store.resume(first.nextCursor(), "query", 1);
+        assertNull(resumed.error());
+        assertFalse(resumed.page().coverageComplete());
+        assertEquals(3, resumed.page().unloadedChunkCount());
+        assertEquals(11, resumed.page().generation());
+    }
+
+    @Test
+    void mismatchedRequestShapeRejectsTheCursor() {
+        SearchSnapshotStore store = new SearchSnapshotStore();
+        SearchSnapshotStore.Page first = store.first(
+            "query-a",
+            result(7, 0, match(1, 2), match(2, 8)),
+            1
+        );
+
+        SearchSnapshotStore.ResumeResult resumed = store.resume(first.nextCursor(), "query-b", 1);
+
+        assertEquals("cursor_request_mismatch", resumed.error());
+        assertNull(resumed.page());
+    }
+
+    @Test
+    void unknownCursorIsMissingAndCursorsAreSingleUse() {
+        SearchSnapshotStore store = new SearchSnapshotStore();
+        assertEquals("cursor_missing", store.resume("nope", "query", 1).error());
+
+        SearchSnapshotStore.Page first = store.first(
+            "query",
+            result(7, 0, match(1, 2), match(2, 8), match(3, 18)),
+            1
+        );
+        SearchSnapshotStore.ResumeResult resumed = store.resume(first.nextCursor(), "query", 1);
+        assertNull(resumed.error());
+        // A consumed cursor is gone; the page issues a fresh one.
+        assertEquals("cursor_missing", store.resume(first.nextCursor(), "query", 1).error());
+        assertNotNull(resumed.page().nextCursor());
+        assertTrue(store.resume(resumed.page().nextCursor(), "query", 1).error() == null);
     }
 }
