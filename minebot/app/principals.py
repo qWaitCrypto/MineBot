@@ -22,7 +22,10 @@ This module is an independent domain store by construction: it does not touch
 
 from __future__ import annotations
 
+import json
 import os
+import sqlite3
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -104,6 +107,93 @@ class InMemoryPrincipalStore:
 
     def all(self) -> tuple[PrincipalRecord, ...]:
         return tuple(self._records[key] for key in sorted(self._records))
+
+
+class SqlitePrincipalStore:
+    """Durable ``PrincipalStore`` so trust promotion survives restarts.
+
+    The one pre-buildable item on F5's activation list (framework §8.1).
+    Independent domain persistence by construction: its own file, connection,
+    and lock — never a table appended to the ``runtime_state.py`` monolith.
+    Pure persistence only: no timestamps, no trust logic; the registry stays
+    the single place that decides anything.
+    """
+
+    def __init__(self, path: str | os.PathLike[str]) -> None:
+        self._path = str(path)
+        parent = os.path.dirname(self._path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS principals (
+                    principal_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    trust TEXT NOT NULL,
+                    granted TEXT NOT NULL,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    notes TEXT NOT NULL
+                )
+                """
+            )
+
+    def get(self, principal_id: str) -> PrincipalRecord | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT principal_id, kind, trust, granted, first_seen,"
+                " last_seen, notes FROM principals WHERE principal_id = ?",
+                (str(principal_id),),
+            ).fetchone()
+        return None if row is None else _principal_from_row(row)
+
+    def put(self, record: PrincipalRecord) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO principals (principal_id, kind, trust, granted,"
+                " first_seen, last_seen, notes) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(principal_id) DO UPDATE SET kind = excluded.kind,"
+                " trust = excluded.trust, granted = excluded.granted,"
+                " first_seen = excluded.first_seen, last_seen = excluded.last_seen,"
+                " notes = excluded.notes",
+                (
+                    record.principal_id,
+                    record.kind.value,
+                    record.trust.value,
+                    json.dumps(list(record.granted), ensure_ascii=False),
+                    record.first_seen,
+                    record.last_seen,
+                    record.notes,
+                ),
+            )
+
+    def all(self) -> tuple[PrincipalRecord, ...]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT principal_id, kind, trust, granted, first_seen,"
+                " last_seen, notes FROM principals ORDER BY principal_id"
+            ).fetchall()
+        return tuple(_principal_from_row(row) for row in rows)
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
+def _principal_from_row(row: tuple[str, str, str, str, str, str, str]) -> PrincipalRecord:
+    principal_id, kind, trust, granted, first_seen, last_seen, notes = row
+    return PrincipalRecord(
+        principal_id=str(principal_id),
+        kind=PrincipalKind(str(kind)),
+        trust=TrustTier(str(trust)),
+        granted=tuple(str(item) for item in json.loads(granted or "[]")),
+        first_seen=str(first_seen),
+        last_seen=str(last_seen),
+        notes=str(notes),
+    )
 
 
 # Capability matrix per trust tier. CONTROL_WORK for FRIEND is conditional on
@@ -220,6 +310,7 @@ class PrincipalRegistry:
 
 OWNERS_ENV = "MINEBOT_PRINCIPAL_OWNERS"
 FRIENDS_ENV = "MINEBOT_PRINCIPAL_FRIENDS"
+PRINCIPAL_DB_ENV = "MINEBOT_PRINCIPAL_DB"
 
 
 def principal_registry_from_env(
@@ -230,13 +321,19 @@ def principal_registry_from_env(
     ``MINEBOT_PRINCIPAL_OWNERS`` / ``MINEBOT_PRINCIPAL_FRIENDS`` are
     comma-separated Minecraft names. With no owners configured the registry is
     ``open`` and admission is a no-op, which is the documented rollback.
+    ``MINEBOT_PRINCIPAL_DB`` opts into durable trust (a SQLite path); unset
+    keeps the in-memory store, so persistence is additive config too.
     """
 
     env = os.environ if env is None else env
+    db_path = str(env.get(PRINCIPAL_DB_ENV) or "").strip()
+    store: PrincipalStore = (
+        SqlitePrincipalStore(db_path) if db_path else InMemoryPrincipalStore()
+    )
     return PrincipalRegistry(
         owners=_name_set(env.get(OWNERS_ENV)),
         friends=_name_set(env.get(FRIENDS_ENV)),
-        store=InMemoryPrincipalStore(),
+        store=store,
     )
 
 
@@ -253,10 +350,12 @@ __all__ = [
     "InMemoryPrincipalStore",
     "OPERATOR_PRINCIPAL_ID",
     "OWNERS_ENV",
+    "PRINCIPAL_DB_ENV",
     "PrincipalKind",
     "PrincipalRecord",
     "PrincipalRegistry",
     "PrincipalStore",
+    "SqlitePrincipalStore",
     "TrustTier",
     "principal_registry_from_env",
 ]

@@ -8,6 +8,8 @@ today's behavior exactly.
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 
 from minebot.app.principals import (
@@ -16,8 +18,11 @@ from minebot.app.principals import (
     InMemoryPrincipalStore,
     OPERATOR_PRINCIPAL_ID,
     OWNERS_ENV,
+    PRINCIPAL_DB_ENV,
     PrincipalKind,
+    PrincipalRecord,
     PrincipalRegistry,
+    SqlitePrincipalStore,
     TrustTier,
     principal_registry_from_env,
 )
@@ -58,6 +63,76 @@ class TrustResolutionTests(unittest.TestCase):
     def test_open_registry_is_not_enforcing(self) -> None:
         self.assertFalse(PrincipalRegistry.open_registry().enforcing)
         self.assertTrue(_enforcing().enforcing)
+
+
+class DurablePrincipalStoreTests(unittest.TestCase):
+    """F5 §8.1 durable trust seam: promotion must survive a restart."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = os.path.join(self._tmp.name, "state", "principals.db")
+
+    def test_record_round_trip_including_granted_tuple(self) -> None:
+        store = SqlitePrincipalStore(self.path)
+        self.addCleanup(store.close)
+        record = PrincipalRecord(
+            principal_id="小明",
+            kind=PrincipalKind.PLAYER,
+            trust=TrustTier.FRIEND,
+            granted=("stance:guard",),
+            first_seen="2026-07-27T00:00:00Z",
+            last_seen="2026-07-27T01:00:00Z",
+            notes="met at spawn",
+        )
+        store.put(record)
+        self.assertEqual(store.get("小明"), record)
+        self.assertEqual(store.all(), (record,))
+        self.assertIsNone(store.get("Nobody"))
+
+    def test_put_is_an_upsert(self) -> None:
+        store = SqlitePrincipalStore(self.path)
+        self.addCleanup(store.close)
+        base = PrincipalRecord("Steve", PrincipalKind.PLAYER, TrustTier.STRANGER)
+        store.put(base)
+        promoted = PrincipalRecord("Steve", PrincipalKind.PLAYER, TrustTier.FRIEND)
+        store.put(promoted)
+        self.assertEqual(store.get("Steve"), promoted)
+        self.assertEqual(len(store.all()), 1)
+
+    def test_promotion_survives_a_restart(self) -> None:
+        registry = PrincipalRegistry(
+            owners=frozenset({"qWait"}), store=SqlitePrincipalStore(self.path)
+        )
+        self.assertIs(registry.resolve("Visitor").trust, TrustTier.STRANGER)
+        registry.promote("Visitor", TrustTier.FRIEND)
+        registry.store.close()  # type: ignore[attr-defined]
+
+        reopened = PrincipalRegistry(
+            owners=frozenset({"qWait"}), store=SqlitePrincipalStore(self.path)
+        )
+        self.addCleanup(reopened.store.close)  # type: ignore[attr-defined]
+        self.assertIs(reopened.resolve("Visitor").trust, TrustTier.FRIEND)
+        # The stored record wins over the env-derived default: promotion is
+        # the explicit owner act, config lists are only bootstrap.
+        self.assertTrue(
+            reopened.evaluate(AdmissionCapability.START_WORK, "Visitor").allowed
+        )
+
+    def test_env_opt_in_selects_the_durable_store(self) -> None:
+        registry = principal_registry_from_env(
+            {OWNERS_ENV: "qWait", PRINCIPAL_DB_ENV: self.path}
+        )
+        self.assertIsInstance(registry.store, SqlitePrincipalStore)
+        registry.resolve("Guest")
+        registry.store.close()  # type: ignore[attr-defined]
+        reopened = SqlitePrincipalStore(self.path)
+        self.addCleanup(reopened.close)
+        self.assertIsNotNone(reopened.get("Guest"))
+
+    def test_unset_env_keeps_the_in_memory_default(self) -> None:
+        registry = principal_registry_from_env({OWNERS_ENV: "qWait"})
+        self.assertIsInstance(registry.store, InMemoryPrincipalStore)
 
 
 class EnvConfigTests(unittest.TestCase):
