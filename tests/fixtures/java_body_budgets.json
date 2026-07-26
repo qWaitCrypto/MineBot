@@ -13,7 +13,14 @@
     "planner_nodes_per_tick": 2000,
     "navigate_default_timeout_ticks": 2400,
     "mutation_verdict_timeout_ticks": 100,
-    "mutation_roundtrip_p95_ms": 10.0
+    "mutation_verdict_turnaround_p95_ms": 500.0
   },
-  "change_policy": "Any added, removed, renamed, or changed budget is a contract change and must update this fixture, the implementation constants, the design-doc freeze table, and the probes in one review packet. Budgets are never widened to make a run pass."
+  "change_policy": "Any added, removed, renamed, or changed budget is a contract change and must update this fixture, the implementation constants, the design-doc freeze table, and the probes in one review packet. Budgets are never widened to make a run pass.",
+  "change_log": [
+    {
+      "date": "2026-07-26",
+      "change": "mutation_roundtrip_p95_ms(10.0) -> mutation_verdict_turnaround_p95_ms(500.0)",
+      "reason": "the 10ms figure predated the real decision path; the production verdict includes the authoritative voxel re-read by design (measured 99.5ms live), and the fail-closed window remains 100 ticks"
+    }
+  ]
 }

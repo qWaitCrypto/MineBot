@@ -23,6 +23,11 @@ from pathlib import Path
 
 from websockets.sync.client import connect
 
+from minebot.body.structure_risk import VoxelStructureRiskAssessor
+from minebot.contract.governance import Region
+from minebot.game.body import ScarpetBody
+from minebot.game.governance import GovernancePolicy
+from minebot.game.java_body_adapter import GovernanceAnswerer
 from minebot.game.java_body_protocol import (
     BotEvent,
     ErrorResponse,
@@ -151,13 +156,50 @@ def main() -> int:
         "scope": "java_body_m2_governed_collect_probe",
         "formal_gate": False,
         "bounded": True,
-        "policy_note": "probe verdicts stand in for production governance integration: deny-all in case A, natural-log-family allow in case B",
+        "policy_note": (
+            "production governance integration: verdicts come from the real "
+            "GovernancePolicy via GovernanceAnswerer. Case A declares the tree "
+            "grove a protected region (scenario config) and must be denied by "
+            "the real protected_region rule; case B uses the natural region "
+            "plus VoxelStructureRiskAssessor over the live Scarpet body for "
+            "the authoritative pre-mutation voxel re-read."
+        ),
         "start_pos_raw": start_pos,
         "cases": {},
     }
 
-    # ---- Case A: deny path -------------------------------------------------
-    probe.verdict_policy = lambda proposal: (False, "probe_policy_deny_test")
+    # Production governance stack: real policy classes, live voxel assessor.
+    # The Scarpet app is player-scoped on this server, so its calls need the
+    # bot's player context — a real integration fact for the production
+    # adapter, handled here by an execute-as prefixing transport.
+    class PlayerContextTransport:
+        def __init__(self, inner, bot: str) -> None:
+            self._inner = inner
+            self._bot = bot
+
+        def _wrap(self, command: str) -> str:
+            if command.startswith("script in "):
+                return f"execute as {self._bot} at @s run {command}"
+            return command
+
+        def request(self, command: str) -> str:
+            return self._inner.request(self._wrap(command))
+
+        def request_once(self, command: str) -> str:
+            return self._inner.request_once(self._wrap(command))
+
+    scarpet_body = ScarpetBody(BOT_NAME, PlayerContextTransport(rcon, BOT_NAME))
+    natural = Region("probe-natural", (-128, 0, -128), (128, 200, 128))
+    grove_protected = Region("probe-protected-grove", (48, 55, -64), (72, 95, -40))
+
+    # ---- Case A: deny path (real protected_region rule) --------------------
+    deny_policy = GovernancePolicy(
+        natural_regions=[natural],
+        protected_regions=[grove_protected],
+        structure_risk_assessor=VoxelStructureRiskAssessor(scarpet_body),
+        require_structure_assessment=True,
+    )
+    probe.verdict_policy = GovernanceAnswerer(deny_policy).verdict
     action_a = f"m2-deny-{int(time.time())}"
     ack = probe.request(probe.protocol.collect_block(BOT_NAME, action_a, LOG_FAMILY, radius=32, timeout_ticks=2400))
     case_a: dict = {"action_id": action_a}
@@ -176,13 +218,14 @@ def main() -> int:
         )
     artifact["cases"]["deny"] = case_a
 
-    # ---- Case B: allow path ------------------------------------------------
+    # ---- Case B: allow path (real natural-region + voxel assessment) -------
     proposals_before = len(probe.proposals)
-    probe.verdict_policy = lambda proposal: (
-        (True, "natural_log_family_allow_probe_policy")
-        if proposal.block_id in LOG_FAMILY and proposal.kind == "break"
-        else (False, "outside_probe_allow_class")
+    allow_policy = GovernancePolicy(
+        natural_regions=[natural],
+        structure_risk_assessor=VoxelStructureRiskAssessor(scarpet_body),
+        require_structure_assessment=True,
     )
+    probe.verdict_policy = GovernanceAnswerer(allow_policy).verdict
     action_b = f"m2-allow-{int(time.time())}"
     ack = probe.request(probe.protocol.collect_block(BOT_NAME, action_b, LOG_FAMILY, radius=32, timeout_ticks=2400))
     case_b: dict = {"action_id": action_b}

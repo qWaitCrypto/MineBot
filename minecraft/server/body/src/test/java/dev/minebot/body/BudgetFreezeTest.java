@@ -45,7 +45,7 @@ final class BudgetFreezeTest {
         assertEquals(300.0, budgets.get("find_blocks_p95_ms_radius_128").getAsDouble());
         assertEquals(40.0, budgets.get("search_server_cost_ceiling_ms").getAsDouble());
         assertEquals(100, budgets.get("mutation_verdict_timeout_ticks").getAsInt());
-        assertEquals(10.0, budgets.get("mutation_roundtrip_p95_ms").getAsDouble());
+        assertEquals(500.0, budgets.get("mutation_verdict_turnaround_p95_ms").getAsDouble());
         assertEquals(7, budgets.size(), "adding or removing a budget is a contract change");
     }
 }

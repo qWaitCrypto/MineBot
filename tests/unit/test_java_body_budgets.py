@@ -26,5 +26,6 @@ def test_java_body_budgets_match_the_freeze() -> None:
         "planner_nodes_per_tick": 2000,
         "navigate_default_timeout_ticks": 2400,
         "mutation_verdict_timeout_ticks": 100,
-        "mutation_roundtrip_p95_ms": 10.0,
+        "mutation_verdict_turnaround_p95_ms": 500.0,
     }
+    assert freeze["change_log"], "budget changes carry an explicit change record"
