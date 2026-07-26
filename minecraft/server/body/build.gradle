@@ -7,7 +7,7 @@ version = "0.1.0"
 group = "dev.minebot"
 
 base {
-    archivesName = "minebot-bridge"
+    archivesName = "minebot-body"
 }
 
 java {
@@ -27,10 +27,8 @@ dependencies {
     implementation "net.fabricmc.fabric-api:fabric-api:0.152.1+26.1.2"
     implementation "org.java-websocket:Java-WebSocket:1.6.0"
     implementation project(":server:common")
-    implementation project(":camera:protocol")
     include "org.java-websocket:Java-WebSocket:1.6.0"
     include project(":server:common")
-    include project(":camera:protocol")
 
     testImplementation platform("org.junit:junit-bom:5.12.2")
     testImplementation "org.junit.jupiter:junit-jupiter"

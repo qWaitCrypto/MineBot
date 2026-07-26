@@ -4,8 +4,9 @@ import dev.minebot.camera.protocol.CameraClientTelemetryPayload;
 import dev.minebot.camera.protocol.CameraDirectivePayload;
 import dev.minebot.bridge.observercontrol.ObserverControlChannel;
 import dev.minebot.bridge.observercontrol.ObserverInteractionPolicy;
-import dev.minebot.bridge.transport.BridgeChannelRouter;
-import dev.minebot.bridge.transport.BridgeWebSocketServer;
+import dev.minebot.server.common.transport.MineBotChannel;
+import dev.minebot.server.common.transport.MineBotChannelRouter;
+import dev.minebot.server.common.transport.MineBotWebSocketServer;
 import dev.minebot.bridge.version.Mojmap2612ObserverAccess;
 import net.fabricmc.api.DedicatedServerModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -26,7 +27,7 @@ public final class MineBotBridgeMod implements DedicatedServerModInitializer {
     private static final int PORT = Integer.getInteger("minebot.bridge.port", 8765);
 
     private static final AtomicInteger TICK_COUNTER = new AtomicInteger();
-    private static BridgeWebSocketServer bridgeServer;
+    private static MineBotWebSocketServer bridgeServer;
     private static volatile ObserverControlChannel observerControlChannel;
 
     @Override
@@ -49,7 +50,7 @@ public final class MineBotBridgeMod implements DedicatedServerModInitializer {
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> stopBridge());
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             int tick = TICK_COUNTER.incrementAndGet();
-            BridgeWebSocketServer current = bridgeServer;
+            MineBotWebSocketServer current = bridgeServer;
             if (current != null) {
                 current.tick(tick);
             }
@@ -60,13 +61,13 @@ public final class MineBotBridgeMod implements DedicatedServerModInitializer {
         if (bridgeServer != null) {
             return;
         }
-        BridgeChannelRouter router = new BridgeChannelRouter(observerChannels(server));
-        bridgeServer = new BridgeWebSocketServer(new InetSocketAddress(HOST, PORT), server, router);
+        MineBotChannelRouter router = new MineBotChannelRouter(observerChannels(server));
+        bridgeServer = new MineBotWebSocketServer(new InetSocketAddress(HOST, PORT), server::execute, router);
         bridgeServer.start();
         log("bridge websocket listening on " + HOST + ":" + PORT);
     }
 
-    private static List<dev.minebot.bridge.transport.BridgeChannel> observerChannels(MinecraftServer server) {
+    private static List<MineBotChannel> observerChannels(MinecraftServer server) {
         String configured = System.getProperty("minebot.camera.observerUuid", "").trim();
         if (configured.isEmpty()) {
             observerControlChannel = null;
@@ -92,7 +93,7 @@ public final class MineBotBridgeMod implements DedicatedServerModInitializer {
     }
 
     private static void stopBridge() {
-        BridgeWebSocketServer current = bridgeServer;
+        MineBotWebSocketServer current = bridgeServer;
         bridgeServer = null;
         observerControlChannel = null;
         if (current == null) {

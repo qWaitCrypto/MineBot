@@ -8,6 +8,7 @@ from pathlib import Path
 
 CAMERA_ROOT = Path("minebot/camera")
 BRIDGE_ROOT = Path("minecraft/server/bridge/src/main/java/dev/minebot/bridge")
+COMMON_ROOT = Path("minecraft/server/common/src/main/java/dev/minebot/server/common/transport")
 JAVA_ROOT = Path("minecraft/server/bridge/src/main/java")
 FABRIC_MOD = Path("minecraft/server/bridge/src/main/resources/fabric.mod.json")
 CLIENT_ROOT = Path("minecraft/camera/client/src/main/java/dev/minebot/camera/client")
@@ -40,19 +41,26 @@ def test_fabric_entrypoint_has_converged_on_bridge_identity() -> None:
     assert metadata["entrypoints"]["server"] == ["dev.minebot.bridge.MineBotBridgeMod"]
 
 
-def test_bridge_reuses_lifecycle_router_connection_and_json_envelope() -> None:
-    required = {
-        "MineBotBridgeMod.java",
-        "transport/BridgeChannel.java",
-        "transport/BridgeChannelRouter.java",
-        "transport/BridgeConnection.java",
-        "transport/BridgeWebSocketServer.java",
-        "transport/OutboundMessage.java",
+def test_bridge_reuses_shared_transport_lifecycle_router_connection_and_json_envelope() -> None:
+    required_common = {
+        "MineBotChannel.java",
+        "MineBotChannelRouter.java",
+        "MineBotConnection.java",
+        "MineBotWebSocketServer.java",
+        "OutboundMessage.java",
     }
-    present = {str(path.relative_to(BRIDGE_ROOT)) for path in BRIDGE_ROOT.rglob("*.java")}
-    assert required <= present
+    present_common = {str(path.relative_to(COMMON_ROOT)) for path in COMMON_ROOT.rglob("*.java")}
+    assert required_common <= present_common
 
-    connection = (BRIDGE_ROOT / "transport/BridgeConnection.java").read_text(encoding="utf-8")
+    present_bridge = {str(path.relative_to(BRIDGE_ROOT)) for path in BRIDGE_ROOT.rglob("*.java")}
+    assert "MineBotBridgeMod.java" in present_bridge
+    # One transport implementation: the bridge must not keep its own copies.
+    assert not any(name.startswith("transport/") for name in present_bridge)
+
+    bridge_mod = (BRIDGE_ROOT / "MineBotBridgeMod.java").read_text(encoding="utf-8")
+    assert "dev.minebot.server.common.transport" in bridge_mod
+
+    connection = (COMMON_ROOT / "MineBotConnection.java").read_text(encoding="utf-8")
     assert "seq" in connection
     assert "server_tick" in connection
     assert "sent_at_ms" in connection
@@ -92,15 +100,16 @@ def test_observer_control_has_narrow_version_adapter_and_exact_request_surface()
 
 
 def test_observer_control_enforces_request_rate_limit() -> None:
-    connection = (BRIDGE_ROOT / "transport/BridgeConnection.java").read_text(encoding="utf-8")
-    server = (BRIDGE_ROOT / "transport/BridgeWebSocketServer.java").read_text(encoding="utf-8")
+    connection = (COMMON_ROOT / "MineBotConnection.java").read_text(encoding="utf-8")
+    server = (COMMON_ROOT / "MineBotWebSocketServer.java").read_text(encoding="utf-8")
     assert "MAX_REQUESTS_PER_SECOND" in connection
     assert "allowRequest" in connection
     assert "rate_limited" in server
 
 
 def test_bridge_outbound_work_and_request_size_are_bounded() -> None:
-    source = "\n".join(path.read_text(encoding="utf-8") for path in BRIDGE_ROOT.rglob("*.java"))
+    java_files = list(BRIDGE_ROOT.rglob("*.java")) + list(COMMON_ROOT.rglob("*.java"))
+    source = "\n".join(path.read_text(encoding="utf-8") for path in java_files)
     assert "MAX_REQUEST_BYTES" in source
     assert "ArrayBlockingQueue" in source or "LinkedBlockingQueue" in source
     assert "newSingleThreadExecutor" not in source

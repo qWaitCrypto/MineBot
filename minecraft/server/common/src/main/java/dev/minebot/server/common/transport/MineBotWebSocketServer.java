@@ -1,9 +1,8 @@
-package dev.minebot.bridge.transport;
+package dev.minebot.server.common.transport;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import net.minecraft.server.MinecraftServer;
 import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
@@ -15,13 +14,14 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
-public final class BridgeWebSocketServer extends WebSocketServer {
+public final class MineBotWebSocketServer extends WebSocketServer {
     public static final int MAX_REQUEST_BYTES = 16 * 1024;
     public static final int MAX_PENDING_OUTBOUND = 256;
 
-    private final MinecraftServer server;
-    private final BridgeChannelRouter router;
+    private final Consumer<Runnable> mainThreadExecutor;
+    private final MineBotChannelRouter router;
     private final ThreadPoolExecutor outboundExecutor = new ThreadPoolExecutor(
         1,
         1,
@@ -29,22 +29,22 @@ public final class BridgeWebSocketServer extends WebSocketServer {
         TimeUnit.MILLISECONDS,
         new ArrayBlockingQueue<>(MAX_PENDING_OUTBOUND),
         runnable -> {
-            Thread thread = new Thread(runnable, "minebot-bridge-outbound");
+            Thread thread = new Thread(runnable, "minebot-websocket-outbound");
             thread.setDaemon(true);
             return thread;
         },
         new ThreadPoolExecutor.AbortPolicy()
     );
-    private final Map<WebSocket, BridgeConnection> connections = new ConcurrentHashMap<>();
+    private final Map<WebSocket, MineBotConnection> connections = new ConcurrentHashMap<>();
     private volatile int currentTick;
 
-    public BridgeWebSocketServer(
+    public MineBotWebSocketServer(
         InetSocketAddress address,
-        MinecraftServer server,
-        BridgeChannelRouter router
+        Consumer<Runnable> mainThreadExecutor,
+        MineBotChannelRouter router
     ) {
         super(address);
-        this.server = server;
+        this.mainThreadExecutor = mainThreadExecutor;
         this.router = router;
     }
 
@@ -55,30 +55,30 @@ public final class BridgeWebSocketServer extends WebSocketServer {
 
     @Override
     public void onOpen(WebSocket socket, ClientHandshake handshake) {
-        connections.put(socket, new BridgeConnection(socket, outboundExecutor));
+        connections.put(socket, new MineBotConnection(socket, outboundExecutor));
     }
 
     @Override
     public void onClose(WebSocket socket, int code, String reason, boolean remote) {
-        BridgeConnection connection = connections.remove(socket);
+        MineBotConnection connection = connections.remove(socket);
         if (connection != null) {
             connection.close();
-            server.execute(() -> router.connectionClosed(connection, currentTick));
+            mainThreadExecutor.accept(() -> router.connectionClosed(connection, currentTick));
         }
     }
 
     @Override
     public void onMessage(WebSocket socket, String message) {
-        BridgeConnection connection = connections.get(socket);
+        MineBotConnection connection = connections.get(socket);
         if (connection == null) {
             return;
         }
         if (!connection.allowRequest(System.nanoTime())) {
-            connection.send(BridgeChannelRouter.error(null, null, "rate_limited", "request rate exceeds limit", true), currentTick);
+            connection.send(MineBotChannelRouter.error(null, null, "rate_limited", "request rate exceeds limit", true), currentTick);
             return;
         }
         if (message.getBytes(StandardCharsets.UTF_8).length > MAX_REQUEST_BYTES) {
-            connection.send(BridgeChannelRouter.error(null, null, "request_too_large", "request exceeds byte limit", false), currentTick);
+            connection.send(MineBotChannelRouter.error(null, null, "request_too_large", "request exceeds byte limit", false), currentTick);
             return;
         }
         JsonObject request;
@@ -89,15 +89,15 @@ public final class BridgeWebSocketServer extends WebSocketServer {
             }
             request = parsed.getAsJsonObject();
         } catch (RuntimeException invalid) {
-            connection.send(BridgeChannelRouter.error(null, null, "invalid_json", "request must be a JSON object", false), currentTick);
+            connection.send(MineBotChannelRouter.error(null, null, "invalid_json", "request must be a JSON object", false), currentTick);
             return;
         }
-        server.execute(() -> router.dispatch(connection, request, currentTick));
+        mainThreadExecutor.accept(() -> router.dispatch(connection, request, currentTick));
     }
 
     @Override
     public void onError(WebSocket socket, Exception error) {
-        System.err.println("[MineBotBridge] websocket error: " + error.getClass().getSimpleName());
+        System.err.println("[MineBot] websocket error: " + error.getClass().getSimpleName());
     }
 
     @Override
@@ -110,7 +110,7 @@ public final class BridgeWebSocketServer extends WebSocketServer {
         router.close(currentTick);
         super.stop(timeout);
         outboundExecutor.shutdownNow();
-        connections.values().forEach(BridgeConnection::close);
+        connections.values().forEach(MineBotConnection::close);
         connections.clear();
     }
 }

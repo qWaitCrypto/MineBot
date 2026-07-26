@@ -1,4 +1,4 @@
-package dev.minebot.bridge.transport;
+package dev.minebot.server.common.transport;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
@@ -10,7 +10,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-public final class BridgeConnection {
+public final class MineBotConnection {
     private static final Gson GSON = new Gson();
     public static final int MAX_REQUESTS_PER_SECOND = 40;
 
@@ -22,7 +22,7 @@ public final class BridgeConnection {
     private long requestWindowStartedNanos = System.nanoTime();
     private int requestsInWindow;
 
-    public BridgeConnection(WebSocket socket, Executor outboundExecutor) {
+    public MineBotConnection(WebSocket socket, Executor outboundExecutor) {
         this.socket = socket;
         this.outboundExecutor = outboundExecutor;
     }
@@ -79,7 +79,7 @@ public final class BridgeConnection {
 
     private void closeOverloaded() {
         if (closed.compareAndSet(false, true)) {
-            socket.close(1013, "bridge outbound queue full");
+            socket.close(1013, "outbound queue full");
         }
     }
 

@@ -7,10 +7,10 @@ import dev.minebot.camera.protocol.CameraClientTelemetry;
 import dev.minebot.camera.protocol.CameraDirective;
 import dev.minebot.camera.protocol.FixedPose;
 import dev.minebot.camera.protocol.FollowSettings;
-import dev.minebot.bridge.transport.BridgeChannel;
-import dev.minebot.bridge.transport.BridgeChannelRouter;
-import dev.minebot.bridge.transport.BridgeConnection;
-import dev.minebot.bridge.transport.BridgeWebSocketServer;
+import dev.minebot.server.common.transport.MineBotChannel;
+import dev.minebot.server.common.transport.MineBotChannelRouter;
+import dev.minebot.server.common.transport.MineBotConnection;
+import dev.minebot.server.common.transport.MineBotWebSocketServer;
 import dev.minebot.bridge.version.ObserverAccess;
 import dev.minebot.bridge.version.ObserverAccessException;
 import dev.minebot.bridge.version.ObserverState;
@@ -24,7 +24,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-public final class ObserverControlChannel implements BridgeChannel {
+public final class ObserverControlChannel implements MineBotChannel {
     public static final String CHANNEL = "observer-control";
     public static final String PROTOCOL = "observer-control/1";
     public static final int MAX_IDEMPOTENCY_ENTRIES = 128;
@@ -65,9 +65,9 @@ public final class ObserverControlChannel implements BridgeChannel {
     }
 
     @Override
-    public void handle(BridgeConnection connection, JsonObject request, int serverTick) {
+    public void handle(MineBotConnection connection, JsonObject request, int serverTick) {
         currentTick = serverTick;
-        String type = BridgeChannelRouter.stringField(request, "type");
+        String type = MineBotChannelRouter.stringField(request, "type");
         if (type == null || !REQUEST_TYPES.contains(type)) {
             sendError(connection, request, "unknown_type", "unknown observer-control request type", false);
             return;
@@ -163,7 +163,7 @@ public final class ObserverControlChannel implements BridgeChannel {
             && telemetry.mode().name().equals(activeMode.name());
     }
 
-    private void handleHello(BridgeConnection connection, JsonObject request) {
+    private void handleHello(MineBotConnection connection, JsonObject request) {
         String protocol = requiredString(request, "protocol", 64);
         if (!PROTOCOL.equals(protocol)) {
             throw new IllegalArgumentException("unsupported observer-control protocol");
@@ -171,8 +171,8 @@ public final class ObserverControlChannel implements BridgeChannel {
         JsonObject response = baseResponse(request, "HELLO_ACK");
         response.addProperty("protocol", PROTOCOL);
         response.addProperty("minecraft_version", access.minecraftVersion());
-        response.addProperty("max_request_bytes", BridgeWebSocketServer.MAX_REQUEST_BYTES);
-        response.addProperty("max_requests_per_second", BridgeConnection.MAX_REQUESTS_PER_SECOND);
+        response.addProperty("max_request_bytes", MineBotWebSocketServer.MAX_REQUEST_BYTES);
+        response.addProperty("max_requests_per_second", MineBotConnection.MAX_REQUESTS_PER_SECOND);
         response.addProperty("lease_ttl_ticks", leaseTtlTicks);
         JsonArray requestTypes = new JsonArray();
         REQUEST_TYPES.stream().sorted().forEach(requestTypes::add);
@@ -180,7 +180,7 @@ public final class ObserverControlChannel implements BridgeChannel {
         connection.send(response, currentTick);
     }
 
-    private void handleAttach(BridgeConnection connection, JsonObject request) {
+    private void handleAttach(MineBotConnection connection, JsonObject request) {
         Mutation mutation = mutation(request);
         JsonObject cached = cached(mutation);
         if (cached != null) {
@@ -208,7 +208,7 @@ public final class ObserverControlChannel implements BridgeChannel {
         connection.send(response, currentTick);
     }
 
-    private void handleUpdate(BridgeConnection connection, JsonObject request) {
+    private void handleUpdate(MineBotConnection connection, JsonObject request) {
         Mutation mutation = mutation(request);
         JsonObject cached = cached(mutation);
         if (cached != null) {
@@ -231,7 +231,7 @@ public final class ObserverControlChannel implements BridgeChannel {
         connection.send(response, currentTick);
     }
 
-    private void handleHeartbeat(BridgeConnection connection, JsonObject request) {
+    private void handleHeartbeat(MineBotConnection connection, JsonObject request) {
         Mutation mutation = mutation(request);
         JsonObject cached = cached(mutation);
         if (cached != null) {
@@ -245,7 +245,7 @@ public final class ObserverControlChannel implements BridgeChannel {
         connection.send(response, currentTick);
     }
 
-    private void handleStatus(BridgeConnection connection, JsonObject request) {
+    private void handleStatus(MineBotConnection connection, JsonObject request) {
         JsonObject response = baseResponse(request, "STATUS_ACK");
         response.add("observer", observerJson(access.observerState(server, configuredObserverId)));
         response.add("server", serverJson(server));
@@ -306,7 +306,7 @@ public final class ObserverControlChannel implements BridgeChannel {
         return value;
     }
 
-    private void handleDetach(BridgeConnection connection, JsonObject request) {
+    private void handleDetach(MineBotConnection connection, JsonObject request) {
         Mutation mutation = mutation(request);
         JsonObject cached = cached(mutation);
         if (cached != null) {
@@ -469,14 +469,14 @@ public final class ObserverControlChannel implements BridgeChannel {
     }
 
     private void sendError(
-        BridgeConnection connection,
+        MineBotConnection connection,
         JsonObject request,
         String code,
         String message,
         boolean retryable
     ) {
         connection.send(
-            BridgeChannelRouter.error(CHANNEL, BridgeChannelRouter.stringField(request, "request_id"), code, message, retryable),
+            MineBotChannelRouter.error(CHANNEL, MineBotChannelRouter.stringField(request, "request_id"), code, message, retryable),
             currentTick
         );
     }
@@ -485,7 +485,7 @@ public final class ObserverControlChannel implements BridgeChannel {
         JsonObject response = new JsonObject();
         response.addProperty("channel", CHANNEL);
         response.addProperty("type", type);
-        String requestId = BridgeChannelRouter.stringField(request, "request_id");
+        String requestId = MineBotChannelRouter.stringField(request, "request_id");
         if (requestId != null) {
             response.addProperty("request_id", requestId);
         }
@@ -566,7 +566,7 @@ public final class ObserverControlChannel implements BridgeChannel {
     }
 
     private static String requiredString(JsonObject object, String name, int maxLength) {
-        String value = BridgeChannelRouter.stringField(object, name);
+        String value = MineBotChannelRouter.stringField(object, name);
         if (value == null || value.isBlank() || value.length() > maxLength) {
             throw new IllegalArgumentException(name + " is required and must be at most " + maxLength + " characters");
         }

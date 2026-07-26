@@ -1,4 +1,4 @@
-package dev.minebot.bridge.transport;
+package dev.minebot.server.common.transport;
 
 import com.google.gson.JsonObject;
 

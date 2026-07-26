@@ -1,4 +1,4 @@
-package dev.minebot.bridge.transport;
+package dev.minebot.server.common.transport;
 
 import com.google.gson.JsonObject;
 
@@ -6,22 +6,22 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-public final class BridgeChannelRouter {
-    private final Map<String, BridgeChannel> channels;
+public final class MineBotChannelRouter {
+    private final Map<String, MineBotChannel> channels;
 
-    public BridgeChannelRouter(List<BridgeChannel> configuredChannels) {
-        Map<String, BridgeChannel> byName = new LinkedHashMap<>();
-        for (BridgeChannel channel : configuredChannels) {
+    public MineBotChannelRouter(List<MineBotChannel> configuredChannels) {
+        Map<String, MineBotChannel> byName = new LinkedHashMap<>();
+        for (MineBotChannel channel : configuredChannels) {
             if (channel.name().isBlank() || byName.putIfAbsent(channel.name(), channel) != null) {
-                throw new IllegalArgumentException("bridge channel names must be unique and nonblank");
+                throw new IllegalArgumentException("channel names must be unique and nonblank");
             }
         }
         channels = Map.copyOf(byName);
     }
 
-    public void dispatch(BridgeConnection connection, JsonObject request, int serverTick) {
+    public void dispatch(MineBotConnection connection, JsonObject request, int serverTick) {
         String channelName = stringField(request, "channel");
-        BridgeChannel channel = channels.get(channelName);
+        MineBotChannel channel = channels.get(channelName);
         if (channel == null) {
             connection.send(error(channelName, stringField(request, "request_id"), "unknown_channel", "unknown channel", false), serverTick);
             return;
@@ -30,19 +30,19 @@ public final class BridgeChannelRouter {
     }
 
     public void tick(int serverTick) {
-        for (BridgeChannel channel : channels.values()) {
+        for (MineBotChannel channel : channels.values()) {
             channel.tick(serverTick);
         }
     }
 
-    public void connectionClosed(BridgeConnection connection, int serverTick) {
-        for (BridgeChannel channel : channels.values()) {
+    public void connectionClosed(MineBotConnection connection, int serverTick) {
+        for (MineBotChannel channel : channels.values()) {
             channel.connectionClosed(connection, serverTick);
         }
     }
 
     public void close(int serverTick) {
-        for (BridgeChannel channel : channels.values()) {
+        for (MineBotChannel channel : channels.values()) {
             channel.close(serverTick);
         }
     }
