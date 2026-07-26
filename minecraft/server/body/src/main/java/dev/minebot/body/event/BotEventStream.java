@@ -47,14 +47,31 @@ public final class BotEventStream {
     }
 
     private final Map<String, BotBuffer> buffers = new HashMap<>();
+    private volatile java.util.function.Consumer<Event> listener;
 
-    public synchronized Event emit(String bot, int tick, String name, String actionId, JsonObject data) {
-        BotBuffer buffer = buffers.computeIfAbsent(bot, ignored -> new BotBuffer());
-        Event event = new Event(bot, buffer.nextSeq++, tick, name, actionId, data);
-        buffer.events.addLast(event);
-        while (buffer.events.size() > MAX_BUFFERED_EVENTS_PER_BOT) {
-            Event dropped = buffer.events.removeFirst();
-            buffer.droppedThroughSeq = dropped.seq();
+    /**
+     * One listener receives every emitted event for live push. Every emitter
+     * (runtime lifecycle, executors, reflexes) goes through {@link #emit}, so
+     * wiring the push here guarantees no event category is buffered-but-silent.
+     */
+    public void setListener(java.util.function.Consumer<Event> listener) {
+        this.listener = listener;
+    }
+
+    public Event emit(String bot, int tick, String name, String actionId, JsonObject data) {
+        Event event;
+        synchronized (this) {
+            BotBuffer buffer = buffers.computeIfAbsent(bot, ignored -> new BotBuffer());
+            event = new Event(bot, buffer.nextSeq++, tick, name, actionId, data);
+            buffer.events.addLast(event);
+            while (buffer.events.size() > MAX_BUFFERED_EVENTS_PER_BOT) {
+                Event dropped = buffer.events.removeFirst();
+                buffer.droppedThroughSeq = dropped.seq();
+            }
+        }
+        java.util.function.Consumer<Event> push = listener;
+        if (push != null) {
+            push.accept(event);
         }
         return event;
     }

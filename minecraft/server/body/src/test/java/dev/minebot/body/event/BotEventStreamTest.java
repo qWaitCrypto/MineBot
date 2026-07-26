@@ -51,6 +51,18 @@ final class BotEventStreamTest {
     }
 
     @Test
+    void everyEmitReachesTheLiveListener() {
+        BotEventStream stream = new BotEventStream();
+        java.util.List<String> pushed = new java.util.ArrayList<>();
+        stream.setListener(event -> pushed.add(event.name() + ":" + event.seq()));
+
+        stream.emit("A", 1, "owner_acquired", "a-1", null);
+        stream.emit("A", 2, "action_terminal", "a-1", null);
+
+        assertEquals(java.util.List.of("owner_acquired:1", "action_terminal:2"), pushed);
+    }
+
+    @Test
     void replayForAnUnknownBotIsEmptyWithoutGap() {
         BotEventStream.Replay replay = new BotEventStream().replay("nobody", 0);
         assertFalse(replay.hasGap());

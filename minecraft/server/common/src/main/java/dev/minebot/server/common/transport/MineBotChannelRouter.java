@@ -55,7 +55,9 @@ public final class MineBotChannelRouter {
         boolean retryable
     ) {
         JsonObject error = new JsonObject();
-        error.addProperty("channel", channel == null ? "bridge" : channel);
+        // Transport-level errors (rate limit, size, parse, unknown channel)
+        // have no application channel; they are reported on "transport".
+        error.addProperty("channel", channel == null ? "transport" : channel);
         error.addProperty("type", "ERROR");
         if (requestId != null) {
             error.addProperty("request_id", requestId);

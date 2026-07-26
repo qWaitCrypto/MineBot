@@ -60,15 +60,18 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         this.server = server;
         this.adapter = new PlayerCommandAdapter(server, new HeldInputs());
         this.runtime = new ActionRuntime(new FakePlayerActionOwner(), adapter, actions, events);
+        // Every emitted event — runtime lifecycle included — is pushed live.
+        events.setListener(event -> {
+            JsonObject json = event.toJson(CHANNEL);
+            for (MineBotConnection subscriber : subscribers) {
+                subscriber.send(json, event.tick());
+            }
+        });
     }
 
-    /** Emits an event and pushes it to every live subscriber. Server thread only. */
+    /** Emits an event; the stream listener pushes it to every subscriber. */
     public void publishEvent(String bot, int serverTick, String name, String actionId, JsonObject data) {
-        BotEventStream.Event event = events.emit(bot, serverTick, name, actionId, data);
-        JsonObject json = event.toJson(CHANNEL);
-        for (MineBotConnection subscriber : subscribers) {
-            subscriber.send(json, serverTick);
-        }
+        events.emit(bot, serverTick, name, actionId, data);
     }
 
     public ActionRuntime runtime() {

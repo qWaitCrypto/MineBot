@@ -141,8 +141,15 @@ class JavaBodyProtocol:
     def feed(self, message: dict) -> list[Response | ErrorResponse | BotEvent | EventGap]:
         if not isinstance(message, dict):
             raise ProtocolViolation("frame must be a JSON object")
-        if message.get("channel") != CHANNEL:
-            raise ProtocolViolation(f"unexpected channel: {message.get('channel')!r}")
+        channel = message.get("channel")
+        if channel == "transport":
+            # Transport-level errors (rate limit, size, parse) carry no
+            # application channel; anything else on "transport" is a breach.
+            if message.get("type") != "ERROR":
+                raise ProtocolViolation("transport channel only carries ERROR frames")
+            return [self._feed_error(message)]
+        if channel != CHANNEL:
+            raise ProtocolViolation(f"unexpected channel: {channel!r}")
         frame_type = message.get("type")
         if frame_type == "EVENT":
             return self._feed_event(message)
