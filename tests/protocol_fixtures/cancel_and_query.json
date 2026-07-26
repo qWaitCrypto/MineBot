@@ -3,7 +3,10 @@
   "description": "Cancel flags a running action; query reconciles running, terminal, and unknown states.",
   "steps": [
     {
-      "send": {"builder": "hello", "args": {}},
+      "send": {
+        "builder": "hello",
+        "args": {}
+      },
       "expect_message": {
         "channel": "fakeplayer-body",
         "protocol": "fakeplayer-body/1",
@@ -20,15 +23,35 @@
         "minecraft_version": "26.1.2",
         "max_request_bytes": 16384,
         "max_requests_per_second": 40,
-        "request_types": ["CANCEL_ACTION", "FIND_BLOCKS", "HELLO", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS"],
+        "request_types": [
+          "CANCEL_ACTION",
+          "COLLECT_BLOCK",
+          "FIND_BLOCKS",
+          "HELLO",
+          "MUTATION_VERDICT",
+          "NAVIGATE",
+          "QUERY_ACTION",
+          "RESUME_EVENTS"
+        ],
         "seq": 1,
         "server_tick": 500,
         "sent_at_ms": 1785000005000
       },
-      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+      "expect": [
+        {
+          "kind": "response",
+          "type": "HELLO_ACK",
+          "request_type": "HELLO"
+        }
+      ]
     },
     {
-      "send": {"builder": "cancel_action", "args": {"action_id": "nav-0005"}},
+      "send": {
+        "builder": "cancel_action",
+        "args": {
+          "action_id": "nav-0005"
+        }
+      },
       "expect_message": {
         "channel": "fakeplayer-body",
         "protocol": "fakeplayer-body/1",
@@ -49,11 +72,23 @@
         "sent_at_ms": 1785000005100
       },
       "expect": [
-        {"kind": "response", "type": "CANCEL_ACTION_RESULT", "request_type": "CANCEL_ACTION", "payload_contains": {"state": "cancel_requested"}}
+        {
+          "kind": "response",
+          "type": "CANCEL_ACTION_RESULT",
+          "request_type": "CANCEL_ACTION",
+          "payload_contains": {
+            "state": "cancel_requested"
+          }
+        }
       ]
     },
     {
-      "send": {"builder": "query_action", "args": {"action_id": "nav-0005"}},
+      "send": {
+        "builder": "query_action",
+        "args": {
+          "action_id": "nav-0005"
+        }
+      },
       "expect_message": {
         "channel": "fakeplayer-body",
         "protocol": "fakeplayer-body/1",
@@ -69,17 +104,36 @@
         "request_id": "r-3",
         "action_id": "nav-0005",
         "state": "terminal",
-        "terminal": {"classification": "canceled", "reason": "cancel_requested", "elapsed_ticks": 44, "replans": 0, "expanded_nodes": 500, "unloaded_touches": 0},
+        "terminal": {
+          "classification": "canceled",
+          "reason": "cancel_requested",
+          "elapsed_ticks": 44,
+          "replans": 0,
+          "expanded_nodes": 500,
+          "unloaded_touches": 0
+        },
         "seq": 3,
         "server_tick": 504,
         "sent_at_ms": 1785000005400
       },
       "expect": [
-        {"kind": "response", "type": "QUERY_ACTION_RESULT", "request_type": "QUERY_ACTION", "payload_contains": {"state": "terminal"}}
+        {
+          "kind": "response",
+          "type": "QUERY_ACTION_RESULT",
+          "request_type": "QUERY_ACTION",
+          "payload_contains": {
+            "state": "terminal"
+          }
+        }
       ]
     },
     {
-      "send": {"builder": "query_action", "args": {"action_id": "lost-after-restart"}},
+      "send": {
+        "builder": "query_action",
+        "args": {
+          "action_id": "lost-after-restart"
+        }
+      },
       "expect_message": {
         "channel": "fakeplayer-body",
         "protocol": "fakeplayer-body/1",
@@ -100,9 +154,18 @@
         "sent_at_ms": 1785000005500
       },
       "expect": [
-        {"kind": "response", "type": "QUERY_ACTION_RESULT", "request_type": "QUERY_ACTION", "payload_contains": {"state": "unknown"}}
+        {
+          "kind": "response",
+          "type": "QUERY_ACTION_RESULT",
+          "request_type": "QUERY_ACTION",
+          "payload_contains": {
+            "state": "unknown"
+          }
+        }
       ]
     }
   ],
-  "final": {"pending_requests": 0}
+  "final": {
+    "pending_requests": 0
+  }
 }

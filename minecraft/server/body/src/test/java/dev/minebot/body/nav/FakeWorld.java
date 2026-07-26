@@ -10,29 +10,29 @@ import java.util.Set;
  * passable above, with explicit overrides and an optional loaded-region
  * boundary.
  */
-final class FakeWorld implements WorldView {
+public final class FakeWorld implements WorldView {
     private final int floorY;
     private final Map<Long, NodeKind> overrides = new HashMap<>();
     private final Set<Long> unloadedChunks = new HashSet<>();
 
-    FakeWorld(int floorY) {
+    public FakeWorld(int floorY) {
         this.floorY = floorY;
     }
 
-    FakeWorld set(int x, int y, int z, NodeKind kind) {
+    public FakeWorld set(int x, int y, int z, NodeKind kind) {
         overrides.put(key(x, y, z), kind);
         return this;
     }
 
     /** A vertical solid column from floor level up to {@code topY}. */
-    FakeWorld wall(int x, int z, int topY) {
+    public FakeWorld wall(int x, int z, int topY) {
         for (int y = floorY + 1; y <= topY; y++) {
             set(x, y, z, NodeKind.SOLID);
         }
         return this;
     }
 
-    FakeWorld unloadChunk(int chunkX, int chunkZ) {
+    public FakeWorld unloadChunk(int chunkX, int chunkZ) {
         unloadedChunks.add(((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL));
         return this;
     }

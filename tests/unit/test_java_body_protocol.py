@@ -21,6 +21,7 @@ from minebot.game.java_body_protocol import (
     JavaBodyProtocol,
     ProtocolViolation,
     Response,
+    ServerProposal,
 )
 
 
@@ -62,6 +63,12 @@ def _assert_item(expected: dict, item: object, context: str) -> None:
         assert isinstance(item, EventGap), f"{context}: expected EventGap, got {type(item).__name__}"
         assert item.from_seq == expected["from_seq"], context
         assert item.to_seq == expected["to_seq"], context
+    elif kind == "proposal":
+        assert isinstance(item, ServerProposal), f"{context}: expected ServerProposal, got {type(item).__name__}"
+        assert item.proposal_id == expected["proposal_id"], context
+        assert item.block_id == expected["block_id"], context
+        assert item.kind == expected["mutation_kind"], context
+        assert (item.x, item.y, item.z) == (expected["x"], expected["y"], expected["z"]), context
     else:
         raise AssertionError(f"{context}: unknown expectation kind {kind!r}")
 
@@ -152,6 +159,20 @@ def test_unknown_request_id_and_wrong_channel_are_violations() -> None:
         protocol.feed({"channel": "fakeplayer-body", "type": "HELLO_ACK", "request_id": "r-99"})
     with pytest.raises(ProtocolViolation):
         protocol.feed({"channel": "observer-control", "type": "EVENT"})
+
+
+def test_malformed_proposal_is_a_violation_never_a_guess() -> None:
+    protocol = JavaBodyProtocol()
+    with pytest.raises(ProtocolViolation):
+        protocol.feed(
+            {
+                "channel": "fakeplayer-body",
+                "type": "MUTATION_PROPOSAL",
+                "proposal_id": "mp-9",
+                "bot": "B",
+                "mutation": {"kind": "break", "block_id": "minecraft:oak_log"},
+            }
+        )
 
 
 def test_mismatched_response_type_is_a_violation() -> None:

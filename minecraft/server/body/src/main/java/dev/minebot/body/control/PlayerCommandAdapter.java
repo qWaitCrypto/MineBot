@@ -14,7 +14,9 @@ import net.minecraft.server.MinecraftServer;
  * and additionally releases sneak/sprint toggles when they were engaged.
  */
 public final class PlayerCommandAdapter
-    implements dev.minebot.body.action.BotControls, dev.minebot.body.nav.MovementControls {
+    implements dev.minebot.body.action.BotControls,
+    dev.minebot.body.action.CollectExecutor.MiningControls,
+    dev.minebot.body.nav.MovementControls {
     private final MinecraftServer server;
     private final HeldInputs heldInputs;
 
@@ -72,6 +74,12 @@ public final class PlayerCommandAdapter
 
     public void attackOnce(String botName) {
         dispatch(botName, "attack once");
+    }
+
+    @Override
+    public void attackContinuous(String botName) {
+        heldInputs.engage(botName, HeldInputs.Input.ATTACK);
+        dispatch(botName, "attack continuous");
     }
 
     public void useOnce(String botName) {

@@ -64,6 +64,27 @@ class EventGap:
     to_seq: int
 
 
+@dataclass(frozen=True)
+class ServerProposal:
+    """A server-initiated MUTATION_PROPOSAL awaiting a governance verdict.
+
+    Fail-closed contract: not answering is a denial after the frozen timeout,
+    so a consumer that cannot decide simply does nothing wrong by staying
+    silent — but it must never answer allow without the real governance
+    decision.
+    """
+
+    proposal_id: str
+    bot: str
+    action_id: str
+    kind: str
+    x: int
+    y: int
+    z: int
+    block_id: str
+    payload: dict
+
+
 @dataclass
 class _Negotiated:
     minecraft_version: str
@@ -134,11 +155,43 @@ class JavaBodyProtocol:
         self._require_capability("RESUME_EVENTS")
         return self._request("RESUME_EVENTS", {"bot_name": bot_name, "after_seq": after_seq})
 
+    def collect_block(
+        self,
+        bot_name: str,
+        action_id: str,
+        block_ids: list[str],
+        *,
+        radius: int | None = None,
+        vertical_radius: int | None = None,
+        timeout_ticks: int | None = None,
+    ) -> dict:
+        self._require_capability("COLLECT_BLOCK")
+        body: dict = {"bot_name": bot_name, "action_id": action_id, "block_ids": list(block_ids)}
+        if radius is not None:
+            body["radius"] = radius
+        if vertical_radius is not None:
+            body["vertical_radius"] = vertical_radius
+        if timeout_ticks is not None:
+            body["timeout_ticks"] = timeout_ticks
+        return self._request("COLLECT_BLOCK", body)
+
+    def mutation_verdict(self, proposal_id: str, allow: bool, reason: str) -> dict:
+        """Fire-and-forget by design: a lost verdict times out into a denial."""
+        self._require_capability("MUTATION_VERDICT")
+        return {
+            "channel": CHANNEL,
+            "protocol": PROTOCOL,
+            "type": "MUTATION_VERDICT",
+            "proposal_id": proposal_id,
+            "allow": allow,
+            "reason": reason,
+        }
+
     # ------------------------------------------------------------------
     # Ingest. Feed one decoded frame; receive typed items in order.
     # ------------------------------------------------------------------
 
-    def feed(self, message: dict) -> list[Response | ErrorResponse | BotEvent | EventGap]:
+    def feed(self, message: dict) -> list[Response | ErrorResponse | BotEvent | EventGap | ServerProposal]:
         if not isinstance(message, dict):
             raise ProtocolViolation("frame must be a JSON object")
         channel = message.get("channel")
@@ -155,6 +208,8 @@ class JavaBodyProtocol:
             return self._feed_event(message)
         if frame_type == "ERROR":
             return [self._feed_error(message)]
+        if frame_type == "MUTATION_PROPOSAL":
+            return [self._feed_proposal(message)]
         return self._feed_response(message)
 
     # -- responses ------------------------------------------------------
@@ -169,7 +224,11 @@ class JavaBodyProtocol:
             raise ProtocolViolation(f"response for unknown request_id {request_id!r}")
         # Acknowledgement-shaped responses are deliberately not "_RESULT":
         # accepting an action is never its terminal result.
-        expected = {"HELLO": "HELLO_ACK", "NAVIGATE": "NAVIGATE_ACK"}.get(request_type, f"{request_type}_RESULT")
+        expected = {
+            "HELLO": "HELLO_ACK",
+            "NAVIGATE": "NAVIGATE_ACK",
+            "COLLECT_BLOCK": "COLLECT_BLOCK_ACK",
+        }.get(request_type, f"{request_type}_RESULT")
         if frame_type != expected:
             raise ProtocolViolation(f"{request_type} answered by {frame_type}")
         if frame_type == "HELLO_ACK":
@@ -191,6 +250,35 @@ class JavaBodyProtocol:
             max_request_bytes=int(message.get("max_request_bytes", 0)),
             max_requests_per_second=int(message.get("max_requests_per_second", 0)),
             request_types=tuple(request_types),
+        )
+
+    def _feed_proposal(self, message: dict) -> ServerProposal:
+        proposal_id = message.get("proposal_id")
+        bot = message.get("bot")
+        action_id = message.get("action_id")
+        mutation = message.get("mutation")
+        if not isinstance(proposal_id, str) or not isinstance(bot, str) or not isinstance(mutation, dict):
+            raise ProtocolViolation("MUTATION_PROPOSAL needs proposal_id, bot, and mutation")
+        kind = mutation.get("kind")
+        block_id = mutation.get("block_id")
+        if not isinstance(kind, str) or not isinstance(block_id, str):
+            raise ProtocolViolation("MUTATION_PROPOSAL mutation needs kind and block_id")
+        try:
+            x = int(mutation["x"])
+            y = int(mutation["y"])
+            z = int(mutation["z"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ProtocolViolation("MUTATION_PROPOSAL mutation needs integer coordinates") from error
+        return ServerProposal(
+            proposal_id=proposal_id,
+            bot=bot,
+            action_id=action_id if isinstance(action_id, str) else "",
+            kind=kind,
+            x=x,
+            y=y,
+            z=z,
+            block_id=block_id,
+            payload=dict(message),
         )
 
     def _feed_error(self, message: dict) -> ErrorResponse:

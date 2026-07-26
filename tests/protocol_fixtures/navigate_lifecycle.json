@@ -3,7 +3,10 @@
   "description": "NAVIGATE is acknowledged (never terminal), then pushed events carry ownership, planning, and the single typed terminal.",
   "steps": [
     {
-      "send": {"builder": "hello", "args": {}},
+      "send": {
+        "builder": "hello",
+        "args": {}
+      },
       "expect_message": {
         "channel": "fakeplayer-body",
         "protocol": "fakeplayer-body/1",
@@ -20,12 +23,27 @@
         "minecraft_version": "26.1.2",
         "max_request_bytes": 16384,
         "max_requests_per_second": 40,
-        "request_types": ["CANCEL_ACTION", "FIND_BLOCKS", "HELLO", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS"],
+        "request_types": [
+          "CANCEL_ACTION",
+          "COLLECT_BLOCK",
+          "FIND_BLOCKS",
+          "HELLO",
+          "MUTATION_VERDICT",
+          "NAVIGATE",
+          "QUERY_ACTION",
+          "RESUME_EVENTS"
+        ],
         "seq": 1,
         "server_tick": 200,
         "sent_at_ms": 1785000001000
       },
-      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+      "expect": [
+        {
+          "kind": "response",
+          "type": "HELLO_ACK",
+          "request_type": "HELLO"
+        }
+      ]
     },
     {
       "send": {
@@ -33,7 +51,13 @@
         "args": {
           "bot_name": "MineBot_1",
           "action_id": "nav-0001",
-          "goal": {"kind": "interact", "x": 101, "y": 70, "z": -12, "range": 4.5},
+          "goal": {
+            "kind": "interact",
+            "x": 101,
+            "y": 70,
+            "z": -12,
+            "range": 4.5
+          },
           "timeout_ticks": 2400
         }
       },
@@ -44,7 +68,13 @@
         "request_id": "r-2",
         "bot_name": "MineBot_1",
         "action_id": "nav-0001",
-        "goal": {"kind": "interact", "x": 101, "y": 70, "z": -12, "range": 4.5},
+        "goal": {
+          "kind": "interact",
+          "x": 101,
+          "y": 70,
+          "z": -12,
+          "range": 4.5
+        },
         "timeout_ticks": 2400
       }
     },
@@ -60,7 +90,14 @@
         "sent_at_ms": 1785000001100
       },
       "expect": [
-        {"kind": "response", "type": "NAVIGATE_ACK", "request_type": "NAVIGATE", "payload_contains": {"state": "accepted"}}
+        {
+          "kind": "response",
+          "type": "NAVIGATE_ACK",
+          "request_type": "NAVIGATE",
+          "payload_contains": {
+            "state": "accepted"
+          }
+        }
       ]
     },
     {
@@ -72,9 +109,19 @@
         "tick": 201,
         "event": "owner_acquired",
         "action_id": "nav-0001",
-        "data": {"type": "NAVIGATE", "priority": "ACTION"}
+        "data": {
+          "type": "NAVIGATE",
+          "priority": "ACTION"
+        }
       },
-      "expect": [{"kind": "event", "name": "owner_acquired", "seq": 1, "action_id": "nav-0001"}]
+      "expect": [
+        {
+          "kind": "event",
+          "name": "owner_acquired",
+          "seq": 1,
+          "action_id": "nav-0001"
+        }
+      ]
     },
     {
       "recv": {
@@ -85,9 +132,20 @@
         "tick": 203,
         "event": "path_planned",
         "action_id": "nav-0001",
-        "data": {"waypoints": 42, "partial": false, "expanded_nodes": 913, "reason": "goal_satisfied"}
+        "data": {
+          "waypoints": 42,
+          "partial": false,
+          "expanded_nodes": 913,
+          "reason": "goal_satisfied"
+        }
       },
-      "expect": [{"kind": "event", "name": "path_planned", "seq": 2}]
+      "expect": [
+        {
+          "kind": "event",
+          "name": "path_planned",
+          "seq": 2
+        }
+      ]
     },
     {
       "recv": {
@@ -110,8 +168,22 @@
           "final_z": -12.3
         }
       },
-      "expect": [{"kind": "event", "name": "action_terminal", "seq": 3, "data_contains": {"classification": "completed"}}]
+      "expect": [
+        {
+          "kind": "event",
+          "name": "action_terminal",
+          "seq": 3,
+          "data_contains": {
+            "classification": "completed"
+          }
+        }
+      ]
     }
   ],
-  "final": {"pending_requests": 0, "last_seq": {"MineBot_1": 3}}
+  "final": {
+    "pending_requests": 0,
+    "last_seq": {
+      "MineBot_1": 3
+    }
+  }
 }

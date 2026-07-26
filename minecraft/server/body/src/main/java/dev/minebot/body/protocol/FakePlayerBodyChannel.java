@@ -4,6 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import dev.minebot.body.action.ActionRegistry;
 import dev.minebot.body.action.ActionRuntime;
+import dev.minebot.body.action.CollectExecutor;
+import dev.minebot.body.action.MutationGate;
 import dev.minebot.body.control.FakePlayerActionOwner;
 import dev.minebot.body.control.HeldInputs;
 import dev.minebot.body.control.OwnerPriority;
@@ -12,6 +14,7 @@ import dev.minebot.body.event.BotEventStream;
 import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MinecraftWorldView;
 import dev.minebot.body.nav.NavigateExecutor;
+import net.minecraft.world.item.ItemStack;
 import dev.minebot.server.common.transport.MineBotChannel;
 import dev.minebot.server.common.transport.MineBotChannelRouter;
 import dev.minebot.server.common.transport.MineBotConnection;
@@ -38,8 +41,10 @@ import java.util.Set;
 public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String CHANNEL = "fakeplayer-body";
     public static final String PROTOCOL = "fakeplayer-body/1";
-    private static final Set<String> REQUEST_TYPES =
-        Set.of("HELLO", "FIND_BLOCKS", "NAVIGATE", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION");
+    private static final Set<String> REQUEST_TYPES = Set.of(
+        "HELLO", "FIND_BLOCKS", "NAVIGATE", "COLLECT_BLOCK", "MUTATION_VERDICT",
+        "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
+    );
     private static final int MAX_RADIUS = 128;
     private static final int MAX_VERTICAL_RADIUS = 64;
     private static final int MAX_PAGE_LIMIT = 128;
@@ -51,6 +56,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     private final SearchSnapshotStore snapshots = new SearchSnapshotStore();
     private final BotEventStream events = new BotEventStream();
     private final ActionRegistry actions = new ActionRegistry();
+    private final MutationGate mutationGate = new MutationGate();
     private final PlayerCommandAdapter adapter;
     private final ActionRuntime runtime;
     private final Set<MineBotConnection> subscribers = new LinkedHashSet<>();
@@ -110,11 +116,155 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "HELLO" -> handleHello(connection, request, serverTick);
             case "FIND_BLOCKS" -> handleFindBlocks(connection, request, serverTick);
             case "NAVIGATE" -> handleNavigate(connection, request, serverTick);
+            case "COLLECT_BLOCK" -> handleCollectBlock(connection, request, serverTick);
+            case "MUTATION_VERDICT" -> handleMutationVerdict(request);
             case "RESUME_EVENTS" -> handleResumeEvents(connection, request, serverTick);
             case "CANCEL_ACTION" -> handleCancelAction(connection, request, serverTick);
             case "QUERY_ACTION" -> handleQueryAction(connection, request, serverTick);
             default -> throw new IllegalStateException("unreachable request type " + type);
         }
+    }
+
+    private void handleCollectBlock(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            String actionId = requiredString(request, "action_id", 128);
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
+                return;
+            }
+            Map<Block, String> requestedBlocks = requiredBlocks(request);
+            int radius = boundedOptionalInt(request, "radius", 48, 4, 64);
+            int verticalRadius = boundedOptionalInt(request, "vertical_radius", 16, 1, MAX_VERTICAL_RADIUS);
+            int timeoutTicks = boundedOptionalInt(request, "timeout_ticks", NavigateExecutor.DEFAULT_TIMEOUT_TICKS, 20, MAX_TIMEOUT_TICKS);
+
+            ActionRuntime.Submission submission = runtime.submit(botName, actionId, "COLLECT_BLOCK", OwnerPriority.ACTION, serverTick);
+            JsonObject response = baseResponse(request, "COLLECT_BLOCK_ACK");
+            response.addProperty("action_id", actionId);
+            switch (submission) {
+                case ActionRuntime.Submission.Accepted ignored -> {
+                    BlockPos center = player.blockPosition();
+                    LoadedSearchResult search = scanner.scan(level, center, requestedBlocks, radius, verticalRadius, serverTick);
+                    JsonObject searchFacts = new JsonObject();
+                    searchFacts.addProperty("radius", radius);
+                    searchFacts.addProperty("matches", search.matches().size());
+                    searchFacts.addProperty("coverage_complete", search.coverageComplete());
+                    searchFacts.addProperty("unloaded_chunk_count", search.unloadedChunkCount());
+                    List<CollectExecutor.Candidate> candidates = new ArrayList<>();
+                    for (SearchMatch match : search.matches()) {
+                        boolean spread = candidates.stream().allMatch(kept ->
+                            Math.abs(match.x() - kept.x()) + Math.abs(match.z() - kept.z()) >= 2);
+                        if (spread) {
+                            candidates.add(new CollectExecutor.Candidate(match.x(), match.y(), match.z(), match.blockId()));
+                        }
+                        if (candidates.size() >= CollectExecutor.MAX_CANDIDATE_ATTEMPTS) {
+                            break;
+                        }
+                    }
+                    Map<String, String> itemIds = new LinkedHashMap<>();
+                    requestedBlocks.values().forEach(blockId -> itemIds.put(blockId, blockId));
+                    CollectExecutor executor = new CollectExecutor(
+                        botName,
+                        actionId,
+                        candidates,
+                        itemIds,
+                        searchFacts,
+                        new MinecraftWorldView(level),
+                        adapter,
+                        adapter,
+                        adapter,
+                        (x, y, z) -> observedBlockId(level, x, y, z),
+                        itemId -> observedItemCount(botName, itemId),
+                        mutationGate,
+                        this::publishProposal,
+                        this::observedPosition,
+                        this::publishEvent,
+                        runtime,
+                        timeoutTicks
+                    );
+                    runtime.attachExecutor(actionId, executor);
+                    response.addProperty("state", "accepted");
+                    response.addProperty("candidates", candidates.size());
+                }
+                case ActionRuntime.Submission.Duplicate duplicate -> {
+                    response.addProperty("state", duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal");
+                    if (duplicate.status().terminal() != null) {
+                        response.add("terminal", duplicate.status().terminal());
+                    }
+                }
+                case ActionRuntime.Submission.Rejected rejected -> {
+                    JsonObject error = MineBotChannelRouter.error(CHANNEL, requestId(request), rejected.code(), "another action owns this bot", true);
+                    error.addProperty("owner_action_id", rejected.currentOwner().actionId());
+                    error.addProperty("owner_priority", rejected.currentOwner().priority().name());
+                    connection.send(error, serverTick);
+                    return;
+                }
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        }
+    }
+
+    /** Fire-and-forget by design: a lost or malformed verdict times out into a denial. */
+    private void handleMutationVerdict(JsonObject request) {
+        String proposalId = MineBotChannelRouter.stringField(request, "proposal_id");
+        if (proposalId == null || !request.has("allow") || !request.get("allow").isJsonPrimitive()) {
+            return;
+        }
+        boolean allow;
+        try {
+            allow = request.get("allow").getAsBoolean();
+        } catch (RuntimeException invalid) {
+            return;
+        }
+        String reason = MineBotChannelRouter.stringField(request, "reason");
+        mutationGate.verdict(proposalId, allow, reason);
+    }
+
+    private void publishProposal(MutationGate.Proposal proposal) {
+        JsonObject frame = new JsonObject();
+        frame.addProperty("channel", CHANNEL);
+        frame.addProperty("type", "MUTATION_PROPOSAL");
+        frame.addProperty("proposal_id", proposal.proposalId());
+        frame.addProperty("bot", proposal.bot());
+        frame.addProperty("action_id", proposal.actionId());
+        JsonObject mutation = new JsonObject();
+        mutation.addProperty("kind", proposal.mutationKind());
+        mutation.addProperty("x", proposal.x());
+        mutation.addProperty("y", proposal.y());
+        mutation.addProperty("z", proposal.z());
+        mutation.addProperty("block_id", proposal.blockId());
+        frame.add("mutation", mutation);
+        for (MineBotConnection subscriber : subscribers) {
+            subscriber.send(frame, currentTick);
+        }
+    }
+
+    private String observedBlockId(ServerLevel level, int x, int y, int z) {
+        var chunk = level.getChunkSource().getChunkNow(x >> 4, z >> 4);
+        if (chunk == null) {
+            return null;
+        }
+        return LoadedBlockScanner.blockId(chunk.getBlockState(new BlockPos(x, y, z)).getBlock());
+    }
+
+    private int observedItemCount(String botName, String itemId) {
+        ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+        if (player == null || player.isRemoved()) {
+            return 0;
+        }
+        int total = 0;
+        var inventory = player.getInventory();
+        for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (!stack.isEmpty()
+                && BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(itemId)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
     }
 
     private void handleNavigate(MineBotConnection connection, JsonObject request, int serverTick) {
