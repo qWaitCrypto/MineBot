@@ -22,6 +22,8 @@ from pathlib import Path
 from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
 from minebot.app.body_events import BodyEventPump
 from minebot.app.autonomy import AutonomyCoordinator
+from minebot.app.expression_egress import expression_speech_sink
+from minebot.brain.expression import ExpressionPolicy
 from minebot.app.conversation import PersistentWindowedConversationSession
 from minebot.app.observation_artifacts import PersistentToolObservationArchive
 from minebot.app.progress_epochs import PersistentProgressEpochArchive
@@ -923,19 +925,20 @@ def _watch_interactive_chat(rcon: RconClient, bot_name: str) -> None:
     rcon.request(build_watch_call(bot_name))
 
 
-def _interactive_speech_sink(body: object):
-    last_text = {"value": None}
+def _interactive_speech_sink(body: object, *, policy: ExpressionPolicy | None = None):
+    """Chat egress, gated by the F6 expression policy.
+
+    The default policy suppresses only consecutive duplicates, which is the
+    behavior this sink has always had; a paced policy is the operator opt-in.
+    """
+
     say = getattr(body, "say", None)
 
-    def sink(text: str) -> None:
-        if not callable(say):
-            return
-        if text == last_text["value"]:
-            return
-        last_text["value"] = text
-        say(text)
+    def emit(text: str) -> None:
+        if callable(say):
+            say(text)
 
-    return sink
+    return expression_speech_sink(emit, policy=policy)
 
 
 def _announce_interactive_terminal(body: object, truth: TerminalTruth) -> bool:
