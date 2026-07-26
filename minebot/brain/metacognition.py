@@ -259,9 +259,204 @@ def _assemble_fixture(
     )
 
 
+# -- replay drift analysis (brain-cognitive-framework.md §10.1) -------------
+#
+# A drift report compares what the original run's model chose (the fixture's
+# ``chosen`` batch) against what a candidate model chooses when replayed on
+# the same compiled context. Comparison is deterministic and bounded:
+#
+#   identical   — same tool multiset AND normalized arguments
+#   same_tools  — same tool multiset, different arguments
+#   divergent   — different tool multiset
+#   unreplayed  — the replay produced no decision for this fixture
+#
+# Aggregation is per decision context, because that is the unit routing
+# decisions are made at.
+
+
+@dataclass(frozen=True)
+class ReplayedDecision:
+    fixture_id: str
+    chosen: tuple[JsonObject, ...]
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class FixtureComparison:
+    fixture_id: str
+    decision_context: str
+    verdict: str                      # identical|same_tools|divergent|unreplayed
+    original_tools: tuple[str, ...]
+    replayed_tools: tuple[str, ...]
+    surface_digest_match: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class DriftReport:
+    total: int
+    by_context: JsonObject            # context -> {verdict -> count, drift_rate}
+    substitutions: tuple[tuple[str, int], ...]  # "orig->replayed" tool drift pairs
+    comparisons: tuple[FixtureComparison, ...]
+
+    def to_payload(self) -> JsonObject:
+        return {
+            "total": self.total,
+            "by_context": dict(self.by_context),
+            "substitutions": [list(item) for item in self.substitutions],
+            "comparisons": [
+                {
+                    "fixture_id": item.fixture_id,
+                    "decision_context": item.decision_context,
+                    "verdict": item.verdict,
+                    "original_tools": list(item.original_tools),
+                    "replayed_tools": list(item.replayed_tools),
+                    "surface_digest_match": item.surface_digest_match,
+                    "error": item.error,
+                }
+                for item in self.comparisons
+            ],
+        }
+
+
+def compare_decision(
+    fixture: DecisionFixture,
+    replay: ReplayedDecision | None,
+    *,
+    current_surface_digest: str | None = None,
+) -> FixtureComparison:
+    original_tools = _tool_sequence(fixture.chosen)
+    surface_match = (
+        current_surface_digest is None
+        or current_surface_digest == fixture.tool_surface_digest
+    )
+    if replay is None or replay.error is not None:
+        return FixtureComparison(
+            fixture_id=fixture.fixture_id,
+            decision_context=fixture.decision_context,
+            verdict="unreplayed",
+            original_tools=original_tools,
+            replayed_tools=(),
+            surface_digest_match=surface_match,
+            error=None if replay is None else replay.error,
+        )
+    replayed_tools = _tool_sequence(replay.chosen)
+    if sorted(original_tools) != sorted(replayed_tools):
+        verdict = "divergent"
+    elif _normalized_argument_multiset(fixture.chosen) == _normalized_argument_multiset(replay.chosen):
+        verdict = "identical"
+    else:
+        verdict = "same_tools"
+    return FixtureComparison(
+        fixture_id=fixture.fixture_id,
+        decision_context=fixture.decision_context,
+        verdict=verdict,
+        original_tools=original_tools,
+        replayed_tools=replayed_tools,
+        surface_digest_match=surface_match,
+    )
+
+
+def drift_report(
+    fixtures: Iterable[DecisionFixture],
+    replays: Mapping[str, ReplayedDecision],
+    *,
+    current_surface_digest: str | None = None,
+) -> DriftReport:
+    comparisons = tuple(
+        compare_decision(
+            fixture,
+            replays.get(fixture.fixture_id),
+            current_surface_digest=current_surface_digest,
+        )
+        for fixture in fixtures
+    )
+    by_context: dict[str, dict[str, object]] = {}
+    substitution_counts: dict[str, int] = {}
+    for item in comparisons:
+        bucket = by_context.setdefault(
+            item.decision_context,
+            {"identical": 0, "same_tools": 0, "divergent": 0, "unreplayed": 0},
+        )
+        bucket[item.verdict] = int(bucket[item.verdict]) + 1  # type: ignore[call-overload]
+        if item.verdict == "divergent":
+            for original, replayed in _tool_substitutions(item.original_tools, item.replayed_tools):
+                key = f"{original}->{replayed}"
+                substitution_counts[key] = substitution_counts.get(key, 0) + 1
+    for bucket in by_context.values():
+        replayed_total = sum(
+            int(bucket[verdict]) for verdict in ("identical", "same_tools", "divergent")  # type: ignore[call-overload]
+        )
+        drifted = int(bucket["divergent"]) + int(bucket["same_tools"])  # type: ignore[call-overload]
+        bucket["drift_rate"] = (
+            None if replayed_total == 0 else round(drifted / replayed_total, 4)
+        )
+    substitutions = tuple(
+        sorted(substitution_counts.items(), key=lambda item: (-item[1], item[0]))[:16]
+    )
+    return DriftReport(
+        total=len(comparisons),
+        by_context=dict(by_context),
+        substitutions=substitutions,
+        comparisons=comparisons,
+    )
+
+
+def _tool_sequence(chosen: Iterable[Mapping[str, object]]) -> tuple[str, ...]:
+    return tuple(str(item.get("tool") or "") for item in chosen)
+
+
+def _normalized_argument_multiset(chosen: Iterable[Mapping[str, object]]) -> list[tuple[str, str]]:
+    normalized = [
+        (str(item.get("tool") or ""), _normalized_arguments(item.get("arguments")))
+        for item in chosen
+    ]
+    return sorted(normalized)
+
+
+def _normalized_arguments(raw: object) -> str:
+    if raw is None:
+        return "{}"
+    text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=True, sort_keys=True, default=str)
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return str(text)
+    return json.dumps(parsed, ensure_ascii=True, sort_keys=True, default=str)
+
+
+def _tool_substitutions(
+    original: tuple[str, ...], replayed: tuple[str, ...]
+) -> list[tuple[str, str]]:
+    original_only = _multiset_difference(original, replayed)
+    replayed_only = _multiset_difference(replayed, original)
+    pairs: list[tuple[str, str]] = []
+    for index in range(max(len(original_only), len(replayed_only))):
+        left = original_only[index] if index < len(original_only) else "<none>"
+        right = replayed_only[index] if index < len(replayed_only) else "<none>"
+        pairs.append((left, right))
+    return pairs
+
+
+def _multiset_difference(left: tuple[str, ...], right: tuple[str, ...]) -> list[str]:
+    remaining = list(right)
+    out: list[str] = []
+    for item in left:
+        if item in remaining:
+            remaining.remove(item)
+        else:
+            out.append(item)
+    return sorted(out)
+
+
 __all__ = [
     "DecisionFixture",
+    "DriftReport",
+    "FixtureComparison",
+    "ReplayedDecision",
     "backfill_decision_context",
+    "compare_decision",
+    "drift_report",
     "fixtures_from_trace",
     "tool_surface_digest",
 ]
