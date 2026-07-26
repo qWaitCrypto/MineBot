@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from minebot.app.autonomy import AutonomyAction, AutonomyCoordinator
 from minebot.app.body_events import event_matches_wait_conditions
+from minebot.app.principals import AdmissionCapability, PrincipalRegistry
 from minebot.app.wiring import AgentRuntimeParts
 from minebot.app.runner import RecoveryOutcome
 from minebot.app.runtime_state import CheckpointDisposition, CompletionAuthority, TaskStatus
@@ -94,6 +95,26 @@ class SessionStep:
     message: str | None = None
 
 
+# Command spelling -> what the principal is actually trying to do (F5 §8.2).
+_ADMISSION_CAPABILITY: dict[SessionCommandKind, AdmissionCapability] = {
+    SessionCommandKind.MESSAGE: AdmissionCapability.CONVERSE,
+    SessionCommandKind.START: AdmissionCapability.START_WORK,
+    SessionCommandKind.PAUSE: AdmissionCapability.CONTROL_WORK,
+    SessionCommandKind.CONTINUE: AdmissionCapability.CONTROL_WORK,
+    SessionCommandKind.CANCEL: AdmissionCapability.CONTROL_WORK,
+    SessionCommandKind.REPLACE_GOAL: AdmissionCapability.CONTROL_WORK,
+    SessionCommandKind.QUIT: AdmissionCapability.CONTROL_PROCESS,
+}
+
+
+def _denied_command_text(command: SessionCommand) -> str:
+    """Preserve the request as dialogue so the model can answer or refuse."""
+    text = command.text.strip()
+    if text:
+        return text
+    return f"(requested {command.kind.value})"
+
+
 PartsFactory = Callable[[str], AgentRuntimeParts]
 ShouldStop = Callable[[SessionStep], bool]
 _WORK_PREEMPTED = object()
@@ -109,7 +130,12 @@ class AgentSession:
     work_queue: WorkIntentQueue | None = None
     autonomy_coordinator: AutonomyCoordinator | None = None
     parts: AgentRuntimeParts | None = None
+    # F5 admission. None (default) = no principal layer at all, exactly
+    # today's behavior; an open registry is also inert. Enforcement begins
+    # only when owner names are configured.
+    principals: PrincipalRegistry | None = None
     max_recovery_attempts: int = 3
+    _goal_principal_id: str | None = None
     _recovery_attempts: int = 0
     _goal_active: bool = False
     _turn_pending: bool = False
@@ -131,6 +157,11 @@ class AgentSession:
         *,
         dedupe_key: str | None = None,
     ) -> WorkIntent:
+        # F5 admission (brain-cognitive-framework.md §8): evaluated before any
+        # intent is created, any generation is invalidated, and any execution
+        # lane is cancelled — a denied CANCEL must not cancel anything. A
+        # denied command degrades to conversation so the model still sees it.
+        command = self._admit(command)
         always_interrupt = command.kind in {
             SessionCommandKind.PAUSE,
             SessionCommandKind.CANCEL,
@@ -184,6 +215,36 @@ class AgentSession:
         if cancellation_reason is not None and self.parts is not None:
             self.parts.runtime.request_execution_cancel(cancellation_reason)
         return intent
+
+    def _admit(self, command: SessionCommand) -> SessionCommand:
+        """Apply the F5 admission matrix; degrade denied commands to chat."""
+        if self.principals is None:
+            return command
+        capability = _ADMISSION_CAPABILITY[command.kind]
+        decision = self.principals.evaluate(
+            capability,
+            command.sender,
+            work_owner_id=self._goal_principal_id,
+        )
+        if decision.allowed:
+            if command.kind in {SessionCommandKind.START, SessionCommandKind.REPLACE_GOAL}:
+                self._goal_principal_id = decision.principal.principal_id
+            return command
+        self._trace(
+            "admission_denied",
+            command=command.kind.value,
+            capability=capability.value,
+            principal=decision.principal.principal_id,
+            trust=decision.principal.trust.value,
+            reason=decision.reason,
+            work_owner=self._goal_principal_id,
+        )
+        return SessionCommand(
+            kind=SessionCommandKind.MESSAGE,
+            text=_denied_command_text(command),
+            reason=f"admission_denied:{command.kind.value}:{decision.reason}",
+            sender=command.sender,
+        )
 
     @property
     def lifecycle_state(self) -> LifecycleState | None:
