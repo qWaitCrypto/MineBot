@@ -5,8 +5,8 @@ import com.google.gson.JsonObject;
 import dev.minebot.body.nav.NavigateExecutor;
 
 /**
- * Governed dig-up vertical escape ("挖竖井垂直逃生"): when the bot is trapped
- * with no horizontal route out, it clears the column straight up to a target
+ * Governed dig-up vertical escape (dig a shaft straight up): when the bot is
+ * trapped with no horizontal route out, it clears the column up to a target
  * height or open sky. Each solid ceiling block goes through the same fail-
  * closed governance round trip as collection — propose the break, wait for an
  * explicit allow, dig only then, verify the world changed — before the body
