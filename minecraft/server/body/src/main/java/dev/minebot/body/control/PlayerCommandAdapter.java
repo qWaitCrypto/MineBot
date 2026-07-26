@@ -13,7 +13,8 @@ import net.minecraft.server.MinecraftServer;
  * {@link #clearAll(String)} is a total cleanup: it always issues {@code stop}
  * and additionally releases sneak/sprint toggles when they were engaged.
  */
-public final class PlayerCommandAdapter implements dev.minebot.body.action.BotControls {
+public final class PlayerCommandAdapter
+    implements dev.minebot.body.action.BotControls, dev.minebot.body.nav.MovementControls {
     private final MinecraftServer server;
     private final HeldInputs heldInputs;
 
