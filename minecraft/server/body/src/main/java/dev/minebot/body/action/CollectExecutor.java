@@ -22,7 +22,7 @@ import java.util.Map;
 public final class CollectExecutor implements ActionRuntime.TickExecutor {
     public static final int MAX_CANDIDATE_ATTEMPTS = 8;
     public static final int BREAK_TIMEOUT_TICKS = 300;
-    public static final int PICKUP_TIMEOUT_TICKS = 80;
+    public static final int PICKUP_TIMEOUT_TICKS = 120;
     public static final int APPROACH_REPLAN_LIMIT = 3;
 
     /** Live block truth; null id when the position is unloaded. */
@@ -262,15 +262,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             data.addProperty("now", observed);
             data.addProperty("break_ticks", serverTick - phaseStartedTick);
             events.emit(bot, serverTick, "mutation_verified", actionId, data);
-            approach = new ApproachController(
-                bot,
-                actionId,
-                new Goal.Near(current.x(), current.y(), current.z(), 1.2),
-                world,
-                movement,
-                events,
-                APPROACH_REPLAN_LIMIT
-            );
+            // The pickup goal is built lazily at ground level: the drop falls
+            // to the floor under the mined block's column, not to the block's
+            // own (often elevated) coordinates.
+            approach = null;
             phase = Phase.PICKUP_APPROACH;
             return;
         }
@@ -283,6 +278,17 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     private void pickupApproachTick(int serverTick, NavigateExecutor.PositionSource.Position position) {
+        if (approach == null) {
+            approach = new ApproachController(
+                bot,
+                actionId,
+                new Goal.Near(current.x(), (int) Math.floor(position.y()), current.z(), 1.2),
+                world,
+                movement,
+                events,
+                APPROACH_REPLAN_LIMIT
+            );
+        }
         ApproachController.Outcome outcome = approach.tick(serverTick, position.x(), position.y(), position.z());
         if (outcome.status() == ApproachController.Status.WORKING) {
             return;
