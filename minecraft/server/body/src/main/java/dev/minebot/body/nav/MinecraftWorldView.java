@@ -38,6 +38,15 @@ public final class MinecraftWorldView implements WorldView {
         if (state.is(Blocks.FIRE) || state.is(Blocks.SOUL_FIRE) || state.is(Blocks.MAGMA_BLOCK)) {
             return NodeKind.HAZARD;
         }
+        if (state.is(Blocks.LADDER)
+            || state.is(Blocks.VINE)
+            || state.is(Blocks.SCAFFOLDING)
+            || state.is(Blocks.TWISTING_VINES)
+            || state.is(Blocks.TWISTING_VINES_PLANT)
+            || state.is(Blocks.WEEPING_VINES)
+            || state.is(Blocks.WEEPING_VINES_PLANT)) {
+            return NodeKind.CLIMBABLE;
+        }
         if (state.getCollisionShape(level, pos).isEmpty()) {
             return NodeKind.PASSABLE;
         }

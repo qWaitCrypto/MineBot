@@ -14,6 +14,8 @@ public interface WorldView {
         SOLID,
         /** Water. A body cell may occupy it (swimming); costed above walking. */
         LIQUID,
+        /** Ladders, vines, scaffolding: a body cell that also grants vertical climb. */
+        CLIMBABLE,
         /** Lava, fire, and other must-not-touch blocks. */
         HAZARD,
         /** Outside loaded chunks. Impassable and counted as a boundary touch. */

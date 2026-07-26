@@ -27,6 +27,8 @@ public final class MoveGenerator {
     public static final double SWIM_DIAGONAL_COST = 12.7;
     public static final double SWIM_UP_COST = 11.0;
     public static final double SWIM_DOWN_COST = 8.0;
+    public static final double CLIMB_UP_COST = 6.0;
+    public static final double CLIMB_DOWN_COST = 5.0;
     /** Falling into water is safe, so a water landing tolerates a deep drop. */
     public static final int MAX_WATER_FALL_BLOCKS = 20;
 
@@ -60,6 +62,7 @@ public final class MoveGenerator {
             }
         }
         addVerticalSwim(x, y, z, moves);
+        addVerticalClimb(x, y, z, moves);
         return new Moves(List.copyOf(moves), unloaded[0]);
     }
 
@@ -104,13 +107,19 @@ public final class MoveGenerator {
             moves.add(new Move(nx, y, nz, swimCost));
             return;
         }
+        if (bodyLow == WorldView.NodeKind.CLIMBABLE) {
+            // Grab onto a ladder/vine at the same height.
+            moves.add(new Move(nx, y, nz, baseCost));
+            return;
+        }
         // bodyLow is PASSABLE (air): decide how the body settles in this column.
         WorldView.NodeKind floor = world.kindAt(nx, y - 1, nz);
         if (floor == WorldView.NodeKind.UNLOADED) {
             unloaded[0]++;
             return;
         }
-        if (floor == WorldView.NodeKind.SOLID) {
+        if (floor == WorldView.NodeKind.SOLID || floor == WorldView.NodeKind.CLIMBABLE) {
+            // Solid ground, or the top of a ladder column, supports a walk arrival.
             moves.add(new Move(nx, y, nz, baseCost));
             return;
         }
@@ -163,11 +172,29 @@ public final class MoveGenerator {
         }
     }
 
+    /** Ladder/vine vertical escape: climb while the body is on a climbable. */
+    private void addVerticalClimb(int x, int y, int z, List<Move> moves) {
+        if (world.kindAt(x, y, z) != WorldView.NodeKind.CLIMBABLE) {
+            return;
+        }
+        // Climb up: rise to occupy (y+1, y+2); the head cell must be clear so
+        // the body can exit at the top onto air or continue up the ladder.
+        if (occupiable(world.kindAt(x, y + 1, z)) && occupiable(world.kindAt(x, y + 2, z))) {
+            moves.add(new Move(x, y + 1, z, CLIMB_UP_COST));
+        }
+        // Climb down one cell while the column below is still climbable.
+        if (world.kindAt(x, y - 1, z) == WorldView.NodeKind.CLIMBABLE) {
+            moves.add(new Move(x, y - 1, z, CLIMB_DOWN_COST));
+        }
+    }
+
     private boolean bodyClear(int x, int y, int z) {
         return occupiable(world.kindAt(x, y, z)) && occupiable(world.kindAt(x, y + 1, z));
     }
 
     private static boolean occupiable(WorldView.NodeKind kind) {
-        return kind == WorldView.NodeKind.PASSABLE || kind == WorldView.NodeKind.LIQUID;
+        return kind == WorldView.NodeKind.PASSABLE
+            || kind == WorldView.NodeKind.LIQUID
+            || kind == WorldView.NodeKind.CLIMBABLE;
     }
 }

@@ -123,4 +123,40 @@ final class MoveGeneratorTest {
         assertEquals(8, moves.size());
         assertTrue(moves.stream().allMatch(m -> m.y() == STAND));
     }
+
+    @Test
+    void ladderColumnOffersClimbUpAndDown() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int y = STAND; y <= STAND + 4; y++) {
+            world.set(0, y, 0, WorldView.NodeKind.CLIMBABLE);
+        }
+        List<MoveGenerator.Move> moves = new MoveGenerator(world).movesFrom(0, STAND + 1, 0).moves();
+        assertTrue(hasMoveTo(moves, 0, STAND + 2, 0), "climb up the ladder");
+        assertTrue(hasMoveTo(moves, 0, STAND, 0), "climb down the ladder");
+        assertEquals(MoveGenerator.CLIMB_UP_COST, moveTo(moves, 0, STAND + 2, 0).cost());
+    }
+
+    @Test
+    void climbUpToAirExitsAtTheTop() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        world.set(0, STAND, 0, WorldView.NodeKind.CLIMBABLE);
+        // Air above the ladder top.
+        List<MoveGenerator.Move> moves = new MoveGenerator(world).movesFrom(0, STAND, 0).moves();
+        assertTrue(hasMoveTo(moves, 0, STAND + 1, 0), "step off the ladder top into air");
+    }
+
+    @Test
+    void ladderIsEnteredHorizontallyAndSupportsAWalkOnTop() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        world.set(1, STAND, 0, WorldView.NodeKind.CLIMBABLE);
+        List<MoveGenerator.Move> moves = new MoveGenerator(world).movesFrom(0, STAND, 0).moves();
+        assertTrue(hasMoveTo(moves, 1, STAND, 0), "grab the adjacent ladder");
+    }
+
+    @Test
+    void landOnlyWorldIsUnchangedByClimbLogic() {
+        // Regression: no climbable anywhere -> exactly the 8 walking moves.
+        List<MoveGenerator.Move> moves = new MoveGenerator(new FakeWorld(FLOOR)).movesFrom(3, STAND, 3).moves();
+        assertEquals(8, moves.size());
+    }
 }
