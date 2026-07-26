@@ -16,8 +16,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public final class MineBotBodyMod implements DedicatedServerModInitializer {
     public static final String MOD_ID = "minebot-body";
+    // Default distinct from the observer Bridge (8766) so every launch path —
+    // including tools/reset-world.sh, which passes only camera JVM args —
+    // binds both servers without collision.
     private static final String HOST = System.getProperty("minebot.body.host", "127.0.0.1");
-    private static final int PORT = Integer.getInteger("minebot.body.port", 8766);
+    private static final int PORT = Integer.getInteger("minebot.body.port", 8767);
 
     private static final AtomicInteger TICK_COUNTER = new AtomicInteger();
     private static MineBotWebSocketServer bodyServer;
