@@ -1,0 +1,116 @@
+{
+  "name": "event_gap_and_resume",
+  "description": "A sequence jump surfaces a typed gap; RESUME_EVENTS replays with an explicit event_gap when the buffer no longer covers the cursor; duplicates are dropped.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["CANCEL_ACTION", "FIND_BLOCKS", "HELLO", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS"],
+        "seq": 1,
+        "server_tick": 400,
+        "sent_at_ms": 1785000003000
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 1,
+        "tick": 401,
+        "event": "owner_acquired",
+        "action_id": "nav-0003",
+        "data": {"type": "NAVIGATE", "priority": "ACTION"}
+      },
+      "expect": [{"kind": "event", "name": "owner_acquired", "seq": 1}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 5,
+        "tick": 460,
+        "event": "action_terminal",
+        "action_id": "nav-0003",
+        "data": {"classification": "completed", "reason": "goal_satisfied"}
+      },
+      "expect": [
+        {"kind": "gap", "from_seq": 2, "to_seq": 4},
+        {"kind": "event", "name": "action_terminal", "seq": 5}
+      ]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 5,
+        "tick": 460,
+        "event": "action_terminal",
+        "action_id": "nav-0003",
+        "data": {"classification": "completed", "reason": "goal_satisfied"}
+      },
+      "expect": []
+    },
+    {
+      "send": {"builder": "resume_events", "args": {"bot_name": "MineBot_1", "after_seq": 5}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "RESUME_EVENTS",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "after_seq": 5
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "RESUME_EVENTS_RESULT",
+        "request_id": "r-2",
+        "bot": "MineBot_1",
+        "event_gap": {"from": 6, "to": 9},
+        "events": [
+          {
+            "channel": "fakeplayer-body",
+            "type": "EVENT",
+            "bot": "MineBot_1",
+            "seq": 10,
+            "tick": 900,
+            "event": "owner_acquired",
+            "action_id": "nav-0004",
+            "data": {"type": "NAVIGATE", "priority": "ACTION"}
+          }
+        ],
+        "replay_complete": true,
+        "last_seq": 10,
+        "seq": 2,
+        "server_tick": 901,
+        "sent_at_ms": 1785000004000
+      },
+      "expect": [
+        {"kind": "response", "type": "RESUME_EVENTS_RESULT", "request_type": "RESUME_EVENTS"},
+        {"kind": "gap", "from_seq": 6, "to_seq": 9},
+        {"kind": "event", "name": "owner_acquired", "seq": 10, "action_id": "nav-0004"}
+      ]
+    }
+  ],
+  "final": {"pending_requests": 0, "last_seq": {"MineBot_1": 10}}
+}

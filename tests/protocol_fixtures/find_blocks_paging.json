@@ -1,0 +1,120 @@
+{
+  "name": "find_blocks_paging",
+  "description": "Pages resume one snapshot; coverage facts and generation survive resume; the final page has a null cursor.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["CANCEL_ACTION", "FIND_BLOCKS", "HELLO", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS"],
+        "seq": 1,
+        "server_tick": 100,
+        "sent_at_ms": 1785000000000
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "find_blocks",
+        "args": {"bot_name": "MineBot_1", "block_ids": ["minecraft:oak_log", "minecraft:spruce_log"], "radius": 64, "vertical_radius": 16, "limit": 2}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "FIND_BLOCKS",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "block_ids": ["minecraft:oak_log", "minecraft:spruce_log"],
+        "radius": 64,
+        "vertical_radius": 16,
+        "limit": 2
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "FIND_BLOCKS_RESULT",
+        "request_id": "r-2",
+        "index_generation": 4211,
+        "coverage_complete": false,
+        "unloaded_chunk_count": 3,
+        "result_capped": false,
+        "next_cursor": "c0ffee00-0000-4000-8000-000000000001",
+        "matches": [
+          {"x": 101, "y": 70, "z": -12, "block_id": "minecraft:oak_log", "distance_squared": 41.0},
+          {"x": 96, "y": 68, "z": -20, "block_id": "minecraft:spruce_log", "distance_squared": 130.0}
+        ],
+        "seq": 2,
+        "server_tick": 101,
+        "sent_at_ms": 1785000000050
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "FIND_BLOCKS_RESULT",
+          "request_type": "FIND_BLOCKS",
+          "payload_contains": {"index_generation": 4211, "unloaded_chunk_count": 3, "coverage_complete": false}
+        }
+      ]
+    },
+    {
+      "send": {
+        "builder": "find_blocks",
+        "args": {"bot_name": "MineBot_1", "block_ids": ["minecraft:oak_log", "minecraft:spruce_log"], "radius": 64, "vertical_radius": 16, "limit": 2, "cursor": "c0ffee00-0000-4000-8000-000000000001"}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "FIND_BLOCKS",
+        "request_id": "r-3",
+        "bot_name": "MineBot_1",
+        "block_ids": ["minecraft:oak_log", "minecraft:spruce_log"],
+        "radius": 64,
+        "vertical_radius": 16,
+        "limit": 2,
+        "cursor": "c0ffee00-0000-4000-8000-000000000001"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "FIND_BLOCKS_RESULT",
+        "request_id": "r-3",
+        "index_generation": 4211,
+        "coverage_complete": false,
+        "unloaded_chunk_count": 3,
+        "result_capped": false,
+        "next_cursor": null,
+        "matches": [
+          {"x": 88, "y": 71, "z": -30, "block_id": "minecraft:oak_log", "distance_squared": 1044.0}
+        ],
+        "seq": 3,
+        "server_tick": 103,
+        "sent_at_ms": 1785000000150
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "FIND_BLOCKS_RESULT",
+          "request_type": "FIND_BLOCKS",
+          "payload_contains": {"index_generation": 4211, "next_cursor": null, "unloaded_chunk_count": 3}
+        }
+      ]
+    }
+  ],
+  "final": {"pending_requests": 0}
+}

@@ -1,0 +1,75 @@
+{
+  "name": "navigate_owner_busy",
+  "description": "A second NAVIGATE while the bot is owned is a typed owner_busy error carrying the current owner's facts.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["CANCEL_ACTION", "FIND_BLOCKS", "HELLO", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS"],
+        "seq": 1,
+        "server_tick": 300,
+        "sent_at_ms": 1785000002000
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "navigate",
+        "args": {
+          "bot_name": "MineBot_1",
+          "action_id": "nav-0002",
+          "goal": {"kind": "near", "x": 40, "y": 64, "z": 9, "range": 1.5}
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "NAVIGATE",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "action_id": "nav-0002",
+        "goal": {"kind": "near", "x": 40, "y": 64, "z": 9, "range": 1.5}
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "ERROR",
+        "request_id": "r-2",
+        "code": "owner_busy",
+        "message": "another action owns this bot",
+        "retryable": true,
+        "owner_action_id": "nav-0001",
+        "owner_priority": "ACTION",
+        "seq": 2,
+        "server_tick": 301,
+        "sent_at_ms": 1785000002100
+      },
+      "expect": [
+        {
+          "kind": "error",
+          "code": "owner_busy",
+          "retryable": true,
+          "request_type": "NAVIGATE",
+          "payload_contains": {"owner_action_id": "nav-0001", "owner_priority": "ACTION"}
+        }
+      ]
+    }
+  ],
+  "final": {"pending_requests": 0}
+}
