@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "goal_id": "fakeplayer-java-body-baseline-recovery-20260726",
+  "status": "frozen",
+  "frozen_at": "2026-07-26",
+  "source_docs": [
+    "docs/design-docs/fakeplayer-java-body.md"
+  ],
+  "budgets": {
+    "find_blocks_p95_ms_radius_32": 100.0,
+    "find_blocks_p95_ms_radius_128": 300.0,
+    "search_server_cost_ceiling_ms": 40.0,
+    "planner_nodes_per_tick": 2000,
+    "navigate_default_timeout_ticks": 2400,
+    "mutation_verdict_timeout_ticks": 100,
+    "mutation_roundtrip_p95_ms": 10.0
+  },
+  "change_policy": "Any added, removed, renamed, or changed budget is a contract change and must update this fixture, the implementation constants, the design-doc freeze table, and the probes in one review packet. Budgets are never widened to make a run pass."
+}

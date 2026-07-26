@@ -38,7 +38,12 @@ LOG_BLOCK_IDS = [
     "minecraft:cherry_log",
 ]
 SAMPLES_PER_RADIUS = 30
-BUDGET_P95_MS = {32: 100.0, 128: 300.0}
+_BUDGETS = json.loads(Path("tests/fixtures/java_body_budgets.json").read_text(encoding="utf-8"))["budgets"]
+BUDGET_P95_MS = {
+    32: _BUDGETS["find_blocks_p95_ms_radius_32"],
+    128: _BUDGETS["find_blocks_p95_ms_radius_128"],
+}
+SERVER_COST_CEILING_MS = _BUDGETS["search_server_cost_ceiling_ms"]
 NAVIGATE_WALL_TIMEOUT_S = 150.0
 
 
@@ -97,9 +102,9 @@ def main() -> int:
 
     # --- FIND_BLOCKS latency sampling -------------------------------------
     perf: dict = {}
-    nearest_match: dict | None = None
     for radius in (32, 128):
         latencies: list[float] = []
+        server_costs_ms: list[float] = []
         coverage: dict = {}
         for _ in range(SAMPLES_PER_RADIUS):
             time.sleep(0.06)  # stay under the 40/s transport rate limit
@@ -112,6 +117,9 @@ def main() -> int:
                 artifact["error"] = {"stage": f"find_blocks_r{radius}", "code": result.code, "message": result.message}
                 write_artifact(artifact)
                 return 1
+            cost_micros = result.payload.get("server_cost_micros")
+            if isinstance(cost_micros, (int, float)):
+                server_costs_ms.append(cost_micros / 1000.0)
             coverage = {
                 "coverage_complete": result.payload.get("coverage_complete"),
                 "unloaded_chunk_count": result.payload.get("unloaded_chunk_count"),
@@ -119,11 +127,10 @@ def main() -> int:
                 "matches": len(result.payload.get("matches", [])),
                 "index_generation": result.payload.get("index_generation"),
             }
-            matches = result.payload.get("matches", [])
-            if matches and (nearest_match is None or matches[0]["distance_squared"] < nearest_match["distance_squared"]):
-                nearest_match = matches[0]
         latencies.sort()
+        server_costs_ms.sort()
         p95 = latencies[int(len(latencies) * 0.95) - 1]
+        cost_max = server_costs_ms[-1] if server_costs_ms else None
         perf[f"radius_{radius}"] = {
             "samples": len(latencies),
             "p50_ms": round(statistics.median(latencies), 3),
@@ -131,6 +138,9 @@ def main() -> int:
             "max_ms": round(latencies[-1], 3),
             "budget_p95_ms": BUDGET_P95_MS[radius],
             "within_budget": p95 <= BUDGET_P95_MS[radius],
+            "server_cost_max_ms": round(cost_max, 3) if cost_max is not None else None,
+            "server_cost_ceiling_ms": SERVER_COST_CEILING_MS,
+            "server_cost_within_ceiling": cost_max is not None and cost_max <= SERVER_COST_CEILING_MS,
             "final_coverage": coverage,
         }
     artifact["find_blocks_perf"] = perf

@@ -342,6 +342,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     }
 
     private void handleFindBlocks(MineBotConnection connection, JsonObject request, int serverTick) {
+        long startedNanos = System.nanoTime();
         try {
             String botName = requiredString(request, "bot_name", 64);
             ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
@@ -361,12 +362,12 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     sendError(connection, request, serverTick, resumed.error(), "search cursor is no longer usable", true);
                     return;
                 }
-                sendPage(connection, request, serverTick, resumed.page());
+                sendPage(connection, request, serverTick, resumed.page(), startedNanos);
                 return;
             }
             BlockPos center = player.blockPosition();
             LoadedSearchResult result = scanner.scan(level, center, requestedBlocks, radius, verticalRadius, serverTick);
-            sendPage(connection, request, serverTick, snapshots.first(fingerprint, result, limit));
+            sendPage(connection, request, serverTick, snapshots.first(fingerprint, result, limit), startedNanos);
         } catch (IllegalArgumentException error) {
             sendError(connection, request, serverTick, "invalid_request", error.getMessage(), false);
         } catch (RuntimeException error) {
@@ -378,9 +379,13 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         MineBotConnection connection,
         JsonObject request,
         int serverTick,
-        SearchSnapshotStore.Page page
+        SearchSnapshotStore.Page page,
+        long startedNanos
     ) {
         JsonObject response = baseResponse(request, "FIND_BLOCKS_RESULT");
+        // Server-thread handler cost: the search's true tick impact, for the
+        // frozen 40 ms search-caused-tick ceiling.
+        response.addProperty("server_cost_micros", (System.nanoTime() - startedNanos) / 1_000L);
         response.addProperty("index_generation", page.generation());
         response.addProperty("coverage_complete", page.coverageComplete());
         response.addProperty("unloaded_chunk_count", page.unloadedChunkCount());
