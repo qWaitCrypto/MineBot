@@ -15,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-RUNTIME_SCHEMA_VERSION = 15
+RUNTIME_SCHEMA_VERSION = 16
 DEFAULT_RUNTIME_STATE_DB = Path("var/minebot/agent-state.sqlite3")
 _MAX_SCOPE_COMPONENT_LENGTH = 256
 
@@ -171,6 +171,10 @@ class MemoryRecord:
     region: tuple[float, float, float, float, float, float] | None
     created_at: str
     updated_at: str
+    # F3 §6.2: plural resolvable evidence handles and the supersession chain.
+    # Additive with defaults so every existing construction site stays valid.
+    evidence_handles: tuple[str, ...] = ()
+    superseded_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1786,10 +1790,12 @@ class RuntimeStateStore:
         content: str,
         subject_key: str = "",
         evidence_ref: str = "",
+        evidence_handles: tuple[str, ...] | list[str] = (),
         dimension: str | None = None,
         point: tuple[float, float, float] | None = None,
         region: tuple[float, float, float, float, float, float] | None = None,
     ) -> MemoryRecord:
+        handles = _normalized_evidence_handles(evidence_handles)
         values = _validated_memory_values(
             kind=kind,
             source=source,
@@ -1813,10 +1819,10 @@ class RuntimeStateStore:
                         memory_id, scope_key, revision, kind, source,
                         subject_key, title, content, evidence_ref, dimension,
                         x, y, z, min_x, min_y, min_z, max_x, max_y, max_z,
-                        created_at, updated_at
+                        created_at, updated_at, evidence_handles_json
                     ) VALUES (
                         ?, ?, 1, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -1833,6 +1839,7 @@ class RuntimeStateStore:
                         *(_region_columns(values["region"])),
                         now,
                         now,
+                        json.dumps(list(handles), ensure_ascii=True),
                     ),
                 )
         except sqlite3.IntegrityError as exc:
@@ -1950,6 +1957,45 @@ class RuntimeStateStore:
             )
         if cursor.rowcount != 1:
             raise MemoryStateConflict(f"memory revision conflict or missing: {memory_id}")
+
+    def supersede_memory(
+        self,
+        scope: RuntimeScope,
+        memory_id: str,
+        *,
+        superseded_by: str,
+        expected_revision: int,
+    ) -> MemoryRecord:
+        """Retire a memory by pointing at its replacement (F3 §6.2).
+
+        Forgetting is a supersession chain, not a silent delete: the retired
+        fact stays resolvable so anything that once cited it can still be
+        traced. ``delete_memory`` remains available for genuine removal.
+        """
+
+        successor = str(superseded_by).strip()
+        if not successor:
+            raise MemoryStateConflict("superseded_by must name a replacement memory")
+        if successor == str(memory_id):
+            raise MemoryStateConflict("a memory cannot supersede itself")
+        if self.get_memory(scope, successor) is None:
+            raise MemoryStateConflict(f"replacement memory not found: {successor}")
+        now = _utc_now()
+        with self._lock, self._connection:
+            self._require_open()
+            cursor = self._connection.execute(
+                """
+                UPDATE memory_entries
+                SET superseded_by = ?, revision = revision + 1, updated_at = ?
+                WHERE scope_key = ? AND memory_id = ? AND revision = ?
+                """,
+                (successor, now, scope.key, str(memory_id), int(expected_revision)),
+            )
+        if cursor.rowcount != 1:
+            raise MemoryStateConflict(f"memory revision conflict or missing: {memory_id}")
+        record = self.get_memory(scope, memory_id)
+        assert record is not None
+        return record
 
     def search_memories(
         self,
@@ -2878,7 +2924,9 @@ class RuntimeStateStore:
                     max_y REAL,
                     max_z REAL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    evidence_handles_json TEXT NOT NULL DEFAULT '[]',
+                    superseded_by TEXT
                 );
 
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_subject
@@ -3215,6 +3263,24 @@ class RuntimeStateStore:
                     """
                 )
                 current = 15
+            elif current == 15:
+                # F3 §6.2: plural evidence handles + supersession chain.
+                columns = {
+                    str(row["name"])
+                    for row in self._connection.execute(
+                        "PRAGMA table_info(memory_entries)"
+                    ).fetchall()
+                }
+                if "evidence_handles_json" not in columns:
+                    self._connection.execute(
+                        "ALTER TABLE memory_entries "
+                        "ADD COLUMN evidence_handles_json TEXT NOT NULL DEFAULT '[]'"
+                    )
+                if "superseded_by" not in columns:
+                    self._connection.execute(
+                        "ALTER TABLE memory_entries ADD COLUMN superseded_by TEXT"
+                    )
+                current = 16
             else:
                 raise RuntimeStateError(
                     f"no runtime schema migration from version {current}"
@@ -3618,7 +3684,48 @@ def _memory_from_row(row: sqlite3.Row) -> MemoryRecord:
         region=region,
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
+        evidence_handles=_memory_evidence_handles(row),
+        superseded_by=_memory_superseded_by(row),
     )
+
+
+def _normalized_evidence_handles(raw: object) -> tuple[str, ...]:
+    """Bounded, de-duplicated, order-preserving handle list."""
+    if not isinstance(raw, (tuple, list)):
+        return ()
+    seen: list[str] = []
+    for item in raw:
+        handle = str(item).strip()[:256]
+        if handle and handle not in seen:
+            seen.append(handle)
+        if len(seen) >= 16:
+            break
+    return tuple(seen)
+
+
+def _memory_evidence_handles(row: sqlite3.Row) -> tuple[str, ...]:
+    """Read plural handles defensively; pre-migration rows have none."""
+    try:
+        raw = row["evidence_handles_json"]
+    except (IndexError, KeyError):
+        return ()
+    if not raw:
+        return ()
+    try:
+        decoded = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(decoded, list):
+        return ()
+    return tuple(str(item) for item in decoded if str(item).strip())
+
+
+def _memory_superseded_by(row: sqlite3.Row) -> str | None:
+    try:
+        raw = row["superseded_by"]
+    except (IndexError, KeyError):
+        return None
+    return None if raw is None else str(raw)
 
 
 def _memory_payload(record: MemoryRecord, *, include_content: bool) -> dict[str, object]:
@@ -3630,6 +3737,8 @@ def _memory_payload(record: MemoryRecord, *, include_content: bool) -> dict[str,
         "subject_key": record.subject_key or None,
         "title": record.title,
         "evidence_ref": record.evidence_ref or None,
+        "evidence_handles": list(record.evidence_handles),
+        "superseded_by": record.superseded_by,
         "dimension": record.dimension,
         "point": None if record.point is None else list(record.point),
         "region": None if record.region is None else list(record.region),
