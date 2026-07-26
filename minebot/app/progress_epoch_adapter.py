@@ -35,6 +35,7 @@ class _ModelFunctionCall:
     tool_name: str
     arguments: str
 
+
 @dataclass
 class _ProgressEpochMember:
     tool_call_id: str
@@ -52,6 +53,7 @@ class _ProgressEpochMember:
     epistemic_keys: tuple[str, ...] = ()
     pending_abort: ProgressAbort | None = None
 
+
 @dataclass
 class _ProgressEpoch:
     epoch_id: str
@@ -60,6 +62,7 @@ class _ProgressEpoch:
     pre_body_fingerprint: str | None
     members: list[_ProgressEpochMember]
     finalized: bool = False
+
 
 def _collapsed_epoch_progress_steps(
     members: list[_ProgressEpochMember],
@@ -108,6 +111,7 @@ def _collapsed_epoch_progress_steps(
             neutral=True,
         ),
     )
+
 
 class ProgressEpochAdapter:
     """Bind one complete SDK model-response tool batch to one progress commit."""
@@ -474,6 +478,7 @@ class ProgressEpochAdapter:
         self._active = None
         return progress_abort
 
+
 def _model_function_calls(response: Any) -> list[_ModelFunctionCall]:
     output = getattr(response, "output", None)
     if not isinstance(output, list):
@@ -504,6 +509,7 @@ def _model_function_calls(response: Any) -> list[_ModelFunctionCall]:
             )
         )
     return calls
+
 
 def _explicit_evidence_keys(result: JsonObject) -> tuple[str, ...]:
     metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}

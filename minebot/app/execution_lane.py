@@ -125,6 +125,7 @@ class SerialExecutionLane:
         with self._lock:
             self._futures.pop(future, None)
 
+
 class ToolExecutionTimeout(TimeoutError):
     """A tool exceeded its budget after entering the serialized execution lane."""
 
@@ -141,6 +142,7 @@ class ToolExecutionTimeout(TimeoutError):
             "execution_elapsed_s": execution_elapsed_s,
             "queue_wait_s": queue_wait_s,
         }
+
 
 class BodyRecoveryRequired(RuntimeError):
     """Raised when a Body-critical fact must preempt the model turn."""
