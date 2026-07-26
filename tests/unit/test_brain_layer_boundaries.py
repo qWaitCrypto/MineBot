@@ -17,6 +17,7 @@ opinion:
 from __future__ import annotations
 
 import ast
+import builtins
 from pathlib import Path
 import unittest
 from unittest.mock import Mock
@@ -146,6 +147,79 @@ class BindingRingBoundaryTests(unittest.TestCase):
             "tool callable); extending RUNNER_TOOL_NAME_WHITELIST requires an "
             "architecture justification.",
         )
+
+
+class ModuleNameResolutionTests(unittest.TestCase):
+    """Every app/brain module must resolve all its own global names.
+
+    ``from __future__ import annotations`` makes annotations lazy, so a name
+    that is only referenced in a type position imports cleanly and fails much
+    later — or, worse, a runtime NameError inside a broad ``except`` silently
+    changes behavior instead of crashing. That is exactly how a module
+    extraction can regress a spine invariant while the module still imports.
+    """
+
+    ROOTS = (Path("minebot/app"), Path("minebot/brain"))
+
+    def test_no_module_references_an_unresolved_global(self) -> None:
+        offenders: list[str] = []
+        for root in self.ROOTS:
+            for path in sorted(root.rglob("*.py")):
+                unresolved = _unresolved_globals(path)
+                offenders.extend(f"{path}:{name}" for name in unresolved)
+        self.assertEqual(offenders, [])
+
+
+# Module-level dunders the interpreter injects; never imported or assigned.
+_IMPLICIT_MODULE_GLOBALS = frozenset({"__file__", "__name__", "__doc__", "__package__"})
+
+
+def _unresolved_globals(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    defined: set[str] = set(dir(builtins)) | set(_IMPLICIT_MODULE_GLOBALS)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            defined.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            defined.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.arg):
+            defined.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            defined.add(node.name)
+        elif isinstance(node, ast.Global):
+            defined.update(node.names)
+    used = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    return sorted(used - defined)
+
+
+class DuplicateDefinitionTests(unittest.TestCase):
+    """A shadowed top-level definition is dead code that reads as live code.
+
+    Python keeps the last definition, so a duplicate silently retires the
+    earlier one; a reader auditing the first version is auditing nothing.
+    """
+
+    ROOTS = (Path("minebot/app"), Path("minebot/brain"))
+
+    def test_no_module_defines_the_same_top_level_symbol_twice(self) -> None:
+        offenders: list[str] = []
+        for root in self.ROOTS:
+            for path in sorted(root.rglob("*.py")):
+                seen: set[str] = set()
+                for node in ast.parse(path.read_text(encoding="utf-8")).body:
+                    name = getattr(node, "name", None)
+                    if name is None:
+                        continue
+                    if name in seen:
+                        offenders.append(f"{path}:{name}")
+                    seen.add(name)
+        self.assertEqual(offenders, [])
 
 
 class ProjectorWiringTests(unittest.TestCase):
