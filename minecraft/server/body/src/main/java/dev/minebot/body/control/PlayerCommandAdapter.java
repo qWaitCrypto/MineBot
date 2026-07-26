@@ -13,7 +13,7 @@ import net.minecraft.server.MinecraftServer;
  * {@link #clearAll(String)} is a total cleanup: it always issues {@code stop}
  * and additionally releases sneak/sprint toggles when they were engaged.
  */
-public final class PlayerCommandAdapter {
+public final class PlayerCommandAdapter implements dev.minebot.body.action.BotControls {
     private final MinecraftServer server;
     private final HeldInputs heldInputs;
 
@@ -83,6 +83,7 @@ public final class PlayerCommandAdapter {
      * toggles that were engaged. Must run before an action's terminal result
      * is emitted.
      */
+    @Override
     public void clearAll(String botName) {
         var engaged = heldInputs.drain(botName);
         dispatch(botName, "stop");

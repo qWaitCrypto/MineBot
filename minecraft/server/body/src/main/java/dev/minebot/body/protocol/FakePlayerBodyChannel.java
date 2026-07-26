@@ -2,6 +2,12 @@ package dev.minebot.body.protocol;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import dev.minebot.body.action.ActionRegistry;
+import dev.minebot.body.action.ActionRuntime;
+import dev.minebot.body.control.FakePlayerActionOwner;
+import dev.minebot.body.control.HeldInputs;
+import dev.minebot.body.control.PlayerCommandAdapter;
+import dev.minebot.body.event.BotEventStream;
 import dev.minebot.server.common.transport.MineBotChannel;
 import dev.minebot.server.common.transport.MineBotChannelRouter;
 import dev.minebot.server.common.transport.MineBotConnection;
@@ -20,6 +26,7 @@ import net.minecraft.world.level.block.Block;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -27,17 +34,40 @@ import java.util.Set;
 public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String CHANNEL = "fakeplayer-body";
     public static final String PROTOCOL = "fakeplayer-body/1";
-    private static final Set<String> REQUEST_TYPES = Set.of("HELLO", "FIND_BLOCKS");
+    private static final Set<String> REQUEST_TYPES =
+        Set.of("HELLO", "FIND_BLOCKS", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION");
     private static final int MAX_RADIUS = 128;
     private static final int MAX_VERTICAL_RADIUS = 64;
     private static final int MAX_PAGE_LIMIT = 128;
+    private static final int MAX_REPLAY_EVENTS_PER_RESPONSE = 256;
 
     private final MinecraftServer server;
     private final LoadedBlockScanner scanner = new LoadedBlockScanner();
     private final SearchSnapshotStore snapshots = new SearchSnapshotStore();
+    private final BotEventStream events = new BotEventStream();
+    private final ActionRegistry actions = new ActionRegistry();
+    private final ActionRuntime runtime;
+    private final Set<MineBotConnection> subscribers = new LinkedHashSet<>();
+    private int currentTick;
 
     public FakePlayerBodyChannel(MinecraftServer server) {
         this.server = server;
+        HeldInputs heldInputs = new HeldInputs();
+        PlayerCommandAdapter adapter = new PlayerCommandAdapter(server, heldInputs);
+        this.runtime = new ActionRuntime(new FakePlayerActionOwner(), adapter, actions, events);
+    }
+
+    /** Emits an event and pushes it to every live subscriber. Server thread only. */
+    public void publishEvent(String bot, int serverTick, String name, String actionId, JsonObject data) {
+        BotEventStream.Event event = events.emit(bot, serverTick, name, actionId, data);
+        JsonObject json = event.toJson(CHANNEL);
+        for (MineBotConnection subscriber : subscribers) {
+            subscriber.send(json, serverTick);
+        }
+    }
+
+    public ActionRuntime runtime() {
+        return runtime;
     }
 
     @Override
@@ -46,7 +76,19 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     }
 
     @Override
+    public void tick(int serverTick) {
+        currentTick = serverTick;
+        runtime.tick(serverTick);
+    }
+
+    @Override
+    public void connectionClosed(MineBotConnection connection, int serverTick) {
+        subscribers.remove(connection);
+    }
+
+    @Override
     public void handle(MineBotConnection connection, JsonObject request, int serverTick) {
+        currentTick = serverTick;
         String type = MineBotChannelRouter.stringField(request, "type");
         if (type == null || !REQUEST_TYPES.contains(type)) {
             connection.send(MineBotChannelRouter.error(CHANNEL, requestId(request), "unknown_type", "unknown body request type", false), serverTick);
@@ -56,14 +98,18 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             connection.send(MineBotChannelRouter.error(CHANNEL, requestId(request), "unsupported_protocol", "unsupported body protocol", false), serverTick);
             return;
         }
-        if ("HELLO".equals(type)) {
-            handleHello(connection, request, serverTick);
-            return;
+        switch (type) {
+            case "HELLO" -> handleHello(connection, request, serverTick);
+            case "FIND_BLOCKS" -> handleFindBlocks(connection, request, serverTick);
+            case "RESUME_EVENTS" -> handleResumeEvents(connection, request, serverTick);
+            case "CANCEL_ACTION" -> handleCancelAction(connection, request, serverTick);
+            case "QUERY_ACTION" -> handleQueryAction(connection, request, serverTick);
+            default -> throw new IllegalStateException("unreachable request type " + type);
         }
-        handleFindBlocks(connection, request, serverTick);
     }
 
     private void handleHello(MineBotConnection connection, JsonObject request, int serverTick) {
+        subscribers.add(connection);
         JsonObject response = baseResponse(request, "HELLO_ACK");
         response.addProperty("protocol", PROTOCOL);
         response.addProperty("minecraft_version", server.getServerVersion());
@@ -73,6 +119,86 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         REQUEST_TYPES.stream().sorted().forEach(requestTypes::add);
         response.add("request_types", requestTypes);
         connection.send(response, serverTick);
+    }
+
+    private void handleResumeEvents(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            long afterSeq = request.has("after_seq") ? request.get("after_seq").getAsLong() : 0L;
+            if (afterSeq < 0) {
+                throw new IllegalArgumentException("after_seq must be >= 0");
+            }
+            BotEventStream.Replay replay = events.replay(botName, afterSeq);
+            JsonObject response = baseResponse(request, "RESUME_EVENTS_RESULT");
+            response.addProperty("bot", botName);
+            if (replay.hasGap()) {
+                JsonObject gap = new JsonObject();
+                gap.addProperty("from", replay.gapFrom());
+                gap.addProperty("to", replay.gapTo());
+                response.add("event_gap", gap);
+            } else {
+                response.add("event_gap", com.google.gson.JsonNull.INSTANCE);
+            }
+            JsonArray replayed = new JsonArray();
+            boolean truncated = replay.events().size() > MAX_REPLAY_EVENTS_PER_RESPONSE;
+            replay.events().stream()
+                .limit(MAX_REPLAY_EVENTS_PER_RESPONSE)
+                .forEach(event -> replayed.add(event.toJson(CHANNEL)));
+            response.add("events", replayed);
+            response.addProperty("replay_complete", !truncated);
+            response.addProperty("last_seq", events.lastSeq(botName));
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException | UnsupportedOperationException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        }
+    }
+
+    private void handleCancelAction(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String actionId = requiredString(request, "action_id", 128);
+            ActionRegistry.ActionStatus status = actions.status(actionId);
+            JsonObject response = baseResponse(request, "CANCEL_ACTION_RESULT");
+            response.addProperty("action_id", actionId);
+            switch (status.state()) {
+                case RUNNING -> {
+                    runtime.requestCancel(actionId);
+                    response.addProperty("state", "cancel_requested");
+                }
+                case TERMINAL -> {
+                    response.addProperty("state", "terminal");
+                    response.add("terminal", status.terminal());
+                }
+                case UNKNOWN -> response.addProperty("state", "unknown");
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        }
+    }
+
+    private void handleQueryAction(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String actionId = requiredString(request, "action_id", 128);
+            ActionRegistry.ActionStatus status = actions.status(actionId);
+            JsonObject response = baseResponse(request, "QUERY_ACTION_RESULT");
+            response.addProperty("action_id", actionId);
+            switch (status.state()) {
+                case RUNNING -> {
+                    response.addProperty("state", "running");
+                    response.addProperty("bot", status.record().bot());
+                    response.addProperty("action_type", status.record().type());
+                    response.addProperty("cancel_requested", status.cancelRequested());
+                }
+                case TERMINAL -> {
+                    response.addProperty("state", "terminal");
+                    response.add("terminal", status.terminal());
+                }
+                case UNKNOWN -> response.addProperty("state", "unknown");
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        }
     }
 
     private void handleFindBlocks(MineBotConnection connection, JsonObject request, int serverTick) {
