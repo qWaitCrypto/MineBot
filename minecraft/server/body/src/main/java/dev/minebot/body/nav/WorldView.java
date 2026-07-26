@@ -12,7 +12,7 @@ public interface WorldView {
         PASSABLE,
         /** Collides and can be stood on. A floor cell must be SOLID. */
         SOLID,
-        /** Water. Impassable to the v1 walk-first move set. */
+        /** Water. A body cell may occupy it (swimming); costed above walking. */
         LIQUID,
         /** Lava, fire, and other must-not-touch blocks. */
         HAZARD,

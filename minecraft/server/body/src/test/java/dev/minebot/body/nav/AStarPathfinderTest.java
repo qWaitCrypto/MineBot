@@ -15,7 +15,11 @@ final class AStarPathfinderTest {
     private static final int STAND = FLOOR + 1;
 
     private static Result solve(WorldView world, Goal goal, int sx, int sz) {
-        AStarPathfinder pathfinder = new AStarPathfinder(world, goal, sx, STAND, sz);
+        return solveAt(world, goal, sx, STAND, sz);
+    }
+
+    private static Result solveAt(WorldView world, Goal goal, int sx, int sy, int sz) {
+        AStarPathfinder pathfinder = new AStarPathfinder(world, goal, sx, sy, sz);
         Result result;
         do {
             result = pathfinder.step(10_000);
@@ -100,16 +104,59 @@ final class AStarPathfinderTest {
     }
 
     @Test
-    void liquidIsNeverWalkedOn() {
+    void lavaIsNeverWalkedOn() {
         FakeWorld world = new FakeWorld(FLOOR);
-        // A water channel across the route: floor and standing cell are LIQUID.
+        // A lava channel across the route: floor and standing cell are HAZARD.
         for (int z = -32; z <= 32; z++) {
-            world.set(5, FLOOR, z, WorldView.NodeKind.LIQUID);
-            world.set(5, STAND, z, WorldView.NodeKind.LIQUID);
+            world.set(5, FLOOR, z, WorldView.NodeKind.HAZARD);
+            world.set(5, STAND, z, WorldView.NodeKind.HAZARD);
         }
         Result result = solve(world, new Goal.Near(10, STAND, 0, 0.5), 0, 0);
 
-        result.path().forEach(w -> assertTrue(w.x() != 5 || Math.abs(w.z()) > 32, "no waypoint stands in water"));
+        result.path().forEach(w -> assertTrue(w.x() != 5 || Math.abs(w.z()) > 32, "no waypoint stands in lava"));
+    }
+
+    @Test
+    void aWaterChannelIsSwumAcrossToReachTheGoal() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        // A 3-wide water channel the route must cross (feet + head are water).
+        for (int x = 4; x <= 6; x++) {
+            for (int z = -20; z <= 20; z++) {
+                world.set(x, STAND, z, WorldView.NodeKind.LIQUID);
+                world.set(x, STAND + 1, z, WorldView.NodeKind.LIQUID);
+            }
+        }
+        Result result = solve(world, new Goal.Near(10, STAND, 0, 0.5), 0, 0);
+
+        assertEquals(Outcome.COMPLETE, result.outcome());
+        assertTrue(result.path().stream().anyMatch(w -> w.x() >= 4 && w.x() <= 6), "the path swims through the channel");
+        assertContiguous(result.path());
+    }
+
+    @Test
+    void aWaterColumnIsClimbedToTheSurface() {
+        // Vertical escape through water: the bot starts at the bottom of a
+        // water shaft and must swim up and climb out onto the surface.
+        FakeWorld world = new FakeWorld(FLOOR);
+        int bottom = FLOOR - 6;
+        // Walls forming a shaft at (0,0) from bottom up to STAND, water inside.
+        for (int y = bottom; y <= STAND; y++) {
+            world.set(0, y, 0, WorldView.NodeKind.LIQUID);
+            for (int[] wall : new int[][] {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+                world.set(wall[0], y, wall[1], WorldView.NodeKind.SOLID);
+            }
+        }
+        // Open the top so the surface at STAND has land to step onto, with a
+        // walkable plain beyond it.
+        for (int x = 1; x <= 6; x++) {
+            world.set(x, STAND, 0, WorldView.NodeKind.SOLID);
+        }
+
+        Result result = solveAt(world, new Goal.Near(4, STAND + 1, 0, 0.5), 0, bottom, 0);
+
+        assertEquals(Outcome.COMPLETE, result.outcome());
+        assertTrue(result.path().get(0).y() < STAND, "starts below the surface");
+        assertTrue(result.path().stream().anyMatch(w -> w.y() >= STAND + 1), "rises out of the shaft");
     }
 
     @Test
