@@ -50,6 +50,13 @@ class SessionCommandKind(Enum):
     REPLACE_GOAL = "replace_goal"
     MESSAGE = "message"
     QUIT = "quit"
+    # G1 authority vocabulary (in-game-dialogue.md §3): additive kinds on the
+    # one admission path. Grammar lives in app/dialogue.py; until P2 wires
+    # execution semantics these degrade to conversation after admission.
+    TRUST = "trust"
+    STANCE = "stance"
+    ABANDON = "abandon"
+    CONFIRM = "confirm"
 
 
 @dataclass(frozen=True)
@@ -104,7 +111,25 @@ _ADMISSION_CAPABILITY: dict[SessionCommandKind, AdmissionCapability] = {
     SessionCommandKind.CANCEL: AdmissionCapability.CONTROL_WORK,
     SessionCommandKind.REPLACE_GOAL: AdmissionCapability.CONTROL_WORK,
     SessionCommandKind.QUIT: AdmissionCapability.CONTROL_PROCESS,
+    SessionCommandKind.TRUST: AdmissionCapability.CONTROL_PROCESS,
+    SessionCommandKind.STANCE: AdmissionCapability.CONTROL_PROCESS,
+    SessionCommandKind.ABANDON: AdmissionCapability.CONTROL_WORK,
+    # CONFIRM's entry gate is deliberately CONVERSE: a confirmation slot only
+    # exists for a principal whose original command already passed admission,
+    # and the stored action's capability is re-checked at confirm time
+    # (in-game-dialogue.md §4) — the static row is the door, not the check.
+    SessionCommandKind.CONFIRM: AdmissionCapability.CONVERSE,
 }
+
+# G1 kinds whose execution semantics arrive at P2 activation. An admitted
+# authority command degrades to conversation (typed trace) instead of reaching
+# the scheduler, so landing the vocabulary cannot change production behavior.
+_UNWIRED_DIALOGUE_KINDS = frozenset({
+    SessionCommandKind.TRUST,
+    SessionCommandKind.STANCE,
+    SessionCommandKind.ABANDON,
+    SessionCommandKind.CONFIRM,
+})
 
 
 def _denied_command_text(command: SessionCommand) -> str:
@@ -162,6 +187,7 @@ class AgentSession:
         # lane is cancelled — a denied CANCEL must not cancel anything. A
         # denied command degrades to conversation so the model still sees it.
         command = self._admit(command)
+        command = self._degrade_unwired_dialogue(command)
         always_interrupt = command.kind in {
             SessionCommandKind.PAUSE,
             SessionCommandKind.CANCEL,
@@ -243,6 +269,25 @@ class AgentSession:
             kind=SessionCommandKind.MESSAGE,
             text=_denied_command_text(command),
             reason=f"admission_denied:{command.kind.value}:{decision.reason}",
+            sender=command.sender,
+        )
+
+    def _degrade_unwired_dialogue(self, command: SessionCommand) -> SessionCommand:
+        """G1 vocabulary lands before its semantics (in-game-dialogue.md §6):
+        the kinds and admission rows exist now so P2 is a wiring flip, but an
+        admitted authority command becomes conversation — never a scheduler
+        error — until that flip."""
+        if command.kind not in _UNWIRED_DIALOGUE_KINDS:
+            return command
+        self._trace(
+            "dialogue_command_unwired",
+            command=command.kind.value,
+            sender=command.sender,
+        )
+        return SessionCommand(
+            kind=SessionCommandKind.MESSAGE,
+            text=_denied_command_text(command),
+            reason=f"dialogue_unwired:{command.kind.value}",
             sender=command.sender,
         )
 
