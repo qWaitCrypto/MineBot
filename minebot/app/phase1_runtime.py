@@ -58,7 +58,10 @@ from minebot.brain.composition import (
     register_ensure_tool_for_tool,
     register_inventory_tools,
 )
+from minebot.app.observability import sanitize_observation
+from minebot.app.projection import bounded_summary_value, top_reasons
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
+from minebot.contract import JsonObject
 from minebot.brain.progress import ProgressAuthority
 from minebot.contract import Body, BreakContext, InventorySlot, PerceptionResult, Position, Region, ToolResult, perception_next_cursor
 from minebot.game import GovernancePolicy, ScarpetBody
@@ -729,6 +732,57 @@ def _move_to_tool(navigator: NavigationTransactions) -> RegisteredTool:
     )
 
 
+def exploration_observation_projector(_reason: str, metrics: dict[str, object]) -> JsonObject:
+    """Model-visible projection for explore_for."""
+    summary: JsonObject = {
+        key: bounded_summary_value(metrics[key])
+        for key in (
+            "dimension",
+            "origin",
+            "final_pos",
+            "budget",
+            "coverage_revision",
+            "resume_cursor",
+            "complete",
+        )
+        if key in metrics
+    }
+    if "continuation" in metrics:
+        continuation = sanitize_observation(metrics["continuation"])
+        summary["continuation"] = (
+            continuation
+            if isinstance(continuation, dict) or continuation is None
+            else bounded_summary_value(continuation)
+        )
+    targets = metrics.get("targets")
+    if isinstance(targets, dict):
+        summary["targets"] = bounded_summary_value(targets.get("requested") or targets)
+    covered = metrics.get("covered_regions")
+    if isinstance(covered, list):
+        summary["covered_region_count"] = len(covered)
+        summary["covered_regions"] = [
+            bounded_summary_value(item) for item in covered[:16]
+        ]
+        summary["covered_regions_complete"] = len(covered) <= 16
+    for field_name, count_field in (("blocks", "block_count"), ("entities", "entity_count")):
+        values = metrics.get(field_name)
+        if not isinstance(values, list):
+            continue
+        summary[count_field] = len(values)
+        summary[field_name] = [bounded_summary_value(item) for item in values[:8]]
+        summary[f"{field_name}_complete"] = len(values) <= 8
+    failures = metrics.get("candidate_failures")
+    if isinstance(failures, list):
+        summary["candidate_failure_count"] = len(failures)
+        summary["candidate_failure_reasons"] = top_reasons(failures)
+    evidence_keys = metrics.get("evidence_keys")
+    if isinstance(evidence_keys, list):
+        summary["evidence_key_count"] = len(evidence_keys)
+    if "source_reason" in metrics:
+        summary["source_reason"] = bounded_summary_value(metrics["source_reason"])
+    return summary
+
+
 def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
     return RegisteredTool(
         "explore_for",
@@ -805,6 +859,7 @@ def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
             timeout_s=900.0,
             body_mutating=True,
         ),
+        projector=exploration_observation_projector,
     )
 
 

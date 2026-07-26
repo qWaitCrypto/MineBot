@@ -42,6 +42,14 @@ from minebot.contract import Body, JsonObject, ProgressAbort, ToolResult, is_can
 # the framework face (SDK function_tool), not here.
 ToolCallable = Callable[[JsonObject], ToolResult]
 
+# Optional per-tool observation projector: (reason, metrics) -> bounded summary
+# facts for the model-visible payload. Registered NEXT TO the tool it projects
+# (brain-cognitive-framework.md §12 H1) so the framework binding stays
+# capability-free: the runner threads the projector through; it never owns
+# per-tool projection knowledge. Full metrics remain persisted/queryable
+# regardless of what the projector surfaces.
+ObservationProjector = Callable[[str, dict[str, object]], JsonObject]
+
 # Neutral sentinel for a stale-generation completion: truthy but not success,
 # not a failure, and not appended as fresh world truth (schema §8).
 PREEMPTED_PAYLOAD: JsonObject = ToolResult(
@@ -88,6 +96,7 @@ class RegisteredTool:
     input_schema: JsonObject
     callable: ToolCallable
     sidecar: ToolSidecar
+    projector: ObservationProjector | None = None
 
     def framework_view(self) -> JsonObject:
         """The only fields the agent framework / LLM may see."""
@@ -257,6 +266,7 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
 
 
 __all__ = [
+    "ObservationProjector",
     "ToolCallable",
     "ToolSidecar",
     "RegisteredTool",

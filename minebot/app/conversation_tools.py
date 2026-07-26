@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from minebot.app.projection import bounded_summary_value
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import ToolResult
+from minebot.contract import JsonObject, ToolResult
 
 
 class ConversationArchive(Protocol):
@@ -32,6 +33,83 @@ def register_conversation_archive_tools(
 ) -> None:
     registry.register(_query_tool(archive))
     registry.register(_read_tool(archive))
+
+
+def conversation_archive_query_projector(_reason: str, metrics: dict[str, object]) -> JsonObject:
+    """Model-visible projection for query_conversation_archive."""
+    summary: JsonObject = {
+        key: bounded_summary_value(metrics[key])
+        for key in (
+            "query",
+            "start",
+            "limit",
+            "total_matches",
+            "next_start",
+            "complete",
+        )
+        if key in metrics
+    }
+    results = metrics.get("results")
+    if not isinstance(results, list):
+        return summary
+    visible = [
+        {
+            key: bounded_summary_value(result[key])
+            for key in (
+                "handle",
+                "turn",
+                "user",
+                "assistant",
+                "tools",
+                "tool_reasons",
+                "item_count",
+            )
+            if key in result
+        }
+        for result in results[:10]
+        if isinstance(result, dict)
+    ]
+    summary["results"] = visible
+    summary["results_complete"] = len(visible) == len(results)
+    if len(visible) < len(results):
+        summary["omitted_result_count"] = len(results) - len(visible)
+    return summary
+
+
+def conversation_archive_turn_projector(_reason: str, metrics: dict[str, object]) -> JsonObject:
+    """Model-visible projection for read_conversation_archive."""
+    summary: JsonObject = {
+        key: bounded_summary_value(metrics[key])
+        for key in (
+            "handle",
+            "turn",
+            "start",
+            "limit",
+            "item_count",
+            "next_start",
+            "complete",
+        )
+        if key in metrics
+    }
+    items = metrics.get("items")
+    if not isinstance(items, list):
+        return summary
+    visible = [_conversation_item_summary(item) for item in items[:8]]
+    summary["items"] = visible
+    summary["items_complete"] = len(visible) == len(items)
+    if len(visible) < len(items):
+        summary["omitted_page_item_count"] = len(items) - len(visible)
+    return summary
+
+
+def _conversation_item_summary(item: object) -> object:
+    if not isinstance(item, dict):
+        return bounded_summary_value(item)
+    return {
+        key: bounded_summary_value(item[key])
+        for key in ("type", "role", "call_id", "id", "name", "content", "output")
+        if key in item
+    }
 
 
 def _query_tool(archive: ConversationArchive) -> RegisteredTool:
@@ -65,6 +143,7 @@ def _query_tool(archive: ConversationArchive) -> RegisteredTool:
             body_scope=(),
             terminal_truth=("ConversationArchive.revision",),
         ),
+        projector=conversation_archive_query_projector,
     )
 
 
@@ -108,6 +187,7 @@ def _read_tool(archive: ConversationArchive) -> RegisteredTool:
             body_scope=(),
             terminal_truth=("ConversationArchive.turn",),
         ),
+        projector=conversation_archive_turn_projector,
     )
 
 

@@ -21,7 +21,8 @@ from minebot.body import (
     ResourceCollectionTransactions,
     UseTransactions,
 )
-from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
+from minebot.app.projection import bounded_summary_value, top_reasons
+from minebot.brain.registry import ObservationProjector, RegisteredTool, ToolRegistry, ToolSidecar
 from minebot.contract import (
     Body,
     BreakContext,
@@ -390,6 +391,7 @@ def _tool(
     body_scope: tuple[str, ...],
     terminal_truth: tuple[str, ...],
     timeout_s: float,
+    projector: ObservationProjector | None = None,
 ) -> RegisteredTool:
     return RegisteredTool(
         name,
@@ -406,6 +408,7 @@ def _tool(
             terminal_truth=terminal_truth,
             timeout_s=timeout_s,
         ),
+        projector=projector,
     )
 
 
@@ -1270,6 +1273,135 @@ def _dig_up_tool(work: BlockWork) -> RegisteredTool:
     )
 
 
+def resource_domain_observation_projector(reason: str, metrics: dict[str, object]) -> JsonObject:
+    """Model-visible projection for collect_block_domain."""
+    attempts = metrics.get("attempts")
+    searches = metrics.get("searches")
+    blocker_counts: dict[str, int] = {}
+    governance_counts: dict[str, int] = {}
+    movement_counts: dict[str, int] = {}
+    final_pos: object | None = None
+    selected_goal: object | None = None
+    capability_snapshot: dict[str, object] | None = None
+
+    def count_reason(counts: dict[str, int], value: object) -> None:
+        normalized = str(value or "").strip()
+        if normalized:
+            counts[normalized] = counts.get(normalized, 0) + 1
+
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            for phase in ("navigation", "mine"):
+                phase_result = attempt.get(phase)
+                if not isinstance(phase_result, dict) or phase_result.get("success") is True:
+                    continue
+                count_reason(blocker_counts, phase_result.get("reason"))
+            navigation = attempt.get("navigation")
+            if not isinstance(navigation, dict):
+                continue
+            navigation_metrics = navigation.get("metrics")
+            if not isinstance(navigation_metrics, dict):
+                continue
+            if navigation_metrics.get("selected_goal") is not None:
+                selected_goal = navigation_metrics["selected_goal"]
+            if navigation_metrics.get("final_pos") is not None:
+                final_pos = navigation_metrics["final_pos"]
+            segments = navigation_metrics.get("segments")
+            if not isinstance(segments, list):
+                continue
+            for segment in segments:
+                if not isinstance(segment, dict):
+                    continue
+                diagnostics = segment.get("diagnostics")
+                if not isinstance(diagnostics, dict):
+                    continue
+                event_data = diagnostics.get("event_data")
+                if isinstance(event_data, dict) and event_data.get("final_pos") is not None:
+                    final_pos = event_data["final_pos"]
+                segment_counts = diagnostics.get("movement_counts")
+                if isinstance(segment_counts, dict):
+                    for movement, value in segment_counts.items():
+                        if isinstance(value, (int, float)) and int(value) > 0:
+                            key = str(movement)
+                            movement_counts[key] = movement_counts.get(key, 0) + int(value)
+                snapshot = diagnostics.get("capability_snapshot")
+                if isinstance(snapshot, dict):
+                    capability_snapshot = snapshot
+                mutation_events = diagnostics.get("mutation_events")
+                if not isinstance(mutation_events, list):
+                    continue
+                for event in mutation_events:
+                    if not isinstance(event, dict):
+                        continue
+                    data = event.get("data")
+                    if not isinstance(data, dict) or data.get("success") is not False:
+                        continue
+                    count_reason(governance_counts, data.get("decision_reason") or data.get("reason"))
+
+    summary: JsonObject = {}
+    if blocker_counts:
+        summary["process_blockers"] = _bounded_reason_counts(blocker_counts)
+    if governance_counts:
+        summary["governance_blockers"] = _bounded_reason_counts(governance_counts)
+    if movement_counts:
+        summary["movement_counts"] = {
+            key: movement_counts[key]
+            for key in sorted(movement_counts)
+        }
+    if final_pos is not None:
+        summary["final_pos"] = bounded_summary_value(final_pos)
+    if selected_goal is not None:
+        summary["selected_goal"] = bounded_summary_value(selected_goal)
+    if capability_snapshot is not None:
+        summary["capability_snapshot"] = {
+            key: bounded_summary_value(capability_snapshot[key])
+            for key in (
+                "allow_break",
+                "allow_place",
+                "allow_pillar",
+                "allow_downward",
+                "allow_swim",
+                "break_budget",
+                "place_budget",
+                "pillar_budget",
+                "downward_budget",
+                "scaffold_item",
+                "scaffold_count",
+            )
+            if key in capability_snapshot
+        }
+    if isinstance(searches, list):
+        summary["search_count"] = len(searches)
+        summary["search_truncated"] = any(
+            isinstance(search, dict) and search.get("truncated") is True
+            for search in searches
+        )
+        search_uncertainty = [
+            uncertainty
+            for search in searches
+            if isinstance(search, dict)
+            for uncertainty in (search.get("uncertainty") or [])
+            if isinstance(uncertainty, dict)
+        ]
+        if search_uncertainty:
+            summary["search_uncertainty"] = top_reasons(search_uncertainty)
+    if reason == "resource_domain_budget_exhausted" and final_pos is not None:
+        summary["resume_hint"] = (
+            "bounded resource work ended after physical progress; retry the same Body domain from final_pos "
+            "or choose a different domain or prerequisite from the blocker facts"
+        )
+    return summary
+
+
+def _bounded_reason_counts(counts: dict[str, int]) -> list[str]:
+    return [
+        f"{reason}:{count}"
+        for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:6]
+    ]
+
+
 def _collect_block_domain_tool(resource: ResourceCollectionTransactions) -> RegisteredTool:
     return _tool(
         "collect_block_domain",
@@ -1312,6 +1444,7 @@ def _collect_block_domain_tool(resource: ResourceCollectionTransactions) -> Regi
         body_scope=("search", "navigation", "mine", "pickup", "inventory"),
         terminal_truth=("findBlocks", "navigateDone", "mineDone", "blockAt", "inventory"),
         timeout_s=960.0,
+        projector=resource_domain_observation_projector,
     )
 
 

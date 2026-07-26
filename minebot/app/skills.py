@@ -29,8 +29,9 @@ from minebot.app.skill_format import (
 )
 from minebot.app.tasks import TaskWorkspace
 from minebot.brain.context import AgentContext
-from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import ToolResult
+from minebot.app.projection import bounded_summary_value, shorten
+from minebot.brain.registry import ObservationProjector, RegisteredTool, ToolRegistry, ToolSidecar
+from minebot.contract import JsonObject, ToolResult
 
 
 MAX_SKILL_DESCRIPTOR_CONTEXT_CHARS = 16_000
@@ -659,6 +660,92 @@ def register_skill_tools(registry: ToolRegistry, workspace: SkillWorkspace) -> N
     registry.register(_delete_skill_tool(workspace))
 
 
+def skill_observation_projector(tool_name: str) -> ObservationProjector:
+    """Model-visible projection factory for the Skill catalog/control tools."""
+
+    def project(_reason: str, metrics: dict[str, object]) -> JsonObject:
+        return _skill_tool_summary(tool_name, metrics)
+
+    return project
+
+
+def _skill_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObject:
+    summary: JsonObject = {
+        key: bounded_summary_value(metrics[key])
+        for key in (
+            "name",
+            "description",
+            "version",
+            "head_version",
+            "revision",
+            "origin",
+            "status",
+            "tools",
+            "loadable",
+            "missing_tools",
+            "derived_from",
+            "count",
+            "total_matches",
+            "start",
+            "limit",
+            "next_start",
+            "complete",
+            "error",
+            "retired_at",
+            "reason",
+            "evidence_refs",
+            "change_reason",
+        )
+        if key in metrics
+    }
+    skills = metrics.get("skills")
+    if isinstance(skills, list):
+        visible = [
+            {
+                key: bounded_summary_value(item[key])
+                for key in (
+                    "name",
+                    "description",
+                    "version",
+                    "head_version",
+                    "revision",
+                    "origin",
+                    "loadable",
+                    "missing_tools",
+                )
+                if key in item
+            }
+            for item in skills[:10]
+            if isinstance(item, dict)
+        ]
+        summary["skills"] = visible
+        summary["skills_complete"] = len(visible) == len(skills)
+        if len(visible) < len(skills):
+            summary["omitted_skill_count"] = len(skills) - len(visible)
+    if tool_name in {"read_skill", "load_skill"} and isinstance(metrics.get("instructions"), str):
+        instructions = str(metrics["instructions"])
+        summary["instructions"] = shorten(instructions, limit=8000)
+        summary["instructions_complete"] = len(summary["instructions"]) == len(instructions)
+    activation = metrics.get("activation")
+    if isinstance(activation, dict):
+        summary["activation"] = {
+            key: bounded_summary_value(activation[key])
+            for key in (
+                "activation_id",
+                "task_id",
+                "owner_kind",
+                "owner_id",
+                "skill_id",
+                "skill_name",
+                "skill_version",
+                "activated_at",
+                "ended_at",
+            )
+            if key in activation
+        }
+    return summary
+
+
 def _list_skills_tool(workspace: SkillWorkspace) -> RegisteredTool:
     def list_skills(params: dict[str, object]) -> ToolResult:
         return ToolResult(
@@ -686,6 +773,7 @@ def _list_skills_tool(workspace: SkillWorkspace) -> RegisteredTool:
         },
         list_skills,
         _skill_sidecar("list_skills", "read_skill_catalog", "skill_catalog"),
+        projector=skill_observation_projector("list_skills"),
     )
 
 
@@ -717,6 +805,7 @@ def _read_skill_tool(workspace: SkillWorkspace) -> RegisteredTool:
         _skill_reference_schema(),
         read_skill,
         _skill_sidecar("read_skill", "read_skill", "skill_catalog"),
+        projector=skill_observation_projector("read_skill"),
     )
 
 
@@ -747,6 +836,7 @@ def _load_skill_tool(workspace: SkillWorkspace) -> RegisteredTool:
         _skill_reference_schema(),
         load_skill,
         _skill_sidecar("load_skill", "load_skill", "skill_activation"),
+        projector=skill_observation_projector("load_skill"),
     )
 
 
@@ -791,6 +881,7 @@ def _create_skill_tool(workspace: SkillWorkspace) -> RegisteredTool:
         },
         create_skill,
         _skill_sidecar("create_skill", "write_skill", "skill_control"),
+        projector=skill_observation_projector("create_skill"),
     )
 
 
@@ -840,6 +931,7 @@ def _update_skill_tool(workspace: SkillWorkspace) -> RegisteredTool:
         },
         update_skill,
         _skill_sidecar("update_skill", "write_skill", "skill_control"),
+        projector=skill_observation_projector("update_skill"),
     )
 
 
@@ -886,6 +978,7 @@ def _delete_skill_tool(workspace: SkillWorkspace) -> RegisteredTool:
         },
         delete_skill,
         _skill_sidecar("delete_skill", "delete_skill", "skill_control"),
+        projector=skill_observation_projector("delete_skill"),
     )
 
 

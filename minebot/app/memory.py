@@ -13,8 +13,9 @@ from minebot.app.runtime_state import (
     RuntimeStateStore,
     memory_record_payload,
 )
-from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import ToolResult
+from minebot.app.projection import bounded_summary_value, shorten
+from minebot.brain.registry import ObservationProjector, RegisteredTool, ToolRegistry, ToolSidecar
+from minebot.contract import JsonObject, ToolResult
 
 
 @dataclass
@@ -130,6 +131,100 @@ def register_memory_tools(registry: ToolRegistry, workspace: MemoryWorkspace) ->
     registry.register(_delete_memory_tool(workspace))
 
 
+def memory_observation_projector(tool_name: str) -> ObservationProjector:
+    """Model-visible projection factory for the scoped memory tools."""
+
+    def project(_reason: str, metrics: dict[str, object]) -> JsonObject:
+        return _memory_tool_summary(tool_name, metrics)
+
+    return project
+
+
+def _memory_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObject:
+    summary: JsonObject = {
+        key: bounded_summary_value(metrics[key])
+        for key in (
+            "memory_id",
+            "revision",
+            "kind",
+            "source",
+            "subject_key",
+            "title",
+            "evidence_ref",
+            "dimension",
+            "point",
+            "region",
+            "query",
+            "filters",
+            "start",
+            "limit",
+            "candidate_count",
+            "next_start",
+            "complete",
+            "candidate_truncated",
+            "lanes",
+            "error",
+        )
+        if key in metrics
+    }
+    results = metrics.get("results")
+    if isinstance(results, list):
+        visible = [
+            _memory_record_summary(item, include_content=False)
+            for item in results[:8]
+            if isinstance(item, dict)
+        ]
+        summary["results"] = visible
+        summary["results_complete"] = len(visible) == len(results)
+        if len(visible) < len(results):
+            summary["omitted_result_count"] = len(results) - len(visible)
+    elif tool_name in {"read_memory", "write_memory", "update_memory"}:
+        summary.update(
+            _memory_record_summary(
+                metrics,
+                include_content=tool_name == "read_memory",
+            )
+        )
+    return summary
+
+
+def _memory_record_summary(
+    record: dict[str, object],
+    *,
+    include_content: bool,
+) -> JsonObject:
+    summary: JsonObject = {
+        key: bounded_summary_value(record[key])
+        for key in (
+            "memory_id",
+            "revision",
+            "kind",
+            "source",
+            "subject_key",
+            "title",
+            "evidence_ref",
+            "dimension",
+            "point",
+            "region",
+            "updated_at",
+            "retrieval_score",
+            "match_lanes",
+            "distance",
+            "content_truncated",
+        )
+        if key in record
+    }
+    excerpt = record.get("excerpt")
+    if isinstance(excerpt, str):
+        summary["excerpt"] = shorten(excerpt, limit=500)
+        summary["excerpt_complete"] = len(summary["excerpt"]) == len(excerpt)
+    if include_content and isinstance(record.get("content"), str):
+        content = str(record["content"])
+        summary["content"] = shorten(content, limit=4000)
+        summary["content_complete"] = len(summary["content"]) == len(content)
+    return summary
+
+
 def _search_memory_tool(workspace: MemoryWorkspace) -> RegisteredTool:
     def search(params: dict[str, object]) -> ToolResult:
         try:
@@ -172,6 +267,7 @@ def _search_memory_tool(workspace: MemoryWorkspace) -> RegisteredTool:
         },
         search,
         _memory_sidecar("search_memory", permission="read_memory", tool_type="memory_query"),
+        projector=memory_observation_projector("search_memory"),
     )
 
 
@@ -204,6 +300,7 @@ def _read_memory_tool(workspace: MemoryWorkspace) -> RegisteredTool:
         },
         read,
         _memory_sidecar("read_memory", permission="read_memory", tool_type="memory_query"),
+        projector=memory_observation_projector("read_memory"),
     )
 
 
@@ -241,6 +338,7 @@ def _write_memory_tool(workspace: MemoryWorkspace) -> RegisteredTool:
         _memory_write_schema(require_all=True),
         write,
         _memory_sidecar("write_memory", permission="write_memory", tool_type="memory_write"),
+        projector=memory_observation_projector("write_memory"),
     )
 
 
@@ -291,6 +389,7 @@ def _update_memory_tool(workspace: MemoryWorkspace) -> RegisteredTool:
         schema,
         update,
         _memory_sidecar("update_memory", permission="write_memory", tool_type="memory_write"),
+        projector=memory_observation_projector("update_memory"),
     )
 
 
@@ -328,6 +427,7 @@ def _delete_memory_tool(workspace: MemoryWorkspace) -> RegisteredTool:
         },
         delete,
         _memory_sidecar("delete_memory", permission="delete_memory", tool_type="memory_write"),
+        projector=memory_observation_projector("delete_memory"),
     )
 
 

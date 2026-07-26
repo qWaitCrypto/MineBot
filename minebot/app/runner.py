@@ -26,6 +26,12 @@ from minebot.app.observation_artifacts import ToolObservationArchive
 from minebot.app.progress_epochs import ProgressEpochArchive
 from minebot.app.skills import SkillOperationError
 from minebot.app.observability import ObservationSink, sanitize_observation
+from minebot.app.projection import (
+    bounded_summary_value as _bounded_summary_value,
+    projection_values_equal as _projection_values_equal,
+    shorten as _shorten,
+    top_reasons as _top_reasons,
+)
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleError, LifecycleState
 from minebot.brain.modes import (
@@ -38,7 +44,13 @@ from minebot.brain.modes import (
     survival_reason_from_tool_results,
 )
 from minebot.brain.progress import ProgressAuthority, ProgressStep
-from minebot.brain.registry import RegisteredTool, ToolRegistry, WeldContext, execute_tool
+from minebot.brain.registry import (
+    ObservationProjector,
+    RegisteredTool,
+    ToolRegistry,
+    WeldContext,
+    execute_tool,
+)
 from minebot.contract import (
     Body,
     ExecutionCancellation,
@@ -1201,6 +1213,7 @@ def _finalize_tool_payload(
         result,
         trace_ref=tool_call_id,
         observation_handle=observation_handle,
+        projector=tool.projector,
     )
     if trace is not None:
         trace.emit(
@@ -1448,6 +1461,7 @@ def _model_tool_payload(
     *,
     trace_ref: str,
     observation_handle: str | None = None,
+    projector: ObservationProjector | None = None,
 ) -> JsonObject:
     reason = str(result.get("reason") or "")
     success = bool(result.get("success"))
@@ -1460,7 +1474,7 @@ def _model_tool_payload(
         "complete": _result_complete(result),
         "traceRef": trace_ref,
     }
-    summary = _metrics_summary(tool_name, reason, metrics)
+    summary = _metrics_summary(tool_name, reason, metrics, projector=projector)
     if summary:
         payload["summary"] = summary
     if observation_handle is not None:
@@ -1509,13 +1523,6 @@ def _projection_metadata(
 _MISSING_PROJECTION_VALUE = object()
 
 
-def _projection_values_equal(source: object, projected: object) -> bool:
-    try:
-        return sanitize_observation(source) == sanitize_observation(projected)
-    except Exception:
-        return False
-
-
 def _projection_value_count(source: object, projected: object) -> int | None:
     if isinstance(source, (list, tuple)):
         if isinstance(projected, list):
@@ -1555,7 +1562,13 @@ def _result_complete(result: JsonObject) -> bool | None:
     return True
 
 
-def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) -> JsonObject:
+def _metrics_summary(
+    tool_name: str,
+    reason: str,
+    metrics: dict[str, object],
+    *,
+    projector: ObservationProjector | None = None,
+) -> JsonObject:
     allowed_keys = (
         "item",
         "target_count",
@@ -1589,39 +1602,10 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
         "reflex_handoff",
     )
     summary: JsonObject = {}
-    if tool_name in {"read_task", "update_plan", "checkpoint_task"}:
-        summary["task_artifact"] = _task_artifact_summary(metrics)
-    elif tool_name == "query_conversation_archive":
-        summary.update(_conversation_archive_query_summary(metrics))
-    elif tool_name == "read_conversation_archive":
-        summary.update(_conversation_archive_turn_summary(metrics))
-    elif tool_name == "query_tool_observations":
-        summary.update(_tool_observation_query_summary(metrics))
-    elif tool_name == "read_tool_observation":
-        summary.update(_tool_observation_read_summary(metrics))
-    elif tool_name in {
-        "search_memory",
-        "read_memory",
-        "write_memory",
-        "update_memory",
-        "delete_memory",
-    }:
-        summary.update(_memory_tool_summary(tool_name, metrics))
-    elif tool_name in {
-        "list_skills",
-        "read_skill",
-        "load_skill",
-        "create_skill",
-        "update_skill",
-        "delete_skill",
-    }:
-        summary.update(_skill_tool_summary(tool_name, metrics))
-    elif tool_name in {"wiki_search", "wiki_read"}:
-        summary.update(_wiki_tool_summary(tool_name, metrics))
-    elif tool_name == "explore_for":
-        summary.update(_exploration_tool_summary(metrics))
-    elif tool_name == "collect_block_domain":
-        summary.update(_resource_domain_tool_summary(reason, metrics))
+    if projector is not None:
+        projected = projector(reason, metrics)
+        if isinstance(projected, dict):
+            summary.update(projected)
     for key in allowed_keys:
         if key in metrics:
             summary[key] = _bounded_summary_value(metrics[key])
@@ -1688,184 +1672,6 @@ def _metrics_summary(tool_name: str, reason: str, metrics: dict[str, object]) ->
     return summary
 
 
-def _resource_domain_tool_summary(reason: str, metrics: dict[str, object]) -> JsonObject:
-    attempts = metrics.get("attempts")
-    searches = metrics.get("searches")
-    blocker_counts: dict[str, int] = {}
-    governance_counts: dict[str, int] = {}
-    movement_counts: dict[str, int] = {}
-    final_pos: object | None = None
-    selected_goal: object | None = None
-    capability_snapshot: dict[str, object] | None = None
-
-    def count_reason(counts: dict[str, int], value: object) -> None:
-        normalized = str(value or "").strip()
-        if normalized:
-            counts[normalized] = counts.get(normalized, 0) + 1
-
-    if isinstance(attempts, list):
-        for attempt in attempts:
-            if not isinstance(attempt, dict):
-                continue
-            for phase in ("navigation", "mine"):
-                phase_result = attempt.get(phase)
-                if not isinstance(phase_result, dict) or phase_result.get("success") is True:
-                    continue
-                count_reason(blocker_counts, phase_result.get("reason"))
-            navigation = attempt.get("navigation")
-            if not isinstance(navigation, dict):
-                continue
-            navigation_metrics = navigation.get("metrics")
-            if not isinstance(navigation_metrics, dict):
-                continue
-            if navigation_metrics.get("selected_goal") is not None:
-                selected_goal = navigation_metrics["selected_goal"]
-            if navigation_metrics.get("final_pos") is not None:
-                final_pos = navigation_metrics["final_pos"]
-            segments = navigation_metrics.get("segments")
-            if not isinstance(segments, list):
-                continue
-            for segment in segments:
-                if not isinstance(segment, dict):
-                    continue
-                diagnostics = segment.get("diagnostics")
-                if not isinstance(diagnostics, dict):
-                    continue
-                event_data = diagnostics.get("event_data")
-                if isinstance(event_data, dict) and event_data.get("final_pos") is not None:
-                    final_pos = event_data["final_pos"]
-                segment_counts = diagnostics.get("movement_counts")
-                if isinstance(segment_counts, dict):
-                    for movement, value in segment_counts.items():
-                        if isinstance(value, (int, float)) and int(value) > 0:
-                            key = str(movement)
-                            movement_counts[key] = movement_counts.get(key, 0) + int(value)
-                snapshot = diagnostics.get("capability_snapshot")
-                if isinstance(snapshot, dict):
-                    capability_snapshot = snapshot
-                mutation_events = diagnostics.get("mutation_events")
-                if not isinstance(mutation_events, list):
-                    continue
-                for event in mutation_events:
-                    if not isinstance(event, dict):
-                        continue
-                    data = event.get("data")
-                    if not isinstance(data, dict) or data.get("success") is not False:
-                        continue
-                    count_reason(governance_counts, data.get("decision_reason") or data.get("reason"))
-
-    summary: JsonObject = {}
-    if blocker_counts:
-        summary["process_blockers"] = _bounded_reason_counts(blocker_counts)
-    if governance_counts:
-        summary["governance_blockers"] = _bounded_reason_counts(governance_counts)
-    if movement_counts:
-        summary["movement_counts"] = {
-            key: movement_counts[key]
-            for key in sorted(movement_counts)
-        }
-    if final_pos is not None:
-        summary["final_pos"] = _bounded_summary_value(final_pos)
-    if selected_goal is not None:
-        summary["selected_goal"] = _bounded_summary_value(selected_goal)
-    if capability_snapshot is not None:
-        summary["capability_snapshot"] = {
-            key: _bounded_summary_value(capability_snapshot[key])
-            for key in (
-                "allow_break",
-                "allow_place",
-                "allow_pillar",
-                "allow_downward",
-                "allow_swim",
-                "break_budget",
-                "place_budget",
-                "pillar_budget",
-                "downward_budget",
-                "scaffold_item",
-                "scaffold_count",
-            )
-            if key in capability_snapshot
-        }
-    if isinstance(searches, list):
-        summary["search_count"] = len(searches)
-        summary["search_truncated"] = any(
-            isinstance(search, dict) and search.get("truncated") is True
-            for search in searches
-        )
-        search_uncertainty = [
-            uncertainty
-            for search in searches
-            if isinstance(search, dict)
-            for uncertainty in (search.get("uncertainty") or [])
-            if isinstance(uncertainty, dict)
-        ]
-        if search_uncertainty:
-            summary["search_uncertainty"] = _top_reasons(search_uncertainty)
-    if reason == "resource_domain_budget_exhausted" and final_pos is not None:
-        summary["resume_hint"] = (
-            "bounded resource work ended after physical progress; retry the same Body domain from final_pos "
-            "or choose a different domain or prerequisite from the blocker facts"
-        )
-    return summary
-
-
-def _bounded_reason_counts(counts: dict[str, int]) -> list[str]:
-    return [
-        f"{reason}:{count}"
-        for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:6]
-    ]
-
-
-def _exploration_tool_summary(metrics: dict[str, object]) -> JsonObject:
-    summary: JsonObject = {
-        key: _bounded_summary_value(metrics[key])
-        for key in (
-            "dimension",
-            "origin",
-            "final_pos",
-            "budget",
-            "coverage_revision",
-            "resume_cursor",
-            "complete",
-        )
-        if key in metrics
-    }
-    if "continuation" in metrics:
-        continuation = sanitize_observation(metrics["continuation"])
-        summary["continuation"] = (
-            continuation
-            if isinstance(continuation, dict) or continuation is None
-            else _bounded_summary_value(continuation)
-        )
-    targets = metrics.get("targets")
-    if isinstance(targets, dict):
-        summary["targets"] = _bounded_summary_value(targets.get("requested") or targets)
-    covered = metrics.get("covered_regions")
-    if isinstance(covered, list):
-        summary["covered_region_count"] = len(covered)
-        summary["covered_regions"] = [
-            _bounded_summary_value(item) for item in covered[:16]
-        ]
-        summary["covered_regions_complete"] = len(covered) <= 16
-    for field, count_field in (("blocks", "block_count"), ("entities", "entity_count")):
-        values = metrics.get(field)
-        if not isinstance(values, list):
-            continue
-        summary[count_field] = len(values)
-        summary[field] = [_bounded_summary_value(item) for item in values[:8]]
-        summary[f"{field}_complete"] = len(values) <= 8
-    failures = metrics.get("candidate_failures")
-    if isinstance(failures, list):
-        summary["candidate_failure_count"] = len(failures)
-        summary["candidate_failure_reasons"] = _top_reasons(failures)
-    evidence_keys = metrics.get("evidence_keys")
-    if isinstance(evidence_keys, list):
-        summary["evidence_key_count"] = len(evidence_keys)
-    if "source_reason" in metrics:
-        summary["source_reason"] = _bounded_summary_value(metrics["source_reason"])
-    return summary
-
-
 def _include_generic_small_metric_facts(
     summary: JsonObject,
     metrics: dict[str, object],
@@ -1886,453 +1692,6 @@ def _include_generic_small_metric_facts(
         encoded = json.dumps(projected, ensure_ascii=False, sort_keys=True, default=str)
         if len(encoded) <= 1200:
             summary[key] = projected
-
-
-def _conversation_archive_query_summary(metrics: dict[str, object]) -> JsonObject:
-    summary: JsonObject = {
-        key: _bounded_summary_value(metrics[key])
-        for key in (
-            "query",
-            "start",
-            "limit",
-            "total_matches",
-            "next_start",
-            "complete",
-        )
-        if key in metrics
-    }
-    results = metrics.get("results")
-    if not isinstance(results, list):
-        return summary
-    visible = [
-        {
-            key: _bounded_summary_value(result[key])
-            for key in (
-                "handle",
-                "turn",
-                "user",
-                "assistant",
-                "tools",
-                "tool_reasons",
-                "item_count",
-            )
-            if key in result
-        }
-        for result in results[:10]
-        if isinstance(result, dict)
-    ]
-    summary["results"] = visible
-    summary["results_complete"] = len(visible) == len(results)
-    if len(visible) < len(results):
-        summary["omitted_result_count"] = len(results) - len(visible)
-    return summary
-
-
-def _conversation_archive_turn_summary(metrics: dict[str, object]) -> JsonObject:
-    summary: JsonObject = {
-        key: _bounded_summary_value(metrics[key])
-        for key in (
-            "handle",
-            "turn",
-            "start",
-            "limit",
-            "item_count",
-            "next_start",
-            "complete",
-        )
-        if key in metrics
-    }
-    items = metrics.get("items")
-    if not isinstance(items, list):
-        return summary
-    visible = [_conversation_item_summary(item) for item in items[:8]]
-    summary["items"] = visible
-    summary["items_complete"] = len(visible) == len(items)
-    if len(visible) < len(items):
-        summary["omitted_page_item_count"] = len(items) - len(visible)
-    return summary
-
-
-def _conversation_item_summary(item: object) -> object:
-    if not isinstance(item, dict):
-        return _bounded_summary_value(item)
-    return {
-        key: _bounded_summary_value(item[key])
-        for key in ("type", "role", "call_id", "id", "name", "content", "output")
-        if key in item
-    }
-
-
-def _tool_observation_query_summary(metrics: dict[str, object]) -> JsonObject:
-    summary: JsonObject = {
-        key: _bounded_summary_value(metrics[key])
-        for key in (
-            "query",
-            "tool",
-            "reason",
-            "start",
-            "limit",
-            "total_matches",
-            "next_start",
-            "complete",
-        )
-        if key in metrics
-    }
-    results = metrics.get("results")
-    if not isinstance(results, list):
-        return summary
-    visible = [
-        {
-            key: _bounded_summary_value(result[key])
-            for key in (
-                "handle",
-                "tool",
-                "tool_call_id",
-                "success",
-                "reason",
-                "complete",
-                "payload_bytes",
-                "created_at",
-            )
-            if key in result
-        }
-        for result in results[:20]
-        if isinstance(result, dict)
-    ]
-    summary["results"] = visible
-    summary["results_complete"] = len(visible) == len(results)
-    if len(visible) < len(results):
-        summary["omitted_result_count"] = len(results) - len(visible)
-    return summary
-
-
-def _tool_observation_read_summary(metrics: dict[str, object]) -> JsonObject:
-    summary: JsonObject = {
-        key: _bounded_summary_value(metrics[key])
-        for key in (
-            "handle",
-            "tool",
-            "tool_call_id",
-            "success",
-            "reason",
-            "source_complete",
-            "payload_bytes",
-            "created_at",
-            "path",
-            "value_type",
-            "start",
-            "limit",
-            "max_chars",
-            "total_count",
-            "char_count",
-            "next_start",
-            "omitted_count",
-            "complete",
-        )
-        if key in metrics
-    }
-    if "value" in metrics:
-        value = metrics["value"]
-        if isinstance(value, str):
-            summary["value"] = _shorten(value, limit=4000)
-            summary["value_complete"] = len(summary["value"]) == len(value)
-        else:
-            summary["value"] = _bounded_summary_value(value)
-            summary["value_complete"] = _projection_values_equal(value, summary["value"])
-    items = metrics.get("items")
-    if isinstance(items, list):
-        visible = [_bounded_summary_value(item) for item in items[:12]]
-        summary["items"] = visible
-        summary["items_complete"] = len(visible) == len(items) and all(
-            _projection_values_equal(source, projected)
-            for source, projected in zip(items, visible, strict=True)
-        )
-        if len(visible) < len(items):
-            summary["omitted_page_item_count"] = len(items) - len(visible)
-    return summary
-
-
-def _memory_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObject:
-    summary: JsonObject = {
-        key: _bounded_summary_value(metrics[key])
-        for key in (
-            "memory_id",
-            "revision",
-            "kind",
-            "source",
-            "subject_key",
-            "title",
-            "evidence_ref",
-            "dimension",
-            "point",
-            "region",
-            "query",
-            "filters",
-            "start",
-            "limit",
-            "candidate_count",
-            "next_start",
-            "complete",
-            "candidate_truncated",
-            "lanes",
-            "error",
-        )
-        if key in metrics
-    }
-    results = metrics.get("results")
-    if isinstance(results, list):
-        visible = [
-            _memory_record_summary(item, include_content=False)
-            for item in results[:8]
-            if isinstance(item, dict)
-        ]
-        summary["results"] = visible
-        summary["results_complete"] = len(visible) == len(results)
-        if len(visible) < len(results):
-            summary["omitted_result_count"] = len(results) - len(visible)
-    elif tool_name in {"read_memory", "write_memory", "update_memory"}:
-        summary.update(
-            _memory_record_summary(
-                metrics,
-                include_content=tool_name == "read_memory",
-            )
-        )
-    return summary
-
-
-def _memory_record_summary(
-    record: dict[str, object],
-    *,
-    include_content: bool,
-) -> JsonObject:
-    summary: JsonObject = {
-        key: _bounded_summary_value(record[key])
-        for key in (
-            "memory_id",
-            "revision",
-            "kind",
-            "source",
-            "subject_key",
-            "title",
-            "evidence_ref",
-            "dimension",
-            "point",
-            "region",
-            "updated_at",
-            "retrieval_score",
-            "match_lanes",
-            "distance",
-            "content_truncated",
-        )
-        if key in record
-    }
-    excerpt = record.get("excerpt")
-    if isinstance(excerpt, str):
-        summary["excerpt"] = _shorten(excerpt, limit=500)
-        summary["excerpt_complete"] = len(summary["excerpt"]) == len(excerpt)
-    if include_content and isinstance(record.get("content"), str):
-        content = str(record["content"])
-        summary["content"] = _shorten(content, limit=4000)
-        summary["content_complete"] = len(summary["content"]) == len(content)
-    return summary
-
-
-def _skill_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObject:
-    summary: JsonObject = {
-        key: _bounded_summary_value(metrics[key])
-        for key in (
-            "name",
-            "description",
-            "version",
-            "head_version",
-            "revision",
-            "origin",
-            "status",
-            "tools",
-            "loadable",
-            "missing_tools",
-            "derived_from",
-            "count",
-            "total_matches",
-            "start",
-            "limit",
-            "next_start",
-            "complete",
-            "error",
-            "retired_at",
-            "reason",
-            "evidence_refs",
-            "change_reason",
-        )
-        if key in metrics
-    }
-    skills = metrics.get("skills")
-    if isinstance(skills, list):
-        visible = [
-            {
-                key: _bounded_summary_value(item[key])
-                for key in (
-                    "name",
-                    "description",
-                    "version",
-                    "head_version",
-                    "revision",
-                    "origin",
-                    "loadable",
-                    "missing_tools",
-                )
-                if key in item
-            }
-            for item in skills[:10]
-            if isinstance(item, dict)
-        ]
-        summary["skills"] = visible
-        summary["skills_complete"] = len(visible) == len(skills)
-        if len(visible) < len(skills):
-            summary["omitted_skill_count"] = len(skills) - len(visible)
-    if tool_name in {"read_skill", "load_skill"} and isinstance(metrics.get("instructions"), str):
-        instructions = str(metrics["instructions"])
-        summary["instructions"] = _shorten(instructions, limit=8000)
-        summary["instructions_complete"] = len(summary["instructions"]) == len(instructions)
-    activation = metrics.get("activation")
-    if isinstance(activation, dict):
-        summary["activation"] = {
-            key: _bounded_summary_value(activation[key])
-            for key in (
-                "activation_id",
-                "task_id",
-                "owner_kind",
-                "owner_id",
-                "skill_id",
-                "skill_name",
-                "skill_version",
-                "activated_at",
-                "ended_at",
-            )
-            if key in activation
-        }
-    return summary
-
-
-def _wiki_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObject:
-    summary: JsonObject = {
-        key: _bounded_summary_value(metrics[key])
-        for key in (
-            "query",
-            "count",
-            "title",
-            "source",
-            "source_url",
-            "revision_id",
-            "revision_timestamp",
-            "retrieved_at",
-            "omitted_sections",
-            "complete",
-            "stale",
-            "cache_status",
-            "cache_fetched_at",
-            "refresh_error",
-            "advisory",
-            "error",
-        )
-        if key in metrics
-    }
-    results = metrics.get("results")
-    if isinstance(results, list):
-        visible = [
-            {
-                key: (
-                    _shorten(str(item[key]), limit=500)
-                    if key == "snippet"
-                    else _bounded_summary_value(item[key])
-                )
-                for key in ("title", "snippet", "page_id", "word_count")
-                if key in item
-            }
-            for item in results[:8]
-            if isinstance(item, dict)
-        ]
-        summary["results"] = visible
-        summary["results_complete"] = len(visible) == len(results)
-        if len(visible) < len(results):
-            summary["omitted_result_count"] = len(results) - len(visible)
-    if tool_name == "wiki_read" and isinstance(metrics.get("markdown"), str):
-        markdown = str(metrics["markdown"])
-        summary["markdown"] = _shorten(markdown, limit=6000)
-        summary["markdown_complete"] = len(summary["markdown"]) == len(markdown)
-    return summary
-
-
-def _task_artifact_summary(metrics: dict[str, object]) -> JsonObject:
-    current = metrics.get("current")
-    source = current if isinstance(current, dict) else metrics
-    summary: JsonObject = {}
-    if "active" in source:
-        summary["active"] = bool(source.get("active"))
-    if source.get("scope_key") is not None:
-        summary["scope_key"] = str(source.get("scope_key"))
-
-    task = metrics.get("task")
-    if not isinstance(task, dict):
-        task = source.get("task")
-    if isinstance(task, dict):
-        summary["task"] = {
-            key: _bounded_summary_value(task[key])
-            for key in (
-                "task_id",
-                "revision",
-                "goal",
-                "status",
-                "completion_authority",
-                "active_plan_id",
-                "latest_checkpoint_id",
-            )
-            if key in task
-        }
-
-    plan = metrics.get("plan")
-    if not isinstance(plan, dict):
-        plan = source.get("plan")
-    if isinstance(plan, dict):
-        plan_summary: JsonObject = {
-            key: _bounded_summary_value(plan[key])
-            for key in ("plan_id", "revision", "summary")
-            if key in plan
-        }
-        steps = plan.get("steps")
-        if isinstance(steps, list):
-            plan_summary["steps"] = [
-                {
-                    key: _bounded_summary_value(step[key])
-                    for key in ("step_id", "ordinal", "title", "status", "blocker")
-                    if key in step
-                }
-                for step in steps[:16]
-                if isinstance(step, dict)
-            ]
-            plan_summary["step_count"] = len(steps)
-            plan_summary["steps_complete"] = len(steps) <= 16
-        summary["plan"] = plan_summary
-
-    checkpoint = metrics.get("checkpoint")
-    if not isinstance(checkpoint, dict):
-        checkpoint = source.get("checkpoint")
-    if isinstance(checkpoint, dict):
-        summary["checkpoint"] = {
-            key: _bounded_summary_value(checkpoint[key])
-            for key in (
-                "checkpoint_id",
-                "revision",
-                "disposition",
-                "summary",
-                "next_step",
-                "wait_for",
-            )
-            if key in checkpoint
-        }
-    if metrics.get("error") is not None:
-        summary["error"] = _bounded_summary_value(metrics["error"])
-    return summary
 
 
 def _tool_result_summary(result: JsonObject) -> JsonObject:
@@ -2361,38 +1720,6 @@ def _recent_session_messages(context: AgentContext, *, limit: int = 3) -> list[J
         {"role": role, "content": _shorten(content, limit=300)}
         for role, content in context.session_messages()[-limit:]
     ]
-
-
-def _bounded_summary_value(value: object) -> object:
-    if isinstance(value, dict):
-        out: JsonObject = {}
-        for key, item in list(value.items())[:12]:
-            if isinstance(item, (dict, list, tuple)):
-                out[str(key)] = _bounded_summary_value(item)
-            else:
-                out[str(key)] = item
-        return out
-    if isinstance(value, (list, tuple)):
-        if len(value) <= 8 and all(not isinstance(item, (dict, list, tuple)) for item in value):
-            return list(value)
-        return {
-            "count": len(value),
-            "sample": [_bounded_summary_value(item) for item in list(value)[:3]],
-        }
-    if isinstance(value, str):
-        return _shorten(value, limit=300)
-    return value
-
-
-def _top_reasons(items: list[object]) -> list[str]:
-    counts: dict[str, int] = {}
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        reason = str(item.get("reason") or "")
-        if reason:
-            counts[reason] = counts.get(reason, 0) + 1
-    return [f"{reason}:{count}" for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:6]]
 
 
 class AgentRuntime:
@@ -3948,12 +3275,6 @@ def _public_text(value: object) -> str:
 def _optional_bool_attr(value: object, name: str) -> bool | None:
     raw = getattr(value, name, None)
     return raw if isinstance(raw, bool) else None
-
-
-def _shorten(text: str, *, limit: int = 500) -> str:
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3] + "..."
 
 
 __all__ = [

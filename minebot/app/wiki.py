@@ -20,8 +20,9 @@ from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from minebot.app.runtime_state import RuntimeStateStore, WikiCacheRecord
-from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import ToolResult
+from minebot.app.projection import bounded_summary_value, shorten
+from minebot.brain.registry import ObservationProjector, RegisteredTool, ToolRegistry, ToolSidecar
+from minebot.contract import JsonObject, ToolResult
 
 
 DEFAULT_WIKI_ENDPOINT = "https://minecraft.wiki/api.php"
@@ -432,6 +433,64 @@ def register_wiki_tools(registry: ToolRegistry, knowledge: WikiKnowledge) -> Non
     registry.register(_wiki_read_tool(knowledge))
 
 
+def wiki_observation_projector(tool_name: str) -> ObservationProjector:
+    """Model-visible projection factory for the advisory wiki tools."""
+
+    def project(_reason: str, metrics: dict[str, object]) -> JsonObject:
+        return _wiki_tool_summary(tool_name, metrics)
+
+    return project
+
+
+def _wiki_tool_summary(tool_name: str, metrics: dict[str, object]) -> JsonObject:
+    summary: JsonObject = {
+        key: bounded_summary_value(metrics[key])
+        for key in (
+            "query",
+            "count",
+            "title",
+            "source",
+            "source_url",
+            "revision_id",
+            "revision_timestamp",
+            "retrieved_at",
+            "omitted_sections",
+            "complete",
+            "stale",
+            "cache_status",
+            "cache_fetched_at",
+            "refresh_error",
+            "advisory",
+            "error",
+        )
+        if key in metrics
+    }
+    results = metrics.get("results")
+    if isinstance(results, list):
+        visible = [
+            {
+                key: (
+                    shorten(str(item[key]), limit=500)
+                    if key == "snippet"
+                    else bounded_summary_value(item[key])
+                )
+                for key in ("title", "snippet", "page_id", "word_count")
+                if key in item
+            }
+            for item in results[:8]
+            if isinstance(item, dict)
+        ]
+        summary["results"] = visible
+        summary["results_complete"] = len(visible) == len(results)
+        if len(visible) < len(results):
+            summary["omitted_result_count"] = len(results) - len(visible)
+    if tool_name == "wiki_read" and isinstance(metrics.get("markdown"), str):
+        markdown = str(metrics["markdown"])
+        summary["markdown"] = shorten(markdown, limit=6000)
+        summary["markdown_complete"] = len(summary["markdown"]) == len(markdown)
+    return summary
+
+
 def _wiki_search_tool(knowledge: WikiKnowledge) -> RegisteredTool:
     def search(params: dict[str, object]) -> ToolResult:
         try:
@@ -464,6 +523,7 @@ def _wiki_search_tool(knowledge: WikiKnowledge) -> RegisteredTool:
         },
         search,
         _wiki_sidecar("wiki_search"),
+        projector=wiki_observation_projector("wiki_search"),
     )
 
 
@@ -509,6 +569,7 @@ def _wiki_read_tool(knowledge: WikiKnowledge) -> RegisteredTool:
         },
         read,
         _wiki_sidecar("wiki_read"),
+        projector=wiki_observation_projector("wiki_read"),
     )
 
 

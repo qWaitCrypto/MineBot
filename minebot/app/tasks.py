@@ -21,9 +21,10 @@ from minebot.app.runtime_state import (
     TaskStatus,
     skill_activation_payload,
 )
+from minebot.app.projection import bounded_summary_value
 from minebot.brain.context import AgentContext
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import ToolResult
+from minebot.contract import JsonObject, ToolResult
 
 
 @dataclass
@@ -240,6 +241,83 @@ def register_task_tools(
     )
 
 
+def task_artifact_projector(_reason: str, metrics: dict[str, object]) -> JsonObject:
+    """Model-visible projection for read_task / update_plan / checkpoint_task."""
+    return {"task_artifact": _task_artifact_summary(metrics)}
+
+
+def _task_artifact_summary(metrics: dict[str, object]) -> JsonObject:
+    current = metrics.get("current")
+    source = current if isinstance(current, dict) else metrics
+    summary: JsonObject = {}
+    if "active" in source:
+        summary["active"] = bool(source.get("active"))
+    if source.get("scope_key") is not None:
+        summary["scope_key"] = str(source.get("scope_key"))
+
+    task = metrics.get("task")
+    if not isinstance(task, dict):
+        task = source.get("task")
+    if isinstance(task, dict):
+        summary["task"] = {
+            key: bounded_summary_value(task[key])
+            for key in (
+                "task_id",
+                "revision",
+                "goal",
+                "status",
+                "completion_authority",
+                "active_plan_id",
+                "latest_checkpoint_id",
+            )
+            if key in task
+        }
+
+    plan = metrics.get("plan")
+    if not isinstance(plan, dict):
+        plan = source.get("plan")
+    if isinstance(plan, dict):
+        plan_summary: JsonObject = {
+            key: bounded_summary_value(plan[key])
+            for key in ("plan_id", "revision", "summary")
+            if key in plan
+        }
+        steps = plan.get("steps")
+        if isinstance(steps, list):
+            plan_summary["steps"] = [
+                {
+                    key: bounded_summary_value(step[key])
+                    for key in ("step_id", "ordinal", "title", "status", "blocker")
+                    if key in step
+                }
+                for step in steps[:16]
+                if isinstance(step, dict)
+            ]
+            plan_summary["step_count"] = len(steps)
+            plan_summary["steps_complete"] = len(steps) <= 16
+        summary["plan"] = plan_summary
+
+    checkpoint = metrics.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        checkpoint = source.get("checkpoint")
+    if isinstance(checkpoint, dict):
+        summary["checkpoint"] = {
+            key: bounded_summary_value(checkpoint[key])
+            for key in (
+                "checkpoint_id",
+                "revision",
+                "disposition",
+                "summary",
+                "next_step",
+                "wait_for",
+            )
+            if key in checkpoint
+        }
+    if metrics.get("error") is not None:
+        summary["error"] = bounded_summary_value(metrics["error"])
+    return summary
+
+
 def _read_task_tool(workspace: TaskWorkspace) -> RegisteredTool:
     return RegisteredTool(
         "read_task",
@@ -260,6 +338,7 @@ def _read_task_tool(workspace: TaskWorkspace) -> RegisteredTool:
             body_scope=(),
             terminal_truth=("TaskRecord", "TaskPlanRecord", "TaskCheckpointRecord"),
         ),
+        projector=task_artifact_projector,
     )
 
 
@@ -329,6 +408,7 @@ def _update_plan_tool(workspace: TaskWorkspace) -> RegisteredTool:
             body_scope=(),
             terminal_truth=("TaskPlanRecord.revision",),
         ),
+        projector=task_artifact_projector,
     )
 
 
@@ -462,6 +542,7 @@ def _checkpoint_task_tool(
             body_scope=(),
             terminal_truth=("TaskCheckpointRecord.revision",),
         ),
+        projector=task_artifact_projector,
     )
 
 

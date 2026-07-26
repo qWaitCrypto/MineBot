@@ -25,6 +25,13 @@ from minebot.app.runner import (
     sdk_tool_for,
     tool_is_enabled,
 )
+from minebot.app.body_capability_tools import resource_domain_observation_projector
+from minebot.app.conversation_tools import (
+    conversation_archive_query_projector,
+    conversation_archive_turn_projector,
+)
+from minebot.app.phase1_runtime import exploration_observation_projector
+from minebot.app.tasks import task_artifact_projector
 from minebot.app.wiring import build_agent_runtime
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleState
@@ -1086,6 +1093,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             "collect_block_domain",
             result,
             trace_ref="resource-domain-trace",
+            projector=resource_domain_observation_projector,
         )
 
         summary = payload["summary"]
@@ -1221,7 +1229,9 @@ class AgentRunnerSpineTests(unittest.TestCase):
             },
         ).to_payload()
 
-        payload = _model_tool_payload("explore_for", result, trace_ref="explore-trace")
+        payload = _model_tool_payload(
+            "explore_for", result, trace_ref="explore-trace", projector=exploration_observation_projector
+        )
 
         self.assertEqual(payload["summary"]["targets"], {"blocks": ["#logs"], "entities": []})
         self.assertEqual(payload["summary"]["block_count"], 10)
@@ -1268,7 +1278,9 @@ class AgentRunnerSpineTests(unittest.TestCase):
             },
         ).to_payload()
 
-        payload = _model_tool_payload("explore_for", result, trace_ref="explore-trace")
+        payload = _model_tool_payload(
+            "explore_for", result, trace_ref="explore-trace", projector=exploration_observation_projector
+        )
 
         self.assertEqual(payload["summary"]["continuation"], continuation)
         self.assertEqual(payload["summary"]["resume_cursor"], cursor)
@@ -1328,7 +1340,9 @@ class AgentRunnerSpineTests(unittest.TestCase):
             },
         ).to_payload()
 
-        payload = _model_tool_payload("update_plan", result, trace_ref="task-trace")
+        payload = _model_tool_payload(
+            "update_plan", result, trace_ref="task-trace", projector=task_artifact_projector
+        )
         artifact = payload["summary"]["task_artifact"]
 
         self.assertEqual(artifact["task"]["revision"], 7)
@@ -1367,6 +1381,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             "query_conversation_archive",
             result,
             trace_ref="archive-query",
+            projector=conversation_archive_query_projector,
         )
 
         self.assertEqual(
@@ -1403,6 +1418,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             "read_conversation_archive",
             result,
             trace_ref="archive-read",
+            projector=conversation_archive_turn_projector,
         )
 
         self.assertEqual(payload["summary"]["handle"], "conversation:scope:turn:2")

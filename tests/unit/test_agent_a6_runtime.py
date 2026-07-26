@@ -11,6 +11,9 @@ from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_r
 from agents import RunContextWrapper
 
 from minebot.app.runner import RuntimeRunContext, RuntimeTrace, _model_tool_payload, sdk_tool_for
+from minebot.app.memory import memory_observation_projector
+from minebot.app.skills import skill_observation_projector
+from minebot.app.wiki import wiki_observation_projector
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
 from minebot.app.skills import SkillCatalog, SkillWorkspace
 from minebot.app.tasks import TaskWorkspace
@@ -431,6 +434,7 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
             },
             trace_ref="trace-memory",
             observation_handle="observation-memory",
+            projector=memory_observation_projector("search_memory"),
         )
         self.assertEqual(memory_payload["summary"]["results"][0]["memory_id"], "memory-1")
         self.assertEqual(
@@ -455,6 +459,7 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
             },
             trace_ref="trace-skill",
             observation_handle="observation-skill",
+            projector=skill_observation_projector("load_skill"),
         )
         self.assertLessEqual(len(skill_payload["summary"]["instructions"]), 8000)
         self.assertFalse(skill_payload["summary"]["instructions_complete"])
@@ -479,6 +484,7 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
             },
             trace_ref="trace-skill-create",
             observation_handle="observation-skill-create",
+            projector=skill_observation_projector("create_skill"),
         )
         self.assertNotIn("skill_markdown", created_payload["summary"])
         self.assertFalse(created_payload["projection"]["complete"])
@@ -503,6 +509,7 @@ class A6RuntimeIntegrationTests(unittest.TestCase):
             },
             trace_ref="trace-wiki",
             observation_handle="observation-wiki",
+            projector=wiki_observation_projector("wiki_read"),
         )
         self.assertEqual(wiki_payload["summary"]["source"], "minecraft.wiki")
         self.assertTrue(wiki_payload["summary"]["advisory"])

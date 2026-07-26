@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from minebot.app.observability import sanitize_observation
+from minebot.app.projection import bounded_summary_value, projection_values_equal, shorten
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
 from minebot.contract import JsonObject, ToolResult
@@ -131,6 +132,97 @@ def register_tool_observation_tools(
     registry.register(_read_tool(archive))
 
 
+def tool_observation_query_projector(_reason: str, metrics: dict[str, object]) -> JsonObject:
+    """Model-visible projection for query_tool_observations."""
+    summary: JsonObject = {
+        key: bounded_summary_value(metrics[key])
+        for key in (
+            "query",
+            "tool",
+            "reason",
+            "start",
+            "limit",
+            "total_matches",
+            "next_start",
+            "complete",
+        )
+        if key in metrics
+    }
+    results = metrics.get("results")
+    if not isinstance(results, list):
+        return summary
+    visible = [
+        {
+            key: bounded_summary_value(result[key])
+            for key in (
+                "handle",
+                "tool",
+                "tool_call_id",
+                "success",
+                "reason",
+                "complete",
+                "payload_bytes",
+                "created_at",
+            )
+            if key in result
+        }
+        for result in results[:20]
+        if isinstance(result, dict)
+    ]
+    summary["results"] = visible
+    summary["results_complete"] = len(visible) == len(results)
+    if len(visible) < len(results):
+        summary["omitted_result_count"] = len(results) - len(visible)
+    return summary
+
+
+def tool_observation_read_projector(_reason: str, metrics: dict[str, object]) -> JsonObject:
+    """Model-visible projection for read_tool_observation."""
+    summary: JsonObject = {
+        key: bounded_summary_value(metrics[key])
+        for key in (
+            "handle",
+            "tool",
+            "tool_call_id",
+            "success",
+            "reason",
+            "source_complete",
+            "payload_bytes",
+            "created_at",
+            "path",
+            "value_type",
+            "start",
+            "limit",
+            "max_chars",
+            "total_count",
+            "char_count",
+            "next_start",
+            "omitted_count",
+            "complete",
+        )
+        if key in metrics
+    }
+    if "value" in metrics:
+        value = metrics["value"]
+        if isinstance(value, str):
+            summary["value"] = shorten(value, limit=4000)
+            summary["value_complete"] = len(summary["value"]) == len(value)
+        else:
+            summary["value"] = bounded_summary_value(value)
+            summary["value_complete"] = projection_values_equal(value, summary["value"])
+    items = metrics.get("items")
+    if isinstance(items, list):
+        visible = [bounded_summary_value(item) for item in items[:12]]
+        summary["items"] = visible
+        summary["items_complete"] = len(visible) == len(items) and all(
+            projection_values_equal(source, projected)
+            for source, projected in zip(items, visible, strict=True)
+        )
+        if len(visible) < len(items):
+            summary["omitted_page_item_count"] = len(items) - len(visible)
+    return summary
+
+
 def _query_tool(archive: ToolObservationArchive) -> RegisteredTool:
     def query(params: dict[str, object]) -> ToolResult:
         result = archive.query(
@@ -166,6 +258,7 @@ def _query_tool(archive: ToolObservationArchive) -> RegisteredTool:
             body_scope=(),
             terminal_truth=("ToolObservationArchive.revision",),
         ),
+        projector=tool_observation_query_projector,
     )
 
 
@@ -231,6 +324,7 @@ def _read_tool(archive: ToolObservationArchive) -> RegisteredTool:
             body_scope=(),
             terminal_truth=("ToolObservationArchive.payload",),
         ),
+        projector=tool_observation_read_projector,
     )
 
 
