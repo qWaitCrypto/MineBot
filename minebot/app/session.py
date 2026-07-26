@@ -322,6 +322,8 @@ class AgentSession:
                         if intent.kind is WorkIntentKind.TASK_BOUNDARY
                         else None
                     ),
+                    intent_kind=intent.kind.value,
+                    has_durable_goal=self.has_active_goal,
                 ),
                 work_kind="agent_turn",
                 admission_version=admission_version,
@@ -416,7 +418,11 @@ class AgentSession:
 
         self._recovery_attempts = 0
         signals = [AgentSignal.recovery_completed(outcome.reason, **outcome.facts)]
-        recovered = await self.parts.runtime.run_turn(extra_signals=signals)
+        recovered = await self.parts.runtime.run_turn(
+            extra_signals=signals,
+            intent_kind=WorkIntentKind.RECOVERY_RECONCILE.value,
+            has_durable_goal=self.has_active_goal,
+        )
         return SessionStep(recovered.status, recovered.lifecycle, recovered.message)
 
     def _yield_recovery_failure(self, reason: str, facts: dict[str, object]) -> SessionStep:

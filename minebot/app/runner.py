@@ -33,6 +33,14 @@ from minebot.app.projection import (
     top_reasons as _top_reasons,
 )
 from minebot.brain.context import AgentContext
+from minebot.brain.deliberation import (
+    DEFAULT_ROUTING_POLICY,
+    DecisionContext,
+    RouteSpec,
+    RoutingPolicy,
+    decision_context,
+    resolve_route,
+)
 from minebot.brain.lifecycle import LifecycleController, LifecycleError, LifecycleState
 from minebot.brain.modes import (
     AgentSignal,
@@ -1746,6 +1754,7 @@ class AgentRuntime:
         conversation_session: Session | None = None,
         observation_archive: ToolObservationArchive | None = None,
         progress_epoch_archive: ProgressEpochArchive | None = None,
+        routing_policy: RoutingPolicy | None = None,
     ) -> None:
         self.body = body
         self.registry = registry
@@ -1781,6 +1790,15 @@ class AgentRuntime:
             instructions=self._instructions,
             model="primary",
         )
+        # F1 deliberation economy (brain-cognitive-framework.md §4). With no
+        # routing_policy the classification is telemetry-only and the identity
+        # route keeps model selection and the "full" context profile exactly
+        # as before; a provided policy is the explicit per-class opt-in.
+        self.routing_policy = routing_policy
+        self._current_decision_context: DecisionContext | None = None
+        self._current_route: RouteSpec | None = None
+        self._turn_intent_kind: str | None = None
+        self._turn_has_durable_goal: bool | None = None
         self.last_tool_results: list[dict[str, Any]] = []
         self._pending_mobility_terminal: dict[str, object] | None = None
         self.last_known_body_state: dict[str, object] | None = None
@@ -1807,7 +1825,11 @@ class AgentRuntime:
         *,
         body_actions_allowed: bool = True,
         continuation_evidence_cursor: int | None = None,
+        intent_kind: str | None = None,
+        has_durable_goal: bool | None = None,
     ) -> AgentTurnOutcome:
+        self._turn_intent_kind = intent_kind
+        self._turn_has_durable_goal = has_durable_goal
         prepared = await self.run_sync(self._prepare_turn, extra_signals)
         if isinstance(prepared, AgentTurnOutcome):
             return prepared
@@ -1825,9 +1847,12 @@ class AgentRuntime:
         input_text, pending_input_count = self.agent_context.pending_turn_input(
             fallback=fallback_input
         )
-        instruction_preamble = self.agent_context.turn_preamble(
-            include_session_messages=False
-        )
+        # F2 compiler: the identity route's "full" profile is golden-locked
+        # byte-identical to the historical turn_preamble output.
+        instruction_preamble = self.agent_context.compile(
+            self._current_route.context_profile if self._current_route is not None else "full",
+            include_session_messages=False,
+        ).text
         skill_preamble = self.agent_context.skill_preamble()
         context_budget = self.agent_context.budget_facts()
         new_turn_frame_chars = (
@@ -2254,18 +2279,26 @@ class AgentRuntime:
         except LifecycleError:
             raise
 
+    def _route_model_for(self, profile: RuntimeProfile) -> str:
+        """Logical model for this turn: F1 route when a policy opted in."""
+        if self.routing_policy is not None and self._current_route is not None:
+            return self._current_route.model
+        return profile.model_route
+
     def _agent_for_profile(self, profile: RuntimeProfile) -> Agent[RuntimeRunContext]:
-        kwargs: dict[str, Any] = {"model": profile.model_route}
+        logical_model = self._route_model_for(profile)
+        kwargs: dict[str, Any] = {"model": logical_model}
         if self.model_provider is not None:
-            kwargs["model_settings"] = self.model_provider.model_settings_for(profile.model_route)
+            kwargs["model_settings"] = self.model_provider.model_settings_for(logical_model)
         return self.agent.clone(**kwargs)
 
     def _run_config(self, profile: RuntimeProfile) -> RunConfig:
         if self.model_provider is None:
             return RunConfig(session_input_callback=bounded_session_input)
+        logical_model = self._route_model_for(profile)
         return RunConfig(
             model_provider=self.model_provider,
-            model_settings=self.model_provider.model_settings_for(profile.model_route),
+            model_settings=self.model_provider.model_settings_for(logical_model),
             session_input_callback=bounded_session_input,
         )
 
@@ -2791,6 +2824,37 @@ class AgentRuntime:
             effort=profile.effort,
             policy_tags=list(profile.policy_tags),
             context_frame=profile.context_frame,
+        )
+
+        # F1 deliberation economy: classify the turn from deterministic facts
+        # and resolve its route. Telemetry always; the route changes model
+        # selection and context profile only when a routing_policy was
+        # explicitly provided (identity default preserves today's behavior).
+        context_class = decision_context(
+            intent_kind=self._turn_intent_kind,
+            lifecycle_state=self.lifecycle.state,
+            mode_facts=reduction,
+            last_epoch_facts=None,
+            has_durable_goal=(
+                True
+                if self._turn_has_durable_goal is None
+                else self._turn_has_durable_goal
+            ),
+        )
+        route = resolve_route(self.routing_policy or DEFAULT_ROUTING_POLICY, context_class)
+        self._current_decision_context = context_class
+        self._current_route = route
+        self.trace.emit(
+            "turn_decision_context",
+            decision_context=context_class.value,
+            route_model=route.model,
+            route_effort=route.effort,
+            route_context_profile=route.context_profile,
+            routing_active=self.routing_policy is not None,
+            intent_kind=self._turn_intent_kind,
+            has_durable_goal=self._turn_has_durable_goal,
+            situational=profile.situational,
+            lifecycle=self.lifecycle.state.value,
         )
 
         if not self.lifecycle.is_active:
