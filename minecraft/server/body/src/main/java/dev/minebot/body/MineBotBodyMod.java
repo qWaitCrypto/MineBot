@@ -6,7 +6,10 @@ import dev.minebot.server.common.transport.MineBotWebSocketServer;
 import net.fabricmc.api.DedicatedServerModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
+import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -24,12 +27,49 @@ public final class MineBotBodyMod implements DedicatedServerModInitializer {
 
     private static final AtomicInteger TICK_COUNTER = new AtomicInteger();
     private static MineBotWebSocketServer bodyServer;
+    private static FakePlayerBodyChannel bodyChannel;
 
     @Override
     public void onInitializeServer() {
         requireLoopback(HOST);
         ServerLifecycleEvents.SERVER_STARTED.register(this::startBody);
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> stopBody());
+        ServerLivingEntityEvents.AFTER_DEATH.register((entity, source) -> {
+            FakePlayerBodyChannel channel = bodyChannel;
+            if (channel != null && entity instanceof ServerPlayer player) {
+                channel.playerDied(player, TICK_COUNTER.get());
+            }
+        });
+        ServerLivingEntityEvents.AFTER_DAMAGE.register((entity, source, baseDamage, damageTaken, blocked) -> {
+            FakePlayerBodyChannel channel = bodyChannel;
+            if (channel != null && entity instanceof ServerPlayer player) {
+                channel.playerDamaged(
+                    player,
+                    damageTaken,
+                    source.type().msgId(),
+                    blocked,
+                    TICK_COUNTER.get()
+                );
+            }
+        });
+        ServerPlayerEvents.JOIN.register(player -> {
+            FakePlayerBodyChannel channel = bodyChannel;
+            if (channel != null) {
+                channel.playerJoined(player, TICK_COUNTER.get());
+            }
+        });
+        ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) -> {
+            FakePlayerBodyChannel channel = bodyChannel;
+            if (channel != null) {
+                channel.playerJoined(newPlayer, TICK_COUNTER.get());
+            }
+        });
+        ServerPlayerEvents.LEAVE.register(player -> {
+            FakePlayerBodyChannel channel = bodyChannel;
+            if (channel != null) {
+                channel.playerLeft(player, TICK_COUNTER.get());
+            }
+        });
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             int tick = TICK_COUNTER.incrementAndGet();
             MineBotWebSocketServer current = bodyServer;
@@ -44,6 +84,7 @@ public final class MineBotBodyMod implements DedicatedServerModInitializer {
             return;
         }
         FakePlayerBodyChannel channel = new FakePlayerBodyChannel(server);
+        bodyChannel = channel;
         MineBotChannelRouter router = new MineBotChannelRouter(List.of(channel));
         bodyServer = new MineBotWebSocketServer(new InetSocketAddress(HOST, PORT), server::execute, router);
         bodyServer.start();
@@ -53,6 +94,7 @@ public final class MineBotBodyMod implements DedicatedServerModInitializer {
     private static void stopBody() {
         MineBotWebSocketServer current = bodyServer;
         bodyServer = null;
+        bodyChannel = null;
         if (current == null) {
             return;
         }

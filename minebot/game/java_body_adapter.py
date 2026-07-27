@@ -213,6 +213,35 @@ class JavaBodyClient:
         self._event_buffer = []
         return drained
 
+    def drain_event_gaps(self) -> list[EventGap]:
+        drained = self._event_gaps
+        self._event_gaps = []
+        return drained
+
+    def resume_events(self, after_seq: int) -> Response | ErrorResponse:
+        self._ensure_connected()
+        self._protocol.seed_last_seq(self._bot, max(0, int(after_seq)))
+        return self.request_response(
+            lambda protocol: protocol.resume_events(self._bot, max(0, int(after_seq)))
+        )
+
+    def interrupt_body(self, reason: str | None = None) -> Response | ErrorResponse:
+        """Use an independent connection so cancellation can preempt a blocking action."""
+        control = JavaBodyClient(
+            self._bot,
+            self._connect,
+            self._governance,
+            action_wall_timeout_s=self._wall_timeout,
+            recv_timeout_s=self._recv_timeout,
+        )
+        try:
+            control.connect()
+            return control.request_response(
+                lambda protocol: protocol.interrupt(self._bot, reason)
+            )
+        finally:
+            control.close()
+
     @property
     def last_action_events(self) -> list[BotEvent]:
         return list(self._last_events)
@@ -395,8 +424,12 @@ class JavaBodyClient:
         kind: str,
         terminals: dict[str, tuple[bool, str, bool]],
     ) -> ToolResult:
+        after_seq = self._protocol.last_seq(self._bot)
         try:
             self.connect()
+            replay = self.resume_events(after_seq)
+            if isinstance(replay, ErrorResponse):
+                return ToolResult(success=False, reason="action_reconciliation_unknown", can_retry=True)
             self._send(self._protocol.query_action(action_id))
             reply = self._await_response("QUERY_ACTION")
         except TransportClosed:

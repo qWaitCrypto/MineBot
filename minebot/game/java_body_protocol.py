@@ -160,6 +160,49 @@ class JavaBodyProtocol:
         self._require_capability("BODY_STATE")
         return self._request("BODY_STATE", {"bot_name": bot_name})
 
+    def event_head(self, bot_name: str, proposed_epoch: str) -> dict:
+        self._require_capability("EVENT_HEAD")
+        return self._request(
+            "EVENT_HEAD",
+            {"bot_name": bot_name, "proposed_epoch": proposed_epoch},
+        )
+
+    def spawn(
+        self,
+        bot_name: str,
+        *,
+        pos: tuple[int, int, int] | None = None,
+        yaw: float | None = None,
+        pitch: float | None = None,
+        dimension: str | None = None,
+        gamemode: str | None = None,
+        emit_respawned: bool = False,
+    ) -> dict:
+        self._require_capability("SPAWN")
+        body: dict = {"bot_name": bot_name, "emit_respawned": emit_respawned}
+        if pos is not None:
+            body["pos"] = list(pos)
+        if yaw is not None:
+            body["yaw"] = yaw
+        if pitch is not None:
+            body["pitch"] = pitch
+        if dimension is not None:
+            body["dimension"] = dimension
+        if gamemode is not None:
+            body["gamemode"] = gamemode
+        return self._request("SPAWN", body)
+
+    def despawn(self, bot_name: str) -> dict:
+        self._require_capability("DESPAWN")
+        return self._request("DESPAWN", {"bot_name": bot_name})
+
+    def interrupt(self, bot_name: str, reason: str | None = None) -> dict:
+        self._require_capability("INTERRUPT")
+        body: dict = {"bot_name": bot_name}
+        if reason is not None:
+            body["reason"] = reason
+        return self._request("INTERRUPT", body)
+
     def inventory(
         self,
         bot_name: str,
@@ -522,6 +565,12 @@ class JavaBodyProtocol:
 
     def last_seq(self, bot_name: str) -> int:
         return self._last_seq_by_bot.get(bot_name, 0)
+
+    def seed_last_seq(self, bot_name: str, seq: int) -> None:
+        self._last_seq_by_bot[bot_name] = max(
+            self._last_seq_by_bot.get(bot_name, 0),
+            max(0, int(seq)),
+        )
 
     def pending_request_ids(self) -> tuple[str, ...]:
         return tuple(self._pending)

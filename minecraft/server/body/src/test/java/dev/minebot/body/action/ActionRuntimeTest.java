@@ -119,6 +119,18 @@ final class ActionRuntimeTest {
     }
 
     @Test
+    void bodyDisappearanceClearsInputsAndTerminatesTheCurrentOwner() {
+        runtime.submit("Bot", "a-1", "NAVIGATE", OwnerPriority.ACTION, 10);
+
+        assertTrue(runtime.abortCurrent("Bot", "death", 11));
+
+        assertNull(owner.current("Bot"));
+        assertEquals(List.of("Bot"), controls.cleared);
+        assertEquals(ActionRegistry.State.TERMINAL, registry.status("a-1").state());
+        assertEquals("death", registry.status("a-1").terminal().get("reason").getAsString());
+    }
+
+    @Test
     void unknownActionReconcilesAsUnknown() {
         assertEquals(ActionRegistry.State.UNKNOWN, registry.status("never-seen").state());
         assertFalse(runtime.requestCancel("never-seen"));

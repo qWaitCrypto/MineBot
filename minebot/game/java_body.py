@@ -21,6 +21,8 @@ contract surface one honest capability at a time.
 
 from __future__ import annotations
 
+import time
+
 from minebot.contract import (
     Action,
     BodyState,
@@ -67,6 +69,10 @@ class JavaBody:
         self._client = client
         self.bot_name = bot_name
         self._action_terminals: dict[str, Event] = {}
+        self.last_seq = 0
+        self.last_chat_seq = 0
+        self.event_log: list[Event] = []
+        self._server_epoch: str | None = None
 
     # -- reads (wire-native) --------------------------------------------
 
@@ -85,18 +91,26 @@ class JavaBody:
             health=float(payload.get("health", 0.0)),
             food=int(payload.get("food", 0)),
             oxygen=int(payload["air"]) if isinstance(payload.get("air"), int) else None,
-            inventory_raw="",
-            inventory_hash="",
-            effects=None,
+            inventory_raw=str(payload.get("inventory_raw") or ""),
+            inventory_hash=str(payload.get("inventory_hash") or ""),
+            effects=list(payload.get("effects") or []),
             time=int(payload.get("game_time", 0)),
-            weather=None,
+            weather=str(payload["weather"]) if payload.get("weather") is not None else None,
             dimension=payload.get("dimension"),
             complete=True,
+            sleeping=bool(payload.get("sleeping")),
             missing=False,
+            selected_slot=_opt_int(payload.get("selected_slot")),
             inventory_counts={str(k): int(v) for k, v in counts.items()},
             selected_item=payload.get("selected_item"),
             offhand_item=payload.get("offhand_item"),
             body_owner=payload.get("body_owner"),
+            pending_action_count=_opt_int(payload.get("pending_action_count")),
+            hazard_unresolved=(
+                dict(payload["hazard_unresolved"])
+                if isinstance(payload.get("hazard_unresolved"), dict)
+                else None
+            ),
         )
 
     def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
@@ -494,7 +508,49 @@ class JavaBody:
         )
 
     def poll_events(self) -> list[Event]:
-        return [_contract_event(item) for item in self._client.drain_events()]
+        reply = self._client.resume_events(self.last_seq)
+        if isinstance(reply, ErrorResponse):
+            raise RuntimeError(f"Java Body event replay failed: {reply.code}")
+        normalized: list[Event] = []
+        for gap in self._client.drain_event_gaps():
+            if gap.bot != self.bot_name or gap.to_seq <= self.last_seq:
+                continue
+            normalized.append(Event(
+                seq=max(self.last_seq + 1, gap.to_seq),
+                tick=0,
+                bot=self.bot_name,
+                name="desync",
+                data={"expected_seq": gap.from_seq, "observed_seq": gap.to_seq + 1},
+            ))
+            self.last_seq = max(self.last_seq, gap.to_seq)
+        for item in self._client.drain_events():
+            if item.bot != self.bot_name or item.seq <= self.last_seq:
+                continue
+            event = _contract_event(item)
+            normalized.append(event)
+            self.last_seq = event.seq
+        self.event_log.extend(normalized)
+        return normalized
+
+    def event_head(self, proposed_epoch: str) -> dict[str, object]:
+        reply = self._client.request_response(
+            lambda protocol: protocol.event_head(self.bot_name, proposed_epoch)
+        )
+        if isinstance(reply, ErrorResponse):
+            raise RuntimeError(f"Java Body event head failed: {reply.code}")
+        payload = reply.payload
+        epoch = str(payload.get("epoch") or "")
+        if not epoch:
+            raise RuntimeError("Java Body event head is missing epoch")
+        self._server_epoch = epoch
+        return {
+            "event_seq": int(payload.get("event_seq") or 0),
+            "chat_seq": int(payload.get("chat_seq") or 0),
+            "tick": int(payload.get("tick") or 0),
+            "epoch": epoch,
+            "owner": payload.get("owner"),
+            "pending_action_count": int(payload.get("pending_action_count") or 0),
+        }
 
     # -- whole-objective writes -----------------------------------------
 
@@ -528,13 +584,73 @@ class JavaBody:
             error=None if outcome.success else outcome.reason,
         )
 
-    # -- semantics the Java provider does not offer yet ------------------
+    # -- lifecycle ------------------------------------------------------
 
-    def spawn(self, pos=None, *, yaw=None, pitch=None, dimension=None, gamemode=None, emit_respawned=False) -> Result:
-        return _gap_result(Action.create("spawn"), self.bot_name)
+    def spawn(
+        self,
+        pos=None,
+        *,
+        yaw=None,
+        pitch=None,
+        dimension=None,
+        gamemode=None,
+        emit_respawned=False,
+        timeout_s=15.0,
+    ) -> Result:
+        reply = self._client.request_response(lambda protocol: protocol.spawn(
+            self.bot_name,
+            pos=None if pos is None else tuple(int(value) for value in pos),
+            yaw=yaw,
+            pitch=pitch,
+            dimension=dimension,
+            gamemode=gamemode,
+            emit_respawned=bool(emit_respawned),
+        ))
+        if isinstance(reply, ErrorResponse):
+            return _lifecycle_result(self.bot_name, "spawn", False, False, reply.payload, reply.code)
+        accepted = bool(reply.payload.get("accepted"))
+        if not accepted:
+            return _lifecycle_result(
+                self.bot_name, "spawn", False, False, reply.payload, "spawn_rejected"
+            )
+        deadline = time.monotonic() + max(0.1, float(timeout_s))
+        while time.monotonic() < deadline:
+            state = self.get_state()
+            if not state.missing:
+                return _lifecycle_result(
+                    self.bot_name,
+                    "spawn",
+                    True,
+                    True,
+                    {**dict(reply.payload), "final_pos": list(state.pos)},
+                    None,
+                )
+            time.sleep(0.1)
+        return _lifecycle_result(
+            self.bot_name, "spawn", False, True, reply.payload, "spawn_timeout"
+        )
 
     def despawn(self) -> Result:
-        return _gap_result(Action.create("despawn"), self.bot_name)
+        reply = self._client.request_response(
+            lambda protocol: protocol.despawn(self.bot_name)
+        )
+        if isinstance(reply, ErrorResponse):
+            return _lifecycle_result(self.bot_name, "despawn", False, False, reply.payload, reply.code)
+        accepted = bool(reply.payload.get("accepted"))
+        if not accepted:
+            return _lifecycle_result(
+                self.bot_name, "despawn", False, False, reply.payload, "despawn_rejected"
+            )
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if self.get_state().missing:
+                return _lifecycle_result(
+                    self.bot_name, "despawn", True, True, reply.payload, None
+                )
+            time.sleep(0.1)
+        return _lifecycle_result(
+            self.bot_name, "despawn", False, True, reply.payload, "despawn_timeout"
+        )
 
     def await_action_terminal(self, action_id, timeout_s=15.0, poll_interval_s=0.10,
                               terminal_events=None, intermediate_events=None) -> Event:
@@ -573,7 +689,19 @@ class JavaBody:
         return self.await_action_terminal(action.id, timeout_s=timeout_s)
 
     def interrupt(self, reason: str | None = None) -> Result:
-        return _gap_result(Action.create("interrupt"), self.bot_name)
+        reply = self._client.interrupt_body(reason)
+        if isinstance(reply, ErrorResponse):
+            return _lifecycle_result(self.bot_name, "interrupt", False, False, reply.payload, reply.code)
+        accepted = bool(reply.payload.get("accepted"))
+        return _lifecycle_result(
+            self.bot_name,
+            "interrupt",
+            accepted,
+            accepted,
+            reply.payload,
+            None if accepted else "interrupt_rejected",
+            complete=bool(reply.payload.get("complete")),
+        )
 
     def _execute_terminal_action(self, action: Action) -> Result:
         if action.name == "containerTransfer":
@@ -639,6 +767,28 @@ def _gap_result(action: Action, bot: str) -> Result:
         id=action.id, bot=bot, type="result",
         ok=False, accepted=False, complete=True,
         error=f"{_CAPABILITY_GAP}:{action.name}",
+    )
+
+
+def _lifecycle_result(
+    bot: str,
+    action: str,
+    ok: bool,
+    accepted: bool,
+    data: dict,
+    error: str | None,
+    *,
+    complete: bool = True,
+) -> Result:
+    return Result(
+        id=None,
+        bot=bot,
+        type="result",
+        ok=ok,
+        accepted=accepted,
+        complete=complete,
+        data={"action": action, **dict(data)},
+        error=error,
     )
 
 

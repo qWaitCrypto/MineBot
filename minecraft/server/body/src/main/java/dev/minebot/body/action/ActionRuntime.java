@@ -98,6 +98,19 @@ public final class ActionRuntime {
         return registry.requestCancel(actionId);
     }
 
+    /** Immediately releases a body that died or disappeared. */
+    public boolean abortCurrent(String bot, String reason, int serverTick) {
+        FakePlayerActionOwner.Owner current = owner.current(bot);
+        if (current == null) {
+            controls.clearAll(bot);
+            return false;
+        }
+        JsonObject facts = new JsonObject();
+        facts.addProperty("reason", reason);
+        facts.addProperty("success", false);
+        return terminate(bot, current.actionId(), CLASS_FAILED, facts, serverTick, true);
+    }
+
     public boolean cancelRequested(String actionId) {
         return registry.cancelRequested(actionId);
     }
@@ -144,5 +157,9 @@ public final class ActionRuntime {
     /** The bot's current physical owner, or null when idle. */
     public FakePlayerActionOwner.Owner currentOwner(String botName) {
         return owner.current(botName);
+    }
+
+    public int pendingActionCount(String botName) {
+        return owner.current(botName) == null ? 0 : 1;
     }
 }

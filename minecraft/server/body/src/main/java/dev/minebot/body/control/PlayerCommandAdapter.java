@@ -37,6 +37,39 @@ public final class PlayerCommandAdapter
         dispatch(botName, "move forward");
     }
 
+    public void spawn(
+        String botName,
+        Integer x,
+        Integer y,
+        Integer z,
+        Float yaw,
+        Float pitch,
+        String dimension
+    ) {
+        StringBuilder command = new StringBuilder("spawn");
+        if (x != null && y != null && z != null) {
+            command.append(" at ").append(x).append(' ').append(y).append(' ').append(z);
+        }
+        if (yaw != null && pitch != null) {
+            command.append(" facing ").append(yaw).append(' ').append(pitch);
+        }
+        if (dimension != null) {
+            command.append(" in ").append(dimension);
+        }
+        dispatch(botName, command.toString());
+    }
+
+    public void setGameMode(String botName, String gameMode) {
+        server.getCommands().performPrefixedCommand(
+            server.createCommandSourceStack().withSuppressedOutput(),
+            "gamemode " + gameMode + " " + botName
+        );
+    }
+
+    public void despawn(String botName) {
+        dispatch(botName, "kill");
+    }
+
     public void stopMovement(String botName) {
         heldInputs.disengage(botName, HeldInputs.Input.MOVEMENT);
         dispatch(botName, "stop");

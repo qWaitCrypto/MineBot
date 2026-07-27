@@ -224,7 +224,14 @@ def _is_recheckable_transport_error(exc: Exception) -> bool:
     if isinstance(exc, (OSError, TimeoutError)):
         return True
     error_type = type(exc).__name__
-    if error_type in {"BodyProtocolError", "EnvelopeError", "RconError", "TruncatedPayloadError", "IncompletePayloadError"}:
+    if error_type in {
+        "BodyProtocolError",
+        "EnvelopeError",
+        "RconError",
+        "TransportClosed",
+        "TruncatedPayloadError",
+        "IncompletePayloadError",
+    }:
         return True
     return "RCON" in str(exc)
 

@@ -73,10 +73,10 @@ class CompositeBody:
         self._terminal_providers: dict[str, Body] = {}
 
     def spawn(self, pos=None, **kwargs) -> Result:
-        return self.scarpet.spawn(pos, **kwargs)
+        return self.java.spawn(pos, **kwargs)
 
     def despawn(self) -> Result:
-        return self.scarpet.despawn()
+        return self.java.despawn()
 
     def get_state(self):
         # Keep the complete legacy state until Java has the full state ledger.
@@ -114,6 +114,25 @@ class CompositeBody:
         # Legacy transactions still depend on Scarpet event names and epochs.
         return self.scarpet.poll_events()
 
+    def event_head(self, proposed_epoch: str) -> dict[str, object]:
+        # Event sequence/epoch still belong to the legacy stream until survival
+        # events migrate. Owner settlement must nevertheless observe both
+        # independent migration-time owner ledgers.
+        scarpet = dict(self.scarpet.event_head(proposed_epoch))
+        java = dict(self.java.event_head(proposed_epoch))
+        owners = [
+            str(owner)
+            for owner in (java.get("owner"), scarpet.get("owner"))
+            if owner is not None
+        ]
+        scarpet["owner"] = None if not owners else "+".join(owners)
+        scarpet["pending_action_count"] = int(
+            scarpet.get("pending_action_count") or 0
+        ) + int(java.get("pending_action_count") or 0)
+        scarpet["java_event_seq"] = int(java.get("event_seq") or 0)
+        scarpet["java_epoch"] = java.get("epoch")
+        return scarpet
+
     def ignite_block(self, pos, **kwargs) -> Event:
         return self.java.ignite_block(pos, **kwargs)
 
@@ -121,13 +140,31 @@ class CompositeBody:
         return self.java.sow_crop(pos, **kwargs)
 
     def interrupt(self, reason: str | None = None) -> Result:
-        # Java objectives are synchronous at the Python contract face today;
-        # legacy interruption remains the active session cancellation path.
-        return self.scarpet.interrupt(reason)
+        # Composite temporarily has two independent server-side owner ledgers.
+        # Cancellation therefore fans out and succeeds only when both owners
+        # accept it; this is cleanup, not runtime behavior fallback.
+        java = self.java.interrupt(reason)
+        scarpet = self.scarpet.interrupt(reason)
+        ok = java.ok and scarpet.ok
+        accepted = java.accepted and scarpet.accepted
+        return Result(
+            id=None,
+            bot=self.bot_name,
+            type="result",
+            ok=ok,
+            accepted=accepted,
+            complete=java.complete and scarpet.complete,
+            data={
+                "action": "interrupt",
+                "java": dict(java.data),
+                "scarpet": dict(scarpet.data),
+            },
+            error=None if ok and accepted else (java.error or scarpet.error or "interrupt_rejected"),
+        )
 
     def __getattr__(self, name: str):
-        # Migration-only extensions such as event_head, chat and telemetry are
-        # intentionally legacy-owned until their contract equivalents land.
+        # Migration-only extensions such as chat and telemetry remain legacy-
+        # owned until their contract equivalents land.
         return getattr(self.scarpet, name)
 
 

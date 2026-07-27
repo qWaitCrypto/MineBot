@@ -2,6 +2,7 @@ import unittest
 
 from minebot.body import LifecycleTransactions
 from minebot.contract import BodyState, Event, Result
+from minebot.game.java_body_adapter import TransportClosed
 
 
 def state_at(pos=(0, 64, 0), *, missing=False):
@@ -176,6 +177,39 @@ class LifecycleRuntimeTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "completed")
         self.assertEqual(result.metrics["state_before_recheck_errors"][0]["message"], "RCON socket closed")
+
+    def test_recover_after_death_retries_java_transport_close(self):
+        body = FakeLifecycleBody(
+            states=[
+                TransportClosed("websocket closed"),
+                state_at((0, -80, 0), missing=True),
+                state_at((3, 59, 0), missing=False),
+            ],
+            spawn_result=Result(
+                id=None,
+                bot="Bot1",
+                type="result",
+                ok=True,
+                accepted=True,
+                complete=True,
+                data={"action": "spawn"},
+                error=None,
+            ),
+            event_batches=[[
+                Event(
+                    seq=1,
+                    tick=20,
+                    bot="Bot1",
+                    name="respawned",
+                    data={"final_pos": [3.5, 59.0, 0.5]},
+                )
+            ]],
+        )
+
+        result = LifecycleTransactions(body).recover_after_death(respawn_pos=(3, 59, 0))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.metrics["state_before_recheck_errors"][0]["error_type"], "TransportClosed")
 
     def test_recover_after_death_accepts_respawn_event_when_state_drifted_after_spawn(self):
         body = FakeLifecycleBody(

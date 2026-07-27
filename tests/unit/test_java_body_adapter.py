@@ -225,6 +225,9 @@ class FakeBodyServer:
         self.scenario = "navigate_complete"
         self.verdict_seen: list[tuple[str, bool]] = []
         self.requests: list[dict] = []
+        self.present = True
+        self.position = [10.5, 64.0, -3.5]
+        self._history: list[dict] = []
 
     def send(self, text: str) -> None:
         if self._closed:
@@ -256,9 +259,57 @@ class FakeBodyServer:
                 "max_requests_per_second": 40,
                 "request_types": [
                     "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "ENTITY_READ", "FIND_BLOCKS", "FURNACE_TRANSFER",
-                    "HELLO", "INVENTORY", "CONTAINER_READ", "CONTAINER_TRANSFER", "CRAFT_ITEM", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
+                    "HELLO", "EVENT_HEAD", "SPAWN", "DESPAWN", "INTERRUPT", "INVENTORY", "CONTAINER_READ", "CONTAINER_TRANSFER", "CRAFT_ITEM", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
                     "RECIPE_READ", "RESUME_EVENTS", "WORLD_READ",
                 ],
+            })
+        elif kind == "EVENT_HEAD":
+            self._emit_response(rid, "EVENT_HEAD_RESULT", {
+                "bot": message.get("bot_name"),
+                "epoch": "fake-server-epoch",
+                "event_seq": self._seq,
+                "chat_seq": 0,
+                "owner": None,
+                "pending_action_count": 0,
+                "tick": self._tick,
+            })
+        elif kind == "SPAWN":
+            self.present = True
+            if message.get("pos") is not None:
+                self.position = [float(value) for value in message["pos"]]
+            if message.get("emit_respawned"):
+                self._emit_event("respawned", None, {"final_pos": list(self.position)})
+            self._emit_response(rid, "SPAWN_RESULT", {
+                "bot": message.get("bot_name"),
+                "accepted": True,
+                "present": True,
+                "already_present": False,
+            })
+        elif kind == "DESPAWN":
+            self.present = False
+            self._emit_event("bodyMissing", None, {"lastPos": list(self.position), "reason": "despawn"})
+            self._emit_response(rid, "DESPAWN_RESULT", {
+                "bot": message.get("bot_name"),
+                "accepted": True,
+                "missing": True,
+                "already_missing": False,
+            })
+        elif kind == "INTERRUPT":
+            self._emit_response(rid, "INTERRUPT_RESULT", {
+                "bot": message.get("bot_name"),
+                "accepted": True,
+                "complete": True,
+                "owner_action_id": None,
+                "reason": message.get("reason"),
+            })
+        elif kind == "RESUME_EVENTS":
+            after = int(message.get("after_seq", 0))
+            self._emit_response(rid, "RESUME_EVENTS_RESULT", {
+                "bot": message.get("bot_name"),
+                "event_gap": None,
+                "events": [event for event in self._history if int(event["seq"]) > after],
+                "replay_complete": True,
+                "last_seq": self._seq,
             })
         elif kind == "NAVIGATE":
             self._handle_navigate(message, rid)
@@ -281,16 +332,24 @@ class FakeBodyServer:
         elif kind == "BODY_STATE":
             self._emit_response(rid, "BODY_STATE_RESULT", {
                 "bot": message.get("bot_name"),
-                "missing": False,
-                "position": {"x": 10.5, "y": 64.0, "z": -3.5},
+                "missing": not self.present,
+                "position": {"x": self.position[0], "y": self.position[1], "z": self.position[2]},
                 "yaw": 90.0, "pitch": 0.0,
                 "health": 18.0, "food": 17, "air": 300,
                 "dimension": "minecraft:overworld",
                 "game_time": 123456,
+                "inventory_raw": "0=minecraft:oak_log*3;",
+                "inventory_hash": "inventory-hash",
                 "inventory_counts": {"minecraft:oak_log": 3},
+                "selected_slot": 0,
                 "selected_item": "minecraft:oak_log",
                 "offhand_item": None,
+                "effects": [],
+                "sleeping": False,
+                "weather": "clear",
                 "body_owner": None,
+                "pending_action_count": 0,
+                "hazard_unresolved": None,
             })
         elif kind == "FIND_BLOCKS":
             self._handle_find_blocks(message, rid)
@@ -943,6 +1002,7 @@ class FakeBodyServer:
         self._seq += 1
         frame = {"channel": self.CHANNEL, "type": "EVENT", "bot": "Bot", "seq": self._seq,
                  "tick": self._tick, "event": name, "action_id": action, "data": data}
+        self._history.append(dict(frame))
         self._out.append(json.dumps(frame))
 
     def _emit_terminal(self, action, data) -> None:
@@ -1044,15 +1104,18 @@ def test_transport_drop_reconciles_via_query_action() -> None:
     server.scenario = "drop_before_terminal"
     server._drop_after = 2
     reconnects = {"n": 0}
+    connections = []
 
     def connect():
         reconnects["n"] += 1
         if reconnects["n"] == 1:
-            return server
-        fresh = FakeBodyServer()
-        fresh.scenario = "drop_before_terminal"
-        fresh._pending_action = server._pending_action
-        return fresh
+            connection = server
+        else:
+            connection = FakeBodyServer()
+            connection.scenario = "drop_before_terminal"
+            connection._pending_action = server._pending_action
+        connections.append(connection)
+        return connection
 
     client = JavaBodyClient("Bot", connect, action_wall_timeout_s=5.0, recv_timeout_s=0.01)
     client.connect()
@@ -1060,6 +1123,8 @@ def test_transport_drop_reconciles_via_query_action() -> None:
     assert result.success is True
     assert result.reason == "arrived"
     assert reconnects["n"] == 2
+    reconnect_types = [request.get("type") for request in connections[1].requests]
+    assert reconnect_types.index("RESUME_EVENTS") < reconnect_types.index("QUERY_ACTION")
 
 
 def test_action_ids_do_not_collide_across_client_process_epochs() -> None:
@@ -1095,8 +1160,54 @@ def test_java_body_get_state_maps_authoritative_wire_state() -> None:
     assert state.oxygen == 300
     assert state.dimension == "minecraft:overworld"
     assert state.inventory_counts == {"minecraft:oak_log": 3}
+    assert state.inventory_hash == "inventory-hash"
+    assert state.selected_slot == 0
     assert state.selected_item == "minecraft:oak_log"
     assert state.body_owner is None
+    assert state.pending_action_count == 0
+    assert state.effects == []
+    assert state.sleeping is False
+    assert state.weather == "clear"
+
+
+def test_java_body_lifecycle_requires_presence_truth_and_emits_respawn() -> None:
+    server = FakeBodyServer()
+    server.present = False
+    body = JavaBody(_client(server), "Bot")
+
+    spawned = body.spawn(
+        (3, 59, 0),
+        yaw=90.0,
+        pitch=0.0,
+        gamemode="survival",
+        emit_respawned=True,
+        timeout_s=1.0,
+    )
+    events = body.poll_events()
+    despawned = body.despawn()
+
+    assert spawned.ok and spawned.accepted
+    assert spawned.data["final_pos"] == [3.0, 59.0, 0.0]
+    assert any(event.name == "respawned" and event.data["final_pos"] == [3.0, 59.0, 0.0] for event in events)
+    assert despawned.ok and despawned.accepted
+    assert body.get_state().missing is True
+
+
+def test_java_body_interrupt_uses_independent_control_connection() -> None:
+    connections: list[FakeBodyServer] = []
+
+    def connect():
+        server = FakeBodyServer()
+        connections.append(server)
+        return server
+
+    body = JavaBody(JavaBodyClient("Bot", connect), "Bot")
+
+    interrupted = body.interrupt("unit_cleanup")
+
+    assert interrupted.ok and interrupted.accepted and interrupted.complete
+    assert len(connections) == 1
+    assert any(request.get("type") == "INTERRUPT" for request in connections[0].requests)
 
 
 def test_java_body_perceive_adapts_find_blocks_and_gaps_the_rest() -> None:

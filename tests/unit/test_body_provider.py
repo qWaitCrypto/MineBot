@@ -170,6 +170,60 @@ def test_composite_does_not_fallback_after_java_player_action_failure() -> None:
     scarpet.await_action_terminal.assert_not_called()
 
 
+def test_composite_routes_lifecycle_to_java_and_interrupts_both_owner_ledgers() -> None:
+    scarpet = _scarpet()
+    java = _scarpet()
+    java.spawn.return_value = Mock(ok=True, accepted=True)
+    java.despawn.return_value = Mock(ok=True, accepted=True)
+    java.interrupt.return_value = Mock(
+        ok=True, accepted=True, complete=True, data={"owner": None}, error=None
+    )
+    scarpet.interrupt.return_value = Mock(
+        ok=True, accepted=True, complete=True, data={"owner": None}, error=None
+    )
+    body = CompositeBody(scarpet, java)
+
+    body.spawn((3, 59, 0), emit_respawned=True, timeout_s=2.0)
+    body.despawn()
+    interrupted = body.interrupt("cleanup")
+
+    java.spawn.assert_called_once_with((3, 59, 0), emit_respawned=True, timeout_s=2.0)
+    java.despawn.assert_called_once_with()
+    scarpet.spawn.assert_not_called()
+    scarpet.despawn.assert_not_called()
+    java.interrupt.assert_called_once_with("cleanup")
+    scarpet.interrupt.assert_called_once_with("cleanup")
+    assert interrupted.ok and interrupted.accepted and interrupted.complete
+
+
+def test_composite_event_head_keeps_legacy_cursor_but_observes_java_owner() -> None:
+    scarpet = _scarpet()
+    java = _scarpet()
+    scarpet.event_head.return_value = {
+        "event_seq": 7,
+        "chat_seq": 3,
+        "epoch": "scarpet-epoch",
+        "owner": None,
+        "pending_action_count": 0,
+    }
+    java.event_head.return_value = {
+        "event_seq": 11,
+        "chat_seq": 0,
+        "epoch": "java-epoch",
+        "owner": "nav-1",
+        "pending_action_count": 1,
+    }
+
+    head = CompositeBody(scarpet, java).event_head("client-epoch")
+
+    assert head["event_seq"] == 7
+    assert head["chat_seq"] == 3
+    assert head["epoch"] == "scarpet-epoch"
+    assert head["owner"] == "nav-1"
+    assert head["pending_action_count"] == 1
+    assert head["java_event_seq"] == 11
+
+
 def test_composite_governance_structure_read_uses_java_world_facts() -> None:
     server = FakeBodyServer()
     scarpet = _scarpet()
