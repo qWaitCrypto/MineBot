@@ -20,8 +20,7 @@ from minebot.app.runner import RuntimeTrace
 from minebot.app.wiring import AgentRuntimeParts
 from minebot.brain.composition import CompositionBudget
 from minebot.brain.registry import ToolRegistry
-from minebot.contract import Region
-from minebot.game import ScarpetBody
+from minebot.contract import Body, Region
 
 
 @dataclass(frozen=True)
@@ -32,7 +31,7 @@ class ResourceRuntimeConfig:
 
 def build_resource_agent_runtime(
     *,
-    body: ScarpetBody,
+    body: Body,
     goal_text: str,
     model_provider: ModelProviderRegistry | None,
     config: ResourceRuntimeConfig,
@@ -51,7 +50,7 @@ def build_resource_agent_runtime(
     )
 
 
-def build_resource_registry(body: ScarpetBody, config: ResourceRuntimeConfig) -> ToolRegistry:
+def build_resource_registry(body: Body, config: ResourceRuntimeConfig) -> ToolRegistry:
     return build_phase1_registry(body, Phase1RuntimeConfig(natural_region=config.natural_region, budget=config.budget))
 
 

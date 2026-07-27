@@ -173,6 +173,36 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(cfg.server_id, "server-alpha")
         self.assertEqual(cfg.world_id_override, "world-fixture")
         self.assertEqual(cfg.state_db_path, Path("var/test-state.sqlite3"))
+        self.assertEqual(cfg.body_provider.value, "scarpet")
+
+    def test_config_parses_composite_body_provider(self):
+        cfg = real_server_config_from_env(
+            {
+                "MINEBOT_REAL_RCON_HOST": "example.invalid",
+                "MINEBOT_REAL_RCON_PORT": "25576",
+                "MINEBOT_REAL_RCON_PASSWORD": "secret",
+                "MINEBOT_REAL_BOT": "MineBot",
+                "MINEBOT_BODY_PROVIDER": "composite",
+                "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
+            }
+        )
+
+        self.assertEqual(cfg.body_provider.value, "composite")
+        self.assertEqual(cfg.java_body_url, "ws://127.0.0.1:8767")
+
+    def test_config_rejects_java_provider_without_java_url(self):
+        with self.assertRaises(RealServerConfigError) as ctx:
+            real_server_config_from_env(
+                {
+                    "MINEBOT_REAL_RCON_HOST": "example.invalid",
+                    "MINEBOT_REAL_RCON_PORT": "25576",
+                    "MINEBOT_REAL_RCON_PASSWORD": "secret",
+                    "MINEBOT_REAL_BOT": "MineBot",
+                    "MINEBOT_BODY_PROVIDER": "java",
+                }
+            )
+
+        self.assertIn("MINEBOT_JAVA_BODY_URL", str(ctx.exception))
 
     def test_config_defaults_scope_without_using_credentials(self):
         cfg = real_server_config_from_env(

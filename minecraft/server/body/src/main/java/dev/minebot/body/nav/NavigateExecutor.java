@@ -18,6 +18,28 @@ public final class NavigateExecutor implements ActionRuntime.TickExecutor {
     /** Observed bot position; null when the bot is gone. */
     public interface PositionSource {
         record Position(double x, double y, double z) {
+            private static final double FEET_Y_INTEGER_EPSILON = 1.0e-4;
+
+            public int blockX() {
+                return (int) Math.floor(x);
+            }
+
+            public int blockZ() {
+                return (int) Math.floor(z);
+            }
+
+            /**
+             * The server may report a standing player's Y infinitesimally
+             * below an integer. Snap only that numerical tail upward before
+             * mapping the player's feet to a voxel.
+             */
+            public int feetBlockY() {
+                double nearestInteger = Math.rint(y);
+                if (Math.abs(y - nearestInteger) <= FEET_Y_INTEGER_EPSILON) {
+                    return (int) nearestInteger;
+                }
+                return (int) Math.floor(y);
+            }
         }
 
         Position position(String botName);

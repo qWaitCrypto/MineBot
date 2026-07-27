@@ -3,10 +3,11 @@ package dev.minebot.body.control;
 import net.minecraft.server.MinecraftServer;
 
 /**
- * The single write surface to a FakePlayer: public Carpet {@code /player}
- * commands dispatched on the server thread from a suppressed console-level
- * source. No Carpet internal class is a control surface. Dispatch is
- * fire-and-observe — a dispatched command is never terminal success; truth
+ * The public Carpet {@code /player} surface for FakePlayer movement, posture,
+ * look, and use commands. Exact governed block breaking is handled separately
+ * by {@code ServerPlayerBlockBreaker} through the real player's game-mode
+ * mechanics. No Carpet internal class is a control surface. Dispatch is
+ * fire-and-observe: a dispatched command is never terminal success; truth
  * comes from observed server state.
  *
  * The adapter records engaged continuous inputs in {@link HeldInputs} so that
@@ -15,14 +16,19 @@ import net.minecraft.server.MinecraftServer;
  */
 public final class PlayerCommandAdapter
     implements dev.minebot.body.action.BotControls,
-    dev.minebot.body.action.CollectExecutor.MiningControls,
     dev.minebot.body.nav.MovementControls {
     private final MinecraftServer server;
     private final HeldInputs heldInputs;
+    private final dev.minebot.body.action.ExactBlockBreaker blockBreaker;
 
-    public PlayerCommandAdapter(MinecraftServer server, HeldInputs heldInputs) {
+    public PlayerCommandAdapter(
+        MinecraftServer server,
+        HeldInputs heldInputs,
+        dev.minebot.body.action.ExactBlockBreaker blockBreaker
+    ) {
         this.server = server;
         this.heldInputs = heldInputs;
+        this.blockBreaker = blockBreaker;
     }
 
     public void moveForward(String botName) {
@@ -72,16 +78,6 @@ public final class PlayerCommandAdapter
         dispatch(botName, "unsprint");
     }
 
-    public void attackOnce(String botName) {
-        dispatch(botName, "attack once");
-    }
-
-    @Override
-    public void attackContinuous(String botName) {
-        heldInputs.engage(botName, HeldInputs.Input.ATTACK);
-        dispatch(botName, "attack continuous");
-    }
-
     public void useOnce(String botName) {
         dispatch(botName, "use once");
     }
@@ -94,6 +90,7 @@ public final class PlayerCommandAdapter
      */
     @Override
     public void clearAll(String botName) {
+        blockBreaker.abort(botName);
         var engaged = heldInputs.drain(botName);
         dispatch(botName, "stop");
         if (engaged.contains(HeldInputs.Input.SNEAK)) {

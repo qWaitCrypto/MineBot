@@ -37,6 +37,7 @@ public final class ApproachController {
     private final MovementControls controls;
     private final NavigateExecutor.EventSink events;
     private final int replanLimit;
+    private final double finalWaypointReachDistance;
 
     private Phase phase = Phase.PLANNING;
     private AStarPathfinder pathfinder;
@@ -59,6 +60,28 @@ public final class ApproachController {
         NavigateExecutor.EventSink events,
         int replanLimit
     ) {
+        this(
+            bot,
+            actionId,
+            goal,
+            world,
+            controls,
+            events,
+            replanLimit,
+            PathFollower.WAYPOINT_REACH_DISTANCE
+        );
+    }
+
+    public ApproachController(
+        String bot,
+        String actionId,
+        Goal goal,
+        WorldView world,
+        MovementControls controls,
+        NavigateExecutor.EventSink events,
+        int replanLimit,
+        double finalWaypointReachDistance
+    ) {
         this.bot = bot;
         this.actionId = actionId;
         this.goal = goal;
@@ -66,6 +89,7 @@ public final class ApproachController {
         this.controls = controls;
         this.events = events;
         this.replanLimit = replanLimit;
+        this.finalWaypointReachDistance = finalWaypointReachDistance;
     }
 
     public int replans() {
@@ -123,7 +147,7 @@ public final class ApproachController {
         unloadedTotal += result.unloadedTouches();
         followingPartialPath = result.outcome() == AStarPathfinder.Outcome.PARTIAL;
         List<Waypoint> path = result.path();
-        follower = new PathFollower(path);
+        follower = new PathFollower(path, finalWaypointReachDistance);
         pathfinder = null;
         phase = Phase.FOLLOWING;
         moving = false;

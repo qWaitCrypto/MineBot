@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Literal
 
 from minebot.body import (
@@ -24,6 +25,7 @@ from minebot.body import (
 from minebot.app.projection import bounded_summary_value, top_reasons
 from minebot.brain.registry import ObservationProjector, RegisteredTool, ToolRegistry, ToolSidecar
 from minebot.contract import (
+    Action,
     Body,
     BreakContext,
     JsonObject,
@@ -341,6 +343,7 @@ def register_body_capability_tools(
     pickup: PickupTransactions,
     resource_collection: ResourceCollectionTransactions,
     use: UseTransactions,
+    java_objective_body: Body | None = None,
 ) -> None:
     tools = (
         _move_away_tool(navigator),
@@ -368,7 +371,7 @@ def register_body_capability_tools(
         _dig_down_tool(work),
         _dig_up_tool(work),
         _pickup_items_tool(pickup),
-        _collect_block_domain_tool(resource_collection),
+        _collect_block_domain_tool(resource_collection, java_objective_body),
         _read_block_tool(body),
         _read_nearby_blocks_tool(body),
         _read_nearby_entities_tool(body),
@@ -1402,7 +1405,29 @@ def _bounded_reason_counts(counts: dict[str, int]) -> list[str]:
     ]
 
 
-def _collect_block_domain_tool(resource: ResourceCollectionTransactions) -> RegisteredTool:
+def _collect_block_domain_tool(
+    resource: ResourceCollectionTransactions,
+    java_objective_body: Body | None = None,
+) -> RegisteredTool:
+    def run(params: JsonObject) -> ToolResult:
+        if java_objective_body is not None:
+            return _java_collect_block_domain(java_objective_body, params)
+        return resource.collect_block_domain(
+            block_types=_strings(params["block_types"]),
+            expected_drops=_strings(params["expected_drops"]),
+            remaining_count=int(params["remaining_count"]),
+            dry=bool(params.get("dry", False)),
+            config=ResourceCollectionConfig(
+                search_radius=int(params.get("search_radius") or 16),
+                candidate_budget=int(params.get("candidate_budget") or 8),
+                mutation_budget=int(params.get("mutation_budget") or 8),
+                max_wall_s=float(params.get("max_wall_s") or 60.0),
+                find_limit=int(params.get("find_limit") or 12),
+                max_pages=int(params.get("max_pages") or 1),
+                segment_timeout_s=float(params.get("segment_timeout_s") or 15.0),
+            ),
+        )
+
     return _tool(
         "collect_block_domain",
         "Collect a bounded physical domain of explicit block types. The Body discovers candidates, submits their stand points as one planner goal set, blacklists failed candidates, replans, mines, and verifies pickup inventory truth.",
@@ -1422,23 +1447,9 @@ def _collect_block_domain_tool(resource: ResourceCollectionTransactions) -> Regi
             },
             required=("block_types", "expected_drops", "remaining_count"),
         ),
-        lambda params: resource.collect_block_domain(
-            block_types=_strings(params["block_types"]),
-            expected_drops=_strings(params["expected_drops"]),
-            remaining_count=int(params["remaining_count"]),
-            dry=bool(params.get("dry", False)),
-            config=ResourceCollectionConfig(
-                search_radius=int(params.get("search_radius") or 16),
-                candidate_budget=int(params.get("candidate_budget") or 8),
-                mutation_budget=int(params.get("mutation_budget") or 8),
-                max_wall_s=float(params.get("max_wall_s") or 60.0),
-                find_limit=int(params.get("find_limit") or 12),
-                max_pages=int(params.get("max_pages") or 1),
-                segment_timeout_s=float(params.get("segment_timeout_s") or 15.0),
-            ),
-        ),
+        run,
         mutating=True,
-        source="body.resource_collection",
+        source=("java_body" if java_objective_body is not None else "body.resource_collection"),
         tool_type="resource",
         permission="collect_natural_resource",
         body_scope=("search", "navigation", "mine", "pickup", "inventory"),
@@ -1446,6 +1457,111 @@ def _collect_block_domain_tool(resource: ResourceCollectionTransactions) -> Regi
         timeout_s=960.0,
         projector=resource_domain_observation_projector,
     )
+
+
+def _java_collect_block_domain(body: Body, params: JsonObject) -> ToolResult:
+    block_types = tuple(_minecraft_id(item) for item in _strings(params["block_types"]))
+    if not block_types:
+        return ToolResult(False, "no_block_types", False)
+    remaining = int(params["remaining_count"])
+    call_limit = min(
+        remaining,
+        int(params.get("candidate_budget") or 8),
+        int(params.get("mutation_budget") or 8),
+    )
+    max_wall_s = float(params.get("max_wall_s") or 60.0)
+    segment_timeout_s = float(params.get("segment_timeout_s") or 15.0)
+    started = time.monotonic()
+    collected = 0
+    attempts: list[dict[str, object]] = []
+    for _ in range(call_limit):
+        wall_remaining = max_wall_s - (time.monotonic() - started)
+        if wall_remaining <= 0:
+            break
+        timeout_ticks = max(20, min(12_000, int(min(segment_timeout_s, wall_remaining) * 20)))
+        try:
+            result = body.execute(
+                Action.create(
+                    "collectBlock",
+                    {
+                        "block_types": list(block_types),
+                        "radius": int(params.get("search_radius") or 16),
+                        "vertical_radius": min(64, int(params.get("search_radius") or 16)),
+                        "timeout_ticks": timeout_ticks,
+                    },
+                )
+            )
+        except Exception as error:  # transport/provider availability
+            return ToolResult(
+                False,
+                "java_body_unavailable",
+                True,
+                metrics={"error": type(error).__name__, "attempts": attempts},
+            )
+        attempt = {
+            "success": bool(result.ok and result.accepted and result.complete),
+            "reason": result.error or ("collected" if result.ok else "body_rejected"),
+            "metrics": dict(result.data),
+        }
+        attempts.append(attempt)
+        if not attempt["success"]:
+            reason = str(attempt["reason"])
+            return ToolResult(
+                False,
+                reason,
+                _java_failure_retryable(reason),
+                metrics={
+                    "attempts": attempts,
+                    "collected_delta": collected,
+                    "remaining_count": max(0, remaining - collected),
+                },
+            )
+        delta = result.data.get("inventory_delta")
+        gained = 0
+        if isinstance(delta, dict):
+            try:
+                gained = max(0, int(delta.get("after") or 0) - int(delta.get("before") or 0))
+            except (TypeError, ValueError):
+                gained = 0
+        if gained <= 0:
+            return ToolResult(
+                False,
+                "collect_no_inventory_delta",
+                True,
+                metrics={"attempts": attempts, "collected_delta": collected},
+            )
+        collected += gained
+        if collected >= remaining:
+            return ToolResult(
+                True,
+                "collected",
+                False,
+                metrics={
+                    "attempts": attempts,
+                    "collected_delta": collected,
+                    "remaining_count": 0,
+                    "candidates_tried": len(attempts),
+                },
+            )
+    return ToolResult(
+        False,
+        "resource_domain_budget_exhausted",
+        True,
+        metrics={
+            "attempts": attempts,
+            "collected_delta": collected,
+            "remaining_count": max(0, remaining - collected),
+            "candidates_tried": len(attempts),
+        },
+    )
+
+
+def _minecraft_id(value: str) -> str:
+    return value if ":" in value else f"minecraft:{value}"
+
+
+def _java_failure_retryable(reason: str) -> bool:
+    return not reason.startswith(("governance_denied", "target_not_found", "invalid_"))
 
 
 def _pickup_items_tool(pickup: PickupTransactions) -> RegisteredTool:

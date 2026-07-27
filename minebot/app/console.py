@@ -18,6 +18,7 @@ from minebot.app.config import AppConfigError, agent_language_from_env, provider
 from minebot.app.session import AgentSession, DEFAULT_RUNAWAY_STEP_LIMIT, SessionCommand
 from minebot.app.resource_runtime import ResourceRuntimeConfig, build_resource_agent_runtime, inventory_count
 from minebot.brain.lifecycle import LifecycleState
+from minebot.contract import Body
 from minebot.game import RconClient, Region, ScarpetBody
 from minebot.game.errors import RconError
 from minebot.game.rcon import RconConfig
@@ -75,7 +76,7 @@ def seed_resource_scene(rcon: RconClient) -> None:
         command(rcon, f"setblock {3 + offset} 70 0 dirt", delay=0.0)
 
 
-async def run_goal(body: ScarpetBody, goal_text: str, *, max_turns: int, sdk_max_turns: int | None, language: str) -> None:
+async def run_goal(body: Body, goal_text: str, *, max_turns: int, sdk_max_turns: int | None, language: str) -> None:
     provider = provider_registry_from_env()
     collect_target = parse_collect_goal(goal_text)
 
@@ -155,7 +156,7 @@ def _last_collect_succeeded(trace: list[dict[str, object]]) -> bool:
 
 
 def _goal_completed(
-    body: ScarpetBody,
+    body: Body,
     trace: list[dict[str, object]],
     collect_target: tuple[str, int] | None,
 ) -> bool:

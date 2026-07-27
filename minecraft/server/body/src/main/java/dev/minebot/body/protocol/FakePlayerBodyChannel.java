@@ -4,12 +4,14 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import dev.minebot.body.action.ActionRegistry;
 import dev.minebot.body.action.ActionRuntime;
+import dev.minebot.body.action.AscendExecutor;
 import dev.minebot.body.action.CollectExecutor;
 import dev.minebot.body.action.MutationGate;
 import dev.minebot.body.control.FakePlayerActionOwner;
 import dev.minebot.body.control.HeldInputs;
 import dev.minebot.body.control.OwnerPriority;
 import dev.minebot.body.control.PlayerCommandAdapter;
+import dev.minebot.body.control.ServerPlayerBlockBreaker;
 import dev.minebot.body.event.BotEventStream;
 import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MinecraftWorldView;
@@ -29,7 +31,9 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.phys.AABB;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -42,7 +46,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String CHANNEL = "fakeplayer-body";
     public static final String PROTOCOL = "fakeplayer-body/1";
     private static final Set<String> REQUEST_TYPES = Set.of(
-        "HELLO", "FIND_BLOCKS", "BODY_STATE", "NAVIGATE", "COLLECT_BLOCK",
+        "HELLO", "FIND_BLOCKS", "BODY_STATE", "NAVIGATE", "COLLECT_BLOCK", "ASCEND",
         "MUTATION_VERDICT", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
     );
     private static final int MAX_RADIUS = 128;
@@ -57,6 +61,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     private final BotEventStream events = new BotEventStream();
     private final ActionRegistry actions = new ActionRegistry();
     private final MutationGate mutationGate = new MutationGate();
+    private final ServerPlayerBlockBreaker blockBreaker;
     private final PlayerCommandAdapter adapter;
     private final ActionRuntime runtime;
     private final Set<MineBotConnection> subscribers = new LinkedHashSet<>();
@@ -64,7 +69,8 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
 
     public FakePlayerBodyChannel(MinecraftServer server) {
         this.server = server;
-        this.adapter = new PlayerCommandAdapter(server, new HeldInputs());
+        this.blockBreaker = new ServerPlayerBlockBreaker(server);
+        this.adapter = new PlayerCommandAdapter(server, new HeldInputs(), blockBreaker);
         this.runtime = new ActionRuntime(new FakePlayerActionOwner(), adapter, actions, events);
         // Every emitted event — runtime lifecycle included — is pushed live.
         events.setListener(event -> {
@@ -118,12 +124,96 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "BODY_STATE" -> handleBodyState(connection, request, serverTick);
             case "NAVIGATE" -> handleNavigate(connection, request, serverTick);
             case "COLLECT_BLOCK" -> handleCollectBlock(connection, request, serverTick);
+            case "ASCEND" -> handleAscend(connection, request, serverTick);
             case "MUTATION_VERDICT" -> handleMutationVerdict(request);
             case "RESUME_EVENTS" -> handleResumeEvents(connection, request, serverTick);
             case "CANCEL_ACTION" -> handleCancelAction(connection, request, serverTick);
             case "QUERY_ACTION" -> handleQueryAction(connection, request, serverTick);
             default -> throw new IllegalStateException("unreachable request type " + type);
         }
+    }
+
+    private void handleAscend(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            String actionId = requiredString(request, "action_id", 128);
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
+                return;
+            }
+            int targetY = boundedOptionalInt(request, "target_y", level.getMaxY(), level.getMinY(), level.getMaxY());
+            int timeoutTicks = boundedOptionalInt(request, "timeout_ticks", MAX_TIMEOUT_TICKS, 20, MAX_TIMEOUT_TICKS);
+            ActionRuntime.Submission submission = runtime.submit(
+                botName, actionId, "ASCEND", OwnerPriority.RECOVERY, serverTick
+            );
+            JsonObject response = baseResponse(request, "ASCEND_ACK");
+            response.addProperty("action_id", actionId);
+            switch (submission) {
+                case ActionRuntime.Submission.Accepted ignored -> {
+                    AscendExecutor.BlockReader blockReader = new AscendExecutor.BlockReader() {
+                        @Override
+                        public String blockIdAt(int x, int y, int z) {
+                            return observedBlockId(level, x, y, z);
+                        }
+
+                        @Override
+                        public boolean skyAbove(int x, int y, int z) {
+                            return level.canSeeSky(new BlockPos(x, y + 1, z));
+                        }
+                    };
+                    AscendExecutor executor = new AscendExecutor(
+                        botName,
+                        actionId,
+                        targetY,
+                        blockBreaker,
+                        adapter,
+                        adapter,
+                        blockReader,
+                        FakePlayerBodyChannel::isAscendHazard,
+                        mutationGate,
+                        this::publishProposal,
+                        this::observedPosition,
+                        this::publishEvent,
+                        runtime,
+                        timeoutTicks
+                    );
+                    runtime.attachExecutor(actionId, executor);
+                    response.addProperty("state", "accepted");
+                }
+                case ActionRuntime.Submission.Duplicate duplicate -> {
+                    response.addProperty(
+                        "state",
+                        duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal"
+                    );
+                    if (duplicate.status().terminal() != null) {
+                        response.add("terminal", duplicate.status().terminal());
+                    }
+                }
+                case ActionRuntime.Submission.Rejected rejected -> {
+                    JsonObject error = MineBotChannelRouter.error(
+                        CHANNEL, requestId(request), rejected.code(), "another action owns this bot", true
+                    );
+                    error.addProperty("owner_action_id", rejected.currentOwner().actionId());
+                    error.addProperty("owner_priority", rejected.currentOwner().priority().name());
+                    connection.send(error, serverTick);
+                    return;
+                }
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        }
+    }
+
+    private static boolean isAscendHazard(String blockId) {
+        return blockId.equals("minecraft:water")
+            || blockId.equals("minecraft:lava")
+            || blockId.equals("minecraft:fire")
+            || blockId.equals("minecraft:soul_fire")
+            || blockId.equals("minecraft:magma_block")
+            || blockId.equals("minecraft:powder_snow")
+            || blockId.equals("minecraft:bubble_column");
     }
 
     private void handleCollectBlock(MineBotConnection connection, JsonObject request, int serverTick) {
@@ -173,10 +263,13 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         searchFacts,
                         new MinecraftWorldView(level),
                         adapter,
-                        adapter,
+                        blockBreaker,
                         adapter,
                         (x, y, z) -> observedBlockId(level, x, y, z),
                         itemId -> observedItemCount(botName, itemId),
+                        (itemId, x, y, z, dropRadius) -> observedDrops(
+                            level, itemId, x, y, z, dropRadius
+                        ),
                         mutationGate,
                         this::publishProposal,
                         this::observedPosition,
@@ -289,10 +382,23 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         mutation.addProperty("y", proposal.y());
         mutation.addProperty("z", proposal.z());
         mutation.addProperty("block_id", proposal.blockId());
+        mutation.addProperty("context", mutationContext(proposal.actionId()));
         frame.add("mutation", mutation);
         for (MineBotConnection subscriber : subscribers) {
             subscriber.send(frame, currentTick);
         }
+    }
+
+    private String mutationContext(String actionId) {
+        ActionRegistry.ActionStatus status = actions.status(actionId);
+        if (status.record() == null) {
+            return "direct";
+        }
+        return switch (status.record().type()) {
+            case "ASCEND" -> "recovery";
+            case "COLLECT_BLOCK" -> "collect";
+            default -> "direct";
+        };
     }
 
     private String observedBlockId(ServerLevel level, int x, int y, int z) {
@@ -318,6 +424,41 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             }
         }
         return total;
+    }
+
+    private List<CollectExecutor.Drop> observedDrops(
+        ServerLevel level,
+        String itemId,
+        int x,
+        int y,
+        int z,
+        double radius
+    ) {
+        AABB bounds = new AABB(
+            x + 0.5 - radius,
+            y + 0.5 - radius,
+            z + 0.5 - radius,
+            x + 0.5 + radius,
+            y + 0.5 + radius,
+            z + 0.5 + radius
+        );
+        List<CollectExecutor.Drop> found = new ArrayList<>();
+        for (ItemEntity entity : level.getEntitiesOfClass(ItemEntity.class, bounds)) {
+            ItemStack stack = entity.getItem();
+            if (stack.isEmpty()
+                || !BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(itemId)) {
+                continue;
+            }
+            found.add(new CollectExecutor.Drop(
+                entity.getUUID().toString(),
+                itemId,
+                stack.getCount(),
+                entity.getX(),
+                entity.getY(),
+                entity.getZ()
+            ));
+        }
+        return List.copyOf(found);
     }
 
     private void handleNavigate(MineBotConnection connection, JsonObject request, int serverTick) {

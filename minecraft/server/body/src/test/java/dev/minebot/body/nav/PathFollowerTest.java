@@ -34,6 +34,16 @@ final class PathFollowerTest {
     }
 
     @Test
+    void tighterFinalReachDoesNotChangeIntermediateWaypointTolerance() {
+        PathFollower follower = new PathFollower(STRAIGHT, 0.15);
+
+        assertEquals(State.CONTINUE, follower.tick(0.5, 64, 0.5).state());
+        assertEquals(State.CONTINUE, follower.tick(2.5, 64, 0.5).state());
+        assertEquals(State.CONTINUE, follower.tick(3.0, 64, 0.5).state());
+        assertEquals(State.ARRIVED, follower.tick(3.36, 64, 0.5).state());
+    }
+
+    @Test
     void jumpIsRequestedApproachingAStepUp() {
         PathFollower follower = new PathFollower(List.of(
             new Waypoint(0, 64, 0),

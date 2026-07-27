@@ -16,6 +16,7 @@ directly and plug this answerer into their proposal path.
 from __future__ import annotations
 
 from typing import Callable, Protocol
+from uuid import uuid4
 
 from minebot.contract.governance import BreakContext
 from minebot.contract.messages import ToolResult
@@ -42,10 +43,14 @@ class GovernanceAnswerer:
             # Only mutation kinds with a mapped governance decision may pass;
             # anything else is denied, never guessed.
             return False, f"unsupported_mutation_kind:{proposal.kind}"
+        try:
+            context = BreakContext(proposal.context) if proposal.context is not None else self._context
+        except ValueError:
+            return False, f"unsupported_break_context:{proposal.context}"
         decision = self._policy.can_break(
             (proposal.x, proposal.y, proposal.z),
             proposal.block_id,
-            self._context,
+            context,
             explicit_target=True,
         )
         return decision.allowed, decision.reason
@@ -82,6 +87,11 @@ _COLLECT_TERMINALS: dict[str, tuple[bool, str, bool]] = {
     "canceled": (False, "canceled", False),
     "timeout": (False, "collect_timeout", True),
 }
+_ASCEND_TERMINALS: dict[str, tuple[bool, str, bool]] = {
+    "completed": (True, "surface_reached", False),
+    "canceled": (False, "canceled", False),
+    "timeout": (False, "ascend_timeout", True),
+}
 
 
 class JavaBodyClient:
@@ -112,6 +122,7 @@ class JavaBodyClient:
         self._transport: DuplexTransport | None = None
         self._protocol = JavaBodyProtocol()
         self._action_counter = 0
+        self._action_epoch = uuid4().hex[:12]
         self._event_gaps: list[EventGap] = []
         self._last_events: list[BotEvent] = []
         self._event_buffer: list[BotEvent] = []
@@ -141,6 +152,12 @@ class JavaBodyClient:
     def event_gaps(self) -> list[EventGap]:
         return list(self._event_gaps)
 
+    def configure_governance(self, governance: GovernanceAnswerer) -> None:
+        """Bind the one production mutation authority before any objective runs."""
+        if self._governance is not None and self._governance is not governance:
+            raise ValueError("Java Body governance is already configured")
+        self._governance = governance
+
     def request_response(self, build) -> Response | ErrorResponse:
         """One read-side request/response exchange.
 
@@ -167,6 +184,7 @@ class JavaBodyClient:
     # -- tool-facing objectives -----------------------------------------
 
     def navigate(self, goal: dict, *, timeout_ticks: int | None = None) -> ToolResult:
+        self._ensure_connected()
         action_id = self._new_action_id("nav")
         request = self._protocol.navigate(self._bot, action_id, goal, timeout_ticks=timeout_ticks)
         return self._run_action(request, action_id, "navigate", _NAVIGATE_TERMINALS)
@@ -179,6 +197,7 @@ class JavaBodyClient:
         vertical_radius: int | None = None,
         timeout_ticks: int | None = None,
     ) -> ToolResult:
+        self._ensure_connected()
         action_id = self._new_action_id("collect")
         request = self._protocol.collect_block(
             self._bot,
@@ -189,6 +208,26 @@ class JavaBodyClient:
             timeout_ticks=timeout_ticks,
         )
         return self._run_action(request, action_id, "collect", _COLLECT_TERMINALS)
+
+    def ascend(
+        self,
+        *,
+        target_y: int | None = None,
+        timeout_ticks: int | None = None,
+    ) -> ToolResult:
+        self._ensure_connected()
+        action_id = self._new_action_id("ascend")
+        request = self._protocol.ascend(
+            self._bot,
+            action_id,
+            target_y=target_y,
+            timeout_ticks=timeout_ticks,
+        )
+        return self._run_action(request, action_id, "ascend", _ASCEND_TERMINALS)
+
+    def _ensure_connected(self) -> None:
+        if self._transport is None or not self._protocol.negotiated:
+            self.connect()
 
     # -- core drive -----------------------------------------------------
 
@@ -253,7 +292,18 @@ class JavaBodyClient:
     def _terminal_metrics(terminal: dict) -> dict:
         metrics = {
             key: terminal[key]
-            for key in ("elapsed_ticks", "replans", "expanded_nodes", "unloaded_touches", "candidates_tried")
+            for key in (
+                "elapsed_ticks",
+                "replans",
+                "expanded_nodes",
+                "unloaded_touches",
+                "candidates_tried",
+                "final_y",
+                "target_y",
+                "ascend_steps",
+                "break_steps",
+                "broken",
+            )
             if key in terminal
         }
         if "inventory_delta" in terminal:
@@ -356,7 +406,7 @@ class JavaBodyClient:
 
     def _new_action_id(self, prefix: str) -> str:
         self._action_counter += 1
-        return f"{self._bot}-{prefix}-{self._action_counter}"
+        return f"{self._bot}-{prefix}-{self._action_epoch}-{self._action_counter}"
 
 
 def _failed_is_retriable(reason: str) -> bool:

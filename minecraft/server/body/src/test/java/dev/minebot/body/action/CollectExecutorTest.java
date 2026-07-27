@@ -27,7 +27,7 @@ final class CollectExecutorTest {
 
     /** Fake body: walks toward the look target; records every control call. */
     private static final class FakeBody
-        implements MovementControls, CollectExecutor.MiningControls, BotControls {
+        implements MovementControls, ExactBlockBreaker, BotControls {
         double x = 0.5;
         double y = STAND;
         double z = 0.5;
@@ -35,7 +35,11 @@ final class CollectExecutorTest {
         double lookZ;
         boolean moving;
         boolean attacking;
+        int breakX;
+        int breakY;
+        int breakZ;
         final List<String> log = new ArrayList<>();
+        final List<String> breakTargets = new ArrayList<>();
 
         @Override
         public void lookAt(String bot, double tx, double ty, double tz) {
@@ -66,10 +70,18 @@ final class CollectExecutorTest {
         }
 
         @Override
-        public void attackContinuous(String bot) {
+        public Outcome begin(String bot, int x, int y, int z, String blockId, int tick) {
+            breakX = x;
+            breakY = y;
+            breakZ = z;
             attacking = true;
-            log.add("attack");
+            breakTargets.add(x + "," + y + "," + z + ":" + blockId);
+            log.add("exactBreak");
+            return Outcome.working();
         }
+
+        @Override public Outcome tick(String bot, int tick) { return Outcome.working(); }
+        @Override public void abort(String bot) { attacking = false; }
 
         @Override
         public void clearAll(String bot) {
@@ -97,12 +109,14 @@ final class CollectExecutorTest {
         final FakeBody body = new FakeBody();
         final Map<String, String> blockStates = new HashMap<>();
         final Map<String, Integer> itemCounts = new HashMap<>();
+        final List<CollectExecutor.Drop> drops = new ArrayList<>();
         final List<MutationGate.Proposal> proposals = new ArrayList<>();
         final MutationGate gate = new MutationGate();
         final ActionRegistry registry = new ActionRegistry();
         final BotEventStream events = new BotEventStream();
         final ActionRuntime runtime = new ActionRuntime(new FakePlayerActionOwner(), body, registry, events);
         int miningTicks;
+        boolean dropPresent;
 
         static String key(int x, int y, int z) {
             return x + "," + y + "," + z;
@@ -122,6 +136,9 @@ final class CollectExecutorTest {
                 body,
                 (x, y, z) -> blockStates.getOrDefault(key(x, y, z), "minecraft:air"),
                 itemId -> itemCounts.getOrDefault(itemId, 0),
+                (itemId, x, y, z, radius) -> drops.stream()
+                    .filter(drop -> drop.itemId().equals(itemId))
+                    .toList(),
                 gate,
                 proposals::add,
                 bot -> new NavigateExecutor.PositionSource.Position(body.x, body.y, body.z),
@@ -160,26 +177,33 @@ final class CollectExecutorTest {
         int treeX = 6;
         Harness harness = new Harness();
         harness.blockStates.put(Harness.key(treeX, STAND, 0), LOG);
-        harness.build(worldWithTrunk(treeX), List.of(new CollectExecutor.Candidate(treeX, STAND, 0, LOG)), 2_400);
+        FakeWorld world = worldWithTrunk(treeX);
+        double dropX = treeX - 0.25;
+        double dropZ = 3.25;
+        harness.build(world, List.of(new CollectExecutor.Candidate(treeX, STAND, 0, LOG)), 2_400);
 
         JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
             // Governance allows as soon as the proposal arrives.
             for (MutationGate.Proposal proposal : harness.proposals) {
                 harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
             }
-            // Physics: the block breaks after 20 attack ticks; the drop lands
-            // in the inventory 10 ticks later.
+            // Physics: the block breaks after 20 attack ticks. Inventory only
+            // changes once the fake player's body actually reaches the drop.
             if (harness.body.attacking) {
                 harness.miningTicks++;
                 if (harness.miningTicks == 20) {
                     harness.blockStates.put(Harness.key(treeX, STAND, 0), "minecraft:air");
+                    world.set(treeX, STAND, 0, WorldView.NodeKind.PASSABLE);
+                    harness.dropPresent = true;
+                    harness.drops.add(new CollectExecutor.Drop(
+                        "mined-drop", LOG, 1, dropX, STAND, dropZ
+                    ));
                 }
             }
-            if (harness.miningTicks >= 20) {
-                harness.miningTicks++;
-                if (harness.miningTicks == 30) {
-                    harness.itemCounts.put(LOG, 1);
-                }
+            if (harness.dropPresent && pickupDistance(harness.body, dropX, dropZ) <= 1.05) {
+                harness.itemCounts.put(LOG, 1);
+                harness.dropPresent = false;
+                harness.drops.clear();
             }
         });
 
@@ -190,7 +214,14 @@ final class CollectExecutorTest {
         assertEquals(0, delta.get("before").getAsInt());
         assertEquals(1, delta.get("after").getAsInt());
         assertEquals(1, harness.proposals.size(), "exactly one proposal for one mine");
-        assertTrue(harness.body.log.contains("attack"));
+        assertEquals(
+            List.of(treeX + "," + STAND + ",0:" + LOG),
+            harness.body.breakTargets
+        );
+        assertTrue(
+            pickupDistance(harness.body, dropX, dropZ) <= 1.05,
+            "pickup must physically reach the drop, x=" + harness.body.x
+        );
     }
 
     @Test
@@ -208,7 +239,7 @@ final class CollectExecutorTest {
 
         assertEquals("failed", terminal.get("classification").getAsString());
         assertEquals("candidate_targets_exhausted", terminal.get("reason").getAsString());
-        assertFalse(harness.body.log.contains("attack"), "a denied mutation must never attack");
+        assertFalse(harness.body.log.contains("exactBreak"), "a denied mutation must never break");
         String failures = terminal.getAsJsonArray("attempt_failures").toString();
         assertTrue(failures.contains("governance_denied:protected_region"), failures);
         assertEquals(LOG, harness.blockStates.get(Harness.key(treeX, STAND, 0)), "the block is untouched");
@@ -225,7 +256,7 @@ final class CollectExecutorTest {
         });
 
         assertEquals("failed", terminal.get("classification").getAsString());
-        assertFalse(harness.body.log.contains("attack"), "no verdict means no mutation");
+        assertFalse(harness.body.log.contains("exactBreak"), "no verdict means no mutation");
         String failures = terminal.getAsJsonArray("attempt_failures").toString();
         assertTrue(failures.contains("governance_verdict_timeout"), failures);
     }
@@ -235,7 +266,8 @@ final class CollectExecutorTest {
         int treeX = 6;
         Harness harness = new Harness();
         harness.blockStates.put(Harness.key(treeX, STAND, 0), LOG);
-        harness.build(worldWithTrunk(treeX), List.of(new CollectExecutor.Candidate(treeX, STAND, 0, LOG)), 4_000);
+        FakeWorld world = worldWithTrunk(treeX);
+        harness.build(world, List.of(new CollectExecutor.Candidate(treeX, STAND, 0, LOG)), 4_000);
 
         JsonObject terminal = harness.runUntilTerminal(3_500, () -> {
             for (MutationGate.Proposal proposal : harness.proposals) {
@@ -245,6 +277,7 @@ final class CollectExecutorTest {
                 harness.miningTicks++;
                 if (harness.miningTicks == 20) {
                     harness.blockStates.put(Harness.key(treeX, STAND, 0), "minecraft:air");
+                    world.set(treeX, STAND, 0, WorldView.NodeKind.PASSABLE);
                 }
             }
             // The drop never arrives in the inventory.
@@ -284,5 +317,9 @@ final class CollectExecutorTest {
 
         assertEquals("failed", terminal.get("classification").getAsString());
         assertEquals("target_not_found", terminal.get("reason").getAsString());
+    }
+
+    private static double pickupDistance(FakeBody body, double dropX, double dropZ) {
+        return Math.hypot(body.x - dropX, body.z - dropZ);
     }
 }

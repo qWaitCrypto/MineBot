@@ -20,6 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
+from minebot.app.body_provider import (
+    BodyProviderConfigError,
+    BodyProviderName,
+    build_body_provider,
+)
 from minebot.app.body_events import BodyEventPump
 from minebot.app.autonomy import AutonomyCoordinator
 from minebot.app.expression_egress import expression_speech_sink
@@ -69,6 +74,7 @@ class RealServerConfig:
     world_id_override: str | None
     state_db_path: Path
     java_body_url: str | None = None
+    body_provider: BodyProviderName = BodyProviderName.SCARPET
 
 
 class RealServerConfigError(RuntimeError):
@@ -497,6 +503,13 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
     world_id_override = (env.get("MINEBOT_REAL_WORLD_ID") or "").strip() or None
     state_db_path = Path(env.get("MINEBOT_AGENT_STATE_DB") or DEFAULT_RUNTIME_STATE_DB)
     java_body_url = (env.get("MINEBOT_JAVA_BODY_URL") or "").strip() or None
+    body_provider = BodyProviderName.parse(
+        env.get("MINEBOT_BODY_PROVIDER") or BodyProviderName.SCARPET.value
+    )
+    if body_provider is not BodyProviderName.SCARPET and java_body_url is None:
+        raise RealServerConfigError(
+            f"MINEBOT_BODY_PROVIDER={body_provider.value} requires MINEBOT_JAVA_BODY_URL"
+        )
     return RealServerConfig(
         rcon=RconConfig(host=host, port=port, password=password, timeout_s=timeout_s),
         bot_name=bot_name,
@@ -508,6 +521,7 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
         world_id_override=world_id_override,
         state_db_path=state_db_path,
         java_body_url=java_body_url,
+        body_provider=body_provider,
     )
 
 
@@ -553,17 +567,32 @@ async def run_real_server_goal(
 
     with rcon:
         camera = _CameraSession(camera_config)
+        scarpet_body: ScarpetBody | None = None
+        if config.body_provider is not BodyProviderName.JAVA:
+            try:
+                _ensure_scarpet_global_app(rcon, config.bot_name)
+            except (EnvelopeError, RconError) as exc:
+                print(
+                    f"Real-server Scarpet app unavailable at {config.rcon.host}:{config.rcon.port}: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                await provider.aclose()
+                return 4
+            scarpet_body = ScarpetBody(config.bot_name, rcon)
         try:
-            _ensure_scarpet_global_app(rcon, config.bot_name)
-        except (EnvelopeError, RconError) as exc:
-            print(
-                f"Real-server Scarpet app unavailable at {config.rcon.host}:{config.rcon.port}: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
+            body_runtime = build_body_provider(
+                config.body_provider,
+                bot_name=config.bot_name,
+                natural_region=config.natural_region,
+                scarpet_body=scarpet_body,
+                java_body_url=config.java_body_url,
             )
+        except BodyProviderConfigError as exc:
+            print(f"Real-server Body provider unavailable: {exc}", file=sys.stderr)
             await provider.aclose()
             return 4
-        body = ScarpetBody(config.bot_name, rcon)
+        body = body_runtime.body
         camera.maybe_start(body)
         sink = JsonlObservationSink(config.log_path)
 
@@ -574,6 +603,7 @@ async def run_real_server_goal(
                 default_route=provider.default,
                 language=config.language,
                 providers=provider.trace_configs(),
+                body_provider=body_runtime.name.value,
             )
             parts = build_phase1_agent_runtime(
                 body=body,
@@ -581,7 +611,8 @@ async def run_real_server_goal(
                 model_provider=provider,
                 config=Phase1RuntimeConfig(
                     natural_region=config.natural_region,
-                    java_body_url=config.java_body_url,
+                    body_provider=body_runtime.name.value,
+                    governance_policy=body_runtime.governance,
                     recovery_respawn_pos=config.recovery_respawn_pos,
                     recovery_gamemode="survival",
                 ),
@@ -664,10 +695,26 @@ async def run_real_server_interactive(
         state_store: RuntimeStateStore | None = None
         conversation_session: PersistentWindowedConversationSession | None = None
         work_queue: PersistentWorkIntentQueue | None = None
-        body = ScarpetBody(config.bot_name, rcon)
+        if config.body_provider is BodyProviderName.JAVA:
+            print(
+                "Interactive Java-only mode is not available until Java owns chat/event lifecycle; "
+                "use MINEBOT_BODY_PROVIDER=composite during migration.",
+                file=sys.stderr,
+            )
+            await provider.aclose()
+            return 4
+        scarpet_body = ScarpetBody(config.bot_name, rcon)
         try:
             app_reloaded = _ensure_scarpet_global_app(rcon, config.bot_name)
             _watch_interactive_chat(rcon, config.bot_name)
+            body_runtime = build_body_provider(
+                config.body_provider,
+                bot_name=config.bot_name,
+                natural_region=config.natural_region,
+                scarpet_body=scarpet_body,
+                java_body_url=config.java_body_url,
+            )
+            body = body_runtime.body
             scope = resolve_runtime_scope(
                 rcon,
                 server_id=config.server_id,
@@ -719,6 +766,7 @@ async def run_real_server_interactive(
             SkillCatalogError,
             SkillOperationError,
             StartupReconciliationError,
+            BodyProviderConfigError,
             ValueError,
         ) as exc:
             if work_queue is not None:
@@ -744,6 +792,7 @@ async def run_real_server_interactive(
                 default_route=provider.default,
                 language=config.language,
                 providers=provider.trace_configs(),
+                body_provider=body_runtime.name.value,
             )
             parts = build_phase1_agent_runtime(
                 body=body,
@@ -751,7 +800,8 @@ async def run_real_server_interactive(
                 model_provider=provider,
                 config=Phase1RuntimeConfig(
                     natural_region=config.natural_region,
-                    java_body_url=config.java_body_url,
+                    body_provider=body_runtime.name.value,
+                    governance_policy=body_runtime.governance,
                     recovery_respawn_pos=config.recovery_respawn_pos,
                     recovery_gamemode="survival",
                     speech_sink=speech_sink,

@@ -27,6 +27,10 @@ from minebot.brain.lifecycle import LifecycleState
 from minebot.brain.modes import ModeRuntime
 from minebot.contract import Region, ToolResult
 from minebot.game import ScarpetBody
+from minebot.game.composite_body import CompositeBody
+from minebot.game.java_body import JavaBody
+from minebot.game.java_body_adapter import JavaBodyClient
+from tests.unit.test_java_body_adapter import FakeBodyServer
 
 
 TRANSACTION_CLASSES = (
@@ -230,28 +234,34 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class JavaBodyHybridRegistryTests(unittest.TestCase):
-    def test_java_body_url_registers_hybrid_tools_on_the_shared_registry(self):
+class JavaBodyProviderRegistryTests(unittest.TestCase):
+    def test_composite_has_one_canonical_navigation_and_collection_surface(self):
+        scarpet = _body()
+        java = JavaBody(JavaBodyClient("Bot1", lambda: FakeBodyServer()), "Bot1")
+        body = CompositeBody(scarpet, java)
         registry = build_phase1_registry(
-            _body(),
+            body,
             Phase1RuntimeConfig(
                 natural_region=Region("test", (-64, -64, -64), (64, 320, 64)),
-                java_body_url="ws://127.0.0.1:8767",
+                body_provider="composite",
             ),
         )
         names = set(registry.names())
-        # The full Scarpet capability surface stays present...
         self.assertIn("collect_block_domain", names)
         self.assertIn("mine_block_collect", names)
         self.assertIn("get_to_block", names)
-        # ...and the Java Body provider tools join the same shared pool.
-        self.assertIn("navigate_to", names)
-        self.assertIn("collect_block", names)
-        self.assertEqual(registry.sidecar("navigate_to").source, "java_body")
-        self.assertEqual(registry.sidecar("collect_block").source, "java_body")
-        self.assertTrue(registry.sidecar("collect_block").mutating)
+        self.assertIn("move_to", names)
+        self.assertNotIn("navigate_to", names)
+        self.assertNotIn("collect_block", names)
+        self.assertEqual(registry.sidecar("move_to").source, "java_body")
+        self.assertEqual(registry.sidecar("collect_block_domain").source, "java_body")
 
-    def test_without_java_body_url_the_registry_is_unchanged(self):
+    def test_default_scarpet_registry_is_unchanged(self):
         names = set(_registry().names())
         self.assertNotIn("navigate_to", names)
         self.assertNotIn("collect_block", names)
+        self.assertEqual(_registry().sidecar("move_to").source, "body.navigation")
+        self.assertEqual(
+            _registry().sidecar("collect_block_domain").source,
+            "body.resource_collection",
+        )

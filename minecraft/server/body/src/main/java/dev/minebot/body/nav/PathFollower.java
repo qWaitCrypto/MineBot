@@ -28,15 +28,27 @@ public final class PathFollower {
     }
 
     private final List<Waypoint> path;
+    private final double finalWaypointReachDistance;
     private int index;
     private double bestProgress = -Double.MAX_VALUE;
     private int ticksWithoutProgress;
 
     public PathFollower(List<Waypoint> path) {
+        this(path, WAYPOINT_REACH_DISTANCE);
+    }
+
+    public PathFollower(List<Waypoint> path, double finalWaypointReachDistance) {
         if (path.isEmpty()) {
             throw new IllegalArgumentException("path must not be empty");
         }
+        if (!(finalWaypointReachDistance > 0.0)
+            || finalWaypointReachDistance > WAYPOINT_REACH_DISTANCE) {
+            throw new IllegalArgumentException(
+                "final waypoint reach distance must be in (0, " + WAYPOINT_REACH_DISTANCE + "]"
+            );
+        }
         this.path = List.copyOf(path);
+        this.finalWaypointReachDistance = finalWaypointReachDistance;
     }
 
     public Directive tick(double px, double py, double pz) {
@@ -56,7 +68,7 @@ public final class PathFollower {
     }
 
     private void advanceThroughReachedWaypoints(double px, double py, double pz) {
-        while (index < path.size() && reached(px, py, pz, path.get(index))) {
+        while (index < path.size() && reached(px, py, pz, path.get(index), reachDistance(index))) {
             index++;
             bestProgress = -Double.MAX_VALUE;
             ticksWithoutProgress = 0;
@@ -96,10 +108,22 @@ public final class PathFollower {
         return ticksWithoutProgress >= STUCK_TICKS;
     }
 
-    private static boolean reached(double px, double py, double pz, Waypoint waypoint) {
+    private double reachDistance(int waypointIndex) {
+        return waypointIndex == path.size() - 1
+            ? finalWaypointReachDistance
+            : WAYPOINT_REACH_DISTANCE;
+    }
+
+    private static boolean reached(
+        double px,
+        double py,
+        double pz,
+        Waypoint waypoint,
+        double reachDistance
+    ) {
         // Upward waypoints must actually be climbed; downward ones tolerate
         // the airborne tail of a fall.
-        return horizontalDistance(px, pz, waypoint) <= WAYPOINT_REACH_DISTANCE
+        return horizontalDistance(px, pz, waypoint) <= reachDistance
             && py >= waypoint.y() - 0.05
             && py - waypoint.y() <= 1.5;
     }

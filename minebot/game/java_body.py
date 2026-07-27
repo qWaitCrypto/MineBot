@@ -121,6 +121,11 @@ class JavaBody:
                 radius=_opt_int(action.params.get("radius")),
                 timeout_ticks=_opt_int(action.params.get("timeout_ticks")),
             )
+        elif action.name == "ascend":
+            outcome = self._client.ascend(
+                target_y=_opt_int(action.params.get("target_y")),
+                timeout_ticks=_opt_int(action.params.get("timeout_ticks")),
+            )
         else:
             return _gap_result(action, self.bot_name)
         return Result(

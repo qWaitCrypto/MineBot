@@ -29,6 +29,17 @@ def _proposal(kind: str = "break", block_id: str = "minecraft:oak_log", pos=(10,
     )
 
 
+def test_proposal_context_selects_the_governance_break_context() -> None:
+    policy = _policy()
+    proposal = _proposal(block_id="minecraft:stone")
+    proposal = ServerProposal(**{**proposal.__dict__, "context": "recovery"})
+
+    allow, reason = GovernanceAnswerer(policy).verdict(proposal)
+
+    assert isinstance(allow, bool)
+    assert reason
+
+
 def _policy() -> GovernancePolicy:
     return GovernancePolicy(
         natural_regions=[Region("probe-natural", (-64, 0, -64), (64, 200, 64))],
@@ -120,7 +131,7 @@ class FakeBodyServer:
                 "max_request_bytes": 16384,
                 "max_requests_per_second": 40,
                 "request_types": [
-                    "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS",
+                    "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS",
                     "HELLO", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION",
                     "RESUME_EVENTS",
                 ],
@@ -129,6 +140,8 @@ class FakeBodyServer:
             self._handle_navigate(message, rid)
         elif kind == "COLLECT_BLOCK":
             self._handle_collect(message, rid)
+        elif kind == "ASCEND":
+            self._handle_ascend(message, rid)
         elif kind == "MUTATION_VERDICT":
             self._handle_verdict(message)
         elif kind == "QUERY_ACTION":
@@ -150,6 +163,7 @@ class FakeBodyServer:
 
     def _handle_navigate(self, message: dict, rid: str) -> None:
         action = message["action_id"]
+        self._navigate_action = action
         if self.scenario == "owner_busy":
             self._emit_error(rid, "owner_busy", retryable=True,
                              extra={"owner_action_id": "other-1", "owner_priority": "ACTION"})
@@ -173,6 +187,21 @@ class FakeBodyServer:
         self._emit_event("owner_acquired", action, {"type": "COLLECT_BLOCK", "priority": "ACTION"})
         self._emit_event("candidate_selected", action, {"x": 5, "y": 64, "z": 5, "block_id": "minecraft:oak_log"})
         self._emit_proposal(action, "mp-1", "minecraft:oak_log", 5, 64, 5)
+
+    def _handle_ascend(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        self._emit_response(rid, "ASCEND_ACK", {"action_id": action, "state": "accepted"})
+        self._emit_event("owner_acquired", action, {"type": "ASCEND", "priority": "RECOVERY"})
+        self._emit_event("ascent_step_verified", action, {"x": 1, "y": 65, "z": 0})
+        self._emit_terminal(action, {
+            "classification": "completed",
+            "reason": "surface_reached",
+            "final_y": 70,
+            "target_y": 320,
+            "ascend_steps": 6,
+            "break_steps": 12,
+            "elapsed_ticks": 280,
+        })
 
     def _handle_verdict(self, message: dict) -> None:
         allow = bool(message.get("allow"))
@@ -292,6 +321,17 @@ def test_collect_denied_by_governance_never_relabels_success() -> None:
     assert server.verdict_seen == [("mp-1", False)]
 
 
+def test_ascend_maps_verified_surface_terminal() -> None:
+    client = _client(FakeBodyServer())
+
+    result = client.ascend(timeout_ticks=2_400)
+
+    assert result.success is True
+    assert result.reason == "surface_reached"
+    assert result.metrics["final_y"] == 70
+    assert result.metrics["ascend_steps"] == 6
+
+
 def test_no_governance_denies_proposals_by_default() -> None:
     client = _client(FakeBodyServer())
     client.connect()
@@ -313,7 +353,7 @@ def test_transport_drop_reconciles_via_query_action() -> None:
             return server
         fresh = FakeBodyServer()
         fresh.scenario = "drop_before_terminal"
-        fresh._pending_action = "Bot-nav-1"
+        fresh._pending_action = server._pending_action
         return fresh
 
     client = JavaBodyClient("Bot", connect, action_wall_timeout_s=5.0, recv_timeout_s=0.01)
@@ -322,6 +362,18 @@ def test_transport_drop_reconciles_via_query_action() -> None:
     assert result.success is True
     assert result.reason == "arrived"
     assert reconnects["n"] == 2
+
+
+def test_action_ids_do_not_collide_across_client_process_epochs() -> None:
+    first_server = FakeBodyServer()
+    second_server = FakeBodyServer()
+    first = _client(first_server)
+    second = _client(second_server)
+
+    assert first.navigate({"kind": "xz", "x": 1, "z": 2}).success is True
+    assert second.navigate({"kind": "xz", "x": 1, "z": 2}).success is True
+
+    assert first_server._navigate_action != second_server._navigate_action
 
 
 # ---------------------------------------------------------------------------

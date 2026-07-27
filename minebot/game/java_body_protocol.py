@@ -83,6 +83,7 @@ class ServerProposal:
     z: int
     block_id: str
     payload: dict
+    context: str | None = None
 
 
 @dataclass
@@ -179,6 +180,22 @@ class JavaBodyProtocol:
             body["timeout_ticks"] = timeout_ticks
         return self._request("COLLECT_BLOCK", body)
 
+    def ascend(
+        self,
+        bot_name: str,
+        action_id: str,
+        *,
+        target_y: int | None = None,
+        timeout_ticks: int | None = None,
+    ) -> dict:
+        self._require_capability("ASCEND")
+        body: dict = {"bot_name": bot_name, "action_id": action_id}
+        if target_y is not None:
+            body["target_y"] = target_y
+        if timeout_ticks is not None:
+            body["timeout_ticks"] = timeout_ticks
+        return self._request("ASCEND", body)
+
     def mutation_verdict(self, proposal_id: str, allow: bool, reason: str) -> dict:
         """Fire-and-forget by design: a lost verdict times out into a denial."""
         self._require_capability("MUTATION_VERDICT")
@@ -232,6 +249,7 @@ class JavaBodyProtocol:
             "HELLO": "HELLO_ACK",
             "NAVIGATE": "NAVIGATE_ACK",
             "COLLECT_BLOCK": "COLLECT_BLOCK_ACK",
+            "ASCEND": "ASCEND_ACK",
         }.get(request_type, f"{request_type}_RESULT")
         if frame_type != expected:
             raise ProtocolViolation(f"{request_type} answered by {frame_type}")
@@ -283,6 +301,11 @@ class JavaBodyProtocol:
             z=z,
             block_id=block_id,
             payload=dict(message),
+            context=(
+                str(mutation["context"])
+                if isinstance(mutation.get("context"), str)
+                else None
+            ),
         )
 
     def _feed_error(self, message: dict) -> ErrorResponse:

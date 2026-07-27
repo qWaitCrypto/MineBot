@@ -204,4 +204,5 @@ final class NavigateExecutorTest {
         assertTrue(distance <= 4.5 + 0.5, "the bot ends within interaction range: " + distance);
         assertTrue(distance >= 0.5, "the bot does not walk inside the trunk");
     }
+
 }

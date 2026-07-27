@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from agents import Session
 
 from minebot.app.body_capability_tools import register_body_capability_tools
+from minebot.app.body_provider import java_objectives_enabled
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.conversation_tools import register_conversation_archive_tools
 from minebot.app.memory import MemoryWorkspace, register_memory_tools
@@ -61,10 +62,10 @@ from minebot.brain.composition import (
 from minebot.app.observability import sanitize_observation
 from minebot.app.projection import bounded_summary_value, top_reasons
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import JsonObject
+from minebot.contract import Action, JsonObject
 from minebot.brain.progress import ProgressAuthority
 from minebot.contract import Body, BreakContext, InventorySlot, PerceptionResult, Position, Region, ToolResult, perception_next_cursor
-from minebot.game import GovernancePolicy, ScarpetBody
+from minebot.game import GovernancePolicy
 from minebot.game.navigation import GoalNear
 
 
@@ -83,11 +84,8 @@ class Phase1RuntimeConfig:
     skill_workspace: SkillWorkspace | None = None
     wiki_knowledge: WikiKnowledge | None = None
     exploration_coverage_store: ExplorationCoverageStore | None = None
-    # Java Body provider weld (fakeplayer-java-body.md migration map): when a
-    # WebSocket URL is configured, navigate_to/collect_block register on the
-    # same shared registry, delegating to the Java Body under the same
-    # GovernancePolicy instance. None keeps the registry Scarpet-only.
-    java_body_url: str | None = None
+    body_provider: str = "scarpet"
+    governance_policy: GovernancePolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -102,7 +100,7 @@ class Phase1ToolManifestEntry:
 
 def build_phase1_agent_runtime(
     *,
-    body: ScarpetBody,
+    body: Body,
     goal_text: str,
     model_provider: ModelProviderRegistry | None,
     config: Phase1RuntimeConfig,
@@ -169,7 +167,7 @@ def build_phase1_agent_runtime(
     return replace(parts, skill_workspace=config.skill_workspace)
 
 
-def _phase1_recovery_handler(body: ScarpetBody, config: Phase1RuntimeConfig):
+def _phase1_recovery_handler(body: Body, config: Phase1RuntimeConfig):
     lifecycle = LifecycleTransactions(body)
 
     def recover(runtime: AgentRuntime) -> RecoveryOutcome:
@@ -311,7 +309,7 @@ def _last_known_state_is_hazardous_for_respawn(state: dict[str, object]) -> bool
 
 
 def _ensure_safe_recovery_stand(
-    body: ScarpetBody,
+    body: Body,
     lifecycle: LifecycleTransactions,
     state,
     config: Phase1RuntimeConfig,
@@ -536,12 +534,12 @@ def _next_start(perception) -> object | None:
 
 
 def build_phase1_registry(
-    body: ScarpetBody,
+    body: Body,
     config: Phase1RuntimeConfig,
     *,
     authority: ProgressAuthority | None = None,
 ) -> ToolRegistry:
-    policy = GovernancePolicy(
+    policy = config.governance_policy or GovernancePolicy(
         natural_regions=[config.natural_region],
         structure_risk_assessor=VoxelStructureRiskAssessor(body),
         require_structure_assessment=True,
@@ -587,9 +585,10 @@ def build_phase1_registry(
     registry = ToolRegistry()
     registry.register(_read_state_tool(body))
     register_inventory_tools(registry, body)
-    registry.register(_move_to_tool(navigator))
+    java_objective_body = body if java_objectives_enabled(body) else None
+    registry.register(_move_to_tool(navigator, java_objective_body))
     registry.register(_explore_for_tool(exploration))
-    registry.register(_go_to_surface_tool(work))
+    registry.register(_go_to_surface_tool(work, java_objective_body))
     registry.register(_follow_tool(navigator))
     combat = CombatTransactions(body, progress=progress)
     registry.register(_engage_tool(combat))
@@ -612,24 +611,8 @@ def build_phase1_registry(
         pickup=pickup,
         resource_collection=resource_collection,
         use=use_txn,
+        java_objective_body=java_objective_body,
     )
-    if config.java_body_url:
-        # Hybrid migration posture: the Java Body owns navigate/collect on the
-        # same registry, answering every mutation proposal through the SAME
-        # GovernancePolicy instance built above (single mutation authority).
-        from minebot.app.java_body_tools import register_java_body_tools
-        from minebot.game.java_body_adapter import (
-            GovernanceAnswerer,
-            JavaBodyClient,
-            websocket_transport,
-        )
-
-        java_client = JavaBodyClient(
-            body.bot_name,
-            websocket_transport(config.java_body_url),
-            GovernanceAnswerer(policy),
-        )
-        register_java_body_tools(registry, java_client)
     return registry
 
 
@@ -719,7 +702,52 @@ def _read_state_tool(body: Body) -> RegisteredTool:
     )
 
 
-def _move_to_tool(navigator: NavigationTransactions) -> RegisteredTool:
+def _move_to_tool(
+    navigator: NavigationTransactions,
+    java_objective_body: Body | None = None,
+) -> RegisteredTool:
+    def run(params: JsonObject) -> ToolResult:
+        if java_objective_body is None:
+            return navigator.navigate_to(
+                _nav_goal(params),
+                break_context=BreakContext.TRAVEL,
+                config=NavigationRunConfig(
+                    max_segments=32,
+                    segment_timeout_s=float(params.get("timeout_s") or 12.0),
+                ),
+            )
+        pos = tuple(int(value) for value in params["pos"])
+        if len(pos) != 3:
+            return ToolResult(False, "invalid_position", False)
+        radius = int(params.get("radius") or 0)
+        timeout_s = float(params.get("timeout_s") or 12.0)
+        try:
+            result = java_objective_body.execute(
+                Action.create(
+                    "navigate",
+                    {
+                        "goal": {
+                            "kind": "near",
+                            "x": pos[0],
+                            "y": pos[1],
+                            "z": pos[2],
+                            "range": float(radius) if radius > 0 else 0.75,
+                        },
+                        "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
+                    },
+                )
+            )
+        except Exception as error:
+            return ToolResult(
+                False,
+                "java_body_unavailable",
+                True,
+                metrics={"error": type(error).__name__},
+            )
+        success = bool(result.ok and result.accepted and result.complete)
+        reason = "arrived" if success else str(result.error or "body_rejected")
+        return ToolResult(success, reason, not success, metrics=dict(result.data))
+
     return RegisteredTool(
         "move_to",
         "Travel to a coordinate or coordinate radius through the Body navigation transaction. "
@@ -736,15 +764,11 @@ def _move_to_tool(navigator: NavigationTransactions) -> RegisteredTool:
             "required": ["pos"],
             "additionalProperties": False,
         },
-        lambda params: navigator.navigate_to(
-            _nav_goal(params),
-            break_context=BreakContext.TRAVEL,
-            config=NavigationRunConfig(max_segments=32, segment_timeout_s=float(params.get("timeout_s") or 12.0)),
-        ),
+        run,
         ToolSidecar(
             "move_to",
             mutating=True,
-            source="body.navigation",
+            source=("java_body" if java_objective_body is not None else "body.navigation"),
             tool_type="navigation",
             permission="move",
             body_scope=("navigation",),
@@ -885,7 +909,39 @@ def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
     )
 
 
-def _go_to_surface_tool(work: BlockWork) -> RegisteredTool:
+def _go_to_surface_tool(
+    work: BlockWork,
+    java_objective_body: Body | None = None,
+) -> RegisteredTool:
+    def run(params: JsonObject) -> ToolResult:
+        if java_objective_body is None:
+            return work.go_to_surface(
+                context=BreakContext.COLLECT_APPROACH,
+                timeout_s=float(params.get("timeout_s") or 30.0),
+                surface_scan_height=int(params.get("surface_scan_height") or 32),
+                surface_scan_radius=int(params.get("surface_scan_radius") or 2),
+                max_steps=(int(params["max_steps"]) if params.get("max_steps") is not None else None),
+                world_top_y=int(params.get("world_top_y") or 320),
+            )
+        timeout_s = float(params.get("timeout_s") or 120.0)
+        action_params: JsonObject = {
+            "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
+        }
+        if params.get("world_top_y") is not None:
+            action_params["target_y"] = int(params["world_top_y"])
+        try:
+            result = java_objective_body.execute(Action.create("ascend", action_params))
+        except Exception as error:
+            return ToolResult(
+                False,
+                "java_body_unavailable",
+                True,
+                metrics={"error": type(error).__name__},
+            )
+        success = bool(result.ok and result.accepted and result.complete)
+        reason = "surface_reached" if success else str(result.error or "body_rejected")
+        return ToolResult(success, reason, not success, metrics=dict(result.data))
+
     return RegisteredTool(
         "go_to_surface",
         "Move from a pit, water pocket, or below-grade position to a verified nearby natural surface using Body-owned navigation/ascent logic.",
@@ -900,18 +956,11 @@ def _go_to_surface_tool(work: BlockWork) -> RegisteredTool:
             },
             "additionalProperties": False,
         },
-        lambda params: work.go_to_surface(
-            context=BreakContext.COLLECT_APPROACH,
-            timeout_s=float(params.get("timeout_s") or 30.0),
-            surface_scan_height=int(params.get("surface_scan_height") or 32),
-            surface_scan_radius=int(params.get("surface_scan_radius") or 2),
-            max_steps=(int(params["max_steps"]) if params.get("max_steps") is not None else None),
-            world_top_y=int(params.get("world_top_y") or 320),
-        ),
+        run,
         ToolSidecar(
             "go_to_surface",
             mutating=True,
-            source="body.block_work",
+            source=("java_body" if java_objective_body is not None else "body.block_work"),
             tool_type="navigation",
             permission="move",
             body_scope=("navigation", "surface"),
