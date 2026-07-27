@@ -6,7 +6,17 @@ from minebot.app.body_capability_tools import (
     BODY_PRIMITIVE_CLOSURE,
     BODY_TRANSACTION_CLOSURE,
 )
-from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry, tool_manifest
+from minebot.app.body_tool_catalog import (
+    BODY_OBJECTIVE_PROVIDER_TABLE,
+    CanonicalBodyToolCatalog,
+    canonical_body_tool_names,
+)
+from minebot.app.phase1_runtime import (
+    Phase1RuntimeConfig,
+    build_phase1_agent_runtime,
+    build_phase1_registry,
+    tool_manifest,
+)
 from minebot.app.runner import tool_is_enabled
 from minebot.body import (
     BlockApproachTransactions,
@@ -25,6 +35,7 @@ from minebot.body import (
 )
 from minebot.brain.lifecycle import LifecycleState
 from minebot.brain.modes import ModeRuntime
+from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
 from minebot.contract import Region, ToolResult
 from minebot.game import ScarpetBody
 from minebot.game.composite_body import CompositeBody
@@ -66,6 +77,77 @@ def _registry():
 
 
 class BodyCapabilityRegistryClosureTests(unittest.TestCase):
+    def test_every_base_player_intent_is_registered_through_the_canonical_catalog(self):
+        registry = _registry()
+
+        self.assertEqual(tuple(registry.names()), canonical_body_tool_names(stage="base"))
+        bindings = registry.canonical_bindings()
+        self.assertEqual(len(bindings), 43)
+        self.assertEqual(
+            {binding.intent for binding in bindings},
+            {f"body:{name}" for name in canonical_body_tool_names(stage="base")},
+        )
+        self.assertTrue(all(row["intent"] for row in tool_manifest(registry)))
+        self.assertTrue(all(row["implementation"] for row in tool_manifest(registry)))
+
+    def test_production_runtime_completes_all_45_player_intents(self):
+        parts = build_phase1_agent_runtime(
+            body=_body(),
+            goal_text="collect wood",
+            model_provider=None,
+            config=Phase1RuntimeConfig(
+                natural_region=Region("test", (-64, -64, -64), (64, 320, 64))
+            ),
+        )
+        try:
+            body_bindings = [
+                binding
+                for binding in parts.registry.canonical_bindings()
+                if binding.intent.startswith("body:")
+            ]
+            self.assertEqual(len(body_bindings), 45)
+            self.assertEqual(
+                {binding.tool_name for binding in body_bindings},
+                set(canonical_body_tool_names()),
+            )
+        finally:
+            parts.runtime.close()
+
+    def test_uncatalogued_player_tool_is_rejected_before_registration(self):
+        registry = ToolRegistry()
+        catalog = CanonicalBodyToolCatalog(registry, "scarpet")
+        tool = RegisteredTool(
+            "scarpet_special_move",
+            "provider-specific sibling",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda _params: ToolResult(True, "done", False),
+            ToolSidecar("scarpet_special_move", mutating=True),
+        )
+
+        with self.assertRaisesRegex(ValueError, "uncatalogued"):
+            catalog.register(tool)
+
+    def test_registry_rejects_two_tools_for_one_canonical_intent(self):
+        registry = ToolRegistry()
+        first = RegisteredTool(
+            "first_move",
+            "first",
+            {"type": "object", "properties": {}},
+            lambda _params: ToolResult(True, "done", False),
+            ToolSidecar("first_move", mutating=True),
+        )
+        second = RegisteredTool(
+            "second_move",
+            "second",
+            {"type": "object", "properties": {}},
+            lambda _params: ToolResult(True, "done", False),
+            ToolSidecar("second_move", mutating=True),
+        )
+        registry.register(first, intent="body:move", implementation="first")
+
+        with self.assertRaisesRegex(ValueError, "duplicate canonical intent"):
+            registry.register(second, intent="body:move", implementation="second")
+
     def test_every_public_body_transaction_has_an_explicit_closure_disposition(self):
         public_transactions = {
             f"{cls.__name__}.{name}"
@@ -235,6 +317,51 @@ if __name__ == "__main__":
 
 
 class JavaBodyProviderRegistryTests(unittest.TestCase):
+    def test_all_providers_expose_identical_canonical_names_descriptions_and_schemas(self):
+        scarpet = _registry()
+        composite_body = CompositeBody(
+            _body(),
+            JavaBody(JavaBodyClient("Bot1", lambda: FakeBodyServer()), "Bot1"),
+        )
+        composite = build_phase1_registry(
+            composite_body,
+            Phase1RuntimeConfig(
+                natural_region=Region("test", (-64, -64, -64), (64, 320, 64)),
+                body_provider="composite",
+            ),
+        )
+        java_body = JavaBody(JavaBodyClient("Bot1", lambda: FakeBodyServer()), "Bot1")
+        java = build_phase1_registry(
+            java_body,
+            Phase1RuntimeConfig(
+                natural_region=Region("test", (-64, -64, -64), (64, 320, 64)),
+                body_provider="java",
+            ),
+        )
+
+        self.assertEqual(scarpet.framework_tools(), composite.framework_tools())
+        self.assertEqual(scarpet.framework_tools(), java.framework_tools())
+        for registry in (scarpet, composite, java):
+            names = set(registry.names())
+            self.assertNotIn("navigate_to", names)
+            self.assertNotIn("collect_block", names)
+            self.assertFalse(any("scarpet" in name or "java" in name for name in names))
+
+    def test_provider_table_is_the_only_direct_objective_owner_choice(self):
+        self.assertEqual(
+            set(BODY_OBJECTIVE_PROVIDER_TABLE),
+            {"scarpet", "java", "composite"},
+        )
+        self.assertTrue(
+            all(
+                set(bindings) == {"move_to", "go_to_surface", "collect_block_domain"}
+                for bindings in BODY_OBJECTIVE_PROVIDER_TABLE.values()
+            )
+        )
+        self.assertEqual(set(BODY_OBJECTIVE_PROVIDER_TABLE["scarpet"].values()), {"scarpet"})
+        self.assertEqual(set(BODY_OBJECTIVE_PROVIDER_TABLE["java"].values()), {"java"})
+        self.assertEqual(set(BODY_OBJECTIVE_PROVIDER_TABLE["composite"].values()), {"java"})
+
     def test_composite_has_one_canonical_navigation_and_collection_surface(self):
         scarpet = _body()
         java = JavaBody(JavaBodyClient("Bot1", lambda: FakeBodyServer()), "Bot1")

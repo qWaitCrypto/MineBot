@@ -62,114 +62,123 @@ LOG_RESOURCE_ITEMS = (
 
 
 def register_inventory_tools(registry: ToolRegistry, body: Body) -> None:
-    registry.register(
-        RegisteredTool(
-            name="read_inventory",
-            description="Read authoritative bot inventory counts.",
-            input_schema={
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
-            callable=lambda _params: _read_inventory_counts(body),
-            sidecar=ToolSidecar(
-                progress_key="read_inventory",
-                mutating=False,
-                source="body.perception",
-                tool_type="state",
-                permission="read_state",
-                body_scope=("inventory",),
-                terminal_truth=("inventory",),
-            ),
-        )
+    registry.register(inventory_tool(body))
+
+
+def inventory_tool(body: Body) -> RegisteredTool:
+    return RegisteredTool(
+        name="read_inventory",
+        description="Read authoritative bot inventory counts.",
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        callable=lambda _params: _read_inventory_counts(body),
+        sidecar=ToolSidecar(
+            progress_key="read_inventory",
+            mutating=False,
+            source="body.perception",
+            tool_type="state",
+            permission="read_state",
+            body_scope=("inventory",),
+            terminal_truth=("inventory",),
+        ),
     )
 
 
 def register_collect_resource_tool(registry: ToolRegistry, context: CompositionContext) -> None:
-    registry.register(
-        RegisteredTool(
-            name="collect_resource",
-            description=(
-                "Collect a requested resource count through one bounded high-level transaction. "
-                "For collect-N goals, prefer this over manually chaining search_for_block, move_to, "
-                "get_to_block, or mine_block_collect: the Body owns candidate discovery and blacklisting, "
-                "stand-point selection, navigation, governed mining, pickup, and authoritative inventory "
-                "completion truth. When a recipe or goal accepts any equivalent material family, request "
-                "the family name, e.g. item='logs' for any log/stem; use an exact species such as "
-                "item='oak_log' only when that exact species is part of the goal or known recipe output."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "item": {
-                        "type": "string",
-                        "description": (
-                            "Resource item or family. Use 'logs' for any log/stem when species is interchangeable; "
-                            "use exact names like 'oak_log' only for exact-species objectives."
-                        ),
-                    },
-                    "count": {"type": "integer", "minimum": 1},
-                    "constraints": {
-                        "type": "object",
-                        "properties": {
-                            "radius": {"type": "integer", "minimum": 1},
-                            "max_candidates": {"type": "integer", "minimum": 1},
-                            "max_mutating_calls": {"type": "integer", "minimum": 1},
-                            "max_wall_s": {"type": "number", "exclusiveMinimum": 0},
-                            "allow_dry": {"type": "boolean"},
-                            "auto_prerequisites": {"type": "boolean"},
-                        },
-                        "additionalProperties": True,
-                    },
+    registry.register(collect_resource_tool(context))
+
+
+def collect_resource_tool(context: CompositionContext) -> RegisteredTool:
+    return RegisteredTool(
+        name="collect_resource",
+        description=(
+            "Collect a requested resource count through one bounded high-level transaction. "
+            "For collect-N goals, prefer this over manually chaining search_for_block, move_to, "
+            "get_to_block, or mine_block_collect: the Body owns candidate discovery and blacklisting, "
+            "stand-point selection, navigation, governed mining, pickup, and authoritative inventory "
+            "completion truth. When a recipe or goal accepts any equivalent material family, request "
+            "the family name, e.g. item='logs' for any log/stem; use an exact species such as "
+            "item='oak_log' only when that exact species is part of the goal or known recipe output."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "item": {
+                    "type": "string",
+                    "description": (
+                        "Resource item or family. Use 'logs' for any log/stem when species is interchangeable; "
+                        "use exact names like 'oak_log' only for exact-species objectives."
+                    ),
                 },
-                "required": ["item", "count"],
-                "additionalProperties": False,
+                "count": {"type": "integer", "minimum": 1},
+                "constraints": {
+                    "type": "object",
+                    "properties": {
+                        "radius": {"type": "integer", "minimum": 1},
+                        "max_candidates": {"type": "integer", "minimum": 1},
+                        "max_mutating_calls": {"type": "integer", "minimum": 1},
+                        "max_wall_s": {"type": "number", "exclusiveMinimum": 0},
+                        "allow_dry": {"type": "boolean"},
+                        "auto_prerequisites": {"type": "boolean"},
+                    },
+                    "additionalProperties": True,
+                },
             },
-            callable=lambda params: collect_resource(params, context),
-            sidecar=ToolSidecar(
-                progress_key="collect_resource",
-                mutating=False,
-                source="agent.composition",
-                tool_type="resource",
-                permission="compose_collect",
-                body_scope=("composition",),
-                terminal_truth=("inventory", "ToolResult"),
-                timeout_s=context.budget.max_wall_s,
-                body_mutating=True,
-            ),
-        )
+            "required": ["item", "count"],
+            "additionalProperties": False,
+        },
+        callable=lambda params: collect_resource(params, context),
+        sidecar=ToolSidecar(
+            progress_key="collect_resource",
+            mutating=False,
+            source="agent.composition",
+            tool_type="resource",
+            permission="compose_collect",
+            body_scope=("composition",),
+            terminal_truth=("inventory", "ToolResult"),
+            timeout_s=context.budget.max_wall_s,
+            body_mutating=True,
+        ),
     )
 
 
 def register_ensure_tool_for_tool(registry: ToolRegistry, context: CompositionContext, recipe_lookup: RecipeLookup) -> None:
-    registry.register(
-        RegisteredTool(
-            name="ensure_tool_for",
-            description="Ensure the bot owns and equips the tool needed for harvesting a resource, or obtain a requested item through deterministic collect/craft/smelt/equip steps. Uses existing Body tools and fails honestly with the planned step that failed.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "resource": {
-                        "type": "string",
-                        "description": "Resource/block to harvest, e.g. 'diamond', or item/tool to obtain directly, e.g. 'iron_pickaxe'.",
-                    }
-                },
-                "required": ["resource"],
-                "additionalProperties": False,
+    registry.register(ensure_tool_for_tool(context, recipe_lookup))
+
+
+def ensure_tool_for_tool(
+    context: CompositionContext,
+    recipe_lookup: RecipeLookup,
+) -> RegisteredTool:
+    return RegisteredTool(
+        name="ensure_tool_for",
+        description="Ensure the bot owns and equips the tool needed for harvesting a resource, or obtain a requested item through deterministic collect/craft/smelt/equip steps. Uses existing Body tools and fails honestly with the planned step that failed.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "resource": {
+                    "type": "string",
+                    "description": "Resource/block to harvest, e.g. 'diamond', or item/tool to obtain directly, e.g. 'iron_pickaxe'.",
+                }
             },
-            callable=lambda params: ensure_tool_for(params, context, recipe_lookup),
-            sidecar=ToolSidecar(
-                progress_key="ensure_tool_for",
-                mutating=False,
-                source="agent.composition",
-                tool_type="resource",
-                permission="compose_ensure",
-                body_scope=("composition",),
-                terminal_truth=("inventory", "ToolResult"),
-                timeout_s=900.0,
-                body_mutating=True,
-            ),
-        )
+            "required": ["resource"],
+            "additionalProperties": False,
+        },
+        callable=lambda params: ensure_tool_for(params, context, recipe_lookup),
+        sidecar=ToolSidecar(
+            progress_key="ensure_tool_for",
+            mutating=False,
+            source="agent.composition",
+            tool_type="resource",
+            permission="compose_ensure",
+            body_scope=("composition",),
+            terminal_truth=("inventory", "ToolResult"),
+            timeout_s=900.0,
+            body_mutating=True,
+        ),
     )
 
 
@@ -1455,5 +1464,8 @@ __all__ = [
     "register_collect_resource_tool",
     "register_ensure_tool_for_tool",
     "register_inventory_tools",
+    "collect_resource_tool",
+    "ensure_tool_for_tool",
+    "inventory_tool",
     "resource_plan_for",
 ]

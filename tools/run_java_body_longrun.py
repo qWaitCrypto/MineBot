@@ -35,10 +35,10 @@ from minebot.app.autonomy_quality import (  # noqa: E402
     AG_FP30_YARDSTICK,
     evaluate_autonomy_quality,
 )
-from minebot.app.java_body_tools import register_java_body_tools  # noqa: E402
+from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry  # noqa: E402
 from minebot.app.java_body_trace import body_progress_event  # noqa: E402
-from minebot.brain.registry import ToolRegistry  # noqa: E402
 from minebot.contract.governance import Region  # noqa: E402
+from minebot.game.java_body import JavaBody  # noqa: E402
 from minebot.game.governance import GovernancePolicy  # noqa: E402
 from minebot.game.java_body_adapter import (  # noqa: E402
     GovernanceAnswerer,
@@ -174,12 +174,25 @@ class ScriptedDriver:
         phase = self._step % 4
         if phase in (0, 1):
             family = "logs"
-            return "collect_block", {"block_types": GATHER_FAMILIES[family], "search_radius": 40}, f"collect:{family}"
+            return "collect_block_domain", {
+                "block_types": GATHER_FAMILIES[family],
+                "expected_drops": GATHER_FAMILIES[family],
+                "remaining_count": 1,
+                "search_radius": 40,
+            }, f"collect:{family}"
         if phase == 2:
             fam = ["dirt", "stone", "sand"][self._step % 3]
-            return "collect_block", {"block_types": GATHER_FAMILIES[fam], "search_radius": 32}, f"collect:{fam}"
+            return "collect_block_domain", {
+                "block_types": GATHER_FAMILIES[fam],
+                "expected_drops": GATHER_FAMILIES[fam],
+                "remaining_count": 1,
+                "search_radius": 32,
+            }, f"collect:{fam}"
         ax, az = self._anchors[self._step % len(self._anchors)]
-        return "navigate_to", {"x": int(self._start[0]) + ax, "z": int(self._start[2]) + az, "kind": "xz"}, f"explore:{ax}_{az}"
+        return "move_to", {
+            "pos": [int(self._start[0]) + ax, int(self._start[1]), int(self._start[2]) + az],
+            "radius": 2,
+        }, f"explore:{ax}_{az}"
 
 
 def _sample_body_state(rcon: RconClient, bot: str, recorder: TraceRecorder) -> None:
@@ -218,12 +231,19 @@ def run(args: argparse.Namespace) -> int:
     start_pos = _parse_pos(rcon.command(f"data get entity {args.bot} Pos")) or [0.0, 70.0, 0.0]
 
     natural = Region("longrun-natural", (-512, 0, -512), (512, 320, 512))
-    governance = GovernanceAnswerer(GovernancePolicy(natural_regions=[natural]))
+    policy = GovernancePolicy(natural_regions=[natural])
+    governance = GovernanceAnswerer(policy)
     client = JavaBodyClient(args.bot, websocket_transport(args.url), governance,
                             action_wall_timeout_s=args.action_timeout_s, recv_timeout_s=2.0)
     client.connect()
-    registry = ToolRegistry()
-    register_java_body_tools(registry, client)
+    registry = build_phase1_registry(
+        JavaBody(client, args.bot),
+        Phase1RuntimeConfig(
+            natural_region=natural,
+            body_provider="java",
+            governance_policy=policy,
+        ),
+    )
 
     driver = ScriptedDriver(start_pos)
 

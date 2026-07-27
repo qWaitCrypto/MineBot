@@ -19,10 +19,10 @@ from minebot.app.autonomy_quality import (
     evaluate_autonomy_quality,
 )
 from minebot.app.java_body_trace import body_progress_event
-from minebot.brain.registry import ToolRegistry
-from minebot.app.java_body_tools import register_java_body_tools
+from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry
 from minebot.contract.governance import Region
 from minebot.game.governance import GovernancePolicy
+from minebot.game.java_body import JavaBody
 from minebot.game.java_body_adapter import GovernanceAnswerer, JavaBodyClient
 
 from tests.unit.test_java_body_adapter import FakeBodyServer
@@ -42,25 +42,38 @@ def _run_collect(policy_regions) -> object:
     policy = GovernancePolicy(**policy_regions)
     client = _client(server, GovernanceAnswerer(policy))
     client.connect()
-    registry = ToolRegistry()
-    register_java_body_tools(registry, client)
-    return registry.get("collect_block").callable({"block_types": ["minecraft:oak_log"], "search_radius": 16})
+    natural = policy_regions.get("natural_regions") or [Region("n", (-64, 0, -64), (64, 200, 64))]
+    registry = build_phase1_registry(
+        JavaBody(client, "Bot"),
+        Phase1RuntimeConfig(
+            natural_region=natural[0],
+            body_provider="java",
+            governance_policy=policy,
+        ),
+    )
+    return registry.get("collect_block_domain").callable({
+        "block_types": ["minecraft:oak_log"],
+        "expected_drops": ["minecraft:oak_log"],
+        "remaining_count": 1,
+        "search_radius": 16,
+    })
 
 
 def _session_trace(collect_result) -> list[dict]:
     """Wrap real Java-Body ToolResults in the runner's trace vocabulary."""
     args = {"block_types": "minecraft:oak_log", "search_radius": 16}
+    tool = "collect_block_domain"
     events: list[dict] = [
         {"event": "scenario_body_ready", "ts": 0.0, "seq": 0},
         # Runner body-state samples: baseline then post-collect.
         {"event": "body_state", "ts": 1.0, "seq": 1, "missing": False,
          "inventory_counts": {}, "selected_item": None, "offhand_item": None},
-        {"event": "tool_invoke", "ts": 2.0, "seq": 2, "tool": "collect_block",
-         "tool_call_id": "c1", "args_hash": _args_hash("collect_block", args),
-         "tactic_signature": "collect_block:logs"},
-        {"event": "tool_result", "ts": 40.0, "seq": 3, "tool": "collect_block",
-         "tool_call_id": "c1", "args_hash": _args_hash("collect_block", args),
-         "tactic_signature": "collect_block:logs",
+        {"event": "tool_invoke", "ts": 2.0, "seq": 2, "tool": tool,
+         "tool_call_id": "c1", "args_hash": _args_hash(tool, args),
+         "tactic_signature": "collect_block_domain:logs"},
+        {"event": "tool_result", "ts": 40.0, "seq": 3, "tool": tool,
+         "tool_call_id": "c1", "args_hash": _args_hash(tool, args),
+         "tactic_signature": "collect_block_domain:logs",
          "success": collect_result.success, "reason": collect_result.reason},
         {"event": "body_state", "ts": 41.0, "seq": 4, "missing": False,
          "inventory_counts": {"minecraft:oak_log": 1} if collect_result.success else {},

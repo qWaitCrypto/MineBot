@@ -13,8 +13,8 @@ from dataclasses import dataclass, replace
 
 from agents import Session
 
-from minebot.app.body_capability_tools import register_body_capability_tools
-from minebot.app.body_provider import java_objectives_enabled
+from minebot.app.body_capability_tools import body_capability_tools
+from minebot.app.body_tool_catalog import CanonicalBodyToolCatalog
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.conversation_tools import register_conversation_archive_tools
 from minebot.app.memory import MemoryWorkspace, register_memory_tools
@@ -55,9 +55,9 @@ from minebot.brain.acquisition import RecipeVariant
 from minebot.brain.composition import (
     CompositionBudget,
     CompositionContext,
-    register_collect_resource_tool,
-    register_ensure_tool_for_tool,
-    register_inventory_tools,
+    collect_resource_tool,
+    ensure_tool_for_tool,
+    inventory_tool,
 )
 from minebot.app.observability import sanitize_observation
 from minebot.app.projection import bounded_summary_value, top_reasons
@@ -133,8 +133,10 @@ def build_phase1_agent_runtime(
         recipe_lookup=_recipe_lookup(body),
         trace=lambda event, payload: parts.runtime.trace.emit(event, **payload),
     )
-    register_collect_resource_tool(registry, context)
-    register_ensure_tool_for_tool(registry, context, _recipe_lookup(body))
+    catalog = CanonicalBodyToolCatalog(registry, config.body_provider)
+    catalog.register(collect_resource_tool(context))
+    catalog.register(ensure_tool_for_tool(context, _recipe_lookup(body)))
+    catalog.assert_stage_complete("composition")
     if config.task_workspace is not None:
         register_task_tools(
             registry,
@@ -583,36 +585,43 @@ def build_phase1_registry(
     )
     container_txn = ContainerTransactions(body, navigator=navigator, governance=policy)
     registry = ToolRegistry()
-    registry.register(_read_state_tool(body))
-    register_inventory_tools(registry, body)
-    java_objective_body = body if java_objectives_enabled(body) else None
-    registry.register(_move_to_tool(navigator, java_objective_body))
-    registry.register(_explore_for_tool(exploration))
-    registry.register(_go_to_surface_tool(work, java_objective_body))
-    registry.register(_follow_tool(navigator))
+    catalog = CanonicalBodyToolCatalog(registry, config.body_provider)
+    move_objective_body = catalog.objective_body("move_to", body)
+    surface_objective_body = catalog.objective_body("go_to_surface", body)
+    collect_objective_body = catalog.objective_body("collect_block_domain", body)
     combat = CombatTransactions(body, progress=progress)
-    registry.register(_engage_tool(combat))
-    registry.register(_find_hostiles_tool(body))
-    registry.register(_search_tool(work))
-    registry.register(_mine_collect_tool(work))
-    registry.register(_craft_tool(inventory_txn))
-    registry.register(_equip_tool(inventory_txn))
-    registry.register(_smelt_tool(body, furnace_txn))
-    register_body_capability_tools(
-        registry,
-        body=body,
-        block_approach=block_approach,
-        navigator=navigator,
-        work=work,
-        inventory=inventory_txn,
-        furnace=furnace_txn,
-        container=container_txn,
-        interaction=interaction_txn,
-        pickup=pickup,
-        resource_collection=resource_collection,
-        use=use_txn,
-        java_objective_body=java_objective_body,
+    catalog.register_many(
+        (
+            _read_state_tool(body),
+            inventory_tool(body),
+            _move_to_tool(navigator, move_objective_body),
+            _explore_for_tool(exploration),
+            _go_to_surface_tool(work, surface_objective_body),
+            _follow_tool(navigator),
+            _engage_tool(combat),
+            _find_hostiles_tool(body),
+            _search_tool(work),
+            _mine_collect_tool(work),
+            _craft_tool(inventory_txn),
+            _equip_tool(inventory_txn),
+            _smelt_tool(body, furnace_txn),
+            *body_capability_tools(
+                body=body,
+                block_approach=block_approach,
+                navigator=navigator,
+                work=work,
+                inventory=inventory_txn,
+                furnace=furnace_txn,
+                container=container_txn,
+                interaction=interaction_txn,
+                pickup=pickup,
+                resource_collection=resource_collection,
+                use=use_txn,
+                java_objective_body=collect_objective_body,
+            ),
+        )
     )
+    catalog.assert_stage_complete("base")
     return registry
 
 
@@ -644,9 +653,14 @@ def _phase1_recipe_item(item: object) -> str:
 
 def tool_manifest(registry: ToolRegistry) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
+    canonical_by_tool = {
+        binding.tool_name: binding
+        for binding in registry.canonical_bindings()
+    }
     for name in registry.names():
         tool = registry.get(name)
         sidecar = tool.sidecar
+        binding = canonical_by_tool.get(name)
         rows.append(
             {
                 "name": tool.name,
@@ -657,6 +671,8 @@ def tool_manifest(registry: ToolRegistry) -> list[dict[str, object]]:
                 "body_mutating": sidecar.can_mutate_body,
                 "body_scope": list(sidecar.body_scope),
                 "terminal_truth": list(sidecar.terminal_truth),
+                "intent": binding.intent if binding is not None else None,
+                "implementation": binding.implementation if binding is not None else None,
             }
         )
     return rows

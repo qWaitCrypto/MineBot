@@ -23,7 +23,7 @@ from minebot.body import (
     UseTransactions,
 )
 from minebot.app.projection import bounded_summary_value, top_reasons
-from minebot.brain.registry import ObservationProjector, RegisteredTool, ToolRegistry, ToolSidecar
+from minebot.brain.registry import ObservationProjector, RegisteredTool, ToolSidecar
 from minebot.contract import (
     Action,
     Body,
@@ -329,8 +329,7 @@ BODY_PRIMITIVE_CLOSURE: dict[str, CapabilityClosure] = {
 }
 
 
-def register_body_capability_tools(
-    registry: ToolRegistry,
+def body_capability_tools(
     *,
     body: Body,
     block_approach: BlockApproachTransactions,
@@ -344,7 +343,7 @@ def register_body_capability_tools(
     resource_collection: ResourceCollectionTransactions,
     use: UseTransactions,
     java_objective_body: Body | None = None,
-) -> None:
+) -> tuple[RegisteredTool, ...]:
     tools = (
         _move_away_tool(navigator),
         _get_to_block_tool(block_approach),
@@ -377,8 +376,7 @@ def register_body_capability_tools(
         _read_nearby_entities_tool(body),
         _read_recipe_tool(body),
     )
-    for tool in tools:
-        registry.register(tool)
+    return tools
 
 
 def _tool(
@@ -1795,5 +1793,5 @@ __all__ = [
     "BODY_PRIMITIVE_CLOSURE",
     "BODY_TRANSACTION_CLOSURE",
     "CapabilityClosure",
-    "register_body_capability_tools",
+    "body_capability_tools",
 ]

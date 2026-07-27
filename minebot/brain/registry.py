@@ -107,17 +107,51 @@ class RegisteredTool:
         }
 
 
+@dataclass(frozen=True)
+class CanonicalToolBinding:
+    """One model-visible intent bound to exactly one runtime implementation."""
+
+    intent: str
+    tool_name: str
+    implementation: str
+
+
 class ToolRegistry:
     """Single source of truth for tools; emits framework + sidecar faces."""
 
     def __init__(self) -> None:
         self._tools: dict[str, RegisteredTool] = {}
+        self._canonical_bindings: dict[str, CanonicalToolBinding] = {}
 
-    def register(self, tool: RegisteredTool) -> RegisteredTool:
+    def register(
+        self,
+        tool: RegisteredTool,
+        *,
+        intent: str | None = None,
+        implementation: str | None = None,
+    ) -> RegisteredTool:
         if tool.name in self._tools:
             raise ValueError(f"duplicate tool name: {tool.name!r}")
         if not tool.sidecar.progress_key:
             raise ValueError(f"tool {tool.name!r}: sidecar.progress_key must be non-empty")
+        if (intent is None) != (implementation is None):
+            raise ValueError("canonical tool registration requires both intent and implementation")
+        if intent is not None:
+            if not intent.strip():
+                raise ValueError("canonical tool intent must be non-empty")
+            if not implementation or not implementation.strip():
+                raise ValueError(f"canonical tool {intent!r}: implementation must be non-empty")
+            if intent in self._canonical_bindings:
+                previous = self._canonical_bindings[intent]
+                raise ValueError(
+                    f"duplicate canonical intent {intent!r}: "
+                    f"{previous.tool_name!r} and {tool.name!r}"
+                )
+            self._canonical_bindings[intent] = CanonicalToolBinding(
+                intent=intent,
+                tool_name=tool.name,
+                implementation=implementation,
+            )
         self._tools[tool.name] = tool
         return tool
 
@@ -138,6 +172,16 @@ class ToolRegistry:
 
     def names(self) -> list[str]:
         return list(self._tools)
+
+    def canonical_bindings(self) -> tuple[CanonicalToolBinding, ...]:
+        return tuple(self._canonical_bindings.values())
+
+    def canonical_binding(self, intent: str) -> CanonicalToolBinding:
+        try:
+            return self._canonical_bindings[intent]
+        except KeyError:
+            known = ", ".join(sorted(self._canonical_bindings)) or "<none>"
+            raise KeyError(f"unknown canonical intent {intent!r}; registered: {known}") from None
 
     def __len__(self) -> int:
         return len(self._tools)
@@ -269,6 +313,7 @@ __all__ = [
     "ObservationProjector",
     "ToolCallable",
     "ToolSidecar",
+    "CanonicalToolBinding",
     "RegisteredTool",
     "ToolRegistry",
     "SingleWriterGuard",
