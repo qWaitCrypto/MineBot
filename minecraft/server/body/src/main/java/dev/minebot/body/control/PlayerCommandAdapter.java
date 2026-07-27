@@ -97,6 +97,16 @@ public final class PlayerCommandAdapter
         dispatch(botName, "hotbar " + (slot + 1));
     }
 
+    @Override
+    public void dropOne(String botName) {
+        dispatch(botName, "drop");
+    }
+
+    @Override
+    public void dropStack(String botName) {
+        dispatch(botName, "dropStack");
+    }
+
     /**
      * Total cleanup of every engaged input. Always issues {@code stop} (which
      * ceases movement and repeating actions) and releases sneak/sprint

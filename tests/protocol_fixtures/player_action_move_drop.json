@@ -1,0 +1,78 @@
+{
+  "name": "player_action_move_drop",
+  "description": "PLAYER_ACTION carries inventory move/drop parameters and authoritative terminal deltas under caller action ids.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {"channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "HELLO", "request_id": "r-1"}
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "HELLO_ACK", "request_id": "r-1",
+        "protocol": "fakeplayer-body/1", "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384, "max_requests_per_second": 40,
+        "request_types": ["HELLO", "PLAYER_ACTION"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "player_action",
+        "args": {
+          "bot_name": "MineBot_1", "action_id": "move-0001", "action": "moveItem",
+          "params": {"from_slot": 18, "to_slot": 0, "count": 3}
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "PLAYER_ACTION",
+        "request_id": "r-2", "bot_name": "MineBot_1", "action_id": "move-0001", "action": "moveItem",
+        "params": {"from_slot": 18, "to_slot": 0, "count": 3}
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "PLAYER_ACTION_ACK", "request_id": "r-2",
+        "action_id": "move-0001", "state": "accepted"
+      },
+      "expect": [{"kind": "response", "type": "PLAYER_ACTION_ACK", "request_type": "PLAYER_ACTION", "payload_contains": {"state": "accepted"}}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "EVENT", "bot": "MineBot_1", "seq": 1, "tick": 601,
+        "event": "action_terminal", "action_id": "move-0001",
+        "data": {"classification": "completed", "reason": "partial", "success": true, "from_slot": 18, "to_slot": 0, "item": "minecraft:diamond", "count": 3}
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 1, "data_contains": {"classification": "completed", "count": 3}}]
+    },
+    {
+      "send": {
+        "builder": "player_action",
+        "args": {
+          "bot_name": "MineBot_1", "action_id": "drop-0001", "action": "dropItem",
+          "params": {"slot": 0, "mode": "all"}
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "PLAYER_ACTION",
+        "request_id": "r-3", "bot_name": "MineBot_1", "action_id": "drop-0001", "action": "dropItem",
+        "params": {"slot": 0, "mode": "all"}
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "PLAYER_ACTION_ACK", "request_id": "r-3",
+        "action_id": "drop-0001", "state": "accepted"
+      },
+      "expect": [{"kind": "response", "type": "PLAYER_ACTION_ACK", "request_type": "PLAYER_ACTION", "payload_contains": {"state": "accepted"}}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "EVENT", "bot": "MineBot_1", "seq": 2, "tick": 603,
+        "event": "action_terminal", "action_id": "drop-0001",
+        "data": {"classification": "completed", "reason": "completed", "success": true, "slot": 0, "mode": "all", "item": "minecraft:diamond", "count_before": 3, "count_after": 0}
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 2, "data_contains": {"classification": "completed", "count_before": 3, "count_after": 0}}]
+    }
+  ],
+  "final": {"supports": ["PLAYER_ACTION"], "pending_requests": 0, "last_seq": {"MineBot_1": 2}}
+}

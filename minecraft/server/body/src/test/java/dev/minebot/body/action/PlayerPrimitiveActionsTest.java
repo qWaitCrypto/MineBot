@@ -52,6 +52,21 @@ final class PlayerPrimitiveActionsTest {
             counts[fromSlot] = 0;
         }
 
+        @Override public boolean sameStack(int firstSlot, int secondSlot) {
+            return items[firstSlot] != null && items[firstSlot].equals(items[secondSlot]);
+        }
+        @Override public int maxStackSizeAt(int slot) { return 64; }
+        @Override public void moveItems(int fromSlot, int toSlot, int count) {
+            if (slotEmpty(toSlot)) {
+                items[toSlot] = items[fromSlot];
+            }
+            counts[toSlot] += count;
+            counts[fromSlot] -= count;
+            if (counts[fromSlot] == 0) {
+                items[fromSlot] = null;
+            }
+        }
+
         @Override
         public String inventoryFingerprint() {
             return Arrays.toString(items) + Arrays.toString(counts);
@@ -81,6 +96,11 @@ final class PlayerPrimitiveActionsTest {
 
         @Override public void useOnce(String botName) { onceUses++; }
         @Override public void useContinuous(String botName) { continuousUses++; }
+        @Override public void dropOne(String botName) { player.counts[player.selected]--; }
+        @Override public void dropStack(String botName) {
+            player.counts[player.selected] = 0;
+            player.items[player.selected] = null;
+        }
         @Override public void clearAll(String botName) { clears++; }
     }
 
@@ -194,6 +214,58 @@ final class PlayerPrimitiveActionsTest {
         assertEquals("failed", terminal.get("classification").getAsString());
         assertEquals("no_effect", terminal.get("reason").getAsString());
         assertEquals(2, controls.onceUses);
+    }
+
+    @Test
+    void moveItemSplitsAndMergesWithObservedCounts() {
+        FakePlayer player = new FakePlayer();
+        player.put(18, "minecraft:stone", 8);
+        player.put(1, "minecraft:stone", 2);
+
+        var split = PlayerPrimitiveActions.moveItem(18, 0, 3, 64, player);
+        var merge = PlayerPrimitiveActions.moveItem(0, 1, 2, 64, player);
+
+        assertTrue(split.success());
+        assertEquals("partial", split.reason());
+        assertEquals(3, split.facts().get("count").getAsInt());
+        assertTrue(merge.success());
+        assertEquals(1, player.counts[0]);
+        assertEquals(4, player.counts[1]);
+    }
+
+    @Test
+    void moveItemRefusesDifferentDestinationWithoutMutation() {
+        FakePlayer player = new FakePlayer();
+        player.put(18, "minecraft:diamond", 3);
+        player.put(0, "minecraft:stone", 1);
+        String before = player.inventoryFingerprint();
+
+        var outcome = PlayerPrimitiveActions.moveItem(18, 0, 3, 64, player);
+
+        assertFalse(outcome.success());
+        assertEquals("destination_occupied", outcome.reason());
+        assertEquals(before, player.inventoryFingerprint());
+    }
+
+    @Test
+    void dropCompletesOnlyAfterTheHotbarCountDecreases() {
+        FakePlayer player = new FakePlayer();
+        player.put(3, "minecraft:diamond", 2);
+        FakeControls controls = new FakeControls(player);
+        ActionRegistry registry = new ActionRegistry();
+        ActionRuntime runtime = runtime(controls, registry);
+        runtime.submit("Bot", "drop-1", "PLAYER_ACTION:dropItem", OwnerPriority.ACTION, 30);
+        runtime.attachExecutor("drop-1", new PlayerPrimitiveActions.DropExecutor(
+            "Bot", "drop-1", 3, "one", player, controls, runtime
+        ));
+
+        runtime.tick(31);
+        runtime.tick(32);
+
+        var terminal = registry.status("drop-1").terminal();
+        assertEquals("completed", terminal.get("classification").getAsString());
+        assertEquals(2, terminal.get("count_before").getAsInt());
+        assertEquals(1, terminal.get("count_after").getAsInt());
     }
 
     private static ActionRuntime runtime(BotControls controls, ActionRegistry registry) {

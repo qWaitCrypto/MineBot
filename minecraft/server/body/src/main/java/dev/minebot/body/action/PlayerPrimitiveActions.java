@@ -41,6 +41,9 @@ public final class PlayerPrimitiveActions {
         int itemCountAt(int slot);
         boolean slotEmpty(int slot);
         void moveWholeStack(int fromSlot, int toSlot);
+        boolean sameStack(int firstSlot, int secondSlot);
+        int maxStackSizeAt(int slot);
+        void moveItems(int fromSlot, int toSlot, int count);
         int selectedHotbarSlot();
         String selectedItemId();
         String inventoryFingerprint();
@@ -57,6 +60,8 @@ public final class PlayerPrimitiveActions {
         void lookAt(String botName, double x, double y, double z);
         void useOnce(String botName);
         void useContinuous(String botName);
+        void dropOne(String botName);
+        void dropStack(String botName);
     }
 
     public static Outcome selectItem(
@@ -138,6 +143,89 @@ public final class PlayerPrimitiveActions {
 
     public static Outcome stop() {
         return new Outcome(true, "completed", baseFacts(true, "completed"));
+    }
+
+    public static Outcome moveItem(
+        int fromSlot,
+        int toSlot,
+        int requestedCount,
+        int requestedMaxStack,
+        PlayerAccess player
+    ) {
+        if (fromSlot < 0 || toSlot < 0 || fromSlot >= player.inventorySize()
+            || toSlot >= player.inventorySize() || fromSlot == toSlot) {
+            return moveOutcome(false, "invalid_slot", fromSlot, toSlot, "unknown", 0, null, null, null, null);
+        }
+        if (player.slotEmpty(fromSlot)) {
+            return moveOutcome(false, "source_empty", fromSlot, toSlot, "empty", 0,
+                slotFact(player, fromSlot), slotFact(player, fromSlot),
+                slotFact(player, toSlot), slotFact(player, toSlot));
+        }
+        String item = player.itemIdAt(fromSlot);
+        int sourceBefore = player.itemCountAt(fromSlot);
+        int destinationBefore = player.itemCountAt(toSlot);
+        JsonObject fromBefore = slotFact(player, fromSlot);
+        JsonObject toBefore = slotFact(player, toSlot);
+        if (!player.slotEmpty(toSlot) && !player.sameStack(fromSlot, toSlot)) {
+            return moveOutcome(false, "destination_occupied", fromSlot, toSlot, item, 0,
+                fromBefore, fromBefore, toBefore, toBefore);
+        }
+        int wanted = requestedCount <= 0 ? sourceBefore : Math.min(requestedCount, sourceBefore);
+        int stackLimit = Math.min(Math.max(1, requestedMaxStack), player.maxStackSizeAt(fromSlot));
+        int room = stackLimit - destinationBefore;
+        if (room <= 0) {
+            return moveOutcome(false, "destination_full", fromSlot, toSlot, item, 0,
+                fromBefore, fromBefore, toBefore, toBefore);
+        }
+        int moved = Math.min(wanted, room);
+        player.moveItems(fromSlot, toSlot, moved);
+        int sourceAfter = player.itemCountAt(fromSlot);
+        int destinationAfter = player.itemCountAt(toSlot);
+        if (sourceAfter != sourceBefore - moved || destinationAfter != destinationBefore + moved) {
+            return moveOutcome(false, "move_verification_failed", fromSlot, toSlot, item, moved,
+                fromBefore, slotFact(player, fromSlot), toBefore, slotFact(player, toSlot));
+        }
+        return moveOutcome(true, moved == sourceBefore ? "completed" : "partial", fromSlot, toSlot, item, moved,
+            fromBefore, slotFact(player, fromSlot), toBefore, slotFact(player, toSlot));
+    }
+
+    private static Outcome moveOutcome(
+        boolean success,
+        String reason,
+        int fromSlot,
+        int toSlot,
+        String item,
+        int count,
+        JsonObject fromBefore,
+        JsonObject fromAfter,
+        JsonObject toBefore,
+        JsonObject toAfter
+    ) {
+        JsonObject facts = baseFacts(success, reason);
+        facts.addProperty("from_slot", fromSlot);
+        facts.addProperty("to_slot", toSlot);
+        facts.addProperty("item", item);
+        facts.addProperty("count", count);
+        facts.add("from_before", fromBefore == null ? new JsonObject() : fromBefore);
+        facts.add("from_after", fromAfter == null ? new JsonObject() : fromAfter);
+        facts.add("to_before", toBefore == null ? new JsonObject() : toBefore);
+        facts.add("to_after", toAfter == null ? new JsonObject() : toAfter);
+        return new Outcome(success, reason, facts);
+    }
+
+    private static JsonObject slotFact(PlayerAccess player, int slot) {
+        JsonObject fact = new JsonObject();
+        boolean empty = slot < 0 || slot >= player.inventorySize() || player.slotEmpty(slot);
+        fact.addProperty("slot", slot);
+        fact.addProperty("empty", empty);
+        if (empty) {
+            fact.addProperty("item", (String) null);
+            fact.addProperty("count", 0);
+        } else {
+            fact.addProperty("item", player.itemIdAt(slot));
+            fact.addProperty("count", player.itemCountAt(slot));
+        }
+        return fact;
     }
 
     private static Outcome lookOutcome(
@@ -348,6 +436,91 @@ public final class PlayerPrimitiveActions {
             );
             facts.add("start_pos", (positionBefore == null ? finalPosition : positionBefore).toJson());
             facts.add("final_pos", finalPosition.toJson());
+            runtime.finish(botName, actionId, classification, facts, serverTick);
+        }
+    }
+
+    public static final class DropExecutor implements ActionRuntime.TickExecutor {
+        private final String botName;
+        private final String actionId;
+        private final int slot;
+        private final String mode;
+        private final PlayerAccess player;
+        private final Controls controls;
+        private final ActionRuntime runtime;
+        private boolean started;
+        private int countBefore;
+        private String item;
+        private JsonObject slotBefore;
+
+        public DropExecutor(
+            String botName,
+            String actionId,
+            int slot,
+            String mode,
+            PlayerAccess player,
+            Controls controls,
+            ActionRuntime runtime
+        ) {
+            this.botName = botName;
+            this.actionId = actionId;
+            this.slot = slot;
+            this.mode = mode;
+            this.player = player;
+            this.controls = controls;
+            this.runtime = runtime;
+        }
+
+        @Override
+        public void tick(int serverTick) {
+            if (runtime.cancelRequested(actionId)) {
+                finish(false, "canceled", ActionRuntime.CLASS_CANCELED, serverTick);
+                return;
+            }
+            if (!started) {
+                start(serverTick);
+                return;
+            }
+            int countAfter = player.itemCountAt(slot);
+            finish(
+                countAfter < countBefore,
+                countAfter < countBefore ? "completed" : "no_delta",
+                countAfter < countBefore ? ActionRuntime.CLASS_COMPLETED : ActionRuntime.CLASS_FAILED,
+                serverTick
+            );
+        }
+
+        private void start(int serverTick) {
+            if (slot < 0 || slot >= HOTBAR_SIZE || slot >= player.inventorySize()) {
+                finish(false, "invalid_slot", ActionRuntime.CLASS_FAILED, serverTick);
+                return;
+            }
+            if (player.slotEmpty(slot)) {
+                finish(false, "source_empty", ActionRuntime.CLASS_FAILED, serverTick);
+                return;
+            }
+            started = true;
+            countBefore = player.itemCountAt(slot);
+            item = player.itemIdAt(slot);
+            slotBefore = slotFact(player, slot);
+            controls.selectHotbar(botName, slot);
+            if ("all".equals(mode)) {
+                controls.dropStack(botName);
+            } else {
+                controls.dropOne(botName);
+            }
+        }
+
+        private void finish(boolean success, String reason, String classification, int serverTick) {
+            int countAfter = slot >= 0 && slot < player.inventorySize() ? player.itemCountAt(slot) : 0;
+            JsonObject facts = baseFacts(success, reason);
+            facts.addProperty("slot", slot);
+            facts.addProperty("mode", mode);
+            facts.addProperty("item", item == null ? "empty" : item);
+            facts.addProperty("count_before", countBefore);
+            facts.addProperty("count_after", countAfter);
+            facts.add("slot_before", slotBefore == null ? new JsonObject() : slotBefore);
+            facts.add("slot_after", slot >= 0 && slot < player.inventorySize() ? slotFact(player, slot) : new JsonObject());
             runtime.finish(botName, actionId, classification, facts, serverTick);
         }
     }

@@ -17,12 +17,21 @@ class CompositeBody:
         "navigate",
         "collectBlock",
         "ascend",
+        "dropItem",
         "lookAt",
+        "moveItem",
         "selectItem",
         "stop",
         "useItem",
     })
-    JAVA_TERMINAL_ACTIONS = frozenset({"lookAt", "selectItem", "stop", "useItem"})
+    JAVA_TERMINAL_ACTIONS = frozenset({
+        "dropItem",
+        "lookAt",
+        "moveItem",
+        "selectItem",
+        "stop",
+        "useItem",
+    })
     JAVA_PERCEPTIONS = frozenset({
         "findBlocks",
         "inventory",

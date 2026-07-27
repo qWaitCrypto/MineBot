@@ -505,6 +505,27 @@ class FakeBodyServer:
             facts.update({"target": params.get("target"), "yaw": 45.0, "pitch": -5.0, "alignment": 1.0})
         elif action == "stop":
             pass
+        elif action == "moveItem":
+            facts.update({
+                "from_slot": params.get("from_slot"),
+                "to_slot": params.get("to_slot"),
+                "item": "minecraft:stone",
+                "count": params.get("count", 3),
+                "from_before": {"item": "minecraft:stone", "count": 8},
+                "from_after": {"item": "minecraft:stone", "count": 5},
+                "to_before": {"item": None, "count": 0},
+                "to_after": {"item": "minecraft:stone", "count": 3},
+            })
+        elif action == "dropItem":
+            facts.update({
+                "slot": params.get("slot", 0),
+                "mode": params.get("mode", "one"),
+                "item": "minecraft:diamond",
+                "count_before": 3,
+                "count_after": 2,
+                "slot_before": {"item": "minecraft:diamond", "count": 3},
+                "slot_after": {"item": "minecraft:diamond", "count": 2},
+            })
         elif action == "useItem":
             facts.update({
                 "mode": params.get("mode", "once"),
@@ -925,6 +946,25 @@ def test_java_body_player_action_preserves_server_terminal_failure() -> None:
     assert terminal.name == "useDone"
     assert terminal.data["success"] is False
     assert terminal.data["stopped_reason"] == "no_effect"
+
+
+def test_java_body_move_and_drop_actions_preserve_inventory_terminal_facts() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+    move = Action.create("moveItem", {"from_slot": 18, "to_slot": 0, "count": 3})
+    drop = Action.create("dropItem", {"slot": 0, "mode": "one"})
+
+    body.execute(move)
+    move_terminal = body.await_action_terminal(move.id)
+    body.execute(drop)
+    drop_terminal = body.await_action_terminal(drop.id)
+
+    assert move_terminal.name == "moveItemDone"
+    assert move_terminal.data["from_slot"] == 18
+    assert move_terminal.data["to_slot"] == 0
+    assert move_terminal.data["count"] == 3
+    assert drop_terminal.name == "dropDone"
+    assert drop_terminal.data["count_before"] == 3
+    assert drop_terminal.data["count_after"] == 2
 
 
 def test_java_body_poll_events_drains_contract_events() -> None:

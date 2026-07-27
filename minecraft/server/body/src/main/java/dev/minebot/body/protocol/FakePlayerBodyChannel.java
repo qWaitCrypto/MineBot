@@ -148,7 +148,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             String botName = requiredString(request, "bot_name", 64);
             String actionId = requiredString(request, "action_id", 128);
             String action = requiredString(request, "action", 32);
-            if (!Set.of("selectItem", "lookAt", "stop", "useItem").contains(action)) {
+            if (!Set.of("selectItem", "lookAt", "stop", "useItem", "moveItem", "dropItem").contains(action)) {
                 throw new IllegalArgumentException("unsupported player action: " + action);
             }
             JsonObject params = request.has("params") && request.get("params").isJsonObject()
@@ -164,6 +164,24 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             final int useTicks = action.equals("useItem")
                 ? boundedOptionalInt(params, "ticks", 1, 1, PlayerPrimitiveActions.MAX_USE_TICKS)
                 : 1;
+            final int fromSlot = action.equals("moveItem")
+                ? boundedInt(params, "from_slot", Integer.MIN_VALUE, Integer.MAX_VALUE)
+                : -1;
+            final int toSlot = action.equals("moveItem")
+                ? boundedInt(params, "to_slot", Integer.MIN_VALUE, Integer.MAX_VALUE)
+                : -1;
+            final int moveCount = action.equals("moveItem")
+                ? boundedOptionalInt(params, "count", -1, -1, Integer.MAX_VALUE)
+                : -1;
+            final int maxStack = action.equals("moveItem")
+                ? boundedOptionalInt(params, "max_stack", 64, 1, 99)
+                : 64;
+            final int dropSlot = action.equals("dropItem")
+                ? boundedOptionalInt(params, "slot", 0, Integer.MIN_VALUE, Integer.MAX_VALUE)
+                : -1;
+            final String dropMode = action.equals("dropItem")
+                ? optionalDropMode(params)
+                : null;
             ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
             if (player == null || player.isRemoved()) {
                 sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
@@ -199,6 +217,23 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                             botName,
                             actionId,
                             PlayerPrimitiveActions::stop,
+                            runtime
+                        );
+                        case "moveItem" -> new PlayerPrimitiveActions.ImmediateExecutor(
+                            botName,
+                            actionId,
+                            () -> PlayerPrimitiveActions.moveItem(
+                                fromSlot, toSlot, moveCount, maxStack, access
+                            ),
+                            runtime
+                        );
+                        case "dropItem" -> new PlayerPrimitiveActions.DropExecutor(
+                            botName,
+                            actionId,
+                            dropSlot,
+                            dropMode,
+                            access,
+                            adapter,
                             runtime
                         );
                         case "useItem" -> {
@@ -1082,6 +1117,36 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             }
 
             @Override
+            public boolean sameStack(int firstSlot, int secondSlot) {
+                return ItemStack.isSameItemSameComponents(
+                    player.getInventory().getItem(firstSlot),
+                    player.getInventory().getItem(secondSlot)
+                );
+            }
+
+            @Override
+            public int maxStackSizeAt(int slot) {
+                return player.getInventory().getItem(slot).getItem().getDefaultMaxStackSize();
+            }
+
+            @Override
+            public void moveItems(int fromSlot, int toSlot, int count) {
+                var inventory = player.getInventory();
+                ItemStack source = inventory.getItem(fromSlot);
+                ItemStack destination = inventory.getItem(toSlot);
+                ItemStack moved = source.split(count);
+                if (destination.isEmpty()) {
+                    inventory.setItem(toSlot, moved);
+                } else {
+                    destination.grow(moved.getCount());
+                }
+                if (source.isEmpty()) {
+                    inventory.setItem(fromSlot, ItemStack.EMPTY);
+                }
+                inventory.setChanged();
+            }
+
+            @Override
             public int selectedHotbarSlot() {
                 return player.getInventory().getSelectedSlot();
             }
@@ -1180,6 +1245,17 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         }
         if (!mode.equals("once") && !mode.equals("continuous")) {
             throw new IllegalArgumentException("mode must be once or continuous");
+        }
+        return mode;
+    }
+
+    private static String optionalDropMode(JsonObject params) {
+        String mode = MineBotChannelRouter.stringField(params, "mode");
+        if (mode == null || mode.isBlank()) {
+            return "one";
+        }
+        if (!mode.equals("one") && !mode.equals("all")) {
+            throw new IllegalArgumentException("mode must be one or all");
         }
         return mode;
     }

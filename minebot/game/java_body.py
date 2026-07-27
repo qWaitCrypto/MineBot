@@ -5,7 +5,8 @@ This is the abstraction seam the multi-provider design promises: the same
 ``fakeplayer-body/1`` wire protocol. Reads are wire-native (BODY_STATE,
 FIND_BLOCKS, world facts, inventory, and the pushed event stream); physical objectives delegate whole
 actions to the Java Body (navigate/collect), while ordinary player controls
-(``selectItem``/``stop``/``lookAt``/``useItem``) retain the neutral contract's
+(``selectItem``/``moveItem``/``dropItem``/``stop``/``lookAt``/``useItem``)
+retain the neutral contract's
 terminal events; semantics the provider does not
 offer return a **typed capability gap** — never a silent fallback to weaker
 behavior, per the Body-layer capability-negotiation rule.
@@ -41,7 +42,9 @@ _WORLD_READ_SCOPES = frozenset({
 })
 _ENTITY_READ_SCOPES = frozenset({"nearbyEntities"})
 _PLAYER_ACTION_TERMINALS = {
+    "dropItem": "dropDone",
     "lookAt": "lookDone",
+    "moveItem": "moveItemDone",
     "selectItem": "selectItemDone",
     "stop": "stopDone",
     "useItem": "useDone",
