@@ -8,13 +8,14 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.monster.Enemy;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
-/** Direct loaded-world entity facts for the neutral nearbyEntities scope. */
+/** Direct loaded-world entity facts for neutral nearby-entity perception scopes. */
 public final class EntityReadService {
     public static final int MAX_RADIUS = 32;
     public static final int MAX_LIMIT = 128;
@@ -30,9 +31,10 @@ public final class EntityReadService {
     }
 
     public Result read(String scope, JsonObject params) {
-        if (!"nearbyEntities".equals(scope)) {
+        if (!Set.of("nearbyEntities", "nearbyHostiles").contains(scope)) {
             throw new IllegalArgumentException("unsupported entity-read scope: " + scope);
         }
+        boolean hostilesOnly = "nearbyHostiles".equals(scope);
         int radius = clamp(optionalInt(params, "radius", 1), 1, MAX_RADIUS);
         int limit = clamp(optionalInt(params, "limit", 32), 1, MAX_LIMIT);
         Set<String> wantedTypes = entityTypes(params);
@@ -49,6 +51,9 @@ public final class EntityReadService {
         )) {
             double distanceSquared = player.distanceToSqr(entity);
             if (distanceSquared > radiusSquared) {
+                continue;
+            }
+            if (hostilesOnly && !(entity instanceof Enemy)) {
                 continue;
             }
             String type = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();

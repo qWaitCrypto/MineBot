@@ -54,6 +54,7 @@ class CompositeBody:
         "nearbyBlocks",
         "debugBlocks",
         "nearbyEntities",
+        "nearbyHostiles",
         "recipeData",
     })
 

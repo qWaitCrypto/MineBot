@@ -566,7 +566,17 @@ class FakeBodyServer:
                 "health": None,
                 "dist2": 0.25,
             },
+            {
+                "id": "zombie-uuid",
+                "type": "minecraft:zombie",
+                "name": "Zombie",
+                "pos": [13.5, 64.0, -3.5],
+                "health": 20.0,
+                "dist2": 9.0,
+            },
         ]
+        if scope == "nearbyHostiles":
+            entities = [entity for entity in entities if entity["type"] == "minecraft:zombie"]
         wanted_types = {
             str(value) if ":" in str(value) else f"minecraft:{value}"
             for value in params.get("types") or []
@@ -1238,6 +1248,24 @@ def test_java_body_nearby_entities_missing_body_is_explicit() -> None:
     assert result.complete is True
     assert result.error == "missing_body"
     assert result.uncertainty == [{"reason": "missing_body"}]
+
+
+def test_java_body_nearby_hostiles_preserves_scope_and_excludes_non_hostiles() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    result = body.perceive("nearbyHostiles", {"radius": 16, "limit": 8})
+
+    assert result.ok and result.complete
+    assert result.scope == "nearbyHostiles"
+    assert result.data["count"] == 1
+    assert result.data["entities"] == [{
+        "id": "zombie-uuid",
+        "type": "minecraft:zombie",
+        "name": "Zombie",
+        "pos": [13.5, 64.0, -3.5],
+        "health": 20.0,
+        "dist2": 9.0,
+    }]
 
 
 def test_java_body_execute_delegates_whole_objectives() -> None:

@@ -91,10 +91,12 @@ def main() -> int:
         ),
     )
     search = registry.get("search_for_entity")
+    find_hostiles = registry.get("find_hostiles")
 
     try:
         command(rcon, "carpet commandPlayer true")
         command(rcon, "carpet allowSpawningOfflinePlayers true")
+        command(rcon, "difficulty normal")
         for player in (BOT, GUIDE, OBSERVER):
             command(rcon, f"player {player} kill")
         command(rcon, "kill @e[tag=minebot.entity.probe]")
@@ -111,6 +113,11 @@ def main() -> int:
         command(
             rcon,
             f"summon cow {BASE[0] + 5} {BASE[1]} {BASE[2]} "
+            "{NoAI:1b,PersistenceRequired:1b,Tags:[\"minebot.entity.probe\"]}",
+        )
+        command(
+            rcon,
+            f"summon husk {BASE[0] + 4} {BASE[1]} {BASE[2]} "
             "{NoAI:1b,PersistenceRequired:1b,Tags:[\"minebot.entity.probe\"]}",
         )
         command(
@@ -159,6 +166,20 @@ def main() -> int:
         assert OBSERVER not in {item["name"] for item in players}
         assert BOT not in {item["name"] for item in players}
 
+        hostile_started = time.monotonic()
+        hostile_result = find_hostiles.callable({"radius": 16, "limit": 8})
+        hostile_wall_ms = (time.monotonic() - hostile_started) * 1000.0
+        hostiles = list(hostile_result.metrics.get("hostiles") or [])
+        assert hostile_result.success and hostile_result.reason == "hostiles_found", hostile_result
+        assert len(hostiles) == 1, hostiles
+        assert hostiles[0]["type"] == "minecraft:husk", hostiles
+        assert hostiles[0]["id"] and hostiles[0]["health"] == 20.0, hostiles
+        assert "minecraft:cow" not in {entity["type"] for entity in hostiles}
+
+        command(rcon, "kill @e[type=minecraft:husk,tag=minebot.entity.probe]")
+        no_hostiles = find_hostiles.callable({"radius": 16, "limit": 8})
+        assert no_hostiles.success and no_hostiles.metrics.get("count") == 0, no_hostiles
+
         missing = search.callable(
             {
                 "entity_types": ["player"],
@@ -188,6 +209,13 @@ def main() -> int:
             "cow": cows[0],
             "item": items[0],
             "observer_excluded": True,
+            "hostiles": {
+                "reason": hostile_result.reason,
+                "entities": hostiles,
+                "non_hostiles_excluded": True,
+                "empty_after_remove": no_hostiles.metrics.get("count") == 0,
+                "wall_ms": round(hostile_wall_ms, 3),
+            },
             "not_found": {"reason": missing.reason, "can_retry": missing.can_retry},
             "movement": {
                 "before": before.pos,

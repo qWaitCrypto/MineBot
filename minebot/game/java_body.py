@@ -40,7 +40,7 @@ _WORLD_READ_SCOPES = frozenset({
     "nearbyBlocks",
     "debugBlocks",
 })
-_ENTITY_READ_SCOPES = frozenset({"nearbyEntities"})
+_ENTITY_READ_SCOPES = frozenset({"nearbyEntities", "nearbyHostiles"})
 _ACTION_TERMINALS = {
     "containerTransfer": "containerDone",
     "craftItem": "craftDone",

@@ -99,6 +99,44 @@
         "next": "limit"
       },
       "expect": [{"kind": "response", "type": "ENTITY_READ_RESULT", "request_type": "ENTITY_READ", "payload_contains": {"scope": "nearbyEntities", "complete": false, "next": "limit"}}]
+    },
+    {
+      "send": {
+        "builder": "entity_read",
+        "args": {"bot_name": "MineBot_1", "scope": "nearbyHostiles", "params": {"radius": 16, "limit": 8}}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "ENTITY_READ",
+        "request_id": "r-4",
+        "bot_name": "MineBot_1",
+        "scope": "nearbyHostiles",
+        "params": {"radius": 16, "limit": 8}
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "ENTITY_READ_RESULT",
+        "request_id": "r-4",
+        "bot": "MineBot_1",
+        "scope": "nearbyHostiles",
+        "missing": false,
+        "ok": true,
+        "complete": true,
+        "data": {
+          "center": [10.5, 64.0, -3.5],
+          "radius": 16,
+          "limit": 8,
+          "count": 1,
+          "totalMatches": 1,
+          "entities": [{"id": "zombie-uuid", "type": "minecraft:zombie", "name": "Zombie", "pos": [13.5, 64.0, -3.5], "health": 20.0, "dist2": 9.0}]
+        },
+        "uncertainty": [],
+        "next": null
+      },
+      "expect": [{"kind": "response", "type": "ENTITY_READ_RESULT", "request_type": "ENTITY_READ", "payload_contains": {"scope": "nearbyHostiles", "complete": true}}]
     }
   ],
   "final": {"pending_requests": 0, "supports": ["ENTITY_READ"]}
