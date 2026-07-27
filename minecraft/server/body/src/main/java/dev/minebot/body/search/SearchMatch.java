@@ -5,6 +5,7 @@ public record SearchMatch(
     int y,
     int z,
     String blockId,
+    String state,
     double distanceSquared
 ) {
 }

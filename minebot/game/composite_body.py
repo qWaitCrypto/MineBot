@@ -14,7 +14,15 @@ class CompositeBody:
     """
 
     JAVA_ACTIONS = frozenset({"navigate", "collectBlock", "ascend"})
-    JAVA_PERCEPTIONS = frozenset({"inventory"})
+    JAVA_PERCEPTIONS = frozenset({
+        "findBlocks",
+        "inventory",
+        "blockAt",
+        "blockCells",
+        "surfaceColumns",
+        "nearbyBlocks",
+        "debugBlocks",
+    })
 
     def __init__(self, scarpet: Body, java: Body) -> None:
         if scarpet.bot_name != java.bot_name:

@@ -148,6 +148,21 @@ def perception_next_cursor(perception: PerceptionResult, *data_keys: str) -> obj
     return perception.next
 
 
+def perception_resume_params(cursor: object | None) -> JsonObject:
+    """Build a provider-neutral page request from a prior response cursor."""
+
+    if cursor is None:
+        return {}
+    if isinstance(cursor, int):
+        return {"start": cursor}
+    if isinstance(cursor, str):
+        stripped = cursor.strip()
+        if stripped.isdigit():
+            return {"start": int(stripped)}
+        return {"cursor": stripped}
+    return {"cursor": str(cursor)}
+
+
 @dataclass(frozen=True)
 class InventorySlot:
     slot: int

@@ -1,0 +1,91 @@
+{
+  "name": "world_read_family",
+  "description": "WORLD_READ carries the existing Body world-fact shapes and numeric pagination without loading or inventing terrain.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS", "HELLO", "INVENTORY", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS", "WORLD_READ"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "world_read",
+        "args": {"bot_name": "MineBot_1", "scope": "blockAt", "params": {"x": 1, "y": 64, "z": 0}}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "WORLD_READ",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "scope": "blockAt",
+        "params": {"x": 1, "y": 64, "z": 0}
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "WORLD_READ_RESULT",
+        "request_id": "r-2",
+        "bot": "MineBot_1",
+        "scope": "blockAt",
+        "missing": false,
+        "ok": true,
+        "complete": true,
+        "data": {"x": 1, "y": 64, "z": 0, "type": "minecraft:oak_log", "state": "SOLID", "properties": {"axis": "x"}},
+        "uncertainty": [],
+        "next": null
+      },
+      "expect": [{"kind": "response", "type": "WORLD_READ_RESULT", "request_type": "WORLD_READ", "payload_contains": {"scope": "blockAt", "complete": true}}]
+    },
+    {
+      "send": {
+        "builder": "world_read",
+        "args": {"bot_name": "MineBot_1", "scope": "blockCells", "params": {"cells": [[0, 63, 0], [1, 64, 0]], "start": 0, "limit": 1}}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "WORLD_READ",
+        "request_id": "r-3",
+        "bot_name": "MineBot_1",
+        "scope": "blockCells",
+        "params": {"cells": [[0, 63, 0], [1, 64, 0]], "start": 0, "limit": 1}
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "WORLD_READ_RESULT",
+        "request_id": "r-3",
+        "bot": "MineBot_1",
+        "scope": "blockCells",
+        "missing": false,
+        "ok": true,
+        "complete": false,
+        "data": {"start": 0, "limit": 1, "nextStart": 1, "total": 2, "count": 1, "cells": [{"x": 0, "y": 63, "z": 0, "type": "minecraft:stone", "state": "SOLID", "properties": {}}]},
+        "uncertainty": [{"reason": "page_limit"}],
+        "next": "1"
+      },
+      "expect": [{"kind": "response", "type": "WORLD_READ_RESULT", "request_type": "WORLD_READ", "payload_contains": {"scope": "blockCells", "complete": false, "next": "1"}}]
+    }
+  ],
+  "final": {"pending_requests": 0, "supports": ["WORLD_READ"]}
+}

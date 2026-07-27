@@ -14,7 +14,16 @@ from minebot.body.navigation import (
     NavigationRunConfig,
     pure_movement_navigation_config,
 )
-from minebot.contract import Action, Body, PerceptionResult, Position, ToolResult, body_rejection_to_tool_result, perception_next_cursor
+from minebot.contract import (
+    Action,
+    Body,
+    PerceptionResult,
+    Position,
+    ToolResult,
+    body_rejection_to_tool_result,
+    perception_next_cursor,
+    perception_resume_params,
+)
 from minebot.contract import terminal_event_to_tool_result
 from minebot.body.world_read import read_block_facts
 from minebot.body.reach import (
@@ -94,13 +103,14 @@ def _read_find_blocks_pages(
     deadline: float | None = None,
     timeout_s: float | None = None,
 ) -> dict[str, object] | ToolResult:
-    start: int | None = 0
+    cursor: object | None = 0
+    seen_cursors: set[str] = set()
     pages_read = 0
     blocks: list[dict[str, object]] = []
     uncertainty: list[object] = []
     complete = False
     total_matches = 0
-    while start is not None:
+    while cursor is not None:
         if deadline is not None and time.monotonic() >= deadline:
             uncertainty.append({"reason": "time_budget", "timeout_s": timeout_s})
             return {
@@ -118,7 +128,7 @@ def _read_find_blocks_pages(
                 "radius": radius,
                 "y_radius": y_radius,
                 "limit": limit,
-                "start": start,
+                **perception_resume_params(cursor),
             },
         )
         pages_read += 1
@@ -131,8 +141,8 @@ def _read_find_blocks_pages(
         blocks.extend(page_blocks)
         uncertainty.extend(list(found.uncertainty or ()))
         total_matches = max(total_matches, int(found.data.get("totalMatches") or len(blocks)))
-        next_start = perception_next_cursor(found)
-        if found.complete or next_start is None:
+        next_cursor = perception_next_cursor(found)
+        if found.complete or next_cursor is None:
             complete = found.complete
             break
         if deadline is not None and time.monotonic() >= deadline:
@@ -148,7 +158,16 @@ def _read_find_blocks_pages(
         if pages_read >= max_pages:
             uncertainty.append({"reason": "page_limit", "max_pages": max_pages})
             break
-        start = int(next_start)
+        cursor_key = str(next_cursor)
+        if cursor_key in seen_cursors or cursor_key == str(cursor):
+            return ToolResult(
+                False,
+                "perception_failed",
+                True,
+                metrics={"scope": "findBlocks", "error": "scan_cursor_did_not_advance"},
+            )
+        seen_cursors.add(str(cursor))
+        cursor = next_cursor
     return {
         "blocks": blocks,
         "complete": complete,

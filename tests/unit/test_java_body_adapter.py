@@ -108,6 +108,25 @@ def _inventory_slot_label(slot: int) -> str:
     }.get(slot, f"aux.{slot - 41}")
 
 
+def _fake_block_fact(
+    x: int,
+    y: int,
+    z: int,
+    *,
+    block: str = "minecraft:stone",
+    state: str = "SOLID",
+    properties: dict | None = None,
+) -> dict:
+    return {
+        "x": x,
+        "y": y,
+        "z": z,
+        "type": block,
+        "state": state,
+        "properties": dict(properties or {}),
+    }
+
+
 class FakeBodyServer:
     """Reactive in-memory Body server driving one bot's protocol.
 
@@ -128,6 +147,7 @@ class FakeBodyServer:
         self._drop_after = drop_after
         self.scenario = "navigate_complete"
         self.verdict_seen: list[tuple[str, bool]] = []
+        self.requests: list[dict] = []
 
     def send(self, text: str) -> None:
         if self._closed:
@@ -148,6 +168,7 @@ class FakeBodyServer:
         self._closed = True
 
     def _react(self, message: dict) -> None:
+        self.requests.append(dict(message))
         kind = message.get("type")
         rid = message.get("request_id")
         if kind == "HELLO":
@@ -159,7 +180,7 @@ class FakeBodyServer:
                 "request_types": [
                     "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS",
                     "HELLO", "INVENTORY", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION",
-                    "RESUME_EVENTS",
+                    "RESUME_EVENTS", "WORLD_READ",
                 ],
             })
         elif kind == "NAVIGATE":
@@ -186,6 +207,8 @@ class FakeBodyServer:
                 "offhand_item": None,
                 "body_owner": None,
             })
+        elif kind == "FIND_BLOCKS":
+            self._handle_find_blocks(message, rid)
         elif kind == "INVENTORY":
             if message.get("bot_name") == "MissingBot":
                 self._emit_response(rid, "INVENTORY_RESULT", {
@@ -222,6 +245,52 @@ class FakeBodyServer:
                 "totalSlots": 46,
                 "slots": slots,
             })
+        elif kind == "WORLD_READ":
+            self._handle_world_read(message, rid)
+
+    def _handle_find_blocks(self, message: dict, rid: str) -> None:
+        if message.get("bot_name") == "MissingBot":
+            self._emit_error(rid, "body_missing", retryable=True)
+            return
+        all_matches = [
+            {
+                "x": 1,
+                "y": 64,
+                "z": 0,
+                "block_id": "minecraft:oak_log",
+                "state": "SOLID",
+                "distance_squared": 1.0,
+            },
+            {
+                "x": 4,
+                "y": 65,
+                "z": 0,
+                "block_id": "minecraft:oak_log",
+                "state": "SOLID",
+                "distance_squared": 17.0,
+            },
+            {
+                "x": 7,
+                "y": 64,
+                "z": 0,
+                "block_id": "minecraft:oak_log",
+                "state": "SOLID",
+                "distance_squared": 49.0,
+            },
+        ]
+        start = 2 if message.get("cursor") == "find-page-2" else 0
+        end = min(len(all_matches), start + int(message.get("limit", 32)))
+        self._emit_response(rid, "FIND_BLOCKS_RESULT", {
+            "server_cost_micros": 90,
+            "start": start,
+            "total_matches": len(all_matches),
+            "index_generation": 321,
+            "coverage_complete": True,
+            "unloaded_chunk_count": 0,
+            "result_capped": False,
+            "next_cursor": "find-page-2" if end < len(all_matches) else None,
+            "matches": all_matches[start:end],
+        })
 
     def _handle_navigate(self, message: dict, rid: str) -> None:
         action = message["action_id"]
@@ -241,6 +310,86 @@ class FakeBodyServer:
             self._emit_event("path_planned", action, {"waypoints": 20, "partial": False})
             self._emit_terminal(action, {"classification": "completed", "reason": "goal_satisfied",
                                          "elapsed_ticks": 88, "replans": 2, "final_x": 10.0})
+
+    def _handle_world_read(self, message: dict, rid: str) -> None:
+        scope = message["scope"]
+        if message.get("bot_name") == "MissingBot":
+            self._emit_response(rid, "WORLD_READ_RESULT", {
+                "bot": "MissingBot", "scope": scope, "missing": True,
+            })
+            return
+        params = message.get("params") or {}
+        if scope == "blockAt":
+            data = _fake_block_fact(
+                int(params["x"]), int(params["y"]), int(params["z"]),
+                block="minecraft:oak_log", properties={"axis": "x"},
+            )
+            complete = True
+            next_cursor = None
+        elif scope == "blockCells":
+            requested = params.get("cells") or []
+            start = int(params.get("start", 0))
+            limit = int(params.get("limit", 64))
+            end = min(len(requested), start + limit)
+            data = {
+                "start": start,
+                "limit": limit,
+                "nextStart": None if end >= len(requested) else end,
+                "total": len(requested),
+                "count": end - start,
+                "cells": [_fake_block_fact(*position) for position in requested[start:end]],
+            }
+            complete = end >= len(requested)
+            next_cursor = None if complete else str(end)
+        elif scope == "surfaceColumns":
+            requested = params.get("columns") or []
+            data = {
+                "start": 0, "limit": 64, "nextStart": None,
+                "total": len(requested), "count": len(requested),
+                "columns": [
+                    {
+                        "x": x, "z": z, "feetY": 65,
+                        "feetType": "minecraft:air", "feetState": "CLEAR",
+                        "headType": "minecraft:air", "headState": "CLEAR",
+                        "supportType": "minecraft:grass_block", "supportState": "SOLID",
+                    }
+                    for x, z in requested
+                ],
+            }
+            complete = True
+            next_cursor = None
+        else:
+            debug = scope == "debugBlocks"
+            block = _fake_block_fact(1, 64, 0, block="minecraft:oak_log")
+            data = {
+                "center": [0.5, 64.0, 0.5],
+                "radius": int(params.get("radius", 1)),
+                "start": 0,
+                "limit": int(params.get("limit", 64)),
+                "nextStart": None,
+                "total": 27,
+                "count": 1,
+                "blocks": [block],
+            }
+            if debug:
+                data.update({
+                    "cursor": _fake_block_fact(0, 64, 0, block="minecraft:air", state="CLEAR"),
+                    "feet": _fake_block_fact(0, 63, 0),
+                    "head": _fake_block_fact(0, 65, 0, block="minecraft:air", state="CLEAR"),
+                })
+            complete = True
+            next_cursor = None
+        self._emit_response(rid, "WORLD_READ_RESULT", {
+            "bot": message.get("bot_name"),
+            "scope": scope,
+            "missing": False,
+            "ok": True,
+            "complete": complete,
+            "server_cost_micros": 125,
+            "data": data,
+            "uncertainty": [] if complete else [{"reason": "page_limit"}],
+            "next": next_cursor,
+        })
 
     def _handle_collect(self, message: dict, rid: str) -> None:
         action = message["action_id"]
@@ -463,13 +612,53 @@ def test_java_body_get_state_maps_authoritative_wire_state() -> None:
     assert state.body_owner is None
 
 
-def test_java_body_perceive_supports_find_blocks_and_gaps_the_rest() -> None:
+def test_java_body_perceive_adapts_find_blocks_and_gaps_the_rest() -> None:
     client = _client(FakeBodyServer())
     body = JavaBody(client, "Bot")
+
+    first = body.perceive(
+        "findBlocks",
+        {"type": "oak_log", "radius": 32, "y_radius": 12, "limit": 2, "start": 0},
+    )
+    second = body.perceive(
+        "findBlocks",
+        {"types": ["oak_log"], "radius": 32, "y_radius": 12, "limit": 2, "cursor": first.next},
+    )
+
+    assert first.ok is True
+    assert first.complete is False
+    assert first.next == "find-page-2"
+    assert first.data["blocks"][0] == {
+        "x": 1,
+        "y": 64,
+        "z": 0,
+        "type": "minecraft:oak_log",
+        "state": "SOLID",
+        "dist2": 1.0,
+    }
+    assert first.data["totalMatches"] == 3
+    assert first.data["serverCostMicros"] == 90
+    assert second.ok is True
+    assert second.complete is True
+    assert second.data["start"] == 2
+    assert second.data["count"] == 1
+    find_requests = [request for request in client._transport.requests if request.get("type") == "FIND_BLOCKS"]
+    assert find_requests[0]["block_ids"] == ["minecraft:oak_log"]
+    assert find_requests[0]["vertical_radius"] == 12
+    assert find_requests[1]["cursor"] == "find-page-2"
 
     gap = body.perceive("nearbyEntities", {})
     assert gap.ok is False
     assert gap.error == "capability_unavailable:nearbyEntities"
+
+
+def test_java_body_find_blocks_rejects_numeric_resume_without_snapshot_cursor() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    result = body.perceive("findBlocks", {"type": "oak_log", "radius": 32, "start": 2})
+
+    assert result.ok is False
+    assert result.error == "invalid_cursor:numeric_resume_requires_original_snapshot"
 
 
 def test_java_body_inventory_preserves_paging_slots_and_metadata() -> None:
@@ -494,6 +683,43 @@ def test_java_body_inventory_missing_body_is_explicit_and_complete() -> None:
     body = JavaBody(_client(FakeBodyServer()), "MissingBot")
 
     result = body.perceive("inventory", {"start": 0, "limit": 7})
+
+    assert result.ok is False
+    assert result.complete is True
+    assert result.error == "missing_body"
+    assert result.uncertainty == [{"reason": "missing_body"}]
+
+
+def test_java_body_world_read_family_preserves_existing_perception_shapes() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    exact = body.perceive("blockAt", {"x": 1, "y": 64, "z": 0})
+    cells = body.perceive(
+        "blockCells",
+        {"cells": [[0, 63, 0], [1, 64, 0]], "start": 0, "limit": 1},
+    )
+    columns = body.perceive("surfaceColumns", {"columns": [[0, 0], [1, 0]]})
+    nearby = body.perceive("nearbyBlocks", {"radius": 1, "limit": 32})
+    debug = body.perceive("debugBlocks", {"radius": 1, "limit": 64})
+
+    assert exact.ok and exact.complete
+    assert exact.data["type"] == "minecraft:oak_log"
+    assert exact.data["properties"] == {"axis": "x"}
+    assert exact.data["serverCostMicros"] == 125
+    assert cells.ok and not cells.complete
+    assert cells.next == "1"
+    assert cells.data["cells"][0]["state"] == "SOLID"
+    assert columns.ok and columns.complete
+    assert columns.data["columns"][0]["supportType"] == "minecraft:grass_block"
+    assert nearby.data["blocks"][0]["type"] == "minecraft:oak_log"
+    assert debug.data["cursor"]["state"] == "CLEAR"
+    assert debug.data["feet"]["state"] == "SOLID"
+
+
+def test_java_body_world_read_missing_body_is_explicit() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "MissingBot")
+
+    result = body.perceive("blockAt", {"x": 0, "y": 64, "z": 0})
 
     assert result.ok is False
     assert result.complete is True

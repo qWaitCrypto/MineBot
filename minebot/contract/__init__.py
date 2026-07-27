@@ -37,6 +37,7 @@ from .messages import (
     ToolResult,
     is_candidate_skip,
     perception_next_cursor,
+    perception_resume_params,
 )
 from .body_iface import Body
 from .execution import (
@@ -74,6 +75,7 @@ __all__ = [
     "MIN_PICKAXE_TIER",
     "PerceptionResult",
     "perception_next_cursor",
+    "perception_resume_params",
     "PlaceContext",
     "PICKAXE_BY_TIER",
     "Position",

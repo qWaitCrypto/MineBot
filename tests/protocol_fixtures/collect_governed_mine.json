@@ -34,7 +34,8 @@
           "MUTATION_VERDICT",
           "NAVIGATE",
           "QUERY_ACTION",
-          "RESUME_EVENTS"
+          "RESUME_EVENTS",
+          "WORLD_READ"
         ],
         "seq": 1,
         "server_tick": 600,

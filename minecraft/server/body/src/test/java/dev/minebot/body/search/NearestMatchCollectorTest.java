@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class NearestMatchCollectorTest {
     private static SearchMatch matchAt(int x, int z) {
-        return new SearchMatch(x, 64, z, "minecraft:stone", (double) x * x + (double) z * z);
+        return new SearchMatch(x, 64, z, "minecraft:stone", "SOLID", (double) x * x + (double) z * z);
     }
 
     @Test

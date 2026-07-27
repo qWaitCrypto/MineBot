@@ -898,6 +898,57 @@ class BlockWorkTests(unittest.TestCase):
         self.assertFalse(result.metrics["truncated"])
         self.assertEqual([item["pos"] for item in result.metrics["candidates"]], [[4, 64, 0], [8, 64, 0]])
 
+    def test_search_for_block_follows_java_opaque_cursor(self):
+        blocks = {
+            (4, 64, 0): ("minecraft:oak_log", "SOLID"),
+            (8, 64, 0): ("minecraft:oak_log", "SOLID"),
+        }
+        pages = [
+            PerceptionResult(
+                "Bot1",
+                "findBlocks",
+                "perception",
+                True,
+                False,
+                {
+                    "blocks": [{"x": 4, "y": 64, "z": 0, "type": "minecraft:oak_log"}],
+                    "totalMatches": 2,
+                },
+                uncertainty=[{"reason": "page_limit"}],
+                next="java-page-2",
+            ),
+            PerceptionResult(
+                "Bot1",
+                "findBlocks",
+                "perception",
+                True,
+                True,
+                {
+                    "blocks": [{"x": 8, "y": 64, "z": 0, "type": "minecraft:oak_log"}],
+                    "totalMatches": 2,
+                },
+            ),
+        ]
+        body = FakeBody(blocks=blocks, find_block_pages=pages)
+        work = BlockWork(
+            body,
+            GovernancePolicy(natural_regions=[Region("search", (-20, 0, -20), (20, 100, 20))]),
+        )
+
+        result = work.search_for_block(
+            block_types=("oak_log",),
+            search_radius=12,
+            find_limit=1,
+            max_pages=2,
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        find_calls = [params for scope, params in body.perceptions if scope == "findBlocks"]
+        self.assertEqual(find_calls[0]["start"], 0)
+        self.assertEqual(find_calls[1]["cursor"], "java-page-2")
+        self.assertNotIn("start", find_calls[1])
+        self.assertEqual(result.metrics["pages_read"], 2)
+
     def test_search_for_block_caps_find_blocks_vertical_window_for_large_radius(self):
         body = FakeBody(
             blocks={(4, 64, 0): ("minecraft:oak_log", "SOLID")},

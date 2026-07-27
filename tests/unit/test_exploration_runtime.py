@@ -179,6 +179,21 @@ class PagedFindBlocksBody(ExplorationBody):
         return self.pages[start]
 
 
+class OpaquePagedFindBlocksBody(ExplorationBody):
+    def __init__(self, pages):
+        super().__init__()
+        self.pages = dict(pages)
+
+    def perceive(self, scope, params):
+        if scope != "findBlocks":
+            return super().perceive(scope, params)
+        self.perceptions.append((scope, dict(params)))
+        cursor = params.get("cursor", params.get("start", 0))
+        if cursor not in self.pages:
+            raise AssertionError((scope, params))
+        return self.pages[cursor]
+
+
 class CornerOnlyFrontierBody(ExplorationBody):
     def __init__(self, *, safe_columns, blocks=None):
         super().__init__(blocks=blocks)
@@ -606,6 +621,36 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertEqual([item["type"] for item in result.metrics["blocks"]], ["dandelion", "poppy"])
         find_calls = [params for scope, params in body.perceptions if scope == "findBlocks"]
         self.assertEqual([params["start"] for params in find_calls], [0, 1])
+
+    def test_find_blocks_follows_opaque_provider_cursor_until_complete(self):
+        body = OpaquePagedFindBlocksBody(
+            {
+                0: _find_blocks_page(
+                    blocks=({"x": 1, "y": 64, "z": 1, "type": "dandelion"},),
+                    complete=False,
+                    next_start="java-page-2",
+                ),
+                "java-page-2": _find_blocks_page(
+                    blocks=({"x": 2, "y": 64, "z": 2, "type": "poppy"},),
+                    complete=True,
+                ),
+            }
+        )
+        runtime, _, _ = _runtime(body=body)
+
+        result = runtime.explore_for(
+            block_targets=("dandelion", "poppy"),
+            max_regions=1,
+            return_policy="region_budget",
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "found")
+        find_calls = [params for scope, params in body.perceptions if scope == "findBlocks"]
+        self.assertEqual(find_calls[0]["start"], 0)
+        self.assertNotIn("cursor", find_calls[0])
+        self.assertEqual(find_calls[1]["cursor"], "java-page-2")
+        self.assertNotIn("start", find_calls[1])
 
     def test_find_blocks_first_match_survives_partial_page(self):
         body = PagedFindBlocksBody(

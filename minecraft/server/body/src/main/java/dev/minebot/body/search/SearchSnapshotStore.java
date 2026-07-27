@@ -56,6 +56,8 @@ public final class SearchSnapshotStore {
             snapshots.put(cursor, snapshot.withNextOffset(end));
         }
         return new Page(
+            start,
+            snapshot.matches.size(),
             entries,
             cursor,
             snapshot.coverageComplete,
@@ -66,6 +68,8 @@ public final class SearchSnapshotStore {
     }
 
     public record Page(
+        int start,
+        int totalMatches,
         List<SearchMatch> matches,
         String nextCursor,
         boolean coverageComplete,

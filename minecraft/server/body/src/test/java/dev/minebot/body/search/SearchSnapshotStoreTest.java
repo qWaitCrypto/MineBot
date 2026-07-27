@@ -16,7 +16,7 @@ final class SearchSnapshotStoreTest {
     }
 
     private static SearchMatch match(int x, double distanceSquared) {
-        return new SearchMatch(x, 64, x, "minecraft:oak_log", distanceSquared);
+        return new SearchMatch(x, 64, x, "minecraft:oak_log", "SOLID", distanceSquared);
     }
 
     @Test
@@ -29,10 +29,14 @@ final class SearchSnapshotStoreTest {
         );
 
         assertEquals(2, first.matches().size());
+        assertEquals(0, first.start());
+        assertEquals(3, first.totalMatches());
         assertNotNull(first.nextCursor());
         SearchSnapshotStore.ResumeResult resumed = store.resume(first.nextCursor(), "query", 2);
         assertNull(resumed.error());
         assertEquals(1, resumed.page().matches().size());
+        assertEquals(2, resumed.page().start());
+        assertEquals(3, resumed.page().totalMatches());
         assertNull(resumed.page().nextCursor());
     }
 

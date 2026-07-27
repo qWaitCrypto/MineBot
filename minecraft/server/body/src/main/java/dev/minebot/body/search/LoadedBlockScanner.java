@@ -1,5 +1,6 @@
 package dev.minebot.body.search;
 
+import dev.minebot.body.perception.MinecraftBlockReader;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
@@ -114,7 +115,14 @@ public final class LoadedBlockScanner {
                         }
                         int y = sectionMinY + localY;
                         long dy = y - center.getY();
-                        collector.add(new SearchMatch(x, y, z, blockId, horizontalDistanceSquared + dy * dy));
+                        collector.add(new SearchMatch(
+                            x,
+                            y,
+                            z,
+                            blockId,
+                            MinecraftBlockReader.classify(state),
+                            horizontalDistanceSquared + dy * dy
+                        ));
                     }
                 }
             }

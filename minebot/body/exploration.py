@@ -27,6 +27,7 @@ from minebot.contract import (
     Position,
     ToolResult,
     perception_next_cursor,
+    perception_resume_params,
 )
 from minebot.game.navigation import GoalComposite, GoalNear
 
@@ -1001,7 +1002,8 @@ class ExplorationTransactions:
         uncertainty: list[JsonObject] = []
         block_page_limited = False
         if targets.blocks:
-            start = 0
+            cursor: object = 0
+            seen_cursors: set[str] = set()
             for page_index in range(FIND_BLOCK_MAX_PAGES):
                 perception = self.body.perceive(
                     "findBlocks",
@@ -1010,7 +1012,7 @@ class ExplorationTransactions:
                         "radius": scan_radius,
                         "y_radius": min(DEFAULT_VERTICAL_RADIUS, scan_radius * 2),
                         "limit": FIND_BLOCK_PAGE_SIZE,
-                        "start": start,
+                        **perception_resume_params(cursor),
                     },
                 )
                 terminal = _perception_terminal(perception, allow_partial=True)
@@ -1045,16 +1047,8 @@ class ExplorationTransactions:
                         tuple(uncertainty),
                         "scan_cursor_missing",
                     )
-                try:
-                    next_start = int(next_cursor)
-                except (TypeError, ValueError):
-                    return _ScanResult(
-                        tuple(blocks),
-                        (),
-                        tuple(uncertainty),
-                        "scan_cursor_invalid",
-                    )
-                if next_start <= start:
+                cursor_key = str(next_cursor)
+                if cursor_key in seen_cursors or cursor_key == str(cursor):
                     return _ScanResult(
                         tuple(blocks),
                         (),
@@ -1066,7 +1060,7 @@ class ExplorationTransactions:
                         {
                             "reason": "scan_page_limit",
                             "pages": FIND_BLOCK_MAX_PAGES,
-                            "next_start": next_start,
+                            "next_start": next_cursor,
                         }
                     )
                     # A dense block domain must not starve a second target
@@ -1077,7 +1071,8 @@ class ExplorationTransactions:
                     # searches retain the historical typed terminal below.
                     block_page_limited = True
                     break
-                start = next_start
+                seen_cursors.add(str(cursor))
+                cursor = next_cursor
         if targets.entities:
             perception = self.body.perceive(
                 "nearbyEntities",

@@ -34,7 +34,8 @@
           "MUTATION_VERDICT",
           "NAVIGATE",
           "QUERY_ACTION",
-          "RESUME_EVENTS"
+          "RESUME_EVENTS",
+          "WORLD_READ"
         ],
         "seq": 1,
         "server_tick": 100,
@@ -82,6 +83,8 @@
         "channel": "fakeplayer-body",
         "type": "FIND_BLOCKS_RESULT",
         "request_id": "r-2",
+        "start": 0,
+        "total_matches": 3,
         "index_generation": 4211,
         "coverage_complete": false,
         "unloaded_chunk_count": 3,
@@ -93,6 +96,7 @@
             "y": 70,
             "z": -12,
             "block_id": "minecraft:oak_log",
+            "state": "SOLID",
             "distance_squared": 41.0
           },
           {
@@ -100,6 +104,7 @@
             "y": 68,
             "z": -20,
             "block_id": "minecraft:spruce_log",
+            "state": "SOLID",
             "distance_squared": 130.0
           }
         ],
@@ -156,6 +161,8 @@
         "channel": "fakeplayer-body",
         "type": "FIND_BLOCKS_RESULT",
         "request_id": "r-3",
+        "start": 2,
+        "total_matches": 3,
         "index_generation": 4211,
         "coverage_complete": false,
         "unloaded_chunk_count": 3,
@@ -167,6 +174,7 @@
             "y": 71,
             "z": -30,
             "block_id": "minecraft:oak_log",
+            "state": "SOLID",
             "distance_squared": 1044.0
           }
         ],
