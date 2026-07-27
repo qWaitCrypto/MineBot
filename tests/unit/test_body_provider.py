@@ -10,7 +10,7 @@ from minebot.app.body_provider import (
     build_body_provider,
 )
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry
-from minebot.contract import BreakContext, PerceptionResult, Region
+from minebot.contract import Action, BreakContext, PerceptionResult, Region
 from minebot.game.composite_body import CompositeBody
 from minebot.game.governance import GovernancePolicy
 from minebot.game.java_body import JavaBody
@@ -81,6 +81,51 @@ def test_composite_routes_migrated_perceptions_to_java_without_runtime_fallback(
     assert result is java_result
     java.perceive.assert_called_once_with(scope, params)
     scarpet.perceive.assert_not_called()
+
+
+@pytest.mark.parametrize("action_name", sorted(CompositeBody.JAVA_TERMINAL_ACTIONS))
+def test_composite_routes_migrated_player_action_and_its_terminal_to_java(
+    action_name: str,
+) -> None:
+    scarpet = _scarpet()
+    java = JavaBody(JavaBodyClient("Bot", lambda: FakeBodyServer()), "Bot")
+    body = CompositeBody(scarpet, java)
+    params = {
+        "selectItem": {"item": "minecraft:bread"},
+        "lookAt": {"target": [1.0, 65.0, 1.0]},
+        "stop": {},
+        "useItem": {"item": "minecraft:bread", "ticks": 2},
+    }[action_name]
+    action = Action.create(action_name, params)
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.bot == "Bot"
+    assert terminal.data["action_id"] == action.id
+    scarpet.execute.assert_not_called()
+    scarpet.await_action_terminal.assert_not_called()
+
+
+def test_composite_does_not_fallback_after_java_player_action_failure() -> None:
+    server = FakeBodyServer()
+    server.scenario = "player_action_no_effect"
+    scarpet = _scarpet()
+    body = CompositeBody(
+        scarpet,
+        JavaBody(JavaBodyClient("Bot", lambda: server), "Bot"),
+    )
+    action = Action.create("useItem", {"item": "minecraft:bread", "ticks": 2})
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.data["success"] is False
+    assert terminal.data["stopped_reason"] == "no_effect"
+    scarpet.execute.assert_not_called()
+    scarpet.await_action_terminal.assert_not_called()
 
 
 def test_composite_governance_structure_read_uses_java_world_facts() -> None:

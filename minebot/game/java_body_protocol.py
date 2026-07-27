@@ -225,6 +225,24 @@ class JavaBodyProtocol:
             body["timeout_ticks"] = timeout_ticks
         return self._request("ASCEND", body)
 
+    def player_action(
+        self,
+        bot_name: str,
+        action_id: str,
+        action: str,
+        params: dict,
+    ) -> dict:
+        self._require_capability("PLAYER_ACTION")
+        return self._request(
+            "PLAYER_ACTION",
+            {
+                "bot_name": bot_name,
+                "action_id": action_id,
+                "action": action,
+                "params": dict(params),
+            },
+        )
+
     def mutation_verdict(self, proposal_id: str, allow: bool, reason: str) -> dict:
         """Fire-and-forget by design: a lost verdict times out into a denial."""
         self._require_capability("MUTATION_VERDICT")
@@ -279,6 +297,7 @@ class JavaBodyProtocol:
             "NAVIGATE": "NAVIGATE_ACK",
             "COLLECT_BLOCK": "COLLECT_BLOCK_ACK",
             "ASCEND": "ASCEND_ACK",
+            "PLAYER_ACTION": "PLAYER_ACTION_ACK",
         }.get(request_type, f"{request_type}_RESULT")
         if frame_type != expected:
             raise ProtocolViolation(f"{request_type} answered by {frame_type}")

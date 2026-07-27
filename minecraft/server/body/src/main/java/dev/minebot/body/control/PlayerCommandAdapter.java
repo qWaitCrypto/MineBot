@@ -16,7 +16,8 @@ import net.minecraft.server.MinecraftServer;
  */
 public final class PlayerCommandAdapter
     implements dev.minebot.body.action.BotControls,
-    dev.minebot.body.nav.MovementControls {
+    dev.minebot.body.nav.MovementControls,
+    dev.minebot.body.action.PlayerPrimitiveActions.Controls {
     private final MinecraftServer server;
     private final HeldInputs heldInputs;
     private final dev.minebot.body.action.ExactBlockBreaker blockBreaker;
@@ -80,6 +81,20 @@ public final class PlayerCommandAdapter
 
     public void useOnce(String botName) {
         dispatch(botName, "use once");
+    }
+
+    @Override
+    public void useContinuous(String botName) {
+        heldInputs.engage(botName, HeldInputs.Input.USE);
+        dispatch(botName, "use continuous");
+    }
+
+    @Override
+    public void selectHotbar(String botName, int slot) {
+        if (slot < 0 || slot >= 9) {
+            throw new IllegalArgumentException("hotbar slot must be 0..8");
+        }
+        dispatch(botName, "hotbar " + (slot + 1));
     }
 
     /**

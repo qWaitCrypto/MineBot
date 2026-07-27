@@ -4,12 +4,14 @@ This is the abstraction seam the multi-provider design promises: the same
 ``minebot.contract.Body`` protocol that ScarpetBody implements, backed by the
 ``fakeplayer-body/1`` wire protocol. Reads are wire-native (BODY_STATE,
 FIND_BLOCKS, world facts, inventory, and the pushed event stream); physical objectives delegate whole
-actions to the Java Body (navigate/collect); semantics the provider does not
+actions to the Java Body (navigate/collect), while ordinary player controls
+(``selectItem``/``stop``/``lookAt``/``useItem``) retain the neutral contract's
+terminal events; semantics the provider does not
 offer return a **typed capability gap** — never a silent fallback to weaker
 behavior, per the Body-layer capability-negotiation rule.
 
-The first migrated data-plane read is complete paged inventory truth; the
-remaining perception and item-mutation primitives stay explicit gaps.
+Inventory, block/entity perception, and the first player-control family are
+live; remaining data-plane primitives stay explicit gaps.
 
 Hybrid deployments keep ScarpetBody for the scopes and actions still owned by
 the Scarpet path; this class is how the Java provider grows into the full
@@ -38,6 +40,12 @@ _WORLD_READ_SCOPES = frozenset({
     "debugBlocks",
 })
 _ENTITY_READ_SCOPES = frozenset({"nearbyEntities"})
+_PLAYER_ACTION_TERMINALS = {
+    "lookAt": "lookDone",
+    "selectItem": "selectItemDone",
+    "stop": "stopDone",
+    "useItem": "useDone",
+}
 
 
 class JavaBody:
@@ -46,6 +54,7 @@ class JavaBody:
     def __init__(self, client: JavaBodyClient, bot_name: str) -> None:
         self._client = client
         self.bot_name = bot_name
+        self._action_terminals: dict[str, Event] = {}
 
     # -- reads (wire-native) --------------------------------------------
 
@@ -347,6 +356,8 @@ class JavaBody:
                 target_y=_opt_int(action.params.get("target_y")),
                 timeout_ticks=_opt_int(action.params.get("timeout_ticks")),
             )
+        elif action.name in _PLAYER_ACTION_TERMINALS:
+            return self._execute_player_action(action)
         else:
             return _gap_result(action, self.bot_name)
         return Result(
@@ -370,7 +381,12 @@ class JavaBody:
 
     def await_action_terminal(self, action_id, timeout_s=15.0, poll_interval_s=0.10,
                               terminal_events=None, intermediate_events=None) -> Event:
-        raise NotImplementedError(f"{_CAPABILITY_GAP}:await_action_terminal")
+        terminal = self._action_terminals.pop(str(action_id), None)
+        if terminal is None:
+            raise NotImplementedError(f"{_CAPABILITY_GAP}:await_action_terminal:{action_id}")
+        if terminal_events is not None and terminal.name not in terminal_events:
+            raise ValueError(f"unexpected Java terminal {terminal.name} for {action_id}")
+        return terminal
 
     def ignite_block(self, pos, *, item=None, allow_server_substitute=False, timeout_s=8.0) -> Event:
         raise NotImplementedError(f"{_CAPABILITY_GAP}:ignite_block")
@@ -380,6 +396,53 @@ class JavaBody:
 
     def interrupt(self, reason: str | None = None) -> Result:
         return _gap_result(Action.create("interrupt"), self.bot_name)
+
+    def _execute_player_action(self, action: Action) -> Result:
+        outcome = self._client.player_action(action.id, action.name, dict(action.params))
+        terminal_record = self._client.last_action_terminal
+        if terminal_record is None or terminal_record[0] != action.id:
+            return Result(
+                id=action.id,
+                bot=self.bot_name,
+                type="result",
+                ok=False,
+                accepted=False,
+                complete=True,
+                data=dict(outcome.metrics or {}),
+                error=outcome.reason,
+            )
+
+        _, terminal_facts = terminal_record
+        terminal_event = next(
+            (
+                event
+                for event in reversed(self._client.last_action_events)
+                if event.name == "action_terminal" and event.action_id == action.id
+            ),
+            None,
+        )
+        data = dict(terminal_facts)
+        data.update({
+            "action_id": action.id,
+            "success": outcome.success,
+            "stopped_reason": outcome.reason,
+        })
+        self._action_terminals[action.id] = Event(
+            seq=terminal_event.seq if terminal_event is not None else 0,
+            tick=terminal_event.tick if terminal_event is not None else 0,
+            bot=self.bot_name,
+            name=_PLAYER_ACTION_TERMINALS[action.name],
+            data=data,
+        )
+        return Result(
+            id=action.id,
+            bot=self.bot_name,
+            type="result",
+            ok=True,
+            accepted=True,
+            complete=False,
+            data={"action": action.name},
+        )
 
 
 def _contract_event(item: BotEvent) -> Event:

@@ -13,7 +13,16 @@ class CompositeBody:
     returned unchanged; it is never retried through Scarpet.
     """
 
-    JAVA_ACTIONS = frozenset({"navigate", "collectBlock", "ascend"})
+    JAVA_ACTIONS = frozenset({
+        "navigate",
+        "collectBlock",
+        "ascend",
+        "lookAt",
+        "selectItem",
+        "stop",
+        "useItem",
+    })
+    JAVA_TERMINAL_ACTIONS = frozenset({"lookAt", "selectItem", "stop", "useItem"})
     JAVA_PERCEPTIONS = frozenset({
         "findBlocks",
         "inventory",
@@ -31,6 +40,7 @@ class CompositeBody:
         self.bot_name = scarpet.bot_name
         self.scarpet = scarpet
         self.java = java
+        self._terminal_providers: dict[str, Body] = {}
 
     def spawn(self, pos=None, **kwargs) -> Result:
         return self.scarpet.spawn(pos, **kwargs)
@@ -48,7 +58,10 @@ class CompositeBody:
 
     def execute(self, action: Action) -> Result:
         provider = self.java if action.name in self.JAVA_ACTIONS else self.scarpet
-        return provider.execute(action)
+        result = provider.execute(action)
+        if action.name in self.JAVA_TERMINAL_ACTIONS and result.ok and result.accepted:
+            self._terminal_providers[action.id] = provider
+        return result
 
     def await_action_terminal(
         self,
@@ -58,7 +71,8 @@ class CompositeBody:
         terminal_events: set[str] | None = None,
         intermediate_events: set[str] | None = None,
     ) -> Event:
-        return self.scarpet.await_action_terminal(
+        provider = self._terminal_providers.pop(action_id, self.scarpet)
+        return provider.await_action_terminal(
             action_id,
             timeout_s=timeout_s,
             poll_interval_s=poll_interval_s,

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from minebot.contract.governance import Region
 from minebot.game.governance import GovernancePolicy
 from minebot.game.java_body_adapter import (
@@ -179,7 +181,7 @@ class FakeBodyServer:
                 "max_requests_per_second": 40,
                 "request_types": [
                     "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "ENTITY_READ", "FIND_BLOCKS",
-                    "HELLO", "INVENTORY", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION",
+                    "HELLO", "INVENTORY", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
                     "RESUME_EVENTS", "WORLD_READ",
                 ],
             })
@@ -189,6 +191,8 @@ class FakeBodyServer:
             self._handle_collect(message, rid)
         elif kind == "ASCEND":
             self._handle_ascend(message, rid)
+        elif kind == "PLAYER_ACTION":
+            self._handle_player_action(message, rid)
         elif kind == "MUTATION_VERDICT":
             self._handle_verdict(message)
         elif kind == "QUERY_ACTION":
@@ -481,6 +485,36 @@ class FakeBodyServer:
             "break_steps": 12,
             "elapsed_ticks": 280,
         })
+
+    def _handle_player_action(self, message: dict, rid: str) -> None:
+        action_id = message["action_id"]
+        action = message["action"]
+        params = message.get("params") or {}
+        self._emit_response(rid, "PLAYER_ACTION_ACK", {"action_id": action_id, "state": "accepted"})
+        self._emit_event("owner_acquired", action_id, {"type": f"PLAYER_ACTION:{action}", "priority": "ACTION"})
+        no_effect = self.scenario == "player_action_no_effect" and action == "useItem"
+        facts = {
+            "classification": "failed" if no_effect else "completed",
+            "reason": "no_effect" if no_effect else "completed",
+            "success": not no_effect,
+            "stopped_reason": "no_effect" if no_effect else "completed",
+        }
+        if action == "selectItem":
+            facts.update({"item": params.get("item"), "slot": 2, "count": 3, "moved_to_hotbar": False})
+        elif action == "lookAt":
+            facts.update({"target": params.get("target"), "yaw": 45.0, "pitch": -5.0, "alignment": 1.0})
+        elif action == "stop":
+            pass
+        elif action == "useItem":
+            facts.update({
+                "mode": params.get("mode", "once"),
+                "item": params.get("item", "unknown"),
+                "ticks": params.get("ticks", 1),
+                "inventory_changed": True,
+                "start_pos": [10.5, 64.0, -3.5],
+                "final_pos": [10.5, 64.0, -3.5],
+            })
+        self._emit_terminal(action_id, facts)
 
     def _handle_verdict(self, message: dict) -> None:
         allow = bool(message.get("allow"))
@@ -843,6 +877,54 @@ def test_java_body_execute_delegates_whole_objectives() -> None:
     gap = body.execute(Action.create("openContainer", {}))
     assert gap.ok is False
     assert gap.error == "capability_unavailable:openContainer"
+
+
+def test_java_body_player_actions_preserve_caller_id_and_legacy_terminals() -> None:
+    client = _client(FakeBodyServer())
+    body = JavaBody(client, "Bot")
+
+    select = Action.create("selectItem", {"item": "minecraft:bread"})
+    accepted = body.execute(select)
+    terminal = body.await_action_terminal(select.id)
+
+    assert accepted.ok is True
+    assert accepted.accepted is True
+    assert accepted.complete is False
+    assert terminal.name == "selectItemDone"
+    assert terminal.data["action_id"] == select.id
+    assert terminal.data["success"] is True
+    assert terminal.data["slot"] == 2
+    request = next(message for message in client._transport.requests if message.get("type") == "PLAYER_ACTION")
+    assert request["action_id"] == select.id
+    assert request["action"] == "selectItem"
+
+
+def test_java_body_player_action_terminal_is_consumed_once() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+    action = Action.create("useItem", {"item": "minecraft:bread", "mode": "continuous", "ticks": 40})
+
+    body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert terminal.name == "useDone"
+    assert terminal.data["stopped_reason"] == "completed"
+    with pytest.raises(NotImplementedError, match="capability_unavailable:await_action_terminal"):
+        body.await_action_terminal(action.id)
+
+
+def test_java_body_player_action_preserves_server_terminal_failure() -> None:
+    server = FakeBodyServer()
+    server.scenario = "player_action_no_effect"
+    body = JavaBody(_client(server), "Bot")
+    action = Action.create("useItem", {"item": "minecraft:bread", "ticks": 2})
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.name == "useDone"
+    assert terminal.data["success"] is False
+    assert terminal.data["stopped_reason"] == "no_effect"
 
 
 def test_java_body_poll_events_drains_contract_events() -> None:

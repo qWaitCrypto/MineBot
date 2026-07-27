@@ -1,0 +1,135 @@
+{
+  "name": "player_action_select_use",
+  "description": "PLAYER_ACTION keeps the caller action id and separates request acceptance from observed select/use terminals.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["HELLO", "PLAYER_ACTION"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "player_action",
+        "args": {
+          "bot_name": "MineBot_1",
+          "action_id": "select-0001",
+          "action": "selectItem",
+          "params": {"item": "minecraft:bread"}
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "PLAYER_ACTION",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "action_id": "select-0001",
+        "action": "selectItem",
+        "params": {"item": "minecraft:bread"}
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "PLAYER_ACTION_ACK",
+        "request_id": "r-2",
+        "action_id": "select-0001",
+        "state": "accepted"
+      },
+      "expect": [{"kind": "response", "type": "PLAYER_ACTION_ACK", "request_type": "PLAYER_ACTION", "payload_contains": {"state": "accepted"}}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 1,
+        "tick": 501,
+        "event": "action_terminal",
+        "action_id": "select-0001",
+        "data": {
+          "classification": "completed",
+          "reason": "completed",
+          "success": true,
+          "item": "minecraft:bread",
+          "slot": 2
+        }
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 1, "data_contains": {"classification": "completed", "item": "minecraft:bread"}}]
+    },
+    {
+      "send": {
+        "builder": "player_action",
+        "args": {
+          "bot_name": "MineBot_1",
+          "action_id": "use-0001",
+          "action": "useItem",
+          "params": {"item": "minecraft:bread", "mode": "continuous", "ticks": 40}
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "PLAYER_ACTION",
+        "request_id": "r-3",
+        "bot_name": "MineBot_1",
+        "action_id": "use-0001",
+        "action": "useItem",
+        "params": {"item": "minecraft:bread", "mode": "continuous", "ticks": 40}
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "PLAYER_ACTION_ACK",
+        "request_id": "r-3",
+        "action_id": "use-0001",
+        "state": "accepted"
+      },
+      "expect": [{"kind": "response", "type": "PLAYER_ACTION_ACK", "request_type": "PLAYER_ACTION", "payload_contains": {"state": "accepted"}}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 2,
+        "tick": 535,
+        "event": "action_terminal",
+        "action_id": "use-0001",
+        "data": {
+          "classification": "completed",
+          "reason": "completed",
+          "success": true,
+          "mode": "continuous",
+          "item": "minecraft:bread",
+          "inventory_changed": true,
+          "ticks": 34
+        }
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 2, "data_contains": {"classification": "completed", "inventory_changed": true}}]
+    }
+  ],
+  "final": {
+    "supports": ["PLAYER_ACTION"],
+    "pending_requests": 0,
+    "last_seq": {"MineBot_1": 2}
+  }
+}

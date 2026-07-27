@@ -9,6 +9,7 @@ import dev.minebot.body.action.ActionRuntime;
 import dev.minebot.body.action.AscendExecutor;
 import dev.minebot.body.action.CollectExecutor;
 import dev.minebot.body.action.MutationGate;
+import dev.minebot.body.action.PlayerPrimitiveActions;
 import dev.minebot.body.control.FakePlayerActionOwner;
 import dev.minebot.body.control.HeldInputs;
 import dev.minebot.body.control.OwnerPriority;
@@ -51,7 +52,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String CHANNEL = "fakeplayer-body";
     public static final String PROTOCOL = "fakeplayer-body/1";
     private static final Set<String> REQUEST_TYPES = Set.of(
-        "HELLO", "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND",
+        "HELLO", "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND", "PLAYER_ACTION",
         "MUTATION_VERDICT", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
     );
     private static final int MAX_RADIUS = 128;
@@ -133,11 +134,114 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "NAVIGATE" -> handleNavigate(connection, request, serverTick);
             case "COLLECT_BLOCK" -> handleCollectBlock(connection, request, serverTick);
             case "ASCEND" -> handleAscend(connection, request, serverTick);
+            case "PLAYER_ACTION" -> handlePlayerAction(connection, request, serverTick);
             case "MUTATION_VERDICT" -> handleMutationVerdict(request);
             case "RESUME_EVENTS" -> handleResumeEvents(connection, request, serverTick);
             case "CANCEL_ACTION" -> handleCancelAction(connection, request, serverTick);
             case "QUERY_ACTION" -> handleQueryAction(connection, request, serverTick);
             default -> throw new IllegalStateException("unreachable request type " + type);
+        }
+    }
+
+    private void handlePlayerAction(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            String actionId = requiredString(request, "action_id", 128);
+            String action = requiredString(request, "action", 32);
+            if (!Set.of("selectItem", "lookAt", "stop", "useItem").contains(action)) {
+                throw new IllegalArgumentException("unsupported player action: " + action);
+            }
+            JsonObject params = request.has("params") && request.get("params").isJsonObject()
+                ? request.getAsJsonObject("params")
+                : new JsonObject();
+            final String itemId = action.equals("selectItem")
+                ? requiredItemId(params, "item")
+                : action.equals("useItem") ? optionalItemId(params, "item") : null;
+            final PlayerPrimitiveActions.Position target = action.equals("lookAt")
+                ? requiredPosition(params, "target")
+                : null;
+            final String useMode = action.equals("useItem") ? optionalMode(params) : null;
+            final int useTicks = action.equals("useItem")
+                ? boundedOptionalInt(params, "ticks", 1, 1, PlayerPrimitiveActions.MAX_USE_TICKS)
+                : 1;
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved()) {
+                sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
+                return;
+            }
+
+            ActionRuntime.Submission submission = runtime.submit(
+                botName, actionId, "PLAYER_ACTION:" + action, OwnerPriority.ACTION, serverTick
+            );
+            JsonObject response = baseResponse(request, "PLAYER_ACTION_ACK");
+            response.addProperty("action_id", actionId);
+            switch (submission) {
+                case ActionRuntime.Submission.Accepted ignored -> {
+                    PlayerPrimitiveActions.PlayerAccess access = playerAccess(player);
+                    ActionRuntime.TickExecutor executor = switch (action) {
+                        case "selectItem" -> {
+                            yield new PlayerPrimitiveActions.ImmediateExecutor(
+                                botName,
+                                actionId,
+                                () -> PlayerPrimitiveActions.selectItem(botName, itemId, access, adapter),
+                                runtime
+                            );
+                        }
+                        case "lookAt" -> {
+                            yield new PlayerPrimitiveActions.ImmediateExecutor(
+                                botName,
+                                actionId,
+                                () -> PlayerPrimitiveActions.lookAt(botName, target, access, adapter),
+                                runtime
+                            );
+                        }
+                        case "stop" -> new PlayerPrimitiveActions.ImmediateExecutor(
+                            botName,
+                            actionId,
+                            PlayerPrimitiveActions::stop,
+                            runtime
+                        );
+                        case "useItem" -> {
+                            yield new PlayerPrimitiveActions.UseExecutor(
+                                botName,
+                                actionId,
+                                useMode,
+                                itemId == null ? "unknown" : itemId,
+                                useTicks,
+                                access,
+                                adapter,
+                                runtime
+                            );
+                        }
+                        default -> throw new IllegalStateException("validated player action disappeared");
+                    };
+                    runtime.attachExecutor(actionId, executor);
+                    response.addProperty("state", "accepted");
+                }
+                case ActionRuntime.Submission.Duplicate duplicate -> {
+                    response.addProperty(
+                        "state",
+                        duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal"
+                    );
+                    if (duplicate.status().terminal() != null) {
+                        response.add("terminal", duplicate.status().terminal());
+                    }
+                }
+                case ActionRuntime.Submission.Rejected rejected -> {
+                    JsonObject error = MineBotChannelRouter.error(
+                        CHANNEL, requestId(request), rejected.code(), "another action owns this bot", true
+                    );
+                    error.addProperty("owner_action_id", rejected.currentOwner().actionId());
+                    error.addProperty("owner_priority", rejected.currentOwner().priority().name());
+                    connection.send(error, serverTick);
+                    return;
+                }
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        } catch (RuntimeException error) {
+            sendError(connection, request, serverTick, "player_action_internal_error", "player action failed", true);
         }
     }
 
@@ -936,6 +1040,148 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             throw new IllegalArgumentException("block_ids must contain 1 to 16 identifiers");
         }
         return Map.copyOf(blocks);
+    }
+
+    private PlayerPrimitiveActions.PlayerAccess playerAccess(ServerPlayer player) {
+        return new PlayerPrimitiveActions.PlayerAccess() {
+            @Override
+            public boolean present() {
+                return !player.isRemoved() && server.getPlayerList().getPlayer(player.getUUID()) == player;
+            }
+
+            @Override
+            public int inventorySize() {
+                return player.getInventory().getContainerSize();
+            }
+
+            @Override
+            public String itemIdAt(int slot) {
+                ItemStack stack = player.getInventory().getItem(slot);
+                return stack.isEmpty() ? null : BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+            }
+
+            @Override
+            public int itemCountAt(int slot) {
+                return player.getInventory().getItem(slot).getCount();
+            }
+
+            @Override
+            public boolean slotEmpty(int slot) {
+                return player.getInventory().getItem(slot).isEmpty();
+            }
+
+            @Override
+            public void moveWholeStack(int fromSlot, int toSlot) {
+                var inventory = player.getInventory();
+                if (!inventory.getItem(toSlot).isEmpty()) {
+                    throw new IllegalStateException("destination inventory slot is occupied");
+                }
+                ItemStack moved = inventory.removeItemNoUpdate(fromSlot);
+                inventory.setItem(toSlot, moved);
+                inventory.setChanged();
+            }
+
+            @Override
+            public int selectedHotbarSlot() {
+                return player.getInventory().getSelectedSlot();
+            }
+
+            @Override
+            public String selectedItemId() {
+                ItemStack selected = player.getMainHandItem();
+                return selected.isEmpty() ? null : BuiltInRegistries.ITEM.getKey(selected.getItem()).toString();
+            }
+
+            @Override
+            public String inventoryFingerprint() {
+                StringBuilder fingerprint = new StringBuilder();
+                var inventory = player.getInventory();
+                for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+                    ItemStack stack = inventory.getItem(slot);
+                    fingerprint
+                        .append(slot).append(':')
+                        .append(ItemStack.hashItemAndComponents(stack)).append(':')
+                        .append(stack.getCount()).append(';');
+                }
+                return fingerprint.toString();
+            }
+
+            @Override
+            public PlayerPrimitiveActions.Position position() {
+                return new PlayerPrimitiveActions.Position(player.getX(), player.getY(), player.getZ());
+            }
+
+            @Override
+            public PlayerPrimitiveActions.Position eyePosition() {
+                var position = player.getEyePosition();
+                return new PlayerPrimitiveActions.Position(position.x(), position.y(), position.z());
+            }
+
+            @Override
+            public PlayerPrimitiveActions.Position lookDirection() {
+                var look = player.getLookAngle();
+                return new PlayerPrimitiveActions.Position(look.x(), look.y(), look.z());
+            }
+
+            @Override
+            public float yaw() {
+                return player.getYRot();
+            }
+
+            @Override
+            public float pitch() {
+                return player.getXRot();
+            }
+        };
+    }
+
+    private static PlayerPrimitiveActions.Position requiredPosition(JsonObject params, String name) {
+        if (!params.has(name) || !params.get(name).isJsonArray() || params.getAsJsonArray(name).size() != 3) {
+            throw new IllegalArgumentException(name + " must be a three-number array");
+        }
+        JsonArray values = params.getAsJsonArray(name);
+        double x = values.get(0).getAsDouble();
+        double y = values.get(1).getAsDouble();
+        double z = values.get(2).getAsDouble();
+        if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) {
+            throw new IllegalArgumentException(name + " must contain finite coordinates");
+        }
+        return new PlayerPrimitiveActions.Position(x, y, z);
+    }
+
+    private static String requiredItemId(JsonObject params, String name) {
+        String itemId = optionalItemId(params, name);
+        if (itemId == null) {
+            throw new IllegalArgumentException(name + " is required");
+        }
+        return itemId;
+    }
+
+    private static String optionalItemId(JsonObject params, String name) {
+        String value = MineBotChannelRouter.stringField(params, name);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String normalized = value.contains(":") ? value : "minecraft:" + value;
+        if (!normalized.matches("[a-z0-9_.-]+:[a-z0-9_/.-]+")) {
+            throw new IllegalArgumentException(name + " is not a valid item identifier");
+        }
+        Identifier identifier = Identifier.tryParse(normalized);
+        if (identifier == null || BuiltInRegistries.ITEM.getOptional(identifier).isEmpty()) {
+            throw new IllegalArgumentException("unknown item id: " + normalized);
+        }
+        return normalized;
+    }
+
+    private static String optionalMode(JsonObject params) {
+        String mode = MineBotChannelRouter.stringField(params, "mode");
+        if (mode == null || mode.isBlank()) {
+            return "once";
+        }
+        if (!mode.equals("once") && !mode.equals("continuous")) {
+            throw new IllegalArgumentException("mode must be once or continuous");
+        }
+        return mode;
     }
 
     private static String requiredString(JsonObject request, String name, int maxLength) {

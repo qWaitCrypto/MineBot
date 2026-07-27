@@ -92,6 +92,11 @@ _ASCEND_TERMINALS: dict[str, tuple[bool, str, bool]] = {
     "canceled": (False, "canceled", False),
     "timeout": (False, "ascend_timeout", True),
 }
+_PLAYER_ACTION_TERMINALS: dict[str, tuple[bool, str, bool]] = {
+    "completed": (True, "completed", False),
+    "canceled": (False, "canceled", False),
+    "timeout": (False, "action_timeout", True),
+}
 
 
 class JavaBodyClient:
@@ -126,6 +131,7 @@ class JavaBodyClient:
         self._event_gaps: list[EventGap] = []
         self._last_events: list[BotEvent] = []
         self._event_buffer: list[BotEvent] = []
+        self._last_terminal: tuple[str, dict] | None = None
 
     # -- lifecycle ------------------------------------------------------
 
@@ -181,6 +187,13 @@ class JavaBodyClient:
     def last_action_events(self) -> list[BotEvent]:
         return list(self._last_events)
 
+    @property
+    def last_action_terminal(self) -> tuple[str, dict] | None:
+        if self._last_terminal is None:
+            return None
+        action_id, terminal = self._last_terminal
+        return action_id, dict(terminal)
+
     # -- tool-facing objectives -----------------------------------------
 
     def navigate(self, goal: dict, *, timeout_ticks: int | None = None) -> ToolResult:
@@ -225,6 +238,11 @@ class JavaBodyClient:
         )
         return self._run_action(request, action_id, "ascend", _ASCEND_TERMINALS)
 
+    def player_action(self, action_id: str, action: str, params: dict) -> ToolResult:
+        self._ensure_connected()
+        request = self._protocol.player_action(self._bot, action_id, action, params)
+        return self._run_action(request, action_id, "player_action", _PLAYER_ACTION_TERMINALS)
+
     def _ensure_connected(self) -> None:
         if self._transport is None or not self._protocol.negotiated:
             self.connect()
@@ -239,6 +257,7 @@ class JavaBodyClient:
         terminals: dict[str, tuple[bool, str, bool]],
     ) -> ToolResult:
         self._last_events = []
+        self._last_terminal = None
         try:
             self._send(request)
             ack = self._await_response(request["type"])
@@ -260,6 +279,7 @@ class JavaBodyClient:
             return self._reconcile_after_drop(action_id, kind, terminals)
         if terminal is None:
             return ToolResult(success=False, reason=f"{kind}_no_terminal", can_retry=True)
+        self._last_terminal = (action_id, dict(terminal))
         return self._terminal_result(terminal, kind, terminals)
 
     def _terminal_result(
@@ -272,24 +292,30 @@ class JavaBodyClient:
         mapped = terminals.get(classification)
         if mapped is not None:
             success, reason, can_retry = mapped
-            if success:
-                reason = str(terminal.get("reason", reason)) if kind == "collect" else reason
+            if success and kind in {"collect", "player_action"}:
+                reason = str(terminal.get("reason", reason))
             return ToolResult(
                 success=success,
                 reason=reason if success else str(terminal.get("reason", reason)),
                 can_retry=can_retry,
-                metrics=self._terminal_metrics(terminal),
+                metrics=self._terminal_metrics(terminal, include_all=kind == "player_action"),
             )
         # Failed classification: keep the Java typed reason, never relabel.
         return ToolResult(
             success=False,
             reason=str(terminal.get("reason", "failed")),
             can_retry=_failed_is_retriable(str(terminal.get("reason", ""))),
-            metrics=self._terminal_metrics(terminal),
+            metrics=self._terminal_metrics(terminal, include_all=kind == "player_action"),
         )
 
     @staticmethod
-    def _terminal_metrics(terminal: dict) -> dict:
+    def _terminal_metrics(terminal: dict, *, include_all: bool = False) -> dict:
+        if include_all:
+            return {
+                key: value
+                for key, value in terminal.items()
+                if key not in {"classification", "reason"}
+            }
         metrics = {
             key: terminal[key]
             for key in (
@@ -328,6 +354,7 @@ class JavaBodyClient:
             return ToolResult(success=False, reason="action_reconciliation_unknown", can_retry=True)
         state = reply.payload.get("state")
         if state == "terminal" and isinstance(reply.payload.get("terminal"), dict):
+            self._last_terminal = (action_id, dict(reply.payload["terminal"]))
             return self._terminal_result(reply.payload["terminal"], kind, terminals)
         if state == "running":
             try:
@@ -335,6 +362,7 @@ class JavaBodyClient:
             except TransportClosed:
                 return ToolResult(success=False, reason="action_reconciliation_unknown", can_retry=True)
             if terminal is not None:
+                self._last_terminal = (action_id, dict(terminal))
                 return self._terminal_result(terminal, kind, terminals)
         return ToolResult(success=False, reason="action_reconciliation_unknown", can_retry=True)
 
