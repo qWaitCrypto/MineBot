@@ -191,6 +191,19 @@ class JavaBodyProtocol:
             body["limit"] = limit
         return self._request("CONTAINER_READ", body)
 
+    def recipe_read(
+        self,
+        bot_name: str,
+        item: str,
+        *,
+        recipe_type: str | None = None,
+    ) -> dict:
+        self._require_capability("RECIPE_READ")
+        body: dict = {"bot_name": bot_name, "item": item}
+        if recipe_type is not None:
+            body["recipe_type"] = recipe_type
+        return self._request("RECIPE_READ", body)
+
     def world_read(self, bot_name: str, scope: str, params: dict) -> dict:
         self._require_capability("WORLD_READ")
         return self._request(
@@ -275,6 +288,22 @@ class JavaBodyProtocol:
             },
         )
 
+    def craft_item(
+        self,
+        bot_name: str,
+        action_id: str,
+        params: dict,
+    ) -> dict:
+        self._require_capability("CRAFT_ITEM")
+        return self._request(
+            "CRAFT_ITEM",
+            {
+                **dict(params),
+                "bot_name": bot_name,
+                "action_id": action_id,
+            },
+        )
+
     def mutation_verdict(self, proposal_id: str, allow: bool, reason: str) -> dict:
         """Fire-and-forget by design: a lost verdict times out into a denial."""
         self._require_capability("MUTATION_VERDICT")
@@ -331,6 +360,7 @@ class JavaBodyProtocol:
             "ASCEND": "ASCEND_ACK",
             "PLAYER_ACTION": "PLAYER_ACTION_ACK",
             "CONTAINER_TRANSFER": "CONTAINER_TRANSFER_ACK",
+            "CRAFT_ITEM": "CRAFT_ITEM_ACK",
         }.get(request_type, f"{request_type}_RESULT")
         if frame_type != expected:
             raise ProtocolViolation(f"{request_type} answered by {frame_type}")

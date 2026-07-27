@@ -1556,6 +1556,25 @@ def _resolve_smelt_output_from_recipe(
     expected_output: str,
     perception: PerceptionResult,
 ) -> tuple[str, int] | None:
+    structured = perception.data.get("variants")
+    if isinstance(structured, list):
+        for variant in structured:
+            if not isinstance(variant, dict):
+                continue
+            output_item = _plain_item(variant.get("output_item"))
+            if output_item != _plain_item(expected_output):
+                continue
+            try:
+                output_count = int(variant.get("output_count") or 0)
+            except (TypeError, ValueError):
+                continue
+            if output_count <= 0 or not _smelt_variant_accepts_input(
+                normalized_input,
+                variant.get("ingredient_groups"),
+            ):
+                continue
+            return (output_item, output_count)
+        return None
     recipe_raw = str(perception.data.get("recipe_raw") or "")
     if not recipe_raw:
         return None
@@ -1582,6 +1601,9 @@ def _resolve_smelt_output_from_recipe(
 def _smelt_recipe_payload_available(perception: PerceptionResult | None) -> bool:
     if perception is None or not perception.ok:
         return False
+    structured = perception.data.get("variants")
+    if isinstance(structured, list):
+        return any(isinstance(variant, dict) for variant in structured)
     recipe_raw = str(perception.data.get("recipe_raw") or "")
     if not recipe_raw:
         return False

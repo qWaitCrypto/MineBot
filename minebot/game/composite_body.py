@@ -18,6 +18,7 @@ class CompositeBody:
         "collectBlock",
         "ascend",
         "containerTransfer",
+        "craftItem",
         "dropItem",
         "lookAt",
         "moveItem",
@@ -27,6 +28,7 @@ class CompositeBody:
     })
     JAVA_TERMINAL_ACTIONS = frozenset({
         "containerTransfer",
+        "craftItem",
         "dropItem",
         "lookAt",
         "moveItem",
@@ -44,6 +46,7 @@ class CompositeBody:
         "nearbyBlocks",
         "debugBlocks",
         "nearbyEntities",
+        "recipeData",
     })
 
     def __init__(self, scarpet: Body, java: Body) -> None:

@@ -98,6 +98,12 @@ def test_composite_routes_migrated_player_action_and_its_terminal_to_java(
             "bot_slot": 1,
             "count": 2,
         },
+        "craftItem": {
+            "inputs": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+            "output": {"slot": 1, "item": "minecraft:oak_planks", "count": 4},
+            "remainders": [],
+            "max_stack": 64,
+        },
         "dropItem": {"slot": 0, "mode": "one"},
         "selectItem": {"item": "minecraft:bread"},
         "lookAt": {"target": [1.0, 65.0, 1.0]},

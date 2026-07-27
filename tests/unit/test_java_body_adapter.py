@@ -215,8 +215,8 @@ class FakeBodyServer:
                 "max_requests_per_second": 40,
                 "request_types": [
                     "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "ENTITY_READ", "FIND_BLOCKS",
-                    "HELLO", "INVENTORY", "CONTAINER_READ", "CONTAINER_TRANSFER", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
-                    "RESUME_EVENTS", "WORLD_READ",
+                    "HELLO", "INVENTORY", "CONTAINER_READ", "CONTAINER_TRANSFER", "CRAFT_ITEM", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
+                    "RECIPE_READ", "RESUME_EVENTS", "WORLD_READ",
                 ],
             })
         elif kind == "NAVIGATE":
@@ -229,6 +229,8 @@ class FakeBodyServer:
             self._handle_player_action(message, rid)
         elif kind == "CONTAINER_TRANSFER":
             self._handle_container_transfer(message, rid)
+        elif kind == "CRAFT_ITEM":
+            self._handle_craft_item(message, rid)
         elif kind == "MUTATION_VERDICT":
             self._handle_verdict(message)
         elif kind == "QUERY_ACTION":
@@ -317,6 +319,42 @@ class FakeBodyServer:
                 "nextStart": None if end >= 27 else end,
                 "totalSlots": 27,
                 "slots": slots,
+            })
+        elif kind == "RECIPE_READ":
+            item = message.get("item")
+            recipe_type = message.get("recipe_type", "crafting")
+            variants = []
+            if item == "minecraft:oak_planks" and recipe_type == "crafting":
+                variants = [{
+                    "recipe_id": "minecraft:oak_planks",
+                    "output_item": "minecraft:oak_planks",
+                    "output_count": 4,
+                    "recipe_kind": "shapeless",
+                    "width": 0,
+                    "height": 0,
+                    "ingredient_groups": [["minecraft:oak_log"]],
+                    "requires_table": False,
+                }]
+            elif item == "minecraft:iron_ingot" and recipe_type == "smelting":
+                variants = [{
+                    "recipe_id": "minecraft:iron_ingot_from_smelting_raw_iron",
+                    "output_item": "minecraft:iron_ingot",
+                    "output_count": 1,
+                    "recipe_kind": "smelting",
+                    "width": 1,
+                    "height": 1,
+                    "ingredient_groups": [["minecraft:raw_iron"]],
+                    "requires_table": False,
+                }]
+            self._emit_response(rid, "RECIPE_READ_RESULT", {
+                "bot": message.get("bot_name"),
+                "missing": False,
+                "found": bool(variants),
+                "item": item,
+                "recipe_type": recipe_type,
+                "variant_count": len(variants),
+                "variants": variants,
+                "server_cost_micros": 120,
             })
         elif kind == "WORLD_READ":
             self._handle_world_read(message, rid)
@@ -621,6 +659,28 @@ class FakeBodyServer:
             context="activate",
         )
 
+    def _handle_craft_item(self, message: dict, rid: str) -> None:
+        action_id = message["action_id"]
+        self._emit_response(rid, "CRAFT_ITEM_ACK", {"action_id": action_id, "state": "accepted"})
+        self._emit_event("owner_acquired", action_id, {"type": "CRAFT_ITEM", "priority": "ACTION"})
+        failed = self.scenario == "craft_recipe_mismatch"
+        output = message.get("output") or {}
+        self._emit_terminal(action_id, {
+            "classification": "failed" if failed else "completed",
+            "reason": "recipe_mismatch" if failed else "completed",
+            "success": not failed,
+            "stopped_reason": "recipe_mismatch" if failed else "completed",
+            "recipe_id": None if failed else "minecraft:oak_planks",
+            "crafts": 0 if failed else 1,
+            "output_item": output.get("item"),
+            "output_count": output.get("count"),
+            "output_slot": output.get("slot"),
+            "inputs_before": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+            "inputs_after": [{"slot": 0, "item": None, "count": 0}],
+            "output_before": {"slot": output.get("slot"), "item": None, "count": 0},
+            "output_after": {"slot": output.get("slot"), "item": output.get("item"), "count": output.get("count")},
+        })
+
     def _handle_verdict(self, message: dict) -> None:
         allow = bool(message.get("allow"))
         self.verdict_seen.append((message.get("proposal_id"), allow))
@@ -897,7 +957,7 @@ def test_java_body_perceive_adapts_find_blocks_and_gaps_the_rest() -> None:
 
     gap = body.perceive("recipeData", {})
     assert gap.ok is False
-    assert gap.error == "capability_unavailable:recipeData"
+    assert gap.error == "invalid_request:item_required"
 
 
 def test_java_body_find_blocks_rejects_numeric_resume_without_snapshot_cursor() -> None:
@@ -961,6 +1021,36 @@ def test_java_body_container_missing_body_is_explicit() -> None:
 
     assert not result.ok and result.complete
     assert result.error == "missing_body"
+
+
+def test_java_body_recipe_data_returns_structured_crafting_and_smelting_truth() -> None:
+    client = _client(FakeBodyServer())
+    body = JavaBody(client, "Bot")
+
+    crafting = body.perceive("recipeData", {"item": "oak_planks"})
+    smelting = body.perceive("recipeData", {"item": "iron_ingot", "type": "smelting"})
+
+    assert crafting.ok and crafting.complete
+    assert crafting.data["variantCount"] == 1
+    assert crafting.data["variants"][0]["ingredient_groups"] == [["minecraft:oak_log"]]
+    assert crafting.data["serverCostMicros"] == 120
+    assert smelting.ok and smelting.data["type"] == "smelting"
+    assert smelting.data["variants"][0]["output_item"] == "minecraft:iron_ingot"
+    requests = [request for request in client._transport.requests if request.get("type") == "RECIPE_READ"]
+    assert requests[0]["item"] == "minecraft:oak_planks"
+    assert requests[0]["recipe_type"] == "crafting"
+    assert requests[1]["recipe_type"] == "smelting"
+
+
+def test_java_body_recipe_not_found_is_complete_and_typed() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    result = body.perceive("recipeData", {"item": "diamond"})
+
+    assert result.ok is False
+    assert result.complete is True
+    assert result.error == "recipe_not_found"
+    assert result.data["variants"] == []
 
 
 def test_java_body_world_read_family_preserves_existing_perception_shapes() -> None:
@@ -1162,6 +1252,47 @@ def test_java_body_container_transfer_governance_denial_is_not_relabelled() -> N
     assert terminal.data["success"] is False
     assert terminal.data["stopped_reason"] == "governance_denied:unknown_provenance"
     assert server.verdict_seen == [("mp-container-1", False)]
+
+
+def test_java_body_craft_item_preserves_caller_id_and_authoritative_terminal_facts() -> None:
+    server = FakeBodyServer()
+    body = JavaBody(_client(server), "Bot")
+    action = Action.create("craftItem", {
+        "inputs": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+        "output": {"slot": 1, "item": "minecraft:oak_planks", "count": 4},
+        "remainders": [],
+        "max_stack": 64,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted and not accepted.complete
+    assert terminal.name == "craftDone"
+    assert terminal.data["action_id"] == action.id
+    assert terminal.data["success"] is True
+    assert terminal.data["recipe_id"] == "minecraft:oak_planks"
+    request = next(item for item in server.requests if item.get("type") == "CRAFT_ITEM")
+    assert request["action_id"] == action.id
+    assert request["inputs"][0]["item"] == "minecraft:oak_log"
+
+
+def test_java_body_craft_item_preserves_recipe_rejection_without_relabeling() -> None:
+    server = FakeBodyServer()
+    server.scenario = "craft_recipe_mismatch"
+    body = JavaBody(_client(server), "Bot")
+    action = Action.create("craftItem", {
+        "inputs": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+        "output": {"slot": 1, "item": "minecraft:diamond", "count": 64},
+        "remainders": [],
+        "max_stack": 64,
+    })
+
+    body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert terminal.data["success"] is False
+    assert terminal.data["stopped_reason"] == "recipe_mismatch"
 
 
 def test_java_body_poll_events_drains_contract_events() -> None:

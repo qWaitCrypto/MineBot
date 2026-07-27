@@ -1,0 +1,130 @@
+{
+  "name": "recipe_read_craft",
+  "description": "RECIPE_READ returns structured server recipe truth and CRAFT_ITEM keeps acknowledgement separate from authoritative terminal inventory facts.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["HELLO", "RECIPE_READ", "CRAFT_ITEM"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "recipe_read",
+        "args": {"bot_name": "MineBot_1", "item": "minecraft:oak_planks", "recipe_type": "crafting"}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "RECIPE_READ",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "item": "minecraft:oak_planks",
+        "recipe_type": "crafting"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "RECIPE_READ_RESULT",
+        "request_id": "r-2",
+        "bot": "MineBot_1",
+        "missing": false,
+        "found": true,
+        "item": "minecraft:oak_planks",
+        "recipe_type": "crafting",
+        "variant_count": 1,
+        "variants": [{
+          "recipe_id": "minecraft:oak_planks",
+          "output_item": "minecraft:oak_planks",
+          "output_count": 4,
+          "recipe_kind": "shapeless",
+          "width": 0,
+          "height": 0,
+          "ingredient_groups": [["minecraft:oak_log"]],
+          "requires_table": false
+        }]
+      },
+      "expect": [{
+        "kind": "response",
+        "type": "RECIPE_READ_RESULT",
+        "request_type": "RECIPE_READ",
+        "payload_contains": {"found": true, "variant_count": 1}
+      }]
+    },
+    {
+      "send": {
+        "builder": "craft_item",
+        "args": {
+          "bot_name": "MineBot_1",
+          "action_id": "craft-1",
+          "params": {
+            "inputs": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+            "output": {"slot": 1, "item": "minecraft:oak_planks", "count": 4},
+            "remainders": [],
+            "max_stack": 64
+          }
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "CRAFT_ITEM",
+        "request_id": "r-3",
+        "inputs": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+        "output": {"slot": 1, "item": "minecraft:oak_planks", "count": 4},
+        "remainders": [],
+        "max_stack": 64,
+        "bot_name": "MineBot_1",
+        "action_id": "craft-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "CRAFT_ITEM_ACK",
+        "request_id": "r-3",
+        "action_id": "craft-1",
+        "state": "accepted"
+      },
+      "expect": [{"kind": "response", "type": "CRAFT_ITEM_ACK", "request_type": "CRAFT_ITEM", "payload_contains": {"state": "accepted"}}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 1,
+        "tick": 900,
+        "event": "action_terminal",
+        "action_id": "craft-1",
+        "data": {
+          "classification": "completed",
+          "reason": "completed",
+          "success": true,
+          "recipe_id": "minecraft:oak_planks",
+          "inputs_after": [{"slot": 0, "empty": true, "item": null, "count": 0}],
+          "output_after": {"slot": 1, "empty": false, "item": "minecraft:oak_planks", "count": 4}
+        }
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 1, "action_id": "craft-1", "data_contains": {"success": true, "recipe_id": "minecraft:oak_planks"}}]
+    }
+  ],
+  "final": {"supports": ["RECIPE_READ", "CRAFT_ITEM"], "pending_requests": 0, "last_seq": {"MineBot_1": 1}}
+}

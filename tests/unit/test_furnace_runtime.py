@@ -363,6 +363,28 @@ class FurnaceRuntimeTests(unittest.TestCase):
         self.assertEqual(result, ("iron_ingot", 1))
         self.assertEqual(calls, ["iron_ingot"])
 
+    def test_resolve_smelt_output_accepts_java_structured_recipe_truth(self):
+        def lookup(output_item):
+            return PerceptionResult(
+                bot="Bot1",
+                scope="recipeData",
+                type="perception",
+                ok=True,
+                complete=True,
+                data={
+                    "item": output_item,
+                    "type": "smelting",
+                    "variants": [{
+                        "output_item": "minecraft:iron_ingot",
+                        "output_count": 1,
+                        "recipe_kind": "smelting",
+                        "ingredient_groups": [["minecraft:iron_ore", "minecraft:raw_iron"]],
+                    }],
+                },
+            )
+
+        self.assertEqual(resolve_smelt_output("minecraft:raw_iron", lookup), ("iron_ingot", 1))
+
     def test_resolve_smelt_output_unwraps_compact_server_variant_list(self):
         def lookup(output_item):
             return recipe_perception(

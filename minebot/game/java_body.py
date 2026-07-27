@@ -43,6 +43,7 @@ _WORLD_READ_SCOPES = frozenset({
 _ENTITY_READ_SCOPES = frozenset({"nearbyEntities"})
 _ACTION_TERMINALS = {
     "containerTransfer": "containerDone",
+    "craftItem": "craftDone",
     "dropItem": "dropDone",
     "lookAt": "lookDone",
     "moveItem": "moveItemDone",
@@ -96,6 +97,8 @@ class JavaBody:
             return self._perceive_inventory(params)
         if scope == "container":
             return self._perceive_container(params)
+        if scope == "recipeData":
+            return self._perceive_recipe(params)
         if scope in _WORLD_READ_SCOPES:
             return self._perceive_world(scope, params)
         if scope in _ENTITY_READ_SCOPES:
@@ -322,6 +325,77 @@ class JavaBody:
             next=None if complete else str(next_start),
         )
 
+    def _perceive_recipe(self, params: dict[str, object]) -> PerceptionResult:
+        item = str(params.get("item") or "")
+        if not item:
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope="recipeData",
+                type="perception",
+                ok=False,
+                complete=True,
+                error="invalid_request:item_required",
+            )
+        normalized_item = item if ":" in item else f"minecraft:{item}"
+        requested_type = str(params.get("type") or "crafting")
+        reply = self._client.request_response(lambda protocol: protocol.recipe_read(
+            self.bot_name,
+            normalized_item,
+            recipe_type=requested_type,
+        ))
+        if isinstance(reply, ErrorResponse):
+            missing = reply.code in {"body_missing", "missing_body"}
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope="recipeData",
+                type="perception",
+                ok=False,
+                complete=missing or not reply.retryable,
+                uncertainty=[{"reason": "missing_body"}] if missing else None,
+                error="missing_body" if missing else reply.code,
+            )
+        payload = reply.payload
+        if payload.get("missing") is True:
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope="recipeData",
+                type="perception",
+                ok=False,
+                complete=True,
+                uncertainty=[{"reason": "missing_body"}],
+                error="missing_body",
+            )
+        variants = [dict(variant) for variant in payload.get("variants") or [] if isinstance(variant, dict)]
+        if payload.get("found") is not True or not variants:
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope="recipeData",
+                type="perception",
+                ok=False,
+                complete=True,
+                data={
+                    "item": normalized_item,
+                    "type": requested_type,
+                    "variantCount": 0,
+                    "variants": [],
+                },
+                error="recipe_not_found",
+            )
+        return PerceptionResult(
+            bot=self.bot_name,
+            scope="recipeData",
+            type="perception",
+            ok=True,
+            complete=True,
+            data={
+                "item": str(payload.get("item") or normalized_item),
+                "type": str(payload.get("recipe_type") or requested_type),
+                "variantCount": int(payload.get("variant_count") or len(variants)),
+                "variants": variants,
+                "serverCostMicros": int(payload.get("server_cost_micros") or 0),
+            },
+        )
+
     def _perceive_world(
         self,
         scope: str,
@@ -476,6 +550,8 @@ class JavaBody:
     def _execute_terminal_action(self, action: Action) -> Result:
         if action.name == "containerTransfer":
             outcome = self._client.container_transfer(action.id, dict(action.params))
+        elif action.name == "craftItem":
+            outcome = self._client.craft_item(action.id, dict(action.params))
         else:
             outcome = self._client.player_action(action.id, action.name, dict(action.params))
         terminal_record = self._client.last_action_terminal

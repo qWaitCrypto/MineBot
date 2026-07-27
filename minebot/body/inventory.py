@@ -1223,24 +1223,42 @@ def _read_recipe_data(body: Body, item: str) -> PerceptionResult:
 
 
 def _parse_recipe_variants(item: str, perception: PerceptionResult) -> list[CraftRecipeVariant] | ToolResult:
+    structured = perception.data.get("variants")
     recipe_raw = str(perception.data.get("recipe_raw") or "")
-    if not recipe_raw:
+    if isinstance(structured, list):
+        parsed: object = []
+        for entry in structured:
+            if not isinstance(entry, dict):
+                continue
+            parsed.append(
+                [
+                    [[entry.get("output_item"), entry.get("output_count")]],
+                    entry.get("ingredient_groups") or [],
+                    [
+                        entry.get("recipe_kind") or "shapeless",
+                        entry.get("width") or 0,
+                        entry.get("height") or 0,
+                    ],
+                ]
+            )
+    elif not recipe_raw:
         return ToolResult(
             success=False,
             reason="recipe_not_found",
             can_retry=False,
             metrics={"item": item, "recipe_data": dict(perception.data or {})},
         )
-    try:
-        parsed = _ScarpetValueParser(recipe_raw).parse()
-    except ValueError as exc:
-        return ToolResult(
-            success=False,
-            reason="recipe_parse_failed",
-            can_retry=True,
-            next_suggestion="retry the recipe query or inspect the Scarpet recipe_data payload shape",
-            metrics={"item": item, "recipe_raw": recipe_raw, "error": str(exc)},
-        )
+    else:
+        try:
+            parsed = _ScarpetValueParser(recipe_raw).parse()
+        except ValueError as exc:
+            return ToolResult(
+                success=False,
+                reason="recipe_parse_failed",
+                can_retry=True,
+                next_suggestion="retry the recipe query or inspect the Scarpet recipe_data payload shape",
+                metrics={"item": item, "recipe_raw": recipe_raw, "error": str(exc)},
+            )
     if not isinstance(parsed, list):
         return ToolResult(
             success=False,
@@ -1276,7 +1294,10 @@ def _parse_recipe_variants(item: str, perception: PerceptionResult) -> list[Craf
         if not isinstance(output, list) or len(output) < 2:
             continue
         output_item = _normalize_recipe_item(output[0])
-        output_count = int(output[1])
+        try:
+            output_count = int(output[1])
+        except (TypeError, ValueError):
+            continue
         if output_item != normalized_item or output_count <= 0:
             continue
         recipe_kind = "shapeless"

@@ -170,6 +170,39 @@ def slot(index, item=None, count=0):
 
 
 class InventoryRuntimeTests(unittest.TestCase):
+    def test_recipe_parser_accepts_java_structured_variants(self):
+        perception_result = PerceptionResult(
+            bot="Bot1",
+            scope="recipeData",
+            type="perception",
+            ok=True,
+            complete=True,
+            data={
+                "item": "minecraft:oak_planks",
+                "variantCount": 1,
+                "variants": [{
+                    "recipe_id": "minecraft:oak_planks",
+                    "output_item": "minecraft:oak_planks",
+                    "output_count": 4,
+                    "recipe_kind": "shapeless",
+                    "width": 0,
+                    "height": 0,
+                    "ingredient_groups": [["minecraft:oak_log", "minecraft:oak_wood"]],
+                    "requires_table": False,
+                }],
+            },
+        )
+
+        variants = _parse_recipe_variants("minecraft:oak_planks", perception_result)
+
+        self.assertIsInstance(variants, list)
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(variants[0].output_count, 4)
+        self.assertEqual(
+            variants[0].ingredient_groups,
+            (("minecraft:oak_log", "minecraft:oak_wood"),),
+        )
+
     def test_recipe_parser_unwraps_compact_server_variant_list(self):
         perception_result = PerceptionResult(
             bot="Bot1",

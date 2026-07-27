@@ -9,6 +9,7 @@ import dev.minebot.body.action.ActionRuntime;
 import dev.minebot.body.action.AscendExecutor;
 import dev.minebot.body.action.CollectExecutor;
 import dev.minebot.body.action.ContainerPrimitiveActions;
+import dev.minebot.body.action.CraftPrimitiveActions;
 import dev.minebot.body.action.MutationGate;
 import dev.minebot.body.action.PlayerPrimitiveActions;
 import dev.minebot.body.control.FakePlayerActionOwner;
@@ -22,6 +23,7 @@ import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MinecraftWorldView;
 import dev.minebot.body.nav.NavigateExecutor;
 import dev.minebot.body.perception.EntityReadService;
+import dev.minebot.body.perception.RecipeReadService;
 import dev.minebot.body.perception.WorldReadService;
 import net.minecraft.world.item.ItemStack;
 import dev.minebot.server.common.transport.MineBotChannel;
@@ -56,7 +58,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String CHANNEL = "fakeplayer-body";
     public static final String PROTOCOL = "fakeplayer-body/1";
     private static final Set<String> REQUEST_TYPES = Set.of(
-        "HELLO", "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "CONTAINER_READ", "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND", "PLAYER_ACTION", "CONTAINER_TRANSFER",
+        "HELLO", "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "CONTAINER_READ", "RECIPE_READ", "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND", "PLAYER_ACTION", "CONTAINER_TRANSFER", "CRAFT_ITEM",
         "MUTATION_VERDICT", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
     );
     private static final int MAX_RADIUS = 128;
@@ -134,6 +136,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "BODY_STATE" -> handleBodyState(connection, request, serverTick);
             case "INVENTORY" -> handleInventory(connection, request, serverTick);
             case "CONTAINER_READ" -> handleContainerRead(connection, request, serverTick);
+            case "RECIPE_READ" -> handleRecipeRead(connection, request, serverTick);
             case "WORLD_READ" -> handleWorldRead(connection, request, serverTick);
             case "ENTITY_READ" -> handleEntityRead(connection, request, serverTick);
             case "NAVIGATE" -> handleNavigate(connection, request, serverTick);
@@ -141,11 +144,108 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "ASCEND" -> handleAscend(connection, request, serverTick);
             case "PLAYER_ACTION" -> handlePlayerAction(connection, request, serverTick);
             case "CONTAINER_TRANSFER" -> handleContainerTransfer(connection, request, serverTick);
+            case "CRAFT_ITEM" -> handleCraftItem(connection, request, serverTick);
             case "MUTATION_VERDICT" -> handleMutationVerdict(request);
             case "RESUME_EVENTS" -> handleResumeEvents(connection, request, serverTick);
             case "CANCEL_ACTION" -> handleCancelAction(connection, request, serverTick);
             case "QUERY_ACTION" -> handleQueryAction(connection, request, serverTick);
             default -> throw new IllegalStateException("unreachable request type " + type);
+        }
+    }
+
+    private void handleRecipeRead(MineBotConnection connection, JsonObject request, int serverTick) {
+        long startedNanos = System.nanoTime();
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            String itemId = requiredItemId(request, "item");
+            String recipeType = MineBotChannelRouter.stringField(request, "recipe_type");
+            if (recipeType == null || recipeType.isBlank()) {
+                recipeType = "crafting";
+            }
+            if (!Set.of("crafting", "smelting").contains(recipeType)) {
+                throw new IllegalArgumentException("recipe_type must be crafting or smelting");
+            }
+            JsonObject response = baseResponse(request, "RECIPE_READ_RESULT");
+            response.addProperty("bot", botName);
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                response.addProperty("missing", true);
+                connection.send(response, serverTick);
+                return;
+            }
+            JsonArray variants = RecipeReadService.read(
+                server.getRecipeManager().getRecipes(), level, itemId, recipeType
+            );
+            response.addProperty("missing", false);
+            response.addProperty("found", !variants.isEmpty());
+            response.addProperty("item", itemId);
+            response.addProperty("recipe_type", recipeType);
+            response.addProperty("variant_count", variants.size());
+            response.add("variants", variants);
+            response.addProperty("server_cost_micros", (System.nanoTime() - startedNanos) / 1_000L);
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        } catch (RuntimeException error) {
+            sendError(connection, request, serverTick, "recipe_read_internal_error", "recipe read failed", true);
+        }
+    }
+
+    private void handleCraftItem(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            String actionId = requiredString(request, "action_id", 128);
+            CraftPrimitiveActions.Request craft = requiredCraftRequest(request);
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
+                return;
+            }
+
+            ActionRuntime.Submission submission = runtime.submit(
+                botName, actionId, "CRAFT_ITEM", OwnerPriority.ACTION, serverTick
+            );
+            JsonObject response = baseResponse(request, "CRAFT_ITEM_ACK");
+            response.addProperty("action_id", actionId);
+            switch (submission) {
+                case ActionRuntime.Submission.Accepted ignored -> {
+                    runtime.attachExecutor(actionId, new CraftPrimitiveActions.Executor(
+                        botName,
+                        actionId,
+                        () -> CraftPrimitiveActions.craft(
+                            craft,
+                            player.getInventory(),
+                            server.getRecipeManager().getRecipes(),
+                            level
+                        ),
+                        runtime
+                    ));
+                    response.addProperty("state", "accepted");
+                }
+                case ActionRuntime.Submission.Duplicate duplicate -> {
+                    response.addProperty(
+                        "state",
+                        duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal"
+                    );
+                    if (duplicate.status().terminal() != null) {
+                        response.add("terminal", duplicate.status().terminal());
+                    }
+                }
+                case ActionRuntime.Submission.Rejected rejected -> {
+                    JsonObject error = MineBotChannelRouter.error(
+                        CHANNEL, requestId(request), rejected.code(), "another action owns this bot", true
+                    );
+                    error.addProperty("owner_action_id", rejected.currentOwner().actionId());
+                    error.addProperty("owner_priority", rejected.currentOwner().priority().name());
+                    connection.send(error, serverTick);
+                    return;
+                }
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        } catch (RuntimeException error) {
+            sendError(connection, request, serverTick, "craft_internal_error", "craft submission failed", true);
         }
     }
 
@@ -1526,6 +1626,61 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             throw new IllegalArgumentException(name + " is required");
         }
         return itemId;
+    }
+
+    private static CraftPrimitiveActions.Request requiredCraftRequest(JsonObject request) {
+        if (!request.has("inputs") || !request.get("inputs").isJsonArray()) {
+            throw new IllegalArgumentException("inputs must be a nonempty array");
+        }
+        JsonArray rawInputs = request.getAsJsonArray("inputs");
+        if (rawInputs.isEmpty() || rawInputs.size() > InventorySnapshot.TOTAL_SLOTS) {
+            throw new IllegalArgumentException("inputs must contain 1 to 46 entries");
+        }
+        List<CraftPrimitiveActions.Input> inputs = new ArrayList<>();
+        for (var element : rawInputs) {
+            if (!element.isJsonObject()) {
+                throw new IllegalArgumentException("inputs entries must be objects");
+            }
+            JsonObject input = element.getAsJsonObject();
+            inputs.add(new CraftPrimitiveActions.Input(
+                boundedInt(input, "slot", 0, InventorySnapshot.TOTAL_SLOTS - 1),
+                requiredItemId(input, "item"),
+                boundedInt(input, "count", 1, 99)
+            ));
+        }
+        if (!request.has("output") || !request.get("output").isJsonObject()) {
+            throw new IllegalArgumentException("output must be an object");
+        }
+        JsonObject rawOutput = request.getAsJsonObject("output");
+        CraftPrimitiveActions.Output output = new CraftPrimitiveActions.Output(
+            boundedInt(rawOutput, "slot", 0, InventorySnapshot.TOTAL_SLOTS - 1),
+            requiredItemId(rawOutput, "item"),
+            boundedInt(rawOutput, "count", 1, 99)
+        );
+        List<CraftPrimitiveActions.Remainder> remainders = new ArrayList<>();
+        if (request.has("remainders")) {
+            if (!request.get("remainders").isJsonArray()
+                || request.getAsJsonArray("remainders").size() > InventorySnapshot.TOTAL_SLOTS) {
+                throw new IllegalArgumentException("remainders must be an array with at most 46 entries");
+            }
+            for (var element : request.getAsJsonArray("remainders")) {
+                if (!element.isJsonObject()) {
+                    throw new IllegalArgumentException("remainder entries must be objects");
+                }
+                JsonObject remainder = element.getAsJsonObject();
+                remainders.add(new CraftPrimitiveActions.Remainder(
+                    boundedInt(remainder, "slot", 0, InventorySnapshot.TOTAL_SLOTS - 1),
+                    requiredItemId(remainder, "item"),
+                    boundedInt(remainder, "count", 1, 99)
+                ));
+            }
+        }
+        return new CraftPrimitiveActions.Request(
+            List.copyOf(inputs),
+            output,
+            List.copyOf(remainders),
+            boundedOptionalInt(request, "max_stack", 64, 1, 99)
+        );
     }
 
     private static String optionalItemId(JsonObject params, String name) {
