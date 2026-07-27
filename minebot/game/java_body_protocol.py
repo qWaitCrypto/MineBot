@@ -175,6 +175,22 @@ class JavaBodyProtocol:
             body["limit"] = limit
         return self._request("INVENTORY", body)
 
+    def container_read(
+        self,
+        bot_name: str,
+        pos: list[int],
+        *,
+        start: int | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        self._require_capability("CONTAINER_READ")
+        body: dict = {"bot_name": bot_name, "pos": list(pos)}
+        if start is not None:
+            body["start"] = start
+        if limit is not None:
+            body["limit"] = limit
+        return self._request("CONTAINER_READ", body)
+
     def world_read(self, bot_name: str, scope: str, params: dict) -> dict:
         self._require_capability("WORLD_READ")
         return self._request(
@@ -243,6 +259,22 @@ class JavaBodyProtocol:
             },
         )
 
+    def container_transfer(
+        self,
+        bot_name: str,
+        action_id: str,
+        params: dict,
+    ) -> dict:
+        self._require_capability("CONTAINER_TRANSFER")
+        return self._request(
+            "CONTAINER_TRANSFER",
+            {
+                **dict(params),
+                "bot_name": bot_name,
+                "action_id": action_id,
+            },
+        )
+
     def mutation_verdict(self, proposal_id: str, allow: bool, reason: str) -> dict:
         """Fire-and-forget by design: a lost verdict times out into a denial."""
         self._require_capability("MUTATION_VERDICT")
@@ -298,6 +330,7 @@ class JavaBodyProtocol:
             "COLLECT_BLOCK": "COLLECT_BLOCK_ACK",
             "ASCEND": "ASCEND_ACK",
             "PLAYER_ACTION": "PLAYER_ACTION_ACK",
+            "CONTAINER_TRANSFER": "CONTAINER_TRANSFER_ACK",
         }.get(request_type, f"{request_type}_RESULT")
         if frame_type != expected:
             raise ProtocolViolation(f"{request_type} answered by {frame_type}")

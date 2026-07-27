@@ -186,3 +186,34 @@ def test_mismatched_response_type_is_a_violation() -> None:
                 "request_id": hello["request_id"],
             }
         )
+
+
+def test_container_transfer_params_cannot_override_caller_identity() -> None:
+    protocol = JavaBodyProtocol()
+    hello = protocol.hello()
+    protocol.feed({
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": hello["request_id"],
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["HELLO", "CONTAINER_TRANSFER"],
+    })
+
+    request = protocol.container_transfer(
+        "MineBot_1",
+        "container-1",
+        {
+            "bot_name": "OtherBot",
+            "action_id": "other-action",
+            "pos": [1, 64, 0],
+            "direction": "container_to_bot",
+            "container_slot": 0,
+            "bot_slot": 1,
+        },
+    )
+
+    assert request["bot_name"] == "MineBot_1"
+    assert request["action_id"] == "container-1"

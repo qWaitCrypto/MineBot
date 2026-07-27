@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Callable, Protocol
 from uuid import uuid4
 
-from minebot.contract.governance import BreakContext
+from minebot.contract.governance import BreakContext, InteractionContext
 from minebot.contract.messages import ToolResult
 from minebot.game.governance import GovernancePolicy
 from minebot.game.java_body_protocol import (
@@ -39,21 +39,34 @@ class GovernanceAnswerer:
         self._context = context
 
     def verdict(self, proposal: ServerProposal) -> tuple[bool, str]:
-        if proposal.kind != "break":
-            # Only mutation kinds with a mapped governance decision may pass;
-            # anything else is denied, never guessed.
-            return False, f"unsupported_mutation_kind:{proposal.kind}"
-        try:
-            context = BreakContext(proposal.context) if proposal.context is not None else self._context
-        except ValueError:
-            return False, f"unsupported_break_context:{proposal.context}"
-        decision = self._policy.can_break(
-            (proposal.x, proposal.y, proposal.z),
-            proposal.block_id,
-            context,
-            explicit_target=True,
-        )
-        return decision.allowed, decision.reason
+        if proposal.kind == "break":
+            try:
+                context = BreakContext(proposal.context) if proposal.context is not None else self._context
+            except ValueError:
+                return False, f"unsupported_break_context:{proposal.context}"
+            decision = self._policy.can_break(
+                (proposal.x, proposal.y, proposal.z),
+                proposal.block_id,
+                context,
+                explicit_target=True,
+            )
+            return decision.allowed, decision.reason
+        if proposal.kind == "open":
+            if proposal.context is None:
+                return False, "unsupported_interaction_context:None"
+            try:
+                context = InteractionContext(proposal.context)
+            except ValueError:
+                return False, f"unsupported_interaction_context:{proposal.context}"
+            decision = self._policy.can_interact(
+                (proposal.x, proposal.y, proposal.z),
+                proposal.block_id,
+                context,
+            )
+            return decision.allowed, decision.reason
+        # Only mutation kinds with a mapped governance decision may pass;
+        # anything else is denied, never guessed.
+        return False, f"unsupported_mutation_kind:{proposal.kind}"
 
 
 class DuplexTransport(Protocol):
@@ -97,6 +110,7 @@ _PLAYER_ACTION_TERMINALS: dict[str, tuple[bool, str, bool]] = {
     "canceled": (False, "canceled", False),
     "timeout": (False, "action_timeout", True),
 }
+_CONTAINER_TRANSFER_TERMINALS = _PLAYER_ACTION_TERMINALS
 
 
 class JavaBodyClient:
@@ -243,6 +257,11 @@ class JavaBodyClient:
         request = self._protocol.player_action(self._bot, action_id, action, params)
         return self._run_action(request, action_id, "player_action", _PLAYER_ACTION_TERMINALS)
 
+    def container_transfer(self, action_id: str, params: dict) -> ToolResult:
+        self._ensure_connected()
+        request = self._protocol.container_transfer(self._bot, action_id, params)
+        return self._run_action(request, action_id, "container_transfer", _CONTAINER_TRANSFER_TERMINALS)
+
     def _ensure_connected(self) -> None:
         if self._transport is None or not self._protocol.negotiated:
             self.connect()
@@ -292,20 +311,26 @@ class JavaBodyClient:
         mapped = terminals.get(classification)
         if mapped is not None:
             success, reason, can_retry = mapped
-            if success and kind in {"collect", "player_action"}:
+            if success and kind in {"collect", "player_action", "container_transfer"}:
                 reason = str(terminal.get("reason", reason))
             return ToolResult(
                 success=success,
                 reason=reason if success else str(terminal.get("reason", reason)),
                 can_retry=can_retry,
-                metrics=self._terminal_metrics(terminal, include_all=kind == "player_action"),
+                metrics=self._terminal_metrics(
+                    terminal,
+                    include_all=kind in {"player_action", "container_transfer"},
+                ),
             )
         # Failed classification: keep the Java typed reason, never relabel.
         return ToolResult(
             success=False,
             reason=str(terminal.get("reason", "failed")),
             can_retry=_failed_is_retriable(str(terminal.get("reason", ""))),
-            metrics=self._terminal_metrics(terminal, include_all=kind == "player_action"),
+            metrics=self._terminal_metrics(
+                terminal,
+                include_all=kind in {"player_action", "container_transfer"},
+            ),
         )
 
     @staticmethod

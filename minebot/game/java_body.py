@@ -41,7 +41,8 @@ _WORLD_READ_SCOPES = frozenset({
     "debugBlocks",
 })
 _ENTITY_READ_SCOPES = frozenset({"nearbyEntities"})
-_PLAYER_ACTION_TERMINALS = {
+_ACTION_TERMINALS = {
+    "containerTransfer": "containerDone",
     "dropItem": "dropDone",
     "lookAt": "lookDone",
     "moveItem": "moveItemDone",
@@ -93,6 +94,8 @@ class JavaBody:
     def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
         if scope == "inventory":
             return self._perceive_inventory(params)
+        if scope == "container":
+            return self._perceive_container(params)
         if scope in _WORLD_READ_SCOPES:
             return self._perceive_world(scope, params)
         if scope in _ENTITY_READ_SCOPES:
@@ -249,6 +252,76 @@ class JavaBody:
             next=None if complete else str(next_start),
         )
 
+    def _perceive_container(self, params: dict[str, object]) -> PerceptionResult:
+        raw_pos = params.get("pos")
+        if not isinstance(raw_pos, (list, tuple)) or len(raw_pos) != 3:
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope="container",
+                type="perception",
+                ok=False,
+                complete=True,
+                error="invalid_request:pos",
+            )
+        try:
+            pos = [int(value) for value in raw_pos]
+        except (TypeError, ValueError):
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope="container",
+                type="perception",
+                ok=False,
+                complete=True,
+                error="invalid_request:pos",
+            )
+        reply = self._client.request_response(lambda protocol: protocol.container_read(
+            self.bot_name,
+            pos,
+            start=_opt_int(params.get("start")),
+            limit=_opt_int(params.get("limit")),
+        ))
+        if isinstance(reply, ErrorResponse):
+            missing = reply.code in {"body_missing", "missing_body"}
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope="container",
+                type="perception",
+                ok=False,
+                complete=missing,
+                uncertainty=[{"reason": "missing_body"}] if missing else None,
+                error="missing_body" if missing else reply.code,
+            )
+        payload = reply.payload
+        if payload.get("missing") is True:
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope="container",
+                type="perception",
+                ok=False,
+                complete=True,
+                uncertainty=[{"reason": "missing_body"}],
+                error="missing_body",
+            )
+        next_start = payload.get("nextStart")
+        complete = next_start is None
+        return PerceptionResult(
+            bot=self.bot_name,
+            scope="container",
+            type="perception",
+            ok=True,
+            complete=complete,
+            data={
+                "pos": payload.get("pos", pos),
+                "start": payload.get("start"),
+                "limit": payload.get("limit"),
+                "nextStart": next_start,
+                "totalSlots": payload.get("totalSlots"),
+                "slots": payload.get("slots", []),
+            },
+            uncertainty=[] if complete else [{"reason": "page_limit"}],
+            next=None if complete else str(next_start),
+        )
+
     def _perceive_world(
         self,
         scope: str,
@@ -359,8 +432,8 @@ class JavaBody:
                 target_y=_opt_int(action.params.get("target_y")),
                 timeout_ticks=_opt_int(action.params.get("timeout_ticks")),
             )
-        elif action.name in _PLAYER_ACTION_TERMINALS:
-            return self._execute_player_action(action)
+        elif action.name in _ACTION_TERMINALS:
+            return self._execute_terminal_action(action)
         else:
             return _gap_result(action, self.bot_name)
         return Result(
@@ -400,8 +473,11 @@ class JavaBody:
     def interrupt(self, reason: str | None = None) -> Result:
         return _gap_result(Action.create("interrupt"), self.bot_name)
 
-    def _execute_player_action(self, action: Action) -> Result:
-        outcome = self._client.player_action(action.id, action.name, dict(action.params))
+    def _execute_terminal_action(self, action: Action) -> Result:
+        if action.name == "containerTransfer":
+            outcome = self._client.container_transfer(action.id, dict(action.params))
+        else:
+            outcome = self._client.player_action(action.id, action.name, dict(action.params))
         terminal_record = self._client.last_action_terminal
         if terminal_record is None or terminal_record[0] != action.id:
             return Result(
@@ -434,7 +510,7 @@ class JavaBody:
             seq=terminal_event.seq if terminal_event is not None else 0,
             tick=terminal_event.tick if terminal_event is not None else 0,
             bot=self.bot_name,
-            name=_PLAYER_ACTION_TERMINALS[action.name],
+            name=_ACTION_TERMINALS[action.name],
             data=data,
         )
         return Result(

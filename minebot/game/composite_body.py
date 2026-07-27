@@ -17,6 +17,7 @@ class CompositeBody:
         "navigate",
         "collectBlock",
         "ascend",
+        "containerTransfer",
         "dropItem",
         "lookAt",
         "moveItem",
@@ -25,6 +26,7 @@ class CompositeBody:
         "useItem",
     })
     JAVA_TERMINAL_ACTIONS = frozenset({
+        "containerTransfer",
         "dropItem",
         "lookAt",
         "moveItem",
@@ -35,6 +37,7 @@ class CompositeBody:
     JAVA_PERCEPTIONS = frozenset({
         "findBlocks",
         "inventory",
+        "container",
         "blockAt",
         "blockCells",
         "surfaceColumns",

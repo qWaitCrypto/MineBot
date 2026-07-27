@@ -8,6 +8,7 @@ import dev.minebot.body.action.ActionRegistry;
 import dev.minebot.body.action.ActionRuntime;
 import dev.minebot.body.action.AscendExecutor;
 import dev.minebot.body.action.CollectExecutor;
+import dev.minebot.body.action.ContainerPrimitiveActions;
 import dev.minebot.body.action.MutationGate;
 import dev.minebot.body.action.PlayerPrimitiveActions;
 import dev.minebot.body.control.FakePlayerActionOwner;
@@ -38,7 +39,10 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.Container;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.entity.BarrelBlockEntity;
 import net.minecraft.world.phys.AABB;
 
 import java.util.ArrayList;
@@ -52,7 +56,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String CHANNEL = "fakeplayer-body";
     public static final String PROTOCOL = "fakeplayer-body/1";
     private static final Set<String> REQUEST_TYPES = Set.of(
-        "HELLO", "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND", "PLAYER_ACTION",
+        "HELLO", "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "CONTAINER_READ", "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND", "PLAYER_ACTION", "CONTAINER_TRANSFER",
         "MUTATION_VERDICT", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
     );
     private static final int MAX_RADIUS = 128;
@@ -129,17 +133,91 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "FIND_BLOCKS" -> handleFindBlocks(connection, request, serverTick);
             case "BODY_STATE" -> handleBodyState(connection, request, serverTick);
             case "INVENTORY" -> handleInventory(connection, request, serverTick);
+            case "CONTAINER_READ" -> handleContainerRead(connection, request, serverTick);
             case "WORLD_READ" -> handleWorldRead(connection, request, serverTick);
             case "ENTITY_READ" -> handleEntityRead(connection, request, serverTick);
             case "NAVIGATE" -> handleNavigate(connection, request, serverTick);
             case "COLLECT_BLOCK" -> handleCollectBlock(connection, request, serverTick);
             case "ASCEND" -> handleAscend(connection, request, serverTick);
             case "PLAYER_ACTION" -> handlePlayerAction(connection, request, serverTick);
+            case "CONTAINER_TRANSFER" -> handleContainerTransfer(connection, request, serverTick);
             case "MUTATION_VERDICT" -> handleMutationVerdict(request);
             case "RESUME_EVENTS" -> handleResumeEvents(connection, request, serverTick);
             case "CANCEL_ACTION" -> handleCancelAction(connection, request, serverTick);
             case "QUERY_ACTION" -> handleQueryAction(connection, request, serverTick);
             default -> throw new IllegalStateException("unreachable request type " + type);
+        }
+    }
+
+    private void handleContainerTransfer(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            String actionId = requiredString(request, "action_id", 128);
+            BlockPos pos = requiredBlockPos(request, "pos");
+            String direction = requiredString(request, "direction", 32);
+            if (!Set.of("container_to_bot", "bot_to_container").contains(direction)) {
+                throw new IllegalArgumentException("unsupported container direction: " + direction);
+            }
+            int containerSlot = boundedInt(request, "container_slot", Integer.MIN_VALUE, Integer.MAX_VALUE);
+            int botSlot = boundedInt(request, "bot_slot", Integer.MIN_VALUE, Integer.MAX_VALUE);
+            int count = boundedOptionalInt(request, "count", -1, -1, Integer.MAX_VALUE);
+            int maxStack = boundedOptionalInt(request, "max_stack", 64, 1, 99);
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
+                return;
+            }
+
+            ActionRuntime.Submission submission = runtime.submit(
+                botName, actionId, "CONTAINER_TRANSFER", OwnerPriority.ACTION, serverTick
+            );
+            JsonObject response = baseResponse(request, "CONTAINER_TRANSFER_ACK");
+            response.addProperty("action_id", actionId);
+            switch (submission) {
+                case ActionRuntime.Submission.Accepted ignored -> {
+                    runtime.attachExecutor(actionId, new ContainerPrimitiveActions.Executor(
+                        botName,
+                        actionId,
+                        pos.getX(),
+                        pos.getY(),
+                        pos.getZ(),
+                        direction,
+                        containerSlot,
+                        botSlot,
+                        count,
+                        maxStack,
+                        () -> resolveContainerTarget(player, level, pos),
+                        mutationGate,
+                        this::publishProposal,
+                        events,
+                        runtime
+                    ));
+                    response.addProperty("state", "accepted");
+                }
+                case ActionRuntime.Submission.Duplicate duplicate -> {
+                    response.addProperty(
+                        "state",
+                        duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal"
+                    );
+                    if (duplicate.status().terminal() != null) {
+                        response.add("terminal", duplicate.status().terminal());
+                    }
+                }
+                case ActionRuntime.Submission.Rejected rejected -> {
+                    JsonObject error = MineBotChannelRouter.error(
+                        CHANNEL, requestId(request), rejected.code(), "another action owns this bot", true
+                    );
+                    error.addProperty("owner_action_id", rejected.currentOwner().actionId());
+                    error.addProperty("owner_priority", rejected.currentOwner().priority().name());
+                    connection.send(error, serverTick);
+                    return;
+                }
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        } catch (RuntimeException error) {
+            sendError(connection, request, serverTick, "container_transfer_internal_error", "container transfer failed", true);
         }
     }
 
@@ -566,6 +644,78 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         }
     }
 
+    /** Paged server-authoritative contents for a real single or combined block container. */
+    private void handleContainerRead(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            BlockPos pos = requiredBlockPos(request, "pos");
+            JsonObject response = baseResponse(request, "CONTAINER_READ_RESULT");
+            response.addProperty("bot", botName);
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                response.addProperty("missing", true);
+                connection.send(response, serverTick);
+                return;
+            }
+            var chunk = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+            if (chunk == null) {
+                sendError(connection, request, serverTick, "container_unloaded", "container chunk is not loaded", true);
+                return;
+            }
+            var state = chunk.getBlockState(pos);
+            Container container = containerAt(level, pos, state.getBlock());
+            if (container == null) {
+                sendError(connection, request, serverTick, "container_unavailable", "target is not an openable container", false);
+                return;
+            }
+
+            int totalSlots = Math.min(54, container.getContainerSize());
+            if (totalSlots <= 0) {
+                sendError(connection, request, serverTick, "container_unavailable", "container has no slots", false);
+                return;
+            }
+            int requestedStart = boundedOptionalInt(request, "start", 0, Integer.MIN_VALUE, Integer.MAX_VALUE);
+            int requestedLimit = boundedOptionalInt(request, "limit", totalSlots, Integer.MIN_VALUE, Integer.MAX_VALUE);
+            int start = Math.max(0, Math.min(totalSlots - 1, requestedStart));
+            int limit = Math.max(1, Math.min(totalSlots, requestedLimit));
+            int end = Math.min(totalSlots, start + limit);
+            JsonArray slots = new JsonArray();
+            for (int slot = start; slot < end; slot++) {
+                ItemStack stack = container.getItem(slot);
+                JsonObject entry = new JsonObject();
+                entry.addProperty("slot", slot);
+                entry.addProperty("slotType", "container");
+                entry.addProperty("slotLabel", "container." + slot);
+                entry.addProperty("empty", stack.isEmpty());
+                entry.addProperty("item", stack.isEmpty() ? null : BuiltInRegistries.ITEM.getKey(stack.getItem()).toString());
+                entry.addProperty("count", stack.isEmpty() ? 0 : stack.getCount());
+                entry.addProperty("stackRaw", stack.isEmpty() ? null : encodeStack(stack));
+                slots.add(entry);
+            }
+
+            response.addProperty("missing", false);
+            response.addProperty("start", start);
+            response.addProperty("limit", limit);
+            if (end >= totalSlots) {
+                response.add("nextStart", JsonNull.INSTANCE);
+            } else {
+                response.addProperty("nextStart", end);
+            }
+            response.addProperty("totalSlots", totalSlots);
+            JsonArray responsePos = new JsonArray();
+            responsePos.add(pos.getX());
+            responsePos.add(pos.getY());
+            responsePos.add(pos.getZ());
+            response.add("pos", responsePos);
+            response.add("slots", slots);
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        } catch (RuntimeException error) {
+            sendError(connection, request, serverTick, "container_read_internal_error", "container snapshot failed", true);
+        }
+    }
+
     private void handleWorldRead(MineBotConnection connection, JsonObject request, int serverTick) {
         long startedNanos = System.nanoTime();
         try {
@@ -690,6 +840,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         return switch (status.record().type()) {
             case "ASCEND" -> "recovery";
             case "COLLECT_BLOCK" -> "collect";
+            case "CONTAINER_TRANSFER" -> "activate";
             default -> "direct";
         };
     }
@@ -1077,6 +1228,146 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         return Map.copyOf(blocks);
     }
 
+    private ContainerPrimitiveActions.Target resolveContainerTarget(
+        ServerPlayer player,
+        ServerLevel level,
+        BlockPos pos
+    ) {
+        if (player.isRemoved() || server.getPlayerList().getPlayer(player.getUUID()) != player) {
+            return ContainerPrimitiveActions.Target.unavailable("missing_body");
+        }
+        var chunk = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+        if (chunk == null) {
+            return ContainerPrimitiveActions.Target.unavailable("container_unloaded");
+        }
+        var state = chunk.getBlockState(pos);
+        String blockId = LoadedBlockScanner.blockId(state.getBlock());
+        if (!(state.getBlock() instanceof ChestBlock)
+            && !(level.getBlockEntity(pos) instanceof BarrelBlockEntity)) {
+            return ContainerPrimitiveActions.Target.unavailable("container_wrong_type");
+        }
+        Container container = containerAt(level, pos, state.getBlock());
+        if (container == null) {
+            return ContainerPrimitiveActions.Target.unavailable("container_unavailable");
+        }
+        if (!container.stillValid(player)) {
+            return ContainerPrimitiveActions.Target.unavailable("container_out_of_range");
+        }
+        return new ContainerPrimitiveActions.Target(
+            blockId,
+            new MinecraftInventoryAccess(container),
+            new MinecraftInventoryAccess(player.getInventory()),
+            null
+        );
+    }
+
+    private static Container containerAt(ServerLevel level, BlockPos pos, Block block) {
+        if (block instanceof ChestBlock chest) {
+            return ChestBlock.getContainer(chest, level.getBlockState(pos), level, pos, false);
+        }
+        return level.getBlockEntity(pos) instanceof Container container ? container : null;
+    }
+
+    private String encodeStack(ItemStack stack) {
+        return ItemStack.CODEC.encodeStart(
+            server.registryAccess().createSerializationContext(JsonOps.INSTANCE),
+            stack
+        ).getOrThrow().toString();
+    }
+
+    private static final class MinecraftInventoryAccess implements ContainerPrimitiveActions.InventoryAccess {
+        private final Container container;
+
+        private MinecraftInventoryAccess(Container container) {
+            this.container = container;
+        }
+
+        @Override
+        public int size() {
+            return container.getContainerSize();
+        }
+
+        @Override
+        public boolean slotEmpty(int slot) {
+            return container.getItem(slot).isEmpty();
+        }
+
+        @Override
+        public String itemIdAt(int slot) {
+            ItemStack stack = container.getItem(slot);
+            return stack.isEmpty() ? null : BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+        }
+
+        @Override
+        public int itemCountAt(int slot) {
+            return container.getItem(slot).getCount();
+        }
+
+        @Override
+        public boolean sameStack(int slot, ContainerPrimitiveActions.InventoryAccess other, int otherSlot) {
+            if (!(other instanceof MinecraftInventoryAccess target)) {
+                return false;
+            }
+            return ItemStack.isSameItemSameComponents(container.getItem(slot), target.container.getItem(otherSlot));
+        }
+
+        @Override
+        public int maxStackSizeAt(int slot) {
+            return container.getItem(slot).getMaxStackSize();
+        }
+
+        @Override
+        public int destinationMaxStackSize(
+            int slot,
+            ContainerPrimitiveActions.InventoryAccess source,
+            int sourceSlot
+        ) {
+            if (!(source instanceof MinecraftInventoryAccess origin)) {
+                return 0;
+            }
+            return container.getMaxStackSize(origin.container.getItem(sourceSlot));
+        }
+
+        @Override
+        public boolean canMoveTo(
+            int sourceSlot,
+            ContainerPrimitiveActions.InventoryAccess destination,
+            int destinationSlot
+        ) {
+            if (!(destination instanceof MinecraftInventoryAccess target)) {
+                return false;
+            }
+            ItemStack stack = container.getItem(sourceSlot);
+            return container.canTakeItem(target.container, sourceSlot, stack)
+                && target.container.canPlaceItem(destinationSlot, stack);
+        }
+
+        @Override
+        public void moveItemsTo(
+            int sourceSlot,
+            ContainerPrimitiveActions.InventoryAccess destination,
+            int destinationSlot,
+            int count
+        ) {
+            if (!(destination instanceof MinecraftInventoryAccess target)) {
+                throw new IllegalArgumentException("destination is not a Minecraft inventory");
+            }
+            ItemStack source = container.getItem(sourceSlot);
+            ItemStack existing = target.container.getItem(destinationSlot);
+            ItemStack moved = source.split(count);
+            if (existing.isEmpty()) {
+                target.container.setItem(destinationSlot, moved);
+            } else {
+                existing.grow(moved.getCount());
+            }
+            if (source.isEmpty()) {
+                container.setItem(sourceSlot, ItemStack.EMPTY);
+            }
+            container.setChanged();
+            target.container.setChanged();
+        }
+    }
+
     private PlayerPrimitiveActions.PlayerAccess playerAccess(ServerPlayer player) {
         return new PlayerPrimitiveActions.PlayerAccess() {
             @Override
@@ -1212,6 +1503,21 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             throw new IllegalArgumentException(name + " must contain finite coordinates");
         }
         return new PlayerPrimitiveActions.Position(x, y, z);
+    }
+
+    private static BlockPos requiredBlockPos(JsonObject params, String name) {
+        if (!params.has(name) || !params.get(name).isJsonArray() || params.getAsJsonArray(name).size() != 3) {
+            throw new IllegalArgumentException(name + " must be a three-number array");
+        }
+        JsonArray values = params.getAsJsonArray(name);
+        double x = values.get(0).getAsDouble();
+        double y = values.get(1).getAsDouble();
+        double z = values.get(2).getAsDouble();
+        if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)
+            || x != Math.floor(x) || y != Math.floor(y) || z != Math.floor(z)) {
+            throw new IllegalArgumentException(name + " must contain finite integer coordinates");
+        }
+        return new BlockPos((int) x, (int) y, (int) z);
     }
 
     private static String requiredItemId(JsonObject params, String name) {

@@ -91,6 +91,13 @@ def test_composite_routes_migrated_player_action_and_its_terminal_to_java(
     java = JavaBody(JavaBodyClient("Bot", lambda: FakeBodyServer()), "Bot")
     body = CompositeBody(scarpet, java)
     params = {
+        "containerTransfer": {
+            "pos": [1, 64, 0],
+            "direction": "container_to_bot",
+            "container_slot": 0,
+            "bot_slot": 1,
+            "count": 2,
+        },
         "dropItem": {"slot": 0, "mode": "one"},
         "selectItem": {"item": "minecraft:bread"},
         "lookAt": {"target": [1.0, 65.0, 1.0]},

@@ -17,7 +17,13 @@ from minebot.game.java_body_adapter import (
 from minebot.game.java_body_protocol import ServerProposal
 
 
-def _proposal(kind: str = "break", block_id: str = "minecraft:oak_log", pos=(10, 64, 10)) -> ServerProposal:
+def _proposal(
+    kind: str = "break",
+    block_id: str = "minecraft:oak_log",
+    pos=(10, 64, 10),
+    *,
+    context: str | None = None,
+) -> ServerProposal:
     return ServerProposal(
         proposal_id="mp-1",
         bot="Bot",
@@ -28,6 +34,7 @@ def _proposal(kind: str = "break", block_id: str = "minecraft:oak_log", pos=(10,
         z=pos[2],
         block_id=block_id,
         payload={},
+        context=context,
     )
 
 
@@ -59,6 +66,33 @@ def test_protected_region_is_denied_by_the_real_policy() -> None:
     allow, reason = GovernanceAnswerer(_policy()).verdict(_proposal(pos=(35, 64, 35)))
     assert allow is False
     assert reason == "protected_region"
+
+
+def test_open_proposal_uses_interaction_governance() -> None:
+    allowed = _proposal(
+        kind="open",
+        block_id="minecraft:chest",
+        pos=(10, 64, 10),
+        context="activate",
+    )
+    protected = _proposal(
+        kind="open",
+        block_id="minecraft:chest",
+        pos=(35, 64, 35),
+        context="activate",
+    )
+
+    assert GovernanceAnswerer(_policy()).verdict(allowed) == (True, "allowed_interaction")
+    assert GovernanceAnswerer(_policy()).verdict(protected) == (False, "protected_region")
+
+
+def test_open_proposal_without_context_is_denied_never_guessed() -> None:
+    proposal = _proposal(kind="open", block_id="minecraft:chest")
+
+    assert GovernanceAnswerer(_policy()).verdict(proposal) == (
+        False,
+        "unsupported_interaction_context:None",
+    )
 
 
 def test_bot_ledger_governs_bot_placed_blocks() -> None:
@@ -181,7 +215,7 @@ class FakeBodyServer:
                 "max_requests_per_second": 40,
                 "request_types": [
                     "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "ENTITY_READ", "FIND_BLOCKS",
-                    "HELLO", "INVENTORY", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
+                    "HELLO", "INVENTORY", "CONTAINER_READ", "CONTAINER_TRANSFER", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
                     "RESUME_EVENTS", "WORLD_READ",
                 ],
             })
@@ -193,6 +227,8 @@ class FakeBodyServer:
             self._handle_ascend(message, rid)
         elif kind == "PLAYER_ACTION":
             self._handle_player_action(message, rid)
+        elif kind == "CONTAINER_TRANSFER":
+            self._handle_container_transfer(message, rid)
         elif kind == "MUTATION_VERDICT":
             self._handle_verdict(message)
         elif kind == "QUERY_ACTION":
@@ -247,6 +283,39 @@ class FakeBodyServer:
                 "limit": limit,
                 "nextStart": None if end >= 46 else end,
                 "totalSlots": 46,
+                "slots": slots,
+            })
+        elif kind == "CONTAINER_READ":
+            if message.get("bot_name") == "MissingBot":
+                self._emit_response(rid, "CONTAINER_READ_RESULT", {
+                    "bot": "MissingBot",
+                    "missing": True,
+                })
+                return
+            start = max(0, min(26, int(message.get("start", 0))))
+            limit = max(1, min(27, int(message.get("limit", 27))))
+            end = min(27, start + limit)
+            slots = []
+            for slot in range(start, end):
+                item = "minecraft:diamond" if slot == 0 else None
+                count = 3 if slot == 0 else 0
+                slots.append({
+                    "slot": slot,
+                    "slotType": "container",
+                    "slotLabel": f"container.{slot}",
+                    "empty": item is None,
+                    "item": item,
+                    "count": count,
+                    "stackRaw": None if item is None else '{"id":"minecraft:diamond","count":3}',
+                })
+            self._emit_response(rid, "CONTAINER_READ_RESULT", {
+                "bot": message.get("bot_name"),
+                "missing": False,
+                "pos": message.get("pos"),
+                "start": start,
+                "limit": limit,
+                "nextStart": None if end >= 27 else end,
+                "totalSlots": 27,
                 "slots": slots,
             })
         elif kind == "WORLD_READ":
@@ -537,9 +606,63 @@ class FakeBodyServer:
             })
         self._emit_terminal(action_id, facts)
 
+    def _handle_container_transfer(self, message: dict, rid: str) -> None:
+        action_id = message["action_id"]
+        self._container_action = action_id
+        self._container_params = dict(message)
+        self._emit_response(rid, "CONTAINER_TRANSFER_ACK", {"action_id": action_id, "state": "accepted"})
+        self._emit_event("owner_acquired", action_id, {"type": "CONTAINER_TRANSFER", "priority": "ACTION"})
+        self._emit_proposal(
+            action_id,
+            "mp-container-1",
+            "minecraft:chest",
+            *message.get("pos", [1, 64, 0]),
+            kind="open",
+            context="activate",
+        )
+
     def _handle_verdict(self, message: dict) -> None:
         allow = bool(message.get("allow"))
         self.verdict_seen.append((message.get("proposal_id"), allow))
+        if getattr(self, "_container_action", None) is not None:
+            action = self._container_action
+            params = self._container_params
+            if allow:
+                count = int(params.get("count", 1))
+                self._emit_event("mutation_allowed", action, {"proposal_id": "mp-container-1"})
+                self._emit_terminal(action, {
+                    "classification": "completed",
+                    "reason": "partial",
+                    "success": True,
+                    "stopped_reason": "partial",
+                    "direction": params.get("direction"),
+                    "pos": params.get("pos"),
+                    "container_slot": params.get("container_slot"),
+                    "bot_slot": params.get("bot_slot"),
+                    "item": "minecraft:diamond",
+                    "count": count,
+                    "container_before": {"item": "minecraft:diamond", "count": 3},
+                    "container_after": {"item": "minecraft:diamond", "count": 3 - count},
+                    "bot_before": {"item": None, "count": 0},
+                    "bot_after": {"item": "minecraft:diamond", "count": count},
+                })
+            else:
+                denial = f"governance_denied:{message.get('reason')}"
+                self._emit_event("mutation_denied", action, {
+                    "proposal_id": "mp-container-1", "reason": denial,
+                })
+                self._emit_terminal(action, {
+                    "classification": "failed",
+                    "reason": denial,
+                    "success": False,
+                    "stopped_reason": denial,
+                    "direction": params.get("direction"),
+                    "pos": params.get("pos"),
+                    "container_slot": params.get("container_slot"),
+                    "bot_slot": params.get("bot_slot"),
+                    "count": 0,
+                })
+            return
         action = getattr(self, "_collect_action", "collect-1")
         if allow:
             self._emit_event("mutation_allowed", action, {"proposal_id": "mp-1"})
@@ -586,10 +709,12 @@ class FakeBodyServer:
     def _emit_terminal(self, action, data) -> None:
         self._emit_event("action_terminal", action, data)
 
-    def _emit_proposal(self, action, pid, block_id, x, y, z) -> None:
+    def _emit_proposal(self, action, pid, block_id, x, y, z, *, kind="break", context=None) -> None:
         frame = {"channel": self.CHANNEL, "type": "MUTATION_PROPOSAL", "proposal_id": pid,
                  "bot": "Bot", "action_id": action, "server_tick": self._tick,
-                 "mutation": {"kind": "break", "x": x, "y": y, "z": z, "block_id": block_id}}
+                 "mutation": {"kind": kind, "x": x, "y": y, "z": z, "block_id": block_id}}
+        if context is not None:
+            frame["mutation"]["context"] = context
         self._out.append(json.dumps(frame))
 
 
@@ -770,9 +895,9 @@ def test_java_body_perceive_adapts_find_blocks_and_gaps_the_rest() -> None:
     assert find_requests[0]["vertical_radius"] == 12
     assert find_requests[1]["cursor"] == "find-page-2"
 
-    gap = body.perceive("container", {})
+    gap = body.perceive("recipeData", {})
     assert gap.ok is False
-    assert gap.error == "capability_unavailable:container"
+    assert gap.error == "capability_unavailable:recipeData"
 
 
 def test_java_body_find_blocks_rejects_numeric_resume_without_snapshot_cursor() -> None:
@@ -811,6 +936,31 @@ def test_java_body_inventory_missing_body_is_explicit_and_complete() -> None:
     assert result.complete is True
     assert result.error == "missing_body"
     assert result.uncertainty == [{"reason": "missing_body"}]
+
+
+def test_java_body_container_preserves_paging_position_and_stack_facts() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    first = body.perceive("container", {"pos": [1, 64, 0], "start": 0, "limit": 12})
+    second = body.perceive("container", {"pos": [1, 64, 0], "start": 12, "limit": 20})
+
+    assert first.ok and not first.complete
+    assert first.next == "12"
+    assert first.data["pos"] == [1, 64, 0]
+    assert first.data["totalSlots"] == 27
+    assert first.data["slots"][0]["item"] == "minecraft:diamond"
+    assert first.data["slots"][0]["count"] == 3
+    assert second.ok and second.complete
+    assert len(second.data["slots"]) == 15
+
+
+def test_java_body_container_missing_body_is_explicit() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "MissingBot")
+
+    result = body.perceive("container", {"pos": [1, 64, 0]})
+
+    assert not result.ok and result.complete
+    assert result.error == "missing_body"
 
 
 def test_java_body_world_read_family_preserves_existing_perception_shapes() -> None:
@@ -965,6 +1115,53 @@ def test_java_body_move_and_drop_actions_preserve_inventory_terminal_facts() -> 
     assert drop_terminal.name == "dropDone"
     assert drop_terminal.data["count_before"] == 3
     assert drop_terminal.data["count_after"] == 2
+
+
+def test_java_body_container_transfer_preserves_caller_id_governance_and_terminal_facts() -> None:
+    server = FakeBodyServer()
+    policy = GovernancePolicy(natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))])
+    body = JavaBody(_client(server, GovernanceAnswerer(policy)), "Bot")
+    action = Action.create("containerTransfer", {
+        "pos": [1, 64, 0],
+        "direction": "container_to_bot",
+        "container_slot": 0,
+        "bot_slot": 1,
+        "count": 2,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted and not accepted.complete
+    assert terminal.name == "containerDone"
+    assert terminal.data["action_id"] == action.id
+    assert terminal.data["success"] is True
+    assert terminal.data["count"] == 2
+    assert terminal.data["container_after"]["count"] == 1
+    assert server.verdict_seen == [("mp-container-1", True)]
+    request = next(item for item in server.requests if item.get("type") == "CONTAINER_TRANSFER")
+    assert request["action_id"] == action.id
+    assert request["pos"] == [1, 64, 0]
+
+
+def test_java_body_container_transfer_governance_denial_is_not_relabelled() -> None:
+    server = FakeBodyServer()
+    body = JavaBody(_client(server, GovernanceAnswerer(GovernancePolicy())), "Bot")
+    action = Action.create("containerTransfer", {
+        "pos": [1, 64, 0],
+        "direction": "container_to_bot",
+        "container_slot": 0,
+        "bot_slot": 1,
+        "count": 2,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.data["success"] is False
+    assert terminal.data["stopped_reason"] == "governance_denied:unknown_provenance"
+    assert server.verdict_seen == [("mp-container-1", False)]
 
 
 def test_java_body_poll_events_drains_contract_events() -> None:
