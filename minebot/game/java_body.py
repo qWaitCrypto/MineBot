@@ -46,6 +46,7 @@ _ACTION_TERMINALS = {
     "craftItem": "craftDone",
     "furnaceTransfer": "furnaceDone",
     "handoffItem": "handoffDone",
+    "igniteBlock": "igniteDone",
     "jump": "jumpDone",
     "mineBlock": "mineDone",
     "placeBlock": "placeDone",
@@ -54,6 +55,7 @@ _ACTION_TERMINALS = {
     "moveItem": "moveItemDone",
     "selectItem": "selectItemDone",
     "stop": "stopDone",
+    "sowCrop": "sowDone",
     "useItem": "useDone",
 }
 
@@ -544,10 +546,31 @@ class JavaBody:
         return terminal
 
     def ignite_block(self, pos, *, item=None, allow_server_substitute=False, timeout_s=8.0) -> Event:
-        raise NotImplementedError(f"{_CAPABILITY_GAP}:ignite_block")
+        params: dict[str, object] = {
+            "target": list(pos),
+            "item": item or "minecraft:flint_and_steel",
+            "allow_server_substitute": bool(allow_server_substitute),
+            "timeout_ticks": max(1, min(200, int(timeout_s * 20.0 + 0.999))),
+        }
+        action = Action.create("igniteBlock", params)
+        accepted = self.execute(action)
+        if not accepted.ok or not accepted.accepted:
+            return _rejected_terminal(action, self.bot_name, "igniteDone", accepted.error)
+        return self.await_action_terminal(action.id, timeout_s=timeout_s)
 
     def sow_crop(self, pos, *, crop_block, seed_item=None, allow_server_substitute=False, timeout_s=8.0) -> Event:
-        raise NotImplementedError(f"{_CAPABILITY_GAP}:sow_crop")
+        params: dict[str, object] = {
+            "target": list(pos),
+            "crop_block": crop_block,
+            "seed_item": seed_item or "",
+            "allow_server_substitute": bool(allow_server_substitute),
+            "timeout_ticks": max(1, min(200, int(timeout_s * 20.0 + 0.999))),
+        }
+        action = Action.create("sowCrop", params)
+        accepted = self.execute(action)
+        if not accepted.ok or not accepted.accepted:
+            return _rejected_terminal(action, self.bot_name, "sowDone", accepted.error)
+        return self.await_action_terminal(action.id, timeout_s=timeout_s)
 
     def interrupt(self, reason: str | None = None) -> Result:
         return _gap_result(Action.create("interrupt"), self.bot_name)
@@ -616,6 +639,22 @@ def _gap_result(action: Action, bot: str) -> Result:
         id=action.id, bot=bot, type="result",
         ok=False, accepted=False, complete=True,
         error=f"{_CAPABILITY_GAP}:{action.name}",
+    )
+
+
+def _rejected_terminal(action: Action, bot: str, name: str, error: str | None) -> Event:
+    reason = str(error or "body_rejected")
+    return Event(
+        seq=0,
+        tick=0,
+        bot=bot,
+        name=name,
+        data={
+            "action_id": action.id,
+            "success": False,
+            "stopped_reason": reason,
+            "reason": reason,
+        },
     )
 
 

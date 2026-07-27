@@ -118,6 +118,11 @@ def test_composite_routes_migrated_player_action_and_its_terminal_to_java(
             "count": 2,
             "timeout_ticks": 60,
         },
+        "igniteBlock": {
+            "target": [1, 64, 0],
+            "item": "minecraft:flint_and_steel",
+            "allow_server_substitute": True,
+        },
         "jump": {},
         "mineBlock": {"target": [1, 64, 0], "block_type": "minecraft:stone", "context": "direct"},
         "placeBlock": {"target": [1, 64, 0], "block_type": "minecraft:cobblestone", "context": "work"},
@@ -125,6 +130,12 @@ def test_composite_routes_migrated_player_action_and_its_terminal_to_java(
         "lookAt": {"target": [1.0, 65.0, 1.0]},
         "moveItem": {"from_slot": 18, "to_slot": 0, "count": 3},
         "stop": {},
+        "sowCrop": {
+            "target": [2, 64, 0],
+            "crop_block": "minecraft:wheat",
+            "seed_item": "minecraft:wheat_seeds",
+            "allow_server_substitute": True,
+        },
         "useItem": {"item": "minecraft:bread", "ticks": 2},
     }[action_name]
     action = Action.create(action_name, params)

@@ -14,6 +14,7 @@ import dev.minebot.body.action.CraftPrimitiveActions;
 import dev.minebot.body.action.FurnacePrimitiveActions;
 import dev.minebot.body.action.MutationGate;
 import dev.minebot.body.action.PlayerPrimitiveActions;
+import dev.minebot.body.action.SpecialUseActions;
 import dev.minebot.body.control.FakePlayerActionOwner;
 import dev.minebot.body.control.HeldInputs;
 import dev.minebot.body.control.OwnerPriority;
@@ -47,6 +48,7 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.Container;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BarrelBlockEntity;
 import net.minecraft.world.phys.AABB;
 
@@ -69,6 +71,12 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     private static final int MAX_PAGE_LIMIT = 128;
     private static final int MAX_REPLAY_EVENTS_PER_RESPONSE = 256;
     private static final int MAX_TIMEOUT_TICKS = 12_000;
+    private static final Map<String, String> SEED_TO_CROP = Map.of(
+        "minecraft:wheat_seeds", "minecraft:wheat",
+        "minecraft:beetroot_seeds", "minecraft:beetroots",
+        "minecraft:carrot", "minecraft:carrots",
+        "minecraft:potato", "minecraft:potatoes"
+    );
 
     private final MinecraftServer server;
     private final LoadedBlockScanner scanner = new LoadedBlockScanner();
@@ -407,16 +415,18 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             String action = requiredString(request, "action", 32);
             if (!Set.of(
                 "selectItem", "lookAt", "stop", "useItem", "moveItem", "dropItem",
-                "handoffItem", "mineBlock", "placeBlock", "jump"
+                "handoffItem", "igniteBlock", "sowCrop", "mineBlock", "placeBlock", "jump"
             ).contains(action)) {
                 throw new IllegalArgumentException("unsupported player action: " + action);
             }
             JsonObject params = request.has("params") && request.get("params").isJsonObject()
                 ? request.getAsJsonObject("params")
                 : new JsonObject();
-            final String itemId = Set.of("selectItem", "handoffItem").contains(action)
+            final String itemId = Set.of("selectItem", "handoffItem", "igniteBlock").contains(action)
                 ? requiredItemId(params, "item")
-                : action.equals("useItem") ? optionalItemId(params, "item") : null;
+                : action.equals("sowCrop")
+                    ? requiredItemId(params, "seed_item")
+                    : action.equals("useItem") ? optionalItemId(params, "item") : null;
             final String receiverName = action.equals("handoffItem")
                 ? requiredString(params, "receiver", 64)
                 : null;
@@ -448,12 +458,24 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             final String dropMode = action.equals("dropItem")
                 ? optionalDropMode(params)
                 : null;
-            final BlockPos blockTarget = Set.of("mineBlock", "placeBlock").contains(action)
+            final BlockPos blockTarget = Set.of(
+                "igniteBlock", "sowCrop", "mineBlock", "placeBlock"
+            ).contains(action)
                 ? requiredBlockPos(params, "target")
                 : null;
             final String blockId = Set.of("mineBlock", "placeBlock").contains(action)
                 ? requiredBlockId(params, "block_type")
-                : null;
+                : action.equals("igniteBlock")
+                    ? "minecraft:fire"
+                    : action.equals("sowCrop") ? requiredBlockId(params, "crop_block") : null;
+            if (action.equals("sowCrop") && !blockId.equals(SEED_TO_CROP.get(itemId))) {
+                throw new IllegalArgumentException("seed_item does not produce crop_block");
+            }
+            final boolean allowServerSubstitute = Set.of("igniteBlock", "sowCrop").contains(action)
+                && optionalBoolean(params, "allow_server_substitute", false);
+            final String specialUseContext = action.equals("igniteBlock")
+                ? "activate"
+                : action.equals("sowCrop") ? "farm" : null;
             final String mutationContext = action.equals("mineBlock")
                 ? requiredChoice(
                     params, "context",
@@ -478,7 +500,9 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         ? boundedOptionalInt(
                             params, "timeout_ticks", 60, 1, PlayerPrimitiveActions.MAX_HANDOFF_TICKS
                         )
-                        : 1;
+                        : Set.of("igniteBlock", "sowCrop").contains(action)
+                            ? boundedOptionalInt(params, "timeout_ticks", 20, 1, 200)
+                            : 1;
             ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
             if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
                 sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
@@ -543,6 +567,26 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                             actionTimeout,
                             access,
                             handoffAccess(player, level, receiverName, itemId),
+                            runtime
+                        );
+                        case "igniteBlock", "sowCrop" -> new SpecialUseActions.Executor(
+                            botName,
+                            actionId,
+                            action.equals("igniteBlock")
+                                ? SpecialUseActions.Mode.IGNITE
+                                : SpecialUseActions.Mode.SOW,
+                            blockTarget.getX(),
+                            blockTarget.getY(),
+                            blockTarget.getZ(),
+                            blockId,
+                            itemId,
+                            specialUseContext,
+                            allowServerSubstitute,
+                            actionTimeout,
+                            specialUseAccess(player, level),
+                            adapter,
+                            mutationGate,
+                            this::publishProposal,
                             runtime
                         );
                         case "useItem" -> {
@@ -1700,6 +1744,90 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             @Override
             public PlayerPrimitiveActions.Position position() {
                 return new PlayerPrimitiveActions.Position(player.getX(), player.getY(), player.getZ());
+            }
+        };
+    }
+
+    private SpecialUseActions.WorldAccess specialUseAccess(ServerPlayer player, ServerLevel level) {
+        return new SpecialUseActions.WorldAccess() {
+            @Override
+            public boolean present() {
+                return !player.isRemoved()
+                    && server.getPlayerList().getPlayer(player.getUUID()) == player
+                    && player.level() == level;
+            }
+
+            @Override
+            public String blockIdAt(int x, int y, int z) {
+                return observedBlockId(level, x, y, z);
+            }
+
+            @Override
+            public String selectedItemId() {
+                ItemStack selected = player.getMainHandItem();
+                return selected.isEmpty() ? null : BuiltInRegistries.ITEM.getKey(selected.getItem()).toString();
+            }
+
+            @Override
+            public int selectedItemCount() {
+                return player.getMainHandItem().getCount();
+            }
+
+            @Override
+            public PlayerPrimitiveActions.Position position() {
+                return new PlayerPrimitiveActions.Position(player.getX(), player.getY(), player.getZ());
+            }
+
+            @Override
+            public boolean substituteFire(int x, int y, int z) {
+                BlockPos pos = new BlockPos(x, y, z);
+                var chunk = level.getChunkSource().getChunkNow(x >> 4, z >> 4);
+                if (chunk == null) {
+                    return false;
+                }
+                var current = chunk.getBlockState(pos);
+                var fire = Blocks.FIRE.defaultBlockState();
+                if (!current.canBeReplaced() || !fire.canSurvive(level, pos)) {
+                    return false;
+                }
+                return level.setBlockAndUpdate(pos, fire);
+            }
+
+            @Override
+            public boolean substituteCrop(
+                int x,
+                int y,
+                int z,
+                String cropBlockId,
+                String seedItemId
+            ) {
+                if (!cropBlockId.equals(SEED_TO_CROP.get(seedItemId))) {
+                    return false;
+                }
+                BlockPos farmlandPos = new BlockPos(x, y, z);
+                BlockPos cropPos = farmlandPos.above();
+                var chunk = level.getChunkSource().getChunkNow(x >> 4, z >> 4);
+                if (chunk == null
+                    || chunk.getBlockState(farmlandPos).getBlock() != Blocks.FARMLAND
+                    || !chunk.getBlockState(cropPos).canBeReplaced()) {
+                    return false;
+                }
+                Identifier cropIdentifier = Identifier.tryParse(cropBlockId);
+                Block crop = cropIdentifier == null
+                    ? null
+                    : BuiltInRegistries.BLOCK.getOptional(cropIdentifier).orElse(null);
+                ItemStack selected = player.getMainHandItem();
+                if (crop == null || selected.isEmpty()
+                    || !seedItemId.equals(BuiltInRegistries.ITEM.getKey(selected.getItem()).toString())) {
+                    return false;
+                }
+                var cropState = crop.defaultBlockState();
+                if (!cropState.canSurvive(level, cropPos) || !level.setBlockAndUpdate(cropPos, cropState)) {
+                    return false;
+                }
+                selected.shrink(1);
+                player.getInventory().setChanged();
+                return true;
             }
         };
     }

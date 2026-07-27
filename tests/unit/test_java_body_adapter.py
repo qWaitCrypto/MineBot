@@ -95,6 +95,20 @@ def test_open_proposal_without_context_is_denied_never_guessed() -> None:
     )
 
 
+@pytest.mark.parametrize("context", ["activate", "farm"])
+def test_interact_proposal_uses_interaction_governance(context: str) -> None:
+    allowed = _proposal(
+        kind="interact",
+        block_id="minecraft:farmland" if context == "farm" else "minecraft:air",
+        pos=(10, 64, 10),
+        context=context,
+    )
+    protected = ServerProposal(**{**allowed.__dict__, "x": 35, "z": 35})
+
+    assert GovernanceAnswerer(_policy()).verdict(allowed) == (True, "allowed_interaction")
+    assert GovernanceAnswerer(_policy()).verdict(protected) == (False, "protected_region")
+
+
 def test_place_proposal_uses_place_governance() -> None:
     allowed = _proposal(
         kind="place",
@@ -690,6 +704,28 @@ class FakeBodyServer:
                     "count": params.get("count", 1),
                     "tick": 604,
                 },
+            })
+        elif action == "igniteBlock":
+            facts.update({
+                "target": params.get("target"),
+                "expected_type": "minecraft:fire",
+                "block_after": "minecraft:fire",
+                "item": params.get("item"),
+                "method": "physical",
+                "final_pos": [10.5, 64.0, -3.5],
+            })
+        elif action == "sowCrop":
+            target = params.get("target") or [1, 64, 0]
+            facts.update({
+                "target": target,
+                "crop_pos": [target[0], target[1] + 1, target[2]],
+                "expected_type": params.get("crop_block"),
+                "block_after": params.get("crop_block"),
+                "item": params.get("seed_item"),
+                "method": "physical",
+                "item_count_before": 3,
+                "item_count_after": 2,
+                "final_pos": [10.5, 64.0, -3.5],
             })
         elif action == "useItem":
             facts.update({
@@ -1392,6 +1428,33 @@ def test_java_body_handoff_preserves_receiver_pickup_terminal_truth() -> None:
         "count": 2,
         "tick": 604,
     }
+
+
+def test_java_body_special_use_methods_preserve_world_and_inventory_terminals() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    ignite = body.ignite_block(
+        (1, 64, 0),
+        item="minecraft:flint_and_steel",
+        allow_server_substitute=True,
+        timeout_s=2.0,
+    )
+    sow = body.sow_crop(
+        (2, 64, 0),
+        crop_block="minecraft:wheat",
+        seed_item="minecraft:wheat_seeds",
+        allow_server_substitute=True,
+        timeout_s=2.0,
+    )
+
+    assert ignite.name == "igniteDone"
+    assert ignite.data["success"] is True
+    assert ignite.data["block_after"] == "minecraft:fire"
+    assert sow.name == "sowDone"
+    assert sow.data["success"] is True
+    assert sow.data["block_after"] == "minecraft:wheat"
+    assert sow.data["item_count_before"] == 3
+    assert sow.data["item_count_after"] == 2
 
 
 def test_java_body_container_transfer_preserves_caller_id_governance_and_terminal_facts() -> None:

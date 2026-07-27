@@ -51,7 +51,7 @@ class GovernanceAnswerer:
                 explicit_target=True,
             )
             return decision.allowed, decision.reason
-        if proposal.kind == "open":
+        if proposal.kind in {"open", "interact"}:
             if proposal.context is None:
                 return False, "unsupported_interaction_context:None"
             try:

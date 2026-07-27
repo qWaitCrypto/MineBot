@@ -21,6 +21,7 @@ class CompositeBody:
         "craftItem",
         "furnaceTransfer",
         "handoffItem",
+        "igniteBlock",
         "jump",
         "mineBlock",
         "placeBlock",
@@ -29,6 +30,7 @@ class CompositeBody:
         "moveItem",
         "selectItem",
         "stop",
+        "sowCrop",
         "useItem",
     })
     JAVA_TERMINAL_ACTIONS = frozenset({
@@ -36,6 +38,7 @@ class CompositeBody:
         "craftItem",
         "furnaceTransfer",
         "handoffItem",
+        "igniteBlock",
         "jump",
         "mineBlock",
         "placeBlock",
@@ -44,6 +47,7 @@ class CompositeBody:
         "moveItem",
         "selectItem",
         "stop",
+        "sowCrop",
         "useItem",
     })
     JAVA_PERCEPTIONS = frozenset({
@@ -111,10 +115,10 @@ class CompositeBody:
         return self.scarpet.poll_events()
 
     def ignite_block(self, pos, **kwargs) -> Event:
-        return self.scarpet.ignite_block(pos, **kwargs)
+        return self.java.ignite_block(pos, **kwargs)
 
     def sow_crop(self, pos, **kwargs) -> Event:
-        return self.scarpet.sow_crop(pos, **kwargs)
+        return self.java.sow_crop(pos, **kwargs)
 
     def interrupt(self, reason: str | None = None) -> Result:
         # Java objectives are synchronous at the Python contract face today;
