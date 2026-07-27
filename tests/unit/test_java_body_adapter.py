@@ -178,7 +178,7 @@ class FakeBodyServer:
                 "max_request_bytes": 16384,
                 "max_requests_per_second": 40,
                 "request_types": [
-                    "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS",
+                    "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "ENTITY_READ", "FIND_BLOCKS",
                     "HELLO", "INVENTORY", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION",
                     "RESUME_EVENTS", "WORLD_READ",
                 ],
@@ -247,6 +247,8 @@ class FakeBodyServer:
             })
         elif kind == "WORLD_READ":
             self._handle_world_read(message, rid)
+        elif kind == "ENTITY_READ":
+            self._handle_entity_read(message, rid)
 
     def _handle_find_blocks(self, message: dict, rid: str) -> None:
         if message.get("bot_name") == "MissingBot":
@@ -389,6 +391,72 @@ class FakeBodyServer:
             "data": data,
             "uncertainty": [] if complete else [{"reason": "page_limit"}],
             "next": next_cursor,
+        })
+
+    def _handle_entity_read(self, message: dict, rid: str) -> None:
+        scope = message["scope"]
+        if message.get("bot_name") == "MissingBot":
+            self._emit_response(rid, "ENTITY_READ_RESULT", {
+                "bot": "MissingBot", "scope": scope, "missing": True,
+            })
+            return
+        params = message.get("params") or {}
+        entities = [
+            {
+                "id": "guide-uuid",
+                "type": "minecraft:player",
+                "name": "MineBotGuide",
+                "pos": [12.5, 64.0, -3.5],
+                "health": 20.0,
+                "dist2": 4.0,
+            },
+            {
+                "id": "cow-uuid",
+                "type": "minecraft:cow",
+                "name": "Cow",
+                "pos": [14.5, 64.0, -3.5],
+                "health": 10.0,
+                "dist2": 16.0,
+            },
+            {
+                "id": "item-uuid",
+                "type": "minecraft:item",
+                "name": "Oak Log",
+                "pos": [11.0, 64.0, -3.5],
+                "health": None,
+                "dist2": 0.25,
+            },
+        ]
+        wanted_types = {
+            str(value) if ":" in str(value) else f"minecraft:{value}"
+            for value in params.get("types") or []
+        }
+        wanted_name = params.get("name")
+        matches = [
+            entity for entity in entities
+            if (not wanted_types or entity["type"] in wanted_types)
+            and (wanted_name in {None, ""} or entity["name"] == wanted_name)
+        ]
+        matches.sort(key=lambda entity: (entity["dist2"], entity["id"]))
+        limit = max(1, min(128, int(params.get("limit", 32))))
+        complete = len(matches) <= limit
+        self._emit_response(rid, "ENTITY_READ_RESULT", {
+            "bot": message.get("bot_name"),
+            "scope": scope,
+            "missing": False,
+            "ok": True,
+            "complete": complete,
+            "server_cost_micros": 75,
+            "data": {
+                "center": [10.5, 64.0, -3.5],
+                "radius": int(params.get("radius", 1)),
+                "limit": limit,
+                "count": min(limit, len(matches)),
+                "totalMatches": len(matches),
+                "entities": matches[:limit],
+            },
+            "uncertainty": [] if complete else [{"reason": "limit_exceeded"}],
+            "next": None if complete else "limit",
         })
 
     def _handle_collect(self, message: dict, rid: str) -> None:
@@ -647,9 +715,9 @@ def test_java_body_perceive_adapts_find_blocks_and_gaps_the_rest() -> None:
     assert find_requests[0]["vertical_radius"] == 12
     assert find_requests[1]["cursor"] == "find-page-2"
 
-    gap = body.perceive("nearbyEntities", {})
+    gap = body.perceive("container", {})
     assert gap.ok is False
-    assert gap.error == "capability_unavailable:nearbyEntities"
+    assert gap.error == "capability_unavailable:container"
 
 
 def test_java_body_find_blocks_rejects_numeric_resume_without_snapshot_cursor() -> None:
@@ -720,6 +788,42 @@ def test_java_body_world_read_missing_body_is_explicit() -> None:
     body = JavaBody(_client(FakeBodyServer()), "MissingBot")
 
     result = body.perceive("blockAt", {"x": 0, "y": 64, "z": 0})
+
+    assert result.ok is False
+    assert result.complete is True
+    assert result.error == "missing_body"
+    assert result.uncertainty == [{"reason": "missing_body"}]
+
+
+def test_java_body_nearby_entities_preserves_filters_identity_and_capping() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    player = body.perceive(
+        "nearbyEntities",
+        {"radius": 16, "limit": 8, "types": ["player"], "name": "MineBotGuide"},
+    )
+    capped = body.perceive("nearbyEntities", {"radius": 16, "limit": 1})
+
+    assert player.ok and player.complete
+    assert player.data["entities"] == [{
+        "id": "guide-uuid",
+        "type": "minecraft:player",
+        "name": "MineBotGuide",
+        "pos": [12.5, 64.0, -3.5],
+        "health": 20.0,
+        "dist2": 4.0,
+    }]
+    assert player.data["serverCostMicros"] == 75
+    assert capped.ok and not capped.complete
+    assert capped.next == "limit"
+    assert capped.data["entities"][0]["id"] == "item-uuid"
+    assert capped.uncertainty == [{"reason": "limit_exceeded"}]
+
+
+def test_java_body_nearby_entities_missing_body_is_explicit() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "MissingBot")
+
+    result = body.perceive("nearbyEntities", {"radius": 16})
 
     assert result.ok is False
     assert result.complete is True

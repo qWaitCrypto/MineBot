@@ -28,6 +28,7 @@
           "BODY_STATE",
           "CANCEL_ACTION",
           "COLLECT_BLOCK",
+          "ENTITY_READ",
           "FIND_BLOCKS",
           "HELLO",
           "INVENTORY",

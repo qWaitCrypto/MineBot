@@ -19,6 +19,7 @@ import dev.minebot.body.inventory.InventorySnapshot;
 import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MinecraftWorldView;
 import dev.minebot.body.nav.NavigateExecutor;
+import dev.minebot.body.perception.EntityReadService;
 import dev.minebot.body.perception.WorldReadService;
 import net.minecraft.world.item.ItemStack;
 import dev.minebot.server.common.transport.MineBotChannel;
@@ -50,7 +51,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String CHANNEL = "fakeplayer-body";
     public static final String PROTOCOL = "fakeplayer-body/1";
     private static final Set<String> REQUEST_TYPES = Set.of(
-        "HELLO", "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "WORLD_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND",
+        "HELLO", "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND",
         "MUTATION_VERDICT", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
     );
     private static final int MAX_RADIUS = 128;
@@ -128,6 +129,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "BODY_STATE" -> handleBodyState(connection, request, serverTick);
             case "INVENTORY" -> handleInventory(connection, request, serverTick);
             case "WORLD_READ" -> handleWorldRead(connection, request, serverTick);
+            case "ENTITY_READ" -> handleEntityRead(connection, request, serverTick);
             case "NAVIGATE" -> handleNavigate(connection, request, serverTick);
             case "COLLECT_BLOCK" -> handleCollectBlock(connection, request, serverTick);
             case "ASCEND" -> handleAscend(connection, request, serverTick);
@@ -462,6 +464,46 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
         } catch (RuntimeException error) {
             sendError(connection, request, serverTick, "world_read_internal_error", "world read failed", true);
+        }
+    }
+
+    private void handleEntityRead(MineBotConnection connection, JsonObject request, int serverTick) {
+        long startedNanos = System.nanoTime();
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            String scope = requiredString(request, "scope", 64);
+            if (!request.has("params") || !request.get("params").isJsonObject()) {
+                throw new IllegalArgumentException("params must be an object");
+            }
+            JsonObject response = baseResponse(request, "ENTITY_READ_RESULT");
+            response.addProperty("bot", botName);
+            response.addProperty("scope", scope);
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                response.addProperty("missing", true);
+                response.addProperty("server_cost_micros", (System.nanoTime() - startedNanos) / 1_000L);
+                connection.send(response, serverTick);
+                return;
+            }
+            EntityReadService.Result result = new EntityReadService(player, level).read(
+                scope, request.getAsJsonObject("params")
+            );
+            response.addProperty("missing", false);
+            response.addProperty("ok", true);
+            response.addProperty("complete", result.complete());
+            response.addProperty("server_cost_micros", (System.nanoTime() - startedNanos) / 1_000L);
+            response.add("data", result.data());
+            response.add("uncertainty", result.uncertainty());
+            if (result.next() == null) {
+                response.add("next", JsonNull.INSTANCE);
+            } else {
+                response.addProperty("next", result.next());
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        } catch (RuntimeException error) {
+            sendError(connection, request, serverTick, "entity_read_internal_error", "entity read failed", true);
         }
     }
 

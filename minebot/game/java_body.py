@@ -37,6 +37,7 @@ _WORLD_READ_SCOPES = frozenset({
     "nearbyBlocks",
     "debugBlocks",
 })
+_ENTITY_READ_SCOPES = frozenset({"nearbyEntities"})
 
 
 class JavaBody:
@@ -82,6 +83,8 @@ class JavaBody:
             return self._perceive_inventory(params)
         if scope in _WORLD_READ_SCOPES:
             return self._perceive_world(scope, params)
+        if scope in _ENTITY_READ_SCOPES:
+            return self._perceive_entities(scope, params)
         if scope == "findBlocks":
             return self._perceive_find_blocks(params)
         return PerceptionResult(
@@ -241,6 +244,51 @@ class JavaBody:
     ) -> PerceptionResult:
         reply = self._client.request_response(
             lambda protocol: protocol.world_read(self.bot_name, scope, params)
+        )
+        if isinstance(reply, ErrorResponse):
+            missing = reply.code in {"body_missing", "missing_body"}
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope=scope,
+                type="perception",
+                ok=False,
+                complete=missing,
+                uncertainty=[{"reason": "missing_body"}] if missing else None,
+                error="missing_body" if missing else reply.code,
+            )
+        payload = reply.payload
+        if payload.get("missing") is True:
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope=scope,
+                type="perception",
+                ok=False,
+                complete=True,
+                uncertainty=[{"reason": "missing_body"}],
+                error="missing_body",
+            )
+        data = dict(payload.get("data") or {})
+        if payload.get("server_cost_micros") is not None:
+            data["serverCostMicros"] = int(payload["server_cost_micros"])
+        return PerceptionResult(
+            bot=self.bot_name,
+            scope=scope,
+            type="perception",
+            ok=bool(payload.get("ok", True)),
+            complete=bool(payload.get("complete")),
+            data=data,
+            uncertainty=list(payload.get("uncertainty") or []),
+            next=str(payload["next"]) if payload.get("next") is not None else None,
+            error=str(payload["error"]) if payload.get("error") is not None else None,
+        )
+
+    def _perceive_entities(
+        self,
+        scope: str,
+        params: dict[str, object],
+    ) -> PerceptionResult:
+        reply = self._client.request_response(
+            lambda protocol: protocol.entity_read(self.bot_name, scope, params)
         )
         if isinstance(reply, ErrorResponse):
             missing = reply.code in {"body_missing", "missing_body"}

@@ -22,6 +22,7 @@ class CompositeBody:
         "surfaceColumns",
         "nearbyBlocks",
         "debugBlocks",
+        "nearbyEntities",
     })
 
     def __init__(self, scarpet: Body, java: Body) -> None:

@@ -182,6 +182,13 @@ class JavaBodyProtocol:
             {"bot_name": bot_name, "scope": scope, "params": dict(params)},
         )
 
+    def entity_read(self, bot_name: str, scope: str, params: dict) -> dict:
+        self._require_capability("ENTITY_READ")
+        return self._request(
+            "ENTITY_READ",
+            {"bot_name": bot_name, "scope": scope, "params": dict(params)},
+        )
+
     def collect_block(
         self,
         bot_name: str,

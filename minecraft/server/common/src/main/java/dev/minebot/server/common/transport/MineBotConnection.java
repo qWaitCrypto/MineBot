@@ -1,6 +1,7 @@
 package dev.minebot.server.common.transport;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import org.java_websocket.WebSocket;
 
@@ -11,7 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class MineBotConnection {
-    private static final Gson GSON = new Gson();
+    private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     public static final int MAX_REQUESTS_PER_SECOND = 40;
 
     private final String id = UUID.randomUUID().toString();
