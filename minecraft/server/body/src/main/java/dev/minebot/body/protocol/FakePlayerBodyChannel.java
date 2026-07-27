@@ -7,6 +7,7 @@ import com.mojang.serialization.JsonOps;
 import dev.minebot.body.action.ActionRegistry;
 import dev.minebot.body.action.ActionRuntime;
 import dev.minebot.body.action.AscendExecutor;
+import dev.minebot.body.action.BlockPrimitiveActions;
 import dev.minebot.body.action.CollectExecutor;
 import dev.minebot.body.action.ContainerPrimitiveActions;
 import dev.minebot.body.action.CraftPrimitiveActions;
@@ -404,7 +405,10 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             String botName = requiredString(request, "bot_name", 64);
             String actionId = requiredString(request, "action_id", 128);
             String action = requiredString(request, "action", 32);
-            if (!Set.of("selectItem", "lookAt", "stop", "useItem", "moveItem", "dropItem").contains(action)) {
+            if (!Set.of(
+                "selectItem", "lookAt", "stop", "useItem", "moveItem", "dropItem",
+                "mineBlock", "placeBlock", "jump"
+            ).contains(action)) {
                 throw new IllegalArgumentException("unsupported player action: " + action);
             }
             JsonObject params = request.has("params") && request.get("params").isJsonObject()
@@ -438,8 +442,35 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             final String dropMode = action.equals("dropItem")
                 ? optionalDropMode(params)
                 : null;
+            final BlockPos blockTarget = Set.of("mineBlock", "placeBlock").contains(action)
+                ? requiredBlockPos(params, "target")
+                : null;
+            final String blockId = Set.of("mineBlock", "placeBlock").contains(action)
+                ? requiredBlockId(params, "block_type")
+                : null;
+            final String mutationContext = action.equals("mineBlock")
+                ? requiredChoice(
+                    params, "context",
+                    Set.of("path", "travel", "collect", "collect_approach", "farm", "recovery", "direct", "bot_cleanup")
+                )
+                : action.equals("placeBlock")
+                    ? requiredChoice(
+                        params, "context",
+                        Set.of("travel", "work", "farm", "recovery", "direct")
+                    )
+                    : null;
+            final String placeFace = action.equals("placeBlock")
+                ? optionalChoice(params, "face", "up", Set.of("up", "down", "north", "south", "east", "west"))
+                : null;
+            final boolean replaceLiquid = action.equals("placeBlock")
+                && optionalBoolean(params, "replace_liquid", false);
+            final int blockActionTimeout = Set.of("mineBlock", "placeBlock").contains(action)
+                ? boundedOptionalInt(params, "timeout_ticks", action.equals("mineBlock") ? 600 : 40, 1, MAX_TIMEOUT_TICKS)
+                : action.equals("jump")
+                    ? boundedOptionalInt(params, "timeout_ticks", 20, 1, MAX_TIMEOUT_TICKS)
+                    : 1;
             ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
-            if (player == null || player.isRemoved()) {
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
                 sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
                 return;
             }
@@ -452,6 +483,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             switch (submission) {
                 case ActionRuntime.Submission.Accepted ignored -> {
                     PlayerPrimitiveActions.PlayerAccess access = playerAccess(player);
+                    BlockPrimitiveActions.WorldAccess blockAccess = blockWorldAccess(player, level);
                     ActionRuntime.TickExecutor executor = switch (action) {
                         case "selectItem" -> {
                             yield new PlayerPrimitiveActions.ImmediateExecutor(
@@ -504,6 +536,47 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                                 runtime
                             );
                         }
+                        case "mineBlock" -> new BlockPrimitiveActions.MineExecutor(
+                            botName,
+                            actionId,
+                            blockTarget.getX(),
+                            blockTarget.getY(),
+                            blockTarget.getZ(),
+                            blockId,
+                            mutationContext,
+                            blockActionTimeout,
+                            blockAccess,
+                            adapter,
+                            blockBreaker,
+                            mutationGate,
+                            this::publishProposal,
+                            runtime
+                        );
+                        case "placeBlock" -> new BlockPrimitiveActions.PlaceExecutor(
+                            botName,
+                            actionId,
+                            blockTarget.getX(),
+                            blockTarget.getY(),
+                            blockTarget.getZ(),
+                            blockId,
+                            placeFace,
+                            mutationContext,
+                            replaceLiquid,
+                            blockActionTimeout,
+                            blockAccess,
+                            adapter,
+                            mutationGate,
+                            this::publishProposal,
+                            runtime
+                        );
+                        case "jump" -> new BlockPrimitiveActions.JumpExecutor(
+                            botName,
+                            actionId,
+                            blockActionTimeout,
+                            blockAccess,
+                            adapter,
+                            runtime
+                        );
                         default -> throw new IllegalStateException("validated player action disappeared");
                     };
                     runtime.attachExecutor(actionId, executor);
@@ -1561,6 +1634,55 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         }
     }
 
+    private BlockPrimitiveActions.WorldAccess blockWorldAccess(ServerPlayer player, ServerLevel level) {
+        return new BlockPrimitiveActions.WorldAccess() {
+            @Override
+            public boolean present() {
+                return !player.isRemoved()
+                    && server.getPlayerList().getPlayer(player.getUUID()) == player
+                    && player.level() == level;
+            }
+
+            @Override
+            public String blockIdAt(int x, int y, int z) {
+                return observedBlockId(level, x, y, z);
+            }
+
+            @Override
+            public boolean canReplaceAt(int x, int y, int z, boolean replaceLiquid) {
+                var chunk = level.getChunkSource().getChunkNow(x >> 4, z >> 4);
+                if (chunk == null || y < level.getMinY() || y > level.getMaxY()) {
+                    return false;
+                }
+                var state = chunk.getBlockState(new BlockPos(x, y, z));
+                return state.isAir()
+                    || state.canBeReplaced()
+                    || (replaceLiquid && !state.getFluidState().isEmpty());
+            }
+
+            @Override
+            public boolean playerIntersects(int x, int y, int z) {
+                return player.getBoundingBox().intersects(new AABB(new BlockPos(x, y, z)));
+            }
+
+            @Override
+            public String selectedItemId() {
+                ItemStack selected = player.getMainHandItem();
+                return selected.isEmpty() ? null : BuiltInRegistries.ITEM.getKey(selected.getItem()).toString();
+            }
+
+            @Override
+            public int selectedItemCount() {
+                return player.getMainHandItem().getCount();
+            }
+
+            @Override
+            public PlayerPrimitiveActions.Position position() {
+                return new PlayerPrimitiveActions.Position(player.getX(), player.getY(), player.getZ());
+            }
+        };
+    }
+
     private PlayerPrimitiveActions.PlayerAccess playerAccess(ServerPlayer player) {
         return new PlayerPrimitiveActions.PlayerAccess() {
             @Override
@@ -1721,6 +1843,22 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         return itemId;
     }
 
+    private static String requiredBlockId(JsonObject params, String name) {
+        String value = MineBotChannelRouter.stringField(params, name);
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(name + " is required");
+        }
+        String normalized = value.contains(":") ? value : "minecraft:" + value;
+        if (!normalized.matches("[a-z0-9_.-]+:[a-z0-9_/.-]+")) {
+            throw new IllegalArgumentException(name + " is not a valid block identifier");
+        }
+        Identifier identifier = Identifier.tryParse(normalized);
+        if (identifier == null || BuiltInRegistries.BLOCK.getOptional(identifier).isEmpty()) {
+            throw new IllegalArgumentException("unknown block id: " + normalized);
+        }
+        return normalized;
+    }
+
     private static CraftPrimitiveActions.Request requiredCraftRequest(JsonObject request) {
         if (!request.has("inputs") || !request.get("inputs").isJsonArray()) {
             throw new IllegalArgumentException("inputs must be a nonempty array");
@@ -1812,6 +1950,44 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             throw new IllegalArgumentException("mode must be one or all");
         }
         return mode;
+    }
+
+    private static String optionalChoice(
+        JsonObject params,
+        String name,
+        String fallback,
+        Set<String> allowed
+    ) {
+        String value = MineBotChannelRouter.stringField(params, name);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        if (!allowed.contains(value)) {
+            throw new IllegalArgumentException(name + " has unsupported value: " + value);
+        }
+        return value;
+    }
+
+    private static String requiredChoice(JsonObject params, String name, Set<String> allowed) {
+        String value = MineBotChannelRouter.stringField(params, name);
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(name + " is required");
+        }
+        if (!allowed.contains(value)) {
+            throw new IllegalArgumentException(name + " has unsupported value: " + value);
+        }
+        return value;
+    }
+
+    private static boolean optionalBoolean(JsonObject params, String name, boolean fallback) {
+        if (!params.has(name) || params.get(name).isJsonNull()) {
+            return fallback;
+        }
+        if (!params.get(name).isJsonPrimitive()
+            || !params.getAsJsonPrimitive(name).isBoolean()) {
+            throw new IllegalArgumentException(name + " must be a boolean");
+        }
+        return params.get(name).getAsBoolean();
     }
 
     private static String requiredString(JsonObject request, String name, int maxLength) {

@@ -69,6 +69,8 @@ def _assert_item(expected: dict, item: object, context: str) -> None:
         assert item.block_id == expected["block_id"], context
         assert item.kind == expected["mutation_kind"], context
         assert (item.x, item.y, item.z) == (expected["x"], expected["y"], expected["z"]), context
+        if "context" in expected:
+            assert item.context == expected["context"], context
     else:
         raise AssertionError(f"{context}: unknown expectation kind {kind!r}")
 

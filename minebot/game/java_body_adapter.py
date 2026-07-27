@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Callable, Protocol
 from uuid import uuid4
 
-from minebot.contract.governance import BreakContext, InteractionContext
+from minebot.contract.governance import BreakContext, InteractionContext, PlaceContext
 from minebot.contract.messages import ToolResult
 from minebot.game.governance import GovernancePolicy
 from minebot.game.java_body_protocol import (
@@ -62,6 +62,20 @@ class GovernanceAnswerer:
                 (proposal.x, proposal.y, proposal.z),
                 proposal.block_id,
                 context,
+            )
+            return decision.allowed, decision.reason
+        if proposal.kind == "place":
+            if proposal.context is None:
+                return False, "unsupported_place_context:None"
+            try:
+                context = PlaceContext(proposal.context)
+            except ValueError:
+                return False, f"unsupported_place_context:{proposal.context}"
+            decision = self._policy.can_place(
+                (proposal.x, proposal.y, proposal.z),
+                proposal.block_id,
+                context,
+                proposal.bot,
             )
             return decision.allowed, decision.reason
         # Only mutation kinds with a mapped governance decision may pass;

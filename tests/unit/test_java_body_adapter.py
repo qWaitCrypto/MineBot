@@ -95,6 +95,33 @@ def test_open_proposal_without_context_is_denied_never_guessed() -> None:
     )
 
 
+def test_place_proposal_uses_place_governance() -> None:
+    allowed = _proposal(
+        kind="place",
+        block_id="minecraft:cobblestone",
+        pos=(10, 64, 10),
+        context="work",
+    )
+    protected = _proposal(
+        kind="place",
+        block_id="minecraft:cobblestone",
+        pos=(35, 64, 35),
+        context="work",
+    )
+
+    assert GovernanceAnswerer(_policy()).verdict(allowed) == (True, "allowed_place")
+    assert GovernanceAnswerer(_policy()).verdict(protected) == (False, "protected_region")
+
+
+def test_place_proposal_without_context_is_denied_never_guessed() -> None:
+    proposal = _proposal(kind="place", block_id="minecraft:cobblestone")
+
+    assert GovernanceAnswerer(_policy()).verdict(proposal) == (
+        False,
+        "unsupported_place_context:None",
+    )
+
+
 def test_bot_ledger_governs_bot_placed_blocks() -> None:
     policy = _policy()
     policy.record_bot_placement((12, 64, 12), "minecraft:cobblestone", "bridge", "Bot")
@@ -108,9 +135,9 @@ def test_bot_ledger_governs_bot_placed_blocks() -> None:
 
 
 def test_unmapped_mutation_kind_is_denied_never_guessed() -> None:
-    allow, reason = GovernanceAnswerer(_policy()).verdict(_proposal(kind="place"))
+    allow, reason = GovernanceAnswerer(_policy()).verdict(_proposal(kind="set_block"))
     assert allow is False
-    assert reason == "unsupported_mutation_kind:place"
+    assert reason == "unsupported_mutation_kind:set_block"
 
 
 # ---------------------------------------------------------------------------
@@ -643,6 +670,28 @@ class FakeBodyServer:
                 "inventory_changed": True,
                 "start_pos": [10.5, 64.0, -3.5],
                 "final_pos": [10.5, 64.0, -3.5],
+            })
+        elif action == "mineBlock":
+            facts.update({
+                "target": params.get("target"),
+                "block_type": params.get("block_type"),
+                "block_after": "minecraft:air",
+                "final_pos": [10.5, 64.0, -3.5],
+            })
+        elif action == "placeBlock":
+            facts.update({
+                "target": params.get("target"),
+                "block_type": params.get("block_type"),
+                "block_after": params.get("block_type"),
+                "item_count_before": 3,
+                "item_count_after": 2,
+                "final_pos": [10.5, 64.0, -3.5],
+            })
+        elif action == "jump":
+            facts.update({
+                "position_before": [10.5, 64.0, -3.5],
+                "position_after": [10.5, 64.42, -3.5],
+                "gained_y": 0.42,
             })
         self._emit_terminal(action_id, facts)
 

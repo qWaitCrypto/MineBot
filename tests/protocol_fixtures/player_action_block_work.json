@@ -1,0 +1,287 @@
+{
+  "name": "player_action_block_work",
+  "description": "PLAYER_ACTION carries governed exact mine/place work and observed jump truth under caller action ids.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["HELLO", "PLAYER_ACTION", "MUTATION_VERDICT"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "player_action",
+        "args": {
+          "bot_name": "MineBot_1",
+          "action_id": "mine-0001",
+          "action": "mineBlock",
+          "params": {
+            "target": [4, 64, 0],
+            "block_type": "minecraft:stone",
+            "context": "direct",
+            "timeout_ticks": 600
+          }
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "PLAYER_ACTION",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "action_id": "mine-0001",
+        "action": "mineBlock",
+        "params": {
+          "target": [4, 64, 0],
+          "block_type": "minecraft:stone",
+          "context": "direct",
+          "timeout_ticks": 600
+        }
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "PLAYER_ACTION_ACK",
+        "request_id": "r-2",
+        "action_id": "mine-0001",
+        "state": "accepted"
+      },
+      "expect": [{"kind": "response", "type": "PLAYER_ACTION_ACK", "request_type": "PLAYER_ACTION"}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "MUTATION_PROPOSAL",
+        "proposal_id": "mp-1",
+        "bot": "MineBot_1",
+        "action_id": "mine-0001",
+        "mutation": {
+          "kind": "break",
+          "x": 4,
+          "y": 64,
+          "z": 0,
+          "block_id": "minecraft:stone",
+          "context": "direct"
+        }
+      },
+      "expect": [{
+        "kind": "proposal",
+        "proposal_id": "mp-1",
+        "block_id": "minecraft:stone",
+        "mutation_kind": "break",
+        "context": "direct",
+        "x": 4,
+        "y": 64,
+        "z": 0
+      }]
+    },
+    {
+      "send": {
+        "builder": "mutation_verdict",
+        "args": {"proposal_id": "mp-1", "allow": true, "reason": "allowed_natural"}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "MUTATION_VERDICT",
+        "proposal_id": "mp-1",
+        "allow": true,
+        "reason": "allowed_natural"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 1,
+        "tick": 540,
+        "event": "action_terminal",
+        "action_id": "mine-0001",
+        "data": {
+          "classification": "completed",
+          "reason": "completed",
+          "success": true,
+          "target": [4, 64, 0],
+          "block_type": "minecraft:stone",
+          "block_after": "minecraft:air",
+          "elapsed_ticks": 34
+        }
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 1, "data_contains": {"block_after": "minecraft:air"}}]
+    },
+    {
+      "send": {
+        "builder": "player_action",
+        "args": {
+          "bot_name": "MineBot_1",
+          "action_id": "place-0001",
+          "action": "placeBlock",
+          "params": {
+            "target": [4, 64, 0],
+            "block_type": "minecraft:cobblestone",
+            "face": "up",
+            "context": "work",
+            "replace_liquid": false,
+            "timeout_ticks": 40
+          }
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "PLAYER_ACTION",
+        "request_id": "r-3",
+        "bot_name": "MineBot_1",
+        "action_id": "place-0001",
+        "action": "placeBlock",
+        "params": {
+          "target": [4, 64, 0],
+          "block_type": "minecraft:cobblestone",
+          "face": "up",
+          "context": "work",
+          "replace_liquid": false,
+          "timeout_ticks": 40
+        }
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "PLAYER_ACTION_ACK",
+        "request_id": "r-3",
+        "action_id": "place-0001",
+        "state": "accepted"
+      },
+      "expect": [{"kind": "response", "type": "PLAYER_ACTION_ACK", "request_type": "PLAYER_ACTION"}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "MUTATION_PROPOSAL",
+        "proposal_id": "mp-2",
+        "bot": "MineBot_1",
+        "action_id": "place-0001",
+        "mutation": {
+          "kind": "place",
+          "x": 4,
+          "y": 64,
+          "z": 0,
+          "block_id": "minecraft:cobblestone",
+          "context": "work"
+        }
+      },
+      "expect": [{
+        "kind": "proposal",
+        "proposal_id": "mp-2",
+        "block_id": "minecraft:cobblestone",
+        "mutation_kind": "place",
+        "context": "work",
+        "x": 4,
+        "y": 64,
+        "z": 0
+      }]
+    },
+    {
+      "send": {
+        "builder": "mutation_verdict",
+        "args": {"proposal_id": "mp-2", "allow": true, "reason": "allowed_place"}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "MUTATION_VERDICT",
+        "proposal_id": "mp-2",
+        "allow": true,
+        "reason": "allowed_place"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 2,
+        "tick": 550,
+        "event": "action_terminal",
+        "action_id": "place-0001",
+        "data": {
+          "classification": "completed",
+          "reason": "completed",
+          "success": true,
+          "target": [4, 64, 0],
+          "block_type": "minecraft:cobblestone",
+          "block_after": "minecraft:cobblestone",
+          "item_count_before": 3,
+          "item_count_after": 2,
+          "elapsed_ticks": 3
+        }
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 2, "data_contains": {"block_after": "minecraft:cobblestone", "item_count_after": 2}}]
+    },
+    {
+      "send": {
+        "builder": "player_action",
+        "args": {"bot_name": "MineBot_1", "action_id": "jump-0001", "action": "jump", "params": {}}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "PLAYER_ACTION",
+        "request_id": "r-4",
+        "bot_name": "MineBot_1",
+        "action_id": "jump-0001",
+        "action": "jump",
+        "params": {}
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "PLAYER_ACTION_ACK",
+        "request_id": "r-4",
+        "action_id": "jump-0001",
+        "state": "accepted"
+      },
+      "expect": [{"kind": "response", "type": "PLAYER_ACTION_ACK", "request_type": "PLAYER_ACTION"}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 3,
+        "tick": 552,
+        "event": "action_terminal",
+        "action_id": "jump-0001",
+        "data": {
+          "classification": "completed",
+          "reason": "completed",
+          "success": true,
+          "position_before": [3.5, 64.0, 0.5],
+          "position_after": [3.5, 64.42, 0.5],
+          "gained_y": 0.42
+        }
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 3, "data_contains": {"gained_y": 0.42}}]
+    }
+  ],
+  "final": {"supports": ["PLAYER_ACTION", "MUTATION_VERDICT"], "pending_requests": 0, "last_seq": {"MineBot_1": 3}}
+}
