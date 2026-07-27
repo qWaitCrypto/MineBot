@@ -13,7 +13,11 @@ public final class PlayerPrimitiveActions {
     public static final int HOTBAR_SIZE = 9;
     public static final int CARRY_END_EXCLUSIVE = 36;
     public static final int MAX_USE_TICKS = 200;
+    public static final int MAX_HANDOFF_TICKS = 200;
     private static final double LOOK_ALIGNMENT_MIN = Math.cos(Math.toRadians(2.0));
+    private static final double HANDOFF_MIN_DISTANCE = 1.25;
+    private static final double HANDOFF_MAX_DISTANCE = 3.0;
+    private static final double HANDOFF_VERTICAL_TOLERANCE = 1.5;
 
     private PlayerPrimitiveActions() {}
 
@@ -62,6 +66,14 @@ public final class PlayerPrimitiveActions {
         void useContinuous(String botName);
         void dropOne(String botName);
         void dropStack(String botName);
+    }
+
+    /** Receiver facts plus the one server-authoritative item-entity spawn. */
+    public interface HandoffAccess {
+        boolean receiverPresent();
+        Position receiverPosition();
+        int receiverItemCount(String itemId);
+        int spawnAtReceiver(int sourceSlot, int count);
     }
 
     public static Outcome selectItem(
@@ -436,6 +448,163 @@ public final class PlayerPrimitiveActions {
             );
             facts.add("start_pos", (positionBefore == null ? finalPosition : positionBefore).toJson());
             facts.add("final_pos", finalPosition.toJson());
+            runtime.finish(botName, actionId, classification, facts, serverTick);
+        }
+    }
+
+    public static final class HandoffExecutor implements ActionRuntime.TickExecutor {
+        private final String botName;
+        private final String actionId;
+        private final String receiverName;
+        private final String itemId;
+        private final int requestedCount;
+        private final int timeoutTicks;
+        private final PlayerAccess player;
+        private final HandoffAccess handoff;
+        private final ActionRuntime runtime;
+        private boolean started;
+        private int startedTick;
+        private int sourceSlot = -1;
+        private int sourceCountBefore;
+        private int spawnedCount;
+        private int receiverCountBefore;
+        private Position receiverPosition;
+        private JsonObject slotBefore;
+
+        public HandoffExecutor(
+            String botName,
+            String actionId,
+            String receiverName,
+            String itemId,
+            int requestedCount,
+            int timeoutTicks,
+            PlayerAccess player,
+            HandoffAccess handoff,
+            ActionRuntime runtime
+        ) {
+            this.botName = botName;
+            this.actionId = actionId;
+            this.receiverName = receiverName;
+            this.itemId = itemId;
+            this.requestedCount = requestedCount;
+            this.timeoutTicks = timeoutTicks;
+            this.player = player;
+            this.handoff = handoff;
+            this.runtime = runtime;
+        }
+
+        @Override
+        public void tick(int serverTick) {
+            if (runtime.cancelRequested(actionId)) {
+                finish(false, "canceled", ActionRuntime.CLASS_CANCELED, serverTick);
+                return;
+            }
+            if (!started) {
+                start(serverTick);
+                return;
+            }
+
+            int receiverCountAfter = handoff.receiverItemCount(itemId);
+            if (receiverCountAfter >= receiverCountBefore + spawnedCount) {
+                finish(true, "completed", ActionRuntime.CLASS_COMPLETED, serverTick);
+                return;
+            }
+            if (!handoff.receiverPresent()) {
+                finish(false, "receiver_missing_after_spawn", ActionRuntime.CLASS_FAILED, serverTick);
+                return;
+            }
+            if (serverTick - startedTick >= timeoutTicks) {
+                finish(false, "receiver_pickup_unconfirmed", ActionRuntime.CLASS_FAILED, serverTick);
+            }
+        }
+
+        private void start(int serverTick) {
+            if (botName.equals(receiverName)) {
+                finish(false, "receiver_is_self", ActionRuntime.CLASS_FAILED, serverTick);
+                return;
+            }
+            if (!player.present()) {
+                finish(false, "missing_body", ActionRuntime.CLASS_FAILED, serverTick);
+                return;
+            }
+            if (!handoff.receiverPresent()) {
+                finish(false, "receiver_not_found", ActionRuntime.CLASS_FAILED, serverTick);
+                return;
+            }
+            receiverPosition = handoff.receiverPosition();
+            Position giverPosition = player.position();
+            double dx = receiverPosition.x() - giverPosition.x();
+            double dy = receiverPosition.y() - giverPosition.y();
+            double dz = receiverPosition.z() - giverPosition.z();
+            double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (Math.abs(dy) > HANDOFF_VERTICAL_TOLERANCE
+                || distance < HANDOFF_MIN_DISTANCE
+                || distance > HANDOFF_MAX_DISTANCE) {
+                finish(false, "receiver_out_of_range", ActionRuntime.CLASS_FAILED, serverTick);
+                return;
+            }
+            if (requestedCount <= 0) {
+                finish(false, "invalid_count", ActionRuntime.CLASS_FAILED, serverTick);
+                return;
+            }
+            sourceSlot = findItem(
+                player,
+                0,
+                Math.min(CARRY_END_EXCLUSIVE, player.inventorySize()),
+                itemId
+            );
+            if (sourceSlot < 0) {
+                finish(false, "item_not_available", ActionRuntime.CLASS_FAILED, serverTick);
+                return;
+            }
+
+            sourceCountBefore = player.itemCountAt(sourceSlot);
+            slotBefore = slotFact(player, sourceSlot);
+            receiverCountBefore = handoff.receiverItemCount(itemId);
+            int intended = Math.min(requestedCount, sourceCountBefore);
+            spawnedCount = handoff.spawnAtReceiver(sourceSlot, intended);
+            int sourceCountAfter = player.itemCountAt(sourceSlot);
+            if (spawnedCount <= 0 || sourceCountAfter != sourceCountBefore - spawnedCount) {
+                finish(false, "spawn_verification_failed", ActionRuntime.CLASS_FAILED, serverTick);
+                return;
+            }
+            started = true;
+            startedTick = serverTick;
+        }
+
+        private void finish(boolean success, String reason, String classification, int serverTick) {
+            int receiverCountAfter = receiverCountBefore;
+            if (started && handoff.receiverPresent()) {
+                receiverCountAfter = handoff.receiverItemCount(itemId);
+            }
+            JsonObject facts = baseFacts(success, reason);
+            facts.addProperty("receiver", receiverName);
+            facts.addProperty("item", itemId);
+            facts.addProperty("requested_count", requestedCount);
+            facts.addProperty("spawned_count", spawnedCount);
+            facts.addProperty("source_slot", sourceSlot);
+            facts.add("slot_before", slotBefore == null ? new JsonObject() : slotBefore);
+            facts.add(
+                "slot_after",
+                sourceSlot >= 0 && sourceSlot < player.inventorySize()
+                    ? slotFact(player, sourceSlot)
+                    : new JsonObject()
+            );
+            facts.add(
+                "receiver_pos",
+                receiverPosition == null ? new JsonArray() : receiverPosition.toJson()
+            );
+            facts.addProperty("receiver_count_before", receiverCountBefore);
+            facts.addProperty("receiver_count_after", receiverCountAfter);
+            facts.addProperty("elapsed_ticks", started ? Math.max(0, serverTick - startedTick) : 0);
+            if (success) {
+                JsonObject receipt = new JsonObject();
+                receipt.addProperty("player", receiverName);
+                receipt.addProperty("item", itemId);
+                receipt.addProperty("count", receiverCountAfter - receiverCountBefore);
+                receipt.addProperty("tick", serverTick);
+                facts.add("pickup_receipt", receipt);
+            }
             runtime.finish(botName, actionId, classification, facts, serverTick);
         }
     }

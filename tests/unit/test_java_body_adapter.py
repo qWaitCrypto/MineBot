@@ -672,6 +672,25 @@ class FakeBodyServer:
                 "slot_before": {"item": "minecraft:diamond", "count": 3},
                 "slot_after": {"item": "minecraft:diamond", "count": 2},
             })
+        elif action == "handoffItem":
+            facts.update({
+                "receiver": params.get("receiver"),
+                "item": params.get("item"),
+                "requested_count": params.get("count", 1),
+                "spawned_count": params.get("count", 1),
+                "source_slot": 18,
+                "slot_before": {"item": params.get("item"), "count": params.get("count", 1)},
+                "slot_after": {"item": None, "count": 0},
+                "receiver_pos": [12.5, 64.0, -3.5],
+                "receiver_count_before": 0,
+                "receiver_count_after": params.get("count", 1),
+                "pickup_receipt": {
+                    "player": params.get("receiver"),
+                    "item": params.get("item"),
+                    "count": params.get("count", 1),
+                    "tick": 604,
+                },
+            })
         elif action == "useItem":
             facts.update({
                 "mode": params.get("mode", "once"),
@@ -1347,6 +1366,32 @@ def test_java_body_move_and_drop_actions_preserve_inventory_terminal_facts() -> 
     assert drop_terminal.name == "dropDone"
     assert drop_terminal.data["count_before"] == 3
     assert drop_terminal.data["count_after"] == 2
+
+
+def test_java_body_handoff_preserves_receiver_pickup_terminal_truth() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+    action = Action.create("handoffItem", {
+        "receiver": "MineBotGuide",
+        "item": "minecraft:diamond",
+        "count": 2,
+        "timeout_ticks": 60,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.name == "handoffDone"
+    assert terminal.data["success"] is True
+    assert terminal.data["spawned_count"] == 2
+    assert terminal.data["receiver_count_before"] == 0
+    assert terminal.data["receiver_count_after"] == 2
+    assert terminal.data["pickup_receipt"] == {
+        "player": "MineBotGuide",
+        "item": "minecraft:diamond",
+        "count": 2,
+        "tick": 604,
+    }
 
 
 def test_java_body_container_transfer_preserves_caller_id_governance_and_terminal_facts() -> None:

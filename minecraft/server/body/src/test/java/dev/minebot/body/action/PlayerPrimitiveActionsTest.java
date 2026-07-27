@@ -104,6 +104,37 @@ final class PlayerPrimitiveActionsTest {
         @Override public void clearAll(String botName) { clears++; }
     }
 
+    private static final class FakeHandoff implements PlayerPrimitiveActions.HandoffAccess {
+        final FakePlayer giver;
+        boolean present = true;
+        int receiverCount;
+        int spawned;
+        PlayerPrimitiveActions.Position position = new PlayerPrimitiveActions.Position(2, 64, 0);
+
+        FakeHandoff(FakePlayer giver) {
+            this.giver = giver;
+        }
+
+        void pickup() {
+            receiverCount += spawned;
+        }
+
+        @Override public boolean receiverPresent() { return present; }
+        @Override public PlayerPrimitiveActions.Position receiverPosition() {
+            return position;
+        }
+        @Override public int receiverItemCount(String itemId) { return receiverCount; }
+        @Override public int spawnAtReceiver(int sourceSlot, int count) {
+            int moved = Math.min(count, giver.counts[sourceSlot]);
+            giver.counts[sourceSlot] -= moved;
+            if (giver.counts[sourceSlot] == 0) {
+                giver.items[sourceSlot] = null;
+            }
+            spawned = moved;
+            return moved;
+        }
+    }
+
     @Test
     void selectsExistingHotbarItemWithoutMovingInventory() {
         FakePlayer player = new FakePlayer();
@@ -266,6 +297,82 @@ final class PlayerPrimitiveActionsTest {
         assertEquals("completed", terminal.get("classification").getAsString());
         assertEquals(2, terminal.get("count_before").getAsInt());
         assertEquals(1, terminal.get("count_after").getAsInt());
+    }
+
+    @Test
+    void handoffCompletesOnlyAfterReceiverInventoryIncreases() {
+        FakePlayer giver = new FakePlayer();
+        giver.put(18, "minecraft:diamond", 2);
+        FakeHandoff handoff = new FakeHandoff(giver);
+        FakeControls controls = new FakeControls(giver);
+        ActionRegistry registry = new ActionRegistry();
+        ActionRuntime runtime = runtime(controls, registry);
+        runtime.submit("Giver", "handoff-1", "PLAYER_ACTION:handoffItem", OwnerPriority.ACTION, 40);
+        runtime.attachExecutor("handoff-1", new PlayerPrimitiveActions.HandoffExecutor(
+            "Giver", "handoff-1", "Receiver", "minecraft:diamond", 2, 60,
+            giver, handoff, runtime
+        ));
+
+        runtime.tick(41);
+        assertEquals(ActionRegistry.State.RUNNING, registry.status("handoff-1").state());
+        assertEquals(0, giver.counts[18]);
+        handoff.pickup();
+        runtime.tick(42);
+
+        var terminal = registry.status("handoff-1").terminal();
+        assertEquals("completed", terminal.get("classification").getAsString());
+        assertEquals(2, terminal.get("spawned_count").getAsInt());
+        assertEquals(0, terminal.get("receiver_count_before").getAsInt());
+        assertEquals(2, terminal.get("receiver_count_after").getAsInt());
+        assertEquals("Receiver", terminal.getAsJsonObject("pickup_receipt").get("player").getAsString());
+    }
+
+    @Test
+    void missingHandoffReceiverLeavesGiverInventoryUnchanged() {
+        FakePlayer giver = new FakePlayer();
+        giver.put(18, "minecraft:diamond", 2);
+        FakeHandoff handoff = new FakeHandoff(giver);
+        handoff.present = false;
+        FakeControls controls = new FakeControls(giver);
+        ActionRegistry registry = new ActionRegistry();
+        ActionRuntime runtime = runtime(controls, registry);
+        runtime.submit("Giver", "handoff-2", "PLAYER_ACTION:handoffItem", OwnerPriority.ACTION, 50);
+        runtime.attachExecutor("handoff-2", new PlayerPrimitiveActions.HandoffExecutor(
+            "Giver", "handoff-2", "Receiver", "minecraft:diamond", 2, 60,
+            giver, handoff, runtime
+        ));
+
+        runtime.tick(51);
+
+        var terminal = registry.status("handoff-2").terminal();
+        assertEquals("failed", terminal.get("classification").getAsString());
+        assertEquals("receiver_not_found", terminal.get("reason").getAsString());
+        assertEquals(2, giver.counts[18]);
+        assertEquals(0, handoff.spawned);
+    }
+
+    @Test
+    void distantHandoffReceiverLeavesGiverInventoryUnchanged() {
+        FakePlayer giver = new FakePlayer();
+        giver.put(18, "minecraft:diamond", 2);
+        FakeHandoff handoff = new FakeHandoff(giver);
+        handoff.position = new PlayerPrimitiveActions.Position(20, 64, 0);
+        FakeControls controls = new FakeControls(giver);
+        ActionRegistry registry = new ActionRegistry();
+        ActionRuntime runtime = runtime(controls, registry);
+        runtime.submit("Giver", "handoff-3", "PLAYER_ACTION:handoffItem", OwnerPriority.ACTION, 60);
+        runtime.attachExecutor("handoff-3", new PlayerPrimitiveActions.HandoffExecutor(
+            "Giver", "handoff-3", "Receiver", "minecraft:diamond", 2, 60,
+            giver, handoff, runtime
+        ));
+
+        runtime.tick(61);
+
+        var terminal = registry.status("handoff-3").terminal();
+        assertEquals("failed", terminal.get("classification").getAsString());
+        assertEquals("receiver_out_of_range", terminal.get("reason").getAsString());
+        assertEquals(2, giver.counts[18]);
+        assertEquals(0, handoff.spawned);
     }
 
     private static ActionRuntime runtime(BotControls controls, ActionRegistry registry) {

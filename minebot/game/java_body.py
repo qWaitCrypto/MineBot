@@ -45,6 +45,7 @@ _ACTION_TERMINALS = {
     "containerTransfer": "containerDone",
     "craftItem": "craftDone",
     "furnaceTransfer": "furnaceDone",
+    "handoffItem": "handoffDone",
     "jump": "jumpDone",
     "mineBlock": "mineDone",
     "placeBlock": "placeDone",

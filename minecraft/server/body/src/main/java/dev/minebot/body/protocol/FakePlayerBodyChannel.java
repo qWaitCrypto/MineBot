@@ -407,16 +407,22 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             String action = requiredString(request, "action", 32);
             if (!Set.of(
                 "selectItem", "lookAt", "stop", "useItem", "moveItem", "dropItem",
-                "mineBlock", "placeBlock", "jump"
+                "handoffItem", "mineBlock", "placeBlock", "jump"
             ).contains(action)) {
                 throw new IllegalArgumentException("unsupported player action: " + action);
             }
             JsonObject params = request.has("params") && request.get("params").isJsonObject()
                 ? request.getAsJsonObject("params")
                 : new JsonObject();
-            final String itemId = action.equals("selectItem")
+            final String itemId = Set.of("selectItem", "handoffItem").contains(action)
                 ? requiredItemId(params, "item")
                 : action.equals("useItem") ? optionalItemId(params, "item") : null;
+            final String receiverName = action.equals("handoffItem")
+                ? requiredString(params, "receiver", 64)
+                : null;
+            final int handoffCount = action.equals("handoffItem")
+                ? boundedOptionalInt(params, "count", 1, 1, 99)
+                : 0;
             final PlayerPrimitiveActions.Position target = action.equals("lookAt")
                 ? requiredPosition(params, "target")
                 : null;
@@ -464,11 +470,15 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 : null;
             final boolean replaceLiquid = action.equals("placeBlock")
                 && optionalBoolean(params, "replace_liquid", false);
-            final int blockActionTimeout = Set.of("mineBlock", "placeBlock").contains(action)
+            final int actionTimeout = Set.of("mineBlock", "placeBlock").contains(action)
                 ? boundedOptionalInt(params, "timeout_ticks", action.equals("mineBlock") ? 600 : 40, 1, MAX_TIMEOUT_TICKS)
                 : action.equals("jump")
                     ? boundedOptionalInt(params, "timeout_ticks", 20, 1, MAX_TIMEOUT_TICKS)
-                    : 1;
+                    : action.equals("handoffItem")
+                        ? boundedOptionalInt(
+                            params, "timeout_ticks", 60, 1, PlayerPrimitiveActions.MAX_HANDOFF_TICKS
+                        )
+                        : 1;
             ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
             if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
                 sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
@@ -524,6 +534,17 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                             adapter,
                             runtime
                         );
+                        case "handoffItem" -> new PlayerPrimitiveActions.HandoffExecutor(
+                            botName,
+                            actionId,
+                            receiverName,
+                            itemId,
+                            handoffCount,
+                            actionTimeout,
+                            access,
+                            handoffAccess(player, level, receiverName, itemId),
+                            runtime
+                        );
                         case "useItem" -> {
                             yield new PlayerPrimitiveActions.UseExecutor(
                                 botName,
@@ -544,7 +565,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                             blockTarget.getZ(),
                             blockId,
                             mutationContext,
-                            blockActionTimeout,
+                            actionTimeout,
                             blockAccess,
                             adapter,
                             blockBreaker,
@@ -562,7 +583,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                             placeFace,
                             mutationContext,
                             replaceLiquid,
-                            blockActionTimeout,
+                            actionTimeout,
                             blockAccess,
                             adapter,
                             mutationGate,
@@ -572,7 +593,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         case "jump" -> new BlockPrimitiveActions.JumpExecutor(
                             botName,
                             actionId,
-                            blockActionTimeout,
+                            actionTimeout,
                             blockAccess,
                             adapter,
                             runtime
@@ -1802,6 +1823,93 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             @Override
             public float pitch() {
                 return player.getXRot();
+            }
+        };
+    }
+
+    private PlayerPrimitiveActions.HandoffAccess handoffAccess(
+        ServerPlayer giver,
+        ServerLevel level,
+        String receiverName,
+        String itemId
+    ) {
+        return new PlayerPrimitiveActions.HandoffAccess() {
+            private ServerPlayer receiver() {
+                ServerPlayer receiver = server.getPlayerList().getPlayerByName(receiverName);
+                if (receiver == null || receiver.isRemoved() || receiver.level() != level) {
+                    return null;
+                }
+                return receiver;
+            }
+
+            @Override
+            public boolean receiverPresent() {
+                return receiver() != null;
+            }
+
+            @Override
+            public PlayerPrimitiveActions.Position receiverPosition() {
+                ServerPlayer receiver = receiver();
+                return receiver == null
+                    ? new PlayerPrimitiveActions.Position(0.0, 0.0, 0.0)
+                    : new PlayerPrimitiveActions.Position(receiver.getX(), receiver.getY(), receiver.getZ());
+            }
+
+            @Override
+            public int receiverItemCount(String requestedItemId) {
+                ServerPlayer receiver = receiver();
+                if (receiver == null) {
+                    return 0;
+                }
+                int total = 0;
+                var inventory = receiver.getInventory();
+                for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+                    ItemStack stack = inventory.getItem(slot);
+                    if (!stack.isEmpty()
+                        && requestedItemId.equals(BuiltInRegistries.ITEM.getKey(stack.getItem()).toString())) {
+                        total += stack.getCount();
+                    }
+                }
+                return total;
+            }
+
+            @Override
+            public int spawnAtReceiver(int sourceSlot, int count) {
+                ServerPlayer receiver = receiver();
+                if (receiver == null || count <= 0) {
+                    return 0;
+                }
+                var inventory = giver.getInventory();
+                if (sourceSlot < 0 || sourceSlot >= inventory.getContainerSize()) {
+                    return 0;
+                }
+                ItemStack source = inventory.getItem(sourceSlot);
+                if (source.isEmpty()
+                    || !itemId.equals(BuiltInRegistries.ITEM.getKey(source.getItem()).toString())) {
+                    return 0;
+                }
+                ItemStack moved = source.split(Math.min(count, source.getCount()));
+                if (moved.isEmpty()) {
+                    return 0;
+                }
+                ItemEntity item = new ItemEntity(
+                    level,
+                    receiver.getX(),
+                    receiver.getY() + 0.25,
+                    receiver.getZ(),
+                    moved
+                );
+                item.setNoPickUpDelay();
+                item.setTarget(receiver.getUUID());
+                if (!level.addFreshEntity(item)) {
+                    source.grow(moved.getCount());
+                    return 0;
+                }
+                if (source.isEmpty()) {
+                    inventory.setItem(sourceSlot, ItemStack.EMPTY);
+                }
+                inventory.setChanged();
+                return moved.getCount();
             }
         };
     }

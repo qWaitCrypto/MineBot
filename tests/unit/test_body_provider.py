@@ -112,6 +112,12 @@ def test_composite_routes_migrated_player_action_and_its_terminal_to_java(
             "count": 2,
         },
         "dropItem": {"slot": 0, "mode": "one"},
+        "handoffItem": {
+            "receiver": "MineBotGuide",
+            "item": "minecraft:diamond",
+            "count": 2,
+            "timeout_ticks": 60,
+        },
         "jump": {},
         "mineBlock": {"target": [1, 64, 0], "block_type": "minecraft:stone", "context": "direct"},
         "placeBlock": {"target": [1, 64, 0], "block_type": "minecraft:cobblestone", "context": "work"},

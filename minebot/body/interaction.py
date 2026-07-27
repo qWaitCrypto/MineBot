@@ -330,7 +330,7 @@ class InteractionTransactions:
             receiver_name=receiver_name,
             item=item,
             count=count,
-            timeout_s=look_timeout_s,
+            timeout_s=pickup_timeout_s,
         )
         spawned = int((handoff.metrics or {}).get("spawned_count") or 0)
         handoff = merge_context(
@@ -348,7 +348,11 @@ class InteractionTransactions:
         if not handoff.success:
             return handoff
 
-        receipt = self._await_pickup(receiver_name, item, timeout_s=pickup_timeout_s)
+        receipt = _terminal_pickup_receipt(
+            (handoff.metrics or {}).get("pickup_receipt"), receiver_name, item
+        )
+        if receipt is None:
+            receipt = self._await_pickup(receiver_name, item, timeout_s=pickup_timeout_s)
         if receipt is None:
             return merge_context(
                 ToolResult(
@@ -1788,7 +1792,15 @@ class InteractionTransactions:
         count: int,
         timeout_s: float,
     ) -> ToolResult:
-        action = Action.create("handoffItem", {"receiver": receiver_name, "item": item, "count": count})
+        action = Action.create(
+            "handoffItem",
+            {
+                "receiver": receiver_name,
+                "item": item,
+                "count": count,
+                "timeout_ticks": max(1, min(200, int(timeout_s * 20.0 + 0.999))),
+            },
+        )
         accepted = self.body.execute(action)
         rejected = _acceptance_failure(accepted)
         if rejected is not None:
@@ -1836,6 +1848,27 @@ def _pickup_receipt(event: Event, receiver_name: str, item: str) -> HandoffRecei
         count=int(event.data.get("count") or 0),
         seq=event.seq,
         tick=event.tick,
+    )
+
+
+def _terminal_pickup_receipt(
+    value: object,
+    receiver_name: str,
+    item: str,
+) -> HandoffReceipt | None:
+    if not isinstance(value, dict):
+        return None
+    if value.get("player") != receiver_name or not _same_item(value.get("item"), item):
+        return None
+    count = int(value.get("count") or 0)
+    if count <= 0:
+        return None
+    return HandoffReceipt(
+        player=receiver_name,
+        item=str(value.get("item")),
+        count=count,
+        seq=int(value.get("seq") or 0),
+        tick=int(value.get("tick") or 0),
     )
 
 

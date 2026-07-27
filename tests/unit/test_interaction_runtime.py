@@ -86,12 +86,23 @@ class FakeWorkTransaction:
 class FakeInteractionBody:
     bot_name = "Bot1"
 
-    def __init__(self, *, entities, block_states, states, events=None, accepted=True, look_success=True):
+    def __init__(
+        self,
+        *,
+        entities,
+        block_states,
+        states,
+        events=None,
+        accepted=True,
+        look_success=True,
+        handoff_terminal_receipt=None,
+    ):
         self.entities = list(entities)
         self.block_states = dict(block_states)
         self.states = list(states)
         self.accepted = accepted
         self.look_success = look_success
+        self.handoff_terminal_receipt = handoff_terminal_receipt
         self.events = list(events or [])
         self.actions: list[Action] = []
         self.perceptions: list[tuple[str, dict[str, object]]] = []
@@ -220,6 +231,7 @@ class FakeInteractionBody:
                 },
             )
         if action.name == "handoffItem":
+            receipt = self.handoff_terminal_receipt
             return Event(
                 seq=4,
                 tick=35,
@@ -234,6 +246,7 @@ class FakeInteractionBody:
                     "requested_count": action.params.get("count"),
                     "spawned_count": action.params.get("count"),
                     "source_slot": 0,
+                    **({"pickup_receipt": receipt} if receipt is not None else {}),
                 },
             )
         return Event(
@@ -1714,6 +1727,34 @@ class InteractionRuntimeTests(unittest.TestCase):
         receipt = result.metrics["pickup_receipt"]
         self.assertEqual(receipt["player"], "Receiver")
         self.assertEqual(receipt["count"], 2)
+
+    def test_give_player_accepts_server_observed_terminal_pickup_receipt(self):
+        body = FakeInteractionBody(
+            entities=[player_entity(pos=(2.0, 64.0, 0.0), dist2=4.0)],
+            block_states={},
+            states=[state_at((0, 64, 0)), state_at((0, 64, 0)), state_at((0, 64, 0))],
+            events=[],
+            handoff_terminal_receipt={
+                "player": "Receiver",
+                "item": "minecraft:diamond",
+                "count": 2,
+                "tick": 35,
+            },
+        )
+        runtime = InteractionTransactions(body)
+
+        result = runtime.give_player(
+            receiver_name="Receiver",
+            item="minecraft:diamond",
+            count=2,
+            pickup_timeout_s=0.01,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(result.metrics["pickup_receipt"]["count"], 2)
+        self.assertEqual(body.poll_calls, 1)
+        self.assertEqual(body.actions[1].params["timeout_ticks"], 1)
 
     def test_give_player_micro_moves_when_receiver_is_near_but_outside_handoff_band(self):
         discard = ToolResult(success=True, reason="completed", can_retry=False, metrics={"dropped_count": 2})
