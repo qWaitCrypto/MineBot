@@ -160,6 +160,21 @@ class JavaBodyProtocol:
         self._require_capability("BODY_STATE")
         return self._request("BODY_STATE", {"bot_name": bot_name})
 
+    def inventory(
+        self,
+        bot_name: str,
+        *,
+        start: int | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        self._require_capability("INVENTORY")
+        body: dict = {"bot_name": bot_name}
+        if start is not None:
+            body["start"] = start
+        if limit is not None:
+            body["limit"] = limit
+        return self._request("INVENTORY", body)
+
     def collect_block(
         self,
         bot_name: str,

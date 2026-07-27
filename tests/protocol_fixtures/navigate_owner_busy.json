@@ -30,6 +30,7 @@
           "COLLECT_BLOCK",
           "FIND_BLOCKS",
           "HELLO",
+          "INVENTORY",
           "MUTATION_VERDICT",
           "NAVIGATE",
           "QUERY_ACTION",

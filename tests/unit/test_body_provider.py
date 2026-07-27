@@ -10,7 +10,7 @@ from minebot.app.body_provider import (
     build_body_provider,
 )
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry
-from minebot.contract import Region
+from minebot.contract import PerceptionResult, Region
 from minebot.game.composite_body import CompositeBody
 from minebot.game.governance import GovernancePolicy
 from minebot.game.java_body import JavaBody
@@ -56,6 +56,27 @@ def test_composite_constructs_java_body_without_connecting_at_startup() -> None:
     assert isinstance(runtime.body, CompositeBody)
     assert runtime.java_body is not None
     assert runtime.java_body._client.negotiated is False
+
+
+def test_composite_routes_inventory_to_java_without_runtime_fallback() -> None:
+    scarpet = _scarpet()
+    java = _scarpet()
+    java_result = PerceptionResult(
+        bot="Bot",
+        scope="inventory",
+        type="perception",
+        ok=False,
+        complete=False,
+        error="inventory_internal_error",
+    )
+    java.perceive.return_value = java_result
+    body = CompositeBody(scarpet, java)
+
+    result = body.perceive("inventory", {"start": 0, "limit": 12})
+
+    assert result is java_result
+    java.perceive.assert_called_once_with("inventory", {"start": 0, "limit": 12})
+    scarpet.perceive.assert_not_called()
 
 
 def test_invalid_provider_is_rejected() -> None:

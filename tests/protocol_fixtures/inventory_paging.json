@@ -1,0 +1,83 @@
+{
+  "name": "inventory_paging",
+  "description": "INVENTORY preserves the 46-slot contract, paged metadata, and explicit missing-body truth.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS", "HELLO", "INVENTORY", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {"builder": "inventory", "args": {"bot_name": "MineBot_1", "start": 36, "limit": 4}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "INVENTORY",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "start": 36,
+        "limit": 4
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "INVENTORY_RESULT",
+        "request_id": "r-2",
+        "bot": "MineBot_1",
+        "missing": false,
+        "start": 36,
+        "limit": 4,
+        "nextStart": 40,
+        "totalSlots": 46,
+        "slots": [
+          {"slot": 36, "slotType": "armor", "slotLabel": "armor.feet", "empty": true, "item": null, "count": 0, "stackRaw": null},
+          {"slot": 37, "slotType": "armor", "slotLabel": "armor.legs", "empty": true, "item": null, "count": 0, "stackRaw": null},
+          {"slot": 38, "slotType": "armor", "slotLabel": "armor.chest", "empty": true, "item": null, "count": 0, "stackRaw": null},
+          {"slot": 39, "slotType": "armor", "slotLabel": "armor.head", "empty": false, "item": "minecraft:diamond_helmet", "count": 1, "stackRaw": "{\"id\":\"minecraft:diamond_helmet\",\"count\":1,\"components\":{\"minecraft:damage\":7}}"}
+        ]
+      },
+      "expect": [{"kind": "response", "type": "INVENTORY_RESULT", "request_type": "INVENTORY", "payload_contains": {"missing": false, "nextStart": 40, "totalSlots": 46}}]
+    },
+    {
+      "send": {"builder": "inventory", "args": {"bot_name": "GhostBot", "start": 0, "limit": 7}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "INVENTORY",
+        "request_id": "r-3",
+        "bot_name": "GhostBot",
+        "start": 0,
+        "limit": 7
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "INVENTORY_RESULT",
+        "request_id": "r-3",
+        "bot": "GhostBot",
+        "missing": true
+      },
+      "expect": [{"kind": "response", "type": "INVENTORY_RESULT", "request_type": "INVENTORY", "payload_contains": {"missing": true}}]
+    }
+  ],
+  "final": {"pending_requests": 0, "supports": ["INVENTORY"]}
+}

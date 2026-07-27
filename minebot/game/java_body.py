@@ -8,6 +8,9 @@ actions to the Java Body (navigate/collect); semantics the provider does not
 offer return a **typed capability gap** — never a silent fallback to weaker
 behavior, per the Body-layer capability-negotiation rule.
 
+The first migrated data-plane read is complete paged inventory truth; the
+remaining perception and item-mutation primitives stay explicit gaps.
+
 Hybrid deployments keep ScarpetBody for the scopes and actions still owned by
 the Scarpet path; this class is how the Java provider grows into the full
 contract surface one honest capability at a time.
@@ -68,6 +71,8 @@ class JavaBody:
         )
 
     def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
+        if scope == "inventory":
+            return self._perceive_inventory(params)
         if scope != "findBlocks":
             return PerceptionResult(
                 bot=self.bot_name,
@@ -104,6 +109,53 @@ class JavaBody:
                 "result_capped": payload.get("result_capped"),
             },
             next=payload.get("next_cursor"),
+        )
+
+    def _perceive_inventory(self, params: dict[str, object]) -> PerceptionResult:
+        reply = self._client.request_response(lambda p: p.inventory(
+            self.bot_name,
+            start=_opt_int(params.get("start")),
+            limit=_opt_int(params.get("limit")),
+        ))
+        if isinstance(reply, ErrorResponse):
+            missing = reply.code in {"body_missing", "missing_body"}
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope="inventory",
+                type="perception",
+                ok=False,
+                complete=missing,
+                uncertainty=[{"reason": "missing_body"}] if missing else None,
+                error="missing_body" if missing else reply.code,
+            )
+        payload = reply.payload
+        if payload.get("missing") is True:
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope="inventory",
+                type="perception",
+                ok=False,
+                complete=True,
+                uncertainty=[{"reason": "missing_body"}],
+                error="missing_body",
+            )
+        next_start = payload.get("nextStart")
+        complete = next_start is None
+        return PerceptionResult(
+            bot=self.bot_name,
+            scope="inventory",
+            type="perception",
+            ok=True,
+            complete=complete,
+            data={
+                "start": payload.get("start"),
+                "limit": payload.get("limit"),
+                "nextStart": next_start,
+                "totalSlots": payload.get("totalSlots"),
+                "slots": payload.get("slots", []),
+            },
+            uncertainty=[] if complete else [{"reason": "page_limit"}],
+            next=None if complete else str(next_start),
         )
 
     def poll_events(self) -> list[Event]:

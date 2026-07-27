@@ -82,6 +82,32 @@ def test_unmapped_mutation_kind_is_denied_never_guessed() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _inventory_slot_type(slot: int) -> str:
+    if slot <= 8:
+        return "hotbar"
+    if slot <= 35:
+        return "inventory"
+    if slot <= 39:
+        return "armor"
+    if slot == 40:
+        return "offhand"
+    return "aux"
+
+
+def _inventory_slot_label(slot: int) -> str:
+    if slot <= 8:
+        return f"hotbar.{slot}"
+    if slot <= 35:
+        return f"inventory.{slot - 9}"
+    return {
+        36: "armor.feet",
+        37: "armor.legs",
+        38: "armor.chest",
+        39: "armor.head",
+        40: "offhand",
+    }.get(slot, f"aux.{slot - 41}")
+
+
 class FakeBodyServer:
     """Reactive in-memory Body server driving one bot's protocol.
 
@@ -132,7 +158,7 @@ class FakeBodyServer:
                 "max_requests_per_second": 40,
                 "request_types": [
                     "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS",
-                    "HELLO", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION",
+                    "HELLO", "INVENTORY", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION",
                     "RESUME_EVENTS",
                 ],
             })
@@ -159,6 +185,42 @@ class FakeBodyServer:
                 "selected_item": "minecraft:oak_log",
                 "offhand_item": None,
                 "body_owner": None,
+            })
+        elif kind == "INVENTORY":
+            if message.get("bot_name") == "MissingBot":
+                self._emit_response(rid, "INVENTORY_RESULT", {
+                    "bot": "MissingBot",
+                    "missing": True,
+                })
+                return
+            start = max(0, min(45, int(message.get("start", 0))))
+            limit = max(1, min(46, int(message.get("limit", 46))))
+            end = min(46, start + limit)
+            slots = []
+            for slot in range(start, end):
+                item = "minecraft:stone" if slot == 0 else "minecraft:diamond_helmet" if slot == 39 else None
+                count = 3 if slot == 0 else 1 if slot == 39 else 0
+                slots.append({
+                    "slot": slot,
+                    "slotType": _inventory_slot_type(slot),
+                    "slotLabel": _inventory_slot_label(slot),
+                    "empty": item is None,
+                    "item": item,
+                    "count": count,
+                    "stackRaw": None if item is None else json.dumps({
+                        "id": item,
+                        "count": count,
+                        "components": {"minecraft:damage": 7} if slot == 39 else {},
+                    }, separators=(",", ":")),
+                })
+            self._emit_response(rid, "INVENTORY_RESULT", {
+                "bot": message.get("bot_name"),
+                "missing": False,
+                "start": start,
+                "limit": limit,
+                "nextStart": None if end >= 46 else end,
+                "totalSlots": 46,
+                "slots": slots,
             })
 
     def _handle_navigate(self, message: dict, rid: str) -> None:
@@ -408,6 +470,35 @@ def test_java_body_perceive_supports_find_blocks_and_gaps_the_rest() -> None:
     gap = body.perceive("nearbyEntities", {})
     assert gap.ok is False
     assert gap.error == "capability_unavailable:nearbyEntities"
+
+
+def test_java_body_inventory_preserves_paging_slots_and_metadata() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    first = body.perceive("inventory", {"start": 0, "limit": 40})
+    second = body.perceive("inventory", {"start": 40, "limit": 40})
+
+    assert first.ok is True
+    assert first.complete is False
+    assert first.next == "40"
+    assert first.uncertainty == [{"reason": "page_limit"}]
+    assert first.data["slots"][0]["item"] == "minecraft:stone"
+    assert '"minecraft:damage":7' in first.data["slots"][39]["stackRaw"]
+    assert second.ok is True
+    assert second.complete is True
+    assert second.next is None
+    assert len(second.data["slots"]) == 6
+
+
+def test_java_body_inventory_missing_body_is_explicit_and_complete() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "MissingBot")
+
+    result = body.perceive("inventory", {"start": 0, "limit": 7})
+
+    assert result.ok is False
+    assert result.complete is True
+    assert result.error == "missing_body"
+    assert result.uncertainty == [{"reason": "missing_body"}]
 
 
 def test_java_body_execute_delegates_whole_objectives() -> None:

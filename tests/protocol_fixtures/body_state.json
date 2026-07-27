@@ -20,7 +20,7 @@
         "minecraft_version": "26.1.2",
         "max_request_bytes": 16384,
         "max_requests_per_second": 40,
-        "request_types": ["ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS", "HELLO", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS"],
+        "request_types": ["ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "FIND_BLOCKS", "HELLO", "INVENTORY", "MUTATION_VERDICT", "NAVIGATE", "QUERY_ACTION", "RESUME_EVENTS"],
         "seq": 1,
         "server_tick": 700,
         "sent_at_ms": 1785000007000

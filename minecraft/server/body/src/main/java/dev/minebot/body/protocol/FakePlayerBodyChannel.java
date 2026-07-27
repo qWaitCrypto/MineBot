@@ -1,7 +1,9 @@
 package dev.minebot.body.protocol;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import com.mojang.serialization.JsonOps;
 import dev.minebot.body.action.ActionRegistry;
 import dev.minebot.body.action.ActionRuntime;
 import dev.minebot.body.action.AscendExecutor;
@@ -13,6 +15,7 @@ import dev.minebot.body.control.OwnerPriority;
 import dev.minebot.body.control.PlayerCommandAdapter;
 import dev.minebot.body.control.ServerPlayerBlockBreaker;
 import dev.minebot.body.event.BotEventStream;
+import dev.minebot.body.inventory.InventorySnapshot;
 import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MinecraftWorldView;
 import dev.minebot.body.nav.NavigateExecutor;
@@ -46,7 +49,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String CHANNEL = "fakeplayer-body";
     public static final String PROTOCOL = "fakeplayer-body/1";
     private static final Set<String> REQUEST_TYPES = Set.of(
-        "HELLO", "FIND_BLOCKS", "BODY_STATE", "NAVIGATE", "COLLECT_BLOCK", "ASCEND",
+        "HELLO", "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "NAVIGATE", "COLLECT_BLOCK", "ASCEND",
         "MUTATION_VERDICT", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
     );
     private static final int MAX_RADIUS = 128;
@@ -122,6 +125,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "HELLO" -> handleHello(connection, request, serverTick);
             case "FIND_BLOCKS" -> handleFindBlocks(connection, request, serverTick);
             case "BODY_STATE" -> handleBodyState(connection, request, serverTick);
+            case "INVENTORY" -> handleInventory(connection, request, serverTick);
             case "NAVIGATE" -> handleNavigate(connection, request, serverTick);
             case "COLLECT_BLOCK" -> handleCollectBlock(connection, request, serverTick);
             case "ASCEND" -> handleAscend(connection, request, serverTick);
@@ -350,6 +354,72 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             connection.send(response, serverTick);
         } catch (IllegalArgumentException error) {
             sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        }
+    }
+
+    /** Paged slot-level inventory truth with the legacy 46-slot logical mapping. */
+    private void handleInventory(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            JsonObject response = baseResponse(request, "INVENTORY_RESULT");
+            response.addProperty("bot", botName);
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved()) {
+                response.addProperty("missing", true);
+                connection.send(response, serverTick);
+                return;
+            }
+
+            List<InventorySnapshot.StackValue> backingSlots = new ArrayList<>();
+            var inventory = player.getInventory();
+            for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+                ItemStack stack = inventory.getItem(slot);
+                if (stack.isEmpty()) {
+                    backingSlots.add(InventorySnapshot.StackValue.emptySlot());
+                    continue;
+                }
+                String itemId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+                String stackRaw = ItemStack.CODEC.encodeStart(
+                    server.registryAccess().createSerializationContext(JsonOps.INSTANCE),
+                    stack
+                ).getOrThrow().toString();
+                backingSlots.add(new InventorySnapshot.StackValue(itemId, stack.getCount(), stackRaw));
+            }
+
+            int requestedStart = boundedOptionalInt(
+                request, "start", 0, Integer.MIN_VALUE, Integer.MAX_VALUE
+            );
+            int requestedLimit = boundedOptionalInt(
+                request, "limit", InventorySnapshot.TOTAL_SLOTS, Integer.MIN_VALUE, Integer.MAX_VALUE
+            );
+            InventorySnapshot.Page page = InventorySnapshot.page(backingSlots, requestedStart, requestedLimit);
+            response.addProperty("missing", false);
+            response.addProperty("start", page.start());
+            response.addProperty("limit", page.limit());
+            if (page.nextStart() == null) {
+                response.add("nextStart", JsonNull.INSTANCE);
+            } else {
+                response.addProperty("nextStart", page.nextStart());
+            }
+            response.addProperty("totalSlots", page.totalSlots());
+            JsonArray slots = new JsonArray();
+            for (InventorySnapshot.Slot slot : page.slots()) {
+                JsonObject entry = new JsonObject();
+                entry.addProperty("slot", slot.slot());
+                entry.addProperty("slotType", slot.slotType());
+                entry.addProperty("slotLabel", slot.slotLabel());
+                entry.addProperty("empty", slot.empty());
+                entry.addProperty("item", slot.item());
+                entry.addProperty("count", slot.count());
+                entry.addProperty("stackRaw", slot.stackRaw());
+                slots.add(entry);
+            }
+            response.add("slots", slots);
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        } catch (RuntimeException error) {
+            sendError(connection, request, serverTick, "inventory_internal_error", "inventory snapshot failed", true);
         }
     }
 

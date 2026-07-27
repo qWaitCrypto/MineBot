@@ -14,6 +14,7 @@ class CompositeBody:
     """
 
     JAVA_ACTIONS = frozenset({"navigate", "collectBlock", "ascend"})
+    JAVA_PERCEPTIONS = frozenset({"inventory"})
 
     def __init__(self, scarpet: Body, java: Body) -> None:
         if scarpet.bot_name != java.bot_name:
@@ -33,9 +34,8 @@ class CompositeBody:
         return self.scarpet.get_state()
 
     def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
-        # Perception remains legacy-owned until each scope has no-downgrade
-        # proof. Java objectives use their own indexed reads internally.
-        return self.scarpet.perceive(scope, params)
+        provider = self.java if scope in self.JAVA_PERCEPTIONS else self.scarpet
+        return provider.perceive(scope, params)
 
     def execute(self, action: Action) -> Result:
         provider = self.java if action.name in self.JAVA_ACTIONS else self.scarpet
