@@ -214,7 +214,7 @@ class FakeBodyServer:
                 "max_request_bytes": 16384,
                 "max_requests_per_second": 40,
                 "request_types": [
-                    "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "ENTITY_READ", "FIND_BLOCKS",
+                    "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "ENTITY_READ", "FIND_BLOCKS", "FURNACE_TRANSFER",
                     "HELLO", "INVENTORY", "CONTAINER_READ", "CONTAINER_TRANSFER", "CRAFT_ITEM", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
                     "RECIPE_READ", "RESUME_EVENTS", "WORLD_READ",
                 ],
@@ -231,6 +231,8 @@ class FakeBodyServer:
             self._handle_container_transfer(message, rid)
         elif kind == "CRAFT_ITEM":
             self._handle_craft_item(message, rid)
+        elif kind == "FURNACE_TRANSFER":
+            self._handle_furnace_transfer(message, rid)
         elif kind == "MUTATION_VERDICT":
             self._handle_verdict(message)
         elif kind == "QUERY_ACTION":
@@ -681,9 +683,72 @@ class FakeBodyServer:
             "output_after": {"slot": output.get("slot"), "item": output.get("item"), "count": output.get("count")},
         })
 
+    def _handle_furnace_transfer(self, message: dict, rid: str) -> None:
+        action_id = message["action_id"]
+        self._furnace_action = action_id
+        self._furnace_params = dict(message)
+        self._emit_response(rid, "FURNACE_TRANSFER_ACK", {"action_id": action_id, "state": "accepted"})
+        self._emit_event("owner_acquired", action_id, {"type": "FURNACE_TRANSFER", "priority": "ACTION"})
+        self._emit_proposal(
+            action_id,
+            "mp-furnace-1",
+            "minecraft:furnace",
+            *message.get("pos", [1, 64, 0]),
+            kind="open",
+            context="activate",
+        )
+
     def _handle_verdict(self, message: dict) -> None:
         allow = bool(message.get("allow"))
         self.verdict_seen.append((message.get("proposal_id"), allow))
+        if getattr(self, "_furnace_action", None) is not None:
+            action = self._furnace_action
+            params = self._furnace_params
+            if allow:
+                count = int(params.get("count", 1))
+                slot = params.get("furnace_slot")
+                direction = params.get("direction")
+                item = "minecraft:iron_ingot" if slot == "output" else (
+                    "minecraft:coal" if slot == "fuel" else "minecraft:raw_iron"
+                )
+                furnace_before = count if direction == "furnace_to_bot" else 0
+                furnace_after = 0 if direction == "furnace_to_bot" else count
+                bot_before = 0 if direction == "furnace_to_bot" else count
+                bot_after = count if direction == "furnace_to_bot" else 0
+                self._emit_event("mutation_allowed", action, {"proposal_id": "mp-furnace-1"})
+                self._emit_terminal(action, {
+                    "classification": "completed",
+                    "reason": "completed",
+                    "success": True,
+                    "stopped_reason": "completed",
+                    "direction": direction,
+                    "pos": params.get("pos"),
+                    "furnace_slot": slot,
+                    "bot_slot": params.get("bot_slot"),
+                    "item": item,
+                    "count": count,
+                    "furnace_before": {"item": item if furnace_before else None, "count": furnace_before},
+                    "furnace_after": {"item": item if furnace_after else None, "count": furnace_after},
+                    "bot_before": {"item": item if bot_before else None, "count": bot_before},
+                    "bot_after": {"item": item if bot_after else None, "count": bot_after},
+                })
+            else:
+                denial = f"governance_denied:{message.get('reason')}"
+                self._emit_event("mutation_denied", action, {
+                    "proposal_id": "mp-furnace-1", "reason": denial,
+                })
+                self._emit_terminal(action, {
+                    "classification": "failed",
+                    "reason": denial,
+                    "success": False,
+                    "stopped_reason": denial,
+                    "direction": params.get("direction"),
+                    "pos": params.get("pos"),
+                    "furnace_slot": params.get("furnace_slot"),
+                    "bot_slot": params.get("bot_slot"),
+                    "count": 0,
+                })
+            return
         if getattr(self, "_container_action", None) is not None:
             action = self._container_action
             params = self._container_params
@@ -1293,6 +1358,54 @@ def test_java_body_craft_item_preserves_recipe_rejection_without_relabeling() ->
 
     assert terminal.data["success"] is False
     assert terminal.data["stopped_reason"] == "recipe_mismatch"
+
+
+def test_java_body_furnace_transfer_preserves_caller_id_governance_and_terminal_facts() -> None:
+    server = FakeBodyServer()
+    policy = GovernancePolicy(natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))])
+    body = JavaBody(_client(server, GovernanceAnswerer(policy)), "Bot")
+    action = Action.create("furnaceTransfer", {
+        "pos": [1, 64, 0],
+        "direction": "bot_to_furnace",
+        "furnace_slot": "input",
+        "bot_slot": 5,
+        "count": 2,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted and not accepted.complete
+    assert terminal.name == "furnaceDone"
+    assert terminal.data["action_id"] == action.id
+    assert terminal.data["success"] is True
+    assert terminal.data["count"] == 2
+    assert terminal.data["furnace_slot"] == "input"
+    assert terminal.data["furnace_after"]["count"] == 2
+    assert server.verdict_seen == [("mp-furnace-1", True)]
+    request = next(item for item in server.requests if item.get("type") == "FURNACE_TRANSFER")
+    assert request["action_id"] == action.id
+    assert request["pos"] == [1, 64, 0]
+
+
+def test_java_body_furnace_transfer_governance_denial_is_not_relabelled() -> None:
+    server = FakeBodyServer()
+    body = JavaBody(_client(server, GovernanceAnswerer(GovernancePolicy())), "Bot")
+    action = Action.create("furnaceTransfer", {
+        "pos": [1, 64, 0],
+        "direction": "bot_to_furnace",
+        "furnace_slot": "fuel",
+        "bot_slot": 6,
+        "count": 1,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.data["success"] is False
+    assert terminal.data["stopped_reason"] == "governance_denied:unknown_provenance"
+    assert server.verdict_seen == [("mp-furnace-1", False)]
 
 
 def test_java_body_poll_events_drains_contract_events() -> None:

@@ -31,6 +31,7 @@ public final class MutationGate {
         int y,
         int z,
         String blockId,
+        String context,
         int deadlineTick
     ) {
     }
@@ -49,11 +50,13 @@ public final class MutationGate {
         int y,
         int z,
         String blockId,
+        String context,
         int currentTick
     ) {
         String proposalId = "mp-" + counter.incrementAndGet();
         Proposal proposal = new Proposal(
-            proposalId, bot, actionId, mutationKind, x, y, z, blockId, currentTick + VERDICT_TIMEOUT_TICKS
+            proposalId, bot, actionId, mutationKind, x, y, z, blockId, context,
+            currentTick + VERDICT_TIMEOUT_TICKS
         );
         pending.put(proposalId, new Pending(proposal, State.PENDING, null));
         return proposal;

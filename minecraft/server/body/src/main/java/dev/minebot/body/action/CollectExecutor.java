@@ -227,7 +227,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                     return;
                 }
                 MutationGate.Proposal proposal = gate.propose(
-                    bot, actionId, "break", current.x(), current.y(), current.z(), current.blockId(), serverTick
+                    bot, actionId, "break", current.x(), current.y(), current.z(), current.blockId(),
+                    "collect", serverTick
                 );
                 proposalId = proposal.proposalId();
                 proposals.send(proposal);

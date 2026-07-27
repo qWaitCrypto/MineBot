@@ -112,6 +112,7 @@ _PLAYER_ACTION_TERMINALS: dict[str, tuple[bool, str, bool]] = {
 }
 _CONTAINER_TRANSFER_TERMINALS = _PLAYER_ACTION_TERMINALS
 _CRAFT_ITEM_TERMINALS = _PLAYER_ACTION_TERMINALS
+_FURNACE_TRANSFER_TERMINALS = _PLAYER_ACTION_TERMINALS
 
 
 class JavaBodyClient:
@@ -268,6 +269,11 @@ class JavaBodyClient:
         request = self._protocol.craft_item(self._bot, action_id, params)
         return self._run_action(request, action_id, "craft_item", _CRAFT_ITEM_TERMINALS)
 
+    def furnace_transfer(self, action_id: str, params: dict) -> ToolResult:
+        self._ensure_connected()
+        request = self._protocol.furnace_transfer(self._bot, action_id, params)
+        return self._run_action(request, action_id, "furnace_transfer", _FURNACE_TRANSFER_TERMINALS)
+
     def _ensure_connected(self) -> None:
         if self._transport is None or not self._protocol.negotiated:
             self.connect()
@@ -317,7 +323,7 @@ class JavaBodyClient:
         mapped = terminals.get(classification)
         if mapped is not None:
             success, reason, can_retry = mapped
-            if success and kind in {"collect", "player_action", "container_transfer", "craft_item"}:
+            if success and kind in {"collect", "player_action", "container_transfer", "craft_item", "furnace_transfer"}:
                 reason = str(terminal.get("reason", reason))
             return ToolResult(
                 success=success,
@@ -325,7 +331,7 @@ class JavaBodyClient:
                 can_retry=can_retry,
                 metrics=self._terminal_metrics(
                     terminal,
-                    include_all=kind in {"player_action", "container_transfer", "craft_item"},
+                    include_all=kind in {"player_action", "container_transfer", "craft_item", "furnace_transfer"},
                 ),
             )
         # Failed classification: keep the Java typed reason, never relabel.
@@ -335,7 +341,7 @@ class JavaBodyClient:
             can_retry=_failed_is_retriable(str(terminal.get("reason", ""))),
             metrics=self._terminal_metrics(
                 terminal,
-                include_all=kind in {"player_action", "container_transfer", "craft_item"},
+                include_all=kind in {"player_action", "container_transfer", "craft_item", "furnace_transfer"},
             ),
         )
 

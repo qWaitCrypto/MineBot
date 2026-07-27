@@ -104,6 +104,13 @@ def test_composite_routes_migrated_player_action_and_its_terminal_to_java(
             "remainders": [],
             "max_stack": 64,
         },
+        "furnaceTransfer": {
+            "pos": [1, 64, 0],
+            "direction": "bot_to_furnace",
+            "furnace_slot": "input",
+            "bot_slot": 5,
+            "count": 2,
+        },
         "dropItem": {"slot": 0, "mode": "one"},
         "selectItem": {"item": "minecraft:bread"},
         "lookAt": {"target": [1.0, 65.0, 1.0]},

@@ -213,7 +213,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                 continue;
             }
             MutationGate.Proposal proposal = gate.propose(
-                bot, actionId, "break", breakX, breakY, breakZ, breakBlock, serverTick
+                bot, actionId, "break", breakX, breakY, breakZ, breakBlock, "recovery", serverTick
             );
             proposalId = proposal.proposalId();
             proposals.send(proposal);

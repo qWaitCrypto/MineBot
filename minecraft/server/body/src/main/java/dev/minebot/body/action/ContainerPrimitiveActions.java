@@ -243,7 +243,7 @@ public final class ContainerPrimitiveActions {
             }
             proposedBlockId = target.blockId();
             MutationGate.Proposal proposal = gate.propose(
-                bot, actionId, "open", x, y, z, proposedBlockId, serverTick
+                bot, actionId, "open", x, y, z, proposedBlockId, "activate", serverTick
             );
             proposalId = proposal.proposalId();
             proposals.send(proposal);

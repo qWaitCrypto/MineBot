@@ -44,6 +44,7 @@ _ENTITY_READ_SCOPES = frozenset({"nearbyEntities"})
 _ACTION_TERMINALS = {
     "containerTransfer": "containerDone",
     "craftItem": "craftDone",
+    "furnaceTransfer": "furnaceDone",
     "dropItem": "dropDone",
     "lookAt": "lookDone",
     "moveItem": "moveItemDone",
@@ -552,6 +553,8 @@ class JavaBody:
             outcome = self._client.container_transfer(action.id, dict(action.params))
         elif action.name == "craftItem":
             outcome = self._client.craft_item(action.id, dict(action.params))
+        elif action.name == "furnaceTransfer":
+            outcome = self._client.furnace_transfer(action.id, dict(action.params))
         else:
             outcome = self._client.player_action(action.id, action.name, dict(action.params))
         terminal_record = self._client.last_action_terminal

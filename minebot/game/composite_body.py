@@ -19,6 +19,7 @@ class CompositeBody:
         "ascend",
         "containerTransfer",
         "craftItem",
+        "furnaceTransfer",
         "dropItem",
         "lookAt",
         "moveItem",
@@ -29,6 +30,7 @@ class CompositeBody:
     JAVA_TERMINAL_ACTIONS = frozenset({
         "containerTransfer",
         "craftItem",
+        "furnaceTransfer",
         "dropItem",
         "lookAt",
         "moveItem",

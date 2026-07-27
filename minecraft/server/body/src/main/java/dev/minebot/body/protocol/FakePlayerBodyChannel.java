@@ -10,6 +10,7 @@ import dev.minebot.body.action.AscendExecutor;
 import dev.minebot.body.action.CollectExecutor;
 import dev.minebot.body.action.ContainerPrimitiveActions;
 import dev.minebot.body.action.CraftPrimitiveActions;
+import dev.minebot.body.action.FurnacePrimitiveActions;
 import dev.minebot.body.action.MutationGate;
 import dev.minebot.body.action.PlayerPrimitiveActions;
 import dev.minebot.body.control.FakePlayerActionOwner;
@@ -26,6 +27,7 @@ import dev.minebot.body.perception.EntityReadService;
 import dev.minebot.body.perception.RecipeReadService;
 import dev.minebot.body.perception.WorldReadService;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import dev.minebot.server.common.transport.MineBotChannel;
 import dev.minebot.server.common.transport.MineBotChannelRouter;
 import dev.minebot.server.common.transport.MineBotConnection;
@@ -58,7 +60,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String CHANNEL = "fakeplayer-body";
     public static final String PROTOCOL = "fakeplayer-body/1";
     private static final Set<String> REQUEST_TYPES = Set.of(
-        "HELLO", "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "CONTAINER_READ", "RECIPE_READ", "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND", "PLAYER_ACTION", "CONTAINER_TRANSFER", "CRAFT_ITEM",
+        "HELLO", "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "CONTAINER_READ", "RECIPE_READ", "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND", "PLAYER_ACTION", "CONTAINER_TRANSFER", "CRAFT_ITEM", "FURNACE_TRANSFER",
         "MUTATION_VERDICT", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
     );
     private static final int MAX_RADIUS = 128;
@@ -145,6 +147,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "PLAYER_ACTION" -> handlePlayerAction(connection, request, serverTick);
             case "CONTAINER_TRANSFER" -> handleContainerTransfer(connection, request, serverTick);
             case "CRAFT_ITEM" -> handleCraftItem(connection, request, serverTick);
+            case "FURNACE_TRANSFER" -> handleFurnaceTransfer(connection, request, serverTick);
             case "MUTATION_VERDICT" -> handleMutationVerdict(request);
             case "RESUME_EVENTS" -> handleResumeEvents(connection, request, serverTick);
             case "CANCEL_ACTION" -> handleCancelAction(connection, request, serverTick);
@@ -318,6 +321,81 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
         } catch (RuntimeException error) {
             sendError(connection, request, serverTick, "container_transfer_internal_error", "container transfer failed", true);
+        }
+    }
+
+    private void handleFurnaceTransfer(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            String actionId = requiredString(request, "action_id", 128);
+            BlockPos pos = requiredBlockPos(request, "pos");
+            String direction = requiredString(request, "direction", 32);
+            if (!Set.of("furnace_to_bot", "bot_to_furnace").contains(direction)) {
+                throw new IllegalArgumentException("unsupported furnace direction: " + direction);
+            }
+            String furnaceSlot = requiredString(request, "furnace_slot", 16);
+            if (!Set.of("input", "fuel", "output").contains(furnaceSlot)) {
+                throw new IllegalArgumentException("unsupported furnace slot: " + furnaceSlot);
+            }
+            int botSlot = boundedInt(request, "bot_slot", Integer.MIN_VALUE, Integer.MAX_VALUE);
+            int count = boundedOptionalInt(request, "count", -1, -1, Integer.MAX_VALUE);
+            int maxStack = boundedOptionalInt(request, "max_stack", 64, 1, 99);
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
+                return;
+            }
+
+            ActionRuntime.Submission submission = runtime.submit(
+                botName, actionId, "FURNACE_TRANSFER", OwnerPriority.ACTION, serverTick
+            );
+            JsonObject response = baseResponse(request, "FURNACE_TRANSFER_ACK");
+            response.addProperty("action_id", actionId);
+            switch (submission) {
+                case ActionRuntime.Submission.Accepted ignored -> {
+                    runtime.attachExecutor(actionId, new FurnacePrimitiveActions.Executor(
+                        botName,
+                        actionId,
+                        pos.getX(),
+                        pos.getY(),
+                        pos.getZ(),
+                        direction,
+                        furnaceSlot,
+                        botSlot,
+                        count,
+                        maxStack,
+                        () -> resolveFurnaceTarget(player, level, pos),
+                        mutationGate,
+                        this::publishProposal,
+                        events,
+                        runtime
+                    ));
+                    response.addProperty("state", "accepted");
+                }
+                case ActionRuntime.Submission.Duplicate duplicate -> {
+                    response.addProperty(
+                        "state",
+                        duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal"
+                    );
+                    if (duplicate.status().terminal() != null) {
+                        response.add("terminal", duplicate.status().terminal());
+                    }
+                }
+                case ActionRuntime.Submission.Rejected rejected -> {
+                    JsonObject error = MineBotChannelRouter.error(
+                        CHANNEL, requestId(request), rejected.code(), "another action owns this bot", true
+                    );
+                    error.addProperty("owner_action_id", rejected.currentOwner().actionId());
+                    error.addProperty("owner_priority", rejected.currentOwner().priority().name());
+                    connection.send(error, serverTick);
+                    return;
+                }
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        } catch (RuntimeException error) {
+            sendError(connection, request, serverTick, "furnace_transfer_internal_error", "furnace transfer failed", true);
         }
     }
 
@@ -925,24 +1003,11 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         mutation.addProperty("y", proposal.y());
         mutation.addProperty("z", proposal.z());
         mutation.addProperty("block_id", proposal.blockId());
-        mutation.addProperty("context", mutationContext(proposal.actionId()));
+        mutation.addProperty("context", proposal.context());
         frame.add("mutation", mutation);
         for (MineBotConnection subscriber : subscribers) {
             subscriber.send(frame, currentTick);
         }
-    }
-
-    private String mutationContext(String actionId) {
-        ActionRegistry.ActionStatus status = actions.status(actionId);
-        if (status.record() == null) {
-            return "direct";
-        }
-        return switch (status.record().type()) {
-            case "ASCEND" -> "recovery";
-            case "COLLECT_BLOCK" -> "collect";
-            case "CONTAINER_TRANSFER" -> "activate";
-            default -> "direct";
-        };
     }
 
     private String observedBlockId(ServerLevel level, int x, int y, int z) {
@@ -1356,6 +1421,34 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         return new ContainerPrimitiveActions.Target(
             blockId,
             new MinecraftInventoryAccess(container),
+            new MinecraftInventoryAccess(player.getInventory()),
+            null
+        );
+    }
+
+    private ContainerPrimitiveActions.Target resolveFurnaceTarget(
+        ServerPlayer player,
+        ServerLevel level,
+        BlockPos pos
+    ) {
+        if (player.isRemoved() || server.getPlayerList().getPlayer(player.getUUID()) != player) {
+            return ContainerPrimitiveActions.Target.unavailable("missing_body");
+        }
+        var chunk = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+        if (chunk == null) {
+            return ContainerPrimitiveActions.Target.unavailable("furnace_unloaded");
+        }
+        var state = chunk.getBlockState(pos);
+        String blockId = LoadedBlockScanner.blockId(state.getBlock());
+        if (!(level.getBlockEntity(pos) instanceof AbstractFurnaceBlockEntity furnace)) {
+            return ContainerPrimitiveActions.Target.unavailable("furnace_wrong_type");
+        }
+        if (!furnace.stillValid(player)) {
+            return ContainerPrimitiveActions.Target.unavailable("furnace_out_of_range");
+        }
+        return new ContainerPrimitiveActions.Target(
+            blockId,
+            new MinecraftInventoryAccess(furnace),
             new MinecraftInventoryAccess(player.getInventory()),
             null
         );
