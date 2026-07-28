@@ -60,6 +60,7 @@ _IDLE_WAKE_OFFSET_S = 870.0
 _IDLE_CLEAR_OFFSET_S = 930.0
 _MATERIAL_RESUME_OFFSET_S = 935.0
 _FIXTURE_CHAT_DISTANCE = 256
+_LOCAL_JAVA_BODY_URL = "ws://127.0.0.1:8767"
 _RCON_ENV_KEYS = frozenset(
     {
         "MINEBOT_REAL_RCON_HOST",
@@ -818,6 +819,7 @@ class SegmentResult:
 def _production_environment(environment: Mapping[str, str]) -> dict[str, str]:
     child_environment = dict(environment)
     child_environment["MINEBOT_BODY_PROVIDER"] = "java"
+    child_environment.setdefault("MINEBOT_JAVA_BODY_URL", _LOCAL_JAVA_BODY_URL)
     for key in _RCON_ENV_KEYS:
         child_environment.pop(key, None)
     return child_environment

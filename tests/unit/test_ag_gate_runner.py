@@ -64,11 +64,11 @@ class QualityGateRunnerTests(unittest.TestCase):
                 "MINEBOT_REAL_RCON_PORT": "25576",
                 "MINEBOT_REAL_RCON_PASSWORD": "secret",
                 "MINEBOT_REAL_RCON_TIMEOUT": "20",
-                "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
             }
         )
 
         self.assertEqual(result["MINEBOT_BODY_PROVIDER"], "java")
+        self.assertEqual(result["MINEBOT_JAVA_BODY_URL"], "ws://127.0.0.1:8767")
         self.assertFalse(any("RCON" in key for key in result))
 
     def test_provider_manifest_requires_every_production_segment_to_be_java_only(self):
