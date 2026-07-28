@@ -70,6 +70,7 @@ def build_body_provider(
         raise BodyProviderConfigError("Scarpet body bot_name does not match provider bot")
 
     java_client: JavaBodyClient | None = None
+    java_read_client: JavaBodyClient | None = None
     java_body: JavaBody | None = None
     if needs_java:
         connect = java_connect
@@ -84,11 +85,8 @@ def build_body_provider(
             connect,
             survival_owner=name in {BodyProviderName.JAVA, BodyProviderName.COMPOSITE},
         )
-        java_body = JavaBody(
-            java_client,
-            bot_name,
-            read_client=JavaBodyClient(bot_name, connect),
-        )
+        java_read_client = JavaBodyClient(bot_name, connect)
+        java_body = JavaBody(java_client, bot_name, read_client=java_read_client)
 
     if name is BodyProviderName.SCARPET:
         assert scarpet_body is not None
@@ -106,7 +104,10 @@ def build_body_provider(
         require_structure_assessment=True,
     )
     if java_client is not None:
-        java_client.configure_governance(GovernanceAnswerer(governance))
+        answerer = GovernanceAnswerer(governance)
+        java_client.configure_governance(answerer)
+        assert java_read_client is not None
+        java_read_client.configure_governance(answerer)
     return BodyProviderRuntime(name, selected, governance, scarpet_body, java_body)
 
 

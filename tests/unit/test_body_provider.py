@@ -69,6 +69,8 @@ def test_composite_constructs_java_body_without_connecting_at_startup() -> None:
     assert runtime.java_body is not None
     assert runtime.java_body._client.negotiated is False
     assert runtime.java_body._read_client is not runtime.java_body._client
+    assert runtime.java_body._client._governance is not None
+    assert runtime.java_body._read_client._governance is runtime.java_body._client._governance
 
 
 def test_java_backed_providers_enable_the_single_java_survival_owner() -> None:
