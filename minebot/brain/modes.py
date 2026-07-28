@@ -258,9 +258,11 @@ def signalize_events(events: list[Event] | tuple[Event, ...]) -> list[AgentSigna
         elif name in {"reflexCompleted", "recoveryCompleted"}:
             signals.append(AgentSignal.body_reflex_completed(str(data.get("kind") or name), event=name))
         elif name in {"death", "deathDetected", "botDied", "bodyMissing"}:
-            signals.append(AgentSignal.death_detected(str(data.get("reason") or name), event=name, **data))
+            reason = str(data.pop("reason", None) or name)
+            signals.append(AgentSignal.death_detected(reason, event=name, **data))
         elif name == "respawned":
-            signals.append(AgentSignal.recovery_completed(str(data.get("reason") or name), event=name, **data))
+            reason = str(data.pop("reason", None) or name)
+            signals.append(AgentSignal.recovery_completed(reason, event=name, **data))
         elif name in {"stuck", "navigationBlocked", "lostPosition"}:
             signals.append(AgentSignal.mobility_blocked(str(data.get("reason") or name), event=name))
         elif name in {"hostileNearby", "hostile_nearby"}:

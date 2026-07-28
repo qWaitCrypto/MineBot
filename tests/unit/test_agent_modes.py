@@ -276,17 +276,31 @@ class ModeRuntimeTests(unittest.TestCase):
 
     def test_signalize_production_death_missing_and_respawn_events(self):
         events = [
-            Event(seq=1, tick=10, bot="Bot", name="death", data={"pos": [0, -80, 0]}),
+            Event(
+                seq=1,
+                tick=10,
+                bot="Bot",
+                name="death",
+                data={"pos": [0, -80, 0], "reason": "drowned"},
+            ),
             Event(seq=2, tick=11, bot="Bot", name="bodyMissing", data={"lastPos": [0, -80, 0]}),
-            Event(seq=3, tick=12, bot="Bot", name="respawned", data={"final_pos": [3, 64, 0]}),
+            Event(
+                seq=3,
+                tick=12,
+                bot="Bot",
+                name="respawned",
+                data={"final_pos": [3, 64, 0], "reason": "player_spawned"},
+            ),
         ]
 
         signals = signalize_events(events)
 
         self.assertEqual([signal.kind for signal in signals], ["death_detected", "death_detected", "recovery_completed"])
         self.assertEqual(signals[0].facts["event"], "death")
+        self.assertEqual(signals[0].facts["reason"], "drowned")
         self.assertEqual(signals[1].facts["event"], "bodyMissing")
         self.assertEqual(signals[2].facts["event"], "respawned")
+        self.assertEqual(signals[2].facts["reason"], "player_spawned")
 
 
 if __name__ == "__main__":
