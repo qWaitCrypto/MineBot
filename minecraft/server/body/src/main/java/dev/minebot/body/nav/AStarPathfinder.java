@@ -39,6 +39,7 @@ public final class AStarPathfinder {
     private record Open(long key, double f, double g) {
     }
 
+    private final WorldView world;
     private final MoveGenerator moves;
     private final Goal goal;
     private final int startX;
@@ -54,6 +55,7 @@ public final class AStarPathfinder {
     private int unloadedTouches;
     private long bestSoFarKey;
     private double bestSoFarH = Double.MAX_VALUE;
+    private boolean hasBestSoFar;
     private Result finished;
 
     public AStarPathfinder(WorldView world, Goal goal, int startX, int startY, int startZ) {
@@ -69,6 +71,7 @@ public final class AStarPathfinder {
         int totalNodeCap,
         int unloadedTouchCap
     ) {
+        this.world = world;
         this.moves = new MoveGenerator(world);
         this.goal = goal;
         this.startX = startX;
@@ -80,7 +83,7 @@ public final class AStarPathfinder {
         gScore.put(startKey, 0.0);
         open.add(new Open(startKey, goal.heuristic(startX, startY, startZ), 0.0));
         bestSoFarKey = startKey;
-        bestSoFarH = goal.heuristic(startX, startY, startZ);
+        trackBestSoFar(startKey, startX, startY, startZ);
     }
 
     /** Expands up to {@code nodeBudget} nodes; call again while IN_PROGRESS. */
@@ -101,7 +104,7 @@ public final class AStarPathfinder {
             int x = unpackX(current.key());
             int y = unpackY(current.key());
             int z = unpackZ(current.key());
-            if (goal.isSatisfied(x, y, z)) {
+            if (goal.isSatisfied(world, x, y, z)) {
                 return finish(new Result(Outcome.COMPLETE, reconstruct(current.key()), "goal_satisfied", expanded, unloadedTouches));
             }
             expanded++;
@@ -131,10 +134,14 @@ public final class AStarPathfinder {
     }
 
     private void trackBestSoFar(long key, int x, int y, int z) {
+        if (!goal.acceptsPartialEndpoint(world, x, y, z)) {
+            return;
+        }
         double h = goal.heuristic(x, y, z);
         if (h < bestSoFarH) {
             bestSoFarH = h;
             bestSoFarKey = key;
+            hasBestSoFar = true;
         }
     }
 
@@ -146,6 +153,15 @@ public final class AStarPathfinder {
 
     /** Budget/boundary stop: usable partial progress or an honest no-path. */
     private Result boundedOutcome(String reason) {
+        if (!hasBestSoFar) {
+            return new Result(
+                Outcome.NO_PATH,
+                List.of(),
+                reason + "_without_stable_endpoint",
+                expanded,
+                unloadedTouches
+            );
+        }
         List<Waypoint> partial = reconstruct(bestSoFarKey);
         Waypoint last = partial.get(partial.size() - 1);
         double dx = last.x() - startX;

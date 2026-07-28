@@ -84,6 +84,24 @@ final class PathFollowerTest {
     }
 
     @Test
+    void compoundFallRemainsOnItsCurrentMovementSegment() {
+        PathFollower follower = new PathFollower(List.of(
+            new Waypoint(61, 70, -40),
+            new Waypoint(61, 63, -41),
+            new Waypoint(61, 62, -42)
+        ));
+
+        PathFollower.Directive ledge = follower.tick(61.33, 70.0, -39.35);
+        PathFollower.Directive falling = follower.tick(61.5, 66.0, -40.4);
+
+        assertEquals(State.CONTINUE, ledge.state());
+        assertEquals(new Waypoint(61, 63, -41), ledge.lookTarget());
+        assertEquals(State.CONTINUE, falling.state());
+        assertEquals(new Waypoint(61, 63, -41), falling.lookTarget());
+        assertEquals(1, follower.waypointIndex());
+    }
+
+    @Test
     void leavingThePathIsDeviationNotSilentWander() {
         PathFollower follower = new PathFollower(STRAIGHT);
         follower.tick(0.5, 64, 0.5);

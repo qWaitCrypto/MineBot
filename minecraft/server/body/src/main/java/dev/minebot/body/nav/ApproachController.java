@@ -29,7 +29,6 @@ public final class ApproachController {
         FOLLOWING
     }
 
-    private static final int JUMP_COOLDOWN_TICKS = 5;
     private static final double PLAYER_EYE_HEIGHT = 1.62;
 
     private final String bot;
@@ -47,10 +46,10 @@ public final class ApproachController {
     private boolean followingPartialPath;
     private boolean moving;
     private boolean sprinted;
+    private boolean continuousJumping;
     private int replans;
     private int expandedTotal;
     private int unloadedTotal;
-    private int lastJumpTick = Integer.MIN_VALUE;
     private long lastStuckCell = Long.MIN_VALUE;
 
     public ApproachController(
@@ -91,7 +90,10 @@ public final class ApproachController {
         this.controls = controls;
         this.events = events;
         this.replanLimit = replanLimit;
-        this.finalWaypointReachDistance = finalWaypointReachDistance;
+        this.finalWaypointReachDistance = Math.min(
+            finalWaypointReachDistance,
+            goal.finalReachDistanceLimit()
+        );
     }
 
     public int replans() {
@@ -119,13 +121,15 @@ public final class ApproachController {
 
     /** Stops any movement this controller started; owner calls before discarding it. */
     public void halt() {
-        if (moving) {
+        if (moving || continuousJumping) {
             controls.stopMovement(bot);
-            moving = false;
         }
+        moving = false;
+        continuousJumping = false;
     }
 
     private Outcome planTick(int serverTick, double px, double py, double pz) {
+        maintainPlanningPosture(px, py, pz);
         if (pathfinder == null) {
             pathfinder = new AStarPathfinder(
                 world, goal, (int) Math.floor(px), (int) Math.floor(py), (int) Math.floor(pz)
@@ -184,10 +188,21 @@ public final class ApproachController {
         switch (directive.state()) {
             case CONTINUE -> {
                 Waypoint target = directive.lookTarget();
-                boolean swimming = world.kindAt(
-                    (int) Math.floor(px), (int) Math.floor(py), (int) Math.floor(pz)
-                ) == WorldView.NodeKind.LIQUID;
+                boolean swimming = swimmingAt(px, py, pz);
                 double lookY = swimming ? py + PLAYER_EYE_HEIGHT : target.y() + 0.5;
+                boolean shouldHoldJump = swimming || directive.jump();
+                if (shouldHoldJump && !continuousJumping) {
+                    controls.jumpContinuous(bot);
+                    continuousJumping = true;
+                } else if (!shouldHoldJump && continuousJumping) {
+                    // Carpet's public stop command releases continuous jump as
+                    // well as forward movement. Re-engage the route controls
+                    // below once the upward movement is complete.
+                    controls.stopMovement(bot);
+                    controls.sprint(bot);
+                    moving = false;
+                    continuousJumping = false;
+                }
                 if (!moving) {
                     JsonObject data = new JsonObject();
                     JsonArray from = new JsonArray();
@@ -209,10 +224,6 @@ public final class ApproachController {
                     controls.moveForward(bot);
                     moving = true;
                 }
-                if (directive.jump() && serverTick - lastJumpTick >= JUMP_COOLDOWN_TICKS) {
-                    controls.jumpOnce(bot);
-                    lastJumpTick = serverTick;
-                }
                 return Outcome.WORKING_OUTCOME;
             }
             case ARRIVED -> {
@@ -220,7 +231,7 @@ public final class ApproachController {
                 int fx = (int) Math.floor(px);
                 int fy = (int) Math.floor(py);
                 int fz = (int) Math.floor(pz);
-                if (goal.isSatisfied(fx, fy, fz)) {
+                if (goal.isSatisfied(world, fx, fy, fz)) {
                     return new Outcome(Status.COMPLETED, "goal_satisfied");
                 }
                 return replanOrFail(
@@ -263,5 +274,24 @@ public final class ApproachController {
         return (((long) Math.floor(px) & 0x3FFFFFF) << 38)
             | (((long) Math.floor(pz) & 0x3FFFFFF) << 12)
             | ((long) Math.floor(py) & 0xFFF);
+    }
+
+    private boolean swimmingAt(double px, double py, double pz) {
+        int x = (int) Math.floor(px);
+        int y = (int) Math.floor(py);
+        int z = (int) Math.floor(pz);
+        return world.kindAt(x, y, z) == WorldView.NodeKind.LIQUID
+            || world.kindAt(x, y - 1, z) == WorldView.NodeKind.LIQUID;
+    }
+
+    private void maintainPlanningPosture(double px, double py, double pz) {
+        boolean swimming = swimmingAt(px, py, pz);
+        if (swimming && !continuousJumping) {
+            controls.jumpContinuous(bot);
+            continuousJumping = true;
+        } else if (!swimming && continuousJumping) {
+            controls.stopMovement(bot);
+            continuousJumping = false;
+        }
     }
 }

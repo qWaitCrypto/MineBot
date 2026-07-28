@@ -16,6 +16,21 @@ public sealed interface Goal {
 
     boolean isSatisfied(int x, int y, int z);
 
+    /** World-aware terminal truth; geometry-only goals keep their old behavior. */
+    default boolean isSatisfied(WorldView world, int x, int y, int z) {
+        return isSatisfied(x, y, z);
+    }
+
+    /** Whether an anytime partial route may end at this movement node. */
+    default boolean acceptsPartialEndpoint(WorldView world, int x, int y, int z) {
+        return true;
+    }
+
+    /** Maximum physical distance from the final node center before handoff. */
+    default double finalReachDistanceLimit() {
+        return PathFollower.WAYPOINT_REACH_DISTANCE;
+    }
+
     /** Optimistic remaining cost in ticks from a standing cell. */
     double heuristic(int x, int y, int z);
 
@@ -68,6 +83,21 @@ public sealed interface Goal {
         }
 
         @Override
+        public boolean isSatisfied(WorldView world, int nx, int ny, int nz) {
+            return isSatisfied(nx, ny, nz) && isDryStand(world, nx, ny, nz);
+        }
+
+        @Override
+        public boolean acceptsPartialEndpoint(WorldView world, int nx, int ny, int nz) {
+            return isDryStand(world, nx, ny, nz);
+        }
+
+        @Override
+        public double finalReachDistanceLimit() {
+            return 0.1;
+        }
+
+        @Override
         public double heuristic(int nx, int ny, int nz) {
             double distance = Math.sqrt(eyeDistanceSquared(nx, ny, nz)) - range;
             return Math.max(0, distance) * HEURISTIC_TICKS_PER_BLOCK;
@@ -78,6 +108,12 @@ public sealed interface Goal {
             double dy = ny + EYE_HEIGHT - (targetY + 0.5);
             double dz = nz + 0.5 - (targetZ + 0.5);
             return dx * dx + dy * dy + dz * dz;
+        }
+
+        private static boolean isDryStand(WorldView world, int x, int y, int z) {
+            return world.kindAt(x, y, z) == WorldView.NodeKind.PASSABLE
+                && world.kindAt(x, y + 1, z) == WorldView.NodeKind.PASSABLE
+                && world.kindAt(x, y - 1, z) == WorldView.NodeKind.SOLID;
         }
     }
 
@@ -103,6 +139,35 @@ public sealed interface Goal {
                 }
             }
             return false;
+        }
+
+        @Override
+        public boolean isSatisfied(WorldView world, int x, int y, int z) {
+            for (Goal goal : goals) {
+                if (goal.isSatisfied(world, x, y, z)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public boolean acceptsPartialEndpoint(WorldView world, int x, int y, int z) {
+            for (Goal goal : goals) {
+                if (goal.acceptsPartialEndpoint(world, x, y, z)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public double finalReachDistanceLimit() {
+            double tightest = PathFollower.WAYPOINT_REACH_DISTANCE;
+            for (Goal goal : goals) {
+                tightest = Math.min(tightest, goal.finalReachDistanceLimit());
+            }
+            return tightest;
         }
 
         @Override

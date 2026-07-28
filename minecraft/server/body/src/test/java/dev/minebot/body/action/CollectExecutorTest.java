@@ -227,6 +227,71 @@ final class CollectExecutorTest {
     }
 
     @Test
+    void navigationSelectsFromTheWholeCandidateDomainInsteadOfListOrder() {
+        int listedFirstX = 20;
+        int reachableFirstX = 6;
+        Harness harness = new Harness();
+        harness.blockStates.put(Harness.key(listedFirstX, STAND, 0), LOG);
+        harness.blockStates.put(Harness.key(reachableFirstX, STAND, 0), LOG);
+        FakeWorld world = worldWithTrunk(listedFirstX);
+        for (int y = STAND; y <= STAND + 3; y++) {
+            world.set(reachableFirstX, y, 0, WorldView.NodeKind.SOLID);
+        }
+        harness.build(
+            world,
+            List.of(
+                new CollectExecutor.Candidate(listedFirstX, STAND, 0, LOG),
+                new CollectExecutor.Candidate(reachableFirstX, STAND, 0, LOG)
+            ),
+            600
+        );
+
+        for (int tick = 1; tick <= 300 && harness.proposals.isEmpty(); tick++) {
+            harness.runtime.tick(tick);
+            harness.body.physicsTick();
+        }
+
+        assertFalse(harness.proposals.isEmpty(), "the reachable candidate should produce a proposal");
+        MutationGate.Proposal proposal = harness.proposals.get(0);
+        assertEquals(reachableFirstX, proposal.x());
+        assertEquals(STAND, proposal.y());
+        assertEquals(0, proposal.z());
+    }
+
+    @Test
+    void navigationKeepsReachableBlocksFromTheSameVerticalColumn() {
+        int treeX = 6;
+        int reachableY = STAND;
+        int highY = STAND + 4;
+        Harness harness = new Harness();
+        harness.blockStates.put(Harness.key(treeX, highY, 0), LOG);
+        harness.blockStates.put(Harness.key(treeX, reachableY, 0), LOG);
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int y = reachableY; y <= highY; y++) {
+            world.set(treeX, y, 0, WorldView.NodeKind.SOLID);
+        }
+        harness.build(
+            world,
+            List.of(
+                new CollectExecutor.Candidate(treeX, highY, 0, LOG),
+                new CollectExecutor.Candidate(treeX, reachableY, 0, LOG)
+            ),
+            600
+        );
+
+        for (int tick = 1; tick <= 300 && harness.proposals.isEmpty(); tick++) {
+            harness.runtime.tick(tick);
+            harness.body.physicsTick();
+        }
+
+        assertFalse(harness.proposals.isEmpty(), "the lower log should remain a route candidate");
+        MutationGate.Proposal proposal = harness.proposals.get(0);
+        assertEquals(treeX, proposal.x());
+        assertEquals(reachableY, proposal.y());
+        assertEquals(0, proposal.z());
+    }
+
+    @Test
     void denialNeverTouchesTheWorld() {
         int treeX = 6;
         Harness harness = new Harness();

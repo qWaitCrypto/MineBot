@@ -908,12 +908,10 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     searchFacts.addProperty("unloaded_chunk_count", search.unloadedChunkCount());
                     List<CollectExecutor.Candidate> candidates = new ArrayList<>();
                     for (SearchMatch match : search.matches()) {
-                        boolean spread = candidates.stream().allMatch(kept ->
-                            Math.abs(match.x() - kept.x()) + Math.abs(match.z() - kept.z()) >= 2);
-                        if (spread) {
-                            candidates.add(new CollectExecutor.Candidate(match.x(), match.y(), match.z(), match.blockId()));
-                        }
-                        if (candidates.size() >= CollectExecutor.MAX_CANDIDATE_ATTEMPTS) {
+                        candidates.add(new CollectExecutor.Candidate(
+                            match.x(), match.y(), match.z(), match.blockId()
+                        ));
+                        if (candidates.size() >= CollectExecutor.MAX_PLANNING_CANDIDATES) {
                             break;
                         }
                     }

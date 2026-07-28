@@ -87,7 +87,13 @@ public final class PathFollower {
             }
         }
         if (bestIndex < 0) {
-            return false;
+            // A graph edge can represent a compound physical move, such as
+            // walking off a ledge and falling several blocks into water. The
+            // player is still on that edge even when neither endpoint is
+            // within the ordinary point-deviation radius.
+            return index > 0
+                && segmentDistance(px, py, pz, path.get(index - 1), path.get(index))
+                    < DEVIATION_DISTANCE;
         }
         if (bestIndex > index) {
             index = bestIndex;
@@ -143,6 +149,31 @@ public final class PathFollower {
         double dx = px - (waypoint.x() + 0.5);
         double dy = py - waypoint.y();
         double dz = pz - (waypoint.z() + 0.5);
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    private static double segmentDistance(
+        double px,
+        double py,
+        double pz,
+        Waypoint start,
+        Waypoint end
+    ) {
+        double sx = start.x() + 0.5;
+        double sy = start.y();
+        double sz = start.z() + 0.5;
+        double vx = end.x() - start.x();
+        double vy = end.y() - start.y();
+        double vz = end.z() - start.z();
+        double lengthSquared = vx * vx + vy * vy + vz * vz;
+        if (lengthSquared == 0.0) {
+            return waypointDistance(px, py, pz, start);
+        }
+        double projection = ((px - sx) * vx + (py - sy) * vy + (pz - sz) * vz) / lengthSquared;
+        double t = Math.max(0.0, Math.min(1.0, projection));
+        double dx = px - (sx + t * vx);
+        double dy = py - (sy + t * vy);
+        double dz = pz - (sz + t * vz);
         return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 

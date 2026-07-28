@@ -8,21 +8,23 @@ import dev.minebot.body.nav.MovementControls;
 import dev.minebot.body.nav.NavigateExecutor;
 import dev.minebot.body.nav.WorldView;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Runs one COLLECT_BLOCK action: iterate natural candidates, approach each
- * through interact-goal navigation, propose the exact mutation to Python and
- * wait fail-closed for the verdict, mine only after an explicit allow, verify
- * the block actually changed, then collect the drop and prove it with an
- * authoritative inventory delta. Every candidate failure is typed and
- * bounded; success is never inferred from a dispatched command.
+ * Runs one COLLECT_BLOCK action: submit the complete live candidate domain to
+ * navigation, lock the candidate selected by the reached stand, propose that
+ * exact mutation to Python and wait fail-closed for the verdict, mine only
+ * after an explicit allow, verify the block actually changed, then collect the
+ * drop and prove it with an authoritative inventory delta. Candidate failures
+ * are typed and bounded; success is never inferred from a dispatched command.
  */
 public final class CollectExecutor implements ActionRuntime.TickExecutor {
     public static final int MAX_CANDIDATE_ATTEMPTS = 8;
+    public static final int MAX_PLANNING_CANDIDATES = Goal.MAX_COMPOSITE_MEMBERS;
     public static final int BREAK_TIMEOUT_TICKS = 300;
     public static final int PICKUP_TIMEOUT_TICKS = 120;
     public static final int DROP_LOCATE_TIMEOUT_TICKS = 60;
@@ -72,6 +74,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private final String bot;
     private final String actionId;
     private final List<Candidate> candidates;
+    private final List<Candidate> remainingCandidates;
     private final Map<String, String> itemIdByBlockId;
     private final JsonObject searchFacts;
     private final WorldView world;
@@ -89,8 +92,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private final int timeoutTicks;
 
     private Phase phase = Phase.NEXT_CANDIDATE;
-    private int candidateIndex = -1;
+    private int candidateAttempts;
+    private int candidatesRetired;
     private Candidate current;
+    private List<Candidate> activeDomain = List.of();
     private ApproachController approach;
     private String proposalId;
     private int phaseStartedTick = -1;
@@ -125,6 +130,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         this.bot = bot;
         this.actionId = actionId;
         this.candidates = List.copyOf(candidates);
+        this.remainingCandidates = new ArrayList<>(candidates);
         this.itemIdByBlockId = Map.copyOf(itemIdByBlockId);
         this.searchFacts = searchFacts;
         this.world = world;
@@ -174,30 +180,38 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     private void nextCandidate(int serverTick) {
-        candidateIndex++;
-        if (candidateIndex >= candidates.size() || candidateIndex >= MAX_CANDIDATE_ATTEMPTS) {
+        current = null;
+        approach = null;
+        if (candidateAttempts >= MAX_CANDIDATE_ATTEMPTS || remainingCandidates.isEmpty()) {
             String reason = candidates.isEmpty() ? "target_not_found" : "candidate_targets_exhausted";
             finish(serverTick, ActionRuntime.CLASS_FAILED, reason);
             return;
         }
-        current = candidates.get(candidateIndex);
-        String observed = blocks.blockIdAt(current.x(), current.y(), current.z());
-        if (observed == null || !observed.equals(current.blockId())) {
-            recordAttemptFailure("target_changed", observed);
-            phase = Phase.NEXT_CANDIDATE;
+
+        refreshLiveCandidates();
+        if (candidateAttempts >= MAX_CANDIDATE_ATTEMPTS || remainingCandidates.isEmpty()) {
+            finish(serverTick, ActionRuntime.CLASS_FAILED, "candidate_targets_exhausted");
             return;
         }
+
+        int domainSize = Math.min(
+            remainingCandidates.size(),
+            MAX_PLANNING_CANDIDATES
+        );
+        activeDomain = List.copyOf(remainingCandidates.subList(0, domainSize));
+        List<Goal> goals = activeDomain.stream()
+            .map(candidate -> (Goal) interactGoal(candidate))
+            .toList();
+        Goal domainGoal = goals.size() == 1 ? goals.get(0) : new Goal.Composite(goals);
+
         JsonObject data = new JsonObject();
-        data.addProperty("x", current.x());
-        data.addProperty("y", current.y());
-        data.addProperty("z", current.z());
-        data.addProperty("block_id", current.blockId());
-        data.addProperty("attempt", candidateIndex + 1);
-        events.emit(bot, serverTick, "candidate_selected", actionId, data);
+        data.addProperty("candidate_count", activeDomain.size());
+        data.addProperty("candidates_retired", candidatesRetired);
+        events.emit(bot, serverTick, "candidate_domain_planned", actionId, data);
         approach = new ApproachController(
             bot,
             actionId,
-            new Goal.Interact(current.x(), current.y(), current.z(), Goal.Interact.MINE_RANGE),
+            domainGoal,
             world,
             movement,
             events,
@@ -214,18 +228,37 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             case FAILED -> {
                 replansTotal += approach.replans();
                 approach.halt();
-                recordAttemptFailure("approach_failed:" + outcome.reason(), null);
-                phase = Phase.NEXT_CANDIDATE;
+                approach = null;
+                recordDomainFailure("approach_failed:" + outcome.reason());
+                finish(
+                    serverTick,
+                    ActionRuntime.CLASS_FAILED,
+                    "candidate_domain_unreachable:" + outcome.reason()
+                );
             }
             case COMPLETED -> {
                 replansTotal += approach.replans();
                 approach.halt();
-                String observed = blocks.blockIdAt(current.x(), current.y(), current.z());
-                if (observed == null || !observed.equals(current.blockId())) {
-                    recordAttemptFailure("target_changed", observed);
+                approach = null;
+                current = selectReachedCandidate(position);
+                if (current == null) {
+                    boolean liveDomainRemains = activeDomain.stream()
+                        .anyMatch(remainingCandidates::contains);
+                    if (liveDomainRemains) {
+                        recordDomainFailure("reached_stand_candidate_mismatch");
+                        finish(
+                            serverTick,
+                            ActionRuntime.CLASS_FAILED,
+                            "reached_stand_candidate_mismatch"
+                        );
+                        return;
+                    }
                     phase = Phase.NEXT_CANDIDATE;
                     return;
                 }
+                remainingCandidates.remove(current);
+                candidateAttempts++;
+                emitCandidateSelected(serverTick);
                 MutationGate.Proposal proposal = gate.propose(
                     bot, actionId, "break", current.x(), current.y(), current.z(), current.blockId(),
                     "collect", serverTick
@@ -473,7 +506,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
 
     private void recordAttemptFailure(String reason, String observedBlock) {
         JsonObject failure = new JsonObject();
-        failure.addProperty("attempt", candidateIndex + 1);
+        failure.addProperty("attempt", candidateAttempts);
         if (current != null) {
             failure.addProperty("x", current.x());
             failure.addProperty("y", current.y());
@@ -485,6 +518,101 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             failure.addProperty("observed", observedBlock);
         }
         attemptFailures.add(failure);
+    }
+
+    private void recordDomainFailure(String reason) {
+        JsonObject failure = new JsonObject();
+        failure.addProperty("attempt", candidateAttempts + 1);
+        failure.addProperty("candidate_count", activeDomain.size());
+        failure.addProperty("reason", reason);
+        attemptFailures.add(failure);
+    }
+
+    private void recordCandidateRetired(String reason, String observedBlock) {
+        candidatesRetired++;
+        JsonObject failure = new JsonObject();
+        failure.addProperty("candidate_retired", candidatesRetired);
+        if (current != null) {
+            failure.addProperty("x", current.x());
+            failure.addProperty("y", current.y());
+            failure.addProperty("z", current.z());
+            failure.addProperty("block_id", current.blockId());
+        }
+        failure.addProperty("reason", reason);
+        if (observedBlock != null) {
+            failure.addProperty("observed", observedBlock);
+        }
+        attemptFailures.add(failure);
+    }
+
+    private void refreshLiveCandidates() {
+        for (Candidate candidate : List.copyOf(remainingCandidates)) {
+            String observed = blocks.blockIdAt(candidate.x(), candidate.y(), candidate.z());
+            if (observed != null && observed.equals(candidate.blockId())) {
+                continue;
+            }
+            current = candidate;
+            remainingCandidates.remove(candidate);
+            recordCandidateRetired("target_changed", observed);
+        }
+        current = null;
+    }
+
+    private Candidate selectReachedCandidate(NavigateExecutor.PositionSource.Position position) {
+        int standX = (int) Math.floor(position.x());
+        int standY = (int) Math.floor(position.y());
+        int standZ = (int) Math.floor(position.z());
+        Candidate selected = null;
+        double selectedDistance = Double.MAX_VALUE;
+        for (Candidate candidate : activeDomain) {
+            if (!remainingCandidates.contains(candidate)) {
+                continue;
+            }
+            String observed = blocks.blockIdAt(candidate.x(), candidate.y(), candidate.z());
+            if (observed == null || !observed.equals(candidate.blockId())) {
+                current = candidate;
+                remainingCandidates.remove(candidate);
+                recordCandidateRetired("target_changed", observed);
+                current = null;
+                continue;
+            }
+            if (!interactGoal(candidate).isSatisfied(world, standX, standY, standZ)) {
+                continue;
+            }
+            double distance = interactionDistanceSquared(position, candidate);
+            if (distance < selectedDistance) {
+                selected = candidate;
+                selectedDistance = distance;
+            }
+        }
+        return selected;
+    }
+
+    private static Goal.Interact interactGoal(Candidate candidate) {
+        return new Goal.Interact(
+            candidate.x(), candidate.y(), candidate.z(), Goal.Interact.MINE_RANGE
+        );
+    }
+
+    private static double interactionDistanceSquared(
+        NavigateExecutor.PositionSource.Position position,
+        Candidate candidate
+    ) {
+        double dx = position.x() - (candidate.x() + 0.5);
+        double dy = position.y() + 1.62 - (candidate.y() + 0.5);
+        double dz = position.z() - (candidate.z() + 0.5);
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private void emitCandidateSelected(int serverTick) {
+        JsonObject data = new JsonObject();
+        data.addProperty("x", current.x());
+        data.addProperty("y", current.y());
+        data.addProperty("z", current.z());
+        data.addProperty("block_id", current.blockId());
+        data.addProperty("attempt", candidateAttempts);
+        data.addProperty("domain_size", activeDomain.size());
+        events.emit(bot, serverTick, "candidate_selected", actionId, data);
     }
 
     private JsonObject blockFacts() {
@@ -507,7 +635,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
         facts.addProperty("reason", reason);
         facts.addProperty("elapsed_ticks", elapsedTicks);
-        facts.addProperty("candidates_tried", Math.max(0, candidateIndex + (phase == Phase.NEXT_CANDIDATE ? 0 : 1)));
+        facts.addProperty("candidates_tried", candidateAttempts);
         facts.addProperty("replans", replansTotal);
         facts.add("attempt_failures", attemptFailures.deepCopy());
         facts.add("search", searchFacts.deepCopy());

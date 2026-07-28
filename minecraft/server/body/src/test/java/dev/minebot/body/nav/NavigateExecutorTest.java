@@ -235,9 +235,79 @@ final class NavigateExecutorTest {
         );
 
         harness.runtime().tick(1);
+        assertTrue(
+            harness.body().log.contains("jumpContinuous"),
+            "planning in water must keep the body afloat"
+        );
         harness.runtime().tick(2);
 
         assertEquals(harness.body().y + 1.62, harness.body().lookY, 1.0e-6);
+        assertTrue(
+            harness.body().log.contains("jumpContinuous"),
+            "ordinary navigation must hold upward swim instead of sinking"
+        );
+    }
+
+    @Test
+    void waterSurfaceStillHoldsUpwardSwimUntilSolidShore() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        world.set(0, FLOOR, 0, WorldView.NodeKind.LIQUID);
+        Harness harness = Harness.create(
+            world,
+            new Goal.Near(3, STAND, 0, 0.5),
+            200
+        );
+
+        harness.runtime().tick(1);
+        harness.runtime().tick(2);
+
+        assertTrue(
+            harness.body().log.contains("jumpContinuous"),
+            "air at the feet with water directly below is still surface swimming"
+        );
+    }
+
+    @Test
+    void anAlreadyReachedWaterGoalReleasesUpwardSwimBeforeTerminalCleanup() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        world.set(0, STAND, 0, WorldView.NodeKind.LIQUID);
+        Harness harness = Harness.create(
+            world,
+            new Goal.Near(0, STAND, 0, 0.5),
+            200
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(20);
+
+        assertEquals("completed", terminal.get("classification").getAsString());
+        int held = harness.body().log.indexOf("jumpContinuous");
+        int released = harness.body().log.indexOf("stop");
+        int terminalCleanup = harness.body().log.indexOf("clearAll");
+        assertTrue(held >= 0);
+        assertTrue(released > held);
+        assertTrue(terminalCleanup > released);
+    }
+
+    @Test
+    void upwardWaypointHoldsJumpInsteadOfTimingOneShotPulses() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int z = -8; z <= 8; z++) {
+            world.set(3, STAND, z, WorldView.NodeKind.SOLID);
+            world.set(4, STAND, z, WorldView.NodeKind.SOLID);
+        }
+        Harness harness = Harness.create(
+            world,
+            new Goal.Near(8, STAND, 0, 0.5),
+            400
+        );
+
+        for (int tick = 1; tick <= 80 && !harness.body().log.contains("jumpContinuous"); tick++) {
+            harness.runtime().tick(tick);
+            harness.body().physicsTick();
+        }
+
+        assertTrue(harness.body().log.contains("jumpContinuous"));
+        assertTrue(!harness.body().log.contains("jump"), "navigation no longer relies on one-shot jump timing");
     }
 
     @Test
@@ -256,6 +326,7 @@ final class NavigateExecutorTest {
         double distance = Math.abs(fx - (treeX + 0.5));
         assertTrue(distance <= 4.5 + 0.5, "the bot ends within interaction range: " + distance);
         assertTrue(distance >= 0.5, "the bot does not walk inside the trunk");
+        assertEquals(0.1, terminal.get("final_reach_distance").getAsDouble());
     }
 
 }

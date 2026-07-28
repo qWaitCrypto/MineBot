@@ -72,22 +72,46 @@ final class MoveGeneratorTest {
     }
 
     @Test
-    void steppingFromWaterOntoLandIsAClimbOut() {
+    void waterCannotPromiseAnUnexecutableFullBlockStep() {
         FakeWorld world = new FakeWorld(FLOOR);
         world.set(0, STAND, 0, WorldView.NodeKind.LIQUID);
-        // A one-block land ledge to the east.
+        // The neighboring solid fills the current body-height cell, so its top
+        // is one full block above this water node.
         world.set(1, STAND, 0, WorldView.NodeKind.SOLID);
         List<MoveGenerator.Move> moves = new MoveGenerator(world).movesFrom(0, STAND, 0).moves();
-        assertTrue(hasMoveTo(moves, 1, STAND + 1, 0), "climb out onto the ledge");
+        assertFalse(hasMoveTo(moves, 1, STAND + 1, 0));
     }
 
     @Test
-    void airAboveWaterDropsIntoTheWater() {
+    void waterSurfaceCanUseALevelShore() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        world.set(0, FLOOR, 0, WorldView.NodeKind.LIQUID);
+
+        List<MoveGenerator.Move> moves = new MoveGenerator(world).movesFrom(0, STAND, 0).moves();
+
+        assertTrue(hasMoveTo(moves, 1, STAND, 0));
+    }
+
+    @Test
+    void airAboveWaterKeepsSurfaceFootHeight() {
         FakeWorld world = new FakeWorld(FLOOR);
         // East column: air at STAND, water at FLOOR (surface one below).
         world.set(1, FLOOR, 0, WorldView.NodeKind.LIQUID);
         List<MoveGenerator.Move> moves = new MoveGenerator(world).movesFrom(0, STAND, 0).moves();
-        assertTrue(hasMoveTo(moves, 1, FLOOR, 0), "drop into the water surface cell");
+        assertTrue(hasMoveTo(moves, 1, STAND, 0), "stay above the water surface");
+        assertFalse(hasMoveTo(moves, 1, FLOOR, 0), "surface traversal must not become a dive");
+    }
+
+    @Test
+    void aSurfaceNodeCanDiveVerticallyForASubmergedObjective() {
+        FakeWorld world = new FakeWorld(FLOOR - 4);
+        for (int y = FLOOR - 3; y <= FLOOR; y++) {
+            world.set(0, y, 0, WorldView.NodeKind.LIQUID);
+        }
+
+        List<MoveGenerator.Move> moves = new MoveGenerator(world).movesFrom(0, STAND, 0).moves();
+
+        assertTrue(hasMoveTo(moves, 0, FLOOR, 0));
     }
 
     @Test
@@ -100,7 +124,14 @@ final class MoveGeneratorTest {
         }
         world.set(1, waterY, 0, WorldView.NodeKind.LIQUID);
         List<MoveGenerator.Move> moves = new MoveGenerator(world).movesFrom(0, STAND, 0).moves();
+        MoveGenerator.Move fall = moveTo(moves, 1, waterY + 1, 0);
         assertTrue(hasMoveTo(moves, 1, waterY + 1, 0), "a deep water landing is reachable");
+        assertEquals(
+            MoveGenerator.WALK_COST
+                + MoveGenerator.SWIM_COST
+                + 7 * MoveGenerator.FALL_PER_BLOCK_COST,
+            fall.cost()
+        );
     }
 
     @Test

@@ -85,9 +85,13 @@ public final class MoveGenerator {
             return;
         }
         if (bodyLow == WorldView.NodeKind.SOLID) {
-            // Step up (or climb out of water onto land): destination floor at
-            // y, body at y+1/y+2, head clearance above the start cell.
-            if (!diagonal
+            // A full-block step needs a grounded jump. A fake player floating
+            // in water cannot reliably clear that collision edge; it must
+            // route to a shore whose top is level with the water surface.
+            boolean supportedByLiquid = world.kindAt(startX, y, startZ) == WorldView.NodeKind.LIQUID
+                || world.kindAt(startX, y - 1, startZ) == WorldView.NodeKind.LIQUID;
+            if (!supportedByLiquid
+                && !diagonal
                 && occupiable(bodyHigh)
                 && occupiable(world.kindAt(nx, y + 2, nz))
                 && occupiable(world.kindAt(startX, y + 2, startZ))) {
@@ -124,8 +128,10 @@ public final class MoveGenerator {
             return;
         }
         if (floor == WorldView.NodeKind.LIQUID) {
-            // Air above a water surface: drop into the water and float there.
-            moves.add(new Move(nx, y - 1, nz, swimCost));
+            // Keep the player's feet in the air cell above the water surface.
+            // Lowering this node by one turns an ordinary crossing into an
+            // unintended dive and makes the physical follower fight the path.
+            moves.add(new Move(nx, y, nz, swimCost));
             return;
         }
         if (floor == WorldView.NodeKind.HAZARD || diagonal) {
@@ -141,7 +147,12 @@ public final class MoveGenerator {
                 return;
             }
             if (below == WorldView.NodeKind.LIQUID) {
-                moves.add(new Move(nx, y - drop + 1, nz, baseCost + SWIM_COST));
+                moves.add(new Move(
+                    nx,
+                    y - drop + 1,
+                    nz,
+                    baseCost + SWIM_COST + (drop - 1) * FALL_PER_BLOCK_COST
+                ));
                 return;
             }
             if (below == WorldView.NodeKind.SOLID) {
@@ -159,7 +170,16 @@ public final class MoveGenerator {
 
     /** Water-column vertical escape: rise or sink while the body is in water. */
     private void addVerticalSwim(int x, int y, int z, List<Move> moves) {
-        if (world.kindAt(x, y, z) != WorldView.NodeKind.LIQUID) {
+        WorldView.NodeKind current = world.kindAt(x, y, z);
+        WorldView.NodeKind below = world.kindAt(x, y - 1, z);
+        if (current == WorldView.NodeKind.PASSABLE && below == WorldView.NodeKind.LIQUID) {
+            // A surface-swimming node keeps the feet in air so ordinary travel
+            // does not dive. It must still connect downward when the actual
+            // objective is submerged, such as a settled item pickup.
+            moves.add(new Move(x, y - 1, z, SWIM_DOWN_COST));
+            return;
+        }
+        if (current != WorldView.NodeKind.LIQUID) {
             return;
         }
         // Swim up: the body rises to occupy (y+1, y+2). Water or air above both.
@@ -167,7 +187,7 @@ public final class MoveGenerator {
             moves.add(new Move(x, y + 1, z, SWIM_UP_COST));
         }
         // Sink one cell if the cell below is still water.
-        if (world.kindAt(x, y - 1, z) == WorldView.NodeKind.LIQUID) {
+        if (below == WorldView.NodeKind.LIQUID) {
             moves.add(new Move(x, y - 1, z, SWIM_DOWN_COST));
         }
     }

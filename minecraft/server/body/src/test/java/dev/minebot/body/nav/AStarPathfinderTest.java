@@ -134,6 +134,61 @@ final class AStarPathfinderTest {
     }
 
     @Test
+    void aSurfaceWaterCrossingDoesNotPlanAnUnderwaterDive() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int x = 1; x <= 3; x++) {
+            world.set(x, FLOOR, 0, WorldView.NodeKind.LIQUID);
+        }
+
+        Result result = solve(world, new Goal.Near(4, STAND, 0, 0.5), 0, 0);
+
+        assertEquals(Outcome.COMPLETE, result.outcome());
+        assertTrue(result.path().stream().anyMatch(w -> w.x() >= 1 && w.x() <= 3));
+        assertTrue(result.path().stream().allMatch(w -> w.y() >= STAND));
+    }
+
+    @Test
+    void interactGoalUsesADryWorkStandInsteadOfStoppingInWater() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int x = 1; x <= 4; x++) {
+            world.set(x, STAND, 0, WorldView.NodeKind.LIQUID);
+            world.set(x, STAND + 1, 0, WorldView.NodeKind.LIQUID);
+        }
+        int targetX = 5;
+        world.set(targetX, STAND, 0, WorldView.NodeKind.SOLID);
+        Goal goal = new Goal.Interact(targetX, STAND, 0, 4.5);
+
+        Result result = solve(world, goal, 0, 0);
+
+        assertEquals(Outcome.COMPLETE, result.outcome());
+        Waypoint last = result.path().get(result.path().size() - 1);
+        assertTrue(goal.isSatisfied(world, last.x(), last.y(), last.z()));
+        assertEquals(WorldView.NodeKind.PASSABLE, world.kindAt(last.x(), last.y(), last.z()));
+        assertEquals(WorldView.NodeKind.SOLID, world.kindAt(last.x(), last.y() - 1, last.z()));
+    }
+
+    @Test
+    void ordinaryDryRouteBeatsASlightlyShorterDeepWaterDrop() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        int waterY = STAND - 8;
+        for (int y = FLOOR; y > waterY; y--) {
+            world.set(1, y, 0, WorldView.NodeKind.PASSABLE);
+        }
+        world.set(1, waterY, 0, WorldView.NodeKind.LIQUID);
+        Goal goal = new Goal.Composite(List.of(
+            new Goal.Near(1, waterY + 1, 0, 0.1),
+            new Goal.Near(0, STAND, 3, 0.1)
+        ));
+
+        Result result = solve(world, goal, 0, 0);
+
+        assertEquals(Outcome.COMPLETE, result.outcome());
+        Waypoint last = result.path().get(result.path().size() - 1);
+        assertEquals(STAND, last.y());
+        assertEquals(3, last.z());
+    }
+
+    @Test
     void aWaterColumnIsClimbedToTheSurface() {
         // Vertical escape through water: the bot starts at the bottom of a
         // water shaft and must swim up and climb out onto the surface.
@@ -157,6 +212,25 @@ final class AStarPathfinderTest {
         assertEquals(Outcome.COMPLETE, result.outcome());
         assertTrue(result.path().get(0).y() < STAND, "starts below the surface");
         assertTrue(result.path().stream().anyMatch(w -> w.y() >= STAND + 1), "rises out of the shaft");
+    }
+
+    @Test
+    void aSurfaceSwimmerCanDiveToASubmergedGoal() {
+        FakeWorld world = new FakeWorld(FLOOR - 5);
+        for (int y = FLOOR - 4; y <= FLOOR; y++) {
+            world.set(0, y, 0, WorldView.NodeKind.LIQUID);
+        }
+
+        Result result = solveAt(
+            world,
+            new Goal.Near(0, FLOOR - 3, 0, 0.1),
+            0,
+            STAND,
+            0
+        );
+
+        assertEquals(Outcome.COMPLETE, result.outcome());
+        assertTrue(result.path().stream().anyMatch(w -> w.y() < FLOOR));
     }
 
     @Test
