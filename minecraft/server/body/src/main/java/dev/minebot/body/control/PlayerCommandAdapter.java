@@ -93,6 +93,7 @@ public final class PlayerCommandAdapter
         dispatch(botName, "jump once");
     }
 
+    @Override
     public void jumpContinuous(String botName) {
         heldInputs.engage(botName, HeldInputs.Input.JUMP);
         dispatch(botName, "jump continuous");

@@ -79,6 +79,8 @@ final class BlockPrimitiveActionsTest {
             }
         }
 
+        @Override public void jumpContinuous(String botName) { }
+
         @Override
         public void clearAll(String botName) {
             clears++;

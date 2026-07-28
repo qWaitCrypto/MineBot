@@ -83,6 +83,8 @@ public final class SurvivalReflexController {
 
         Target findEscapeTarget(String botName, Kind kind, Position position, boolean dryOnly);
 
+        Goal findDryEgressGoal(String botName, Position position);
+
         boolean isDryStand(String botName, Position position);
 
         WorldView world(String botName);
@@ -230,10 +232,13 @@ public final class SurvivalReflexController {
         }
 
         Target target = environment.findEscapeTarget(bot, kind, position, false);
+        Goal initialDryGoal = target == null && kind == Kind.WATER
+            ? environment.findDryEgressGoal(bot, position)
+            : null;
         Active reflex = new Active(actionId, kind, position, target);
         active.put(bot, reflex);
         events.emit(bot, serverTick, "reflexTriggered", actionId, triggeredFacts(reflex));
-        if (target == null) {
+        if (target == null && initialDryGoal == null) {
             complete(
                 bot,
                 reflex,
@@ -263,7 +268,7 @@ public final class SurvivalReflexController {
         }
         runtime.attachExecutor(
             actionId,
-            new ReflexExecutor(bot, reflex, world)
+            new ReflexExecutor(bot, reflex, world, initialDryGoal)
         );
     }
 
@@ -358,24 +363,37 @@ public final class SurvivalReflexController {
         private ApproachController approach;
         private Target target;
         private int elapsedTicks;
+        private int phaseTicks;
         private int retargets;
+        private int observedApproachReplans;
+        private boolean seekingReachableDryStand;
 
-        private ReflexExecutor(String bot, Active reflex, WorldView world) {
+        private ReflexExecutor(
+            String bot,
+            Active reflex,
+            WorldView world,
+            Goal initialDryGoal
+        ) {
             this.bot = bot;
             this.reflex = reflex;
             this.world = world;
             this.target = reflex.target();
-            this.approach = approachFor(target);
+            this.seekingReachableDryStand = initialDryGoal != null;
+            this.approach = seekingReachableDryStand
+                ? approachForReachableDryStand(initialDryGoal)
+                : approachFor(target);
+            engageWaterControls();
         }
 
         @Override
         public void tick(int serverTick) {
             elapsedTicks++;
+            phaseTicks++;
             if (runtime.cancelRequested(reflex.actionId())) {
                 finish(serverTick, ActionRuntime.CLASS_CANCELED, "cancel_requested", false);
                 return;
             }
-            if (elapsedTicks > MAX_REFLEX_TICKS) {
+            if (!seekingReachableDryStand && phaseTicks > MAX_REFLEX_TICKS) {
                 finish(serverTick, ActionRuntime.CLASS_TIMEOUT, "reflex_timeout", false);
                 return;
             }
@@ -392,7 +410,15 @@ public final class SurvivalReflexController {
             ApproachController.Outcome outcome = approach.tick(
                 serverTick, position.x(), position.y(), position.z()
             );
+            if (approach.replans() != observedApproachReplans) {
+                observedApproachReplans = approach.replans();
+                engageWaterControls();
+            }
             if (outcome.status() == ApproachController.Status.FAILED) {
+                if (reflex.kind() == Kind.WATER && !seekingReachableDryStand) {
+                    beginReachableDryEgress(position, serverTick, "surface_navigation_failed");
+                    return;
+                }
                 finish(
                     serverTick,
                     ActionRuntime.CLASS_FAILED,
@@ -403,6 +429,10 @@ public final class SurvivalReflexController {
             }
             if (outcome.status() == ApproachController.Status.COMPLETED
                 && !escaped(position)) {
+                if (reflex.kind() == Kind.WATER && !seekingReachableDryStand) {
+                    beginReachableDryEgress(position, serverTick, "surface_reached");
+                    return;
+                }
                 Target next = environment.findEscapeTarget(
                     bot, reflex.kind(), position, true
                 );
@@ -443,6 +473,61 @@ public final class SurvivalReflexController {
             );
         }
 
+        private ApproachController approachForReachableDryStand(Goal goal) {
+            return new ApproachController(
+                bot,
+                reflex.actionId(),
+                goal,
+                world,
+                controls,
+                events::emit,
+                APPROACH_REPLAN_LIMIT,
+                0.35
+            );
+        }
+
+        private void beginReachableDryEgress(
+            Position position,
+            int serverTick,
+            String reason
+        ) {
+            approach.halt();
+            target = null;
+            seekingReachableDryStand = true;
+            phaseTicks = 0;
+            observedApproachReplans = 0;
+            Goal dryGoal = environment.findDryEgressGoal(bot, position);
+            if (dryGoal == null) {
+                finish(
+                    serverTick,
+                    ActionRuntime.CLASS_FAILED,
+                    "dry_egress_target_unavailable",
+                    false
+                );
+                return;
+            }
+            approach = approachForReachableDryStand(dryGoal);
+            engageWaterControls();
+
+            JsonObject data = new JsonObject();
+            data.addProperty("kind", reflex.kind().wireName());
+            data.addProperty("reason", reason);
+            data.add("start", positionJson(position));
+            data.addProperty("goal", "reachable_dry_stand");
+            data.addProperty(
+                "candidate_count",
+                dryGoal instanceof Goal.Composite composite ? composite.goals().size() : 1
+            );
+            events.emit(bot, serverTick, "reflexRetargeted", reflex.actionId(), data);
+        }
+
+        private void engageWaterControls() {
+            if (reflex.kind() == Kind.WATER) {
+                controls.sprint(bot);
+                controls.jumpContinuous(bot);
+            }
+        }
+
         private void finish(
             int serverTick,
             String classification,
@@ -452,10 +537,16 @@ public final class SurvivalReflexController {
             if (approach != null) {
                 approach.halt();
             }
+            Position finalPosition = environment.position(bot);
+            Target completedTarget = target;
+            if (escaped && completedTarget == null && finalPosition != null
+                && environment.isDryStand(bot, finalPosition)) {
+                completedTarget = new Target(finalPosition, true);
+            }
             complete(
                 bot,
                 reflex,
-                target,
+                completedTarget,
                 classification,
                 reason,
                 escaped,

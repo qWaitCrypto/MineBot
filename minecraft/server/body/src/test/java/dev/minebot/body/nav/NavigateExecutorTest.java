@@ -25,6 +25,7 @@ final class NavigateExecutorTest {
         double y = STAND;
         double z = 0.5;
         double lookX;
+        double lookY;
         double lookZ;
         boolean moving;
         boolean frozen;
@@ -33,6 +34,7 @@ final class NavigateExecutorTest {
         @Override
         public void lookAt(String bot, double tx, double ty, double tz) {
             lookX = tx;
+            lookY = ty;
             lookZ = tz;
         }
 
@@ -52,6 +54,8 @@ final class NavigateExecutorTest {
         public void jumpOnce(String bot) {
             log.add("jump");
         }
+
+        @Override public void jumpContinuous(String bot) { log.add("jumpContinuous"); }
 
         @Override
         public void sprint(String bot) {
@@ -213,6 +217,27 @@ final class NavigateExecutorTest {
         JsonObject terminal = harness.runUntilTerminal(200);
 
         assertEquals("timeout", terminal.get("classification").getAsString());
+    }
+
+    @Test
+    void swimmingLooksHorizontallyInsteadOfDrivingIntoTheFloorOrCeiling() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int x = -2; x <= 4; x++) {
+            for (int z = -2; z <= 2; z++) {
+                world.set(x, STAND, z, WorldView.NodeKind.LIQUID);
+                world.set(x, STAND + 1, z, WorldView.NodeKind.LIQUID);
+            }
+        }
+        Harness harness = Harness.create(
+            world,
+            new Goal.Near(3, STAND, 0, 0.5),
+            200
+        );
+
+        harness.runtime().tick(1);
+        harness.runtime().tick(2);
+
+        assertEquals(harness.body().y + 1.62, harness.body().lookY, 1.0e-6);
     }
 
     @Test

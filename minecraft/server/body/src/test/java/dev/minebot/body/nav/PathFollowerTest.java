@@ -67,6 +67,23 @@ final class PathFollowerTest {
     }
 
     @Test
+    void resyncDoesNotSkipALateralDetourToAFutureWaypointInTheSameColumn() {
+        PathFollower follower = new PathFollower(List.of(
+            new Waypoint(40, 56, 56),
+            new Waypoint(39, 56, 56),
+            new Waypoint(39, 57, 56),
+            new Waypoint(40, 58, 56),
+            new Waypoint(40, 59, 56)
+        ));
+
+        PathFollower.Directive directive = follower.tick(40.5, 56.02, 56.5);
+
+        assertEquals(State.CONTINUE, directive.state());
+        assertEquals(new Waypoint(39, 56, 56), directive.lookTarget());
+        assertEquals(1, follower.waypointIndex());
+    }
+
+    @Test
     void leavingThePathIsDeviationNotSilentWander() {
         PathFollower follower = new PathFollower(STRAIGHT);
         follower.tick(0.5, 64, 0.5);

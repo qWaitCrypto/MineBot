@@ -231,9 +231,9 @@ def run_lava_no_escape_latch(rcon, body) -> dict:
 
 
 def run_low_air_water_escape(rcon, body) -> dict:
-    command(rcon, "fill -10 199 -8 12 205 8 air")
-    command(rcon, "fill -10 199 -8 12 199 8 stone")
-    command(rcon, "fill -4 200 -4 4 202 4 water")
+    command(rcon, "fill -16 199 -8 16 205 8 air")
+    command(rcon, "fill -16 199 -8 16 199 8 stone")
+    command(rcon, "fill -12 200 -4 12 202 4 water")
     teleport(rcon, body, 0, 200, 0)
     command(rcon, f"effect clear {BOT} minecraft:water_breathing")
     start_seq = body.last_seq

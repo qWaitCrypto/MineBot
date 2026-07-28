@@ -27,6 +27,7 @@ final class FollowExecutorTest {
         @Override public void moveForward(String bot) { moving = true; }
         @Override public void stopMovement(String bot) { moving = false; }
         @Override public void jumpOnce(String bot) { }
+        @Override public void jumpContinuous(String bot) { }
         @Override public void sprint(String bot) { }
         @Override public void clearAll(String bot) { clears++; }
 

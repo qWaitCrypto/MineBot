@@ -58,6 +58,7 @@ final class AscendExecutorTest {
         @Override public void stopMovement(String b) { moving = false; }
         @Override public void sprint(String b) { }
         @Override public void jumpOnce(String b) { wantJump = true; log.add("jump"); }
+        @Override public void jumpContinuous(String b) { log.add("jumpContinuous"); }
         @Override public Outcome begin(String b, int x, int y, int z, String blockId, int tick) {
             breakX = x;
             breakY = y;

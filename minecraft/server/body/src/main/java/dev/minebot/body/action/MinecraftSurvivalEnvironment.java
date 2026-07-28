@@ -1,5 +1,6 @@
 package dev.minebot.body.action;
 
+import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MinecraftWorldView;
 import dev.minebot.body.nav.WorldView;
 import net.minecraft.core.BlockPos;
@@ -7,12 +8,17 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.material.Fluids;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /** Live loaded-world facts and generic escape-target selection for reflexes. */
 public final class MinecraftSurvivalEnvironment implements SurvivalReflexController.Environment {
     public static final int WATER_AIR_THRESHOLD = 80;
     public static final int ESCAPE_RADIUS = 8;
+    public static final int WATER_SHORE_RADIUS = 96;
     private static final int[] Y_OFFSETS = {0, 1, -1, 2, -2, 3, -3};
 
     private final MinecraftServer server;
@@ -82,11 +88,11 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
             return null;
         }
         WorldView world = new MinecraftWorldView(level);
-        SurvivalReflexController.Target dry = findDryStand(world, level, kind, position);
-        if (dry != null || dryOnly || kind != SurvivalReflexController.Kind.WATER) {
-            return dry;
+        if (kind == SurvivalReflexController.Kind.WATER && !dryOnly) {
+            return findBreathableSurface(world, level, position);
         }
-        return findBreathableSurface(world, level, position);
+        SurvivalReflexController.Target dry = findDryStand(world, level, kind, position);
+        return dry;
     }
 
     @Override
@@ -102,6 +108,38 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
             new MinecraftWorldView(level),
             position.blockX(), position.blockY(), position.blockZ()
         );
+    }
+
+    @Override
+    public Goal findDryEgressGoal(
+        String botName,
+        SurvivalReflexController.Position position
+    ) {
+        ServerPlayer player = player(botName);
+        if (player == null || !(player.level() instanceof ServerLevel level)) {
+            return null;
+        }
+        WorldView world = new MinecraftWorldView(level);
+        List<Goal> candidates = new ArrayList<>();
+        int baseX = position.blockX();
+        int baseZ = position.blockZ();
+        for (int radius = 1; radius <= WATER_SHORE_RADIUS
+            && candidates.size() < Goal.MAX_COMPOSITE_MEMBERS; radius++) {
+            for (int delta = -radius; delta <= radius; delta++) {
+                addShoreCandidate(candidates, world, level, baseX + radius, baseZ + delta);
+                addShoreCandidate(candidates, world, level, baseX - radius, baseZ + delta);
+            }
+            for (int delta = -radius + 1; delta < radius; delta++) {
+                addShoreCandidate(candidates, world, level, baseX + delta, baseZ + radius);
+                addShoreCandidate(candidates, world, level, baseX + delta, baseZ - radius);
+            }
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        return candidates.size() == 1
+            ? candidates.getFirst()
+            : new Goal.Composite(candidates);
     }
 
     @Override
@@ -187,8 +225,7 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         int baseY = origin.blockY();
         int baseZ = origin.blockZ();
         int[][] offsets = {{0, 0}, {1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-        for (int rise = 0; rise <= ESCAPE_RADIUS; rise++) {
-            int y = baseY + rise;
+        for (int y = baseY; y <= level.getMaxY() - 2; y++) {
             for (int[] offset : offsets) {
                 int x = baseX + offset[0];
                 int z = baseZ + offset[1];
@@ -209,6 +246,37 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         return world.kindAt(x, y, z) == WorldView.NodeKind.PASSABLE
             && world.kindAt(x, y + 1, z) == WorldView.NodeKind.PASSABLE
             && world.kindAt(x, y - 1, z) == WorldView.NodeKind.SOLID;
+    }
+
+    private static void addShoreCandidate(
+        List<Goal> candidates,
+        WorldView world,
+        ServerLevel level,
+        int x,
+        int z
+    ) {
+        if (candidates.size() >= Goal.MAX_COMPOSITE_MEMBERS
+            || level.getChunkSource().getChunkNow(x >> 4, z >> 4) == null) {
+            return;
+        }
+        int y = level.getHeight(Heightmap.Types.WORLD_SURFACE, x, z);
+        if (!isDryStand(world, x, y, z) || !waterBesideShore(world, x, y, z)) {
+            return;
+        }
+        candidates.add(new Goal.Near(x, y, z, 0.5));
+    }
+
+    private static boolean waterBesideShore(WorldView world, int x, int y, int z) {
+        int[][] neighbors = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        for (int[] neighbor : neighbors) {
+            int nx = x + neighbor[0];
+            int nz = z + neighbor[1];
+            if (world.kindAt(nx, y, nz) == WorldView.NodeKind.LIQUID
+                || world.kindAt(nx, y - 1, nz) == WorldView.NodeKind.LIQUID) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean waterRisk(

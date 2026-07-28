@@ -1,5 +1,6 @@
 package dev.minebot.body.nav;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import dev.minebot.body.nav.AStarPathfinder.Waypoint;
 
@@ -29,6 +30,7 @@ public final class ApproachController {
     }
 
     private static final int JUMP_COOLDOWN_TICKS = 5;
+    private static final double PLAYER_EYE_HEIGHT = 1.62;
 
     private final String bot;
     private final String actionId;
@@ -160,6 +162,16 @@ public final class ApproachController {
         data.addProperty("partial", followingPartialPath);
         data.addProperty("expanded_nodes", result.expandedNodes());
         data.addProperty("reason", result.reason());
+        JsonArray preview = new JsonArray();
+        for (int index = 0; index < Math.min(path.size(), 16); index++) {
+            Waypoint waypoint = path.get(index);
+            JsonArray point = new JsonArray();
+            point.add(waypoint.x());
+            point.add(waypoint.y());
+            point.add(waypoint.z());
+            preview.add(point);
+        }
+        data.add("waypoint_preview", preview);
         events.emit(bot, serverTick, "path_planned", actionId, data);
         if (!sprinted) {
             controls.sprint(bot);
@@ -172,7 +184,27 @@ public final class ApproachController {
         switch (directive.state()) {
             case CONTINUE -> {
                 Waypoint target = directive.lookTarget();
-                controls.lookAt(bot, target.x() + 0.5, target.y() + 0.5, target.z() + 0.5);
+                boolean swimming = world.kindAt(
+                    (int) Math.floor(px), (int) Math.floor(py), (int) Math.floor(pz)
+                ) == WorldView.NodeKind.LIQUID;
+                double lookY = swimming ? py + PLAYER_EYE_HEIGHT : target.y() + 0.5;
+                if (!moving) {
+                    JsonObject data = new JsonObject();
+                    JsonArray from = new JsonArray();
+                    from.add(px);
+                    from.add(py);
+                    from.add(pz);
+                    JsonArray waypoint = new JsonArray();
+                    waypoint.add(target.x());
+                    waypoint.add(target.y());
+                    waypoint.add(target.z());
+                    data.add("from", from);
+                    data.add("waypoint", waypoint);
+                    data.addProperty("swimming", swimming);
+                    data.addProperty("look_y", lookY);
+                    events.emit(bot, serverTick, "path_follow_started", actionId, data);
+                }
+                controls.lookAt(bot, target.x() + 0.5, lookY, target.z() + 0.5);
                 if (!moving) {
                     controls.moveForward(bot);
                     moving = true;

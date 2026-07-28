@@ -80,7 +80,7 @@ public final class PathFollower {
         int bestIndex = -1;
         double bestDistance = DEVIATION_DISTANCE;
         for (int i = index; i < Math.min(index + RESYNC_LOOKAHEAD + 1, path.size()); i++) {
-            double distance = horizontalDistance(px, pz, path.get(i));
+            double distance = waypointDistance(px, py, pz, path.get(i));
             if (distance < bestDistance) {
                 bestDistance = distance;
                 bestIndex = i;
@@ -98,7 +98,7 @@ public final class PathFollower {
     }
 
     private boolean trackStuck(double px, double py, double pz) {
-        double progress = index * 1_000.0 - horizontalDistance(px, pz, path.get(index));
+        double progress = index * 1_000.0 - waypointDistance(px, py, pz, path.get(index));
         if (progress > bestProgress + STUCK_MIN_PROGRESS) {
             bestProgress = progress;
             ticksWithoutProgress = 0;
@@ -132,6 +132,18 @@ public final class PathFollower {
         double dx = px - (waypoint.x() + 0.5);
         double dz = pz - (waypoint.z() + 0.5);
         return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    private static double waypointDistance(
+        double px,
+        double py,
+        double pz,
+        Waypoint waypoint
+    ) {
+        double dx = px - (waypoint.x() + 0.5);
+        double dy = py - waypoint.y();
+        double dz = pz - (waypoint.z() + 0.5);
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 
     public int waypointIndex() {

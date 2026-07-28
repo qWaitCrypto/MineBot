@@ -13,5 +13,7 @@ public interface MovementControls {
 
     void jumpOnce(String botName);
 
+    void jumpContinuous(String botName);
+
     void sprint(String botName);
 }

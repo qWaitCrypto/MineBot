@@ -52,6 +52,7 @@ final class EngageExecutorTest {
         @Override public void moveForward(String bot) { controls.add("forward"); }
         @Override public void stopMovement(String bot) { controls.add("stop"); }
         @Override public void jumpOnce(String bot) { controls.add("jump"); }
+        @Override public void jumpContinuous(String bot) { controls.add("jumpContinuous"); }
         @Override public void sprint(String bot) { controls.add("sprint"); }
 
         @Override

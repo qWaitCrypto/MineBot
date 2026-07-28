@@ -28,6 +28,7 @@ final class SurvivalReflexControllerTest {
         double lookZ;
         boolean moving;
         int clears;
+        int continuousJumps;
 
         @Override
         public SurvivalReflexController.Position position(String botName) {
@@ -59,6 +60,17 @@ final class SurvivalReflexControllerTest {
             boolean dryOnly
         ) {
             return target;
+        }
+
+        @Override
+        public dev.minebot.body.nav.Goal findDryEgressGoal(
+            String botName,
+            SurvivalReflexController.Position ignored
+        ) {
+            SurvivalReflexController.Position value = target.position();
+            return new dev.minebot.body.nav.Goal.Near(
+                value.blockX(), value.blockY(), value.blockZ(), 0.5
+            );
         }
 
         @Override
@@ -101,6 +113,8 @@ final class SurvivalReflexControllerTest {
         @Override public void sprint(String botName) { }
 
         @Override public void jumpOnce(String botName) { }
+
+        @Override public void jumpContinuous(String botName) { continuousJumps++; }
 
         @Override
         public void clearAll(String botName) {
@@ -154,6 +168,132 @@ final class SurvivalReflexControllerTest {
             controller.tick(serverTick);
             runtime.tick(serverTick);
             environment.physics();
+        }
+    }
+
+    private static final class WaterEnvironment
+        implements SurvivalReflexController.Environment, MovementControls, BotControls {
+        SurvivalReflexController.Position position =
+            new SurvivalReflexController.Position(0.5, 64.0, 0.5);
+        double lookX;
+        double lookZ;
+        boolean moving;
+        int continuousJumps;
+
+        @Override
+        public SurvivalReflexController.Position position(String botName) {
+            return position;
+        }
+
+        @Override
+        public SurvivalReflexController.Kind detectHazard(
+            String botName,
+            SurvivalReflexController.Position ignored
+        ) {
+            return isDry(position) ? null : SurvivalReflexController.Kind.WATER;
+        }
+
+        @Override
+        public boolean hazardPresent(
+            String botName,
+            SurvivalReflexController.Kind kind,
+            SurvivalReflexController.Position ignored
+        ) {
+            return kind == SurvivalReflexController.Kind.WATER && !isDry(position);
+        }
+
+        @Override
+        public SurvivalReflexController.Target findEscapeTarget(
+            String botName,
+            SurvivalReflexController.Kind kind,
+            SurvivalReflexController.Position ignored,
+            boolean dryOnly
+        ) {
+            if (dryOnly) {
+                return null;
+            }
+            return new SurvivalReflexController.Target(position, false);
+        }
+
+        @Override
+        public dev.minebot.body.nav.Goal findDryEgressGoal(
+            String botName,
+            SurvivalReflexController.Position ignored
+        ) {
+            return new dev.minebot.body.nav.Goal.Near(12, 64, 0, 0.5);
+        }
+
+        @Override
+        public boolean isDryStand(
+            String botName,
+            SurvivalReflexController.Position ignored
+        ) {
+            return isDry(position);
+        }
+
+        @Override
+        public WorldView world(String botName) {
+            return (x, y, z) -> {
+                if (Math.abs(x) > 20 || Math.abs(z) > 20) {
+                    return WorldView.NodeKind.UNLOADED;
+                }
+                if (y == 63) {
+                    return WorldView.NodeKind.SOLID;
+                }
+                if (y == 64 && x < 12) {
+                    return WorldView.NodeKind.LIQUID;
+                }
+                if (y == 64 || y == 65) {
+                    return WorldView.NodeKind.PASSABLE;
+                }
+                return WorldView.NodeKind.UNLOADED;
+            };
+        }
+
+        @Override
+        public void lookAt(String botName, double x, double y, double z) {
+            lookX = x;
+            lookZ = z;
+        }
+
+        @Override
+        public void moveForward(String botName) {
+            moving = true;
+        }
+
+        @Override
+        public void stopMovement(String botName) {
+            moving = false;
+        }
+
+        @Override public void jumpOnce(String botName) { }
+
+        @Override public void jumpContinuous(String botName) { continuousJumps++; }
+
+        @Override public void sprint(String botName) { }
+
+        @Override public void clearAll(String botName) { moving = false; }
+
+        void physics() {
+            if (!moving) {
+                return;
+            }
+            double dx = lookX - position.x();
+            double dz = lookZ - position.z();
+            double norm = Math.sqrt(dx * dx + dz * dz);
+            if (norm <= 0.01) {
+                return;
+            }
+            double step = Math.min(0.45, norm);
+            position = new SurvivalReflexController.Position(
+                position.x() + dx / norm * step,
+                position.y(),
+                position.z() + dz / norm * step
+            );
+        }
+
+        private static boolean isDry(SurvivalReflexController.Position position) {
+            return position.x() >= 12.0;
         }
     }
 
@@ -231,5 +371,46 @@ final class SurvivalReflexControllerTest {
 
         assertNull(harness.controller.activeOwnerName("Bot"));
         assertTrue(harness.events.replay("Bot", 0).events().isEmpty());
+    }
+
+    @Test
+    void waterReflexFindsAndReachesDryGroundBeyondTheLegacyScanRadius() {
+        WaterEnvironment environment = new WaterEnvironment();
+        ActionRegistry registry = new ActionRegistry();
+        BotEventStream events = new BotEventStream();
+        ActionRuntime runtime = new ActionRuntime(
+            new FakePlayerActionOwner(), environment, registry, events
+        );
+        SurvivalReflexController controller = new SurvivalReflexController(
+            runtime, environment, environment, events::emit
+        );
+        controller.watch("Bot");
+
+        for (int tick = 1; tick <= 100; tick++) {
+            controller.tick(tick);
+            runtime.tick(tick);
+            environment.physics();
+            if (environment.isDryStand("Bot", environment.position)) {
+                controller.tick(tick + 1);
+                runtime.tick(tick + 1);
+                break;
+            }
+        }
+
+        assertTrue(environment.position.x() >= 12.0, environment.position.toString());
+        assertTrue(environment.continuousJumps > 0);
+        BotEventStream.Event retargeted = events.replay("Bot", 0).events().stream()
+            .filter(event -> event.name().equals("reflexRetargeted"))
+            .findFirst()
+            .orElseThrow();
+        assertEquals("reachable_dry_stand", retargeted.data().get("goal").getAsString());
+        BotEventStream.Event completed = events.replay("Bot", 0).events().stream()
+            .filter(event -> event.name().equals("reflexCompleted"))
+            .findFirst()
+            .orElseThrow();
+        assertTrue(completed.data().get("escaped_hazard").getAsBoolean());
+        assertTrue(completed.data().get("final_is_dry_stand").getAsBoolean());
+        assertTrue(completed.data().get("target_is_dry_stand").getAsBoolean());
+        assertNull(runtime.currentOwner("Bot"));
     }
 }

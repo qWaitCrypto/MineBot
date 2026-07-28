@@ -64,6 +64,8 @@ final class CollectExecutorTest {
             log.add("jump");
         }
 
+        @Override public void jumpContinuous(String bot) { log.add("jumpContinuous"); }
+
         @Override
         public void sprint(String bot) {
             log.add("sprint");
