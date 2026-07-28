@@ -64,7 +64,7 @@ IDLE_BODY_STATE_SAMPLE_INTERVAL_S = 120.0
 
 @dataclass(frozen=True)
 class RealServerConfig:
-    rcon: RconConfig
+    rcon: RconConfig | None
     bot_name: str
     natural_region: Region
     recovery_respawn_pos: tuple[int, int, int] | None
@@ -490,18 +490,6 @@ def env_required(env: Mapping[str, str], name: str) -> str:
 
 def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealServerConfig:
     env = os.environ if env is None else env
-    host = env_required(env, "MINEBOT_REAL_RCON_HOST")
-    port = int(env_required(env, "MINEBOT_REAL_RCON_PORT"))
-    password = env_required(env, "MINEBOT_REAL_RCON_PASSWORD")
-    bot_name = env_required(env, "MINEBOT_REAL_BOT")
-    timeout_s = float(env.get("MINEBOT_REAL_RCON_TIMEOUT", "20"))
-    natural_region = _region_from_env(env)
-    recovery_respawn_pos = _position_from_env(env, "MINEBOT_REAL_RECOVERY_RESPAWN_POS")
-    log_path = Path(env.get("MINEBOT_AGENT_LOG_PATH") or "logs/agent-session.jsonl")
-    language = agent_language_from_env(env)
-    server_id = (env.get("MINEBOT_REAL_SERVER_ID") or f"{host}:{port}").strip()
-    world_id_override = (env.get("MINEBOT_REAL_WORLD_ID") or "").strip() or None
-    state_db_path = Path(env.get("MINEBOT_AGENT_STATE_DB") or DEFAULT_RUNTIME_STATE_DB)
     java_body_url = (env.get("MINEBOT_JAVA_BODY_URL") or "").strip() or None
     body_provider = BodyProviderName.parse(
         env.get("MINEBOT_BODY_PROVIDER") or BodyProviderName.SCARPET.value
@@ -510,8 +498,26 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
         raise RealServerConfigError(
             f"MINEBOT_BODY_PROVIDER={body_provider.value} requires MINEBOT_JAVA_BODY_URL"
         )
+    rcon: RconConfig | None = None
+    if body_provider is not BodyProviderName.JAVA:
+        host = env_required(env, "MINEBOT_REAL_RCON_HOST")
+        port = int(env_required(env, "MINEBOT_REAL_RCON_PORT"))
+        password = env_required(env, "MINEBOT_REAL_RCON_PASSWORD")
+        timeout_s = float(env.get("MINEBOT_REAL_RCON_TIMEOUT", "20"))
+        rcon = RconConfig(host=host, port=port, password=password, timeout_s=timeout_s)
+        default_server_id = f"{host}:{port}"
+    else:
+        default_server_id = str(java_body_url)
+    bot_name = env_required(env, "MINEBOT_REAL_BOT")
+    natural_region = _region_from_env(env)
+    recovery_respawn_pos = _position_from_env(env, "MINEBOT_REAL_RECOVERY_RESPAWN_POS")
+    log_path = Path(env.get("MINEBOT_AGENT_LOG_PATH") or "logs/agent-session.jsonl")
+    language = agent_language_from_env(env)
+    world_id_override = (env.get("MINEBOT_REAL_WORLD_ID") or "").strip() or None
+    state_db_path = Path(env.get("MINEBOT_AGENT_STATE_DB") or DEFAULT_RUNTIME_STATE_DB)
+    server_id = (env.get("MINEBOT_REAL_SERVER_ID") or default_server_id).strip()
     return RealServerConfig(
-        rcon=RconConfig(host=host, port=port, password=password, timeout_s=timeout_s),
+        rcon=rcon,
         bot_name=bot_name,
         natural_region=natural_region,
         recovery_respawn_pos=recovery_respawn_pos,
@@ -553,22 +559,26 @@ async def run_real_server_goal(
     camera_config: Path | None = None,
 ) -> int:
     provider = provider_registry_from_env()
-    rcon = RconClient(config.rcon)
-    try:
-        rcon.connect()
-    except (OSError, PermissionError, RconError) as exc:
-        print(
-            f"Real-server RCON unavailable at {config.rcon.host}:{config.rcon.port}: "
-            f"{type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        await provider.aclose()
-        return 3
+    rcon: RconClient | None = None
+    if config.body_provider is not BodyProviderName.JAVA:
+        assert config.rcon is not None
+        rcon = RconClient(config.rcon)
+        try:
+            rcon.connect()
+        except (OSError, PermissionError, RconError) as exc:
+            print(
+                f"Real-server RCON unavailable at {config.rcon.host}:{config.rcon.port}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            await provider.aclose()
+            return 3
 
-    with rcon:
+    with (rcon if rcon is not None else contextlib.nullcontext()):
         camera = _CameraSession(camera_config)
         scarpet_body: ScarpetBody | None = None
         if config.body_provider is not BodyProviderName.JAVA:
+            assert rcon is not None
             try:
                 _ensure_scarpet_global_app(rcon, config.bot_name)
             except (EnvelopeError, RconError) as exc:
@@ -678,6 +688,15 @@ async def run_real_server_interactive(
     anchored after cancellation or ``/quit`` clears the active goal.
     """
     provider = provider_registry_from_env()
+    if config.body_provider is BodyProviderName.JAVA:
+        print(
+            "Interactive Java-only mode is not available until Java owns chat/world identity; "
+            "use MINEBOT_BODY_PROVIDER=composite during migration.",
+            file=sys.stderr,
+        )
+        await provider.aclose()
+        return 4
+    assert config.rcon is not None
     rcon = RconClient(config.rcon)
     try:
         rcon.connect()
@@ -695,14 +714,6 @@ async def run_real_server_interactive(
         state_store: RuntimeStateStore | None = None
         conversation_session: PersistentWindowedConversationSession | None = None
         work_queue: PersistentWorkIntentQueue | None = None
-        if config.body_provider is BodyProviderName.JAVA:
-            print(
-                "Interactive Java-only mode is not available until Java owns chat/event lifecycle; "
-                "use MINEBOT_BODY_PROVIDER=composite during migration.",
-                file=sys.stderr,
-            )
-            await provider.aclose()
-            return 4
         scarpet_body = ScarpetBody(config.bot_name, rcon)
         try:
             app_reloaded = _ensure_scarpet_global_app(rcon, config.bot_name)

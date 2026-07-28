@@ -85,16 +85,19 @@ if len(_SPEC_BY_NAME) != len(CANONICAL_BODY_TOOL_SPECS):
 BODY_OBJECTIVE_PROVIDER_TABLE: dict[str, dict[str, str]] = {
     "scarpet": {
         "move_to": "scarpet",
+        "follow_entity": "scarpet",
         "go_to_surface": "scarpet",
         "collect_block_domain": "scarpet",
     },
     "java": {
         "move_to": "java",
+        "follow_entity": "java",
         "go_to_surface": "java",
         "collect_block_domain": "java",
     },
     "composite": {
         "move_to": "java",
+        "follow_entity": "java",
         "go_to_surface": "java",
         "collect_block_domain": "java",
     },

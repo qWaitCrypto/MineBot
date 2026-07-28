@@ -12,9 +12,13 @@ import dev.minebot.body.action.CollectExecutor;
 import dev.minebot.body.action.ContainerPrimitiveActions;
 import dev.minebot.body.action.CraftPrimitiveActions;
 import dev.minebot.body.action.FurnacePrimitiveActions;
+import dev.minebot.body.action.EngageExecutor;
+import dev.minebot.body.action.FollowExecutor;
 import dev.minebot.body.action.MutationGate;
+import dev.minebot.body.action.MinecraftSurvivalEnvironment;
 import dev.minebot.body.action.PlayerPrimitiveActions;
 import dev.minebot.body.action.SpecialUseActions;
+import dev.minebot.body.action.SurvivalReflexController;
 import dev.minebot.body.control.FakePlayerActionOwner;
 import dev.minebot.body.control.HeldInputs;
 import dev.minebot.body.control.OwnerPriority;
@@ -46,6 +50,8 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.Container;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.ChestBlock;
@@ -69,10 +75,16 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String PROTOCOL = "fakeplayer-body/1";
     private static final Set<String> REQUEST_TYPES = Set.of(
         "HELLO", "EVENT_HEAD", "SPAWN", "DESPAWN", "INTERRUPT",
+        "SET_SURVIVAL_OWNER",
         "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "CONTAINER_READ", "RECIPE_READ",
         "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND",
+        "FOLLOW_ENTITY", "ENGAGE_ENTITY",
         "PLAYER_ACTION", "CONTAINER_TRANSFER", "CRAFT_ITEM", "FURNACE_TRANSFER",
         "MUTATION_VERDICT", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
+    );
+    private static final Set<String> HAZARD_GATED_REQUEST_TYPES = Set.of(
+        "NAVIGATE", "COLLECT_BLOCK", "ASCEND", "FOLLOW_ENTITY", "ENGAGE_ENTITY", "PLAYER_ACTION",
+        "CONTAINER_TRANSFER", "CRAFT_ITEM", "FURNACE_TRANSFER"
     );
     private static final int MAX_RADIUS = 128;
     private static final int MAX_VERTICAL_RADIUS = 64;
@@ -95,8 +107,10 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     private final ServerPlayerBlockBreaker blockBreaker;
     private final PlayerCommandAdapter adapter;
     private final ActionRuntime runtime;
+    private final SurvivalReflexController survival;
     private final BodyLifecycleTracker lifecycle;
     private final Set<MineBotConnection> subscribers = new LinkedHashSet<>();
+    private final Map<String, String> pendingSpawnGameModes = new LinkedHashMap<>();
     private final String eventEpoch = UUID.randomUUID().toString();
     private int currentTick;
 
@@ -105,6 +119,12 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         this.blockBreaker = new ServerPlayerBlockBreaker(server);
         this.adapter = new PlayerCommandAdapter(server, new HeldInputs(), blockBreaker);
         this.runtime = new ActionRuntime(new FakePlayerActionOwner(), adapter, actions, events);
+        this.survival = new SurvivalReflexController(
+            runtime,
+            adapter,
+            new MinecraftSurvivalEnvironment(server),
+            this::publishEvent
+        );
         this.lifecycle = new BodyLifecycleTracker(this::publishEvent);
         // Every emitted event — runtime lifecycle included — is pushed live.
         events.setListener(event -> {
@@ -132,10 +152,13 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     @Override
     public void tick(int serverTick) {
         currentTick = serverTick;
+        survival.tick(serverTick);
         runtime.tick(serverTick);
         for (String botName : lifecycle.watchedBots()) {
             ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
             if (present(player)) {
+                // Carpet applies its spawn mode after JOIN; honor the request on the next tick.
+                applyPendingSpawnGameMode(botName, player);
                 lifecycle.observePresent(botName, lifecycleSnapshot(player), serverTick);
             } else if (lifecycle.observeMissing(botName, serverTick)) {
                 runtime.abortCurrent(botName, "body_missing", serverTick);
@@ -145,7 +168,8 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
 
     public void playerJoined(ServerPlayer player, int serverTick) {
         if (player != null) {
-            lifecycle.observePresent(player.getGameProfile().name(), lifecycleSnapshot(player), serverTick);
+            String botName = player.getGameProfile().name();
+            lifecycle.observePresent(botName, lifecycleSnapshot(player), serverTick);
         }
     }
 
@@ -200,8 +224,21 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             connection.send(MineBotChannelRouter.error(CHANNEL, requestId(request), "unsupported_protocol", "unsupported body protocol", false), serverTick);
             return;
         }
+        String botName = MineBotChannelRouter.stringField(request, "bot_name");
+        if (botName != null && !hazardActionAllowed(botName, type, request)) {
+            sendError(
+                connection,
+                request,
+                serverTick,
+                "hazard_unresolved",
+                "an unresolved survival hazard blocks ordinary actions",
+                false
+            );
+            return;
+        }
         switch (type) {
             case "HELLO" -> handleHello(connection, request, serverTick);
+            case "SET_SURVIVAL_OWNER" -> handleSetSurvivalOwner(connection, request, serverTick);
             case "EVENT_HEAD" -> handleEventHead(connection, request, serverTick);
             case "SPAWN" -> handleSpawn(connection, request, serverTick);
             case "DESPAWN" -> handleDespawn(connection, request, serverTick);
@@ -216,6 +253,8 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "NAVIGATE" -> handleNavigate(connection, request, serverTick);
             case "COLLECT_BLOCK" -> handleCollectBlock(connection, request, serverTick);
             case "ASCEND" -> handleAscend(connection, request, serverTick);
+            case "FOLLOW_ENTITY" -> handleFollowEntity(connection, request, serverTick);
+            case "ENGAGE_ENTITY" -> handleEngageEntity(connection, request, serverTick);
             case "PLAYER_ACTION" -> handlePlayerAction(connection, request, serverTick);
             case "CONTAINER_TRANSFER" -> handleContainerTransfer(connection, request, serverTick);
             case "CRAFT_ITEM" -> handleCraftItem(connection, request, serverTick);
@@ -965,9 +1004,17 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 level.isThundering() ? "thunder" : level.isRaining() ? "rain" : "clear"
             );
             var owner = runtime.currentOwner(botName);
-            response.addProperty("body_owner", owner == null ? null : owner.actionId());
+            String reflexOwner = survival.activeOwnerName(botName);
+            response.addProperty(
+                "body_owner",
+                reflexOwner != null ? reflexOwner : owner == null ? null : owner.actionId()
+            );
             response.addProperty("pending_action_count", runtime.pendingActionCount(botName));
-            response.add("hazard_unresolved", JsonNull.INSTANCE);
+            JsonObject unresolved = survival.hazardUnresolved(botName);
+            response.add(
+                "hazard_unresolved",
+                unresolved == null ? JsonNull.INSTANCE : unresolved
+            );
             connection.send(response, serverTick);
         } catch (IllegalArgumentException error) {
             sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
@@ -1302,6 +1349,16 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             }
             Goal goal = parseGoal(request.getAsJsonObject("goal"), true);
             int timeoutTicks = boundedOptionalInt(request, "timeout_ticks", NavigateExecutor.DEFAULT_TIMEOUT_TICKS, 20, MAX_TIMEOUT_TICKS);
+            double finalReachDistance = optionalDouble(
+                request,
+                "final_reach_distance",
+                dev.minebot.body.nav.PathFollower.WAYPOINT_REACH_DISTANCE,
+                0.05,
+                dev.minebot.body.nav.PathFollower.WAYPOINT_REACH_DISTANCE
+            );
+            boolean survivalRecovery = optionalBoolean(
+                request, "survival_recovery", false
+            );
 
             ActionRuntime.Submission submission = runtime.submit(botName, actionId, "NAVIGATE", OwnerPriority.ACTION, serverTick);
             JsonObject response = baseResponse(request, "NAVIGATE_ACK");
@@ -1317,10 +1374,12 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         this::observedPosition,
                         this::publishEvent,
                         runtime,
-                        timeoutTicks
+                        timeoutTicks,
+                        finalReachDistance
                     );
                     runtime.attachExecutor(actionId, executor);
                     response.addProperty("state", "accepted");
+                    response.addProperty("survival_recovery", survivalRecovery);
                 }
                 case ActionRuntime.Submission.Duplicate duplicate -> {
                     response.addProperty("state", duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal");
@@ -1340,6 +1399,236 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         } catch (IllegalArgumentException error) {
             sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
         }
+    }
+
+    private void handleFollowEntity(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            String actionId = requiredString(request, "action_id", 128);
+            String targetSpec = requiredString(request, "target_spec", 256);
+            double keepRadius = boundedOptionalDouble(request, "keep_radius", 3.0, 0.0, 32.0);
+            double replanDistance = boundedOptionalDouble(
+                request, "replan_distance", 2.0, 0.5, 16.0
+            );
+            int acquireRadius = boundedOptionalInt(request, "acquire_radius", 32, 1, 64);
+            int timeoutTicks = boundedOptionalInt(
+                request, "timeout_ticks", 600, 1, MAX_TIMEOUT_TICKS
+            );
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
+                return;
+            }
+
+            ActionRuntime.Submission submission = runtime.submit(
+                botName, actionId, "FOLLOW_ENTITY", OwnerPriority.ACTION, serverTick
+            );
+            JsonObject response = baseResponse(request, "FOLLOW_ENTITY_ACK");
+            response.addProperty("action_id", actionId);
+            switch (submission) {
+                case ActionRuntime.Submission.Accepted ignored -> {
+                    runtime.attachExecutor(actionId, new FollowExecutor(
+                        botName,
+                        actionId,
+                        targetSpec,
+                        keepRadius,
+                        replanDistance,
+                        acquireRadius,
+                        new MinecraftWorldView(level),
+                        adapter,
+                        engageTargetSource(player, level),
+                        this::observedPosition,
+                        this::publishEvent,
+                        runtime,
+                        timeoutTicks
+                    ));
+                    response.addProperty("state", "accepted");
+                }
+                case ActionRuntime.Submission.Duplicate duplicate -> {
+                    response.addProperty(
+                        "state",
+                        duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal"
+                    );
+                    if (duplicate.status().terminal() != null) {
+                        response.add("terminal", duplicate.status().terminal());
+                    }
+                }
+                case ActionRuntime.Submission.Rejected rejected -> {
+                    JsonObject error = MineBotChannelRouter.error(
+                        CHANNEL, requestId(request), rejected.code(), "another action owns this bot", true
+                    );
+                    error.addProperty("owner_action_id", rejected.currentOwner().actionId());
+                    error.addProperty("owner_priority", rejected.currentOwner().priority().name());
+                    connection.send(error, serverTick);
+                    return;
+                }
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        } catch (RuntimeException error) {
+            sendError(connection, request, serverTick, "follow_entity_internal_error", "follow submission failed", true);
+        }
+    }
+
+    private void handleEngageEntity(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            String actionId = requiredString(request, "action_id", 128);
+            String targetSpec = requiredString(request, "target_spec", 256);
+            double attackRange = boundedOptionalDouble(request, "attack_range", 2.0, 1.2, 3.0);
+            int cooldownTicks = boundedOptionalInt(request, "cooldown_ticks", 10, 1, 200);
+            int acquireRadius = boundedOptionalInt(request, "acquire_radius", 32, 1, 64);
+            int timeoutTicks = boundedOptionalInt(
+                request, "timeout_ticks", 400, 1, MAX_TIMEOUT_TICKS
+            );
+            double disengageHealth = boundedOptionalDouble(
+                request, "disengage_health", 6.0, 0.0, 40.0
+            );
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
+                return;
+            }
+
+            ActionRuntime.Submission submission = runtime.submit(
+                botName, actionId, "ENGAGE_ENTITY", OwnerPriority.ACTION, serverTick
+            );
+            JsonObject response = baseResponse(request, "ENGAGE_ENTITY_ACK");
+            response.addProperty("action_id", actionId);
+            switch (submission) {
+                case ActionRuntime.Submission.Accepted ignored -> {
+                    runtime.attachExecutor(actionId, new EngageExecutor(
+                        botName,
+                        actionId,
+                        targetSpec,
+                        attackRange,
+                        cooldownTicks,
+                        acquireRadius,
+                        disengageHealth,
+                        new MinecraftWorldView(level),
+                        adapter,
+                        adapter,
+                        engageTargetSource(player, level),
+                        this::observedPosition,
+                        this::publishEvent,
+                        runtime,
+                        timeoutTicks
+                    ));
+                    response.addProperty("state", "accepted");
+                }
+                case ActionRuntime.Submission.Duplicate duplicate -> {
+                    response.addProperty(
+                        "state",
+                        duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal"
+                    );
+                    if (duplicate.status().terminal() != null) {
+                        response.add("terminal", duplicate.status().terminal());
+                    }
+                }
+                case ActionRuntime.Submission.Rejected rejected -> {
+                    JsonObject error = MineBotChannelRouter.error(
+                        CHANNEL, requestId(request), rejected.code(), "another action owns this bot", true
+                    );
+                    error.addProperty("owner_action_id", rejected.currentOwner().actionId());
+                    error.addProperty("owner_priority", rejected.currentOwner().priority().name());
+                    connection.send(error, serverTick);
+                    return;
+                }
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        } catch (RuntimeException error) {
+            sendError(connection, request, serverTick, "engage_entity_internal_error", "engagement submission failed", true);
+        }
+    }
+
+    private EngageExecutor.TargetSource engageTargetSource(ServerPlayer actor, ServerLevel level) {
+        return new EngageExecutor.TargetSource() {
+            @Override
+            public EngageExecutor.Lookup acquire(String botName, String targetSpec, double radius) {
+                if ("player".equals(targetSpec) || "minecraft:player".equals(targetSpec)) {
+                    return EngageExecutor.Lookup.missing("player_target_requires_name");
+                }
+                if (actor.getGameProfile().name().equals(targetSpec)) {
+                    return EngageExecutor.Lookup.missing("self_target_disallowed");
+                }
+                List<net.minecraft.world.entity.Entity> matches = nearbyLivingEntities(radius, entity -> {
+                    if ("nearest_hostile".equals(targetSpec)) {
+                        return entity instanceof Enemy;
+                    }
+                    if (targetSpec.equals(entity.getUUID().toString())) {
+                        return true;
+                    }
+                    String entityType = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();
+                    String normalizedType = targetSpec.contains(":") ? targetSpec : "minecraft:" + targetSpec;
+                    return normalizedType.equals(entityType)
+                        || targetSpec.equals(entity.getName().getString())
+                        || (entity instanceof ServerPlayer player
+                            && targetSpec.equals(player.getGameProfile().name()));
+                });
+                return closestLookup(matches);
+            }
+
+            @Override
+            public EngageExecutor.Lookup refresh(String botName, String targetId, double radius) {
+                List<net.minecraft.world.entity.Entity> matches = nearbyLivingEntities(
+                    radius, entity -> targetId.equals(entity.getUUID().toString())
+                );
+                return closestLookup(matches);
+            }
+
+            @Override
+            public Double bodyHealth(String botName) {
+                return actor.isRemoved() ? null : (double) actor.getHealth();
+            }
+
+            @Override
+            public boolean hasLineOfSight(String botName, EngageExecutor.Target target) {
+                List<net.minecraft.world.entity.Entity> matches = nearbyLivingEntities(
+                    64.0, entity -> target.id().equals(entity.getUUID().toString())
+                );
+                return !matches.isEmpty() && actor.hasLineOfSight(matches.get(0));
+            }
+
+            private List<net.minecraft.world.entity.Entity> nearbyLivingEntities(
+                double radius,
+                java.util.function.Predicate<net.minecraft.world.entity.Entity> predicate
+            ) {
+                double boundedRadius = Math.max(1.0, Math.min(64.0, radius));
+                return level.getEntities(
+                    actor,
+                    actor.getBoundingBox().inflate(boundedRadius),
+                    entity -> !entity.isRemoved()
+                        && !entity.getUUID().equals(actor.getUUID())
+                        && !entity.entityTags().contains("minebot.camera.observer")
+                        && entity instanceof LivingEntity living
+                        && living.isAlive()
+                        && predicate.test(entity)
+                );
+            }
+
+            private EngageExecutor.Lookup closestLookup(List<net.minecraft.world.entity.Entity> matches) {
+                net.minecraft.world.entity.Entity closest = matches.stream()
+                    .min(java.util.Comparator.comparingDouble(actor::distanceToSqr))
+                    .orElse(null);
+                if (closest == null) {
+                    return EngageExecutor.Lookup.missing("target_not_found");
+                }
+                LivingEntity living = (LivingEntity) closest;
+                return EngageExecutor.Lookup.found(new EngageExecutor.Target(
+                    closest.getUUID().toString(),
+                    BuiltInRegistries.ENTITY_TYPE.getKey(closest.getType()).toString(),
+                    closest.getName().getString(),
+                    closest.getX(),
+                    closest.getY(),
+                    closest.getZ(),
+                    (double) living.getHealth(),
+                    living.isAlive()
+                ));
+            }
+        };
     }
 
     private NavigateExecutor.PositionSource.Position observedPosition(String botName) {
@@ -1376,8 +1665,10 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 if (!json.has("goals") || !json.get("goals").isJsonArray() || json.getAsJsonArray("goals").isEmpty()) {
                     throw new IllegalArgumentException("composite goal needs a nonempty goals array");
                 }
-                if (json.getAsJsonArray("goals").size() > 16) {
-                    throw new IllegalArgumentException("composite goal supports at most 16 members");
+                if (json.getAsJsonArray("goals").size() > Goal.MAX_COMPOSITE_MEMBERS) {
+                    throw new IllegalArgumentException(
+                        "composite goal supports at most " + Goal.MAX_COMPOSITE_MEMBERS + " members"
+                    );
                 }
                 List<Goal> members = new ArrayList<>();
                 json.getAsJsonArray("goals").forEach(member -> {
@@ -1432,6 +1723,29 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         connection.send(response, serverTick);
     }
 
+    private void handleSetSurvivalOwner(
+        MineBotConnection connection,
+        JsonObject request,
+        int serverTick
+    ) {
+        try {
+            String botName = requiredBotName(request);
+            boolean enabled = optionalBoolean(request, "enabled", false);
+            lifecycle.watch(botName);
+            if (enabled) {
+                survival.watch(botName);
+            } else {
+                survival.unwatch(botName);
+            }
+            JsonObject response = baseResponse(request, "SET_SURVIVAL_OWNER_RESULT");
+            response.addProperty("bot", botName);
+            response.addProperty("enabled", enabled);
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", error.getMessage(), false);
+        }
+    }
+
     private void handleEventHead(MineBotConnection connection, JsonObject request, int serverTick) {
         try {
             String botName = requiredBotName(request);
@@ -1442,7 +1756,11 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             response.addProperty("event_seq", events.lastSeq(botName));
             response.addProperty("chat_seq", 0);
             var owner = runtime.currentOwner(botName);
-            response.addProperty("owner", owner == null ? null : owner.actionId());
+            String reflexOwner = survival.activeOwnerName(botName);
+            response.addProperty(
+                "owner",
+                reflexOwner != null ? reflexOwner : owner == null ? null : owner.actionId()
+            );
             response.addProperty("pending_action_count", runtime.pendingActionCount(botName));
             response.addProperty("tick", serverTick);
             connection.send(response, serverTick);
@@ -1470,6 +1788,11 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             ServerPlayer before = server.getPlayerList().getPlayerByName(botName);
             boolean emitRespawned = optionalBoolean(request, "emit_respawned", false);
             lifecycle.requestSpawn(botName, emitRespawned && !present(before));
+            if (gamemode == null) {
+                pendingSpawnGameModes.remove(botName);
+            } else {
+                pendingSpawnGameModes.put(botName, gamemode);
+            }
             if (!present(before)) {
                 adapter.spawn(
                     botName,
@@ -1483,9 +1806,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             }
             ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
             if (present(player)) {
-                if (gamemode != null) {
-                    adapter.setGameMode(botName, gamemode);
-                }
+                applyPendingSpawnGameMode(botName, player);
                 adapter.clearAll(botName);
                 lifecycle.observePresent(botName, lifecycleSnapshot(player), serverTick);
             }
@@ -1507,6 +1828,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         try {
             String botName = requiredBotName(request);
             lifecycle.requestDespawn(botName);
+            pendingSpawnGameModes.remove(botName);
             runtime.abortCurrent(botName, "despawn", serverTick);
             ServerPlayer before = server.getPlayerList().getPlayerByName(botName);
             if (present(before)) {
@@ -1549,6 +1871,27 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         } catch (IllegalArgumentException error) {
             sendError(connection, request, serverTick, "invalid_request", error.getMessage(), false);
         }
+    }
+
+    private boolean hazardActionAllowed(String botName, String type, JsonObject request) {
+        if (!HAZARD_GATED_REQUEST_TYPES.contains(type)) {
+            return true;
+        }
+        if ("PLAYER_ACTION".equals(type)
+            && "stop".equals(MineBotChannelRouter.stringField(request, "action"))) {
+            return true;
+        }
+        boolean survivalRecovery = false;
+        if ("NAVIGATE".equals(type)
+            && request.has("survival_recovery")
+            && request.get("survival_recovery").isJsonPrimitive()) {
+            try {
+                survivalRecovery = request.get("survival_recovery").getAsBoolean();
+            } catch (RuntimeException ignored) {
+                // The request handler will report the malformed field.
+            }
+        }
+        return survival.actionAllowed(botName, survivalRecovery);
     }
 
     private void handleResumeEvents(MineBotConnection connection, JsonObject request, int serverTick) {
@@ -1859,6 +2202,18 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException("SHA-256 is unavailable", impossible);
         }
+    }
+
+    private void applyPendingSpawnGameMode(String botName, ServerPlayer player) {
+        if (!present(player)) {
+            return;
+        }
+        String gameMode = pendingSpawnGameModes.get(botName);
+        if (gameMode == null) {
+            return;
+        }
+        adapter.setGameMode(botName, gameMode);
+        pendingSpawnGameModes.remove(botName, gameMode);
     }
 
     private static boolean present(ServerPlayer player) {
@@ -2556,6 +2911,31 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
 
     private static int boundedOptionalInt(JsonObject request, String name, int fallback, int min, int max) {
         return request.has(name) ? boundedInt(request, name, min, max) : fallback;
+    }
+
+    private static double boundedOptionalDouble(
+        JsonObject request,
+        String name,
+        double fallback,
+        double min,
+        double max
+    ) {
+        if (!request.has(name) || request.get(name).isJsonNull()) {
+            return fallback;
+        }
+        if (!request.get(name).isJsonPrimitive()) {
+            throw new IllegalArgumentException(name + " must be a number");
+        }
+        double value;
+        try {
+            value = request.get(name).getAsDouble();
+        } catch (RuntimeException error) {
+            throw new IllegalArgumentException(name + " must be a number");
+        }
+        if (!Double.isFinite(value) || value < min || value > max) {
+            throw new IllegalArgumentException(name + " is out of bounds");
+        }
+        return value;
     }
 
     private static String fingerprint(ServerPlayer player, Iterable<String> blockIds, int radius, int verticalRadius) {

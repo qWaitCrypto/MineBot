@@ -15,6 +15,8 @@ directly and plug this answerer into their proposal path.
 
 from __future__ import annotations
 
+from collections import deque
+import time
 from typing import Callable, Protocol
 from uuid import uuid4
 
@@ -119,6 +121,16 @@ _ASCEND_TERMINALS: dict[str, tuple[bool, str, bool]] = {
     "canceled": (False, "canceled", False),
     "timeout": (False, "ascend_timeout", True),
 }
+_FOLLOW_TERMINALS: dict[str, tuple[bool, str, bool]] = {
+    "completed": (True, "arrived", False),
+    "canceled": (False, "canceled", False),
+    "timeout": (False, "follow_timeout", True),
+}
+_ENGAGE_TERMINALS: dict[str, tuple[bool, str, bool]] = {
+    "completed": (True, "killed", False),
+    "canceled": (False, "canceled", False),
+    "timeout": (False, "engage_timeout", True),
+}
 _PLAYER_ACTION_TERMINALS: dict[str, tuple[bool, str, bool]] = {
     "completed": (True, "completed", False),
     "canceled": (False, "canceled", False),
@@ -148,12 +160,14 @@ class JavaBodyClient:
         *,
         action_wall_timeout_s: float = 90.0,
         recv_timeout_s: float = 2.0,
+        survival_owner: bool | None = None,
     ) -> None:
         self._bot = bot_name
         self._connect = connect
         self._governance = governance
         self._wall_timeout = action_wall_timeout_s
         self._recv_timeout = recv_timeout_s
+        self._survival_owner = survival_owner
         self._transport: DuplexTransport | None = None
         self._protocol = JavaBodyProtocol()
         self._action_counter = 0
@@ -162,14 +176,25 @@ class JavaBodyClient:
         self._last_events: list[BotEvent] = []
         self._event_buffer: list[BotEvent] = []
         self._last_terminal: tuple[str, dict] | None = None
+        self._request_times: deque[float] = deque()
 
     # -- lifecycle ------------------------------------------------------
 
     def connect(self) -> None:
         self._transport = self._connect()
         self._protocol = JavaBodyProtocol()
+        self._request_times.clear()
         self._send(self._protocol.hello())
         self._await_response("HELLO")
+        if self._survival_owner is not None:
+            self._send(self._protocol.set_survival_owner(
+                self._bot, self._survival_owner
+            ))
+            ownership = self._await_response("SET_SURVIVAL_OWNER")
+            if isinstance(ownership, ErrorResponse):
+                raise TransportClosed(
+                    f"survival ownership negotiation failed: {ownership.code}"
+                )
 
     def close(self) -> None:
         if self._transport is not None:
@@ -233,6 +258,7 @@ class JavaBodyClient:
             self._governance,
             action_wall_timeout_s=self._wall_timeout,
             recv_timeout_s=self._recv_timeout,
+            survival_owner=self._survival_owner,
         )
         try:
             control.connect()
@@ -255,10 +281,24 @@ class JavaBodyClient:
 
     # -- tool-facing objectives -----------------------------------------
 
-    def navigate(self, goal: dict, *, timeout_ticks: int | None = None) -> ToolResult:
+    def navigate(
+        self,
+        goal: dict,
+        *,
+        timeout_ticks: int | None = None,
+        final_reach_distance: float | None = None,
+        survival_recovery: bool = False,
+    ) -> ToolResult:
         self._ensure_connected()
         action_id = self._new_action_id("nav")
-        request = self._protocol.navigate(self._bot, action_id, goal, timeout_ticks=timeout_ticks)
+        request = self._protocol.navigate(
+            self._bot,
+            action_id,
+            goal,
+            timeout_ticks=timeout_ticks,
+            final_reach_distance=final_reach_distance,
+            survival_recovery=survival_recovery,
+        )
         return self._run_action(request, action_id, "navigate", _NAVIGATE_TERMINALS)
 
     def collect_block(
@@ -296,6 +336,16 @@ class JavaBodyClient:
             timeout_ticks=timeout_ticks,
         )
         return self._run_action(request, action_id, "ascend", _ASCEND_TERMINALS)
+
+    def engage_entity(self, action_id: str, params: dict) -> ToolResult:
+        self._ensure_connected()
+        request = self._protocol.engage_entity(self._bot, action_id, params)
+        return self._run_action(request, action_id, "engage_entity", _ENGAGE_TERMINALS)
+
+    def follow_entity(self, action_id: str, params: dict) -> ToolResult:
+        self._ensure_connected()
+        request = self._protocol.follow_entity(self._bot, action_id, params)
+        return self._run_action(request, action_id, "follow_entity", _FOLLOW_TERMINALS)
 
     def player_action(self, action_id: str, action: str, params: dict) -> ToolResult:
         self._ensure_connected()
@@ -366,7 +416,7 @@ class JavaBodyClient:
         mapped = terminals.get(classification)
         if mapped is not None:
             success, reason, can_retry = mapped
-            if success and kind in {"collect", "player_action", "container_transfer", "craft_item", "furnace_transfer"}:
+            if success and kind in {"collect", "player_action", "container_transfer", "craft_item", "furnace_transfer", "engage_entity", "follow_entity"}:
                 reason = str(terminal.get("reason", reason))
             return ToolResult(
                 success=success,
@@ -374,7 +424,7 @@ class JavaBodyClient:
                 can_retry=can_retry,
                 metrics=self._terminal_metrics(
                     terminal,
-                    include_all=kind in {"player_action", "container_transfer", "craft_item", "furnace_transfer"},
+                    include_all=kind in {"player_action", "container_transfer", "craft_item", "furnace_transfer", "engage_entity", "follow_entity"},
                 ),
             )
         # Failed classification: keep the Java typed reason, never relabel.
@@ -384,7 +434,7 @@ class JavaBodyClient:
             can_retry=_failed_is_retriable(str(terminal.get("reason", ""))),
             metrics=self._terminal_metrics(
                 terminal,
-                include_all=kind in {"player_action", "container_transfer", "craft_item", "furnace_transfer"},
+                include_all=kind in {"player_action", "container_transfer", "craft_item", "furnace_transfer", "engage_entity", "follow_entity"},
             ),
         )
 
@@ -404,11 +454,17 @@ class JavaBodyClient:
                 "expanded_nodes",
                 "unloaded_touches",
                 "candidates_tried",
+                "final_x",
                 "final_y",
+                "final_z",
+                "final_reach_distance",
                 "target_y",
                 "ascend_steps",
                 "break_steps",
                 "broken",
+                "paused",
+                "preempted_by",
+                "preempted_by_priority",
             )
             if key in terminal
         }
@@ -512,9 +568,25 @@ class JavaBodyClient:
         if self._transport is None:
             raise TransportClosed("transport is not connected")
         try:
+            self._pace_request()
             self._transport.send(_json.dumps(message))
         except Exception as error:
             raise TransportClosed(str(error)) from error
+
+    def _pace_request(self) -> None:
+        """Honor the server-advertised request window before sending."""
+
+        limit = self._protocol.max_requests_per_second
+        if limit <= 0:
+            return
+        while True:
+            now = time.monotonic()
+            while self._request_times and now - self._request_times[0] >= 1.0:
+                self._request_times.popleft()
+            if len(self._request_times) < limit:
+                self._request_times.append(now)
+                return
+            time.sleep(max(0.001, 1.0 - (now - self._request_times[0]) + 0.001))
 
     def _new_action_id(self, prefix: str) -> str:
         self._action_counter += 1

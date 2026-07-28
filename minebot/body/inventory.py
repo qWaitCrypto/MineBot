@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from math import ceil
 
 from minebot.body.block_work import BlockWork
+from minebot.body.inventory_read import preferred_inventory_page_size
 from minebot.body.interaction_support import (
     InteractionNavigator,
     ensure_interaction_range,
@@ -861,7 +862,9 @@ class InventoryTransactions:
         }
 
 
-def _read_inventory(body: Body, page_size: int = 12) -> PerceptionResult:
+def _read_inventory(body: Body, page_size: int | None = None) -> PerceptionResult:
+    if page_size is None:
+        page_size = preferred_inventory_page_size(body)
     start: int | None = 0
     slots: list[dict[str, object]] = []
     last: PerceptionResult | None = None

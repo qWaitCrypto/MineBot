@@ -41,6 +41,7 @@ from minebot.body import (
     LifecycleTransactions,
     NavigationRunConfig,
     NavigationTransactions,
+    ObjectiveNavigationTransactions,
     MemoryExplorationCoverageStore,
     PickupTransactions,
     ResourceCollectionTransactions,
@@ -547,7 +548,16 @@ def build_phase1_registry(
         require_structure_assessment=True,
     )
     progress = authority or ProgressAuthority()
-    navigator = NavigationTransactions.server_side(body, policy, progress=progress)
+    legacy_navigator = NavigationTransactions.server_side(body, policy, progress=progress)
+    registry = ToolRegistry()
+    catalog = CanonicalBodyToolCatalog(registry, config.body_provider)
+    move_objective_body = catalog.objective_body("move_to", body)
+    navigator = (
+        ObjectiveNavigationTransactions(move_objective_body)
+        if move_objective_body is not None
+        else legacy_navigator
+    )
+    approach_navigator = navigator
     pickup = PickupTransactions(body, navigator)
     work = BlockWork(body, policy, navigator=navigator, pickup=pickup)
     def mobility_egress(timeout_s: float) -> ToolResult:
@@ -565,28 +575,25 @@ def build_phase1_registry(
         config.exploration_coverage_store or MemoryExplorationCoverageStore(),
         mobility_egress=mobility_egress,
     )
-    block_approach = BlockApproachTransactions(body, navigator)
+    block_approach = BlockApproachTransactions(body, approach_navigator)
     resource_collection = ResourceCollectionTransactions(
         body,
         navigator,
         work,
         mobility_egress=mobility_egress,
     )
-    inventory_txn = InventoryTransactions(body, navigator=navigator, governance=policy, work=work)
-    furnace_txn = FurnaceTransactions(body, navigator=navigator, governance=policy, work=work)
-    use_txn = UseTransactions(body, navigator=navigator, inventory=inventory_txn)
+    inventory_txn = InventoryTransactions(body, navigator=approach_navigator, governance=policy, work=work)
+    furnace_txn = FurnaceTransactions(body, navigator=approach_navigator, governance=policy, work=work)
+    use_txn = UseTransactions(body, navigator=approach_navigator, inventory=inventory_txn)
     interaction_txn = InteractionTransactions(
         body,
-        navigator=navigator,
+        navigator=approach_navigator,
         inventory=inventory_txn,
         use=use_txn,
         work=work,
         governance=policy,
     )
-    container_txn = ContainerTransactions(body, navigator=navigator, governance=policy)
-    registry = ToolRegistry()
-    catalog = CanonicalBodyToolCatalog(registry, config.body_provider)
-    move_objective_body = catalog.objective_body("move_to", body)
+    container_txn = ContainerTransactions(body, navigator=approach_navigator, governance=policy)
     surface_objective_body = catalog.objective_body("go_to_surface", body)
     collect_objective_body = catalog.objective_body("collect_block_domain", body)
     combat = CombatTransactions(body, progress=progress)

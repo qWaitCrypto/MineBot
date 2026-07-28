@@ -137,12 +137,41 @@ class JavaBodyProtocol:
         goal: dict,
         *,
         timeout_ticks: int | None = None,
+        final_reach_distance: float | None = None,
+        survival_recovery: bool = False,
     ) -> dict:
         self._require_capability("NAVIGATE")
         body: dict = {"bot_name": bot_name, "action_id": action_id, "goal": dict(goal)}
         if timeout_ticks is not None:
             body["timeout_ticks"] = timeout_ticks
+        if final_reach_distance is not None:
+            body["final_reach_distance"] = final_reach_distance
+        if survival_recovery:
+            body["survival_recovery"] = True
         return self._request("NAVIGATE", body)
+
+    def follow_entity(
+        self,
+        bot_name: str,
+        action_id: str,
+        params: dict,
+    ) -> dict:
+        self._require_capability("FOLLOW_ENTITY")
+        return self._request(
+            "FOLLOW_ENTITY",
+            {
+                **dict(params),
+                "bot_name": bot_name,
+                "action_id": action_id,
+            },
+        )
+
+    def set_survival_owner(self, bot_name: str, enabled: bool) -> dict:
+        self._require_capability("SET_SURVIVAL_OWNER")
+        return self._request(
+            "SET_SURVIVAL_OWNER",
+            {"bot_name": bot_name, "enabled": bool(enabled)},
+        )
 
     def cancel_action(self, action_id: str) -> dict:
         self._require_capability("CANCEL_ACTION")
@@ -297,6 +326,22 @@ class JavaBodyProtocol:
             body["timeout_ticks"] = timeout_ticks
         return self._request("ASCEND", body)
 
+    def engage_entity(
+        self,
+        bot_name: str,
+        action_id: str,
+        params: dict,
+    ) -> dict:
+        self._require_capability("ENGAGE_ENTITY")
+        return self._request(
+            "ENGAGE_ENTITY",
+            {
+                **dict(params),
+                "bot_name": bot_name,
+                "action_id": action_id,
+            },
+        )
+
     def player_action(
         self,
         bot_name: str,
@@ -417,6 +462,8 @@ class JavaBodyProtocol:
             "NAVIGATE": "NAVIGATE_ACK",
             "COLLECT_BLOCK": "COLLECT_BLOCK_ACK",
             "ASCEND": "ASCEND_ACK",
+            "FOLLOW_ENTITY": "FOLLOW_ENTITY_ACK",
+            "ENGAGE_ENTITY": "ENGAGE_ENTITY_ACK",
             "PLAYER_ACTION": "PLAYER_ACTION_ACK",
             "CONTAINER_TRANSFER": "CONTAINER_TRANSFER_ACK",
             "CRAFT_ITEM": "CRAFT_ITEM_ACK",
@@ -562,6 +609,10 @@ class JavaBodyProtocol:
 
     def supports(self, request_type: str) -> bool:
         return self._negotiated is not None and request_type in self._negotiated.request_types
+
+    @property
+    def max_requests_per_second(self) -> int:
+        return 0 if self._negotiated is None else self._negotiated.max_requests_per_second
 
     def last_seq(self, bot_name: str) -> int:
         return self._last_seq_by_bot.get(bot_name, 0)

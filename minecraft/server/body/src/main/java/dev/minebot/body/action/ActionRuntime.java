@@ -74,9 +74,19 @@ public final class ActionRuntime {
         if (acquired.preempted()) {
             FakePlayerActionOwner.Owner previous = acquired.previous();
             JsonObject facts = new JsonObject();
+            facts.addProperty("reason", CLASS_PREEMPTED);
+            facts.addProperty("success", false);
+            facts.addProperty("paused", true);
             facts.addProperty("preempted_by", actionId);
             facts.addProperty("preempted_by_priority", priority.name());
             terminate(bot, previous.actionId(), CLASS_PREEMPTED, facts, serverTick, false);
+            JsonObject handoff = new JsonObject();
+            handoff.addProperty("previous_owner", previous.actionId());
+            handoff.addProperty("previous_priority", previous.priority().name());
+            handoff.addProperty("new_owner", actionId);
+            handoff.addProperty("new_priority", priority.name());
+            handoff.addProperty("reason", CLASS_PREEMPTED);
+            events.emit(bot, serverTick, "ownerPreempted", previous.actionId(), handoff);
         }
         registry.submit(bot, actionId, type, serverTick);
         events.emit(bot, serverTick, "owner_acquired", actionId, ownerFacts(type, priority));

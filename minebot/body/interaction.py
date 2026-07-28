@@ -2030,11 +2030,13 @@ def _approach_openable_target(
     if not nav_result.success:
         last_failure = nav_result
     else:
-        center_result = _move_to_bed_use_stance(body, selected_stand, arrival_radius=0.25, timeout_s=timeout_s)
-        attempt["center_result"] = center_result.to_payload()
-        if not center_result.success:
-            last_failure = center_result
-        else:
+        center_result = None
+        if not bool((nav_result.metrics or {}).get("provider_centered")):
+            center_result = _move_to_bed_use_stance(
+                body, selected_stand, arrival_radius=0.25, timeout_s=timeout_s
+            )
+            attempt["center_result"] = center_result.to_payload()
+        if center_result is None or center_result.success:
             final_state = body.get_state()
             final_distance = dist(final_state.pos, (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5))
             if final_distance <= INTERACTION_RANGE:
@@ -2056,6 +2058,8 @@ def _approach_openable_target(
                     "final_distance": final_distance,
                 },
             )
+        else:
+            last_failure = center_result
 
     return ToolResult(
         success=False,
@@ -2117,11 +2121,13 @@ def _approach_bed_target(
     if not nav_result.success:
         last_failure = nav_result
     else:
-        center_result = _move_to_bed_use_stance(body, selected_stand, arrival_radius=0.25, timeout_s=timeout_s)
-        attempt["center_result"] = center_result.to_payload()
-        if not center_result.success:
-            last_failure = center_result
-        else:
+        center_result = None
+        if not bool((nav_result.metrics or {}).get("provider_centered")):
+            center_result = _move_to_bed_use_stance(
+                body, selected_stand, arrival_radius=0.25, timeout_s=timeout_s
+            )
+            attempt["center_result"] = center_result.to_payload()
+        if center_result is None or center_result.success:
             final_state = body.get_state()
             final_distance = dist(final_state.pos, (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5))
             return {
@@ -2131,6 +2137,7 @@ def _approach_bed_target(
                 "final_distance": final_distance,
                 "attempts": attempts,
             }
+        last_failure = center_result
 
     return ToolResult(
         success=False,

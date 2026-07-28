@@ -354,7 +354,12 @@ class JavaBodyProviderRegistryTests(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                set(bindings) == {"move_to", "go_to_surface", "collect_block_domain"}
+                set(bindings) == {
+                    "move_to",
+                    "follow_entity",
+                    "go_to_surface",
+                    "collect_block_domain",
+                }
                 for bindings in BODY_OBJECTIVE_PROVIDER_TABLE.values()
             )
         )

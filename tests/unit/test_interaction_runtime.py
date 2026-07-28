@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from minebot.body import InteractionTransactions
 from minebot.body.interaction import _openable_look_target, _openable_stand_points
-from minebot.body.interaction_support import interaction_stand_points
+from minebot.body.interaction_support import entity_stand_points, interaction_stand_points
 from minebot.body.interaction_support import ensure_interaction_range
 from minebot.body.navigation import NavigationRunConfig, SERVER_GOAL_SET_LIMIT
 from minebot.body.use import UseTransactions
@@ -1267,6 +1267,24 @@ class InteractionRuntimeTests(unittest.TestCase):
 
         self.assertNotIsInstance(stands, ToolResult)
         self.assertIn((1, 64, 0), stands)
+
+    def test_entity_stand_points_reads_the_domain_through_block_cells_batch(self):
+        body = FakeInteractionBody(
+            entities=[],
+            block_states={},
+            states=[state_at((0, 64, 0))],
+        )
+
+        stands = entity_stand_points(
+            body,
+            (4.5, 64.0, 0.5),
+            max_distance=4.5,
+        )
+
+        self.assertNotIsInstance(stands, ToolResult)
+        self.assertTrue(stands)
+        scopes = [scope for scope, _params in body.perceptions]
+        self.assertIn("blockCells", scopes)
 
     def test_interaction_stand_points_allow_head_cell_to_be_the_target_block(self):
         body = FakeInteractionBody(

@@ -5,7 +5,24 @@ from __future__ import annotations
 from minebot.contract import Body, InventorySlot, PerceptionResult, ToolResult, perception_next_cursor
 
 
-def read_inventory_slots(body: Body, page_size: int = 12) -> PerceptionResult:
+DEFAULT_INVENTORY_PAGE_SIZE = 12
+MAX_INVENTORY_PAGE_SIZE = 46
+
+
+def preferred_inventory_page_size(body: Body, fallback: int = DEFAULT_INVENTORY_PAGE_SIZE) -> int:
+    """Use a provider's native page size without changing Scarpet's contract."""
+
+    raw = getattr(body, "preferred_inventory_page_size", fallback)
+    try:
+        requested = int(raw)
+    except (TypeError, ValueError):
+        requested = int(fallback)
+    return max(1, min(MAX_INVENTORY_PAGE_SIZE, requested))
+
+
+def read_inventory_slots(body: Body, page_size: int | None = None) -> PerceptionResult:
+    if page_size is None:
+        page_size = preferred_inventory_page_size(body)
     start: int | None = 0
     slots: list[dict[str, object]] = []
     last: PerceptionResult | None = None
@@ -50,7 +67,7 @@ def inventory_counts(slots: list[InventorySlot]) -> dict[str, int]:
     return counts
 
 
-def read_inventory_counts(body: Body, page_size: int = 12) -> dict[str, int] | ToolResult:
+def read_inventory_counts(body: Body, page_size: int | None = None) -> dict[str, int] | ToolResult:
     inventory = read_inventory_slots(body, page_size=page_size)
     if not (inventory.ok and inventory.complete):
         return ToolResult(
@@ -71,4 +88,10 @@ def read_inventory_counts(body: Body, page_size: int = 12) -> dict[str, int] | T
     )
 
 
-__all__ = ["inventory_counts", "read_inventory_counts", "read_inventory_slots"]
+__all__ = [
+    "DEFAULT_INVENTORY_PAGE_SIZE",
+    "inventory_counts",
+    "preferred_inventory_page_size",
+    "read_inventory_counts",
+    "read_inventory_slots",
+]

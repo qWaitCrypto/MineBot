@@ -129,7 +129,13 @@ class CombatTransactions:
                 "attack_range": attack_range,
                 "event": terminal.name,
                 "attacks": td.get("attacks"),
+                "target_id": td.get("target_id"),
                 "target_health": td.get("target_health"),
+                "damage_observed": td.get("damage_observed"),
+                "persistent_target": td.get("persistent_target"),
+                "cooldown_ticks": td.get("cooldown_ticks"),
+                "min_attack_interval_ticks": td.get("min_attack_interval_ticks"),
+                "max_attack_interval_ticks": td.get("max_attack_interval_ticks"),
             },
         )
 

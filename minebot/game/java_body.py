@@ -46,6 +46,8 @@ _ENTITY_READ_SCOPES = frozenset({"nearbyEntities", "nearbyHostiles"})
 _ACTION_TERMINALS = {
     "containerTransfer": "containerDone",
     "craftItem": "craftDone",
+    "engageEntity": "engageDone",
+    "followEntity": "followDone",
     "furnaceTransfer": "furnaceDone",
     "handoffItem": "handoffDone",
     "igniteBlock": "igniteDone",
@@ -64,6 +66,11 @@ _ACTION_TERMINALS = {
 
 class JavaBody:
     """Neutral Body-contract adapter over :class:`JavaBodyClient`."""
+
+    # The Java protocol can return the complete neutral 46-slot view in one
+    # response. Scarpet has no attribute here and keeps its legacy 12-slot
+    # transaction pages.
+    preferred_inventory_page_size = 46
 
     def __init__(self, client: JavaBodyClient, bot_name: str) -> None:
         self._client = client
@@ -557,7 +564,9 @@ class JavaBody:
     def execute(self, action: Action) -> Result:
         if action.name == "navigate":
             outcome = self._client.navigate(dict(action.params.get("goal") or {}),
-                                            timeout_ticks=_opt_int(action.params.get("timeout_ticks")))
+                                            timeout_ticks=_opt_int(action.params.get("timeout_ticks")),
+                                            final_reach_distance=_opt_float(action.params.get("final_reach_distance")),
+                                            survival_recovery=bool(action.params.get("survival_recovery", False)))
         elif action.name == "collectBlock":
             outcome = self._client.collect_block(
                 [str(b) for b in (action.params.get("block_types") or ())],
@@ -708,6 +717,10 @@ class JavaBody:
             outcome = self._client.container_transfer(action.id, dict(action.params))
         elif action.name == "craftItem":
             outcome = self._client.craft_item(action.id, dict(action.params))
+        elif action.name == "engageEntity":
+            outcome = self._client.engage_entity(action.id, dict(action.params))
+        elif action.name == "followEntity":
+            outcome = self._client.follow_entity(action.id, dict(action.params))
         elif action.name == "furnaceTransfer":
             outcome = self._client.furnace_transfer(action.id, dict(action.params))
         else:

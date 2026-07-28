@@ -66,7 +66,13 @@ class FakeBody:
                 "success": success,
                 "reason": reason,
                 "attacks": attacks,
+                "target_id": "target-uuid",
                 "target_health": 0.0 if success else None,
+                "damage_observed": success,
+                "persistent_target": True,
+                "cooldown_ticks": 10,
+                "min_attack_interval_ticks": 10 if success else None,
+                "max_attack_interval_ticks": 10 if success else None,
             },
         )
 
@@ -129,6 +135,9 @@ class EngageRuntimeTests(unittest.TestCase):
         self.assertEqual(result.metrics["target_spec"], "Zombie")
         self.assertEqual(result.metrics["event"], "engageDone")
         self.assertEqual(result.metrics["attacks"], 7)
+        self.assertEqual(result.metrics["target_id"], "target-uuid")
+        self.assertTrue(result.metrics["damage_observed"])
+        self.assertEqual(result.metrics["min_attack_interval_ticks"], 10)
 
     def test_engage_entity_awaits_engage_done_terminal(self):
         body = FakeBody(terminal_reason="killed")

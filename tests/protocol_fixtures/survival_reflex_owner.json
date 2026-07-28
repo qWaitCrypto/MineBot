@@ -1,0 +1,216 @@
+{
+  "name": "survival_reflex_owner",
+  "description": "Java survival ownership is explicit, recovery navigation is marked, and preemption/reflex facts remain ordered server events.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["BODY_STATE", "HELLO", "NAVIGATE", "SET_SURVIVAL_OWNER"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "set_survival_owner",
+        "args": {"bot_name": "MineBot_1", "enabled": true}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "SET_SURVIVAL_OWNER",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "enabled": true
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "SET_SURVIVAL_OWNER_RESULT",
+        "request_id": "r-2",
+        "bot": "MineBot_1",
+        "enabled": true
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "SET_SURVIVAL_OWNER_RESULT",
+          "request_type": "SET_SURVIVAL_OWNER",
+          "payload_contains": {"enabled": true}
+        }
+      ]
+    },
+    {
+      "send": {
+        "builder": "navigate",
+        "args": {
+          "bot_name": "MineBot_1",
+          "action_id": "recovery-nav-1",
+          "goal": {"kind": "near", "x": 4, "y": 64, "z": 0, "range": 0.5},
+          "timeout_ticks": 300,
+          "survival_recovery": true
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "NAVIGATE",
+        "request_id": "r-3",
+        "bot_name": "MineBot_1",
+        "action_id": "recovery-nav-1",
+        "goal": {"kind": "near", "x": 4, "y": 64, "z": 0, "range": 0.5},
+        "timeout_ticks": 300,
+        "survival_recovery": true
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "NAVIGATE_ACK",
+        "request_id": "r-3",
+        "action_id": "recovery-nav-1",
+        "state": "accepted",
+        "survival_recovery": true
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "NAVIGATE_ACK",
+          "request_type": "NAVIGATE",
+          "payload_contains": {"state": "accepted", "survival_recovery": true}
+        }
+      ]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 1,
+        "tick": 901,
+        "event": "ownerPreempted",
+        "action_id": "nav-ordinary-1",
+        "data": {
+          "previous_owner": "nav-ordinary-1",
+          "new_owner": "survival-lava-1",
+          "reason": "preempted"
+        }
+      },
+      "expect": [
+        {
+          "kind": "event",
+          "name": "ownerPreempted",
+          "seq": 1,
+          "data_contains": {"reason": "preempted"}
+        }
+      ]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 2,
+        "tick": 901,
+        "event": "reflexTriggered",
+        "action_id": "survival-lava-1",
+        "data": {
+          "kind": "lava",
+          "owner": "lavaReflex",
+          "target_is_dry_stand": true
+        }
+      },
+      "expect": [
+        {
+          "kind": "event",
+          "name": "reflexTriggered",
+          "seq": 2,
+          "data_contains": {"kind": "lava", "owner": "lavaReflex"}
+        }
+      ]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 3,
+        "tick": 918,
+        "event": "reflexCompleted",
+        "action_id": "survival-lava-1",
+        "data": {
+          "kind": "lava",
+          "reason": "escaped",
+          "escaped_hazard": true,
+          "final_is_dry_stand": true
+        }
+      },
+      "expect": [
+        {
+          "kind": "event",
+          "name": "reflexCompleted",
+          "seq": 3,
+          "data_contains": {
+            "kind": "lava",
+            "escaped_hazard": true,
+            "final_is_dry_stand": true
+          }
+        }
+      ]
+    },
+    {
+      "send": {"builder": "body_state", "args": {"bot_name": "MineBot_1"}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "BODY_STATE",
+        "request_id": "r-4",
+        "bot_name": "MineBot_1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "BODY_STATE_RESULT",
+        "request_id": "r-4",
+        "bot": "MineBot_1",
+        "missing": false,
+        "body_owner": null,
+        "pending_action_count": 0,
+        "hazard_unresolved": null
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "BODY_STATE_RESULT",
+          "request_type": "BODY_STATE",
+          "payload_contains": {
+            "body_owner": null,
+            "pending_action_count": 0,
+            "hazard_unresolved": null
+          }
+        }
+      ]
+    }
+  ],
+  "final": {
+    "supports": ["BODY_STATE", "NAVIGATE", "SET_SURVIVAL_OWNER"],
+    "pending_requests": 0,
+    "last_seq": {"MineBot_1": 3}
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "name": "follow_entity",
+  "description": "FOLLOW_ENTITY locks one moving entity and settles from its final server-observed distance band.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["FOLLOW_ENTITY", "HELLO"]
+      },
+      "expect": [
+        {"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}
+      ]
+    },
+    {
+      "send": {
+        "builder": "follow_entity",
+        "args": {
+          "bot_name": "MineBot_1",
+          "action_id": "follow-0001",
+          "params": {
+            "target_spec": "Guide",
+            "keep_radius": 3.0,
+            "replan_distance": 2.0,
+            "acquire_radius": 32,
+            "timeout_ticks": 200
+          }
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "FOLLOW_ENTITY",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "action_id": "follow-0001",
+        "target_spec": "Guide",
+        "keep_radius": 3.0,
+        "replan_distance": 2.0,
+        "acquire_radius": 32,
+        "timeout_ticks": 200
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "FOLLOW_ENTITY_ACK",
+        "request_id": "r-2",
+        "action_id": "follow-0001",
+        "state": "accepted"
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "FOLLOW_ENTITY_ACK",
+          "request_type": "FOLLOW_ENTITY",
+          "payload_contains": {"state": "accepted"}
+        }
+      ]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 1,
+        "tick": 904,
+        "event": "action_terminal",
+        "action_id": "follow-0001",
+        "data": {
+          "classification": "completed",
+          "reason": "arrived",
+          "target_id": "guide-uuid",
+          "keep_radius": 3.0,
+          "final_distance": 2.5,
+          "target_replans": 1
+        }
+      },
+      "expect": [
+        {
+          "kind": "event",
+          "name": "action_terminal",
+          "seq": 1,
+          "action_id": "follow-0001",
+          "data_contains": {
+            "classification": "completed",
+            "reason": "arrived",
+            "final_distance": 2.5
+          }
+        }
+      ]
+    }
+  ],
+  "final": {
+    "supports": ["FOLLOW_ENTITY"],
+    "pending_requests": 0,
+    "last_seq": {"MineBot_1": 1}
+  }
+}

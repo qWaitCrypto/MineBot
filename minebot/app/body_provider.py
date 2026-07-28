@@ -79,7 +79,11 @@ def build_body_provider(
                     f"{name.value} provider requires MINEBOT_JAVA_BODY_URL"
                 )
             connect = websocket_transport(java_body_url)
-        java_client = JavaBodyClient(bot_name, connect)
+        java_client = JavaBodyClient(
+            bot_name,
+            connect,
+            survival_owner=name in {BodyProviderName.JAVA, BodyProviderName.COMPOSITE},
+        )
         java_body = JavaBody(java_client, bot_name)
 
     if name is BodyProviderName.SCARPET:

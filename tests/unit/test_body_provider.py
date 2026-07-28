@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -10,6 +10,18 @@ from minebot.app.body_provider import (
     build_body_provider,
 )
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry
+from minebot.body import (
+    BlockApproachTransactions,
+    BlockWork,
+    ContainerTransactions,
+    ExplorationTransactions,
+    FurnaceTransactions,
+    InteractionTransactions,
+    InventoryTransactions,
+    PickupTransactions,
+    ResourceCollectionTransactions,
+    UseTransactions,
+)
 from minebot.contract import Action, BreakContext, PerceptionResult, Region
 from minebot.game.composite_body import CompositeBody
 from minebot.game.governance import GovernancePolicy
@@ -58,6 +70,37 @@ def test_composite_constructs_java_body_without_connecting_at_startup() -> None:
     assert runtime.java_body._client.negotiated is False
 
 
+def test_java_backed_providers_enable_the_single_java_survival_owner() -> None:
+    java_server = FakeBodyServer()
+    java_runtime = build_body_provider(
+        "java",
+        bot_name="Bot",
+        natural_region=REGION,
+        java_connect=lambda: java_server,
+    )
+    java_runtime.body.get_state()
+
+    composite_server = FakeBodyServer()
+    composite_runtime = build_body_provider(
+        "composite",
+        bot_name="Bot",
+        natural_region=REGION,
+        scarpet_body=_scarpet(),
+        java_connect=lambda: composite_server,
+    )
+    assert composite_runtime.java_body is not None
+    composite_runtime.java_body.get_state()
+
+    assert next(
+        request for request in java_server.requests
+        if request["type"] == "SET_SURVIVAL_OWNER"
+    )["enabled"] is True
+    assert next(
+        request for request in composite_server.requests
+        if request["type"] == "SET_SURVIVAL_OWNER"
+    )["enabled"] is True
+
+
 @pytest.mark.parametrize("scope", sorted(CompositeBody.JAVA_PERCEPTIONS))
 def test_composite_routes_migrated_perceptions_to_java_without_runtime_fallback(
     scope: str,
@@ -91,6 +134,21 @@ def test_composite_routes_migrated_player_action_and_its_terminal_to_java(
     java = JavaBody(JavaBodyClient("Bot", lambda: FakeBodyServer()), "Bot")
     body = CompositeBody(scarpet, java)
     params = {
+        "engageEntity": {
+            "target_spec": "nearest_hostile",
+            "attack_range": 2.0,
+            "cooldown_ticks": 10,
+            "acquire_radius": 32,
+            "timeout_ticks": 100,
+            "disengage_health": 6.0,
+        },
+        "followEntity": {
+            "target_spec": "Guide",
+            "keep_radius": 3.0,
+            "replan_distance": 2.0,
+            "acquire_radius": 32,
+            "timeout_ticks": 100,
+        },
         "containerTransfer": {
             "pos": [1, 64, 0],
             "direction": "container_to_bot",
@@ -170,7 +228,7 @@ def test_composite_does_not_fallback_after_java_player_action_failure() -> None:
     scarpet.await_action_terminal.assert_not_called()
 
 
-def test_composite_routes_lifecycle_to_java_and_interrupts_both_owner_ledgers() -> None:
+def test_composite_routes_lifecycle_and_interrupt_to_java_only() -> None:
     scarpet = _scarpet()
     java = _scarpet()
     java.spawn.return_value = Mock(ok=True, accepted=True)
@@ -192,20 +250,13 @@ def test_composite_routes_lifecycle_to_java_and_interrupts_both_owner_ledgers() 
     scarpet.spawn.assert_not_called()
     scarpet.despawn.assert_not_called()
     java.interrupt.assert_called_once_with("cleanup")
-    scarpet.interrupt.assert_called_once_with("cleanup")
+    scarpet.interrupt.assert_not_called()
     assert interrupted.ok and interrupted.accepted and interrupted.complete
 
 
-def test_composite_event_head_keeps_legacy_cursor_but_observes_java_owner() -> None:
+def test_composite_state_and_event_stream_are_java_owned() -> None:
     scarpet = _scarpet()
     java = _scarpet()
-    scarpet.event_head.return_value = {
-        "event_seq": 7,
-        "chat_seq": 3,
-        "epoch": "scarpet-epoch",
-        "owner": None,
-        "pending_action_count": 0,
-    }
     java.event_head.return_value = {
         "event_seq": 11,
         "chat_seq": 0,
@@ -213,15 +264,40 @@ def test_composite_event_head_keeps_legacy_cursor_but_observes_java_owner() -> N
         "owner": "nav-1",
         "pending_action_count": 1,
     }
+    java.get_state.return_value = object()
+    java.poll_events.return_value = []
 
-    head = CompositeBody(scarpet, java).event_head("client-epoch")
+    body = CompositeBody(scarpet, java)
+    head = body.event_head("client-epoch")
+    state = body.get_state()
+    events = body.poll_events()
 
-    assert head["event_seq"] == 7
-    assert head["chat_seq"] == 3
-    assert head["epoch"] == "scarpet-epoch"
+    assert head["event_seq"] == 11
+    assert head["chat_seq"] == 0
+    assert head["epoch"] == "java-epoch"
     assert head["owner"] == "nav-1"
     assert head["pending_action_count"] == 1
-    assert head["java_event_seq"] == 11
+    assert state is java.get_state.return_value
+    assert events == []
+    scarpet.event_head.assert_not_called()
+    scarpet.get_state.assert_not_called()
+    scarpet.poll_events.assert_not_called()
+
+
+def test_composite_unknown_capability_returns_java_gap_without_scarpet_fallback() -> None:
+    scarpet = _scarpet()
+    java = JavaBody(JavaBodyClient("Bot", lambda: FakeBodyServer()), "Bot")
+    body = CompositeBody(scarpet, java)
+
+    perception = body.perceive("legacyOnlyRead", {})
+    action = body.execute(Action.create("legacyOnlyAction", {}))
+
+    assert perception.ok is False
+    assert perception.error == "capability_unavailable:legacyOnlyRead"
+    assert action.ok is False
+    assert action.error == "capability_unavailable:legacyOnlyAction"
+    scarpet.perceive.assert_not_called()
+    scarpet.execute.assert_not_called()
 
 
 def test_composite_governance_structure_read_uses_java_world_facts() -> None:
@@ -275,6 +351,79 @@ def test_java_provider_uses_canonical_move_to_tool() -> None:
     assert result.success is True
     assert result.reason == "arrived"
     assert "navigate_to" not in registry.names()
+
+
+def test_java_provider_wires_known_target_movement_to_the_objective_navigator() -> None:
+    body = _scarpet()
+    objective_navigator = Mock(name="objective_navigator")
+    legacy_navigator = Mock(name="legacy_navigator")
+
+    with (
+        patch(
+            "minebot.app.phase1_runtime.NavigationTransactions.server_side",
+            return_value=legacy_navigator,
+        ),
+        patch(
+            "minebot.app.phase1_runtime.ObjectiveNavigationTransactions",
+            return_value=objective_navigator,
+        ) as objective_factory,
+        patch(
+            "minebot.app.phase1_runtime.PickupTransactions",
+            wraps=PickupTransactions,
+        ) as pickup,
+        patch(
+            "minebot.app.phase1_runtime.BlockWork",
+            wraps=BlockWork,
+        ) as work,
+        patch(
+            "minebot.app.phase1_runtime.ExplorationTransactions",
+            wraps=ExplorationTransactions,
+        ) as exploration,
+        patch(
+            "minebot.app.phase1_runtime.ResourceCollectionTransactions",
+            wraps=ResourceCollectionTransactions,
+        ) as resource_collection,
+        patch(
+            "minebot.app.phase1_runtime.BlockApproachTransactions",
+            wraps=BlockApproachTransactions,
+        ) as block_approach,
+        patch(
+            "minebot.app.phase1_runtime.InventoryTransactions",
+            wraps=InventoryTransactions,
+        ) as inventory,
+        patch(
+            "minebot.app.phase1_runtime.FurnaceTransactions",
+            wraps=FurnaceTransactions,
+        ) as furnace,
+        patch(
+            "minebot.app.phase1_runtime.UseTransactions",
+            wraps=UseTransactions,
+        ) as use,
+        patch(
+            "minebot.app.phase1_runtime.InteractionTransactions",
+            wraps=InteractionTransactions,
+        ) as interaction,
+        patch(
+            "minebot.app.phase1_runtime.ContainerTransactions",
+            wraps=ContainerTransactions,
+        ) as container,
+    ):
+        build_phase1_registry(
+            body,
+            Phase1RuntimeConfig(natural_region=REGION, body_provider="java"),
+        )
+
+    objective_factory.assert_called_once_with(body)
+    assert pickup.call_args.args[1] is objective_navigator
+    assert work.call_args.kwargs["navigator"] is objective_navigator
+    assert exploration.call_args.args[1] is objective_navigator
+    assert resource_collection.call_args.args[1] is objective_navigator
+    assert block_approach.call_args.args[1] is objective_navigator
+    assert inventory.call_args.kwargs["navigator"] is objective_navigator
+    assert furnace.call_args.kwargs["navigator"] is objective_navigator
+    assert use.call_args.kwargs["navigator"] is objective_navigator
+    assert interaction.call_args.kwargs["navigator"] is objective_navigator
+    assert container.call_args.kwargs["navigator"] is objective_navigator
 
 
 def test_java_provider_uses_canonical_collect_domain_tool() -> None:

@@ -190,6 +190,18 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(cfg.body_provider.value, "composite")
         self.assertEqual(cfg.java_body_url, "ws://127.0.0.1:8767")
 
+    def test_java_config_does_not_require_rcon_credentials(self):
+        cfg = real_server_config_from_env(
+            {
+                "MINEBOT_REAL_BOT": "MineBot",
+                "MINEBOT_BODY_PROVIDER": "java",
+                "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
+            }
+        )
+
+        self.assertIsNone(cfg.rcon)
+        self.assertEqual(cfg.server_id, "ws://127.0.0.1:8767")
+
     def test_config_rejects_java_provider_without_java_url(self):
         with self.assertRaises(RealServerConfigError) as ctx:
             real_server_config_from_env(
@@ -1566,6 +1578,72 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
                 for call in print_mock.call_args_list
             )
         )
+
+    def test_java_goal_runner_never_constructs_or_connects_rcon(self):
+        cfg = real_server_config_from_env(
+            {
+                "MINEBOT_REAL_RCON_HOST": "must-not-connect.invalid",
+                "MINEBOT_REAL_RCON_PORT": "25576",
+                "MINEBOT_REAL_RCON_PASSWORD": "unused",
+                "MINEBOT_REAL_BOT": "JavaOnly",
+                "MINEBOT_BODY_PROVIDER": "java",
+                "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
+            }
+        )
+        body = HarnessBody()
+
+        class FakeProvider:
+            default = "primary"
+
+            def trace_configs(self):
+                return []
+
+            async def aclose(self):
+                pass
+
+        class Trace:
+            def emit(self, *_args, **_kwargs):
+                pass
+
+            def close(self):
+                pass
+
+        parts = type("Parts", (), {"runtime": type("Runtime", (), {"trace": Trace()})()})()
+
+        class FakeSession:
+            current_goal = "collect 1 dirt"
+
+            def __init__(self, make_parts):
+                self.parts = make_parts(self.current_goal)
+
+            def submit(self, _command):
+                pass
+
+            async def run_until_waiting(self, **_kwargs):
+                return SessionStep("waiting", LifecycleState.YIELDED)
+
+        runtime = type(
+            "BodyRuntime",
+            (),
+            {"name": cfg.body_provider, "body": body, "governance": object()},
+        )()
+        truth = TerminalTruth(
+            "collect 1 dirt", None, None, False, "waiting", "yielded", 5
+        )
+
+        with (
+            patch("minebot.app.real_server_session.provider_registry_from_env", return_value=FakeProvider()),
+            patch("minebot.app.real_server_session.RconClient", side_effect=AssertionError("RCON constructed")) as rcon,
+            patch("minebot.app.real_server_session.build_body_provider", return_value=runtime),
+            patch("minebot.app.real_server_session.build_phase1_agent_runtime", return_value=parts),
+            patch("minebot.app.real_server_session.AgentSession", FakeSession),
+            patch("minebot.app.real_server_session.safe_evaluate_terminal_truth", return_value=truth),
+            patch("builtins.print"),
+        ):
+            result = asyncio.run(run_real_server_goal(cfg, "collect 1 dirt", max_steps=1))
+
+        self.assertEqual(result, 5)
+        rcon.assert_not_called()
 
     def test_phase1_recovery_facts_include_inventory_recount_delta(self):
         body = RecoveringInventoryBody(

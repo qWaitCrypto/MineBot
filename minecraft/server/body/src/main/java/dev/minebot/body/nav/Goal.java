@@ -11,6 +11,8 @@ import java.util.List;
 public sealed interface Goal {
     /** Cost-model scale for heuristics: optimistic ticks per block. */
     double HEURISTIC_TICKS_PER_BLOCK = 3.5;
+    /** Shared with Python's complete interaction stand-domain limit. */
+    int MAX_COMPOSITE_MEMBERS = 32;
 
     boolean isSatisfied(int x, int y, int z);
 
@@ -84,6 +86,11 @@ public sealed interface Goal {
         public Composite {
             if (goals.isEmpty()) {
                 throw new IllegalArgumentException("composite goal must not be empty");
+            }
+            if (goals.size() > MAX_COMPOSITE_MEMBERS) {
+                throw new IllegalArgumentException(
+                    "composite goal supports at most " + MAX_COMPOSITE_MEMBERS + " members"
+                );
             }
             goals = List.copyOf(goals);
         }

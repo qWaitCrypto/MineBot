@@ -258,10 +258,15 @@ class FakeBodyServer:
                 "max_request_bytes": 16384,
                 "max_requests_per_second": 40,
                 "request_types": [
-                    "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "ENTITY_READ", "FIND_BLOCKS", "FURNACE_TRANSFER",
+                    "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "ENGAGE_ENTITY", "ENTITY_READ", "FIND_BLOCKS", "FOLLOW_ENTITY", "FURNACE_TRANSFER",
                     "HELLO", "EVENT_HEAD", "SPAWN", "DESPAWN", "INTERRUPT", "INVENTORY", "CONTAINER_READ", "CONTAINER_TRANSFER", "CRAFT_ITEM", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
-                    "RECIPE_READ", "RESUME_EVENTS", "WORLD_READ",
+                    "RECIPE_READ", "RESUME_EVENTS", "SET_SURVIVAL_OWNER", "WORLD_READ",
                 ],
+            })
+        elif kind == "SET_SURVIVAL_OWNER":
+            self._emit_response(rid, "SET_SURVIVAL_OWNER_RESULT", {
+                "bot": message.get("bot_name"),
+                "enabled": bool(message.get("enabled")),
             })
         elif kind == "EVENT_HEAD":
             self._emit_response(rid, "EVENT_HEAD_RESULT", {
@@ -317,6 +322,10 @@ class FakeBodyServer:
             self._handle_collect(message, rid)
         elif kind == "ASCEND":
             self._handle_ascend(message, rid)
+        elif kind == "FOLLOW_ENTITY":
+            self._handle_follow(message, rid)
+        elif kind == "ENGAGE_ENTITY":
+            self._handle_engage(message, rid)
         elif kind == "PLAYER_ACTION":
             self._handle_player_action(message, rid)
         elif kind == "CONTAINER_TRANSFER":
@@ -519,12 +528,24 @@ class FakeBodyServer:
         if self.scenario == "navigate_no_path":
             self._emit_terminal(action, {"classification": "failed", "reason": "no_path",
                                          "elapsed_ticks": 12, "replans": 0})
+        elif self.scenario == "navigate_preempted":
+            self._emit_terminal(action, {
+                "classification": "preempted",
+                "reason": "preempted",
+                "paused": True,
+                "preempted_by": "survival-lava-1",
+                "preempted_by_priority": "SURVIVAL",
+            })
         elif self.scenario == "drop_before_terminal":
             self._pending_action = action
         else:
             self._emit_event("path_planned", action, {"waypoints": 20, "partial": False})
-            self._emit_terminal(action, {"classification": "completed", "reason": "goal_satisfied",
-                                         "elapsed_ticks": 88, "replans": 2, "final_x": 10.0})
+            terminal = {"classification": "completed", "reason": "goal_satisfied",
+                        "elapsed_ticks": 88, "replans": 2,
+                        "final_x": 10.0, "final_y": 64.0, "final_z": 0.0}
+            if message.get("final_reach_distance") is not None:
+                terminal["final_reach_distance"] = message["final_reach_distance"]
+            self._emit_terminal(action, terminal)
 
     def _handle_world_read(self, message: dict, rid: str) -> None:
         scope = message["scope"]
@@ -703,6 +724,46 @@ class FakeBodyServer:
             "ascend_steps": 6,
             "break_steps": 12,
             "elapsed_ticks": 280,
+        })
+
+    def _handle_engage(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        self._emit_response(rid, "ENGAGE_ENTITY_ACK", {"action_id": action, "state": "accepted"})
+        self._emit_event("owner_acquired", action, {"type": "ENGAGE_ENTITY", "priority": "ACTION"})
+        self._emit_terminal(action, {
+            "classification": "completed",
+            "reason": "killed",
+            "success": True,
+            "target_spec": message.get("target_spec"),
+            "target_type": "minecraft:husk",
+            "target_id": "husk-uuid",
+            "target_name": "Husk",
+            "target_health": 0.0,
+            "target_initial_health": 20.0,
+            "damage_observed": True,
+            "persistent_target": True,
+            "attacks": 4,
+            "cooldown_ticks": message.get("cooldown_ticks", 10),
+            "min_attack_interval_ticks": message.get("cooldown_ticks", 10),
+            "max_attack_interval_ticks": message.get("cooldown_ticks", 10),
+        })
+
+    def _handle_follow(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        self._emit_response(rid, "FOLLOW_ENTITY_ACK", {"action_id": action, "state": "accepted"})
+        self._emit_event("owner_acquired", action, {"type": "FOLLOW_ENTITY", "priority": "ACTION"})
+        self._emit_terminal(action, {
+            "classification": "completed",
+            "reason": "arrived",
+            "success": True,
+            "target_spec": message.get("target_spec"),
+            "target_type": "minecraft:player",
+            "target_id": "target-uuid",
+            "target_name": message.get("target_spec"),
+            "keep_radius": message.get("keep_radius", 3.0),
+            "final_distance": 2.5,
+            "elapsed_ticks": message.get("timeout_ticks", 600),
+            "target_replans": 1,
         })
 
     def _handle_player_action(self, message: dict, rid: str) -> None:
@@ -1028,6 +1089,9 @@ def test_navigate_complete_maps_to_arrived_with_metrics() -> None:
     assert result.success is True
     assert result.reason == "arrived"
     assert result.metrics["replans"] == 2
+    assert result.metrics["final_x"] == 10.0
+    assert result.metrics["final_y"] == 64.0
+    assert result.metrics["final_z"] == 0.0
 
 
 def test_navigate_no_path_keeps_typed_failure() -> None:
@@ -1039,6 +1103,36 @@ def test_navigate_no_path_keeps_typed_failure() -> None:
     assert result.success is False
     assert result.reason == "no_path"
     assert result.can_retry is True
+
+
+def test_survival_preemption_stays_typed_retryable_and_paused() -> None:
+    server = FakeBodyServer()
+    server.scenario = "navigate_preempted"
+    client = _client(server)
+    client.connect()
+
+    result = client.navigate({"kind": "xz", "x": 99, "z": 0})
+
+    assert result.success is False
+    assert result.reason == "preempted"
+    assert result.can_retry is True
+    assert result.metrics["paused"] is True
+    assert result.metrics["preempted_by_priority"] == "SURVIVAL"
+
+
+def test_navigate_precision_reach_is_sent_and_preserved_in_terminal_metrics() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+    client.connect()
+
+    result = client.navigate(
+        {"kind": "near", "x": 10, "y": 64, "z": 0, "range": 0.5},
+        final_reach_distance=0.1,
+    )
+
+    request = next(request for request in server.requests if request.get("type") == "NAVIGATE")
+    assert request["final_reach_distance"] == 0.1
+    assert result.metrics["final_reach_distance"] == 0.1
 
 
 def test_owner_busy_ack_becomes_a_retryable_toolresult() -> None:
@@ -1088,6 +1182,58 @@ def test_ascend_maps_verified_surface_terminal() -> None:
     assert result.reason == "surface_reached"
     assert result.metrics["final_y"] == 70
     assert result.metrics["ascend_steps"] == 6
+
+
+def test_engage_entity_preserves_server_kill_facts_and_action_identity() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+
+    result = client.engage_entity(
+        "engage-1",
+        {
+            "target_spec": "nearest_hostile",
+            "attack_range": 2.0,
+            "cooldown_ticks": 10,
+            "acquire_radius": 32,
+            "timeout_ticks": 400,
+            "disengage_health": 6.0,
+        },
+    )
+
+    request = next(request for request in server.requests if request.get("type") == "ENGAGE_ENTITY")
+    assert request["action_id"] == "engage-1"
+    assert request["target_spec"] == "nearest_hostile"
+    assert result.success is True
+    assert result.reason == "killed"
+    assert result.metrics["target_id"] == "husk-uuid"
+    assert result.metrics["target_health"] == 0.0
+    assert result.metrics["damage_observed"] is True
+    assert result.metrics["min_attack_interval_ticks"] == 10
+
+
+def test_follow_entity_preserves_target_lock_and_final_distance() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+
+    result = client.follow_entity(
+        "follow-1",
+        {
+            "target_spec": "Guide",
+            "keep_radius": 3.0,
+            "replan_distance": 2.0,
+            "acquire_radius": 32,
+            "timeout_ticks": 200,
+        },
+    )
+
+    request = next(request for request in server.requests if request.get("type") == "FOLLOW_ENTITY")
+    assert request["action_id"] == "follow-1"
+    assert request["target_spec"] == "Guide"
+    assert result.success is True
+    assert result.reason == "arrived"
+    assert result.metrics["target_id"] == "target-uuid"
+    assert result.metrics["final_distance"] == 2.5
+    assert result.metrics["target_replans"] == 1
 
 
 def test_no_governance_denies_proposals_by_default() -> None:

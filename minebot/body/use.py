@@ -23,6 +23,7 @@ from minebot.body.interaction_support import (
     refresh_entity_target,
 )
 from minebot.body.inventory import InventoryTransactions
+from minebot.body.inventory_read import preferred_inventory_page_size
 from minebot.contract import Action, Body, InventorySlot, PerceptionResult, Result, ToolResult, body_rejection_to_tool_result, perception_next_cursor
 from minebot.contract import terminal_event_to_tool_result
 
@@ -1027,7 +1028,9 @@ def _await_position_delta(
     }
 
 
-def _read_inventory(body: Body, page_size: int = 12) -> PerceptionResult:
+def _read_inventory(body: Body, page_size: int | None = None) -> PerceptionResult:
+    if page_size is None:
+        page_size = preferred_inventory_page_size(body)
     start: int | None = 0
     slots: list[dict[str, object]] = []
     last: PerceptionResult | None = None
@@ -1532,7 +1535,12 @@ def _recover_line_of_sight(
         "result": nav_result.to_payload(),
     }
     attempts = [attempt]
-    if nav_result.success and arrival_radius is not None and center_after_navigation:
+    if (
+        nav_result.success
+        and arrival_radius is not None
+        and center_after_navigation
+        and not bool((nav_result.metrics or {}).get("provider_centered"))
+    ):
         center_result = _move_to_stand_center(
             body,
             selected_stand,

@@ -140,6 +140,32 @@ def test_unoffered_request_type_is_a_capability_gap_never_a_silent_substitute() 
     assert protocol.supports("FIND_BLOCKS")
 
 
+def test_survival_owner_and_recovery_navigation_are_explicit_protocol_facts() -> None:
+    protocol = JavaBodyProtocol()
+    hello = protocol.hello()
+    protocol.feed({
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": hello["request_id"],
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["HELLO", "NAVIGATE", "SET_SURVIVAL_OWNER"],
+    })
+
+    ownership = protocol.set_survival_owner("MineBot_1", True)
+    navigation = protocol.navigate(
+        "MineBot_1",
+        "nav-recovery-1",
+        {"kind": "near", "x": 4, "y": 64, "z": 0, "range": 0.5},
+        survival_recovery=True,
+    )
+
+    assert ownership["enabled"] is True
+    assert navigation["survival_recovery"] is True
+
+
 def test_protocol_version_mismatch_fails_closed() -> None:
     protocol = JavaBodyProtocol()
     hello = protocol.hello()

@@ -86,6 +86,15 @@ final class NavigateExecutorTest {
         BotEventStream events
     ) {
         static Harness create(WorldView world, Goal goal, int timeoutTicks) {
+            return create(world, goal, timeoutTicks, PathFollower.WAYPOINT_REACH_DISTANCE);
+        }
+
+        static Harness create(
+            WorldView world,
+            Goal goal,
+            int timeoutTicks,
+            double finalReachDistance
+        ) {
             FakeBody body = new FakeBody();
             ActionRegistry registry = new ActionRegistry();
             BotEventStream events = new BotEventStream();
@@ -100,7 +109,8 @@ final class NavigateExecutorTest {
                 bot -> new NavigateExecutor.PositionSource.Position(body.x, body.y, body.z),
                 (bot, tick, name, actionId, data) -> events.emit(bot, tick, name, actionId, data),
                 runtime,
-                timeoutTicks
+                timeoutTicks,
+                finalReachDistance
             );
             runtime.attachExecutor("nav-1", executor);
             return new Harness(runtime, registry, body, events);
@@ -130,6 +140,24 @@ final class NavigateExecutorTest {
         assertTrue(terminal.get("final_x").getAsDouble() > 8.0);
         assertTrue(harness.body().log.contains("sprint"));
         assertTrue(harness.body().log.contains("clearAll"), "terminal must clear inputs");
+    }
+
+    @Test
+    void preciseApproachFinishesAtTheSelectedStandCenter() {
+        Harness harness = Harness.create(
+            new FakeWorld(FLOOR),
+            new Goal.Near(10, STAND, 0, 0.5),
+            2_400,
+            0.1
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(2_000);
+
+        assertEquals("completed", terminal.get("classification").getAsString());
+        double dx = terminal.get("final_x").getAsDouble() - 10.5;
+        double dz = terminal.get("final_z").getAsDouble() - 0.5;
+        assertTrue(Math.sqrt(dx * dx + dz * dz) <= 0.1 + 1.0e-6);
+        assertEquals(0.1, terminal.get("final_reach_distance").getAsDouble());
     }
 
     @Test

@@ -73,10 +73,19 @@ final class ActionRuntimeTest {
         var status = registry.status("a-1");
         assertEquals(ActionRegistry.State.TERMINAL, status.state());
         assertEquals("preempted", status.terminal().get("classification").getAsString());
+        assertEquals("preempted", status.terminal().get("reason").getAsString());
+        assertTrue(status.terminal().get("paused").getAsBoolean());
         assertEquals("reflex-1", status.terminal().get("preempted_by").getAsString());
         assertEquals("reflex-1", owner.current("Bot").actionId());
         assertEquals(List.of("Bot"), controls.cleared);
         assertEquals(ActionRegistry.State.RUNNING, registry.status("reflex-1").state());
+
+        BotEventStream.Replay replay = events.replay("Bot", 0);
+        assertTrue(replay.events().stream().anyMatch(event ->
+            event.name().equals("ownerPreempted")
+                && event.data().get("previous_owner").getAsString().equals("a-1")
+                && event.data().get("new_owner").getAsString().equals("reflex-1")
+        ));
     }
 
     @Test

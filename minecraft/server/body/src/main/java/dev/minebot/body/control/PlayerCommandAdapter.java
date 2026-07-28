@@ -17,7 +17,8 @@ import net.minecraft.server.MinecraftServer;
 public final class PlayerCommandAdapter
     implements dev.minebot.body.action.BotControls,
     dev.minebot.body.nav.MovementControls,
-    dev.minebot.body.action.PlayerPrimitiveActions.Controls {
+    dev.minebot.body.action.PlayerPrimitiveActions.Controls,
+    dev.minebot.body.action.EngageExecutor.CombatControls {
     private final MinecraftServer server;
     private final HeldInputs heldInputs;
     private final dev.minebot.body.action.ExactBlockBreaker blockBreaker;
@@ -77,6 +78,11 @@ public final class PlayerCommandAdapter
 
     public void lookAt(String botName, double x, double y, double z) {
         dispatch(botName, "look at " + x + " " + y + " " + z);
+    }
+
+    /** One server-authoritative melee attempt through Carpet's public player command. */
+    public void attackOnce(String botName) {
+        dispatch(botName, "attack once");
     }
 
     public void look(String botName, float yaw, float pitch) {

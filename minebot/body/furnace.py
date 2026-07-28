@@ -10,6 +10,7 @@ from math import dist
 from typing import Callable
 
 from minebot.body.block_work import BlockWork
+from minebot.body.inventory_read import preferred_inventory_page_size
 from minebot.body.inventory import _ScarpetValueParser
 from minebot.body.interaction_support import (
     InteractionNavigator,
@@ -1312,7 +1313,9 @@ def _dispatch(body: Body, action_name: str, params: dict[str, object], *, timeou
     )
 
 
-def _read_inventory(body: Body, page_size: int = 12) -> PerceptionResult:
+def _read_inventory(body: Body, page_size: int | None = None) -> PerceptionResult:
+    if page_size is None:
+        page_size = preferred_inventory_page_size(body)
     start: int | None = 0
     slots: list[dict[str, object]] = []
     last: PerceptionResult | None = None

@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from math import dist
 
 from minebot.body.interaction_support import (
+    InteractionNavigator,
     NearbyBlockSearch,
     NearbyBlockTarget,
     block_type_matches_wanted,
@@ -17,7 +18,6 @@ from minebot.body.interaction_support import (
 from minebot.body.navigation import (
     SERVER_GOAL_SET_LIMIT,
     NavigationRunConfig,
-    NavigationTransactions,
     pure_movement_navigation_config,
 )
 from minebot.body.reach import ReachIntent, block_reach_domains, round_robin_reach_goals
@@ -53,7 +53,7 @@ class BlockApproachTransactions:
     def __init__(
         self,
         body: Body,
-        navigator: NavigationTransactions,
+        navigator: InteractionNavigator,
     ) -> None:
         self.body = body
         self.navigator = navigator

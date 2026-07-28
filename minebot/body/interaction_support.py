@@ -534,7 +534,11 @@ def ensure_interaction_range(
         last_failure = nav_result
     else:
         last_failure = None
-        if navigation_arrival_radius is not None and center_after_navigation:
+        if (
+            navigation_arrival_radius is not None
+            and center_after_navigation
+            and not bool((nav_result.metrics or {}).get("provider_centered"))
+        ):
             center_result = move_to_block_center(
                 body,
                 selected_stand,
@@ -941,6 +945,15 @@ def _entity_distance_band_stand_points(
     candidates: list[tuple[float, Position]] = []
     seen: set[Position] = set()
 
+    candidates_to_read: list[Position] = []
+    positions_to_read: list[Position] = []
+    seen_read_positions: set[Position] = set()
+
+    def add_read_position(pos: Position) -> None:
+        if pos not in seen_read_positions:
+            seen_read_positions.add(pos)
+            positions_to_read.append(pos)
+
     for dx in range(-radius, radius + 1):
         for dz in range(-radius, radius + 1):
             if dx == 0 and dz == 0:
@@ -954,25 +967,48 @@ def _entity_distance_band_stand_points(
                 continue
             if max_distance is not None and stand_distance > max_distance:
                 continue
-            stand = body.perceive("blockAt", {"x": pos[0], "y": pos[1], "z": pos[2]})
-            failed = perception_failure(stand)
-            if failed is not None:
-                return failed
-            head = body.perceive("blockAt", {"x": pos[0], "y": pos[1] + 1, "z": pos[2]})
-            failed = perception_failure(head)
-            if failed is not None:
-                return failed
-            below = body.perceive("blockAt", {"x": pos[0], "y": pos[1] - 1, "z": pos[2]})
-            failed = perception_failure(below)
-            if failed is not None:
-                return failed
-            if not _interaction_feet_clear(stand):
-                continue
-            if not _interaction_head_clear(head, head_pos=(pos[0], pos[1] + 1, pos[2]), target=block_pos):
-                continue
-            if not _interaction_support_standable(below):
-                continue
-            candidates.append((dist(state.pos, (pos[0] + 0.5, pos[1], pos[2] + 0.5)), pos))
+            candidates_to_read.append(pos)
+            add_read_position(pos)
+            add_read_position((pos[0], pos[1] + 1, pos[2]))
+            add_read_position((pos[0], pos[1] - 1, pos[2]))
+
+    # Entity approach used to issue three WORLD_READ requests for every
+    # geometric candidate. That made a normal ten-block approach hit the
+    # transport request limiter before Java navigation even started. Read the
+    # complete bounded domain through the shared batch primitive instead; the
+    # provider still returns authoritative block facts and the candidate
+    # predicate below remains unchanged.
+    try:
+        facts = read_block_facts(
+            body,
+            tuple(positions_to_read),
+            failure_label="entity_stand_domain",
+        )
+    except ValueError as exc:
+        return ToolResult(
+            success=False,
+            reason="perception_failed",
+            can_retry=True,
+            next_suggestion="refresh authoritative block facts before selecting an entity approach stand",
+            metrics={
+                "scope": "blockCells",
+                "failure_label": "entity_stand_domain",
+                "error": str(exc),
+                "candidate_count": len(candidates_to_read),
+            },
+        )
+
+    for pos in candidates_to_read:
+        stand = facts[pos]
+        head = facts[(pos[0], pos[1] + 1, pos[2])]
+        below = facts[(pos[0], pos[1] - 1, pos[2])]
+        if not _interaction_feet_clear(stand):
+            continue
+        if not _interaction_head_clear(head, head_pos=(pos[0], pos[1] + 1, pos[2]), target=block_pos):
+            continue
+        if not _interaction_support_standable(below):
+            continue
+        candidates.append((dist(state.pos, (pos[0] + 0.5, pos[1], pos[2] + 0.5)), pos))
 
     candidates.sort(key=lambda item: (item[0], item[1]))
     return [pos for _distance, pos in candidates[:max_points]]

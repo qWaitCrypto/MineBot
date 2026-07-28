@@ -24,6 +24,7 @@ from .navigation import (
     navigation_governed_mobility_upgrade_allowed,
     navigation_governed_mobility_upgrade_reason,
 )
+from .objective_navigation import ObjectiveNavigationTransactions
 from .pickup import PickupConfig, PickupTransactions
 from .reach import ReachDomain, ReachIntent, block_reach_domain, block_reach_domains
 from .resource_collection import ResourceCollectionConfig, ResourceCollectionTransactions
@@ -55,6 +56,7 @@ __all__ = [
     "MemoryExplorationCoverageStore",
     "NavigationRunConfig",
     "NavigationTransactions",
+    "ObjectiveNavigationTransactions",
     "governed_mobility_navigation_config",
     "load_limited_navigation_config",
     "navigation_governed_mobility_upgrade_allowed",

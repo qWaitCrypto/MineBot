@@ -71,13 +71,48 @@ public final class NavigateExecutor implements ActionRuntime.TickExecutor {
         ActionRuntime runtime,
         int timeoutTicks
     ) {
+        this(
+            bot,
+            actionId,
+            goal,
+            world,
+            controls,
+            positions,
+            events,
+            runtime,
+            timeoutTicks,
+            PathFollower.WAYPOINT_REACH_DISTANCE
+        );
+    }
+
+    public NavigateExecutor(
+        String bot,
+        String actionId,
+        Goal goal,
+        WorldView world,
+        MovementControls controls,
+        PositionSource positions,
+        EventSink events,
+        ActionRuntime runtime,
+        int timeoutTicks,
+        double finalReachDistance
+    ) {
         this.bot = bot;
         this.actionId = actionId;
         this.goal = goal;
         this.positions = positions;
         this.runtime = runtime;
         this.timeoutTicks = timeoutTicks;
-        this.approach = new ApproachController(bot, actionId, goal, world, controls, events, REPLAN_LIMIT);
+        this.approach = new ApproachController(
+            bot,
+            actionId,
+            goal,
+            world,
+            controls,
+            events,
+            REPLAN_LIMIT,
+            finalReachDistance
+        );
     }
 
     @Override
@@ -113,6 +148,7 @@ public final class NavigateExecutor implements ActionRuntime.TickExecutor {
         facts.addProperty("replans", approach.replans());
         facts.addProperty("expanded_nodes", approach.expandedNodes());
         facts.addProperty("unloaded_touches", approach.unloadedTouches());
+        facts.addProperty("final_reach_distance", approach.finalWaypointReachDistance());
         runtime.finish(bot, actionId, classification, facts, serverTick);
     }
 

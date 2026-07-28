@@ -104,6 +104,10 @@ public final class ApproachController {
         return unloadedTotal;
     }
 
+    public double finalWaypointReachDistance() {
+        return finalWaypointReachDistance;
+    }
+
     public Outcome tick(int serverTick, double px, double py, double pz) {
         if (phase == Phase.PLANNING) {
             return planTick(serverTick, px, py, pz);
