@@ -832,9 +832,12 @@ async def run_real_server_interactive(
             return 4
         sink = JsonlObservationSink(config.log_path)
         speech_sink = _interactive_speech_sink(body)
+        latest_trace: RuntimeTrace | None = None
 
         def make_parts(goal_text: str):
+            nonlocal latest_trace
             trace = RuntimeTrace(session_id=config.bot_name, sink=sink)
+            latest_trace = trace
             trace.emit(
                 "provider_manifest",
                 default_route=provider.default,
@@ -937,8 +940,13 @@ async def run_real_server_interactive(
                     )
 
             scenario_task.add_done_callback(record_scenario_failure)
-        if session.parts is not None:
-            session.parts.runtime.trace.emit(
+        readiness_trace = (
+            session.parts.runtime.trace
+            if session.parts is not None
+            else latest_trace
+        )
+        if readiness_trace is not None:
+            readiness_trace.emit(
                 "interactive_ready",
                 body_provider=body_runtime.name.value,
                 server=_body_endpoint(config),

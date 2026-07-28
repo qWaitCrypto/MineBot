@@ -1706,7 +1706,8 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             parts = None
 
             def __init__(self, make_parts, **_kwargs):
-                self.parts = make_parts(self.current_goal)
+                make_parts(self.current_goal)
+                self.parts = None
 
             def submit(self, _command, **_kwargs):
                 pass
