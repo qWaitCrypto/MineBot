@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Run the fixed-world AG gate through production interactive ingress.
 
-This is test orchestration only. The child process calls the normal production
-entrypoint with a restricted scenario hook; the hook can inject user chat and
-scheduled world facts but cannot submit tasks, select tools, or invoke Body
-transactions.
+The production child is Java-only and receives no RCON configuration. A
+separate parent-owned fixture uses RCON for world setup and public FakePlayer
+chat, keeping test orchestration out of the Agent process and its trace.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Awaitable, Callable, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -38,11 +37,12 @@ from minebot.app.autonomy_quality import AG_FP30_YARDSTICK, evaluate_autonomy_qu
 from minebot.app.observability import sanitize_observation  # noqa: E402
 from minebot.app.real_server_session import (  # noqa: E402
     AG_FP30_GOAL,
-    InteractiveScenarioContext,
     real_server_config_from_env,
     run_real_server_interactive,
 )
 from minebot.camera.config import discover_camera_config_path  # noqa: E402
+from minebot.game import RconClient  # noqa: E402
+from minebot.game.rcon import RconConfig  # noqa: E402
 
 
 # Keep the scenario ingress byte-for-byte aligned with the frozen evaluator.
@@ -59,14 +59,323 @@ _IDLE_PROMPT_OFFSET_S = 420.0
 _IDLE_WAKE_OFFSET_S = 870.0
 _IDLE_CLEAR_OFFSET_S = 930.0
 _MATERIAL_RESUME_OFFSET_S = 935.0
+_FIXTURE_CHAT_DISTANCE = 256
+_RCON_ENV_KEYS = frozenset(
+    {
+        "MINEBOT_REAL_RCON_HOST",
+        "MINEBOT_REAL_RCON_PORT",
+        "MINEBOT_REAL_RCON_PASSWORD",
+        "MINEBOT_REAL_RCON_TIMEOUT",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _FixtureBotState:
+    missing: bool
+    pos: tuple[float, float, float]
+    health: float
+
+
+class ExternalInteractiveScenarioContext:
+    """Restricted external fixture surface for a production Java session."""
+
+    def __init__(
+        self,
+        *,
+        bot_name: str,
+        chat_sender: str,
+        rcon: RconClient,
+        production_trace_path: Path,
+        fixture_trace_path: Path,
+    ) -> None:
+        self.bot_name = bot_name
+        self.chat_sender = chat_sender
+        self._rcon = rcon
+        self._production_trace_path = production_trace_path
+        self._fixture_trace_path = fixture_trace_path
+        self._fixture_seq = 0
+        self._chat_sender_ready = False
+
+    async def emit_chat(self, sender: str, message: str) -> int:
+        if sender != self.chat_sender:
+            raise ValueError(
+                f"external gate chat sender must be {self.chat_sender!r}, got {sender!r}"
+            )
+        text = str(message).strip()
+        if not text or "\n" in text or "\r" in text:
+            raise ValueError("scenario chat message must be one non-empty line")
+        if not self._chat_sender_ready:
+            await self._spawn_chat_sender()
+        baseline_seq = max(
+            (int(record.get("seq") or 0) for record in self._production_records()),
+            default=0,
+        )
+        await asyncio.to_thread(
+            self._rcon.request,
+            f"execute as {sender} run me {text}",
+        )
+        self._emit_fixture_event(
+            "scenario_chat_emitted",
+            sender=sender,
+            message=text,
+            production_trace_seq=baseline_seq,
+        )
+        return baseline_seq
+
+    async def wait_for_idle_quiescence(
+        self,
+        *,
+        after_trace_seq: int,
+        timeout_s: float = 120.0,
+    ) -> None:
+        if after_trace_seq < 0:
+            raise ValueError("idle marker sequence must not be negative")
+        record = await self._wait_for_production_record(
+            lambda candidate: (
+                int(candidate.get("seq") or 0) > after_trace_seq
+                and candidate.get("event") == "autonomy_decision"
+                and candidate.get("action") == "park"
+                and candidate.get("reason") == "checkpoint_wait_event"
+            ),
+            timeout_s=timeout_s,
+        )
+        self._emit_fixture_event(
+            "scenario_idle_quiescent",
+            after_trace_seq=after_trace_seq,
+            production_trace_seq=int(record.get("seq") or 0),
+        )
+
+    async def wait_for_body_ready(self, *, timeout_s: float = 60.0) -> None:
+        if timeout_s <= 0:
+            raise ValueError("fixture ready timeout must be positive")
+        deadline = time.monotonic() + timeout_s
+        while True:
+            state = await self._read_bot_state()
+            if not state.missing:
+                self._emit_fixture_event(
+                    "scenario_body_ready",
+                    position=list(state.pos),
+                )
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError("fixture Bot did not become ready before timeout")
+            await asyncio.sleep(0.25)
+
+    async def spawn_fake_player(
+        self,
+        name: str,
+        position: tuple[int, int, int],
+    ) -> None:
+        x, y, z = (int(value) for value in position)
+        await asyncio.to_thread(self._rcon.request, f"player {name} kill")
+        await asyncio.to_thread(
+            self._rcon.request,
+            f"player {name} spawn at {x} {y} {z}",
+        )
+        self._emit_fixture_event(
+            "scenario_fake_player_spawned",
+            name=name,
+            position=[x, y, z],
+        )
+
+    async def remove_fake_player(self, name: str) -> None:
+        await asyncio.to_thread(self._rcon.request, f"player {name} kill")
+        self._emit_fixture_event("scenario_fake_player_removed", name=name)
+
+    async def spawn_fake_player_near_bot(self, name: str, *, distance: int = 5) -> None:
+        if distance < 1 or distance > 32:
+            raise ValueError("fixture fake-player distance must be between 1 and 32")
+        state = await self._require_bot_state()
+        await self.spawn_fake_player(
+            name,
+            (round(state.pos[0]) + distance, round(state.pos[1]), round(state.pos[2])),
+        )
+
+    async def set_difficulty(self, difficulty: str) -> None:
+        normalized = str(difficulty).lower()
+        if normalized not in {"peaceful", "easy", "normal", "hard"}:
+            raise ValueError(f"unsupported fixture difficulty: {difficulty!r}")
+        await asyncio.to_thread(self._rcon.request, f"difficulty {normalized}")
+        self._emit_fixture_event("scenario_difficulty_set", difficulty=normalized)
+
+    async def spawn_husk_near_bot(
+        self,
+        *,
+        distance: int = 2,
+        offset: tuple[int, int] | None = None,
+    ) -> None:
+        if distance < 1 or distance > 8:
+            raise ValueError("fixture hostile distance must be between 1 and 8")
+        state = await self._require_bot_state()
+        dx, dz = (distance, 0) if offset is None else offset
+        if (dx == 0 and dz == 0) or abs(dx) > 8 or abs(dz) > 8:
+            raise ValueError("fixture hostile offset must be non-zero and within 8 blocks")
+        x = round(state.pos[0]) + dx
+        y = round(state.pos[1])
+        z = round(state.pos[2]) + dz
+        await asyncio.to_thread(
+            self._rcon.request,
+            "kill @e[type=minecraft:husk]",
+        )
+        await asyncio.to_thread(
+            self._rcon.request,
+            f"summon husk {x} {y} {z} {{PersistenceRequired:1b}}",
+        )
+        self._emit_fixture_event(
+            "scenario_husk_spawned",
+            position=[x, y, z],
+            distance=distance,
+        )
+
+    async def provoke_husk_attack(self, *, timeout_s: float = 45.0) -> None:
+        if timeout_s <= 0:
+            raise ValueError("fixture attack timeout must be positive")
+        baseline = await self._require_bot_state()
+        deadline = time.monotonic() + timeout_s
+        offsets = ((1, 0), (-1, 0), (0, 1), (0, -1))
+        attempt = 0
+        while time.monotonic() < deadline:
+            await self.spawn_husk_near_bot(offset=offsets[attempt % len(offsets)])
+            attempt += 1
+            attempt_deadline = min(deadline, time.monotonic() + 8.0)
+            while time.monotonic() < attempt_deadline:
+                state = await self._read_bot_state()
+                if not state.missing and state.health < baseline.health:
+                    self._emit_fixture_event(
+                        "scenario_husk_attack_observed",
+                        health=state.health,
+                        attempt=attempt,
+                    )
+                    return
+                await asyncio.sleep(0.25)
+            await self.clear_hostiles()
+        raise TimeoutError("fixture husk did not damage the bot")
+
+    async def clear_hostiles(self) -> None:
+        await asyncio.to_thread(
+            self._rcon.request,
+            "kill @e[type=minecraft:husk]",
+        )
+        self._emit_fixture_event("scenario_hostiles_cleared")
+
+    async def cleanup(self) -> None:
+        if self._chat_sender_ready:
+            await asyncio.to_thread(
+                self._rcon.request,
+                f"player {self.chat_sender} kill",
+            )
+            self._chat_sender_ready = False
+
+    async def _spawn_chat_sender(self) -> None:
+        state = await self._require_bot_state()
+        x = round(state.pos[0]) + _FIXTURE_CHAT_DISTANCE
+        y = round(state.pos[1])
+        z = round(state.pos[2])
+        await asyncio.to_thread(
+            self._rcon.request,
+            f"player {self.chat_sender} kill",
+        )
+        await asyncio.to_thread(
+            self._rcon.request,
+            f"player {self.chat_sender} spawn at {x} {y} {z}",
+        )
+        await asyncio.to_thread(
+            self._rcon.request,
+            f"gamemode spectator {self.chat_sender}",
+        )
+        self._chat_sender_ready = True
+        self._emit_fixture_event(
+            "scenario_chat_sender_ready",
+            sender=self.chat_sender,
+            gamemode="spectator",
+            position=[x, y, z],
+            distance=_FIXTURE_CHAT_DISTANCE,
+        )
+
+    async def _require_bot_state(self) -> _FixtureBotState:
+        state = await self._read_bot_state()
+        if state.missing:
+            raise RuntimeError("cannot schedule fixture fact while Bot is missing")
+        return state
+
+    async def _read_bot_state(self) -> _FixtureBotState:
+        position_response = await asyncio.to_thread(
+            self._rcon.request,
+            f"data get entity {self.bot_name} Pos",
+        )
+        if not position_response.strip() or "No entity was found" in position_response:
+            return _FixtureBotState(True, (0.0, 0.0, 0.0), 0.0)
+        position = _parse_entity_vector(position_response)
+        health_response = await asyncio.to_thread(
+            self._rcon.request,
+            f"data get entity {self.bot_name} Health",
+        )
+        health = _parse_entity_scalar(health_response)
+        return _FixtureBotState(False, position, health)
+
+    async def _wait_for_production_record(
+        self,
+        predicate: Callable[[Mapping[str, object]], bool],
+        *,
+        timeout_s: float,
+    ) -> dict[str, object]:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            for record in self._production_records():
+                if predicate(record):
+                    return record
+            await asyncio.sleep(0.1)
+        raise TimeoutError(
+            f"expected production trace record did not arrive: {self._production_trace_path}"
+        )
+
+    def _production_records(self) -> list[dict[str, object]]:
+        return _read_trace_records(self._production_trace_path)
+
+    def _emit_fixture_event(self, event: str, **fields: object) -> None:
+        self._fixture_seq += 1
+        record = sanitize_observation(
+            {
+                "fixture_seq": self._fixture_seq,
+                "ts": time.time(),
+                "session_id": "ag-external-fixture",
+                "event": event,
+                **fields,
+            }
+        )
+        with self._fixture_trace_path.open("a", encoding="utf-8") as sink:
+            sink.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _parse_entity_vector(response: str) -> tuple[float, float, float]:
+    match = re.search(r"\[([^\]]+)\]", response)
+    if match is None:
+        raise ValueError(f"entity position response is malformed: {response!r}")
+    values = [
+        float(re.sub(r"[dDfFbBsSlL]$", "", part.strip()))
+        for part in match.group(1).split(",")
+    ]
+    if len(values) != 3:
+        raise ValueError(f"entity position response is malformed: {response!r}")
+    return values[0], values[1], values[2]
+
+
+def _parse_entity_scalar(response: str) -> float:
+    matches = re.findall(
+        r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?[dDfFbBsSlL]?",
+        response,
+    )
+    if not matches:
+        raise ValueError(f"entity scalar response is malformed: {response!r}")
+    return float(re.sub(r"[dDfFbBsSlL]$", "", matches[-1]))
 
 
 async def _first_segment(
-    context: InteractiveScenarioContext,
-    mark_ready: Callable[[], None],
+    context: ExternalInteractiveScenarioContext,
+    duration_s: float,
 ) -> None:
-    await context.wait_for_body_ready(timeout_s=60)
-    mark_ready()
+    started = time.monotonic()
     await context.emit_chat("AGTester", "你好，你是谁？请简短说明你现在能做什么。")
     await asyncio.sleep(12)
     await context.emit_chat("AGTester", f"/goal {MATERIAL_GOAL}")
@@ -74,17 +383,13 @@ async def _first_segment(
     await context.emit_chat("AGTester", "/pause gate_pause_coverage")
     await asyncio.sleep(20)
     await context.emit_chat("AGTester", "/continue")
-    while True:
-        await asyncio.sleep(60)
+    await asyncio.sleep(max(0.0, duration_s - (time.monotonic() - started)))
 
 
 async def _quality_segment(
-    context: InteractiveScenarioContext,
+    context: ExternalInteractiveScenarioContext,
     duration_s: float,
-    mark_ready: Callable[[], None],
 ) -> None:
-    await context.wait_for_body_ready(timeout_s=60)
-    mark_ready()
     started = time.monotonic()
     await context.emit_chat("AGTester", f"/goal {MATERIAL_GOAL}")
     await asyncio.sleep(max(0.0, duration_s - (time.monotonic() - started)))
@@ -92,9 +397,8 @@ async def _quality_segment(
 
 
 async def _second_segment(
-    context: InteractiveScenarioContext,
+    context: ExternalInteractiveScenarioContext,
     duration_s: float,
-    mark_ready: Callable[[], None],
 ) -> None:
     async def wait_until(offset_s: float) -> bool:
         remaining = offset_s - (time.monotonic() - started)
@@ -104,8 +408,6 @@ async def _second_segment(
         return time.monotonic() - started < duration_s
 
     try:
-        await context.wait_for_body_ready(timeout_s=60)
-        mark_ready()
         started = time.monotonic()
         if await wait_until(15):
             await context.emit_chat("AGTester", "请回忆刚才的目标和已经确认的世界事实，然后继续当前任务。")
@@ -148,23 +450,14 @@ async def _second_segment(
 
 def _run_child(
     environment: Mapping[str, str],
-    segment: str,
-    duration_s: float,
     camera: bool,
     diagnostic_path: str,
-    ready_event: Any,
 ) -> None:
     os.environ.clear()
     os.environ.update(environment)
     try:
         config = real_server_config_from_env()
         camera_path = discover_camera_config_path(environ=os.environ) if camera else None
-        if segment == "quality":
-            hook = lambda context: _quality_segment(context, duration_s, ready_event.set)
-        elif segment == "first":
-            hook = lambda context: _first_segment(context, ready_event.set)
-        else:
-            hook = lambda context: _second_segment(context, duration_s, ready_event.set)
         raise SystemExit(
             asyncio.run(
                 run_real_server_interactive(
@@ -172,7 +465,7 @@ def _run_child(
                     None,
                     max_steps=None,
                     camera_config=camera_path,
-                    scenario_hook=hook,
+                    scenario_hook=None,
                     terminal_goal=AG_FP30_GOAL,
                 )
             )
@@ -181,7 +474,7 @@ def _run_child(
         if not isinstance(exc, SystemExit) or int(exc.code or 0) != 0:
             payload = sanitize_observation(
                 {
-                    "segment": segment,
+                    "segment": "production_child",
                     "error_type": type(exc).__name__,
                     "message": str(exc),
                 }
@@ -193,12 +486,83 @@ def _run_child(
         raise
 
 
-def _trace_summary(path: Path, *, active_elapsed_s: float | None = None) -> dict[str, object]:
+def _read_trace_records(path: Path) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
     if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                events.append(json.loads(line))
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                events.append(record)
+    return events
+
+
+def _combined_trace_records(
+    production_trace_path: Path,
+    fixture_trace_path: Path | None,
+) -> list[dict[str, object]]:
+    records = [
+        *(_read_trace_records(production_trace_path)),
+        *(_read_trace_records(fixture_trace_path) if fixture_trace_path is not None else []),
+    ]
+    return sorted(
+        records,
+        key=lambda record: (
+            float(record.get("ts"))
+            if isinstance(record.get("ts"), (int, float))
+            else float("inf"),
+            1 if "fixture_seq" in record else 0,
+            int(record.get("seq") or record.get("fixture_seq") or 0),
+        ),
+    )
+
+
+def _provider_manifest_summary(
+    production_events: list[dict[str, object]],
+) -> dict[str, object]:
+    manifests = [
+        event for event in production_events if event.get("event") == "provider_manifest"
+    ]
+    valid = bool(manifests) and all(
+        manifest.get("body_provider") == "java"
+        and manifest.get("legacy_rcon_constructed") is False
+        and manifest.get("legacy_scarpet_body_constructed") is False
+        for manifest in manifests
+    )
+    return {
+        "count": len(manifests),
+        "valid": valid,
+        "body_providers": sorted(
+            {str(manifest.get("body_provider")) for manifest in manifests}
+        ),
+        "legacy_rcon_constructed": any(
+            manifest.get("legacy_rcon_constructed") is not False
+            for manifest in manifests
+        ),
+        "legacy_scarpet_body_constructed": any(
+            manifest.get("legacy_scarpet_body_constructed") is not False
+            for manifest in manifests
+        ),
+    }
+
+
+def _trace_summary(
+    production_trace_path: Path,
+    *,
+    fixture_trace_path: Path | None = None,
+    active_elapsed_s: float | None = None,
+) -> dict[str, object]:
+    production_events = _read_trace_records(production_trace_path)
+    fixture_events = (
+        _read_trace_records(fixture_trace_path)
+        if fixture_trace_path is not None
+        else []
+    )
+    events = _combined_trace_records(production_trace_path, fixture_trace_path)
     counts = Counter(str(event.get("event") or "") for event in events)
     terminal_truths = [
         event.get("terminal_truth")
@@ -219,9 +583,16 @@ def _trace_summary(path: Path, *, active_elapsed_s: float | None = None) -> dict
             if event.get("event") == "runtime_scope" and event.get("world_id")
         }
     )
-    secret_matches = len(
-        re.findall(r"\b(?:sk-[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{20,})\b", path.read_text(encoding="utf-8"))
-    ) if path.exists() else 0
+    secret_matches = sum(
+        len(
+            re.findall(
+                r"\b(?:sk-[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{20,})\b",
+                path.read_text(encoding="utf-8", errors="replace"),
+            )
+        )
+        for path in (production_trace_path, fixture_trace_path)
+        if path is not None and path.exists()
+    )
     ready_to_terminal_elapsed_s = _trace_elapsed_s(events, "scenario_body_ready", "session_terminal")
     idle_window = _idle_window_summary(events)
     quality = evaluate_autonomy_quality(
@@ -231,6 +602,8 @@ def _trace_summary(path: Path, *, active_elapsed_s: float | None = None) -> dict
     )
     return {
         "trace_records": len(events),
+        "production_trace_records": len(production_events),
+        "fixture_trace_records": len(fixture_events),
         "event_counts": dict(sorted(counts.items())),
         "model_requests": sum(count for name, count in counts.items() if name in {"llm_start", "model_request"}),
         "transport_errors": counts["body_transport_error"],
@@ -247,6 +620,7 @@ def _trace_summary(path: Path, *, active_elapsed_s: float | None = None) -> dict
             and canonical_terminal_truths[-1]["facts"].get("terminal_satisfied") is True
         ),
         "autonomy_quality": quality,
+        "provider_manifest": _provider_manifest_summary(production_events),
         "ready_to_terminal_elapsed_s": ready_to_terminal_elapsed_s,
         "idle_window": idle_window,
         "governance_events": sum(
@@ -261,6 +635,7 @@ def _quality_gate_passes(
     quality: object,
     *,
     active_duration_met: bool,
+    provider_manifest_valid: bool,
 ) -> bool:
     """Keep the configured active-window duration part of the gate.
 
@@ -274,6 +649,7 @@ def _quality_gate_passes(
         segment.body_ready
         and segment.exit_code == 0
         and active_duration_met
+        and provider_manifest_valid
         and isinstance(quality, dict)
         and quality.get("verdict") == "pass"
     )
@@ -439,24 +815,126 @@ class SegmentResult:
     terminated_at_deadline: bool
 
 
+def _production_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    child_environment = dict(environment)
+    child_environment["MINEBOT_BODY_PROVIDER"] = "java"
+    for key in _RCON_ENV_KEYS:
+        child_environment.pop(key, None)
+    return child_environment
+
+
+def _fixture_rcon_config(environment: Mapping[str, str]) -> RconConfig:
+    return RconConfig(
+        host=str(environment["MINEBOT_REAL_RCON_HOST"]),
+        port=int(environment["MINEBOT_REAL_RCON_PORT"]),
+        password=str(environment["MINEBOT_REAL_RCON_PASSWORD"]),
+        timeout_s=float(environment.get("MINEBOT_REAL_RCON_TIMEOUT", "20")),
+    )
+
+
+def _wait_for_interactive_ready(
+    trace_path: Path,
+    process: multiprocessing.Process,
+    *,
+    started_at: float,
+    timeout_s: float,
+) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if any(
+            record.get("event") == "interactive_ready"
+            and isinstance(record.get("ts"), (int, float))
+            and float(record["ts"]) >= started_at
+            for record in _read_trace_records(trace_path)
+        ):
+            return True
+        if process.exitcode is not None:
+            return False
+        time.sleep(0.1)
+    return False
+
+
+def _scenario_for_segment(
+    segment: str,
+    context: ExternalInteractiveScenarioContext,
+    duration_s: float,
+) -> Awaitable[None]:
+    if segment == "quality":
+        return _quality_segment(context, duration_s)
+    if segment == "first":
+        return _first_segment(context, duration_s)
+    if segment == "second":
+        return _second_segment(context, duration_s)
+    raise ValueError(f"unknown AG gate segment: {segment!r}")
+
+
+async def _run_scenario_while_child_alive(
+    process: multiprocessing.Process,
+    scenario: Awaitable[None],
+) -> None:
+    scenario_task = asyncio.create_task(scenario)
+    try:
+        while not scenario_task.done():
+            if process.exitcode is not None:
+                await asyncio.sleep(0.25)
+                if not scenario_task.done():
+                    raise RuntimeError(
+                        f"production child exited during fixture scenario: {process.exitcode}"
+                    )
+            await asyncio.sleep(0.1)
+        await scenario_task
+    finally:
+        if not scenario_task.done():
+            scenario_task.cancel()
+            try:
+                await scenario_task
+            except asyncio.CancelledError:
+                pass
+
+
+def _write_fixture_diagnostic(
+    path: Path,
+    *,
+    segment: str,
+    exc: BaseException,
+) -> None:
+    payload = sanitize_observation(
+        {
+            "segment": segment,
+            "source": "external_fixture",
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+        }
+    )
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def _run_segment(
     context: multiprocessing.context.BaseContext,
-    environment: Mapping[str, str],
+    production_environment: Mapping[str, str],
+    fixture_environment: Mapping[str, str],
     segment: str,
     duration_s: float,
     *,
     camera: bool,
     hard_stop: bool,
     diagnostic_path: Path,
+    production_trace_path: Path,
+    fixture_trace_path: Path,
 ) -> SegmentResult:
-    ready_event = context.Event()
     process = context.Process(
         target=_run_child,
-        args=(dict(environment), segment, duration_s, camera, str(diagnostic_path), ready_event),
+        args=(dict(production_environment), camera, str(diagnostic_path)),
     )
     started = time.monotonic()
+    started_at = time.time()
     process.start()
-    if not ready_event.wait(timeout=_BODY_READY_TIMEOUT_S):
+    if not _wait_for_interactive_ready(
+        production_trace_path,
+        process,
+        started_at=started_at,
+        timeout_s=_BODY_READY_TIMEOUT_S,
+    ):
         if process.is_alive():
             process.terminate()
             process.join(timeout=30)
@@ -469,11 +947,77 @@ def _run_segment(
             terminated_at_deadline=False,
         )
 
-    ready_at = time.monotonic()
-    process.join(timeout=duration_s if hard_stop else duration_s + _SECOND_SEGMENT_EXIT_GRACE_S)
+    fixture_failed = False
+    ready_at: float | None = None
+    rcon = RconClient(_fixture_rcon_config(fixture_environment))
+    fixture = ExternalInteractiveScenarioContext(
+        bot_name=str(fixture_environment["MINEBOT_REAL_BOT"]),
+        chat_sender="AGTester",
+        rcon=rcon,
+        production_trace_path=production_trace_path,
+        fixture_trace_path=fixture_trace_path,
+    )
+    try:
+        rcon.connect()
+    except BaseException as exc:
+        fixture_failed = True
+        fixture._emit_fixture_event(
+            "scenario_fixture_failed",
+            stage="connect",
+            error_type=type(exc).__name__,
+            message=str(exc),
+        )
+        _write_fixture_diagnostic(
+            diagnostic_path,
+            segment=f"{segment}_connect",
+            exc=exc,
+        )
+    if not fixture_failed:
+        try:
+            asyncio.run(fixture.wait_for_body_ready(timeout_s=60.0))
+            ready_at = time.monotonic()
+            asyncio.run(
+                _run_scenario_while_child_alive(
+                    process,
+                    _scenario_for_segment(segment, fixture, duration_s),
+                )
+            )
+        except BaseException as exc:
+            fixture_failed = True
+            fixture._emit_fixture_event(
+                "scenario_fixture_failed",
+                error_type=type(exc).__name__,
+                message=str(exc),
+            )
+            _write_fixture_diagnostic(diagnostic_path, segment=segment, exc=exc)
+        finally:
+            try:
+                asyncio.run(fixture.cleanup())
+            except BaseException as cleanup_exc:
+                fixture_failed = True
+                fixture._emit_fixture_event(
+                    "scenario_fixture_failed",
+                    stage="cleanup",
+                    error_type=type(cleanup_exc).__name__,
+                    message=str(cleanup_exc),
+                )
+                _write_fixture_diagnostic(
+                    diagnostic_path,
+                    segment=f"{segment}_cleanup",
+                    exc=cleanup_exc,
+                )
+            finally:
+                rcon.close()
+
+    if ready_at is None:
+        ready_at = time.monotonic()
+    if fixture_failed and process.is_alive():
+        process.terminate()
+        process.join(timeout=30)
+    process.join(timeout=0.0 if hard_stop else _SECOND_SEGMENT_EXIT_GRACE_S)
     terminated_at_deadline = False
     if process.is_alive():
-        terminated_at_deadline = hard_stop
+        terminated_at_deadline = hard_stop and not fixture_failed
         process.terminate()
         process.join(timeout=30)
     return SegmentResult(
@@ -481,7 +1025,7 @@ def _run_segment(
         elapsed_s=round(time.monotonic() - started, 3),
         active_elapsed_s=round(time.monotonic() - ready_at, 3),
         ready_elapsed_s=round(ready_at - started, 3),
-        body_ready=True,
+        body_ready=not fixture_failed,
         terminated_at_deadline=terminated_at_deadline,
     )
 
@@ -513,9 +1057,13 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     run_dir = (args.run_dir or ROOT / "logs" / "agentic-runtime" / f"ag-{stamp}").resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
-    environment["MINEBOT_AGENT_LOG_PATH"] = str(run_dir / "trace.jsonl")
+    production_trace_path = run_dir / "trace.jsonl"
+    fixture_trace_path = run_dir / "fixture-trace.jsonl"
+    environment["MINEBOT_BODY_PROVIDER"] = "java"
+    environment["MINEBOT_AGENT_LOG_PATH"] = str(production_trace_path)
     environment["MINEBOT_AGENT_STATE_DB"] = str(run_dir / "state.sqlite3")
-    preflight_runtime_environment(environment, camera=not args.no_camera)
+    production_environment = _production_environment(environment)
+    preflight_runtime_environment(production_environment, camera=not args.no_camera)
     camera_path = discover_camera_config_path(environ=environment) if not args.no_camera else None
     camera_initial = _require_stopped_camera(camera_path)
 
@@ -534,14 +1082,22 @@ def main(argv: list[str] | None = None) -> int:
         diagnostic = run_dir / "quality-segment-diagnostic.json"
         quality_segment = _run_segment(
             process_context,
+            production_environment,
             environment,
             "quality",
             args.duration_seconds,
             camera=not args.no_camera,
             hard_stop=False,
             diagnostic_path=diagnostic,
+            production_trace_path=production_trace_path,
+            fixture_trace_path=fixture_trace_path,
         )
         final_camera_cleanup = _stop_gate_camera(camera_path)
+        trace_summary = _trace_summary(
+            production_trace_path,
+            fixture_trace_path=fixture_trace_path,
+            active_elapsed_s=quality_segment.active_elapsed_s,
+        )
         report = {
             "started_at": started,
             "mode": "autonomy_quality",
@@ -554,7 +1110,14 @@ def main(argv: list[str] | None = None) -> int:
                 "configured_duration_s": args.duration_seconds,
                 "active_duration_met": quality_segment.active_elapsed_s >= args.duration_seconds,
             },
-            "trace": _trace_summary(run_dir / "trace.jsonl", active_elapsed_s=quality_segment.active_elapsed_s),
+            "trace_paths": {
+                "production": str(production_trace_path),
+                "fixture": str(fixture_trace_path),
+            },
+            "production_rcon_env_present": any(
+                key in production_environment for key in _RCON_ENV_KEYS
+            ),
+            "trace": trace_summary,
             "camera": {
                 "initial": camera_initial,
                 "after_gate": final_camera_cleanup,
@@ -566,21 +1129,29 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"AG quality gate report: {run_dir / 'gate-report.json'}")
         quality = report["trace"].get("autonomy_quality")
+        provider_manifest = report["trace"].get("provider_manifest")
         return 0 if _quality_gate_passes(
             quality_segment,
             quality,
             active_duration_met=bool(report["coverage"].get("active_duration_met")),
+            provider_manifest_valid=(
+                isinstance(provider_manifest, dict)
+                and provider_manifest.get("valid") is True
+            ),
         ) else 1
 
     first_diagnostic = run_dir / "first-segment-diagnostic.json"
     first = _run_segment(
         process_context,
+        production_environment,
         environment,
         "first",
         args.restart_after_seconds,
         camera=not args.no_camera,
         hard_stop=True,
         diagnostic_path=first_diagnostic,
+        production_trace_path=production_trace_path,
+        fixture_trace_path=fixture_trace_path,
     )
     first_camera_cleanup = _stop_gate_camera(camera_path)
     if not first.body_ready or not first.terminated_at_deadline:
@@ -596,7 +1167,18 @@ def main(argv: list[str] | None = None) -> int:
                 else "fixture_first_segment_exited_early"
             ),
             "diagnostic": _read_diagnostic(first_diagnostic),
-            "trace": _trace_summary(run_dir / "trace.jsonl", active_elapsed_s=first.active_elapsed_s),
+            "trace_paths": {
+                "production": str(production_trace_path),
+                "fixture": str(fixture_trace_path),
+            },
+            "production_rcon_env_present": any(
+                key in production_environment for key in _RCON_ENV_KEYS
+            ),
+            "trace": _trace_summary(
+                production_trace_path,
+                fixture_trace_path=fixture_trace_path,
+                active_elapsed_s=first.active_elapsed_s,
+            ),
             "camera": {
                 "initial": camera_initial,
                 "after_first_segment": first_camera_cleanup,
@@ -612,12 +1194,15 @@ def main(argv: list[str] | None = None) -> int:
     second_diagnostic = run_dir / "second-segment-diagnostic.json"
     second = _run_segment(
         process_context,
+        production_environment,
         environment,
         "second",
         second_duration,
         camera=not args.no_camera,
         hard_stop=False,
         diagnostic_path=second_diagnostic,
+        production_trace_path=production_trace_path,
+        fixture_trace_path=fixture_trace_path,
     )
     final_camera_cleanup = _stop_gate_camera(camera_path)
     active_elapsed_s = round(first.active_elapsed_s + second.active_elapsed_s, 3)
@@ -636,7 +1221,18 @@ def main(argv: list[str] | None = None) -> int:
             "configured_duration_s": args.duration_seconds,
             "active_duration_met": active_elapsed_s >= args.duration_seconds,
         },
-        "trace": _trace_summary(run_dir / "trace.jsonl", active_elapsed_s=active_elapsed_s),
+        "trace_paths": {
+            "production": str(production_trace_path),
+            "fixture": str(fixture_trace_path),
+        },
+        "production_rcon_env_present": any(
+            key in production_environment for key in _RCON_ENV_KEYS
+        ),
+        "trace": _trace_summary(
+            production_trace_path,
+            fixture_trace_path=fixture_trace_path,
+            active_elapsed_s=active_elapsed_s,
+        ),
         "camera": {
             "initial": camera_initial,
             "after_first_segment": first_camera_cleanup,
@@ -646,7 +1242,19 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "gate-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"AG gate report: {run_dir / 'gate-report.json'}")
     terminal_ok = bool(report["trace"].get("authoritative_satisfied"))
-    return 0 if first.body_ready and second.body_ready and first.exit_code in {-15, 0} and second.exit_code == 0 and terminal_ok else 1
+    provider_manifest = report["trace"].get("provider_manifest")
+    provider_ok = bool(
+        isinstance(provider_manifest, dict)
+        and provider_manifest.get("valid") is True
+    )
+    return 0 if (
+        first.body_ready
+        and second.body_ready
+        and first.exit_code in {-15, 0}
+        and second.exit_code == 0
+        and terminal_ok
+        and provider_ok
+    ) else 1
 
 
 def _read_diagnostic(path: Path) -> dict[str, object] | None:

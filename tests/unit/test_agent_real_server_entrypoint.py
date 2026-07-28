@@ -1768,6 +1768,9 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(manifest["body_provider"], "java")
         self.assertFalse(manifest["legacy_rcon_constructed"])
         self.assertFalse(manifest["legacy_scarpet_body_constructed"])
+        ready = next(event for event in trace_events if event["event"] == "interactive_ready")
+        self.assertEqual(ready["body_provider"], "java")
+        self.assertEqual(ready["server"], "ws://127.0.0.1:8767")
         rcon.assert_not_called()
         scarpet.assert_not_called()
 

@@ -937,6 +937,12 @@ async def run_real_server_interactive(
                     )
 
             scenario_task.add_done_callback(record_scenario_failure)
+        if session.parts is not None:
+            session.parts.runtime.trace.emit(
+                "interactive_ready",
+                body_provider=body_runtime.name.value,
+                server=_body_endpoint(config),
+            )
         print(
             f"interactive_ready bot={config.bot_name} "
             f"server={_body_endpoint(config)}",
