@@ -4,6 +4,8 @@ and JavaBodyClient drives the protocol into ToolResults over a fake duplex."""
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -228,6 +230,8 @@ class FakeBodyServer:
         self.present = True
         self.position = [10.5, 64.0, -3.5]
         self._history: list[dict] = []
+        self._chat_history: list[dict] = []
+        self._chat_seq = 0
 
     def send(self, text: str) -> None:
         if self._closed:
@@ -247,6 +251,17 @@ class FakeBodyServer:
     def close(self) -> None:
         self._closed = True
 
+    def emit_chat(self, sender: str, message: str) -> None:
+        self._chat_seq += 1
+        self._chat_history.append({
+            "channel": self.CHANNEL,
+            "type": "EVENT",
+            "bot": "Bot",
+            "seq": self._chat_seq,
+            "tick": self._tick,
+            "event": "agentChat",
+            "data": {"sender": sender, "message": message},
+        })
     def _react(self, message: dict) -> None:
         self.requests.append(dict(message))
         kind = message.get("type")
@@ -259,7 +274,8 @@ class FakeBodyServer:
                 "max_requests_per_second": 40,
                 "request_types": [
                     "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "ENGAGE_ENTITY", "ENTITY_READ", "FIND_BLOCKS", "FOLLOW_ENTITY", "FURNACE_TRANSFER",
-                    "HELLO", "EVENT_HEAD", "SPAWN", "DESPAWN", "INTERRUPT", "INVENTORY", "CONTAINER_READ", "CONTAINER_TRANSFER", "CRAFT_ITEM", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
+                    "HELLO", "EVENT_HEAD", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY",
+                    "SPAWN", "DESPAWN", "INTERRUPT", "INVENTORY", "CONTAINER_READ", "CONTAINER_TRANSFER", "CRAFT_ITEM", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
                     "RECIPE_READ", "RESUME_EVENTS", "SET_SURVIVAL_OWNER", "WORLD_READ",
                 ],
             })
@@ -273,10 +289,29 @@ class FakeBodyServer:
                 "bot": message.get("bot_name"),
                 "epoch": "fake-server-epoch",
                 "event_seq": self._seq,
-                "chat_seq": 0,
+                "chat_seq": self._chat_seq,
                 "owner": None,
                 "pending_action_count": 0,
                 "tick": self._tick,
+            })
+        elif kind == "WORLD_IDENTITY":
+            self._emit_response(rid, "WORLD_IDENTITY_RESULT", {
+                "world_id": "world-java-fixture",
+            })
+        elif kind == "CHAT_EVENTS":
+            after = int(message.get("after_seq", 0))
+            self._emit_response(rid, "CHAT_EVENTS_RESULT", {
+                "bot": message.get("bot_name"),
+                "epoch": "fake-server-epoch",
+                "event_gap": None,
+                "events": [event for event in self._chat_history if int(event["seq"]) > after],
+                "replay_complete": True,
+                "last_seq": self._chat_seq,
+            })
+        elif kind == "SAY":
+            self._emit_response(rid, "SAY_RESULT", {
+                "bot": message.get("bot_name"),
+                "said": True,
             })
         elif kind == "SPAWN":
             self.present = True
@@ -1084,8 +1119,53 @@ class FakeBodyServer:
         self._out.append(json.dumps(frame))
 
 
+class ConcurrentRecvServer(FakeBodyServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_recvs = 0
+        self.max_active_recvs = 0
+        self._recv_lock = threading.Lock()
+
+    def recv(self, timeout: float) -> str:
+        with self._recv_lock:
+            self.active_recvs += 1
+            self.max_active_recvs = max(self.max_active_recvs, self.active_recvs)
+        try:
+            time.sleep(0.01)
+            return super().recv(timeout)
+        finally:
+            with self._recv_lock:
+                self.active_recvs -= 1
+
+
 def _client(server, governance=None) -> JavaBodyClient:
     return JavaBodyClient("Bot", lambda: server, governance, action_wall_timeout_s=5.0, recv_timeout_s=0.01)
+
+
+def test_client_serializes_complete_exchanges_on_one_connection() -> None:
+    server = ConcurrentRecvServer()
+    client = _client(server)
+    barrier = threading.Barrier(3)
+    errors: list[Exception] = []
+
+    def read_state() -> None:
+        barrier.wait()
+        try:
+            client.request_response(lambda protocol: protocol.body_state("Bot"))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=read_state) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    assert server.max_active_recvs == 1
+    assert sum(request["type"] == "BODY_STATE" for request in server.requests) == 2
 
 
 def test_navigate_complete_maps_to_arrived_with_metrics() -> None:
@@ -1323,6 +1403,66 @@ def test_java_body_get_state_maps_authoritative_wire_state() -> None:
     assert state.effects == []
     assert state.sleeping is False
     assert state.weather == "clear"
+
+
+def test_java_body_owns_world_identity_chat_ingress_and_chat_egress() -> None:
+    server = FakeBodyServer()
+    body = JavaBody(_client(server), "Bot")
+
+    assert body.world_identity() == "world-java-fixture"
+    head = body.event_head("client-epoch")
+    assert head["chat_seq"] == 0
+
+    server.emit_chat("Guide", "/goal collect one log")
+    events = body.poll_chat_events()
+    assert len(events) == 1
+    assert events[0].name == "agentChat"
+    assert events[0].data == {
+        "sender": "Guide",
+        "message": "/goal collect one log",
+    }
+    assert body.poll_chat_events() == []
+
+    assert body.say("reached 12, 64, -3\nnow") is True
+    say = next(request for request in server.requests if request["type"] == "SAY")
+    assert say["text"] == "reached [position] now"
+
+
+def test_java_body_keeps_short_reads_off_the_action_connection() -> None:
+    action_server = FakeBodyServer()
+    read_server = FakeBodyServer()
+    body = JavaBody(
+        _client(action_server),
+        "Bot",
+        read_client=_client(read_server),
+    )
+
+    body.event_head("client-epoch")
+    read_server.emit_chat("Guide", "/quit now")
+    body.get_state()
+    body.world_identity()
+    events = body.poll_chat_events()
+    body.say("still responsive")
+
+    assert [event.data["message"] for event in events] == ["/quit now"]
+    action_types = [request["type"] for request in action_server.requests]
+    read_types = [request["type"] for request in read_server.requests]
+    assert "EVENT_HEAD" in action_types
+    assert not {"BODY_STATE", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY"}.intersection(
+        action_types
+    )
+    assert {"BODY_STATE", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY"}.issubset(read_types)
+
+
+def test_java_body_rejects_malformed_chat_instead_of_silently_dropping_it() -> None:
+    server = FakeBodyServer()
+    body = JavaBody(_client(server), "Bot")
+    body.event_head("client-epoch")
+    server.emit_chat("Guide", "/goal collect one log")
+    server._chat_history[0]["bot"] = "OtherBot"
+
+    with pytest.raises(RuntimeError, match="chat event is malformed"):
+        body.poll_chat_events()
 
 
 def test_java_body_lifecycle_requires_presence_truth_and_emits_respawn() -> None:

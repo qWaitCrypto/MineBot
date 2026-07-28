@@ -8,6 +8,7 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents;
+import net.fabricmc.fabric.api.message.v1.ServerMessageEvents;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 
@@ -68,6 +69,19 @@ public final class MineBotBodyMod implements DedicatedServerModInitializer {
             FakePlayerBodyChannel channel = bodyChannel;
             if (channel != null) {
                 channel.playerLeft(player, TICK_COUNTER.get());
+            }
+        });
+        ServerMessageEvents.CHAT_MESSAGE.register((message, sender, params) -> {
+            FakePlayerBodyChannel channel = bodyChannel;
+            if (channel != null) {
+                channel.playerChat(sender, message.signedContent(), TICK_COUNTER.get());
+            }
+        });
+        ServerMessageEvents.COMMAND_MESSAGE.register((message, source, params) -> {
+            FakePlayerBodyChannel channel = bodyChannel;
+            ServerPlayer sender = source.getPlayer();
+            if (channel != null && sender != null) {
+                channel.playerChat(sender, message.signedContent(), TICK_COUNTER.get());
             }
         });
         ServerTickEvents.END_SERVER_TICK.register(server -> {

@@ -16,6 +16,7 @@ directly and plug this answerer into their proposal path.
 from __future__ import annotations
 
 from collections import deque
+import threading
 import time
 from typing import Callable, Protocol
 from uuid import uuid4
@@ -177,29 +178,32 @@ class JavaBodyClient:
         self._event_buffer: list[BotEvent] = []
         self._last_terminal: tuple[str, dict] | None = None
         self._request_times: deque[float] = deque()
+        self._exchange_lock = threading.RLock()
 
     # -- lifecycle ------------------------------------------------------
 
     def connect(self) -> None:
-        self._transport = self._connect()
-        self._protocol = JavaBodyProtocol()
-        self._request_times.clear()
-        self._send(self._protocol.hello())
-        self._await_response("HELLO")
-        if self._survival_owner is not None:
-            self._send(self._protocol.set_survival_owner(
-                self._bot, self._survival_owner
-            ))
-            ownership = self._await_response("SET_SURVIVAL_OWNER")
-            if isinstance(ownership, ErrorResponse):
-                raise TransportClosed(
-                    f"survival ownership negotiation failed: {ownership.code}"
-                )
+        with self._exchange_lock:
+            self._transport = self._connect()
+            self._protocol = JavaBodyProtocol()
+            self._request_times.clear()
+            self._send(self._protocol.hello())
+            self._await_response("HELLO")
+            if self._survival_owner is not None:
+                self._send(self._protocol.set_survival_owner(
+                    self._bot, self._survival_owner
+                ))
+                ownership = self._await_response("SET_SURVIVAL_OWNER")
+                if isinstance(ownership, ErrorResponse):
+                    raise TransportClosed(
+                        f"survival ownership negotiation failed: {ownership.code}"
+                    )
 
     def close(self) -> None:
-        if self._transport is not None:
-            self._transport.close()
-            self._transport = None
+        with self._exchange_lock:
+            if self._transport is not None:
+                self._transport.close()
+                self._transport = None
 
     @property
     def negotiated(self) -> bool:
@@ -226,29 +230,33 @@ class JavaBodyClient:
         is always constructed against the current protocol epoch — a reconnect
         gets a fresh, correctly-registered request instead of a stale one.
         """
-        if self._transport is None or not self._protocol.negotiated:
-            self.connect()
-        message = build(self._protocol)
-        self._send(message)
-        return self._await_response(message["type"])
+        with self._exchange_lock:
+            if self._transport is None or not self._protocol.negotiated:
+                self.connect()
+            message = build(self._protocol)
+            self._send(message)
+            return self._await_response(message["type"])
 
     def drain_events(self) -> list[BotEvent]:
         """Buffered pushed events since the last drain, in per-bot order."""
-        drained = self._event_buffer
-        self._event_buffer = []
-        return drained
+        with self._exchange_lock:
+            drained = self._event_buffer
+            self._event_buffer = []
+            return drained
 
     def drain_event_gaps(self) -> list[EventGap]:
-        drained = self._event_gaps
-        self._event_gaps = []
-        return drained
+        with self._exchange_lock:
+            drained = self._event_gaps
+            self._event_gaps = []
+            return drained
 
     def resume_events(self, after_seq: int) -> Response | ErrorResponse:
-        self._ensure_connected()
-        self._protocol.seed_last_seq(self._bot, max(0, int(after_seq)))
-        return self.request_response(
-            lambda protocol: protocol.resume_events(self._bot, max(0, int(after_seq)))
-        )
+        with self._exchange_lock:
+            self._ensure_connected()
+            self._protocol.seed_last_seq(self._bot, max(0, int(after_seq)))
+            return self.request_response(
+                lambda protocol: protocol.resume_events(self._bot, max(0, int(after_seq)))
+            )
 
     def interrupt_body(self, reason: str | None = None) -> Response | ErrorResponse:
         """Use an independent connection so cancellation can preempt a blocking action."""
@@ -289,17 +297,18 @@ class JavaBodyClient:
         final_reach_distance: float | None = None,
         survival_recovery: bool = False,
     ) -> ToolResult:
-        self._ensure_connected()
-        action_id = self._new_action_id("nav")
-        request = self._protocol.navigate(
-            self._bot,
-            action_id,
-            goal,
-            timeout_ticks=timeout_ticks,
-            final_reach_distance=final_reach_distance,
-            survival_recovery=survival_recovery,
-        )
-        return self._run_action(request, action_id, "navigate", _NAVIGATE_TERMINALS)
+        with self._exchange_lock:
+            self._ensure_connected()
+            action_id = self._new_action_id("nav")
+            request = self._protocol.navigate(
+                self._bot,
+                action_id,
+                goal,
+                timeout_ticks=timeout_ticks,
+                final_reach_distance=final_reach_distance,
+                survival_recovery=survival_recovery,
+            )
+            return self._run_action(request, action_id, "navigate", _NAVIGATE_TERMINALS)
 
     def collect_block(
         self,
@@ -309,17 +318,18 @@ class JavaBodyClient:
         vertical_radius: int | None = None,
         timeout_ticks: int | None = None,
     ) -> ToolResult:
-        self._ensure_connected()
-        action_id = self._new_action_id("collect")
-        request = self._protocol.collect_block(
-            self._bot,
-            action_id,
-            block_ids,
-            radius=radius,
-            vertical_radius=vertical_radius,
-            timeout_ticks=timeout_ticks,
-        )
-        return self._run_action(request, action_id, "collect", _COLLECT_TERMINALS)
+        with self._exchange_lock:
+            self._ensure_connected()
+            action_id = self._new_action_id("collect")
+            request = self._protocol.collect_block(
+                self._bot,
+                action_id,
+                block_ids,
+                radius=radius,
+                vertical_radius=vertical_radius,
+                timeout_ticks=timeout_ticks,
+            )
+            return self._run_action(request, action_id, "collect", _COLLECT_TERMINALS)
 
     def ascend(
         self,
@@ -327,45 +337,52 @@ class JavaBodyClient:
         target_y: int | None = None,
         timeout_ticks: int | None = None,
     ) -> ToolResult:
-        self._ensure_connected()
-        action_id = self._new_action_id("ascend")
-        request = self._protocol.ascend(
-            self._bot,
-            action_id,
-            target_y=target_y,
-            timeout_ticks=timeout_ticks,
-        )
-        return self._run_action(request, action_id, "ascend", _ASCEND_TERMINALS)
+        with self._exchange_lock:
+            self._ensure_connected()
+            action_id = self._new_action_id("ascend")
+            request = self._protocol.ascend(
+                self._bot,
+                action_id,
+                target_y=target_y,
+                timeout_ticks=timeout_ticks,
+            )
+            return self._run_action(request, action_id, "ascend", _ASCEND_TERMINALS)
 
     def engage_entity(self, action_id: str, params: dict) -> ToolResult:
-        self._ensure_connected()
-        request = self._protocol.engage_entity(self._bot, action_id, params)
-        return self._run_action(request, action_id, "engage_entity", _ENGAGE_TERMINALS)
+        with self._exchange_lock:
+            self._ensure_connected()
+            request = self._protocol.engage_entity(self._bot, action_id, params)
+            return self._run_action(request, action_id, "engage_entity", _ENGAGE_TERMINALS)
 
     def follow_entity(self, action_id: str, params: dict) -> ToolResult:
-        self._ensure_connected()
-        request = self._protocol.follow_entity(self._bot, action_id, params)
-        return self._run_action(request, action_id, "follow_entity", _FOLLOW_TERMINALS)
+        with self._exchange_lock:
+            self._ensure_connected()
+            request = self._protocol.follow_entity(self._bot, action_id, params)
+            return self._run_action(request, action_id, "follow_entity", _FOLLOW_TERMINALS)
 
     def player_action(self, action_id: str, action: str, params: dict) -> ToolResult:
-        self._ensure_connected()
-        request = self._protocol.player_action(self._bot, action_id, action, params)
-        return self._run_action(request, action_id, "player_action", _PLAYER_ACTION_TERMINALS)
+        with self._exchange_lock:
+            self._ensure_connected()
+            request = self._protocol.player_action(self._bot, action_id, action, params)
+            return self._run_action(request, action_id, "player_action", _PLAYER_ACTION_TERMINALS)
 
     def container_transfer(self, action_id: str, params: dict) -> ToolResult:
-        self._ensure_connected()
-        request = self._protocol.container_transfer(self._bot, action_id, params)
-        return self._run_action(request, action_id, "container_transfer", _CONTAINER_TRANSFER_TERMINALS)
+        with self._exchange_lock:
+            self._ensure_connected()
+            request = self._protocol.container_transfer(self._bot, action_id, params)
+            return self._run_action(request, action_id, "container_transfer", _CONTAINER_TRANSFER_TERMINALS)
 
     def craft_item(self, action_id: str, params: dict) -> ToolResult:
-        self._ensure_connected()
-        request = self._protocol.craft_item(self._bot, action_id, params)
-        return self._run_action(request, action_id, "craft_item", _CRAFT_ITEM_TERMINALS)
+        with self._exchange_lock:
+            self._ensure_connected()
+            request = self._protocol.craft_item(self._bot, action_id, params)
+            return self._run_action(request, action_id, "craft_item", _CRAFT_ITEM_TERMINALS)
 
     def furnace_transfer(self, action_id: str, params: dict) -> ToolResult:
-        self._ensure_connected()
-        request = self._protocol.furnace_transfer(self._bot, action_id, params)
-        return self._run_action(request, action_id, "furnace_transfer", _FURNACE_TRANSFER_TERMINALS)
+        with self._exchange_lock:
+            self._ensure_connected()
+            request = self._protocol.furnace_transfer(self._bot, action_id, params)
+            return self._run_action(request, action_id, "furnace_transfer", _FURNACE_TRANSFER_TERMINALS)
 
     def _ensure_connected(self) -> None:
         if self._transport is None or not self._protocol.negotiated:

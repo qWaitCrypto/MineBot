@@ -121,6 +121,15 @@ class CompositeBody:
     def event_head(self, proposed_epoch: str) -> dict[str, object]:
         return self.java.event_head(proposed_epoch)
 
+    def world_identity(self) -> str:
+        return self.java.world_identity()
+
+    def poll_chat_events(self) -> list[Event]:
+        return self.java.poll_chat_events()
+
+    def say(self, text: str) -> bool:
+        return self.java.say(text)
+
     def ignite_block(self, pos, **kwargs) -> Event:
         return self.java.ignite_block(pos, **kwargs)
 

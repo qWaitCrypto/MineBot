@@ -1601,9 +1601,14 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             async def aclose(self):
                 pass
 
+        trace_events = []
+
         class Trace:
-            def emit(self, *_args, **_kwargs):
+            def __init__(self, *_args, **_kwargs):
                 pass
+
+            def emit(self, event, **fields):
+                trace_events.append({"event": event, **fields})
 
             def close(self):
                 pass
@@ -1634,6 +1639,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         with (
             patch("minebot.app.real_server_session.provider_registry_from_env", return_value=FakeProvider()),
             patch("minebot.app.real_server_session.RconClient", side_effect=AssertionError("RCON constructed")) as rcon,
+            patch("minebot.app.real_server_session.RuntimeTrace", Trace),
             patch("minebot.app.real_server_session.build_body_provider", return_value=runtime),
             patch("minebot.app.real_server_session.build_phase1_agent_runtime", return_value=parts),
             patch("minebot.app.real_server_session.AgentSession", FakeSession),
@@ -1643,7 +1649,127 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             result = asyncio.run(run_real_server_goal(cfg, "collect 1 dirt", max_steps=1))
 
         self.assertEqual(result, 5)
+        manifest = next(event for event in trace_events if event["event"] == "provider_manifest")
+        self.assertEqual(manifest["body_provider"], "java")
+        self.assertFalse(manifest["legacy_rcon_constructed"])
+        self.assertFalse(manifest["legacy_scarpet_body_constructed"])
         rcon.assert_not_called()
+
+    def test_java_interactive_runner_uses_java_world_and_chat_without_rcon_or_scarpet(self):
+        cfg = real_server_config_from_env(
+            {
+                "MINEBOT_REAL_BOT": "JavaOnly",
+                "MINEBOT_BODY_PROVIDER": "java",
+                "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
+                "MINEBOT_AGENT_STATE_DB": ":memory:",
+            }
+        )
+        body = HarnessBody()
+        body.bot_name = "JavaOnly"
+
+        class FakeProvider:
+            default = "primary"
+
+            def trace_configs(self):
+                return []
+
+            async def aclose(self):
+                pass
+
+        trace_events = []
+
+        class Trace:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def emit(self, event, **fields):
+                trace_events.append({"event": event, **fields})
+
+            def close(self):
+                pass
+
+        parts = type("Parts", (), {"runtime": type("Runtime", (), {"trace": Trace()})()})()
+
+        class FakeConversation:
+            closed = False
+
+            async def sync_archive(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        conversation = FakeConversation()
+
+        class FakeSession:
+            current_goal = "collect 1 dirt"
+            parts = None
+
+            def __init__(self, make_parts, **_kwargs):
+                self.parts = make_parts(self.current_goal)
+
+            def submit(self, _command, **_kwargs):
+                pass
+
+            def close(self):
+                conversation.close()
+
+        runtime = type(
+            "BodyRuntime",
+            (),
+            {"name": cfg.body_provider, "body": body, "governance": object()},
+        )()
+        reconciliation = type(
+            "Reconciliation",
+            (),
+            {
+                "intent": type("Intent", (), {"intent_id": "reconcile-1"})(),
+                "decision": type("Decision", (), {"value": "idle"})(),
+                "events": (),
+                "orphaned_intents": (),
+                "inventory_counts": {},
+                "state": body.get_state(),
+            },
+        )()
+        truth = TerminalTruth(
+            "collect 1 dirt", None, None, False, "waiting", "yielded", 5
+        )
+
+        async def fake_loop(_session, **_kwargs):
+            return SessionStep("waiting", LifecycleState.YIELDED)
+
+        with (
+            patch("minebot.app.real_server_session.provider_registry_from_env", return_value=FakeProvider()),
+            patch("minebot.app.real_server_session.RconClient", side_effect=AssertionError("RCON constructed")) as rcon,
+            patch("minebot.app.real_server_session.ScarpetBody", side_effect=AssertionError("ScarpetBody constructed")) as scarpet,
+            patch("minebot.app.real_server_session.RuntimeTrace", Trace),
+            patch("minebot.app.real_server_session.build_body_provider", return_value=runtime),
+            patch(
+                "minebot.app.real_server_session.PersistentWindowedConversationSession",
+                return_value=conversation,
+            ),
+            patch("minebot.app.real_server_session.build_phase1_agent_runtime", return_value=parts),
+            patch("minebot.app.real_server_session.AgentSession", FakeSession),
+            patch(
+                "minebot.app.real_server_session.enqueue_startup_reconciliation",
+                return_value=reconciliation,
+            ),
+            patch("minebot.app.real_server_session._run_interactive_loop", side_effect=fake_loop),
+            patch("minebot.app.real_server_session.safe_evaluate_terminal_truth", return_value=truth),
+            patch("builtins.print"),
+        ):
+            result = asyncio.run(
+                run_real_server_interactive(cfg, "collect 1 dirt", max_steps=1)
+            )
+
+        self.assertEqual(result, 5)
+        self.assertTrue(conversation.closed)
+        manifest = next(event for event in trace_events if event["event"] == "provider_manifest")
+        self.assertEqual(manifest["body_provider"], "java")
+        self.assertFalse(manifest["legacy_rcon_constructed"])
+        self.assertFalse(manifest["legacy_scarpet_body_constructed"])
+        rcon.assert_not_called()
+        scarpet.assert_not_called()
 
     def test_phase1_recovery_facts_include_inventory_recount_delta(self):
         body = RecoveringInventoryBody(
@@ -2083,6 +2209,8 @@ class HarnessBody:
     def __init__(self):
         self.spoken = []
         self.event_log = []
+        self.last_seq = 0
+        self.last_chat_seq = 0
 
     def spawn(self, *args, **kwargs):
         return Result(None, self.bot_name, "result", True, True, True)
@@ -2119,6 +2247,21 @@ class HarnessBody:
 
     def poll_events(self):
         return []
+
+    def poll_chat_events(self):
+        return []
+
+    def event_head(self, _proposed_epoch):
+        return {
+            "event_seq": 0,
+            "chat_seq": 0,
+            "epoch": "java-unit-epoch",
+            "owner": None,
+            "pending_action_count": 0,
+        }
+
+    def world_identity(self):
+        return "world-java-unit"
 
     def ignite_block(self, pos, *, item=None, allow_server_substitute=False, timeout_s=8.0):
         return Event(seq=1, tick=1, bot=self.bot_name, name="igniteDone", data={})

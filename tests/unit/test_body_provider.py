@@ -68,6 +68,7 @@ def test_composite_constructs_java_body_without_connecting_at_startup() -> None:
     assert isinstance(runtime.body, CompositeBody)
     assert runtime.java_body is not None
     assert runtime.java_body._client.negotiated is False
+    assert runtime.java_body._read_client is not runtime.java_body._client
 
 
 def test_java_backed_providers_enable_the_single_java_survival_owner() -> None:
@@ -78,6 +79,8 @@ def test_java_backed_providers_enable_the_single_java_survival_owner() -> None:
         natural_region=REGION,
         java_connect=lambda: java_server,
     )
+    assert java_runtime.java_body is not None
+    java_runtime.java_body.event_head("java-provider-test")
     java_runtime.body.get_state()
 
     composite_server = FakeBodyServer()
@@ -89,6 +92,7 @@ def test_java_backed_providers_enable_the_single_java_survival_owner() -> None:
         java_connect=lambda: composite_server,
     )
     assert composite_runtime.java_body is not None
+    composite_runtime.java_body.event_head("composite-provider-test")
     composite_runtime.java_body.get_state()
 
     assert next(
@@ -266,11 +270,17 @@ def test_composite_state_and_event_stream_are_java_owned() -> None:
     }
     java.get_state.return_value = object()
     java.poll_events.return_value = []
+    java.poll_chat_events.return_value = []
+    java.world_identity.return_value = "world-java"
+    java.say.return_value = True
 
     body = CompositeBody(scarpet, java)
     head = body.event_head("client-epoch")
     state = body.get_state()
     events = body.poll_events()
+    chat_events = body.poll_chat_events()
+    world_id = body.world_identity()
+    said = body.say("hello")
 
     assert head["event_seq"] == 11
     assert head["chat_seq"] == 0
@@ -279,9 +289,15 @@ def test_composite_state_and_event_stream_are_java_owned() -> None:
     assert head["pending_action_count"] == 1
     assert state is java.get_state.return_value
     assert events == []
+    assert chat_events == []
+    assert world_id == "world-java"
+    assert said is True
     scarpet.event_head.assert_not_called()
     scarpet.get_state.assert_not_called()
     scarpet.poll_events.assert_not_called()
+    scarpet.poll_chat_events.assert_not_called()
+    scarpet.world_identity.assert_not_called()
+    scarpet.say.assert_not_called()
 
 
 def test_composite_unknown_capability_returns_java_gap_without_scarpet_fallback() -> None:

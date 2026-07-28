@@ -44,7 +44,11 @@ from minebot.app.skills import (
 )
 from minebot.app.wiki import WikiKnowledge
 from minebot.app.reconciliation import StartupReconciliationError, enqueue_startup_reconciliation
-from minebot.app.runtime_identity import RuntimeIdentityError, resolve_runtime_scope
+from minebot.app.runtime_identity import (
+    RuntimeIdentityError,
+    resolve_runtime_scope,
+    runtime_scope_from_world_identity,
+)
 from minebot.app.runtime_state import DEFAULT_RUNTIME_STATE_DB, RuntimeStateError, RuntimeStateStore
 from minebot.app.runtime_state import TaskStatus
 from minebot.app.tasks import TaskWorkspace
@@ -531,6 +535,13 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
     )
 
 
+def _body_endpoint(config: RealServerConfig) -> str:
+    if config.body_provider is BodyProviderName.JAVA:
+        return str(config.java_body_url)
+    assert config.rcon is not None
+    return f"{config.rcon.host}:{config.rcon.port}"
+
+
 def _region_from_env(env: Mapping[str, str]) -> Region:
     raw = env.get("MINEBOT_REAL_NATURAL_REGION")
     if raw:
@@ -614,6 +625,8 @@ async def run_real_server_goal(
                 language=config.language,
                 providers=provider.trace_configs(),
                 body_provider=body_runtime.name.value,
+                legacy_rcon_constructed=rcon is not None,
+                legacy_scarpet_body_constructed=scarpet_body is not None,
             )
             parts = build_phase1_agent_runtime(
                 body=body,
@@ -688,36 +701,41 @@ async def run_real_server_interactive(
     anchored after cancellation or ``/quit`` clears the active goal.
     """
     provider = provider_registry_from_env()
-    if config.body_provider is BodyProviderName.JAVA:
+    if scenario_hook is not None and config.body_provider is BodyProviderName.JAVA:
         print(
-            "Interactive Java-only mode is not available until Java owns chat/world identity; "
-            "use MINEBOT_BODY_PROVIDER=composite during migration.",
+            "Java-only scenario hooks require an external fixture runner",
             file=sys.stderr,
         )
         await provider.aclose()
         return 4
-    assert config.rcon is not None
-    rcon = RconClient(config.rcon)
-    try:
-        rcon.connect()
-    except (OSError, PermissionError, RconError) as exc:
-        print(
-            f"Real-server RCON unavailable at {config.rcon.host}:{config.rcon.port}: "
-            f"{type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        await provider.aclose()
-        return 3
+    rcon: RconClient | None = None
+    if config.body_provider is not BodyProviderName.JAVA:
+        assert config.rcon is not None
+        rcon = RconClient(config.rcon)
+        try:
+            rcon.connect()
+        except (OSError, PermissionError, RconError) as exc:
+            print(
+                f"Real-server RCON unavailable at {config.rcon.host}:{config.rcon.port}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            await provider.aclose()
+            return 3
 
-    with rcon:
+    with (rcon if rcon is not None else contextlib.nullcontext()):
         camera = _CameraSession(camera_config)
         state_store: RuntimeStateStore | None = None
         conversation_session: PersistentWindowedConversationSession | None = None
         work_queue: PersistentWorkIntentQueue | None = None
-        scarpet_body = ScarpetBody(config.bot_name, rcon)
+        scarpet_body: ScarpetBody | None = None
         try:
-            app_reloaded = _ensure_scarpet_global_app(rcon, config.bot_name)
-            _watch_interactive_chat(rcon, config.bot_name)
+            app_reloaded = False
+            if rcon is not None:
+                app_reloaded = _ensure_scarpet_global_app(rcon, config.bot_name)
+                scarpet_body = ScarpetBody(config.bot_name, rcon)
+                if config.body_provider is BodyProviderName.SCARPET:
+                    _watch_interactive_chat(rcon, config.bot_name)
             body_runtime = build_body_provider(
                 config.body_provider,
                 bot_name=config.bot_name,
@@ -726,12 +744,31 @@ async def run_real_server_interactive(
                 java_body_url=config.java_body_url,
             )
             body = body_runtime.body
-            scope = resolve_runtime_scope(
-                rcon,
-                server_id=config.server_id,
-                bot_id=config.bot_name,
-                world_id_override=config.world_id_override,
-            )
+            if config.body_provider in {BodyProviderName.JAVA, BodyProviderName.COMPOSITE}:
+                world_id = config.world_id_override
+                if world_id is None:
+                    world_identity = getattr(body, "world_identity", None)
+                    if not callable(world_identity):
+                        raise RuntimeIdentityError("selected Body does not expose world identity")
+                    try:
+                        world_id = str(world_identity())
+                    except Exception as exc:
+                        raise RuntimeIdentityError(
+                            f"Java Body world identity failed: {type(exc).__name__}"
+                        ) from exc
+                scope = runtime_scope_from_world_identity(
+                    server_id=config.server_id,
+                    world_id=world_id,
+                    bot_id=config.bot_name,
+                )
+            else:
+                assert rcon is not None
+                scope = resolve_runtime_scope(
+                    rcon,
+                    server_id=config.server_id,
+                    bot_id=config.bot_name,
+                    world_id_override=config.world_id_override,
+                )
             state_store = RuntimeStateStore(config.state_db_path)
             state_store.register_scope(scope)
             task_workspace = TaskWorkspace(state_store, scope)
@@ -787,7 +824,7 @@ async def run_real_server_interactive(
             if state_store is not None:
                 state_store.close()
             print(
-                f"Real-server runtime unavailable at {config.rcon.host}:{config.rcon.port}: "
+                f"Real-server runtime unavailable at {_body_endpoint(config)}: "
                 f"{type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
@@ -804,6 +841,8 @@ async def run_real_server_interactive(
                 language=config.language,
                 providers=provider.trace_configs(),
                 body_provider=body_runtime.name.value,
+                legacy_rcon_constructed=rcon is not None,
+                legacy_scarpet_body_constructed=scarpet_body is not None,
             )
             parts = build_phase1_agent_runtime(
                 body=body,
@@ -868,6 +907,7 @@ async def run_real_server_interactive(
         chat_reader = asyncio.create_task(_chat_command_reader(session, body_event_pump))
         scenario_task: asyncio.Task[None] | None = None
         if scenario_hook is not None:
+            assert rcon is not None
             def trace_scenario_event(event: str, fields: Mapping[str, object]) -> None:
                 parts = session.parts
                 if parts is not None:
@@ -899,7 +939,7 @@ async def run_real_server_interactive(
             scenario_task.add_done_callback(record_scenario_failure)
         print(
             f"interactive_ready bot={config.bot_name} "
-            f"server={config.rcon.host}:{config.rcon.port}",
+            f"server={_body_endpoint(config)}",
             flush=True,
         )
         try:

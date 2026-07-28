@@ -32,6 +32,7 @@ from minebot.contract import (
     Result,
 )
 from minebot.game.java_body_adapter import JavaBodyClient
+from minebot.game.chat import sanitize_chat_text
 from minebot.game.java_body_protocol import BotEvent, ErrorResponse, Response
 
 _CAPABILITY_GAP = "capability_unavailable"
@@ -72,8 +73,15 @@ class JavaBody:
     # transaction pages.
     preferred_inventory_page_size = 46
 
-    def __init__(self, client: JavaBodyClient, bot_name: str) -> None:
+    def __init__(
+        self,
+        client: JavaBodyClient,
+        bot_name: str,
+        *,
+        read_client: JavaBodyClient | None = None,
+    ) -> None:
         self._client = client
+        self._read_client = read_client or client
         self.bot_name = bot_name
         self._action_terminals: dict[str, Event] = {}
         self.last_seq = 0
@@ -84,7 +92,7 @@ class JavaBody:
     # -- reads (wire-native) --------------------------------------------
 
     def get_state(self) -> BodyState:
-        reply = self._client.request_response(lambda p: p.body_state(self.bot_name))
+        reply = self._read_client.request_response(lambda p: p.body_state(self.bot_name))
         if isinstance(reply, ErrorResponse) or reply.payload.get("missing") is True:
             return _missing_state(self.bot_name)
         payload = reply.payload
@@ -167,7 +175,7 @@ class JavaBody:
                 complete=True,
                 error="invalid_cursor:numeric_resume_requires_original_snapshot",
             )
-        reply = self._client.request_response(lambda p: p.find_blocks(
+        reply = self._read_client.request_response(lambda p: p.find_blocks(
             self.bot_name,
             block_ids,
             int(params.get("radius", 32)),
@@ -237,7 +245,7 @@ class JavaBody:
         )
 
     def _perceive_inventory(self, params: dict[str, object]) -> PerceptionResult:
-        reply = self._client.request_response(lambda p: p.inventory(
+        reply = self._read_client.request_response(lambda p: p.inventory(
             self.bot_name,
             start=_opt_int(params.get("start")),
             limit=_opt_int(params.get("limit")),
@@ -305,7 +313,7 @@ class JavaBody:
                 complete=True,
                 error="invalid_request:pos",
             )
-        reply = self._client.request_response(lambda protocol: protocol.container_read(
+        reply = self._read_client.request_response(lambda protocol: protocol.container_read(
             self.bot_name,
             pos,
             start=_opt_int(params.get("start")),
@@ -366,7 +374,7 @@ class JavaBody:
             )
         normalized_item = item if ":" in item else f"minecraft:{item}"
         requested_type = str(params.get("type") or "crafting")
-        reply = self._client.request_response(lambda protocol: protocol.recipe_read(
+        reply = self._read_client.request_response(lambda protocol: protocol.recipe_read(
             self.bot_name,
             normalized_item,
             recipe_type=requested_type,
@@ -429,7 +437,7 @@ class JavaBody:
         scope: str,
         params: dict[str, object],
     ) -> PerceptionResult:
-        reply = self._client.request_response(
+        reply = self._read_client.request_response(
             lambda protocol: protocol.world_read(self.bot_name, scope, params)
         )
         if isinstance(reply, ErrorResponse):
@@ -474,7 +482,7 @@ class JavaBody:
         scope: str,
         params: dict[str, object],
     ) -> PerceptionResult:
-        reply = self._client.request_response(
+        reply = self._read_client.request_response(
             lambda protocol: protocol.entity_read(self.bot_name, scope, params)
         )
         if isinstance(reply, ErrorResponse):
@@ -558,6 +566,78 @@ class JavaBody:
             "owner": payload.get("owner"),
             "pending_action_count": int(payload.get("pending_action_count") or 0),
         }
+
+    def world_identity(self) -> str:
+        reply = self._read_client.request_response(lambda protocol: protocol.world_identity())
+        if isinstance(reply, ErrorResponse):
+            raise RuntimeError(f"Java Body world identity failed: {reply.code}")
+        world_id = str(reply.payload.get("world_id") or "")
+        if not world_id:
+            raise RuntimeError("Java Body world identity is missing")
+        return world_id
+
+    def poll_chat_events(self) -> list[Event]:
+        reply = self._read_client.request_response(
+            lambda protocol: protocol.chat_events(self.bot_name, self.last_chat_seq)
+        )
+        if isinstance(reply, ErrorResponse):
+            raise RuntimeError(f"Java Body chat poll failed: {reply.code}")
+        payload = reply.payload
+        epoch = str(payload.get("epoch") or "")
+        if not epoch or (self._server_epoch is not None and epoch != self._server_epoch):
+            raise RuntimeError("Java Body chat epoch changed without an event-head handshake")
+        raw_events = payload.get("events")
+        if not isinstance(raw_events, list):
+            raise RuntimeError("Java Body chat response is missing events")
+        normalized: list[Event] = []
+        gap = payload.get("event_gap")
+        if isinstance(gap, dict):
+            gap_from = int(gap.get("from") or 0)
+            gap_to = int(gap.get("to") or 0)
+            if gap_to >= gap_from > 0:
+                normalized.append(Event(
+                    seq=gap_to,
+                    tick=0,
+                    bot=self.bot_name,
+                    name="chatDesync",
+                    data={"from_seq": gap_from, "to_seq": gap_to},
+                ))
+                self.last_chat_seq = max(self.last_chat_seq, gap_to)
+        for raw in raw_events:
+            if not isinstance(raw, dict):
+                raise RuntimeError("Java Body chat event is not an object")
+            seq = int(raw.get("seq") or 0)
+            if seq <= self.last_chat_seq:
+                continue
+            data = raw.get("data")
+            if (
+                raw.get("bot") != self.bot_name
+                or raw.get("event") != "agentChat"
+                or not isinstance(data, dict)
+                or not isinstance(data.get("sender"), str)
+                or not isinstance(data.get("message"), str)
+            ):
+                raise RuntimeError("Java Body chat event is malformed")
+            event = Event(
+                seq=seq,
+                tick=int(raw.get("tick") or 0),
+                bot=self.bot_name,
+                name="agentChat",
+                data=dict(data),
+            )
+            normalized.append(event)
+            self.last_chat_seq = seq
+        self.event_log.extend(normalized)
+        return normalized
+
+    def say(self, text: str) -> bool:
+        cleaned = sanitize_chat_text(text)
+        if not cleaned:
+            return True
+        reply = self._read_client.request_response(
+            lambda protocol: protocol.say(self.bot_name, cleaned)
+        )
+        return not isinstance(reply, ErrorResponse) and reply.payload.get("said") is True
 
     # -- whole-objective writes -----------------------------------------
 

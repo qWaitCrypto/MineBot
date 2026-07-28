@@ -13,6 +13,7 @@ from minebot.app.runtime_identity import (
     RuntimeIdentityError,
     parse_world_identity_response,
     resolve_runtime_scope,
+    runtime_scope_from_world_identity,
 )
 from minebot.app.runtime_state import (
     CheckpointDisposition,
@@ -820,6 +821,21 @@ class RuntimeIdentityTests(unittest.TestCase):
 
         self.assertEqual(scope.world_id, "fixture-w1")
         self.assertEqual(transport.commands, [])
+
+    def test_java_world_identity_builds_the_same_persistent_scope_without_a_command_transport(self):
+        scope = runtime_scope_from_world_identity(
+            server_id="ws://127.0.0.1:8767",
+            world_id="world-java",
+            bot_id="Bot1",
+        )
+
+        self.assertEqual(scope.world_id, "world-java")
+        with self.assertRaises(RuntimeIdentityError):
+            runtime_scope_from_world_identity(
+                server_id="ws://127.0.0.1:8767",
+                world_id="bad world",
+                bot_id="Bot1",
+            )
 
     def test_invalid_world_identity_response_is_rejected(self):
         self.assertIsNone(parse_world_identity_response("Found no elements matching world_id"))

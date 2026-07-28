@@ -31,6 +31,21 @@ def resolve_runtime_scope(
     world_id_override: str | None = None,
 ) -> RuntimeScope:
     world_id = world_id_override or ensure_world_identity(transport)
+    return runtime_scope_from_world_identity(
+        server_id=server_id,
+        world_id=world_id,
+        bot_id=bot_id,
+    )
+
+
+def runtime_scope_from_world_identity(
+    *,
+    server_id: str,
+    world_id: str,
+    bot_id: str,
+) -> RuntimeScope:
+    if _WORLD_ID_PATTERN.fullmatch(world_id) is None:
+        raise RuntimeIdentityError("world identity is invalid")
     return RuntimeScope(server_id=server_id, world_id=world_id, bot_id=bot_id)
 
 
@@ -72,4 +87,5 @@ __all__ = [
     "ensure_world_identity",
     "parse_world_identity_response",
     "resolve_runtime_scope",
+    "runtime_scope_from_world_identity",
 ]

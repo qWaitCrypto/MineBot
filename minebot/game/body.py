@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-import re
 from typing import Any, NoReturn
 
 from minebot.contract import (
@@ -24,6 +23,7 @@ from minebot.game.action_reconciliation import (
     reconciled_terminal_event,
     terminal_event_name,
 )
+from minebot.game.chat import sanitize_chat_text
 from minebot.game.errors import ActionReconciliationUnknownError, BodyActionTimeoutError, BodyProtocolError
 from minebot.game.protocol import (
     RCON_SLOT_PAGE_SIZE,
@@ -88,25 +88,6 @@ ACTION_RECONCILIATION_MAX_NOT_SEEN_RESENDS = 2
 # race is not reported as an outcome-unknown dispatch.
 ACTION_RECONCILIATION_SETTLE_GRACE_S = 3.0
 MAX_MINECRAFT_USERNAME_LENGTH = 16
-CHAT_TEXT_LIMIT = 220
-_MINECRAFT_FORMATTING_RE = re.compile(r"§.")
-_NUMBER_PATTERN = r"-?\d+(?:\.\d+)?"
-_COORDINATE_TRIPLE_RE = re.compile(
-    rf"(?<![\w.-])[\[(]\s*{_NUMBER_PATTERN}\s*[,，]\s*{_NUMBER_PATTERN}\s*[,，]\s*{_NUMBER_PATTERN}\s*[\])]"
-)
-_BARE_COORDINATE_TRIPLE_RE = re.compile(
-    rf"(?<![\w.-]){_NUMBER_PATTERN}\s*[,，]\s*{_NUMBER_PATTERN}\s*[,，]\s*{_NUMBER_PATTERN}(?![\w-])"
-)
-_AXIS_COORDINATE_TRIPLE_RE = re.compile(
-    rf"(?i)(?<!\w)x\s*[:=]?\s*{_NUMBER_PATTERN}\s*[,，;；]?\s*"
-    rf"y\s*[:=]?\s*{_NUMBER_PATTERN}\s*[,，;；]?\s*"
-    rf"z\s*[:=]?\s*{_NUMBER_PATTERN}(?!\w)"
-)
-_LABELED_SPACE_COORDINATE_TRIPLE_RE = re.compile(
-    rf"(?i)(?<!\w)(?:coordinates?|coords?|position|pos|located\s+at|at|坐标|位置|位于)"
-    rf"\s*(?:is|are|about|around|roughly|approximately|为|是|在|约|大约|大概)?\s*[:：=]?\s*"
-    rf"{_NUMBER_PATTERN}\s+{_NUMBER_PATTERN}\s+{_NUMBER_PATTERN}(?![\w-])"
-)
 
 
 class ScarpetBody:
@@ -968,7 +949,7 @@ class ScarpetBody:
         return parse_result(self._timed_request(build_despawn_call(self.bot_name, self.app), kind="despawn"))
 
     def say(self, text: str) -> bool:
-        cleaned = _sanitize_chat_text(text)
+        cleaned = sanitize_chat_text(text)
         if not cleaned:
             return True
         try:
@@ -1461,18 +1442,6 @@ def _transport_snapshot(transport: BodyTransport) -> dict[str, object]:
     if isinstance(value, dict):
         return {"transport_stats": dict(value)}
     return {}
-
-
-def _sanitize_chat_text(text: str) -> str:
-    cleaned = str(text).replace("\r", " ").replace("\n", " ")
-    cleaned = _MINECRAFT_FORMATTING_RE.sub("", cleaned)
-    cleaned = _COORDINATE_TRIPLE_RE.sub("[position]", cleaned)
-    cleaned = _BARE_COORDINATE_TRIPLE_RE.sub("[position]", cleaned)
-    cleaned = _AXIS_COORDINATE_TRIPLE_RE.sub("[position]", cleaned)
-    cleaned = _LABELED_SPACE_COORDINATE_TRIPLE_RE.sub("[position]", cleaned)
-    cleaned = "".join(ch for ch in cleaned if ch == "\t" or ord(ch) >= 32)
-    cleaned = " ".join(cleaned.strip().split())
-    return cleaned[:CHAT_TEXT_LIMIT]
 
 
 def _next_start(perception) -> object | None:

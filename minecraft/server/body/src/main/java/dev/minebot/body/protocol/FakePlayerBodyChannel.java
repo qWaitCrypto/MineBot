@@ -26,6 +26,8 @@ import dev.minebot.body.control.PlayerCommandAdapter;
 import dev.minebot.body.control.ServerPlayerBlockBreaker;
 import dev.minebot.body.event.BotEventStream;
 import dev.minebot.body.inventory.InventorySnapshot;
+import dev.minebot.body.interaction.InteractiveChatStream;
+import dev.minebot.body.interaction.WorldIdentityStore;
 import dev.minebot.body.lifecycle.BodyLifecycleTracker;
 import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MinecraftWorldView;
@@ -45,6 +47,7 @@ import dev.minebot.body.search.SearchMatch;
 import dev.minebot.body.search.SearchSnapshotStore;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -74,7 +77,8 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     public static final String CHANNEL = "fakeplayer-body";
     public static final String PROTOCOL = "fakeplayer-body/1";
     private static final Set<String> REQUEST_TYPES = Set.of(
-        "HELLO", "EVENT_HEAD", "SPAWN", "DESPAWN", "INTERRUPT",
+        "HELLO", "EVENT_HEAD", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY",
+        "SPAWN", "DESPAWN", "INTERRUPT",
         "SET_SURVIVAL_OWNER",
         "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "CONTAINER_READ", "RECIPE_READ",
         "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND",
@@ -109,6 +113,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     private final ActionRuntime runtime;
     private final SurvivalReflexController survival;
     private final BodyLifecycleTracker lifecycle;
+    private final InteractiveChatStream chat = new InteractiveChatStream();
     private final Set<MineBotConnection> subscribers = new LinkedHashSet<>();
     private final Map<String, String> pendingSpawnGameModes = new LinkedHashMap<>();
     private final String eventEpoch = UUID.randomUUID().toString();
@@ -207,6 +212,18 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         }
     }
 
+    public void playerChat(ServerPlayer sender, String message, int serverTick) {
+        if (sender == null) {
+            return;
+        }
+        chat.receive(
+            sender.getGameProfile().name(),
+            message,
+            serverTick,
+            sender.entityTags().contains("minebot.camera.observer")
+        );
+    }
+
     @Override
     public void connectionClosed(MineBotConnection connection, int serverTick) {
         subscribers.remove(connection);
@@ -240,6 +257,9 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "HELLO" -> handleHello(connection, request, serverTick);
             case "SET_SURVIVAL_OWNER" -> handleSetSurvivalOwner(connection, request, serverTick);
             case "EVENT_HEAD" -> handleEventHead(connection, request, serverTick);
+            case "WORLD_IDENTITY" -> handleWorldIdentity(connection, request, serverTick);
+            case "CHAT_EVENTS" -> handleChatEvents(connection, request, serverTick);
+            case "SAY" -> handleSay(connection, request, serverTick);
             case "SPAWN" -> handleSpawn(connection, request, serverTick);
             case "DESPAWN" -> handleDespawn(connection, request, serverTick);
             case "INTERRUPT" -> handleInterrupt(connection, request, serverTick);
@@ -1751,11 +1771,12 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         try {
             String botName = requiredBotName(request);
             lifecycle.watch(botName);
+            chat.watch(botName);
             JsonObject response = baseResponse(request, "EVENT_HEAD_RESULT");
             response.addProperty("bot", botName);
             response.addProperty("epoch", eventEpoch);
             response.addProperty("event_seq", events.lastSeq(botName));
-            response.addProperty("chat_seq", 0);
+            response.addProperty("chat_seq", chat.lastSeq(botName));
             var owner = runtime.currentOwner(botName);
             String reflexOwner = survival.activeOwnerName(botName);
             response.addProperty(
@@ -1767,6 +1788,110 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             connection.send(response, serverTick);
         } catch (IllegalArgumentException error) {
             sendError(connection, request, serverTick, "invalid_request", error.getMessage(), false);
+        }
+    }
+
+    private void handleWorldIdentity(
+        MineBotConnection connection,
+        JsonObject request,
+        int serverTick
+    ) {
+        try {
+            JsonObject response = baseResponse(request, "WORLD_IDENTITY_RESULT");
+            response.addProperty("world_id", WorldIdentityStore.getOrCreate(server));
+            connection.send(response, serverTick);
+        } catch (RuntimeException error) {
+            sendError(
+                connection,
+                request,
+                serverTick,
+                "world_identity_unavailable",
+                "persistent world identity is unavailable",
+                false
+            );
+        }
+    }
+
+    private void handleChatEvents(
+        MineBotConnection connection,
+        JsonObject request,
+        int serverTick
+    ) {
+        try {
+            String botName = requiredBotName(request);
+            long afterSeq = request.has("after_seq") ? request.get("after_seq").getAsLong() : 0L;
+            if (afterSeq < 0) {
+                throw new IllegalArgumentException("after_seq must be >= 0");
+            }
+            BotEventStream.Replay replay = chat.replay(botName, afterSeq);
+            JsonObject response = baseResponse(request, "CHAT_EVENTS_RESULT");
+            response.addProperty("bot", botName);
+            response.addProperty("epoch", eventEpoch);
+            if (replay.hasGap()) {
+                JsonObject gap = new JsonObject();
+                gap.addProperty("from", replay.gapFrom());
+                gap.addProperty("to", replay.gapTo());
+                response.add("event_gap", gap);
+            } else {
+                response.add("event_gap", JsonNull.INSTANCE);
+            }
+            JsonArray replayed = new JsonArray();
+            replay.events().stream()
+                .limit(MAX_REPLAY_EVENTS_PER_RESPONSE)
+                .forEach(event -> replayed.add(event.toJson(CHANNEL)));
+            response.add("events", replayed);
+            response.addProperty(
+                "replay_complete",
+                replay.events().size() <= MAX_REPLAY_EVENTS_PER_RESPONSE
+            );
+            response.addProperty("last_seq", chat.lastSeq(botName));
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException | UnsupportedOperationException error) {
+            sendError(
+                connection,
+                request,
+                serverTick,
+                "invalid_request",
+                String.valueOf(error.getMessage()),
+                false
+            );
+        }
+    }
+
+    private void handleSay(
+        MineBotConnection connection,
+        JsonObject request,
+        int serverTick
+    ) {
+        try {
+            String botName = requiredBotName(request);
+            String text = requiredString(request, "text", 220);
+            if (text.indexOf('\n') >= 0 || text.indexOf('\r') >= 0) {
+                throw new IllegalArgumentException("text must be one line");
+            }
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (!present(player)) {
+                sendError(
+                    connection,
+                    request,
+                    serverTick,
+                    "body_missing",
+                    "FakePlayer is not present",
+                    true
+                );
+                return;
+            }
+            Component rendered = Component.literal("[" + botName + "] " + text);
+            server.getPlayerList().broadcastSystemMessage(rendered, false);
+            server.sendSystemMessage(rendered);
+            JsonObject response = baseResponse(request, "SAY_RESULT");
+            response.addProperty("bot", botName);
+            response.addProperty("said", true);
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", error.getMessage(), false);
+        } catch (RuntimeException error) {
+            sendError(connection, request, serverTick, "say_internal_error", "chat egress failed", true);
         }
     }
 

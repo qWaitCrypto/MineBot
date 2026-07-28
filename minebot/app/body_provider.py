@@ -84,7 +84,11 @@ def build_body_provider(
             connect,
             survival_owner=name in {BodyProviderName.JAVA, BodyProviderName.COMPOSITE},
         )
-        java_body = JavaBody(java_client, bot_name)
+        java_body = JavaBody(
+            java_client,
+            bot_name,
+            read_client=JavaBodyClient(bot_name, connect),
+        )
 
     if name is BodyProviderName.SCARPET:
         assert scarpet_body is not None

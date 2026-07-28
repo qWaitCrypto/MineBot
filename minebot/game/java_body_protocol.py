@@ -196,6 +196,21 @@ class JavaBodyProtocol:
             {"bot_name": bot_name, "proposed_epoch": proposed_epoch},
         )
 
+    def world_identity(self) -> dict:
+        self._require_capability("WORLD_IDENTITY")
+        return self._request("WORLD_IDENTITY", {})
+
+    def chat_events(self, bot_name: str, after_seq: int) -> dict:
+        self._require_capability("CHAT_EVENTS")
+        return self._request(
+            "CHAT_EVENTS",
+            {"bot_name": bot_name, "after_seq": max(0, int(after_seq))},
+        )
+
+    def say(self, bot_name: str, text: str) -> dict:
+        self._require_capability("SAY")
+        return self._request("SAY", {"bot_name": bot_name, "text": text})
+
     def spawn(
         self,
         bot_name: str,
