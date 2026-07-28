@@ -832,12 +832,9 @@ async def run_real_server_interactive(
             return 4
         sink = JsonlObservationSink(config.log_path)
         speech_sink = _interactive_speech_sink(body)
-        latest_trace: RuntimeTrace | None = None
+        trace = RuntimeTrace(session_id=config.bot_name, sink=sink)
 
         def make_parts(goal_text: str):
-            nonlocal latest_trace
-            trace = RuntimeTrace(session_id=config.bot_name, sink=sink)
-            latest_trace = trace
             trace.emit(
                 "provider_manifest",
                 default_route=provider.default,
@@ -912,19 +909,13 @@ async def run_real_server_interactive(
         if scenario_hook is not None:
             assert rcon is not None
             def trace_scenario_event(event: str, fields: Mapping[str, object]) -> None:
-                parts = session.parts
-                if parts is not None:
-                    parts.runtime.trace.emit(event, **dict(fields))
+                trace.emit(event, **dict(fields))
 
             scenario_context = InteractiveScenarioContext(
                 bot_name=config.bot_name,
                 _rcon=rcon,
                 _trace_event=trace_scenario_event,
-                _trace_snapshot=lambda: (
-                    []
-                    if session.parts is None
-                    else session.parts.runtime.trace.snapshot()
-                ),
+                _trace_snapshot=trace.snapshot,
             )
             scenario_task = asyncio.create_task(scenario_hook(scenario_context))
 
@@ -940,17 +931,11 @@ async def run_real_server_interactive(
                     )
 
             scenario_task.add_done_callback(record_scenario_failure)
-        readiness_trace = (
-            session.parts.runtime.trace
-            if session.parts is not None
-            else latest_trace
+        trace.emit(
+            "interactive_ready",
+            body_provider=body_runtime.name.value,
+            server=_body_endpoint(config),
         )
-        if readiness_trace is not None:
-            readiness_trace.emit(
-                "interactive_ready",
-                body_provider=body_runtime.name.value,
-                server=_body_endpoint(config),
-            )
         print(
             f"interactive_ready bot={config.bot_name} "
             f"server={_body_endpoint(config)}",
@@ -970,16 +955,15 @@ async def run_real_server_interactive(
             evaluated_goal = _session_goal(session, terminal_goal or goal)
             truth = safe_evaluate_terminal_truth(body, evaluated_goal, final, session=session)
             _announce_interactive_terminal(body, truth)
-            if session.parts is not None:
-                session.parts.runtime.trace.emit(
-                    "session_terminal",
-                    mode="interactive",
-                    status=final.status,
-                    lifecycle=final.lifecycle.value,
-                    message=final.message,
-                    terminal_truth=truth.to_trace(),
-                )
-                session.parts.runtime.trace.close()
+            trace.emit(
+                "session_terminal",
+                mode="interactive",
+                status=final.status,
+                lifecycle=final.lifecycle.value,
+                message=final.message,
+                terminal_truth=truth.to_trace(),
+            )
+            trace.close()
             print(f"log={config.log_path}")
             print(
                 f"status={final.status} lifecycle={final.lifecycle.value} "
