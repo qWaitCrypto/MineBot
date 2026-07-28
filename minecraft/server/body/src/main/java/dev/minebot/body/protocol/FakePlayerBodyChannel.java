@@ -812,6 +812,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         blockBreaker,
                         adapter,
                         adapter,
+                        ascendPillarAccess(player),
                         blockReader,
                         FakePlayerBodyChannel::isAscendHazard,
                         mutationGate,
@@ -2358,6 +2359,74 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             @Override
             public PlayerPrimitiveActions.Position position() {
                 return new PlayerPrimitiveActions.Position(player.getX(), player.getY(), player.getZ());
+            }
+        };
+    }
+
+    private AscendExecutor.PillarAccess ascendPillarAccess(ServerPlayer player) {
+        PlayerPrimitiveActions.PlayerAccess access = playerAccess(player);
+        return new AscendExecutor.PillarAccess() {
+            @Override
+            public AscendExecutor.ScaffoldSelection selectScaffold(String botName, List<String> candidates) {
+                if (!access.present()) {
+                    return new AscendExecutor.ScaffoldSelection(false, null, 0, "body_missing");
+                }
+                int inventoryEnd = Math.min(
+                    PlayerPrimitiveActions.CARRY_END_EXCLUSIVE,
+                    access.inventorySize()
+                );
+                for (String candidate : candidates) {
+                    boolean found = false;
+                    for (int slot = 0; slot < inventoryEnd; slot++) {
+                        if (candidate.equals(access.itemIdAt(slot)) && access.itemCountAt(slot) > 0) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        continue;
+                    }
+                    PlayerPrimitiveActions.Outcome selected = PlayerPrimitiveActions.selectItem(
+                        botName,
+                        candidate,
+                        access,
+                        adapter
+                    );
+                    int count = access.itemCountAt(access.selectedHotbarSlot());
+                    return new AscendExecutor.ScaffoldSelection(
+                        selected.success(),
+                        selected.success() ? candidate : null,
+                        selected.success() ? count : 0,
+                        selected.success() ? selected.reason() : "pillar_scaffold_selection_failed:" + selected.reason()
+                    );
+                }
+                return new AscendExecutor.ScaffoldSelection(
+                    false,
+                    null,
+                    0,
+                    "pillar_no_scaffold_available"
+                );
+            }
+
+            @Override
+            public String selectedItemId() {
+                return access.selectedItemId();
+            }
+
+            @Override
+            public int selectedItemCount() {
+                int slot = access.selectedHotbarSlot();
+                return slot < 0 || slot >= access.inventorySize() ? 0 : access.itemCountAt(slot);
+            }
+
+            @Override
+            public void useOnce(String botName) {
+                adapter.useOnce(botName);
+            }
+
+            @Override
+            public void sneak(String botName) {
+                adapter.sneak(botName);
             }
         };
     }

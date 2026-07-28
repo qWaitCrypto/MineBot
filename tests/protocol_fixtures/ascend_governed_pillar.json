@@ -1,0 +1,152 @@
+{
+  "name": "ascend_governed_pillar",
+  "description": "ASCEND falls back from an unavailable stair to a governed physical pillar and completes only after block, inventory, and height truth agree.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["ASCEND", "HELLO", "MUTATION_VERDICT", "QUERY_ACTION", "RESUME_EVENTS"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "ascend",
+        "args": {"bot_name": "MineBot_1", "action_id": "ascend-pillar-1", "target_y": 67, "timeout_ticks": 2400}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "ASCEND",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "action_id": "ascend-pillar-1",
+        "target_y": 67,
+        "timeout_ticks": 2400
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "ASCEND_ACK",
+        "request_id": "r-2",
+        "action_id": "ascend-pillar-1",
+        "state": "accepted"
+      },
+      "expect": [{"kind": "response", "type": "ASCEND_ACK", "request_type": "ASCEND", "payload_contains": {"state": "accepted"}}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "MUTATION_PROPOSAL",
+        "proposal_id": "mp-pillar-1",
+        "bot": "MineBot_1",
+        "action_id": "ascend-pillar-1",
+        "mutation": {
+          "kind": "place",
+          "x": 20,
+          "y": 64,
+          "z": -4,
+          "block_id": "minecraft:cobblestone",
+          "context": "recovery"
+        }
+      },
+      "expect": [{
+        "kind": "proposal",
+        "proposal_id": "mp-pillar-1",
+        "block_id": "minecraft:cobblestone",
+        "mutation_kind": "place",
+        "context": "recovery",
+        "x": 20,
+        "y": 64,
+        "z": -4
+      }]
+    },
+    {
+      "send": {
+        "builder": "mutation_verdict",
+        "args": {"proposal_id": "mp-pillar-1", "allow": true, "reason": "natural_terrain_allow"}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "MUTATION_VERDICT",
+        "proposal_id": "mp-pillar-1",
+        "allow": true,
+        "reason": "natural_terrain_allow"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 1,
+        "tick": 940,
+        "event": "ascent_pillar_verified",
+        "action_id": "ascend-pillar-1",
+        "data": {
+          "x": 20,
+          "y": 64,
+          "z": -4,
+          "block_id": "minecraft:cobblestone",
+          "item_count_before": 8,
+          "item_count_after": 7
+        }
+      },
+      "expect": [{"kind": "event", "name": "ascent_pillar_verified", "seq": 1}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 2,
+        "tick": 960,
+        "event": "action_terminal",
+        "action_id": "ascend-pillar-1",
+        "data": {
+          "classification": "completed",
+          "reason": "surface_reached",
+          "final_y": 67,
+          "target_y": 67,
+          "ascend_steps": 3,
+          "break_steps": 0,
+          "pillar_steps": 3,
+          "pillar_fallback_from": "stair_route_unavailable",
+          "elapsed_ticks": 90,
+          "broken": [],
+          "placed": [
+            {"x": 20, "y": 64, "z": -4, "block_id": "minecraft:cobblestone", "item_count_before": 8, "item_count_after": 7}
+          ]
+        }
+      },
+      "expect": [{
+        "kind": "event",
+        "name": "action_terminal",
+        "seq": 2,
+        "data_contains": {"classification": "completed", "reason": "surface_reached", "pillar_steps": 3}
+      }]
+    }
+  ],
+  "final": {
+    "supports": ["ASCEND"],
+    "pending_requests": 0,
+    "last_seq": {"MineBot_1": 2}
+  }
+}

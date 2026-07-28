@@ -723,6 +723,12 @@ class FakeBodyServer:
             "target_y": 320,
             "ascend_steps": 6,
             "break_steps": 12,
+            "pillar_steps": 2,
+            "pillar_fallback_from": "stair_route_unavailable",
+            "placed": [
+                {"x": 1, "y": 64, "z": 0, "block_id": "minecraft:cobblestone"},
+                {"x": 1, "y": 65, "z": 0, "block_id": "minecraft:cobblestone"},
+            ],
             "elapsed_ticks": 280,
         })
 
@@ -1182,6 +1188,9 @@ def test_ascend_maps_verified_surface_terminal() -> None:
     assert result.reason == "surface_reached"
     assert result.metrics["final_y"] == 70
     assert result.metrics["ascend_steps"] == 6
+    assert result.metrics["pillar_steps"] == 2
+    assert result.metrics["pillar_fallback_from"] == "stair_route_unavailable"
+    assert len(result.metrics["placed"]) == 2
 
 
 def test_engage_entity_preserves_server_kill_facts_and_action_identity() -> None:

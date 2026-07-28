@@ -21,9 +21,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 final class AscendExecutorTest {
     private static final String STONE = "minecraft:stone";
     private static final String AIR = "minecraft:air";
+    private static final String COBBLESTONE = "minecraft:cobblestone";
 
-    /** Fake physics only climbs after forward+jump targets a cleared stair. */
-    private static final class FakeBody implements MovementControls, ExactBlockBreaker, BotControls {
+    /** Fake physics supports both a cleared stair and jump-place pillar. */
+    private static final class FakeBody implements MovementControls, ExactBlockBreaker, BotControls,
+                                                    AscendExecutor.PillarAccess {
         double x = 0.5;
         double y;
         double z = 0.5;
@@ -37,6 +39,9 @@ final class AscendExecutorTest {
         int breakX;
         int breakY;
         int breakZ;
+        String scaffoldItem = COBBLESTONE;
+        int scaffoldCount = 8;
+        World world;
         final List<String> log = new ArrayList<>();
         final List<String> breakTargets = new ArrayList<>();
 
@@ -70,12 +75,41 @@ final class AscendExecutorTest {
             wantJump = false;
             log.add("clearAll");
         }
+        @Override public AscendExecutor.ScaffoldSelection selectScaffold(
+            String b,
+            List<String> candidates
+        ) {
+            if (scaffoldCount <= 0 || !candidates.contains(scaffoldItem)) {
+                return new AscendExecutor.ScaffoldSelection(
+                    false, null, 0, "pillar_no_scaffold_available"
+                );
+            }
+            log.add("selectScaffold");
+            return new AscendExecutor.ScaffoldSelection(true, scaffoldItem, scaffoldCount, "completed");
+        }
+        @Override public String selectedItemId() { return scaffoldCount > 0 ? scaffoldItem : null; }
+        @Override public int selectedItemCount() { return scaffoldCount; }
+        @Override public void useOnce(String b) {
+            log.add("useOnce");
+            int targetX = (int) Math.floor(lookX);
+            int targetY = (int) Math.floor(lookY + 0.25);
+            int targetZ = (int) Math.floor(lookZ);
+            if (world != null && scaffoldCount > 0 && y > targetY + 0.15) {
+                world.set(targetX, targetY, targetZ, scaffoldItem);
+                scaffoldCount--;
+                y = targetY + 1.0;
+            }
+        }
+        @Override public void sneak(String b) { log.add("sneak"); }
 
         void physics() {
             if (moving && wantJump) {
                 x = partialClimb ? Math.floor(lookX) - 0.2 : Math.floor(lookX) + 0.5;
                 y = Math.floor(lookY);
                 z = Math.floor(lookZ) + 0.5;
+                wantJump = false;
+            } else if (wantJump) {
+                y = Math.floor(y) + 0.42;
                 wantJump = false;
             }
         }
@@ -129,11 +163,12 @@ final class AscendExecutorTest {
             BotEventStream events = new BotEventStream();
             MutationGate gate = new MutationGate();
             ActionRuntime runtime = new ActionRuntime(new FakePlayerActionOwner(), body, registry, events);
+            body.world = world;
             runtime.submit("Bot", "asc-1", "ASCEND", OwnerPriority.RECOVERY, 0);
             List<MutationGate.Proposal> proposals = new ArrayList<>();
             AscendExecutor executor = new AscendExecutor(
                 "Bot", "asc-1", targetY,
-                body, body, body,
+                body, body, body, body,
                 new AscendExecutor.BlockReader() {
                     public String blockIdAt(int x, int y, int z) { return world.at(x, y, z); }
                     public boolean skyAbove(int x, int y, int z) { return world.sky; }
@@ -167,6 +202,17 @@ final class AscendExecutorTest {
         World world = new World();
         world.set(0, 60, 0, AIR);
         world.set(0, 61, 0, AIR);
+        return world;
+    }
+
+    private static World openPillarStart() {
+        World world = enclosedStart();
+        for (int y = 60; y <= 63; y++) {
+            world.set(0, y, 0, AIR);
+        }
+        for (int[] direction : new int[][] {{1, 0}, {0, 1}, {-1, 0}, {0, -1}}) {
+            world.set(direction[0], 60, direction[1], AIR);
+        }
         return world;
     }
 
@@ -233,14 +279,87 @@ final class AscendExecutorTest {
             world.set(direction[0], 61, direction[1], "minecraft:lava");
         }
         FakeBody body = new FakeBody(60);
+        body.scaffoldCount = 0;
         Harness h = Harness.create(world, body, 70, 2_000);
 
         JsonObject terminal = h.run(50, () -> { });
 
         assertEquals("unsafe", terminal.get("classification").getAsString());
-        assertEquals("hazard_blocks_stair_route", terminal.get("reason").getAsString());
+        assertEquals("pillar_no_scaffold_available", terminal.get("reason").getAsString());
+        assertEquals(
+            "hazard_blocks_stair_route",
+            terminal.get("pillar_fallback_from").getAsString()
+        );
         assertTrue(h.proposals.isEmpty());
         assertFalse(body.log.contains("exactBreak"));
+    }
+
+    @Test
+    void pillarsWhenNoStairRouteExistsAndVerifiesWorldHeightAndInventory() {
+        World world = openPillarStart();
+        FakeBody body = new FakeBody(60);
+        body.scaffoldCount = 2;
+        Harness h = Harness.create(world, body, 61, 2_000);
+
+        JsonObject terminal = h.run(500, () -> {
+            for (var proposal : h.proposals) {
+                h.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("surface_reached", terminal.get("reason").getAsString());
+        assertEquals(1, terminal.get("pillar_steps").getAsInt());
+        assertEquals(1, terminal.get("ascend_steps").getAsInt());
+        assertEquals(COBBLESTONE, world.at(0, 60, 0));
+        assertEquals(61.0, body.y);
+        assertEquals(1, body.scaffoldCount);
+        assertTrue(body.log.contains("sneak"));
+        assertTrue(body.log.contains("jump"));
+        assertTrue(body.log.contains("useOnce"));
+        assertEquals(1, h.proposals.size());
+        MutationGate.Proposal proposal = h.proposals.get(0);
+        assertEquals("place", proposal.mutationKind());
+        assertEquals("recovery", proposal.context());
+        assertEquals(60, proposal.y());
+        assertEquals(1, terminal.getAsJsonArray("placed").size());
+    }
+
+    @Test
+    void deniedPillarPlaceNeverJumpsOrMutates() {
+        World world = openPillarStart();
+        FakeBody body = new FakeBody(60);
+        Harness h = Harness.create(world, body, 61, 2_000);
+
+        JsonObject terminal = h.run(200, () -> {
+            for (var proposal : h.proposals) {
+                h.gate.verdict(proposal.proposalId(), false, "protected_region");
+            }
+        });
+
+        assertEquals("unsafe", terminal.get("classification").getAsString());
+        assertTrue(terminal.get("reason").getAsString().startsWith("governance_denied"));
+        assertEquals(AIR, world.at(0, 60, 0));
+        assertEquals(60.0, body.y);
+        assertFalse(body.log.contains("jump"));
+        assertFalse(body.log.contains("useOnce"));
+    }
+
+    @Test
+    void pillarWithoutScaffoldFailsBeforeMutationOrMovement() {
+        World world = openPillarStart();
+        FakeBody body = new FakeBody(60);
+        body.scaffoldCount = 0;
+        Harness h = Harness.create(world, body, 61, 2_000);
+
+        JsonObject terminal = h.run(20, () -> { });
+
+        assertEquals("failed", terminal.get("classification").getAsString());
+        assertEquals("pillar_no_scaffold_available", terminal.get("reason").getAsString());
+        assertTrue(h.proposals.isEmpty());
+        assertEquals(AIR, world.at(0, 60, 0));
+        assertEquals(60.0, body.y);
+        assertFalse(body.log.contains("jump"));
     }
 
     @Test
@@ -254,6 +373,22 @@ final class AscendExecutorTest {
 
         assertEquals("completed", terminal.get("classification").getAsString());
         assertEquals(0, terminal.get("ascend_steps").getAsInt());
+    }
+
+    @Test
+    void invalidAuthoritativePositionFailsBeforeAnyControlOrMutation() {
+        World world = enclosedStart();
+        FakeBody body = new FakeBody(60);
+        body.x = Double.NaN;
+        Harness h = Harness.create(world, body, 70, 500);
+
+        JsonObject terminal = h.run(10, () -> { });
+
+        assertEquals("failed", terminal.get("classification").getAsString());
+        assertEquals("body_position_invalid", terminal.get("reason").getAsString());
+        assertTrue(h.proposals.isEmpty());
+        assertFalse(body.log.contains("jump"));
+        assertFalse(body.log.contains("forward"));
     }
 
     @Test
