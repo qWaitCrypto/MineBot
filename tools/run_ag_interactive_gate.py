@@ -48,6 +48,7 @@ from minebot.game.rcon import RconConfig  # noqa: E402
 # Keep the scenario ingress byte-for-byte aligned with the frozen evaluator.
 MATERIAL_GOAL = AG_FP30_GOAL
 GUIDE_NAME = "MineBotGuide"
+FIXTURE_SENDER = "AGT"
 IDLE_PROMPT = "请暂时不要行动，等待环境中的下一次实质变化后再决定如何继续。"
 _BODY_READY_TIMEOUT_S = 120.0
 _SECOND_SEGMENT_EXIT_GRACE_S = 90.0
@@ -61,6 +62,7 @@ _IDLE_CLEAR_OFFSET_S = 930.0
 _MATERIAL_RESUME_OFFSET_S = 935.0
 _FIXTURE_CHAT_DISTANCE = 256
 _LOCAL_JAVA_BODY_URL = "ws://127.0.0.1:8767"
+_MAX_MINECRAFT_COMMAND_LENGTH = 256
 _RCON_ENV_KEYS = frozenset(
     {
         "MINEBOT_REAL_RCON_HOST",
@@ -112,10 +114,12 @@ class ExternalInteractiveScenarioContext:
             (int(record.get("seq") or 0) for record in self._production_records()),
             default=0,
         )
-        await asyncio.to_thread(
-            self._rcon.request,
-            f"execute as {sender} run me {text}",
-        )
+        command = f"execute as {sender} run me {text}"
+        if len(command) > _MAX_MINECRAFT_COMMAND_LENGTH:
+            raise ValueError(
+                "public fixture chat command exceeds Minecraft's 256-character limit"
+            )
+        await asyncio.to_thread(self._rcon.request, command)
         self._emit_fixture_event(
             "scenario_chat_emitted",
             sender=sender,
@@ -281,6 +285,7 @@ class ExternalInteractiveScenarioContext:
             self._rcon.request,
             f"player {self.chat_sender} spawn at {x} {y} {z}",
         )
+        await self._wait_for_entity(self.chat_sender, timeout_s=10.0)
         await asyncio.to_thread(
             self._rcon.request,
             f"gamemode spectator {self.chat_sender}",
@@ -293,6 +298,18 @@ class ExternalInteractiveScenarioContext:
             position=[x, y, z],
             distance=_FIXTURE_CHAT_DISTANCE,
         )
+
+    async def _wait_for_entity(self, name: str, *, timeout_s: float) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            response = await asyncio.to_thread(
+                self._rcon.request,
+                f"data get entity {name} Pos",
+            )
+            if response.strip() and "No entity was found" not in response:
+                return
+            await asyncio.sleep(0.1)
+        raise TimeoutError(f"fixture FakePlayer {name!r} did not join the world")
 
     async def _require_bot_state(self) -> _FixtureBotState:
         state = await self._read_bot_state()
@@ -377,13 +394,13 @@ async def _first_segment(
     duration_s: float,
 ) -> None:
     started = time.monotonic()
-    await context.emit_chat("AGTester", "你好，你是谁？请简短说明你现在能做什么。")
+    await context.emit_chat(FIXTURE_SENDER, "你好，你是谁？请简短说明你现在能做什么。")
     await asyncio.sleep(12)
-    await context.emit_chat("AGTester", f"/goal {MATERIAL_GOAL}")
+    await context.emit_chat(FIXTURE_SENDER, f"/goal {MATERIAL_GOAL}")
     await asyncio.sleep(90)
-    await context.emit_chat("AGTester", "/pause gate_pause_coverage")
+    await context.emit_chat(FIXTURE_SENDER, "/pause gate_pause_coverage")
     await asyncio.sleep(20)
-    await context.emit_chat("AGTester", "/continue")
+    await context.emit_chat(FIXTURE_SENDER, "/continue")
     await asyncio.sleep(max(0.0, duration_s - (time.monotonic() - started)))
 
 
@@ -392,9 +409,9 @@ async def _quality_segment(
     duration_s: float,
 ) -> None:
     started = time.monotonic()
-    await context.emit_chat("AGTester", f"/goal {MATERIAL_GOAL}")
+    await context.emit_chat(FIXTURE_SENDER, f"/goal {MATERIAL_GOAL}")
     await asyncio.sleep(max(0.0, duration_s - (time.monotonic() - started)))
-    await context.emit_chat("AGTester", "/quit ag_quality_gate_complete")
+    await context.emit_chat(FIXTURE_SENDER, "/quit ag_quality_gate_complete")
 
 
 async def _second_segment(
@@ -411,15 +428,15 @@ async def _second_segment(
     try:
         started = time.monotonic()
         if await wait_until(15):
-            await context.emit_chat("AGTester", "请回忆刚才的目标和已经确认的世界事实，然后继续当前任务。")
+            await context.emit_chat(FIXTURE_SENDER, "请回忆刚才的目标和已经确认的世界事实，然后继续当前任务。")
         if await wait_until(75):
             await context.spawn_fake_player_near_bot(GUIDE_NAME, distance=6)
             await context.emit_chat(
-                "AGTester",
+                FIXTURE_SENDER,
                 f"/goal 请找到并短暂跟随 {GUIDE_NAME}，保持安全距离；完成后如实汇报。",
             )
         if await wait_until(210):
-            await context.emit_chat("AGTester", f"/goal {MATERIAL_GOAL}")
+            await context.emit_chat(FIXTURE_SENDER, f"/goal {MATERIAL_GOAL}")
         if await wait_until(360):
             await context.set_difficulty("normal")
             await context.spawn_husk_near_bot(distance=2)
@@ -427,7 +444,7 @@ async def _second_segment(
             await context.clear_hostiles()
             await context.set_difficulty("peaceful")
             idle_marker = await context.emit_chat(
-                "AGTester",
+                FIXTURE_SENDER,
                 IDLE_PROMPT,
             )
             await context.wait_for_idle_quiescence(after_trace_seq=idle_marker)
@@ -438,11 +455,11 @@ async def _second_segment(
             await context.clear_hostiles()
             await context.set_difficulty("peaceful")
         if await wait_until(_MATERIAL_RESUME_OFFSET_S):
-            await context.emit_chat("AGTester", f"/goal {MATERIAL_GOAL}")
+            await context.emit_chat(FIXTURE_SENDER, f"/goal {MATERIAL_GOAL}")
         if await wait_until(max(0.0, duration_s - 80)):
-            await context.emit_chat("AGTester", "/cancel gate_cancellation_coverage")
+            await context.emit_chat(FIXTURE_SENDER, "/cancel gate_cancellation_coverage")
         await asyncio.sleep(max(0.0, duration_s - (time.monotonic() - started)))
-        await context.emit_chat("AGTester", "/quit ag_gate_complete")
+        await context.emit_chat(FIXTURE_SENDER, "/quit ag_gate_complete")
     finally:
         await context.clear_hostiles()
         await context.set_difficulty("peaceful")
@@ -954,7 +971,7 @@ def _run_segment(
     rcon = RconClient(_fixture_rcon_config(fixture_environment))
     fixture = ExternalInteractiveScenarioContext(
         bot_name=str(fixture_environment["MINEBOT_REAL_BOT"]),
-        chat_sender="AGTester",
+        chat_sender=FIXTURE_SENDER,
         rcon=rcon,
         production_trace_path=production_trace_path,
         fixture_trace_path=fixture_trace_path,
