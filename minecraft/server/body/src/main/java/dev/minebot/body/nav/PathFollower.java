@@ -184,4 +184,9 @@ public final class PathFollower {
     public int pathLength() {
         return path.size();
     }
+
+    double finalHorizontalDistance(double px, double pz) {
+        Waypoint waypoint = path.get(path.size() - 1);
+        return horizontalDistance(px, pz, waypoint);
+    }
 }

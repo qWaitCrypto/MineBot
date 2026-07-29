@@ -1151,7 +1151,7 @@ def _use_on_block_tool(use: UseTransactions) -> RegisteredTool:
 def _place_block_tool(work: BlockWork) -> RegisteredTool:
     return _tool(
         "place_block",
-        "Place one owned block at an exact empty position through fixed WORK governance and verify block truth.",
+        "Place one owned block at an exact empty position; Body selects a valid support face and verifies block truth.",
         _object_schema(
             {
                 "pos": POSITION_SCHEMA,

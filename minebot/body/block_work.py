@@ -124,6 +124,8 @@ class BlockWork:
     PLACE_HERE_VERTICAL_RADIUS = 4
     PLACE_HERE_COLUMN_LIMIT = 32
     PLACE_HERE_CANDIDATE_LIMIT = 32
+    PLACE_STAND_CENTER_RADIUS = 0.12
+    PLACE_STAND_Y_TOLERANCE = 0.08
     SHAFT_ALIGNMENT_RADIUS = 0.1
     SHAFT_ALIGNMENT_TIMEOUT_S = 5.0
 
@@ -1268,6 +1270,39 @@ class BlockWork:
                 jump_result,
                 "dig_up",
                 {"origin": list(origin), "cleared": cleared, "scaffold_candidates": list(candidates)},
+            )
+
+        jump_state = self.body.get_state()
+        jump_gain = jump_state.pos[1] - before.pos[1]
+        if jump_gain <= 0:
+            return ToolResult(
+                success=False,
+                reason="dig_up_no_height_gain",
+                can_retry=True,
+                next_suggestion="use the Body-owned surface recovery when a one-shot jump cannot leave the pillar cell",
+                metrics={
+                    "origin": list(origin),
+                    "observed_pos": list(jump_state.pos),
+                    "gained_y": jump_gain,
+                    "cleared": cleared,
+                    "jump_result": jump_result.to_payload(),
+                    "scaffold_candidates": list(candidates),
+                },
+            )
+        if _body_intersects_block(jump_state.pos, origin):
+            return ToolResult(
+                success=False,
+                reason="dig_up_jump_clearance_incomplete",
+                can_retry=True,
+                next_suggestion="use the Body-owned surface recovery so jump and pillar placement stay in one server-tick controller",
+                metrics={
+                    "origin": list(origin),
+                    "observed_pos": list(jump_state.pos),
+                    "gained_y": jump_gain,
+                    "cleared": cleared,
+                    "jump_result": jump_result.to_payload(),
+                    "scaffold_candidates": list(candidates),
+                },
             )
 
         scaffold_block = candidates[0]
@@ -2742,7 +2777,7 @@ class BlockWork:
             {
                 "target": list(pos),
                 "block_type": block_type,
-                "face": face,
+                "face": face or "auto",
                 "context": PlaceContext(context).value,
                 "purpose": purpose,
                 "replace_liquid": replacing_liquid,
@@ -2760,6 +2795,17 @@ class BlockWork:
         if result.success:
             self.governance.record_bot_placement(pos, block_type, purpose, self.body.bot_name)
         metrics = dict(result.metrics or {})
+        if result.reason == "placement_target_missed":
+            recorded: list[list[int]] = []
+            for raw in metrics.get("observed_placements") or []:
+                if not isinstance(raw, (list, tuple)) or len(raw) < 3:
+                    continue
+                actual = (int(raw[0]), int(raw[1]), int(raw[2]))
+                if actual == pos:
+                    continue
+                self.governance.record_bot_placement(actual, block_type, purpose, self.body.bot_name)
+                recorded.append(list(actual))
+            metrics["recorded_unintended_placements"] = recorded
         metrics.setdefault("target", list(pos))
         metrics.setdefault("block_type", block_type)
         metrics.setdefault("block_before", target_type)
@@ -2899,42 +2945,28 @@ class BlockWork:
         for candidate in standable:
             pos = tuple(candidate["target"])
             stand_points = [tuple(point) for point in candidate["stand_points"]]
-            current_feet = _state_block_pos(self.body.get_state().pos)
-            approach: dict[str, object] | None = None
-            if current_feet not in stand_points:
-                navigation_needed = True
-                if self.navigator is None:
+            approach_result = self._approach_place_candidate(stand_points, pos, timeout_s=timeout_s)
+            if isinstance(approach_result, ToolResult):
+                if approach_result.reason == "place_here_navigation_missing":
                     navigation_missing = True
-                    attempts.append(
-                        {
-                            "target": list(pos),
-                            "stand_points": [list(point) for point in stand_points],
-                            "result": ToolResult(
-                                success=False,
-                                reason="place_here_navigation_missing",
-                                can_retry=True,
-                                next_suggestion="attach a navigation transaction before using distant placement stand points",
-                            ).to_payload(),
-                        }
-                    )
-                    continue
-                approach_result = self._approach_place_candidate(stand_points, pos, timeout_s=timeout_s)
-                if isinstance(approach_result, ToolResult):
-                    navigation_failures.append(
-                        {
-                            "target": list(pos),
-                            "result": approach_result.to_payload(),
-                        }
-                    )
-                    attempts.append(
-                        {
-                            "target": list(pos),
-                            "stand_points": [list(point) for point in stand_points],
-                            "result": approach_result.to_payload(),
-                        }
-                    )
-                    continue
-                approach = approach_result
+                else:
+                    navigation_needed = True
+                navigation_failures.append(
+                    {
+                        "target": list(pos),
+                        "result": approach_result.to_payload(),
+                    }
+                )
+                attempts.append(
+                    {
+                        "target": list(pos),
+                        "stand_points": [list(point) for point in stand_points],
+                        "result": approach_result.to_payload(),
+                    }
+                )
+                continue
+            approach = approach_result
+            navigation_needed = navigation_needed or bool(approach.get("navigated"))
 
             result = self.place_block(
                 pos,
@@ -3080,32 +3112,62 @@ class BlockWork:
         *,
         timeout_s: float,
     ) -> dict[str, object] | ToolResult:
-        if self.navigator is None:
-            return ToolResult(
-                success=False,
-                reason="place_here_navigation_missing",
-                can_retry=True,
-                next_suggestion="attach a navigation transaction before approaching a placement stand point",
-                metrics={"target": list(target)},
-            )
-
         attempts: list[dict[str, object]] = []
         for stand in stand_points:
+            initial_pos = self.body.get_state().pos
+            if _place_stance_ready(
+                initial_pos,
+                stand,
+                target,
+                center_radius=self.PLACE_STAND_CENTER_RADIUS,
+                y_tolerance=self.PLACE_STAND_Y_TOLERANCE,
+            ):
+                return {
+                    "navigated": False,
+                    "stand_target": list(stand),
+                    "final_pos": list(initial_pos),
+                    "attempts": attempts,
+                }
+            if self.navigator is None:
+                attempts.append(
+                    {
+                        "goal": list(stand),
+                        "final_pos": list(initial_pos),
+                        "stance_ready": False,
+                        "reason": "centering_required",
+                    }
+                )
+                continue
             nav_result = self.navigator.navigate_to(
                 stand,
                 timeout_s=timeout_s,
                 break_context=BreakContext.TRAVEL,
-                arrival_radius=0.25,
+                arrival_radius=0.1,
             )
             if not nav_result.success:
                 attempts.append({"goal": list(stand), "result": nav_result.to_payload()})
                 continue
-            final_pos = _state_block_pos(self.body.get_state().pos)
-            if final_pos == stand:
-                attempts.append({"goal": list(stand), "result": nav_result.to_payload(), "final_feet": list(final_pos)})
+            final_state_pos = self.body.get_state().pos
+            final_pos = _state_block_pos(final_state_pos)
+            if _place_stance_ready(
+                final_state_pos,
+                stand,
+                target,
+                center_radius=self.PLACE_STAND_CENTER_RADIUS,
+                y_tolerance=self.PLACE_STAND_Y_TOLERANCE,
+            ):
+                attempts.append(
+                    {
+                        "goal": list(stand),
+                        "result": nav_result.to_payload(),
+                        "final_feet": list(final_pos),
+                        "final_pos": list(final_state_pos),
+                    }
+                )
                 return {
                     "navigated": True,
                     "stand_target": list(stand),
+                    "final_pos": list(final_state_pos),
                     "attempts": attempts,
                 }
             attempts.append(
@@ -3113,9 +3175,22 @@ class BlockWork:
                     "goal": list(stand),
                     "result": nav_result.to_payload(),
                     "final_feet": list(final_pos),
+                    "final_pos": list(final_state_pos),
                     "stand_verified": False,
-                    "reason": "stand_point_missed",
+                    "reason": "stand_point_not_settled",
                 }
+            )
+        if self.navigator is None:
+            return ToolResult(
+                success=False,
+                reason="place_here_navigation_missing",
+                can_retry=True,
+                next_suggestion="attach a navigation transaction before approaching or centering on a placement stand point",
+                metrics={
+                    "target": list(target),
+                    "stand_points": [list(point) for point in stand_points],
+                    "attempts": attempts,
+                },
             )
         return ToolResult(
             success=False,
@@ -3558,37 +3633,66 @@ def _placement_collision(
     *,
     purpose: str,
 ) -> ToolResult | None:
+    if not _body_intersects_block(body_pos, target):
+        return None
     feet = _state_block_pos(body_pos)
     head = (feet[0], feet[1] + 1, feet[2])
-    if target == head:
-        return ToolResult(
-            success=False,
-            reason="place_denied:body_collision",
-            can_retry=False,
-            next_suggestion="step away or lower the target before placing a solid block into the bot's head space",
-            metrics={
-                "target": list(target),
-                "body_feet": list(feet),
-                "body_head": list(head),
-                "collision_part": "head",
-                "purpose": purpose,
-            },
-        )
-    if target == feet and purpose != "pillar":
-        return ToolResult(
-            success=False,
-            reason="place_denied:body_collision",
-            can_retry=False,
-            next_suggestion="step off the target block before placing into the bot's occupied foot space",
-            metrics={
-                "target": list(target),
-                "body_feet": list(feet),
-                "body_head": list(head),
-                "collision_part": "feet",
-                "purpose": purpose,
-            },
-        )
-    return None
+    collision_part = "head" if target == head else "feet" if target == feet else "body_edge"
+    return ToolResult(
+        success=False,
+        reason="place_denied:body_collision",
+        can_retry=True,
+        next_suggestion="move to a centered stand point that leaves the target outside the player's collision box",
+        metrics={
+            "target": list(target),
+            "body_pos": list(body_pos),
+            "body_feet": list(feet),
+            "body_head": list(head),
+            "collision_part": collision_part,
+            "purpose": purpose,
+        },
+    )
+
+
+def _body_intersects_block(
+    body_pos: tuple[float, float, float],
+    target: Position,
+    *,
+    half_width: float = 0.3,
+    height: float = 1.8,
+    epsilon: float = 1.0e-6,
+) -> bool:
+    body_min_x = body_pos[0] - half_width
+    body_max_x = body_pos[0] + half_width
+    body_min_y = body_pos[1]
+    body_max_y = body_pos[1] + height
+    body_min_z = body_pos[2] - half_width
+    body_max_z = body_pos[2] + half_width
+    return (
+        body_max_x > target[0] + epsilon
+        and body_min_x < target[0] + 1.0 - epsilon
+        and body_max_y > target[1] + epsilon
+        and body_min_y < target[1] + 1.0 - epsilon
+        and body_max_z > target[2] + epsilon
+        and body_min_z < target[2] + 1.0 - epsilon
+    )
+
+
+def _place_stance_ready(
+    body_pos: tuple[float, float, float],
+    stand: Position,
+    target: Position,
+    *,
+    center_radius: float,
+    y_tolerance: float,
+) -> bool:
+    if _state_block_pos(body_pos) != stand:
+        return False
+    if abs(body_pos[1] - stand[1]) > y_tolerance:
+        return False
+    if dist((body_pos[0], body_pos[2]), (stand[0] + 0.5, stand[2] + 0.5)) > center_radius:
+        return False
+    return not _body_intersects_block(body_pos, target)
 
 
 def _scan_place_here_candidates(
@@ -3838,7 +3942,13 @@ def _surface_lateral_columns(
 
 
 def _place_here_retryable_reason(reason: str) -> bool:
-    return reason == "timeout" or reason.startswith("place_denied:")
+    return reason in {
+        "timeout",
+        "place_timeout",
+        "body_collision",
+        "placement_support_missing",
+        "target_changed_during_place",
+    } or reason.startswith("place_denied:")
 
 
 def _state_block_pos(pos: tuple[float, float, float]) -> Position:

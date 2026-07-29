@@ -445,7 +445,10 @@ class GovernancePolicy:
         if natural_region is None and context != PlaceContext.DIRECT:
             return LegalityDecision(allowed=False, reason="unknown_provenance", protected=True)
 
-        if block_type in STRONGLY_PROTECTED_TYPES and context != PlaceContext.DIRECT:
+        if block_type in STRONGLY_PROTECTED_TYPES and context in {
+            PlaceContext.TRAVEL,
+            PlaceContext.RECOVERY,
+        }:
             return LegalityDecision(allowed=False, reason="protected_type", protected=True)
 
         return LegalityDecision(

@@ -612,7 +612,12 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     )
                     : null;
             final String placeFace = action.equals("placeBlock")
-                ? optionalChoice(params, "face", "up", Set.of("up", "down", "north", "south", "east", "west"))
+                ? optionalChoice(
+                    params,
+                    "face",
+                    "auto",
+                    Set.of("auto", "up", "down", "north", "south", "east", "west")
+                )
                 : null;
             final boolean replaceLiquid = action.equals("placeBlock")
                 && optionalBoolean(params, "replace_liquid", false);

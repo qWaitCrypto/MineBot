@@ -165,6 +165,33 @@ final class NavigateExecutorTest {
     }
 
     @Test
+    void dryStandDoesNotCompleteWhileFeetAreStillFallingThroughItsVoxel() {
+        Harness harness = Harness.create(
+            new FakeWorld(FLOOR),
+            new Goal.Stand(0, STAND, 0),
+            200,
+            0.1
+        );
+        harness.body().y = STAND + 0.92;
+
+        harness.runtime().tick(1);
+        harness.runtime().tick(2);
+
+        assertEquals(ActionRegistry.State.RUNNING, harness.registry().status("nav-1").state());
+
+        harness.body().y = STAND;
+        harness.runtime().tick(3);
+        assertEquals(ActionRegistry.State.RUNNING, harness.registry().status("nav-1").state());
+        harness.runtime().tick(4);
+
+        assertEquals(ActionRegistry.State.TERMINAL, harness.registry().status("nav-1").state());
+        assertEquals(
+            "completed",
+            harness.registry().status("nav-1").terminal().get("classification").getAsString()
+        );
+    }
+
+    @Test
     void noPathIsATypedFailureNotARetryLoop() {
         FakeWorld world = new FakeWorld(FLOOR);
         // Box the bot in completely.

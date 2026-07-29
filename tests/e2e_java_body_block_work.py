@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from minebot.app.body_provider import build_body_provider
+from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry
 from minebot.body import BlockWork
 from minebot.body.inventory_read import read_inventory_slots
 from minebot.contract import Action, BreakContext, InventorySlot, PlaceContext, Region
@@ -160,7 +161,8 @@ def main() -> int:
 
         jump = run_action(body, Action.create("jump", {}))
         assert jump.data.get("success") is True, jump
-        assert float(jump.data.get("gained_y") or 0.0) > 0.05, jump
+        assert float(jump.data.get("gained_y") or 0.0) >= 1.0, jump
+        time.sleep(0.5)
 
         denied_mine_before = read_block(body, DENIED_MINE)
         denied_mine = run_action(body, Action.create("mineBlock", {
@@ -190,6 +192,62 @@ def main() -> int:
         assert denied_place_before == denied_place_after == "minecraft:air"
         assert denied_inventory_before == denied_inventory_after
 
+        command(rcon, "setblock 0 200 -1 stone")
+        command(rcon, "setblock -1 200 0 stone")
+        command(rcon, "setblock 0 200 1 stone")
+        command(rcon, "setblock 1 200 0 air")
+        command(rcon, f"tp {BOT} 0.82 200 0.5 0 0")
+        command(rcon, f"clear {BOT}")
+        command(rcon, f"item replace entity {BOT} hotbar.0 with crafting_table 1")
+        command(rcon, f"item replace entity {BOT} hotbar.1 with oak_planks 3")
+        command(rcon, f"item replace entity {BOT} hotbar.2 with stick 2")
+        registry = build_phase1_registry(
+            body,
+            Phase1RuntimeConfig(
+                natural_region=NATURAL_REGION,
+                body_provider="java",
+                governance_policy=provider.governance,
+            ),
+        )
+        place_here_tool = registry.get("place_here").callable
+        craft_item_tool = registry.get("craft_item").callable
+        selected_table = run_action(
+            body,
+            Action.create("selectItem", {"item": "minecraft:crafting_table"}),
+        )
+        assert selected_table.data.get("success") is True, selected_table
+        placement_started = time.monotonic()
+        table_place = place_here_tool(
+            {
+                "block_type": "minecraft:crafting_table",
+                "radius": 1,
+                "purpose": "workstation",
+                "timeout_s": 8.0,
+            }
+        )
+        placement_elapsed_s = time.monotonic() - placement_started
+        place_here = (table_place.metrics or {}).get("place_here") or {}
+        table_target = place_here.get("chosen_target")
+        assert table_place.success and table_place.reason == "completed", table_place
+        assert table_target == [1, 200, 0], table_place
+        assert read_block(body, tuple(table_target)) == "minecraft:crafting_table"
+        approach = (place_here.get("attempts") or [{}])[-1].get("approach") or {}
+        assert approach.get("navigated") is True, table_place
+        centered = body.get_state().pos
+        assert abs(centered[0] - 0.5) <= BlockWork.PLACE_STAND_CENTER_RADIUS, centered
+        assert abs(centered[2] - 0.5) <= BlockWork.PLACE_STAND_CENTER_RADIUS, centered
+
+        crafted = craft_item_tool(
+            {
+                "item": "minecraft:wooden_pickaxe",
+                "count": 1,
+                "auto_equip": True,
+            }
+        )
+        assert crafted.success and crafted.reason == "completed", crafted
+        assert inventory_count(body, "minecraft:wooden_pickaxe") == 1
+        assert body.get_state().selected_item == "minecraft:wooden_pickaxe"
+
         artifact = {
             "scope": "java_body_block_work",
             "formal_gate": False,
@@ -198,6 +256,7 @@ def main() -> int:
             "provider": "java",
             "scarpet_body_constructed": False,
             "scarpet_action_calls": 0,
+            "canonical_tools": ["place_here", "craft_item"],
             "mine": {
                 "reason": mined.reason,
                 "block_after": mine_block_after,
@@ -225,8 +284,19 @@ def main() -> int:
                 "place_world_unchanged": True,
                 "place_inventory_unchanged": True,
             },
+            "off_center_workstation_replay": {
+                "start_pos": [0.82, 200.0, 0.5],
+                "stand_center": [0.5, 200.0, 0.5],
+                "table_target": table_target,
+                "placement_reason": table_place.reason,
+                "placement_elapsed_s": round(placement_elapsed_s, 3),
+                "navigated_to_stable_stand": approach.get("navigated"),
+                "final_pos": list(centered),
+                "crafted": "minecraft:wooden_pickaxe",
+                "equipped": body.get_state().selected_item,
+            },
         }
-        output = Path("logs/agentic-runtime/java-body-block-work-20260727.json")
+        output = Path("logs/agentic-runtime/java-body-block-work-20260729.json")
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
         print(json.dumps(artifact, indent=2))

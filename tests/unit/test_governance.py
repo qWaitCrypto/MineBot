@@ -221,6 +221,18 @@ class GovernanceTests(unittest.TestCase):
         self.assertEqual(decision.reason, "allowed_place")
         self.assertEqual(decision.natural_region, "test_mine")
 
+    def test_work_context_allows_bot_owned_workstation_in_natural_region(self):
+        decision = self.policy.can_place((0, 64, 0), "crafting_table", PlaceContext.WORK, "Bot1")
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed_place")
+
+    def test_travel_context_does_not_use_workstation_as_scaffold(self):
+        decision = self.policy.can_place((0, 64, 0), "crafting_table", PlaceContext.TRAVEL, "Bot1")
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "protected_type")
+
     def test_place_blocked_in_protected_region(self):
         decision = self.policy.can_place((25, 64, 25), "cobblestone", PlaceContext.DIRECT, "Bot1")
 

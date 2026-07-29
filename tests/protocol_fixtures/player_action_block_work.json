@@ -1,6 +1,6 @@
 {
   "name": "player_action_block_work",
-  "description": "PLAYER_ACTION carries governed exact mine/place work and observed jump truth under caller action ids.",
+  "description": "PLAYER_ACTION carries governed exact mine/place work, Body-selected placement support, and full-block jump truth under caller action ids.",
   "steps": [
     {
       "send": {"builder": "hello", "args": {}},
@@ -137,7 +137,7 @@
           "params": {
             "target": [4, 64, 0],
             "block_type": "minecraft:cobblestone",
-            "face": "up",
+            "face": "auto",
             "context": "work",
             "replace_liquid": false,
             "timeout_ticks": 40
@@ -155,7 +155,7 @@
         "params": {
           "target": [4, 64, 0],
           "block_type": "minecraft:cobblestone",
-          "face": "up",
+          "face": "auto",
           "context": "work",
           "replace_liquid": false,
           "timeout_ticks": 40
@@ -228,6 +228,8 @@
           "success": true,
           "target": [4, 64, 0],
           "block_type": "minecraft:cobblestone",
+          "requested_face": "auto",
+          "face": "up",
           "block_after": "minecraft:cobblestone",
           "item_count_before": 3,
           "item_count_after": 2,
@@ -276,11 +278,11 @@
           "reason": "completed",
           "success": true,
           "position_before": [3.5, 64.0, 0.5],
-          "position_after": [3.5, 64.42, 0.5],
-          "gained_y": 0.42
+          "position_after": [3.5, 65.001, 0.5],
+          "gained_y": 1.001
         }
       },
-      "expect": [{"kind": "event", "name": "action_terminal", "seq": 3, "data_contains": {"gained_y": 0.42}}]
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 3, "data_contains": {"gained_y": 1.001}}]
     }
   ],
   "final": {"supports": ["PLAYER_ACTION", "MUTATION_VERDICT"], "pending_requests": 0, "last_seq": {"MineBot_1": 3}}

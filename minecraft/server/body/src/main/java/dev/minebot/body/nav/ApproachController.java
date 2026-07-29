@@ -30,6 +30,8 @@ public final class ApproachController {
     }
 
     private static final double PLAYER_EYE_HEIGHT = 1.62;
+    private static final double STABLE_STAND_Y_TOLERANCE = 0.08;
+    private static final int STABLE_STAND_TICKS = 2;
 
     private final String bot;
     private final String actionId;
@@ -50,6 +52,7 @@ public final class ApproachController {
     private int replans;
     private int expandedTotal;
     private int unloadedTotal;
+    private int stableArrivalTicks;
     private long lastStuckCell = Long.MIN_VALUE;
 
     public ApproachController(
@@ -156,6 +159,7 @@ public final class ApproachController {
         expandedTotal += result.expandedNodes();
         unloadedTotal += result.unloadedTouches();
         followingPartialPath = result.outcome() == AStarPathfinder.Outcome.PARTIAL;
+        stableArrivalTicks = 0;
         List<Waypoint> path = result.path();
         follower = new PathFollower(path, finalWaypointReachDistance);
         pathfinder = null;
@@ -232,8 +236,24 @@ public final class ApproachController {
                 int fy = (int) Math.floor(py);
                 int fz = (int) Math.floor(pz);
                 if (goal.isSatisfied(world, fx, fy, fz)) {
+                    if (isDrySupportedStand(fx, fy, fz)) {
+                        if (Math.abs(py - fy) > STABLE_STAND_Y_TOLERANCE) {
+                            stableArrivalTicks = 0;
+                            return Outcome.WORKING_OUTCOME;
+                        }
+                        if (follower.finalHorizontalDistance(px, pz)
+                            > finalWaypointReachDistance + 1.0e-6) {
+                            stableArrivalTicks = 0;
+                            return replanOrFail(serverTick, "arrival_drift");
+                        }
+                        stableArrivalTicks++;
+                        if (stableArrivalTicks < STABLE_STAND_TICKS) {
+                            return Outcome.WORKING_OUTCOME;
+                        }
+                    }
                     return new Outcome(Status.COMPLETED, "goal_satisfied");
                 }
+                stableArrivalTicks = 0;
                 return replanOrFail(
                     serverTick,
                     followingPartialPath ? "partial_path_continuation" : "arrival_goal_unsatisfied"
@@ -260,6 +280,7 @@ public final class ApproachController {
             return new Outcome(Status.FAILED, "replan_budget_exhausted:" + reason);
         }
         replans++;
+        stableArrivalTicks = 0;
         follower = null;
         pathfinder = null;
         phase = Phase.PLANNING;
@@ -282,6 +303,12 @@ public final class ApproachController {
         int z = (int) Math.floor(pz);
         return world.kindAt(x, y, z) == WorldView.NodeKind.LIQUID
             || world.kindAt(x, y - 1, z) == WorldView.NodeKind.LIQUID;
+    }
+
+    private boolean isDrySupportedStand(int x, int y, int z) {
+        return world.kindAt(x, y, z) == WorldView.NodeKind.PASSABLE
+            && world.kindAt(x, y + 1, z) == WorldView.NodeKind.PASSABLE
+            && world.kindAt(x, y - 1, z) == WorldView.NodeKind.SOLID;
     }
 
     private void maintainPlanningPosture(double px, double py, double pz) {

@@ -7,7 +7,9 @@ import dev.minebot.body.nav.MovementControls;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -21,12 +23,17 @@ final class BlockPrimitiveActionsTest {
         boolean collision;
         String selectedItem = "minecraft:cobblestone";
         int selectedCount = 3;
+        boolean supportAvailable = true;
+        final Set<String> supportCells = new HashSet<>();
         PlayerPrimitiveActions.Position position = new PlayerPrimitiveActions.Position(0.5, 64.0, 0.5);
 
         @Override public boolean present() { return present; }
         @Override public String blockIdAt(int x, int y, int z) { return targetBlock; }
         @Override public boolean canReplaceAt(int x, int y, int z, boolean replaceLiquid) { return replaceable; }
         @Override public boolean playerIntersects(int x, int y, int z) { return collision; }
+        @Override public boolean canPlaceAgainst(int x, int y, int z) {
+            return supportCells.isEmpty() ? supportAvailable : supportCells.contains(x + ":" + y + ":" + z);
+        }
         @Override public String selectedItemId() { return selectedItem; }
         @Override public int selectedItemCount() { return selectedCount; }
         @Override public PlayerPrimitiveActions.Position position() { return position; }
@@ -40,6 +47,7 @@ final class BlockPrimitiveActionsTest {
         int jumps;
         int clears;
         boolean decrementOnUse = true;
+        boolean placeAtTarget = true;
         boolean gainOnJump = true;
 
         FakeControls(FakeWorld world) {
@@ -62,8 +70,10 @@ final class BlockPrimitiveActionsTest {
         @Override
         public void useOnce(String botName) {
             uses++;
-            world.targetBlock = world.selectedItem;
-            world.replaceable = false;
+            if (placeAtTarget) {
+                world.targetBlock = world.selectedItem;
+                world.replaceable = false;
+            }
             if (decrementOnUse) {
                 world.selectedCount--;
             }
@@ -74,7 +84,7 @@ final class BlockPrimitiveActionsTest {
             jumps++;
             if (gainOnJump) {
                 world.position = new PlayerPrimitiveActions.Position(
-                    world.position.x(), world.position.y() + 0.42, world.position.z()
+                    world.position.x(), world.position.y() + 1.05, world.position.z()
                 );
             }
         }
@@ -262,6 +272,86 @@ final class BlockPrimitiveActionsTest {
     }
 
     @Test
+    void autoFaceUsesAnActuallySupportedNeighbor() {
+        FakeWorld world = new FakeWorld();
+        world.targetBlock = "minecraft:air";
+        world.replaceable = true;
+        world.supportCells.add("0:64:0");
+        FakeControls controls = new FakeControls(world);
+        MutationGate gate = new MutationGate();
+        List<MutationGate.Proposal> proposals = new ArrayList<>();
+        ActionRegistry registry = new ActionRegistry();
+        ActionRuntime runtime = runtime(controls, registry);
+        runtime.submit("Bot", "place-auto", "PLAYER_ACTION:placeBlock", OwnerPriority.ACTION, 48);
+        runtime.attachExecutor("place-auto", new BlockPrimitiveActions.PlaceExecutor(
+            "Bot", "place-auto", 1, 64, 0, "minecraft:cobblestone", "auto", "work", false, 20,
+            world, controls, gate, proposals::add, runtime
+        ));
+
+        runtime.tick(48);
+        gate.verdict(proposals.getFirst().proposalId(), true, "allowed_place");
+        runtime.tick(49);
+        runtime.tick(50);
+
+        var terminal = registry.status("place-auto").terminal();
+        assertEquals("completed", terminal.get("classification").getAsString());
+        assertEquals("east", terminal.get("face").getAsString());
+    }
+
+    @Test
+    void placeFailsBeforeUseWhenNoSupportingFaceExists() {
+        FakeWorld world = new FakeWorld();
+        world.targetBlock = "minecraft:air";
+        world.replaceable = true;
+        world.supportAvailable = false;
+        FakeControls controls = new FakeControls(world);
+        ActionRegistry registry = new ActionRegistry();
+        ActionRuntime runtime = runtime(controls, registry);
+        runtime.submit("Bot", "place-no-support", "PLAYER_ACTION:placeBlock", OwnerPriority.ACTION, 51);
+        runtime.attachExecutor("place-no-support", new BlockPrimitiveActions.PlaceExecutor(
+            "Bot", "place-no-support", 1, 64, 0, "minecraft:cobblestone", "auto", "work", false, 20,
+            world, controls, new MutationGate(), proposal -> {}, runtime
+        ));
+
+        runtime.tick(51);
+
+        var terminal = registry.status("place-no-support").terminal();
+        assertEquals("failed", terminal.get("classification").getAsString());
+        assertEquals("placement_support_missing", terminal.get("reason").getAsString());
+        assertEquals(0, controls.uses);
+    }
+
+    @Test
+    void consumedItemWithoutTargetEffectFailsAsTargetMissInsteadOfTimingOut() {
+        FakeWorld world = new FakeWorld();
+        world.targetBlock = "minecraft:air";
+        world.replaceable = true;
+        FakeControls controls = new FakeControls(world);
+        controls.placeAtTarget = false;
+        MutationGate gate = new MutationGate();
+        List<MutationGate.Proposal> proposals = new ArrayList<>();
+        ActionRegistry registry = new ActionRegistry();
+        ActionRuntime runtime = runtime(controls, registry);
+        runtime.submit("Bot", "place-missed", "PLAYER_ACTION:placeBlock", OwnerPriority.ACTION, 52);
+        runtime.attachExecutor("place-missed", new BlockPrimitiveActions.PlaceExecutor(
+            "Bot", "place-missed", 1, 64, 0, "minecraft:cobblestone", "up", "work", false, 40,
+            world, controls, gate, proposals::add, runtime
+        ));
+
+        runtime.tick(52);
+        gate.verdict(proposals.getFirst().proposalId(), true, "allowed_place");
+        for (int tick = 53; tick <= 59; tick++) {
+            runtime.tick(tick);
+        }
+
+        var terminal = registry.status("place-missed").terminal();
+        assertEquals("failed", terminal.get("classification").getAsString());
+        assertEquals("placement_target_missed", terminal.get("reason").getAsString());
+        assertEquals(3, terminal.get("item_count_before").getAsInt());
+        assertEquals(2, terminal.get("item_count_after").getAsInt());
+    }
+
+    @Test
     void jumpCompletesOnlyAfterObservedHeightGain() {
         FakeWorld world = new FakeWorld();
         FakeControls controls = new FakeControls(world);
@@ -278,7 +368,7 @@ final class BlockPrimitiveActionsTest {
 
         var terminal = registry.status("jump-1").terminal();
         assertEquals("completed", terminal.get("classification").getAsString());
-        assertTrue(terminal.get("gained_y").getAsDouble() > 0.4);
+        assertTrue(terminal.get("gained_y").getAsDouble() >= 1.0);
         assertEquals(1, controls.jumps);
     }
 

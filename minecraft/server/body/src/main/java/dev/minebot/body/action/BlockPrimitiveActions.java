@@ -4,9 +4,18 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import dev.minebot.body.nav.MovementControls;
 
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+
 /** Governed exact block work and observed one-shot jumping for Python transactions. */
 public final class BlockPrimitiveActions {
-    private static final double JUMP_MIN_GAIN = 0.05;
+    private static final double JUMP_CLEARANCE_GAIN = 1.0;
+    private static final int PLACEMENT_EFFECT_GRACE_TICKS = 4;
+    private static final Set<String> PLACEMENT_FACES = Set.of(
+        "up", "down", "north", "south", "east", "west"
+    );
 
     private BlockPrimitiveActions() {}
 
@@ -18,6 +27,10 @@ public final class BlockPrimitiveActions {
         String selectedItemId();
         int selectedItemCount();
         PlayerPrimitiveActions.Position position();
+
+        default boolean canPlaceAgainst(int x, int y, int z) {
+            return blockIdAt(x, y, z) != null && !canReplaceAt(x, y, z, false);
+        }
     }
 
     public interface ProposalSink {
@@ -202,7 +215,7 @@ public final class BlockPrimitiveActions {
         private final int y;
         private final int z;
         private final String blockId;
-        private final String face;
+        private final String requestedFace;
         private final String context;
         private final boolean replaceLiquid;
         private final int timeoutTicks;
@@ -216,6 +229,9 @@ public final class BlockPrimitiveActions {
         private String proposalId;
         private int startedTick = -1;
         private int itemCountBefore;
+        private int itemDeltaObservedTick = -1;
+        private String resolvedFace;
+        private final Map<Cell, String> nearbyBefore = new LinkedHashMap<>();
 
         public PlaceExecutor(
             String bot,
@@ -240,7 +256,7 @@ public final class BlockPrimitiveActions {
             this.y = y;
             this.z = z;
             this.blockId = blockId;
-            this.face = face;
+            this.requestedFace = face;
             this.context = context;
             this.replaceLiquid = replaceLiquid;
             this.timeoutTicks = Math.max(1, timeoutTicks);
@@ -310,7 +326,8 @@ public final class BlockPrimitiveActions {
                 return;
             }
             itemCountBefore = world.selectedItemCount();
-            PlayerPrimitiveActions.Position aim = placementAim(x, y, z, face);
+            snapshotNearby();
+            PlayerPrimitiveActions.Position aim = placementAim(x, y, z, resolvedFace);
             controls.lookAt(bot, aim.x(), aim.y(), aim.z());
             controls.useOnce(bot);
             phase = MutationPhase.EXECUTING;
@@ -327,6 +344,15 @@ public final class BlockPrimitiveActions {
                 }
                 return;
             }
+            if (countAfter < itemCountBefore) {
+                if (itemDeltaObservedTick < 0) {
+                    itemDeltaObservedTick = serverTick;
+                }
+                if (serverTick - itemDeltaObservedTick >= PLACEMENT_EFFECT_GRACE_TICKS) {
+                    finish(false, "placement_target_missed", ActionRuntime.CLASS_FAILED, serverTick);
+                }
+                return;
+            }
             if (!world.canReplaceAt(x, y, z, replaceLiquid)) {
                 finish(false, "target_changed_during_place", ActionRuntime.CLASS_FAILED, serverTick);
             }
@@ -338,6 +364,10 @@ public final class BlockPrimitiveActions {
             }
             if (world.playerIntersects(x, y, z)) {
                 return "body_collision";
+            }
+            resolvedFace = resolvePlacementFace();
+            if (resolvedFace == null) {
+                return "placement_support_missing";
             }
             if (!blockId.equals(world.selectedItemId()) || world.selectedItemCount() <= 0) {
                 return "selected_item_mismatch";
@@ -351,12 +381,69 @@ public final class BlockPrimitiveActions {
                 proposalId = null;
             }
             JsonObject facts = mutationFacts(success, reason, x, y, z, blockId, world.position());
-            facts.addProperty("face", face);
+            facts.addProperty("requested_face", requestedFace);
+            if (resolvedFace != null) {
+                facts.addProperty("face", resolvedFace);
+            }
             facts.addProperty("block_after", world.blockIdAt(x, y, z));
             facts.addProperty("item_count_before", itemCountBefore);
             facts.addProperty("item_count_after", world.selectedItemCount());
             facts.addProperty("elapsed_ticks", Math.max(0, serverTick - startedTick));
+            if (reason.equals("placement_target_missed")) {
+                facts.add("observed_placements", changedPlacements());
+            }
             runtime.finish(bot, actionId, classification, facts, serverTick);
+        }
+
+        private String resolvePlacementFace() {
+            LinkedHashSet<String> candidates = new LinkedHashSet<>();
+            if (requestedFace != null && !requestedFace.equals("auto")) {
+                candidates.add(requestedFace);
+            }
+            candidates.add("up");
+            candidates.add("north");
+            candidates.add("south");
+            candidates.add("east");
+            candidates.add("west");
+            candidates.add("down");
+            for (String candidate : candidates) {
+                if (!PLACEMENT_FACES.contains(candidate)) {
+                    continue;
+                }
+                Cell support = placementSupport(x, y, z, candidate);
+                if (world.canPlaceAgainst(support.x(), support.y(), support.z())) {
+                    return candidate;
+                }
+            }
+            return null;
+        }
+
+        private void snapshotNearby() {
+            nearbyBefore.clear();
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        Cell cell = new Cell(x + dx, y + dy, z + dz);
+                        nearbyBefore.put(cell, world.blockIdAt(cell.x(), cell.y(), cell.z()));
+                    }
+                }
+            }
+        }
+
+        private JsonArray changedPlacements() {
+            JsonArray changed = new JsonArray();
+            for (Map.Entry<Cell, String> entry : nearbyBefore.entrySet()) {
+                Cell cell = entry.getKey();
+                String after = world.blockIdAt(cell.x(), cell.y(), cell.z());
+                if (blockId.equals(after) && !blockId.equals(entry.getValue())) {
+                    JsonArray position = new JsonArray();
+                    position.add(cell.x());
+                    position.add(cell.y());
+                    position.add(cell.z());
+                    changed.add(position);
+                }
+            }
+            return changed;
         }
     }
 
@@ -403,7 +490,7 @@ public final class BlockPrimitiveActions {
                 return;
             }
             PlayerPrimitiveActions.Position after = world.position();
-            if (after.y() - before.y() > JUMP_MIN_GAIN) {
+            if (after.y() - before.y() >= JUMP_CLEARANCE_GAIN) {
                 finish(true, "completed", ActionRuntime.CLASS_COMPLETED, serverTick);
                 return;
             }
@@ -432,6 +519,20 @@ public final class BlockPrimitiveActions {
             case "east" -> new PlayerPrimitiveActions.Position(x - 0.2, y + 0.5, z + 0.5);
             default -> new PlayerPrimitiveActions.Position(x + 0.5, y - 0.2, z + 0.5);
         };
+    }
+
+    private static Cell placementSupport(int x, int y, int z, String face) {
+        return switch (face) {
+            case "down" -> new Cell(x, y + 1, z);
+            case "north" -> new Cell(x, y, z + 1);
+            case "south" -> new Cell(x, y, z - 1);
+            case "west" -> new Cell(x + 1, y, z);
+            case "east" -> new Cell(x - 1, y, z);
+            default -> new Cell(x, y - 1, z);
+        };
+    }
+
+    private record Cell(int x, int y, int z) {
     }
 
     private static JsonObject mutationFacts(
