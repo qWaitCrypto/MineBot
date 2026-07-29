@@ -750,6 +750,12 @@ class FakeBodyServer:
         action = message["action_id"]
         self._emit_response(rid, "ASCEND_ACK", {"action_id": action, "state": "accepted"})
         self._emit_event("owner_acquired", action, {"type": "ASCEND", "priority": "RECOVERY"})
+        self._emit_event("ascent_pillar_verified", action, {
+            "x": 1, "y": 64, "z": 0, "block_id": "minecraft:cobblestone",
+        })
+        self._emit_event("ascent_pillar_verified", action, {
+            "x": 1, "y": 65, "z": 0, "block_id": "minecraft:cobblestone",
+        })
         self._emit_event("ascent_step_verified", action, {"x": 1, "y": 65, "z": 0})
         self._emit_terminal(action, {
             "classification": "completed",
@@ -1280,6 +1286,17 @@ def test_ascend_maps_verified_surface_terminal() -> None:
     assert result.metrics["surface_candidate_count"] == 12
     assert result.metrics["surface_route_failure"] == "no_path"
     assert len(result.metrics["placed"]) == 2
+
+
+def test_ascend_records_server_verified_pillars_in_shared_governance() -> None:
+    policy = _policy()
+    client = _client(FakeBodyServer(), GovernanceAnswerer(policy))
+
+    result = client.ascend(timeout_ticks=2_400)
+
+    assert result.success is True
+    assert policy.bot_placements[(1, 64, 0)].purpose == "pillar"
+    assert policy.bot_placements[(1, 65, 0)].block_type == "cobblestone"
 
 
 def test_engage_entity_preserves_server_kill_facts_and_action_identity() -> None:

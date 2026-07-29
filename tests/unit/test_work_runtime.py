@@ -1028,7 +1028,7 @@ class BlockWorkTests(unittest.TestCase):
 
     def test_mine_block_marks_ambiguous_structure_as_retryable_inspection(self):
         class AmbiguousRisk:
-            def assess(self, pos, block_type, context):
+            def assess(self, pos, block_type, context, *, bot_placements=None):
                 return StructureRiskAssessment(
                     pos=pos,
                     block_type=block_type,
@@ -3179,7 +3179,7 @@ class BlockWorkTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def assess(self, pos, block_type, context):
+            def assess(self, pos, block_type, context, *, bot_placements=None):
                 self.calls.append((pos, block_type, context))
                 return StructureRiskAssessment(
                     pos=pos,

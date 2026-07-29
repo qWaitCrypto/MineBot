@@ -85,6 +85,25 @@ class GovernanceAnswerer:
         # anything else is denied, never guessed.
         return False, f"unsupported_mutation_kind:{proposal.kind}"
 
+    def observe_event(self, event: BotEvent) -> None:
+        """Commit server-verified temporary placements to the shared ledger."""
+
+        purpose = {
+            "ascent_pillar_verified": "pillar",
+        }.get(event.name)
+        if purpose is None:
+            return
+        data = event.data
+        block_id = data.get("block_id")
+        coordinates = (data.get("x"), data.get("y"), data.get("z"))
+        if (
+            not isinstance(block_id, str)
+            or not block_id
+            or not all(isinstance(value, int) and not isinstance(value, bool) for value in coordinates)
+        ):
+            return
+        self._policy.record_bot_placement(coordinates, block_id, purpose, event.bot)
+
 
 class DuplexTransport(Protocol):
     """Minimal blocking duplex the Java Body client drives.
@@ -571,6 +590,8 @@ class JavaBodyClient:
                 self._event_gaps.append(item)
             else:
                 if isinstance(item, BotEvent):
+                    if self._governance is not None:
+                        self._governance.observe_event(item)
                     self._event_buffer.append(item)
                 out.append(item)
         return out

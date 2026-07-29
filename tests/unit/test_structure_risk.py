@@ -1,7 +1,7 @@
 import unittest
 
 from minebot.body.structure_risk import VoxelStructureRiskAssessor
-from minebot.contract import BreakContext, PerceptionResult, StructureRiskLevel
+from minebot.contract import BotPlacement, BreakContext, PerceptionResult, StructureRiskLevel
 
 
 class VoxelBody:
@@ -85,6 +85,48 @@ class StructureRiskTests(unittest.TestCase):
 
         self.assertEqual(assessment.level, StructureRiskLevel.HIGH)
         self.assertIn("manufactured_blocks:1", assessment.signals)
+
+    def test_matching_temporary_bot_receipt_excludes_own_scaffold_from_risk(self):
+        body = VoxelBody(
+            {
+                (0, 64, 0): "stone",
+                (0, 63, 0): "spruce_planks",
+            }
+        )
+        assessor = VoxelStructureRiskAssessor(body)
+
+        without_receipt = assessor.assess((0, 64, 0), "stone", BreakContext.RECOVERY)
+        with_receipt = assessor.assess(
+            (0, 64, 0),
+            "stone",
+            BreakContext.RECOVERY,
+            bot_placements={
+                (0, 63, 0): BotPlacement(
+                    (0, 63, 0),
+                    "spruce_planks",
+                    "pillar",
+                    "Bot1",
+                )
+            },
+        )
+        mismatched_receipt = assessor.assess(
+            (0, 64, 0),
+            "stone",
+            BreakContext.RECOVERY,
+            bot_placements={
+                (0, 63, 0): BotPlacement(
+                    (0, 63, 0),
+                    "cobblestone",
+                    "pillar",
+                    "Bot1",
+                )
+            },
+        )
+
+        self.assertEqual(without_receipt.level, StructureRiskLevel.HIGH)
+        self.assertEqual(with_receipt.level, StructureRiskLevel.LOW)
+        self.assertIn("bot_owned_neighbors:1", with_receipt.signals)
+        self.assertEqual(mismatched_receipt.level, StructureRiskLevel.HIGH)
 
     def test_exposed_regular_raw_stone_plane_is_ambiguous(self):
         blocks = {

@@ -24,7 +24,8 @@ REGION = Region("pillar-probe-natural", (-128, -64, -128), (128, 320, 128))
 X = 120
 Y = 100
 Z = 120
-SCAFFOLD = "cobblestone"
+SCAFFOLD = "spruce_planks"
+PILLAR_STEPS = 8
 
 
 def inventory_counts(body: Body) -> dict[str, int]:
@@ -62,14 +63,18 @@ def prepare_shaft(rcon: RconClient) -> None:
 
     # A sealed 7x7 chamber keeps every scanned surface physically unreachable.
     # The open interior removes adjacent stair support, so the player must
-    # pillar twice and break the roof above its own column.
+    # center from an off-axis start, pillar eight times, and break the roof.
     rcon.command(f"fill {X - 3} {Y - 1} {Z - 3} {X + 3} {Y - 1} {Z + 3} stone")
-    rcon.command(f"fill {X - 3} {Y} {Z - 3} {X + 3} {Y + 3} {Z + 3} stone hollow")
-    rcon.command(f"fill {X - 2} {Y} {Z - 2} {X + 2} {Y + 2} {Z + 2} air")
+    rcon.command(
+        f"fill {X - 3} {Y} {Z - 3} {X + 3} {Y + PILLAR_STEPS + 1} {Z + 3} stone hollow"
+    )
+    rcon.command(
+        f"fill {X - 2} {Y} {Z - 2} {X + 2} {Y + PILLAR_STEPS} {Z + 2} air"
+    )
     rcon.command(f"gamemode survival {BOT}")
-    rcon.command(f"give {BOT} {SCAFFOLD} 8")
+    rcon.command(f"give {BOT} {SCAFFOLD} {PILLAR_STEPS}")
     rcon.command(f"give {BOT} iron_pickaxe 1")
-    rcon.command(f"tp {BOT} {X + 0.5} {Y} {Z + 0.5}")
+    rcon.command(f"tp {BOT} {X + 0.82} {Y} {Z + 0.28}")
     time.sleep(0.5)
 
 
@@ -116,9 +121,8 @@ def main() -> int:
             wall_s = time.monotonic() - started
             after = provider.body.get_state()
             inventory_after = inventory_counts(provider.body)
-            first_pillar = block_is(rcon, Y, SCAFFOLD)
-            second_pillar = block_is(rcon, Y + 1, SCAFFOLD)
-            roof_open = block_is(rcon, Y + 3, "air")
+            pillar_blocks = [block_is(rcon, Y + offset, SCAFFOLD) for offset in range(PILLAR_STEPS)]
+            roof_open = block_is(rcon, Y + PILLAR_STEPS + 1, "air")
         finally:
             provider.body.interrupt("bounded_probe_cleanup")
 
@@ -132,8 +136,7 @@ def main() -> int:
             "inventory_before": inventory_before,
             "inventory_after": inventory_after,
             "scaffold_delta": scaffold_after - scaffold_before,
-            "first_pillar": first_pillar,
-            "second_pillar": second_pillar,
+            "pillar_blocks": pillar_blocks,
             "roof_open": roof_open,
             "wall_s": wall_s,
         }
@@ -141,11 +144,10 @@ def main() -> int:
     metrics = result.metrics or {}
     success = (
         result.success
-        and after.pos[1] >= before.pos[1] + 2.0
-        and int(metrics.get("pillar_steps") or 0) >= 2
-        and scaffold_after == scaffold_before - 2
-        and first_pillar
-        and second_pillar
+        and after.pos[1] >= before.pos[1] + PILLAR_STEPS
+        and int(metrics.get("pillar_steps") or 0) >= PILLAR_STEPS
+        and scaffold_after == scaffold_before - PILLAR_STEPS
+        and all(pillar_blocks)
         and roof_open
     )
     artifact["success"] = success

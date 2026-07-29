@@ -10,7 +10,7 @@ class StaticRiskAssessor:
         self.complete = complete
         self.calls = []
 
-    def assess(self, pos, block_type, context):
+    def assess(self, pos, block_type, context, *, bot_placements=None):
         self.calls.append((pos, block_type, context))
         return StructureRiskAssessment(
             pos=pos,

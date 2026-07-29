@@ -39,6 +39,7 @@ final class AscendExecutorTest {
         boolean moving;
         boolean wantJump;
         boolean partialClimb;
+        boolean overshootCentering;
         int breakX;
         int breakY;
         int breakZ;
@@ -58,7 +59,7 @@ final class AscendExecutorTest {
             lookZ = z;
         }
         @Override public void moveForward(String b) { moving = true; log.add("forward"); }
-        @Override public void stopMovement(String b) { moving = false; }
+        @Override public void stopMovement(String b) { moving = false; log.add("stop"); }
         @Override public void sprint(String b) { }
         @Override public void jumpOnce(String b) { wantJump = true; log.add("jump"); }
         @Override public void jumpContinuous(String b) { log.add("jumpContinuous"); }
@@ -119,7 +120,7 @@ final class AscendExecutorTest {
                 double dz = lookZ - z;
                 double distance = Math.hypot(dx, dz);
                 if (distance > 1.0e-6) {
-                    double step = Math.min(0.25, distance);
+                    double step = overshootCentering ? 0.16 : Math.min(0.25, distance);
                     x += dx / distance * step;
                     z += dz / distance * step;
                 }
@@ -270,6 +271,21 @@ final class AscendExecutorTest {
         return world;
     }
 
+    private static World openPillarShaft(int topY) {
+        World world = enclosedStart();
+        for (int y = 60; y <= topY + 1; y++) {
+            world.set(0, y, 0, AIR);
+            for (int[] direction : DIRECTIONS) {
+                world.set(direction[0], y, direction[1], AIR);
+            }
+        }
+        return world;
+    }
+
+    private static final int[][] DIRECTIONS = {
+        {1, 0}, {0, 1}, {-1, 0}, {0, -1}
+    };
+
     @Test
     void carvesAndWalksUpARealStairUnderGovernance() {
         World world = enclosedStart();
@@ -380,6 +396,55 @@ final class AscendExecutorTest {
         assertEquals("recovery", proposal.context());
         assertEquals(60, proposal.y());
         assertEquals(1, terminal.getAsJsonArray("placed").size());
+    }
+
+    @Test
+    void brakesAtCenterAndContinuesPillaringAcrossMultipleBlocks() {
+        World world = openPillarShaft(64);
+        FakeBody body = new FakeBody(60);
+        body.x = 0.31;
+        body.overshootCentering = true;
+        body.scaffoldCount = 4;
+        Harness h = Harness.create(world, body, 2_000);
+
+        JsonObject terminal = h.run(1_500, () -> {
+            for (var proposal : h.proposals) {
+                h.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (h.body.y >= 64) {
+                h.world.sky = true;
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("surface_reached", terminal.get("reason").getAsString());
+        assertEquals(4, terminal.get("pillar_steps").getAsInt());
+        assertEquals(64.0, body.y);
+        assertEquals(0, body.scaffoldCount);
+        assertTrue(body.log.contains("stop"), "centering must brake before stability is accepted");
+    }
+
+    @Test
+    void ordinaryPlanksAreValidEmergencyScaffold() {
+        World world = openPillarStart();
+        FakeBody body = new FakeBody(60);
+        body.scaffoldItem = "minecraft:spruce_planks";
+        body.scaffoldCount = 1;
+        Harness h = Harness.create(world, body, 2_000);
+
+        JsonObject terminal = h.run(500, () -> {
+            for (var proposal : h.proposals) {
+                h.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (h.body.y >= 61) {
+                h.world.sky = true;
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("surface_reached", terminal.get("reason").getAsString());
+        assertEquals("minecraft:spruce_planks", world.at(0, 60, 0));
+        assertEquals(0, body.scaffoldCount);
     }
 
     @Test

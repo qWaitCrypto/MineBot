@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Protocol
+from typing import Iterable, Mapping, Protocol
 
 from minebot.contract.governance import (
     BotPlacement,
@@ -236,6 +236,8 @@ class StructureRiskAssessor(Protocol):
         pos: Position,
         block_type: str,
         context: BreakContext,
+        *,
+        bot_placements: Mapping[Position, BotPlacement] | None = None,
     ) -> StructureRiskAssessment: ...
 
 
@@ -510,7 +512,12 @@ class GovernancePolicy:
         if self.structure_risk_assessor is None:
             return None
         try:
-            return self.structure_risk_assessor.assess(pos, block_type, context)
+            return self.structure_risk_assessor.assess(
+                pos,
+                block_type,
+                context,
+                bot_placements=self.bot_placements,
+            )
         except Exception as exc:
             return StructureRiskAssessment(
                 pos=pos,

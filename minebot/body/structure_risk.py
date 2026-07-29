@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Mapping
 
 from minebot.body.world_read import read_block_facts
 from minebot.contract import (
     Body,
+    BotPlacement,
     BreakContext,
     Position,
     StructureRiskAssessment,
     StructureRiskLevel,
 )
-from minebot.game.governance import STRONGLY_PROTECTED_TYPES, normalize_block_type
+from minebot.game.governance import (
+    STRONGLY_PROTECTED_TYPES,
+    TEMPORARY_BOT_PURPOSES,
+    normalize_block_type,
+)
 
 
 _CLEAR_TYPES = frozenset({"air", "cave_air", "void_air", "water", "lava"})
@@ -64,6 +70,8 @@ class VoxelStructureRiskAssessor:
         pos: Position,
         block_type: str,
         context: BreakContext,
+        *,
+        bot_placements: Mapping[Position, BotPlacement] | None = None,
     ) -> StructureRiskAssessment:
         positions = _sample_positions(pos)
         normalized_target = normalize_block_type(block_type)
@@ -99,7 +107,13 @@ class VoxelStructureRiskAssessor:
                 sampled_cells=len(block_types),
                 signals=(f"target_changed:{observed_target}",),
             )
-        return _classify_voxels(pos, normalized_target, BreakContext(context), block_types)
+        return _classify_voxels(
+            pos,
+            normalized_target,
+            BreakContext(context),
+            block_types,
+            bot_placements=bot_placements,
+        )
 
 
 def _sample_positions(pos: Position) -> tuple[Position, ...]:
@@ -117,10 +131,32 @@ def _classify_voxels(
     block_type: str,
     context: BreakContext,
     cells: dict[Position, str],
+    *,
+    bot_placements: Mapping[Position, BotPlacement] | None = None,
 ) -> StructureRiskAssessment:
     signals: list[str] = []
     score = 0.0
-    nearby = {sample_pos: value for sample_pos, value in cells.items() if sample_pos != pos}
+    assessment_cells = dict(cells)
+    bot_owned_neighbors = 0
+    for sample_pos, observed_type in cells.items():
+        if sample_pos == pos or bot_placements is None:
+            continue
+        receipt = bot_placements.get(sample_pos)
+        if (
+            receipt is not None
+            and receipt.purpose in TEMPORARY_BOT_PURPOSES
+            and normalize_block_type(receipt.block_type) == observed_type
+        ):
+            assessment_cells[sample_pos] = "air"
+            bot_owned_neighbors += 1
+    if bot_owned_neighbors:
+        signals.append(f"bot_owned_neighbors:{bot_owned_neighbors}")
+
+    nearby = {
+        sample_pos: value
+        for sample_pos, value in assessment_cells.items()
+        if sample_pos != pos
+    }
     manufactured = [value for value in nearby.values() if _is_manufactured(value)]
     protected = [value for value in nearby.values() if value in STRONGLY_PROTECTED_TYPES]
     if protected:
@@ -131,12 +167,12 @@ def _classify_voxels(
         signals.append(f"manufactured_blocks:{len(manufactured)}")
 
     if block_type.endswith("_log"):
-        score += _log_risk(pos, block_type, cells, signals)
+        score += _log_risk(pos, block_type, assessment_cells, signals)
     elif block_type.endswith(_ORE_SUFFIXES):
         score -= 0.35
         signals.append("ore_natural_prior")
     else:
-        score += _regular_surface_risk(pos, block_type, cells, signals)
+        score += _regular_surface_risk(pos, block_type, assessment_cells, signals)
 
     if context in {
         BreakContext.TRAVEL,
@@ -156,7 +192,7 @@ def _classify_voxels(
         level = StructureRiskLevel.AMBIGUOUS
     else:
         level = StructureRiskLevel.LOW
-    palette = Counter(value for value in cells.values() if value not in _CLEAR_TYPES)
+    palette = Counter(value for value in assessment_cells.values() if value not in _CLEAR_TYPES)
     signals.append(f"solid_palette:{len(palette)}")
     return StructureRiskAssessment(
         pos=pos,

@@ -33,7 +33,19 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         "minecraft:deepslate",
         "minecraft:stone",
         "minecraft:dirt",
-        "minecraft:netherrack"
+        "minecraft:netherrack",
+        "minecraft:oak_planks",
+        "minecraft:spruce_planks",
+        "minecraft:birch_planks",
+        "minecraft:jungle_planks",
+        "minecraft:acacia_planks",
+        "minecraft:dark_oak_planks",
+        "minecraft:mangrove_planks",
+        "minecraft:cherry_planks",
+        "minecraft:pale_oak_planks",
+        "minecraft:bamboo_planks",
+        "minecraft:crimson_planks",
+        "minecraft:warped_planks"
     );
 
     /** Live block truth; null id when the position is unloaded. */
@@ -131,6 +143,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     private int preferredDirection;
     private int landingStableTicks;
     private int centeringStableTicks;
+    private boolean centeringPulseActive;
     private int phaseStartedTick = -1;
     private int elapsedTicks;
     private int ascendSteps;
@@ -537,6 +550,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         hygiene.clearAll(bot);
         phaseStartedTick = serverTick;
         centeringStableTicks = 0;
+        centeringPulseActive = false;
         phase = Phase.PILLAR_CENTERING;
     }
 
@@ -552,7 +566,15 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         double dx = position.x() - (originX + 0.5);
         double dz = position.z() - (originZ + 0.5);
         boolean centered = Math.hypot(dx, dz) <= CENTER_TOLERANCE;
-        centeringStableTicks = centered ? centeringStableTicks + 1 : 0;
+        if (centered) {
+            // Carpet movement is continuous. Brake on the first centered tick
+            // or the player crosses the center before stability can be observed.
+            movement.stopMovement(bot);
+            centeringPulseActive = false;
+            centeringStableTicks++;
+        } else {
+            centeringStableTicks = 0;
+        }
         if (centeringStableTicks >= CENTER_STABLE_TICKS) {
             hygiene.clearAll(bot);
             proposePillarPlacement(serverTick);
@@ -563,8 +585,14 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
             return;
         }
         if (!centered) {
+            if (centeringPulseActive) {
+                movement.stopMovement(bot);
+                centeringPulseActive = false;
+                return;
+            }
             movement.lookAt(bot, originX + 0.5, originFeetY + 0.1, originZ + 0.5);
             movement.moveForward(bot);
+            centeringPulseActive = true;
         }
     }
 
