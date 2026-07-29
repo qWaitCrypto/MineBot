@@ -293,15 +293,6 @@ class BlockWork:
             "max_break_steps": self.MINE_APPROACH_MAX_BREAK_STEPS,
             "target_block_type": target_block_type,
         }
-        if not nav.success:
-            return ToolResult(
-                success=False,
-                reason=f"mine_approach_failed:{nav.reason}",
-                can_retry=nav.can_retry,
-                next_suggestion=nav.next_suggestion or "choose another target if this stand domain is exhausted",
-                metrics=navigation_metrics,
-            ), None
-
         self._pause(self._mine_approach_settle_s)
         after = self.body.get_state()
         reach = _mining_reach_distance(after.pos, pos)
@@ -310,8 +301,21 @@ class BlockWork:
                 "state_after": list(_state_block_pos(after.pos)),
                 "reach_distance": reach,
                 "approach_settle_s": self._mine_approach_settle_s,
+                "navigation_terminal_reconciled": False,
             }
         )
+        terminal_reconcilable = _mining_approach_terminal_reconcilable(nav)
+        if not after.missing and reach <= reach_limit and terminal_reconcilable:
+            navigation_metrics["navigation_terminal_reconciled"] = not nav.success
+            return None, navigation_metrics
+        if not nav.success or not terminal_reconcilable:
+            return ToolResult(
+                success=False,
+                reason=f"mine_approach_failed:{nav.reason}",
+                can_retry=nav.can_retry,
+                next_suggestion=nav.next_suggestion or "choose another target if this stand domain is exhausted",
+                metrics=navigation_metrics,
+            ), None
         if reach > reach_limit:
             return ToolResult(
                 success=False,
@@ -3931,6 +3935,24 @@ def _selected_mining_stand(result: ToolResult, candidates: list[Position]) -> Po
         if selected in candidates:
             return selected
     return candidates[0]
+
+
+def _mining_approach_terminal_reconcilable(result: ToolResult) -> bool:
+    reason = str(result.reason or "")
+    if result.success:
+        return reason == "arrived"
+    if reason.startswith("recovery_exhausted:"):
+        reason = reason.split(":", 1)[1]
+    return reason in {
+        "deviated",
+        "no_path",
+        "node_budget_without_progress",
+        "partial_segment_budget_exhausted",
+        "segment_budget_exhausted",
+        "stuck",
+        "timeout",
+        "timeout_ticks_exhausted",
+    }
 
 
 def _selected_surface_goal(result: ToolResult, candidates: tuple[Position, ...]) -> Position:

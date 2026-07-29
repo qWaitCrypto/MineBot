@@ -23,9 +23,13 @@ from urllib.parse import urlparse
 from agents import (
     Model,
     ModelProvider,
+    ModelRetryBackoffSettings,
+    ModelRetrySettings,
     ModelSettings,
     OpenAIChatCompletionsModel,
     OpenAIResponsesModel,
+    RetryPolicyContext,
+    retry_policies,
     set_tracing_disabled,
 )
 from openai import AsyncOpenAI
@@ -57,6 +61,25 @@ _SETTINGS_ALLOWLIST = (
     "tool_choice",
     "parallel_tool_calls",
     "reasoning",
+)
+
+_MODEL_RETRY_MAX_RETRIES = 2
+_MODEL_RETRY_HTTP_STATUSES = frozenset({408, 409, 425, 429, *range(500, 600)})
+_MODEL_RETRY_ERROR_CODES = frozenset(
+    {
+        "overloaded",
+        "rate_limit_exceeded",
+        "server_error",
+        "service_unavailable",
+        "temporarily_unavailable",
+    }
+)
+_MODEL_RETRY_MESSAGE_FRAGMENTS = (
+    "overloaded",
+    "server is busy",
+    "service unavailable",
+    "temporarily unavailable",
+    "try again later",
 )
 
 
@@ -156,6 +179,10 @@ class ModelProviderRegistry(ModelProvider):
                     },
                     "include_usage": cfg.include_usage,
                     "tracing": cfg.tracing,
+                    "model_retry": {
+                        "max_retries": _MODEL_RETRY_MAX_RETRIES,
+                        "replay_guard": "sdk_stream_events",
+                    },
                 }
             )
         return rows
@@ -250,7 +277,35 @@ def _model_settings(cfg: ProviderConfig) -> ModelSettings:
     }
     if cfg.include_usage:
         kwargs["include_usage"] = True
+    kwargs["retry"] = _model_retry_settings()
     for passthrough in ("extra_body", "extra_headers"):
         if cfg.settings.get(passthrough) is not None:
             kwargs[passthrough] = cfg.settings[passthrough]
     return ModelSettings(**kwargs)
+
+
+def _model_retry_settings() -> ModelRetrySettings:
+    return ModelRetrySettings(
+        max_retries=_MODEL_RETRY_MAX_RETRIES,
+        backoff=ModelRetryBackoffSettings(
+            initial_delay=1.0,
+            max_delay=2.0,
+            multiplier=2.0,
+            jitter=True,
+        ),
+        policy=retry_policies.any(
+            retry_policies.provider_suggested(),
+            retry_policies.network_error(),
+            retry_policies.http_status(_MODEL_RETRY_HTTP_STATUSES),
+            _retry_explicit_transient_model_error,
+        ),
+    )
+
+
+def _retry_explicit_transient_model_error(context: RetryPolicyContext) -> bool:
+    normalized = context.normalized
+    error_code = str(normalized.error_code or "").strip().lower()
+    if error_code in _MODEL_RETRY_ERROR_CODES:
+        return True
+    message = str(normalized.message or "").strip().lower()
+    return any(fragment in message for fragment in _MODEL_RETRY_MESSAGE_FRAGMENTS)

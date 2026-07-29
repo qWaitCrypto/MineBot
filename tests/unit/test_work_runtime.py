@@ -1150,6 +1150,75 @@ class BlockWorkTests(unittest.TestCase):
         self.assertIsInstance(navigator.calls[0][0], GoalComposite)
         self.assertNotIn("mineBlock", [action.name for action in body.actions])
 
+    def test_mine_block_reconciles_failed_navigation_that_ends_in_interaction_range(self):
+        class NearTargetFailureNavigator(FakeNavigator):
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                assert self.body is not None
+                self.body.state_pos = (0.5, 65.0, 3.0)
+                selected = goal_position(goal)
+                return ToolResult(
+                    success=False,
+                    reason="node_budget_without_progress",
+                    can_retry=True,
+                    metrics={
+                        "goal": list(selected),
+                        "selected_goal": list(selected),
+                        "final_pos": [0, 65, 3],
+                    },
+                )
+
+        body = FakeBody(blocks={(0, 64, 6): ("spruce_log", "SOLID")})
+        body.state_pos = (0.5, 65.0, 0.5)
+        navigator = NearTargetFailureNavigator()
+        navigator.body = body
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.mine_block((0, 64, 6), context=BreakContext.COLLECT, timeout_s=1.0)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual([action.name for action in body.actions], ["mineBlock"])
+        approach = result.metrics["mine_approach"]
+        self.assertTrue(approach["navigation_terminal_reconciled"])
+        self.assertLessEqual(approach["reach_distance"], BlockWork.MINE_INTERACTION_RANGE)
+        self.assertEqual(
+            approach["navigation_result"]["reason"],
+            "node_budget_without_progress",
+        )
+
+    def test_mine_block_does_not_reconcile_preemption_even_when_in_interaction_range(self):
+        class NearTargetPreemptedNavigator(FakeNavigator):
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                assert self.body is not None
+                self.body.state_pos = (0.5, 65.0, 3.0)
+                selected = goal_position(goal)
+                return ToolResult(
+                    success=True,
+                    reason="preempted",
+                    can_retry=True,
+                    metrics={
+                        "goal": list(selected),
+                        "selected_goal": list(selected),
+                        "paused": True,
+                    },
+                )
+
+        body = FakeBody(blocks={(0, 64, 6): ("spruce_log", "SOLID")})
+        body.state_pos = (0.5, 65.0, 0.5)
+        navigator = NearTargetPreemptedNavigator()
+        navigator.body = body
+        policy = GovernancePolicy(natural_regions=[Region("mine", (-10, 0, -10), (10, 100, 10))])
+        runtime = BlockWork(body, policy, navigator=navigator)
+
+        result = runtime.mine_block((0, 64, 6), context=BreakContext.COLLECT, timeout_s=1.0)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "mine_approach_failed:preempted")
+        self.assertNotIn("mineBlock", [action.name for action in body.actions])
+        self.assertFalse(result.metrics["navigation_terminal_reconciled"])
+
     def test_target_occluded_is_a_candidate_skip(self):
         from minebot.contract import is_candidate_skip
 
