@@ -85,7 +85,7 @@ class Phase1RuntimeConfig:
     skill_workspace: SkillWorkspace | None = None
     wiki_knowledge: WikiKnowledge | None = None
     exploration_coverage_store: ExplorationCoverageStore | None = None
-    body_provider: str = "scarpet"
+    body_provider: str = "java"
     governance_policy: GovernancePolicy | None = None
 
 

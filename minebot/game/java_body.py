@@ -11,12 +11,9 @@ terminal events; semantics the provider does not
 offer return a **typed capability gap** — never a silent fallback to weaker
 behavior, per the Body-layer capability-negotiation rule.
 
-Inventory, block/entity perception, and the first player-control family are
-live; remaining data-plane primitives stay explicit gaps.
-
-Hybrid deployments keep ScarpetBody for the scopes and actions still owned by
-the Scarpet path; this class is how the Java provider grows into the full
-contract surface one honest capability at a time.
+Java now owns every production Body scope/action used by the surviving Python
+transactions. Scarpet and composite implementations remain legacy regression
+evidence only; production constructs this provider directly.
 """
 
 from __future__ import annotations

@@ -8,7 +8,6 @@ from enum import Enum
 
 from minebot.body import VoxelStructureRiskAssessor
 from minebot.contract import Body, Region
-from minebot.game.composite_body import CompositeBody
 from minebot.game.governance import GovernancePolicy
 from minebot.game.java_body import JavaBody
 from minebot.game.java_body_adapter import (
@@ -96,6 +95,8 @@ def build_body_provider(
         selected = java_body
     else:
         assert scarpet_body is not None and java_body is not None
+        from minebot.game.composite_body import CompositeBody
+
         selected = CompositeBody(scarpet_body, java_body)
 
     governance = GovernancePolicy(
@@ -112,7 +113,11 @@ def build_body_provider(
 
 
 def java_objectives_enabled(body: Body) -> bool:
-    return isinstance(body, (JavaBody, CompositeBody))
+    if isinstance(body, JavaBody):
+        return True
+    from minebot.game.composite_body import CompositeBody
+
+    return isinstance(body, CompositeBody)
 
 
 __all__ = [

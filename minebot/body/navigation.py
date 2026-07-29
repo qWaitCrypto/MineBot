@@ -31,7 +31,6 @@ from minebot.game.navigation import (
     GoalNear,
     normalize_goal,
 )
-from minebot.game.protocol import build_action_call
 
 
 SERVER_GOAL_SET_LIMIT = 32
@@ -758,6 +757,8 @@ class NavigationTransactions:
                 }
             )
             action = Action.create("navigateTo", action_params)
+            from minebot.game.protocol import build_action_call
+
             action_command_len = len(build_action_call(getattr(self.body, "bot_name", ""), action))
             result = self.body.execute(action)
             if not (result.ok and result.accepted):

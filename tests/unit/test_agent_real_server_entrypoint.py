@@ -1,12 +1,15 @@
 import asyncio
 import contextlib
 import os
+import subprocess
+import sys
 import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from minebot.app.observation_artifacts import PersistentToolObservationArchive
+from minebot.app.body_provider import BodyProviderName
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, _phase1_recovery_handler, _recipe_lookup, _run_smelt_tool, build_phase1_agent_runtime, build_phase1_registry, tool_manifest
 from minebot.app.runner import AgentRuntime, RuntimeTrace
 from minebot.brain.context import AgentContext
@@ -141,7 +144,28 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         with self.assertRaises(RealServerConfigError) as ctx:
             real_server_config_from_env({})
 
-        self.assertIn("MINEBOT_REAL_RCON_HOST", str(ctx.exception))
+        self.assertIn("MINEBOT_JAVA_BODY_URL", str(ctx.exception))
+
+    def test_production_entry_import_does_not_load_legacy_body_transports(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; import minebot.app.real_server_session; "
+                    "forbidden={'minebot.game.body','minebot.game.rcon','minebot.game.protocol',"
+                    "'minebot.game.composite_body'}; "
+                    "loaded=sorted(forbidden.intersection(sys.modules)); "
+                    "sys.exit(','.join(loaded)) if loaded else None"
+                ),
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
     def test_config_parses_region_and_log_path_without_exposing_secret(self):
         cfg = real_server_config_from_env(
@@ -151,6 +175,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
                 "MINEBOT_REAL_RCON_PASSWORD": "secret",
                 "MINEBOT_REAL_BOT": "MineBot",
                 "MINEBOT_REAL_RCON_TIMEOUT": "7",
+                "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
                 "MINEBOT_REAL_NATURAL_REGION": "-1,2,-3,4,5,6",
                 "MINEBOT_REAL_RECOVERY_RESPAWN_POS": "7,80,9",
                 "MINEBOT_AGENT_LOG_PATH": "logs/custom.jsonl",
@@ -161,9 +186,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(cfg.rcon.host, "example.invalid")
-        self.assertEqual(cfg.rcon.port, 25576)
-        self.assertEqual(cfg.rcon.timeout_s, 7)
+        self.assertEqual(cfg.java_body_url, "ws://127.0.0.1:8767")
         self.assertEqual(cfg.bot_name, "MineBot")
         self.assertEqual(cfg.natural_region.min_pos, (-1, 2, -3))
         self.assertEqual(cfg.natural_region.max_pos, (4, 5, 6))
@@ -173,22 +196,21 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(cfg.server_id, "server-alpha")
         self.assertEqual(cfg.world_id_override, "world-fixture")
         self.assertEqual(cfg.state_db_path, Path("var/test-state.sqlite3"))
-        self.assertEqual(cfg.body_provider.value, "scarpet")
+        self.assertFalse(hasattr(cfg, "rcon"))
+        self.assertFalse(hasattr(cfg, "body_provider"))
 
-    def test_config_parses_composite_body_provider(self):
-        cfg = real_server_config_from_env(
-            {
-                "MINEBOT_REAL_RCON_HOST": "example.invalid",
-                "MINEBOT_REAL_RCON_PORT": "25576",
-                "MINEBOT_REAL_RCON_PASSWORD": "secret",
-                "MINEBOT_REAL_BOT": "MineBot",
-                "MINEBOT_BODY_PROVIDER": "composite",
-                "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
-            }
-        )
+    def test_config_rejects_legacy_production_body_provider(self):
+        for provider in ("scarpet", "composite"):
+            with self.subTest(provider=provider), self.assertRaises(RealServerConfigError) as ctx:
+                real_server_config_from_env(
+                    {
+                        "MINEBOT_REAL_BOT": "MineBot",
+                        "MINEBOT_BODY_PROVIDER": provider,
+                        "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
+                    }
+                )
 
-        self.assertEqual(cfg.body_provider.value, "composite")
-        self.assertEqual(cfg.java_body_url, "ws://127.0.0.1:8767")
+            self.assertIn("legacy/debug-only", str(ctx.exception))
 
     def test_java_config_does_not_require_rcon_credentials(self):
         cfg = real_server_config_from_env(
@@ -199,18 +221,14 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             }
         )
 
-        self.assertIsNone(cfg.rcon)
         self.assertEqual(cfg.server_id, "ws://127.0.0.1:8767")
+        self.assertFalse(hasattr(cfg, "rcon"))
 
     def test_config_rejects_java_provider_without_java_url(self):
         with self.assertRaises(RealServerConfigError) as ctx:
             real_server_config_from_env(
                 {
-                    "MINEBOT_REAL_RCON_HOST": "example.invalid",
-                    "MINEBOT_REAL_RCON_PORT": "25576",
-                    "MINEBOT_REAL_RCON_PASSWORD": "secret",
                     "MINEBOT_REAL_BOT": "MineBot",
-                    "MINEBOT_BODY_PROVIDER": "java",
                 }
             )
 
@@ -223,10 +241,11 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
                 "MINEBOT_REAL_RCON_PORT": "25576",
                 "MINEBOT_REAL_RCON_PASSWORD": "do-not-use-in-id",
                 "MINEBOT_REAL_BOT": "MineBot",
+                "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
             }
         )
 
-        self.assertEqual(cfg.server_id, "example.invalid:25576")
+        self.assertEqual(cfg.server_id, "ws://127.0.0.1:8767")
         self.assertIsNone(cfg.world_id_override)
         self.assertNotIn("do-not-use-in-id", cfg.server_id)
 
@@ -238,6 +257,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
                     "MINEBOT_REAL_RCON_PORT": "25576",
                     "MINEBOT_REAL_RCON_PASSWORD": "secret",
                     "MINEBOT_REAL_BOT": "MineBot",
+                    "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
                     "MINEBOT_REAL_NATURAL_REGION": "-1,2,-3,4,5,6",
                     "MINEBOT_REAL_RECOVERY_RESPAWN_POS": "1,2",
                 }
@@ -510,9 +530,9 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         manifest = tool_manifest(registry)
         by_name = {row["name"]: row for row in manifest}
-        self.assertEqual(by_name["move_to"]["source"], "body.navigation")
+        self.assertEqual(by_name["move_to"]["source"], "java_body")
         self.assertEqual(by_name["move_to"]["tool_type"], "navigation")
-        self.assertEqual(by_name["go_to_surface"]["source"], "body.block_work")
+        self.assertEqual(by_name["go_to_surface"]["source"], "java_body")
         self.assertEqual(by_name["go_to_surface"]["tool_type"], "navigation")
         self.assertEqual(by_name["read_state"]["source"], "body.perception")
         self.assertEqual(by_name["search_for_block"]["tool_type"], "perception")
@@ -1459,7 +1479,6 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
     def test_real_server_interactive_passes_speech_sink_but_goal_mode_does_not(self):
         captured_configs = []
-        rcon_instances = []
 
         class FakeProvider:
             default = "primary"
@@ -1469,33 +1488,6 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
             async def aclose(self):
                 pass
-
-        class FakeRcon:
-            def __init__(self, _config):
-                self.commands = []
-                rcon_instances.append(self)
-
-            def connect(self):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_exc):
-                pass
-
-            def request(self, command):
-                self.commands.append(command)
-                if "minebot_state" in command:
-                    return _state_envelope("Bot1")
-                if "minebot_event_head" in command:
-                    return (
-                        '{"type":"result","id":null,"bot":"Bot1",'
-                        '"ok":true,"accepted":true,"complete":true,'
-                        '"data":{"eventSeq":0,"chatSeq":0,"tick":0,"epoch":"unit-app"},'
-                        '"error":null}'
-                    )
-                return "loaded"
 
         def fake_build_runtime(**kwargs):
             captured_configs.append(kwargs["config"])
@@ -1536,19 +1528,23 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         cfg = real_server_config_from_env(
             {
-                "MINEBOT_REAL_RCON_HOST": "example.invalid",
-                "MINEBOT_REAL_RCON_PORT": "25576",
-                "MINEBOT_REAL_RCON_PASSWORD": "secret",
                 "MINEBOT_REAL_BOT": "Bot1",
+                "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
                 "MINEBOT_AGENT_LOG_PATH": "logs/test.jsonl",
                 "MINEBOT_REAL_WORLD_ID": "unit-world",
                 "MINEBOT_AGENT_STATE_DB": ":memory:",
             }
         )
+        body = HarnessBody()
+        runtime = type(
+            "BodyRuntime",
+            (),
+            {"name": BodyProviderName.JAVA, "body": body, "governance": object()},
+        )()
 
         with (
             patch("minebot.app.real_server_session.provider_registry_from_env", return_value=FakeProvider()),
-            patch("minebot.app.real_server_session.RconClient", FakeRcon),
+            patch("minebot.app.real_server_session.build_body_provider", return_value=runtime),
             patch("minebot.app.real_server_session.build_phase1_agent_runtime", side_effect=fake_build_runtime),
             patch("minebot.app.real_server_session.AgentSession", FakeSession),
             patch(
@@ -1569,12 +1565,11 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             captured_configs[1].observation_archive,
             PersistentToolObservationArchive,
         )
-        self.assertFalse(any("minebot_say" in command for command in rcon_instances[0].commands))
-        self.assertFalse(any("watch_bot" in command for command in rcon_instances[0].commands))
-        self.assertIn("script in minebot run watch_bot('Bot1')", rcon_instances[1].commands)
         self.assertTrue(
             any(
-                call.args and str(call.args[0]).startswith("interactive_ready bot=Bot1 server=example.invalid:25576")
+                call.args and str(call.args[0]).startswith(
+                    "interactive_ready bot=Bot1 server=ws://127.0.0.1:8767"
+                )
                 for call in print_mock.call_args_list
             )
         )
@@ -1630,7 +1625,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         runtime = type(
             "BodyRuntime",
             (),
-            {"name": cfg.body_provider, "body": body, "governance": object()},
+            {"name": BodyProviderName.JAVA, "body": body, "governance": object()},
         )()
         truth = TerminalTruth(
             "collect 1 dirt", None, None, False, "waiting", "yielded", 5
@@ -1638,7 +1633,6 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         with (
             patch("minebot.app.real_server_session.provider_registry_from_env", return_value=FakeProvider()),
-            patch("minebot.app.real_server_session.RconClient", side_effect=AssertionError("RCON constructed")) as rcon,
             patch("minebot.app.real_server_session.RuntimeTrace", Trace),
             patch("minebot.app.real_server_session.build_body_provider", return_value=runtime),
             patch("minebot.app.real_server_session.build_phase1_agent_runtime", return_value=parts),
@@ -1653,7 +1647,6 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(manifest["body_provider"], "java")
         self.assertFalse(manifest["legacy_rcon_constructed"])
         self.assertFalse(manifest["legacy_scarpet_body_constructed"])
-        rcon.assert_not_called()
 
     def test_java_interactive_runner_uses_java_world_and_chat_without_rcon_or_scarpet(self):
         cfg = real_server_config_from_env(
@@ -1718,7 +1711,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         runtime = type(
             "BodyRuntime",
             (),
-            {"name": cfg.body_provider, "body": body, "governance": object()},
+            {"name": BodyProviderName.JAVA, "body": body, "governance": object()},
         )()
         reconciliation = type(
             "Reconciliation",
@@ -1741,8 +1734,6 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         with (
             patch("minebot.app.real_server_session.provider_registry_from_env", return_value=FakeProvider()),
-            patch("minebot.app.real_server_session.RconClient", side_effect=AssertionError("RCON constructed")) as rcon,
-            patch("minebot.app.real_server_session.ScarpetBody", side_effect=AssertionError("ScarpetBody constructed")) as scarpet,
             patch("minebot.app.real_server_session.RuntimeTrace", Trace),
             patch("minebot.app.real_server_session.build_body_provider", return_value=runtime),
             patch(
@@ -1772,8 +1763,6 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         ready = next(event for event in trace_events if event["event"] == "interactive_ready")
         self.assertEqual(ready["body_provider"], "java")
         self.assertEqual(ready["server"], "ws://127.0.0.1:8767")
-        rcon.assert_not_called()
-        scarpet.assert_not_called()
 
     def test_phase1_recovery_facts_include_inventory_recount_delta(self):
         body = RecoveringInventoryBody(

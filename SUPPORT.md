@@ -12,9 +12,9 @@ the project's long-term architecture.
 | Native Windows | Not currently claimed | Support begins only after a Windows CI contract passes; cross-platform queue locking alone is not sufficient |
 | macOS | Not currently claimed | No CI or clean-clone proof yet |
 | Full unit suite | Development signal | Broader than the newcomer gate and may expose active implementation work |
-| Local Minecraft Body | Advanced/manual | Requires a disposable 26.1.2 Fabric + Carpet + Scarpet + RCON server |
+| Local Minecraft Body | Advanced/manual | Requires a disposable 26.1.2 Fabric + Carpet server with the MineBot Java Body mod |
 | Newcomer Body lab | Not ready | No distributable server bootstrap or clean-world fixture contract yet |
-| Fabric/Java bridge | Optional/experimental | Not required for the RCON-first Body path |
+| Fabric Java Body | Production architecture, developer preview | Java-only live gates run without production Scarpet/RCON; the 30-minute autonomy-quality gate has not passed yet |
 
 The supported contributor command is documented in
 [CONTRIBUTING.md](CONTRIBUTING.md). Passing it proves only the shared terminal

@@ -109,6 +109,8 @@ def test_runtime_env_init_creates_private_local_template(tmp_path: Path) -> None
     assert profile.stat().st_mode & 0o077 == 0
     document = profile.read_text(encoding="utf-8")
     assert "MINEBOT_REAL_RCON_HOST=127.0.0.1" in document
+    assert "MINEBOT_BODY_PROVIDER=java" in document
+    assert "MINEBOT_JAVA_BODY_URL=ws://127.0.0.1:8767" in document
     assert "MINEBOT_LLM_API_KEY=\n" in document
     assert "sk-" not in document
 
@@ -129,7 +131,7 @@ def test_main_composes_reset_camera_and_production_session_without_secret_argv(
     profile = tmp_path / "runtime.env"
     profile.write_text("MINEBOT_LLM_API_KEY=profile-secret\n", encoding="utf-8")
     run_dir = tmp_path / "run"
-    server = SimpleNamespace(rcon=SimpleNamespace(host="127.0.0.1"))
+    server = SimpleNamespace(java_body_url="ws://127.0.0.1:8767")
     camera_path = tmp_path / "camera.toml"
     completed = [
         subprocess.CompletedProcess(["reset"], 0),
@@ -161,9 +163,11 @@ def test_main_composes_reset_camera_and_production_session_without_secret_argv(
     assert "profile-secret" not in repr(reset_call.args[0])
     assert "MINEBOT_LLM_API_KEY" not in reset_call.kwargs["env"]
     assert session_call.kwargs["env"]["MINEBOT_LLM_API_KEY"] == "profile-secret"
-    assert session_call.kwargs["env"]["MINEBOT_REAL_RCON_HOST"] == "127.0.0.1"
-    assert session_call.kwargs["env"]["MINEBOT_REAL_RCON_PORT"] == "25576"
-    assert session_call.kwargs["env"]["MINEBOT_REAL_RCON_PASSWORD"] == "test"
+    assert session_call.kwargs["env"]["MINEBOT_BODY_PROVIDER"] == "java"
+    assert session_call.kwargs["env"]["MINEBOT_JAVA_BODY_URL"] == "ws://127.0.0.1:8767"
+    assert "MINEBOT_REAL_RCON_HOST" not in session_call.kwargs["env"]
+    assert "MINEBOT_REAL_RCON_PORT" not in session_call.kwargs["env"]
+    assert "MINEBOT_REAL_RCON_PASSWORD" not in session_call.kwargs["env"]
     assert session_call.kwargs["env"]["MINEBOT_AGENT_LOG_PATH"] == str(
         run_dir / "trace.jsonl"
     )

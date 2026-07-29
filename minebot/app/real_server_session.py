@@ -1,8 +1,8 @@
-"""Agent session entrypoint for an existing real Minecraft server.
+"""Java-only Agent session entrypoint for an existing Minecraft server.
 
-Unlike the local console, this module must not prepare, reset, teleport, clear,
-seed resources, or change gamerules. It only connects to an explicitly
-configured real-server RCON endpoint and drives the Agent session.
+Unlike the local console or external gate fixture, this production module does
+not prepare/reset the world or load Scarpet/RCON. It drives the authoritative
+Carpet FakePlayer exclusively through the Java Body WebSocket contract.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from pathlib import Path
 from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
 from minebot.app.body_provider import (
     BodyProviderConfigError,
-    BodyProviderName,
     build_body_provider,
 )
 from minebot.app.body_events import BodyEventPump
@@ -46,7 +45,6 @@ from minebot.app.wiki import WikiKnowledge
 from minebot.app.reconciliation import StartupReconciliationError, enqueue_startup_reconciliation
 from minebot.app.runtime_identity import (
     RuntimeIdentityError,
-    resolve_runtime_scope,
     runtime_scope_from_world_identity,
 )
 from minebot.app.runtime_state import DEFAULT_RUNTIME_STATE_DB, RuntimeStateError, RuntimeStateStore
@@ -58,17 +56,14 @@ from minebot.app.session import DEFAULT_RUNAWAY_STEP_LIMIT, AgentSession, Sessio
 from minebot.brain.lifecycle import LifecycleState
 from minebot.brain.composition import resource_plan_for
 from minebot.contract import Body, InventorySlot, Region
-from minebot.game import RconClient, ScarpetBody
-from minebot.game.errors import EnvelopeError, RconError
-from minebot.game.protocol import build_state_call, build_watch_call, parse_state
-from minebot.game.rcon import RconConfig
+from minebot.game.errors import BodyProtocolError
 
 IDLE_BODY_STATE_SAMPLE_INTERVAL_S = 120.0
 
 
 @dataclass(frozen=True)
 class RealServerConfig:
-    rcon: RconConfig | None
+    java_body_url: str
     bot_name: str
     natural_region: Region
     recovery_respawn_pos: tuple[int, int, int] | None
@@ -77,8 +72,6 @@ class RealServerConfig:
     server_id: str
     world_id_override: str | None
     state_db_path: Path
-    java_body_url: str | None = None
-    body_provider: BodyProviderName = BodyProviderName.SCARPET
 
 
 class RealServerConfigError(RuntimeError):
@@ -131,15 +124,15 @@ AG_FP30_DROP_FAMILIES = {
 
 @dataclass(frozen=True)
 class InteractiveScenarioContext:
-    """Restricted test-fixture surface for a production interactive session.
+    """Archived in-process Scarpet fixture surface.
 
-    The scenario owns only scheduled external facts. It cannot submit
-    SessionCommands, inspect the tool registry, or invoke Body transactions.
-    Every operation uses the session's existing RCON client.
+    Java-only production rejects ``scenario_hook`` before startup. Current gates
+    own fixture RCON in an external parent process; this class remains only for
+    historical directed tests.
     """
 
     bot_name: str
-    _rcon: RconClient
+    _rcon: object
     _trace_event: Callable[[str, Mapping[str, object]], None]
     _trace_snapshot: Callable[[], list[dict[str, object]]] = lambda: []
 
@@ -297,6 +290,8 @@ class InteractiveScenarioContext:
         return state
 
     async def _read_bot_state(self):
+        from minebot.game.protocol import build_state_call, parse_state
+
         state = await asyncio.to_thread(
             parse_state,
             self._rcon.request(build_state_call(self.bot_name)),
@@ -340,7 +335,7 @@ class _CameraSession:
             return
         try:
             state = body.get_state()
-        except (EnvelopeError, RconError, ValueError):
+        except (BodyProtocolError, ValueError):
             return
         if state.missing:
             return
@@ -494,24 +489,13 @@ def env_required(env: Mapping[str, str], name: str) -> str:
 
 def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealServerConfig:
     env = os.environ if env is None else env
-    java_body_url = (env.get("MINEBOT_JAVA_BODY_URL") or "").strip() or None
-    body_provider = BodyProviderName.parse(
-        env.get("MINEBOT_BODY_PROVIDER") or BodyProviderName.SCARPET.value
-    )
-    if body_provider is not BodyProviderName.SCARPET and java_body_url is None:
+    requested_provider = (env.get("MINEBOT_BODY_PROVIDER") or "java").strip().lower()
+    if requested_provider != "java":
         raise RealServerConfigError(
-            f"MINEBOT_BODY_PROVIDER={body_provider.value} requires MINEBOT_JAVA_BODY_URL"
+            "production Body provider is Java-only; "
+            f"MINEBOT_BODY_PROVIDER={requested_provider or '<empty>'} is legacy/debug-only"
         )
-    rcon: RconConfig | None = None
-    if body_provider is not BodyProviderName.JAVA:
-        host = env_required(env, "MINEBOT_REAL_RCON_HOST")
-        port = int(env_required(env, "MINEBOT_REAL_RCON_PORT"))
-        password = env_required(env, "MINEBOT_REAL_RCON_PASSWORD")
-        timeout_s = float(env.get("MINEBOT_REAL_RCON_TIMEOUT", "20"))
-        rcon = RconConfig(host=host, port=port, password=password, timeout_s=timeout_s)
-        default_server_id = f"{host}:{port}"
-    else:
-        default_server_id = str(java_body_url)
+    java_body_url = env_required(env, "MINEBOT_JAVA_BODY_URL").strip()
     bot_name = env_required(env, "MINEBOT_REAL_BOT")
     natural_region = _region_from_env(env)
     recovery_respawn_pos = _position_from_env(env, "MINEBOT_REAL_RECOVERY_RESPAWN_POS")
@@ -519,9 +503,9 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
     language = agent_language_from_env(env)
     world_id_override = (env.get("MINEBOT_REAL_WORLD_ID") or "").strip() or None
     state_db_path = Path(env.get("MINEBOT_AGENT_STATE_DB") or DEFAULT_RUNTIME_STATE_DB)
-    server_id = (env.get("MINEBOT_REAL_SERVER_ID") or default_server_id).strip()
+    server_id = (env.get("MINEBOT_REAL_SERVER_ID") or java_body_url).strip()
     return RealServerConfig(
-        rcon=rcon,
+        java_body_url=java_body_url,
         bot_name=bot_name,
         natural_region=natural_region,
         recovery_respawn_pos=recovery_respawn_pos,
@@ -530,16 +514,11 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
         server_id=server_id,
         world_id_override=world_id_override,
         state_db_path=state_db_path,
-        java_body_url=java_body_url,
-        body_provider=body_provider,
     )
 
 
 def _body_endpoint(config: RealServerConfig) -> str:
-    if config.body_provider is BodyProviderName.JAVA:
-        return str(config.java_body_url)
-    assert config.rcon is not None
-    return f"{config.rcon.host}:{config.rcon.port}"
+    return config.java_body_url
 
 
 def _region_from_env(env: Mapping[str, str]) -> Region:
@@ -570,43 +549,13 @@ async def run_real_server_goal(
     camera_config: Path | None = None,
 ) -> int:
     provider = provider_registry_from_env()
-    rcon: RconClient | None = None
-    if config.body_provider is not BodyProviderName.JAVA:
-        assert config.rcon is not None
-        rcon = RconClient(config.rcon)
-        try:
-            rcon.connect()
-        except (OSError, PermissionError, RconError) as exc:
-            print(
-                f"Real-server RCON unavailable at {config.rcon.host}:{config.rcon.port}: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            await provider.aclose()
-            return 3
-
-    with (rcon if rcon is not None else contextlib.nullcontext()):
+    with contextlib.nullcontext():
         camera = _CameraSession(camera_config)
-        scarpet_body: ScarpetBody | None = None
-        if config.body_provider is not BodyProviderName.JAVA:
-            assert rcon is not None
-            try:
-                _ensure_scarpet_global_app(rcon, config.bot_name)
-            except (EnvelopeError, RconError) as exc:
-                print(
-                    f"Real-server Scarpet app unavailable at {config.rcon.host}:{config.rcon.port}: "
-                    f"{type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-                await provider.aclose()
-                return 4
-            scarpet_body = ScarpetBody(config.bot_name, rcon)
         try:
             body_runtime = build_body_provider(
-                config.body_provider,
+                "java",
                 bot_name=config.bot_name,
                 natural_region=config.natural_region,
-                scarpet_body=scarpet_body,
                 java_body_url=config.java_body_url,
             )
         except BodyProviderConfigError as exc:
@@ -625,8 +574,8 @@ async def run_real_server_goal(
                 language=config.language,
                 providers=provider.trace_configs(),
                 body_provider=body_runtime.name.value,
-                legacy_rcon_constructed=rcon is not None,
-                legacy_scarpet_body_constructed=scarpet_body is not None,
+                legacy_rcon_constructed=False,
+                legacy_scarpet_body_constructed=False,
             )
             parts = build_phase1_agent_runtime(
                 body=body,
@@ -695,80 +644,50 @@ async def run_real_server_interactive(
 ) -> int:
     """Run one persistent real-server session with stdin as the user channel.
 
-    ``terminal_goal`` is an optional evaluator contract for production
-    scenarios that inject/replace goals through the live ingress.  It is never
-    submitted to the Agent automatically; it only keeps final verification
-    anchored after cancellation or ``/quit`` clears the active goal.
+    ``terminal_goal`` is an optional evaluator contract for an external fixture
+    that injects/replaces goals through public ingress. It is never submitted to
+    the Agent automatically; it only keeps final verification anchored after
+    cancellation or ``/quit`` clears the active goal.
     """
     provider = provider_registry_from_env()
-    if scenario_hook is not None and config.body_provider is BodyProviderName.JAVA:
+    if scenario_hook is not None:
         print(
-            "Java-only scenario hooks require an external fixture runner",
+            "Production scenario hooks are retired; use an external fixture runner",
             file=sys.stderr,
         )
         await provider.aclose()
         return 4
-    rcon: RconClient | None = None
-    if config.body_provider is not BodyProviderName.JAVA:
-        assert config.rcon is not None
-        rcon = RconClient(config.rcon)
-        try:
-            rcon.connect()
-        except (OSError, PermissionError, RconError) as exc:
-            print(
-                f"Real-server RCON unavailable at {config.rcon.host}:{config.rcon.port}: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            await provider.aclose()
-            return 3
 
-    with (rcon if rcon is not None else contextlib.nullcontext()):
+    with contextlib.nullcontext():
         camera = _CameraSession(camera_config)
         state_store: RuntimeStateStore | None = None
         conversation_session: PersistentWindowedConversationSession | None = None
         work_queue: PersistentWorkIntentQueue | None = None
-        scarpet_body: ScarpetBody | None = None
         try:
             app_reloaded = False
-            if rcon is not None:
-                app_reloaded = _ensure_scarpet_global_app(rcon, config.bot_name)
-                scarpet_body = ScarpetBody(config.bot_name, rcon)
-                if config.body_provider is BodyProviderName.SCARPET:
-                    _watch_interactive_chat(rcon, config.bot_name)
             body_runtime = build_body_provider(
-                config.body_provider,
+                "java",
                 bot_name=config.bot_name,
                 natural_region=config.natural_region,
-                scarpet_body=scarpet_body,
                 java_body_url=config.java_body_url,
             )
             body = body_runtime.body
-            if config.body_provider in {BodyProviderName.JAVA, BodyProviderName.COMPOSITE}:
-                world_id = config.world_id_override
-                if world_id is None:
-                    world_identity = getattr(body, "world_identity", None)
-                    if not callable(world_identity):
-                        raise RuntimeIdentityError("selected Body does not expose world identity")
-                    try:
-                        world_id = str(world_identity())
-                    except Exception as exc:
-                        raise RuntimeIdentityError(
-                            f"Java Body world identity failed: {type(exc).__name__}"
-                        ) from exc
-                scope = runtime_scope_from_world_identity(
-                    server_id=config.server_id,
-                    world_id=world_id,
-                    bot_id=config.bot_name,
-                )
-            else:
-                assert rcon is not None
-                scope = resolve_runtime_scope(
-                    rcon,
-                    server_id=config.server_id,
-                    bot_id=config.bot_name,
-                    world_id_override=config.world_id_override,
-                )
+            world_id = config.world_id_override
+            if world_id is None:
+                world_identity = getattr(body, "world_identity", None)
+                if not callable(world_identity):
+                    raise RuntimeIdentityError("Java Body does not expose world identity")
+                try:
+                    world_id = str(world_identity())
+                except Exception as exc:
+                    raise RuntimeIdentityError(
+                        f"Java Body world identity failed: {type(exc).__name__}"
+                    ) from exc
+            scope = runtime_scope_from_world_identity(
+                server_id=config.server_id,
+                world_id=world_id,
+                bot_id=config.bot_name,
+            )
             state_store = RuntimeStateStore(config.state_db_path)
             state_store.register_scope(scope)
             task_workspace = TaskWorkspace(state_store, scope)
@@ -807,8 +726,7 @@ async def run_real_server_interactive(
                 terminal_probe=_startup_terminal_probe,
             )
         except (
-            EnvelopeError,
-            RconError,
+            BodyProtocolError,
             RuntimeIdentityError,
             RuntimeStateError,
             SkillCatalogError,
@@ -841,8 +759,8 @@ async def run_real_server_interactive(
                 language=config.language,
                 providers=provider.trace_configs(),
                 body_provider=body_runtime.name.value,
-                legacy_rcon_constructed=rcon is not None,
-                legacy_scarpet_body_constructed=scarpet_body is not None,
+                legacy_rcon_constructed=False,
+                legacy_scarpet_body_constructed=False,
             )
             parts = build_phase1_agent_runtime(
                 body=body,
@@ -905,32 +823,6 @@ async def run_real_server_interactive(
                 )
         reader = asyncio.create_task(_stdin_command_reader(session))
         chat_reader = asyncio.create_task(_chat_command_reader(session, body_event_pump))
-        scenario_task: asyncio.Task[None] | None = None
-        if scenario_hook is not None:
-            assert rcon is not None
-            def trace_scenario_event(event: str, fields: Mapping[str, object]) -> None:
-                trace.emit(event, **dict(fields))
-
-            scenario_context = InteractiveScenarioContext(
-                bot_name=config.bot_name,
-                _rcon=rcon,
-                _trace_event=trace_scenario_event,
-                _trace_snapshot=trace.snapshot,
-            )
-            scenario_task = asyncio.create_task(scenario_hook(scenario_context))
-
-            def record_scenario_failure(task: asyncio.Task[None]) -> None:
-                if task.cancelled():
-                    return
-                try:
-                    task.result()
-                except Exception as exc:
-                    trace_scenario_event(
-                        "scenario_fixture_failed",
-                        {"error_type": type(exc).__name__, "message": str(exc)},
-                    )
-
-            scenario_task.add_done_callback(record_scenario_failure)
         trace.emit(
             "interactive_ready",
             body_provider=body_runtime.name.value,
@@ -950,8 +842,6 @@ async def run_real_server_interactive(
                 body_event_pump=body_event_pump,
                 iteration_hook=lambda: camera.maybe_start(body),
             )
-            if scenario_task is not None and scenario_task.done():
-                scenario_task.result()
             evaluated_goal = _session_goal(session, terminal_goal or goal)
             truth = safe_evaluate_terminal_truth(body, evaluated_goal, final, session=session)
             _announce_interactive_terminal(body, truth)
@@ -971,10 +861,6 @@ async def run_real_server_interactive(
             )
             return truth.exit_code
         finally:
-            if scenario_task is not None:
-                scenario_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await scenario_task
             reader.cancel()
             chat_reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -991,7 +877,11 @@ async def run_real_server_interactive(
             await provider.aclose()
 
 
-def _ensure_scarpet_global_app(rcon: RconClient, bot_name: str) -> bool:
+def _ensure_scarpet_global_app(rcon: object, bot_name: str) -> bool:
+    """Legacy fixture helper; imports Scarpet protocol only when called."""
+    from minebot.game.errors import EnvelopeError
+    from minebot.game.protocol import build_state_call, parse_state
+
     command = build_state_call(bot_name)
     try:
         parse_state(rcon.request(command))
@@ -1025,7 +915,9 @@ def _startup_terminal_probe(task, counts: dict[str, int]) -> dict[str, object]:
     }
 
 
-def _watch_interactive_chat(rcon: RconClient, bot_name: str) -> None:
+def _watch_interactive_chat(rcon: object, bot_name: str) -> None:
+    from minebot.game.protocol import build_watch_call
+
     rcon.request(build_watch_call(bot_name))
 
 
@@ -1353,12 +1245,11 @@ def _maybe_trace_body_events(
 ) -> bool:
     """Record already-observed Body events without draining the provider.
 
-    ScarpetBody keeps a local event log whenever a transaction or the idle
-    pump consumes events.  Reading that log is safe for telemetry and avoids
-    racing the action terminal waiter by calling ``poll_events`` a second
-    time.  Other Body providers may omit the log; they still get an explicit
-    empty heartbeat and therefore fail closed only on missing state fields,
-    not by silently inventing event coverage.
+    The Body keeps a local event log whenever a transaction or the idle pump
+    consumes events. Reading that log is safe for telemetry and avoids racing
+    the action terminal waiter by calling ``poll_events`` a second time. A Body
+    that omits the log still gets an explicit empty heartbeat and therefore
+    fails closed only on missing state fields, not invented event coverage.
     """
 
     parts = getattr(session, "parts", None)

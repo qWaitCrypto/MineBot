@@ -15,19 +15,19 @@ setting up an environment or promising support for a new platform.
 | Area | Start here | Typical contributions |
 |---|---|---|
 | Agent Runtime | `minebot/app/`, `minebot/brain/`, `minebot/contract/` | lifecycle, task truth, persistence, progress, Memory/Skills |
-| Body / Scarpet | `minebot/body/`, `minebot/game/`, `minecraft/server/scarpet/` | transactions, controllers, navigation, governance, server facts |
+| Body / Fabric Java | `minebot/body/`, `minebot/game/`, `minecraft/server/body/` | transactions, controllers, navigation, governance, server facts |
 | Eval / Failure Worlds | `tests/`, fixtures, traces | reproducible false success, stalls, recovery failures, safety boundaries |
 | Observability | `minebot/camera/`, trace and event surfaces | readable model -> Body -> server evidence |
 | Developer Experience | setup, CI, public docs | clean-clone behavior, compatibility, configuration, focused tests |
 
-The Fabric/Java bridge is an optional transport path, not the current game-logic
-main line. Proposals there should begin with evidence that RCON payload, latency,
-or push limitations require a transport change.
+The Fabric Java Body is the production game-logic path. Scarpet/RCON source is
+retained for historical regression and directed debugging, not as a production
+fallback.
 
 ## First Five Minutes
 
-The contributor truth gate needs no Minecraft server, Java, RCON endpoint, LLM
-key, or external world:
+The contributor truth gate needs no Minecraft server, Java runtime, LLM key, or
+external world:
 
 ```bash
 python3.13 -m venv .venv
@@ -56,9 +56,10 @@ distinction explicit in issues and pull requests.
 ## Real Minecraft Body Work
 
 The Body path currently requires a manually prepared disposable Minecraft
-26.1.2 Fabric server with Carpet, the MineBot Scarpet app, and local RCON. The
-repository does not yet provide a newcomer-ready server bootstrap or a verified
-30-minute Body lab.
+26.1.2 Fabric server with Carpet and the built MineBot Java Body mod. The Agent
+connects over WebSocket; RCON is not part of the production Body contract. The
+repository does not yet provide a newcomer-ready server bootstrap or a passing
+30-minute autonomy-quality lab.
 
 Do not run mutation tests against a shared or valuable world. Do not send real
 RCON credentials, model keys, private world data, or player information in an
@@ -76,7 +77,7 @@ the setup must be reproducible without assuming access to a maintainer's local
 - Server/world/inventory facts outrank model text and command acceptance.
 - Never broaden block mutation merely to make a scenario pass. Player structure
   risk and protected claims must remain governed before every mutation.
-- Keep Java/WebSocket transport optional unless runtime evidence justifies it.
+- Keep the Java/WebSocket Body boundary provider-neutral from the Python Brain.
 
 Large changes to Memory, high-level capabilities, multi-bot behavior, mutation
 permissions, public-server safety, or transport start as a
@@ -89,7 +90,7 @@ A failure case is a complete contribution even when it has no fix. Use the
 [failure-case form](https://github.com/qWaitCrypto/MineBot/issues/new?template=failure_case.yml)
 and include:
 
-- MineBot, Minecraft, Fabric, Carpet, and Scarpet versions;
+- MineBot, Minecraft, Fabric, Carpet, and Java Body build versions;
 - seed, dimension, coordinates, and minimal setup;
 - initial authoritative state;
 - goal or Body action;

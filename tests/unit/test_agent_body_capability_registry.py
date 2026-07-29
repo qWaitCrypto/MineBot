@@ -406,12 +406,13 @@ class JavaBodyProviderRegistryTests(unittest.TestCase):
         self.assertEqual(registry.sidecar("move_to").source, "java_body")
         self.assertEqual(registry.sidecar("collect_block_domain").source, "java_body")
 
-    def test_default_scarpet_registry_is_unchanged(self):
-        names = set(_registry().names())
+    def test_default_registry_uses_java_after_production_retirement(self):
+        registry = _registry()
+        names = set(registry.names())
         self.assertNotIn("navigate_to", names)
         self.assertNotIn("collect_block", names)
-        self.assertEqual(_registry().sidecar("move_to").source, "body.navigation")
+        self.assertEqual(registry.sidecar("move_to").source, "java_body")
         self.assertEqual(
-            _registry().sidecar("collect_block_domain").source,
-            "body.resource_collection",
+            registry.sidecar("collect_block_domain").source,
+            "java_body",
         )

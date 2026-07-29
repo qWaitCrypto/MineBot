@@ -28,12 +28,20 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_ENV_VAR = "MINEBOT_RUNTIME_ENV"
 _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_RCON_ENV_KEYS = (
+    "MINEBOT_REAL_RCON_HOST",
+    "MINEBOT_REAL_RCON_PORT",
+    "MINEBOT_REAL_RCON_PASSWORD",
+    "MINEBOT_REAL_RCON_TIMEOUT",
+)
 _LOCAL_RUNTIME_DEFAULTS = {
     "MINEBOT_REAL_RCON_HOST": "127.0.0.1",
     "MINEBOT_REAL_RCON_PORT": "25576",
     "MINEBOT_REAL_RCON_PASSWORD": "test",
     "MINEBOT_REAL_BOT": "Bot1",
     "MINEBOT_REAL_RCON_TIMEOUT": "30",
+    "MINEBOT_BODY_PROVIDER": "java",
+    "MINEBOT_JAVA_BODY_URL": "ws://127.0.0.1:8767",
     "MINEBOT_AGENT_LANGUAGE": "Chinese",
 }
 _RUNTIME_ENV_TEMPLATE = """# MineBot local runtime profile. Keep this file private.
@@ -42,6 +50,8 @@ MINEBOT_REAL_RCON_PORT=25576
 MINEBOT_REAL_RCON_PASSWORD=test
 MINEBOT_REAL_BOT=Bot1
 MINEBOT_REAL_RCON_TIMEOUT=30
+MINEBOT_BODY_PROVIDER=java
+MINEBOT_JAVA_BODY_URL=ws://127.0.0.1:8767
 MINEBOT_AGENT_LANGUAGE=Chinese
 MINEBOT_LLM_MODEL=
 MINEBOT_LLM_KIND=openai_responses
@@ -215,6 +225,14 @@ def _reset_environment(environment: Mapping[str, str]) -> dict[str, str]:
     return result
 
 
+def _production_session_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    result = dict(environment)
+    result["MINEBOT_BODY_PROVIDER"] = "java"
+    for key in _RCON_ENV_KEYS:
+        result.pop(key, None)
+    return result
+
+
 def _default_run_dir(root: Path) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return root / "logs" / "agentic-runtime" / f"local-{stamp}-{os.getpid()}"
@@ -272,7 +290,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             camera=arguments.camera,
         )
         if arguments.reset:
-            _require_local_reset(server.rcon.host)
+            _require_local_reset(environment["MINEBOT_REAL_RCON_HOST"])
         run_dir.mkdir(parents=True, exist_ok=True)
     except (
         AppConfigError,
@@ -309,7 +327,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     session = subprocess.run(
         _session_command(arguments),
         cwd=ROOT,
-        env=environment,
+        env=_production_session_environment(environment),
         check=False,
     )
     return session.returncode

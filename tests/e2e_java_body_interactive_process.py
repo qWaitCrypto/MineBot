@@ -88,13 +88,13 @@ def stop_process(process: subprocess.Popen) -> int | None:
 
 
 def main() -> int:
-    run_dir = Path("logs/agentic-runtime/java-body-interactive-process-20260728")
+    run_dir = Path("logs/agentic-runtime/java-body-interactive-process-20260729")
     run_dir.mkdir(parents=True, exist_ok=True)
     trace_path = run_dir / "trace.jsonl"
     stdout_path = run_dir / "process.log"
     state_path = run_dir / "state.sqlite3"
     artifact_path = Path(
-        "logs/agentic-runtime/java-body-interactive-process-20260728.json"
+        "logs/agentic-runtime/java-body-interactive-process-20260729.json"
     )
     for path in (
         trace_path,
@@ -109,7 +109,6 @@ def main() -> int:
     child_env = dict(os.environ)
     child_env.update(
         {
-            "MINEBOT_BODY_PROVIDER": "java",
             "MINEBOT_JAVA_BODY_URL": BODY_URL,
             "MINEBOT_REAL_BOT": BOT,
             "MINEBOT_REAL_NATURAL_REGION": "-128,-64,-128,128,320,128",
@@ -119,12 +118,14 @@ def main() -> int:
     )
     for key in RCON_ENV_KEYS:
         child_env.pop(key, None)
+    child_env.pop("MINEBOT_BODY_PROVIDER", None)
 
     artifact: dict[str, object] = {
         "scope": "java_body_interactive_production_process",
         "formal_gate": False,
         "bounded": True,
         "body_provider": "java",
+        "production_provider_env_present": "MINEBOT_BODY_PROVIDER" in child_env,
         "public_goal_sender": GUIDE,
         "public_goal_text": PUBLIC_GOAL_COMMAND,
         "production_rcon_env_present": any(key in child_env for key in RCON_ENV_KEYS),
@@ -209,6 +210,7 @@ def main() -> int:
         )
         success = (
             artifact["production_rcon_env_present"] is False
+            and artifact["production_provider_env_present"] is False
             and artifact["manifest_body_provider"] == "java"
             and artifact["legacy_rcon_constructed"] is False
             and artifact["legacy_scarpet_body_constructed"] is False

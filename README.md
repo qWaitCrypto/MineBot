@@ -32,30 +32,34 @@ The model chooses from one shared capability pool. The harness preserves task
 continuity. The Body handles the grind inside one physical objective. Every
 result comes back as structured world truth.
 
-MineBot's current lightweight Body keeps physics and fast reactions on the
-server through Carpet + Scarpet. A planned second, narrow-version Body runs a
-real Minecraft client and reuses Baritone broadly for mature physical work. Both
-accept success only when observed world state confirms it.
+MineBot's production Body runs inside the Fabric server. Java owns indexed
+perception, navigation, continuous controls, survival reactions, and structured
+WebSocket transport; Carpet supplies the real FakePlayer. Scarpet/RCON remains
+only as legacy regression and debug material. A real-client/Baritone path is
+deferred, not part of the current production architecture. Success is accepted
+only when observed server state confirms it.
 
 ## Built To Finish
 
 **Navigate. Gather. Craft. Smelt. Equip. Fight. Recover. Continue.**
 
-The current baseline has passed real-server gates for collecting 64 logs,
-tool-gated acquisition through diamond, navigation over real terrain, following,
-combat, survival preemption, death recovery, restart reconciliation, and idle
-wake-up. Success is measured by authoritative world and inventory changes, not
-by a tool claiming it succeeded.
+The current Java-only baseline has live evidence for natural-terrain collection,
+crafting and smelting, navigation, following, combat, vertical escape, survival
+preemption, death recovery, restart reconciliation, and idle wake-up. The latest
+30-minute quality gate produced logs and a wooden tool chain but still failed its
+long no-output and recovery criteria. This is a developer preview, not a claim
+of finished open-world autonomy. Success is measured by authoritative world and
+inventory changes, not by a tool claiming it succeeded.
 
 ## One Mind. One Body. One Source Of Truth.
 
-<img src="assets/readme/architecture.webp" alt="MineBot architecture from the Python brain and persistent runtime through governed Body transactions and RCON to Scarpet controllers and the Carpet FakePlayer" width="100%">
-
 `openai-agents-python` runs the inner model/tool loop. MineBot owns the persistent
 control plane around it: tasks, context, lifecycle, progress, and governed tools.
-Python Body transactions complete physical objectives through JSON over RCON;
-Scarpet reads authoritative server state and runs planning, controllers, events,
-and reflexes; Carpet supplies the physical FakePlayer body.
+Python Body transactions plan crafting, inventory, work, and recovery over one
+provider-neutral contract. The Fabric Java Body executes physical objectives
+through public `/player` controls and returns authoritative facts over WebSocket.
+Every break/place/open proposal is rechecked by the shared Python governance
+policy immediately before mutation.
 
 The Brain decides **what**. The Body resolves **how**. Before physical mutation,
 governance refuses protected claims and ambiguous/high-risk structure evidence.
@@ -65,12 +69,12 @@ minebot/
   brain/      context, lifecycle, progress, capability registry
   app/        persistent runtime and the single composition root
   body/       navigation, work, inventory, crafting, combat, recovery
-  game/       protocol, transport, governance, server-backed Body client
+  game/       Java Body protocol/client, governance, legacy debug adapters
   contract/   shared facts and result schemas
   camera/     optional observer supervisor and recording/live fan-out
 
 minecraft/
-  server/     Scarpet controllers and the optional Fabric bridge
+  server/     Fabric Java Body and archived Scarpet regression source
   camera/     observer client and shared Java protocol
 
 tests/        unit, live Body, and real-agent gates
@@ -91,25 +95,20 @@ design and build in an open world.
 ## Wake It Up
 
 MineBot currently targets Python 3.13 and a Minecraft 26.1.2 Fabric server with
-Carpet, the MineBot Scarpet app, and local RCON enabled.
+Carpet plus the MineBot Java Body mod. The Agent process talks to the Body over
+WebSocket and does not need RCON credentials.
 
 The contributor gate targets Ubuntu Linux and is developed under WSL2. Native
 Windows and macOS are not currently claimed; see [support status](SUPPORT.md).
 
-Use a disposable local world for the developer console: it spawns and resets a
-FakePlayer, changes gamerules, and can seed a tiny demo patch. Install Fabric +
-Carpet, enable local RCON in `server.properties`, and place the Scarpet app in
-the active world's scripts directory:
-
-```properties
-enable-rcon=true
-rcon.port=25576
-rcon.password=test
-```
+Build the Body and place the JAR in the server's `mods/` directory alongside
+Fabric API and Carpet:
 
 ```bash
-mkdir -p /path/to/server/world/scripts
-cp minecraft/server/scarpet/minebot.sc /path/to/server/world/scripts/
+cd minecraft
+./gradlew :server:body:build
+cp server/body/build/libs/minebot-body-0.1.0.jar /path/to/server/mods/
+cd ..
 ```
 
 Start the server, then prepare MineBot:
@@ -126,8 +125,10 @@ export MINEBOT_LLM_MODEL=<model>
 export MINEBOT_LLM_API_KEY=<key>
 # Optional for an OpenAI-compatible endpoint:
 export MINEBOT_LLM_BASE_URL=<https://host/v1>
+export MINEBOT_REAL_BOT=Bot1
+export MINEBOT_JAVA_BODY_URL=ws://127.0.0.1:8767
 
-python3 -m minebot.app.console
+python3 -m minebot.app.real_server_session --interactive
 ```
 
 For the managed local golden-world environment, start the server reset, provider
@@ -144,10 +145,11 @@ environment. For a persistent private provider profile, run `minebot-local
 observer once with `minebot-camera init`.
 
 `minebot-local` resets only a loopback test server and enables Camera by
-default. Use `--no-reset` to preserve the current local world or `--no-camera`
-on machines without the observer stack. Remote servers continue to use the
-explicit `minebot.app.real_server_session` entrypoint and are never reset by the
-launcher.
+default. The launcher may use loopback RCON in its external reset step, but it
+removes every RCON variable before starting the Java-only Agent child. Use
+`--no-reset` to preserve the current local world or `--no-camera` on machines
+without the observer stack. Remote servers use the explicit
+`minebot.app.real_server_session` entrypoint and are never reset by the launcher.
 
 Then talk to it:
 
@@ -157,10 +159,8 @@ minebot> follow me
 minebot> what happened while I was away?
 ```
 
-The local console uses `127.0.0.1:25576` with password `test`; keep that RCON
-endpoint local. Existing worlds should use the non-mutating real-server
-entrypoint (`python3 -m minebot.app.real_server_session --help`) instead of this
-demo console.
+The old `minebot.app.console`, Scarpet app, and RCON client remain available for
+legacy directed debugging only. They are not loaded by the production entrypoint.
 
 Run the unit suite with:
 
