@@ -13,6 +13,7 @@ from minebot.body import (
 )
 from minebot.body.exploration import _frontier_direction, _frontier_regions, _region_key
 from minebot.contract import BodyState, PerceptionResult, ToolResult
+from minebot.game.java_body_protocol import MAX_FIND_BLOCK_IDS
 from minebot.game.navigation import GoalComposite, GoalNear
 
 
@@ -280,6 +281,28 @@ def _runtime(*, body=None, coverage=None, outcomes=None, mobility_egress=None):
 
 
 class ExplorationTransactionsTests(unittest.TestCase):
+    def test_combined_resource_groups_fit_one_java_block_search(self):
+        targets = ExplorationTargets.create(
+            blocks=("#logs", "#flowers"),
+            entities=("pig", "cow", "sheep"),
+        )
+        runtime, body, navigator = _runtime()
+
+        result = runtime.explore_for(
+            block_targets=("#logs", "#flowers"),
+            entity_targets=("pig", "cow", "sheep"),
+            max_regions=1,
+            return_policy="region_budget",
+            scan_radius=24,
+        )
+
+        self.assertEqual(len(targets.blocks), 32)
+        self.assertLessEqual(len(targets.blocks), MAX_FIND_BLOCK_IDS)
+        find_call = next(params for scope, params in body.perceptions if scope == "findBlocks")
+        self.assertEqual(tuple(find_call["types"]), targets.blocks)
+        self.assertNotEqual(result.reason, "perception_incomplete")
+        self.assertFalse(navigator.calls)
+
     def test_frontier_selector_samples_directions_before_extending_one_strip(self):
         origin = (-30, 67, -42)
         origin_region = _region_key((int(origin[0]), int(origin[1]), int(origin[2])))
@@ -805,6 +828,18 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertEqual(len(regions), 1)
         self.assertEqual(regions[0].status, CoverageStatus.UNLOADED_BOUNDARY)
         self.assertFalse(regions[0].settled)
+
+    def test_invalid_request_is_not_mislabeled_as_incomplete_perception(self):
+        runtime, _, navigator = _runtime(
+            body=ExplorationBody(scan_error="invalid_request"),
+        )
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=1)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "invalid_request")
+        self.assertEqual(result.metrics["source_reason"], "invalid_request")
+        self.assertFalse(navigator.calls)
 
     def test_frontier_navigation_finds_target_in_next_region(self):
         body = ExplorationBody(

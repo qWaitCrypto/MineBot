@@ -93,6 +93,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     private static final int MAX_RADIUS = 128;
     private static final int MAX_VERTICAL_RADIUS = 64;
     private static final int MAX_PAGE_LIMIT = 128;
+    static final int MAX_REQUESTED_BLOCK_IDS = 64;
     private static final int MAX_REPLAY_EVENTS_PER_RESPONSE = 256;
     private static final int MAX_TIMEOUT_TICKS = 12_000;
     private static final Map<String, String> SEED_TO_CROP = Map.of(
@@ -2191,10 +2192,16 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             }
             blocks.put(block, blockId);
         }
-        if (blocks.isEmpty() || blocks.size() > 16) {
-            throw new IllegalArgumentException("block_ids must contain 1 to 16 identifiers");
-        }
+        validateRequestedBlockCount(blocks.size());
         return Map.copyOf(blocks);
+    }
+
+    static void validateRequestedBlockCount(int count) {
+        if (count < 1 || count > MAX_REQUESTED_BLOCK_IDS) {
+            throw new IllegalArgumentException(
+                "block_ids must contain 1 to " + MAX_REQUESTED_BLOCK_IDS + " identifiers"
+            );
+        }
     }
 
     private ContainerPrimitiveActions.Target resolveContainerTarget(

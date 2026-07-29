@@ -19,6 +19,7 @@ from minebot.game.java_body_protocol import (
     ErrorResponse,
     EventGap,
     JavaBodyProtocol,
+    MAX_FIND_BLOCK_IDS,
     ProtocolViolation,
     Response,
     ServerProposal,
@@ -138,6 +139,35 @@ def test_unoffered_request_type_is_a_capability_gap_never_a_silent_substitute() 
     with pytest.raises(CapabilityGap):
         protocol.navigate("MineBot_1", "nav-1", {"kind": "xz", "x": 1, "z": 2})
     assert protocol.supports("FIND_BLOCKS")
+
+
+def test_find_blocks_carries_one_canonical_multi_target_query() -> None:
+    protocol = JavaBodyProtocol()
+    hello = protocol.hello()
+    protocol.feed(
+        {
+            "channel": "fakeplayer-body",
+            "type": "HELLO_ACK",
+            "request_id": hello["request_id"],
+            "protocol": "fakeplayer-body/1",
+            "minecraft_version": "26.1.2",
+            "max_request_bytes": 16384,
+            "max_requests_per_second": 40,
+            "request_types": ["FIND_BLOCKS", "HELLO"],
+        }
+    )
+    block_ids = [f"minecraft:test_block_{index}" for index in range(32)]
+
+    request = protocol.find_blocks("MineBot_1", block_ids, 24)
+
+    assert request["block_ids"] == block_ids
+    assert MAX_FIND_BLOCK_IDS == 64
+    with pytest.raises(ValueError, match="1 to 64"):
+        protocol.find_blocks(
+            "MineBot_1",
+            [f"minecraft:test_block_{index}" for index in range(65)],
+            24,
+        )
 
 
 def test_survival_owner_and_recovery_navigation_are_explicit_protocol_facts() -> None:

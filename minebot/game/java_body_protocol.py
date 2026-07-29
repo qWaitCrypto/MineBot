@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 PROTOCOL = "fakeplayer-body/1"
 CHANNEL = "fakeplayer-body"
+MAX_FIND_BLOCK_IDS = 64
 
 
 class ProtocolViolation(Exception):
@@ -121,6 +122,10 @@ class JavaBodyProtocol:
         cursor: str | None = None,
     ) -> dict:
         self._require_capability("FIND_BLOCKS")
+        if not 1 <= len(block_ids) <= MAX_FIND_BLOCK_IDS:
+            raise ValueError(
+                f"FIND_BLOCKS requires 1 to {MAX_FIND_BLOCK_IDS} block ids"
+            )
         body: dict = {"bot_name": bot_name, "block_ids": list(block_ids), "radius": radius}
         if vertical_radius is not None:
             body["vertical_radius"] = vertical_radius

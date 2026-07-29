@@ -1304,7 +1304,11 @@ def _tool_inventory_counts(body: Body, *, page_size: int = 12) -> dict[str, int]
                 success=False,
                 reason="perception_failed",
                 can_retry=True,
-                metrics={"scope": "inventory", "error": perception.error, "uncertainty": list(perception.uncertainty)},
+                metrics={
+                    "scope": "inventory",
+                    "error": perception.error,
+                    "uncertainty": list(perception.uncertainty or ()),
+                },
             )
         for payload in perception.data.get("slots") or []:
             if not isinstance(payload, dict):
@@ -1321,7 +1325,11 @@ def _tool_inventory_counts(body: Body, *, page_size: int = 12) -> dict[str, int]
                 success=False,
                 reason="perception_failed",
                 can_retry=True,
-                metrics={"scope": "inventory", "error": perception.error, "uncertainty": list(perception.uncertainty)},
+                metrics={
+                    "scope": "inventory",
+                    "error": perception.error,
+                    "uncertainty": list(perception.uncertainty or ()),
+                },
             )
     if not saw_page:
         return ToolResult(False, "perception_failed", True, metrics={"scope": "inventory", "error": "no pages read"})

@@ -190,8 +190,18 @@ class JavaBody:
                 scope="findBlocks",
                 type="perception",
                 ok=False,
-                complete=missing,
-                uncertainty=[{"reason": "missing_body"}] if missing else None,
+                complete=missing or not reply.retryable,
+                uncertainty=(
+                    [{"reason": "missing_body"}]
+                    if missing
+                    else [
+                        {
+                            "reason": reply.code,
+                            "message": reply.message,
+                            "retryable": reply.retryable,
+                        }
+                    ]
+                ),
                 error="missing_body" if missing else reply.code,
             )
         payload = reply.payload

@@ -1419,7 +1419,9 @@ def _perception_terminal(perception: PerceptionResult, *, allow_partial: bool = 
     error = str(perception.error or "").casefold()
     if "missing" in error or "body" in error and "missing" in error:
         return "body_missing"
-    return "unloaded_boundary" if _is_unloaded_reason(error) else "perception_incomplete"
+    if _is_unloaded_reason(error):
+        return "unloaded_boundary"
+    return error or "perception_incomplete"
 
 
 def _uncertainty(perception: PerceptionResult) -> list[JsonObject]:

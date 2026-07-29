@@ -919,7 +919,11 @@ def _read_inventory_counts(body: Body, *, page_size: int = 12) -> ToolResult:
             False,
             "perception_failed",
             True,
-            metrics={"scope": "inventory", "error": perception.error, "uncertainty": list(perception.uncertainty)},
+            metrics={
+                "scope": "inventory",
+                "error": perception.error,
+                "uncertainty": list(perception.uncertainty or ()),
+            },
         )
     counts: dict[str, int] = {}
     for payload in slots:

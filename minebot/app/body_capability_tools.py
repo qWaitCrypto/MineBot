@@ -1747,7 +1747,7 @@ def _read_container(
                     "pos": list(pos),
                     "pages": pages,
                     "slots": slots,
-                    "uncertainty": list(perception.uncertainty),
+                    "uncertainty": list(perception.uncertainty or ()),
                 },
             )
         start = int(next_cursor) if next_cursor is not None else None
@@ -1775,7 +1775,7 @@ def _perception_tool_result(
         "scope": perception.scope,
         "complete": perception.complete,
         "data": perception.data,
-        "uncertainty": list(perception.uncertainty),
+        "uncertainty": list(perception.uncertainty or ()),
         "next": perception.next,
     }
     if not perception.ok:

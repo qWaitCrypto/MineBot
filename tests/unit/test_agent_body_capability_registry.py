@@ -247,6 +247,24 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
             ["query_signature", "dimension", "coverage_revision"],
         )
 
+    def test_java_recipe_tool_accepts_no_uncertainty_as_complete_truth(self):
+        server = FakeBodyServer()
+        body = JavaBody(JavaBodyClient("Bot", lambda: server), "Bot")
+        registry = build_phase1_registry(
+            body,
+            Phase1RuntimeConfig(
+                natural_region=Region("test", (-64, -64, -64), (64, 320, 64)),
+                body_provider="java",
+            ),
+        )
+
+        result = registry.get("read_recipe").callable({"item": "oak_planks"})
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "recipe_read")
+        self.assertEqual(result.metrics["uncertainty"], [])
+        self.assertEqual(result.metrics["data"]["variantCount"], 1)
+
     def test_resource_tool_descriptions_expose_the_capability_hierarchy(self):
         registry = _registry()
 

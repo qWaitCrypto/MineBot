@@ -1554,6 +1554,27 @@ def test_java_body_find_blocks_rejects_numeric_resume_without_snapshot_cursor() 
     assert result.error == "invalid_cursor:numeric_resume_requires_original_snapshot"
 
 
+def test_java_body_find_blocks_preserves_server_error_details() -> None:
+    class RejectingFindServer(FakeBodyServer):
+        def _handle_find_blocks(self, message: dict, rid: str) -> None:
+            self._emit_error(rid, "invalid_request", retryable=False)
+
+    body = JavaBody(_client(RejectingFindServer()), "Bot")
+
+    result = body.perceive("findBlocks", {"type": "oak_log", "radius": 32})
+
+    assert result.ok is False
+    assert result.complete is True
+    assert result.error == "invalid_request"
+    assert result.uncertainty == [
+        {
+            "reason": "invalid_request",
+            "message": "invalid_request",
+            "retryable": False,
+        }
+    ]
+
+
 def test_java_body_inventory_preserves_paging_slots_and_metadata() -> None:
     body = JavaBody(_client(FakeBodyServer()), "Bot")
 
