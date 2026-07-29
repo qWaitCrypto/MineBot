@@ -26,6 +26,11 @@ public sealed interface Goal {
         return true;
     }
 
+    /** Whether a node-cap stop may commit movement before a complete route exists. */
+    default boolean allowsNodeBudgetPartial() {
+        return true;
+    }
+
     /** Maximum physical distance from the final node center before handoff. */
     default double finalReachDistanceLimit() {
         return PathFollower.WAYPOINT_REACH_DISTANCE;
@@ -53,6 +58,123 @@ public sealed interface Goal {
         }
     }
 
+    /** One exact dry, supported standing cell. */
+    record Stand(int x, int y, int z) implements Goal {
+        @Override
+        public boolean isSatisfied(int nx, int ny, int nz) {
+            return nx == x && ny == y && nz == z;
+        }
+
+        @Override
+        public boolean isSatisfied(WorldView world, int nx, int ny, int nz) {
+            return isSatisfied(nx, ny, nz) && isDryStand(world, nx, ny, nz);
+        }
+
+        @Override
+        public boolean acceptsPartialEndpoint(WorldView world, int nx, int ny, int nz) {
+            return isDryStand(world, nx, ny, nz);
+        }
+
+        @Override
+        public boolean allowsNodeBudgetPartial() {
+            return false;
+        }
+
+        @Override
+        public double finalReachDistanceLimit() {
+            return 0.15;
+        }
+
+        @Override
+        public double heuristic(int nx, int ny, int nz) {
+            double dx = nx - x;
+            double dy = ny - y;
+            double dz = nz - z;
+            return Math.sqrt(dx * dx + dy * dy + dz * dz) * HEURISTIC_TICKS_PER_BLOCK;
+        }
+
+        private static boolean isDryStand(WorldView world, int x, int y, int z) {
+            return world.kindAt(x, y, z) == WorldView.NodeKind.PASSABLE
+                && world.kindAt(x, y + 1, z) == WorldView.NodeKind.PASSABLE
+                && world.kindAt(x, y - 1, z) == WorldView.NodeKind.SOLID
+                && !world.isBodyPositionHazardous(x, y, z);
+        }
+    }
+
+    /**
+     * A standing cell whose player touch volume contains an item entity.
+     * Minecraft checks entities inside the player box inflated by 1 block on
+     * X/Z and 0.5 blocks on Y; these bounds conservatively ignore the item's
+     * own width so a planned terminal cannot stop outside the real volume.
+     */
+    record Pickup(double targetX, double targetY, double targetZ) implements Goal {
+        public static final double HORIZONTAL_REACH = 1.3;
+        public static final double BELOW_FEET_REACH = 0.5;
+        public static final double ABOVE_FEET_REACH = 2.3;
+        private static final double FINAL_POSITION_MARGIN = 0.15;
+        private static final double PLANNED_HORIZONTAL_REACH =
+            HORIZONTAL_REACH - FINAL_POSITION_MARGIN;
+        private static final double PLANNED_BELOW_FEET_REACH =
+            BELOW_FEET_REACH - FINAL_POSITION_MARGIN;
+        private static final double PLANNED_ABOVE_FEET_REACH =
+            ABOVE_FEET_REACH - FINAL_POSITION_MARGIN;
+
+        @Override
+        public boolean isSatisfied(int nx, int ny, int nz) {
+            double centerX = nx + 0.5;
+            double centerZ = nz + 0.5;
+            return Math.abs(centerX - targetX) <= PLANNED_HORIZONTAL_REACH
+                && Math.abs(centerZ - targetZ) <= PLANNED_HORIZONTAL_REACH
+                && targetY >= ny - PLANNED_BELOW_FEET_REACH
+                && targetY <= ny + PLANNED_ABOVE_FEET_REACH;
+        }
+
+        @Override
+        public boolean isSatisfied(WorldView world, int nx, int ny, int nz) {
+            return isSatisfied(nx, ny, nz)
+                && isOccupiable(world.kindAt(nx, ny, nz))
+                && isOccupiable(world.kindAt(nx, ny + 1, nz));
+        }
+
+        @Override
+        public boolean acceptsPartialEndpoint(WorldView world, int nx, int ny, int nz) {
+            return isOccupiable(world.kindAt(nx, ny, nz))
+                && isOccupiable(world.kindAt(nx, ny + 1, nz));
+        }
+
+        @Override
+        public boolean allowsNodeBudgetPartial() {
+            return false;
+        }
+
+        @Override
+        public double heuristic(int nx, int ny, int nz) {
+            double dx = Math.max(
+                0.0,
+                Math.abs(nx + 0.5 - targetX) - PLANNED_HORIZONTAL_REACH
+            );
+            double dz = Math.max(
+                0.0,
+                Math.abs(nz + 0.5 - targetZ) - PLANNED_HORIZONTAL_REACH
+            );
+            double dy;
+            if (targetY < ny - PLANNED_BELOW_FEET_REACH) {
+                dy = ny - PLANNED_BELOW_FEET_REACH - targetY;
+            } else if (targetY > ny + PLANNED_ABOVE_FEET_REACH) {
+                dy = targetY - (ny + PLANNED_ABOVE_FEET_REACH);
+            } else {
+                dy = 0.0;
+            }
+            return Math.sqrt(dx * dx + dy * dy + dz * dz) * HEURISTIC_TICKS_PER_BLOCK;
+        }
+
+        private static boolean isOccupiable(WorldView.NodeKind kind) {
+            return kind == WorldView.NodeKind.PASSABLE
+                || kind == WorldView.NodeKind.LIQUID
+                || kind == WorldView.NodeKind.CLIMBABLE;
+        }
+    }
+
     /** Column goal for far or unloaded targets; any Y counts. */
     record XZ(int x, int z) implements Goal {
         @Override
@@ -69,9 +191,9 @@ public sealed interface Goal {
     }
 
     /**
-     * Any standing cell whose eye position is within interaction range of the
-     * target block center. Exact line-of-sight and legality stay with the
-     * execution-time server checks; the goal only shapes the search.
+     * A dry supported standing cell within interaction range and with a clear
+     * voxel line to one target face. Execution still rechecks exact live
+     * legality before mutation.
      */
     record Interact(int targetX, int targetY, int targetZ, double range) implements Goal {
         public static final double MINE_RANGE = 4.5;
@@ -84,12 +206,21 @@ public sealed interface Goal {
 
         @Override
         public boolean isSatisfied(WorldView world, int nx, int ny, int nz) {
-            return isSatisfied(nx, ny, nz) && isDryStand(world, nx, ny, nz);
+            return isSatisfied(nx, ny, nz)
+                && isDryStand(world, nx, ny, nz)
+                && hasInteractionLine(world, nx, ny, nz);
         }
 
         @Override
         public boolean acceptsPartialEndpoint(WorldView world, int nx, int ny, int nz) {
             return isDryStand(world, nx, ny, nz);
+        }
+
+        @Override
+        public boolean allowsNodeBudgetPartial() {
+            // A distance-only partial toward a known block can end underneath
+            // an occluding floor. Wait for a complete executable route instead.
+            return false;
         }
 
         @Override
@@ -114,6 +245,55 @@ public sealed interface Goal {
             return world.kindAt(x, y, z) == WorldView.NodeKind.PASSABLE
                 && world.kindAt(x, y + 1, z) == WorldView.NodeKind.PASSABLE
                 && world.kindAt(x, y - 1, z) == WorldView.NodeKind.SOLID;
+        }
+
+        private boolean hasInteractionLine(WorldView world, int x, int y, int z) {
+            double eyeX = x + 0.5;
+            double eyeY = y + EYE_HEIGHT;
+            double eyeZ = z + 0.5;
+            double[][] targetPoints = {
+                {targetX + 0.01, targetY + 0.5, targetZ + 0.5},
+                {targetX + 0.99, targetY + 0.5, targetZ + 0.5},
+                {targetX + 0.5, targetY + 0.01, targetZ + 0.5},
+                {targetX + 0.5, targetY + 0.99, targetZ + 0.5},
+                {targetX + 0.5, targetY + 0.5, targetZ + 0.01},
+                {targetX + 0.5, targetY + 0.5, targetZ + 0.99},
+            };
+            for (double[] target : targetPoints) {
+                if (rayClear(world, eyeX, eyeY, eyeZ, target[0], target[1], target[2])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean rayClear(
+            WorldView world,
+            double fromX,
+            double fromY,
+            double fromZ,
+            double toX,
+            double toY,
+            double toZ
+        ) {
+            double dx = toX - fromX;
+            double dy = toY - fromY;
+            double dz = toZ - fromZ;
+            int samples = Math.max(1, (int) Math.ceil(Math.sqrt(dx * dx + dy * dy + dz * dz) * 16.0));
+            for (int index = 1; index < samples; index++) {
+                double fraction = index / (double) samples;
+                int sampleX = (int) Math.floor(fromX + dx * fraction);
+                int sampleY = (int) Math.floor(fromY + dy * fraction);
+                int sampleZ = (int) Math.floor(fromZ + dz * fraction);
+                if (sampleX == targetX && sampleY == targetY && sampleZ == targetZ) {
+                    return true;
+                }
+                WorldView.NodeKind kind = world.kindAt(sampleX, sampleY, sampleZ);
+                if (kind == WorldView.NodeKind.SOLID || kind == WorldView.NodeKind.UNLOADED) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 
@@ -159,6 +339,16 @@ public sealed interface Goal {
                 }
             }
             return false;
+        }
+
+        @Override
+        public boolean allowsNodeBudgetPartial() {
+            for (Goal goal : goals) {
+                if (!goal.allowsNodeBudgetPartial()) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         @Override

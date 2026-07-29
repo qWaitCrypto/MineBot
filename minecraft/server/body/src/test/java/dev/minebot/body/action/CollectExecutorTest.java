@@ -5,6 +5,7 @@ import dev.minebot.body.control.FakePlayerActionOwner;
 import dev.minebot.body.control.OwnerPriority;
 import dev.minebot.body.event.BotEventStream;
 import dev.minebot.body.nav.FakeWorld;
+import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MovementControls;
 import dev.minebot.body.nav.NavigateExecutor;
 import dev.minebot.body.nav.WorldView;
@@ -202,14 +203,18 @@ final class CollectExecutorTest {
                     ));
                 }
             }
-            if (harness.dropPresent && pickupDistance(harness.body, dropX, dropZ) <= 1.05) {
+            if (harness.dropPresent && insidePlayerTouchVolume(harness.body, dropX, STAND, dropZ)) {
                 harness.itemCounts.put(LOG, 1);
                 harness.dropPresent = false;
                 harness.drops.clear();
             }
         });
 
-        assertEquals("completed", terminal.get("classification").getAsString());
+        assertEquals(
+            "completed",
+            terminal.get("classification").getAsString(),
+            terminal + ", body=" + harness.body.x + "," + harness.body.y + "," + harness.body.z
+        );
         assertEquals("collected", terminal.get("reason").getAsString());
         JsonObject delta = terminal.getAsJsonObject("inventory_delta");
         assertEquals(LOG, delta.get("item_id").getAsString());
@@ -221,9 +226,105 @@ final class CollectExecutorTest {
             harness.body.breakTargets
         );
         assertTrue(
-            pickupDistance(harness.body, dropX, dropZ) <= 1.05,
+            insidePlayerTouchVolume(harness.body, dropX, STAND, dropZ),
             "pickup must physically reach the drop, x=" + harness.body.x
         );
+    }
+
+    @Test
+    void pickupUsesThePlayersTouchVolumeInsteadOfTheDropsFeetLevel() {
+        int treeX = 6;
+        int targetY = STAND + 1;
+        double dropX = treeX + 0.5;
+        double dropY = targetY;
+        double dropZ = 0.5;
+        Harness harness = new Harness();
+        harness.body.y = STAND - 1;
+        harness.blockStates.put(Harness.key(treeX, targetY, 0), LOG);
+        FakeWorld world = new FakeWorld(FLOOR - 1);
+        world.set(treeX, targetY - 1, 0, WorldView.NodeKind.SOLID);
+        world.set(treeX, targetY, 0, WorldView.NodeKind.SOLID);
+        harness.build(
+            world,
+            List.of(new CollectExecutor.Candidate(treeX, targetY, 0, LOG)),
+            2_400
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (harness.body.attacking) {
+                harness.miningTicks++;
+                if (harness.miningTicks == 20) {
+                    harness.blockStates.put(Harness.key(treeX, targetY, 0), "minecraft:air");
+                    world.set(treeX, targetY, 0, WorldView.NodeKind.PASSABLE);
+                    harness.dropPresent = true;
+                    harness.drops.add(new CollectExecutor.Drop(
+                        "raised-drop", LOG, 1, dropX, dropY, dropZ
+                    ));
+                }
+            }
+            if (harness.dropPresent && insidePlayerTouchVolume(harness.body, dropX, dropY, dropZ)) {
+                harness.itemCounts.put(LOG, 1);
+                harness.dropPresent = false;
+                harness.drops.clear();
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString());
+        assertEquals("collected", terminal.get("reason").getAsString());
+        assertEquals(1, harness.proposals.size(), "one requested item must require one mined block");
+        assertEquals(
+            List.of(treeX + "," + targetY + ",0:" + LOG),
+            harness.body.breakTargets
+        );
+    }
+
+    @Test
+    void pickupTracksADropWhileItIsStillMoving() {
+        int treeX = 6;
+        double dropX = treeX - 0.25;
+        double[] dropZ = {3.25};
+        Harness harness = new Harness();
+        harness.blockStates.put(Harness.key(treeX, STAND, 0), LOG);
+        FakeWorld world = worldWithTrunk(treeX);
+        harness.build(
+            world,
+            List.of(new CollectExecutor.Candidate(treeX, STAND, 0, LOG)),
+            2_400
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (harness.body.attacking) {
+                harness.miningTicks++;
+                if (harness.miningTicks == 20) {
+                    harness.blockStates.put(Harness.key(treeX, STAND, 0), "minecraft:air");
+                    world.set(treeX, STAND, 0, WorldView.NodeKind.PASSABLE);
+                    harness.dropPresent = true;
+                }
+            }
+            if (harness.dropPresent) {
+                dropZ[0] += 0.08;
+                harness.drops.clear();
+                harness.drops.add(new CollectExecutor.Drop(
+                    "moving-drop", LOG, 1, dropX, STAND, dropZ[0]
+                ));
+                if (insidePlayerTouchVolume(harness.body, dropX, STAND, dropZ[0])) {
+                    harness.itemCounts.put(LOG, 1);
+                    harness.dropPresent = false;
+                    harness.drops.clear();
+                }
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("collected", terminal.get("reason").getAsString());
+        assertEquals(1, harness.proposals.size(), "a moving drop must not trigger another mine");
+        assertTrue(terminal.getAsJsonArray("attempt_failures").isEmpty(), terminal.toString());
     }
 
     @Test
@@ -288,6 +389,48 @@ final class CollectExecutorTest {
         MutationGate.Proposal proposal = harness.proposals.get(0);
         assertEquals(treeX, proposal.x());
         assertEquals(reachableY, proposal.y());
+        assertEquals(0, proposal.z());
+    }
+
+    @Test
+    void navigationSkipsAnOccludedCandidateForAVisibleCandidate() {
+        int occludedX = 3;
+        int occludedY = STAND + 1;
+        int occludedZ = 3;
+        int visibleX = 8;
+        Harness harness = new Harness();
+        harness.blockStates.put(Harness.key(occludedX, occludedY, occludedZ), LOG);
+        harness.blockStates.put(Harness.key(visibleX, STAND, 0), LOG);
+
+        FakeWorld world = worldWithTrunk(visibleX);
+        world.set(occludedX, occludedY, occludedZ, WorldView.NodeKind.SOLID);
+        for (int x = occludedX - 1; x <= occludedX + 1; x++) {
+            for (int y = occludedY - 1; y <= occludedY + 1; y++) {
+                for (int z = occludedZ - 1; z <= occludedZ + 1; z++) {
+                    if (x != occludedX || y != occludedY || z != occludedZ) {
+                        world.set(x, y, z, WorldView.NodeKind.SOLID);
+                    }
+                }
+            }
+        }
+        harness.build(
+            world,
+            List.of(
+                new CollectExecutor.Candidate(occludedX, occludedY, occludedZ, LOG),
+                new CollectExecutor.Candidate(visibleX, STAND, 0, LOG)
+            ),
+            1_200
+        );
+
+        for (int tick = 1; tick <= 600 && harness.proposals.isEmpty(); tick++) {
+            harness.runtime.tick(tick);
+            harness.body.physicsTick();
+        }
+
+        assertFalse(harness.proposals.isEmpty(), "the visible candidate should produce a proposal");
+        MutationGate.Proposal proposal = harness.proposals.get(0);
+        assertEquals(visibleX, proposal.x());
+        assertEquals(STAND, proposal.y());
         assertEquals(0, proposal.z());
     }
 
@@ -386,7 +529,15 @@ final class CollectExecutorTest {
         assertEquals("target_not_found", terminal.get("reason").getAsString());
     }
 
-    private static double pickupDistance(FakeBody body, double dropX, double dropZ) {
-        return Math.hypot(body.x - dropX, body.z - dropZ);
+    private static boolean insidePlayerTouchVolume(
+        FakeBody body,
+        double dropX,
+        double dropY,
+        double dropZ
+    ) {
+        return Math.abs(body.x - dropX) <= Goal.Pickup.HORIZONTAL_REACH
+            && Math.abs(body.z - dropZ) <= Goal.Pickup.HORIZONTAL_REACH
+            && dropY >= body.y - Goal.Pickup.BELOW_FEET_REACH
+            && dropY <= body.y + Goal.Pickup.ABOVE_FEET_REACH;
     }
 }

@@ -4,15 +4,18 @@ import com.google.gson.JsonObject;
 import dev.minebot.body.control.FakePlayerActionOwner;
 import dev.minebot.body.control.OwnerPriority;
 import dev.minebot.body.event.BotEventStream;
+import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MovementControls;
 import dev.minebot.body.nav.NavigateExecutor;
 import dev.minebot.body.nav.WorldView;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -109,6 +112,17 @@ final class AscendExecutorTest {
                 y = Math.floor(lookY);
                 z = Math.floor(lookZ) + 0.5;
                 wantJump = false;
+            } else if (moving && partialClimb) {
+                // Preserve the failed edge contact until the controller times out.
+            } else if (moving) {
+                double dx = lookX - x;
+                double dz = lookZ - z;
+                double distance = Math.hypot(dx, dz);
+                if (distance > 1.0e-6) {
+                    double step = Math.min(0.25, distance);
+                    x += dx / distance * step;
+                    z += dz / distance * step;
+                }
             } else if (wantJump) {
                 y = Math.floor(y) + 0.42;
                 wantJump = false;
@@ -118,14 +132,43 @@ final class AscendExecutorTest {
 
     private static final class World implements WorldView {
         final Map<String, String> blocks = new HashMap<>();
+        final Set<String> surfaces = new HashSet<>();
         boolean sky;
 
+        static String key(int x, int y, int z) {
+            return x + "," + y + "," + z;
+        }
+
         String at(int x, int y, int z) {
-            return blocks.getOrDefault(x + "," + y + "," + z, STONE);
+            return blocks.getOrDefault(key(x, y, z), STONE);
         }
 
         void set(int x, int y, int z, String id) {
-            blocks.put(x + "," + y + "," + z, id);
+            blocks.put(key(x, y, z), id);
+        }
+
+        void addSurface(int x, int y, int z) {
+            surfaces.add(key(x, y, z));
+        }
+
+        boolean skyAbove(int x, int y, int z) {
+            return sky || surfaces.contains(key(x, y, z));
+        }
+
+        Goal surfaceGoal() {
+            List<Goal> goals = new ArrayList<>();
+            for (String value : surfaces) {
+                String[] parts = value.split(",");
+                goals.add(new Goal.Stand(
+                    Integer.parseInt(parts[0]),
+                    Integer.parseInt(parts[1]),
+                    Integer.parseInt(parts[2])
+                ));
+            }
+            if (goals.isEmpty()) {
+                return null;
+            }
+            return goals.size() == 1 ? goals.getFirst() : new Goal.Composite(goals);
         }
 
         @Override
@@ -159,7 +202,7 @@ final class AscendExecutorTest {
             this.proposals = proposals;
         }
 
-        static Harness create(World world, FakeBody body, int targetY, int timeout) {
+        static Harness create(World world, FakeBody body, int timeout) {
             ActionRegistry registry = new ActionRegistry();
             BotEventStream events = new BotEventStream();
             MutationGate gate = new MutationGate();
@@ -168,11 +211,21 @@ final class AscendExecutorTest {
             runtime.submit("Bot", "asc-1", "ASCEND", OwnerPriority.RECOVERY, 0);
             List<MutationGate.Proposal> proposals = new ArrayList<>();
             AscendExecutor executor = new AscendExecutor(
-                "Bot", "asc-1", targetY,
+                "Bot", "asc-1",
                 body, body, body, body,
                 new AscendExecutor.BlockReader() {
                     public String blockIdAt(int x, int y, int z) { return world.at(x, y, z); }
-                    public boolean skyAbove(int x, int y, int z) { return world.sky; }
+                    public boolean skyAbove(int x, int y, int z) { return world.skyAbove(x, y, z); }
+                },
+                new AscendExecutor.SurfaceAccess() {
+                    public boolean isSurfaceStand(int x, int y, int z) {
+                        return world.skyAbove(x, y, z)
+                            && new Goal.Stand(x, y, z).isSatisfied(world, x, y, z);
+                    }
+                    public Goal findSurfaceGoal(NavigateExecutor.PositionSource.Position position) {
+                        return world.surfaceGoal();
+                    }
+                    public WorldView world() { return world; }
                 },
                 id -> id.equals("minecraft:lava") || id.equals("minecraft:water"),
                 gate,
@@ -221,7 +274,7 @@ final class AscendExecutorTest {
     void carvesAndWalksUpARealStairUnderGovernance() {
         World world = enclosedStart();
         FakeBody body = new FakeBody(60);
-        Harness h = Harness.create(world, body, 70, 4_000);
+        Harness h = Harness.create(world, body, 4_000);
 
         JsonObject terminal = h.run(3_000, () -> {
             for (var proposal : h.proposals) {
@@ -259,7 +312,7 @@ final class AscendExecutorTest {
     void deniedStairBreakNeverMoves() {
         World world = enclosedStart();
         FakeBody body = new FakeBody(60);
-        Harness h = Harness.create(world, body, 70, 2_000);
+        Harness h = Harness.create(world, body, 2_000);
 
         JsonObject terminal = h.run(1_500, () -> {
             for (var proposal : h.proposals) {
@@ -281,7 +334,7 @@ final class AscendExecutorTest {
         }
         FakeBody body = new FakeBody(60);
         body.scaffoldCount = 0;
-        Harness h = Harness.create(world, body, 70, 2_000);
+        Harness h = Harness.create(world, body, 2_000);
 
         JsonObject terminal = h.run(50, () -> { });
 
@@ -300,11 +353,14 @@ final class AscendExecutorTest {
         World world = openPillarStart();
         FakeBody body = new FakeBody(60);
         body.scaffoldCount = 2;
-        Harness h = Harness.create(world, body, 61, 2_000);
+        Harness h = Harness.create(world, body, 2_000);
 
         JsonObject terminal = h.run(500, () -> {
             for (var proposal : h.proposals) {
                 h.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (h.body.y >= 61) {
+                h.world.sky = true;
             }
         });
 
@@ -330,7 +386,7 @@ final class AscendExecutorTest {
     void deniedPillarPlaceNeverJumpsOrMutates() {
         World world = openPillarStart();
         FakeBody body = new FakeBody(60);
-        Harness h = Harness.create(world, body, 61, 2_000);
+        Harness h = Harness.create(world, body, 2_000);
 
         JsonObject terminal = h.run(200, () -> {
             for (var proposal : h.proposals) {
@@ -351,7 +407,7 @@ final class AscendExecutorTest {
         World world = openPillarStart();
         FakeBody body = new FakeBody(60);
         body.scaffoldCount = 0;
-        Harness h = Harness.create(world, body, 61, 2_000);
+        Harness h = Harness.create(world, body, 2_000);
 
         JsonObject terminal = h.run(20, () -> { });
 
@@ -366,9 +422,11 @@ final class AscendExecutorTest {
     @Test
     void alreadyAtSurfaceCompletesImmediately() {
         World world = enclosedStart();
+        world.set(0, 70, 0, AIR);
+        world.set(0, 71, 0, AIR);
         world.sky = true;
         FakeBody body = new FakeBody(70);
-        Harness h = Harness.create(world, body, 70, 500);
+        Harness h = Harness.create(world, body, 500);
 
         JsonObject terminal = h.run(10, () -> { });
 
@@ -377,11 +435,52 @@ final class AscendExecutorTest {
     }
 
     @Test
+    void visibleSkyWhileSubmergedIsNotASurfaceTerminal() {
+        World world = enclosedStart();
+        world.set(0, 60, 0, "minecraft:water");
+        world.set(0, 61, 0, "minecraft:water");
+        world.sky = true;
+        FakeBody body = new FakeBody(60);
+        body.scaffoldCount = 0;
+        Harness h = Harness.create(world, body, 500);
+
+        JsonObject terminal = h.run(1_000, () -> {
+            for (var proposal : h.proposals) {
+                h.gate.verdict(proposal.proposalId(), false, "submerged_route");
+            }
+        });
+
+        assertEquals("unsafe", terminal.get("classification").getAsString(), terminal.toString());
+        assertFalse("surface_reached".equals(terminal.get("reason").getAsString()));
+    }
+
+    @Test
+    void walksToAReachableSurfaceExitBeforeConsideringMutation() {
+        World world = enclosedStart();
+        for (int x = 1; x <= 3; x++) {
+            world.set(x, 60, 0, AIR);
+            world.set(x, 61, 0, AIR);
+        }
+        world.addSurface(3, 60, 0);
+        FakeBody body = new FakeBody(60);
+        body.scaffoldCount = 0;
+        Harness h = Harness.create(world, body, 500);
+
+        JsonObject terminal = h.run(400, () -> { });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("surface_reached", terminal.get("reason").getAsString());
+        assertTrue(body.x >= 2.8, "the player must physically walk to the exit: " + body.x);
+        assertTrue(h.proposals.isEmpty(), "a walkable exit must not mutate terrain");
+        assertFalse(body.log.contains("exactBreak"));
+    }
+
+    @Test
     void invalidAuthoritativePositionFailsBeforeAnyControlOrMutation() {
         World world = enclosedStart();
         FakeBody body = new FakeBody(60);
         body.x = Double.NaN;
-        Harness h = Harness.create(world, body, 70, 500);
+        Harness h = Harness.create(world, body, 500);
 
         JsonObject terminal = h.run(10, () -> { });
 
@@ -396,7 +495,7 @@ final class AscendExecutorTest {
     void missingVerdictFailsClosed() {
         World world = enclosedStart();
         FakeBody body = new FakeBody(60);
-        Harness h = Harness.create(world, body, 70, 2_000);
+        Harness h = Harness.create(world, body, 2_000);
 
         JsonObject terminal = h.run(1_500, () -> { });
 
@@ -411,7 +510,7 @@ final class AscendExecutorTest {
         World world = enclosedStart();
         FakeBody body = new FakeBody(60);
         body.partialClimb = true;
-        Harness h = Harness.create(world, body, 70, 2_000);
+        Harness h = Harness.create(world, body, 2_000);
 
         JsonObject terminal = h.run(1_500, () -> {
             for (var proposal : h.proposals) {

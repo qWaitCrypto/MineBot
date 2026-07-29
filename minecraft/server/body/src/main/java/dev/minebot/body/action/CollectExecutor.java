@@ -28,10 +28,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     public static final int BREAK_TIMEOUT_TICKS = 300;
     public static final int PICKUP_TIMEOUT_TICKS = 120;
     public static final int DROP_LOCATE_TIMEOUT_TICKS = 60;
-    public static final int DROP_SETTLE_TICKS = 5;
-    public static final double DROP_SETTLE_DISTANCE = 0.05;
+    public static final double DROP_REPLAN_DISTANCE = 0.5;
     public static final double DROP_SEARCH_RADIUS = 8.0;
-    public static final double PICKUP_STAND_RANGE = 1.0;
     public static final double PICKUP_FINAL_REACH_DISTANCE = 0.15;
     public static final int APPROACH_REPLAN_LIMIT = 3;
 
@@ -103,7 +101,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private int replansTotal;
     private Map<String, Integer> dropsBeforeBreak = Map.of();
     private Drop pickupDrop;
-    private int stableDropTicks;
+    private Drop plannedPickupDrop;
+    private boolean pickupApproachFailed;
     private final JsonArray attemptFailures = new JsonArray();
     private final Map<String, Integer> baselineCounts;
 
@@ -175,7 +174,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             case MINING -> miningTick(serverTick);
             case PICKUP_LOCATE -> pickupLocateTick(serverTick);
             case PICKUP_APPROACH -> pickupApproachTick(serverTick, position);
-            case PICKUP_WAIT -> pickupWaitTick(serverTick);
+            case PICKUP_WAIT -> pickupWaitTick(serverTick, position);
         }
     }
 
@@ -326,7 +325,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             events.emit(bot, serverTick, "mutation_verified", actionId, data);
             approach = null;
             pickupDrop = null;
-            stableDropTicks = 0;
+            plannedPickupDrop = null;
+            pickupApproachFailed = false;
             phaseStartedTick = serverTick;
             phase = Phase.PICKUP_LOCATE;
             return;
@@ -360,17 +360,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             }
             return;
         }
-        if (pickupDrop != null
-            && pickupDrop.entityId().equals(observed.entityId())
-            && distanceSquared(pickupDrop, observed) <= DROP_SETTLE_DISTANCE * DROP_SETTLE_DISTANCE) {
-            stableDropTicks++;
-        } else {
-            stableDropTicks = 0;
-        }
         pickupDrop = observed;
-        if (stableDropTicks < DROP_SETTLE_TICKS) {
-            return;
-        }
         JsonObject data = new JsonObject();
         data.addProperty("entity_id", pickupDrop.entityId());
         data.addProperty("item_id", pickupDrop.itemId());
@@ -385,22 +375,31 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         if (completeFromInventoryDelta(serverTick)) {
             return;
         }
+        Drop observed = currentPickupDrop();
+        if (observed != null) {
+            boolean moved = plannedPickupDrop != null
+                && distanceSquared(plannedPickupDrop, observed)
+                >= DROP_REPLAN_DISTANCE * DROP_REPLAN_DISTANCE;
+            pickupDrop = observed;
+            if (moved && approach != null) {
+                approach.halt();
+                approach = null;
+                plannedPickupDrop = null;
+                pickupApproachFailed = false;
+            }
+        }
         if (approach == null) {
             approach = new ApproachController(
                 bot,
                 actionId,
-                new Goal.Near(
-                    (int) Math.floor(pickupDrop.x()),
-                    (int) Math.floor(pickupDrop.y()),
-                    (int) Math.floor(pickupDrop.z()),
-                    PICKUP_STAND_RANGE
-                ),
+                pickupGoal(pickupDrop),
                 world,
                 movement,
                 events,
                 APPROACH_REPLAN_LIMIT,
                 PICKUP_FINAL_REACH_DISTANCE
             );
+            plannedPickupDrop = pickupDrop;
         }
         ApproachController.Outcome outcome = approach.tick(serverTick, position.x(), position.y(), position.z());
         if (outcome.status() == ApproachController.Status.WORKING) {
@@ -409,13 +408,35 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         // Whether or not the walk-in fully succeeded, give the drop time to
         // arrive and let the inventory delta be the only truth.
         approach.halt();
+        approach = null;
+        pickupApproachFailed = outcome.status() == ApproachController.Status.FAILED;
         phaseStartedTick = serverTick;
         phase = Phase.PICKUP_WAIT;
     }
 
-    private void pickupWaitTick(int serverTick) {
+    private void pickupWaitTick(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
         if (completeFromInventoryDelta(serverTick)) {
             return;
+        }
+        Drop observed = currentPickupDrop();
+        if (observed != null) {
+            boolean moved = plannedPickupDrop != null
+                && distanceSquared(plannedPickupDrop, observed)
+                >= DROP_REPLAN_DISTANCE * DROP_REPLAN_DISTANCE;
+            pickupDrop = observed;
+            int x = (int) Math.floor(position.x());
+            int y = (int) Math.floor(position.y());
+            int z = (int) Math.floor(position.z());
+            boolean outsidePickupVolume = !pickupGoal(pickupDrop).isSatisfied(world, x, y, z);
+            if (outsidePickupVolume && (!pickupApproachFailed || moved)) {
+                plannedPickupDrop = null;
+                pickupApproachFailed = false;
+                phase = Phase.PICKUP_APPROACH;
+                return;
+            }
         }
         if (serverTick - phaseStartedTick > PICKUP_TIMEOUT_TICKS) {
             recordAttemptFailure("pickup_not_observed", null);
@@ -479,6 +500,20 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         double dy = left.y() - right.y();
         double dz = left.z() - right.z();
         return dx * dx + dy * dy + dz * dz;
+    }
+
+    private Drop currentPickupDrop() {
+        if (pickupDrop == null) {
+            return null;
+        }
+        return attributableDrops().stream()
+            .filter(drop -> pickupDrop.entityId().equals(drop.entityId()))
+            .findFirst()
+            .orElse(null);
+    }
+
+    private static Goal.Pickup pickupGoal(Drop drop) {
+        return new Goal.Pickup(drop.x(), drop.y(), drop.z());
     }
 
     private JsonObject inventoryDelta() {

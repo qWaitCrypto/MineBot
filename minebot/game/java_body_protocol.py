@@ -335,13 +335,10 @@ class JavaBodyProtocol:
         bot_name: str,
         action_id: str,
         *,
-        target_y: int | None = None,
         timeout_ticks: int | None = None,
     ) -> dict:
         self._require_capability("ASCEND")
         body: dict = {"bot_name": bot_name, "action_id": action_id}
-        if target_y is not None:
-            body["target_y"] = target_y
         if timeout_ticks is not None:
             body["timeout_ticks"] = timeout_ticks
         return self._request("ASCEND", body)

@@ -334,7 +334,6 @@ class JavaBodyClient:
     def ascend(
         self,
         *,
-        target_y: int | None = None,
         timeout_ticks: int | None = None,
     ) -> ToolResult:
         with self._exchange_lock:
@@ -343,7 +342,6 @@ class JavaBodyClient:
             request = self._protocol.ascend(
                 self._bot,
                 action_id,
-                target_y=target_y,
                 timeout_ticks=timeout_ticks,
             )
             return self._run_action(request, action_id, "ascend", _ASCEND_TERMINALS)
@@ -475,11 +473,15 @@ class JavaBodyClient:
                 "final_y",
                 "final_z",
                 "final_reach_distance",
-                "target_y",
                 "ascend_steps",
                 "break_steps",
                 "pillar_steps",
                 "pillar_fallback_from",
+                "surface_route_attempted",
+                "surface_route_used",
+                "surface_route_replans",
+                "surface_candidate_count",
+                "surface_route_failure",
                 "broken",
                 "placed",
                 "paused",

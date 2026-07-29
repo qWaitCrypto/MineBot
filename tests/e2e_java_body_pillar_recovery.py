@@ -60,12 +60,12 @@ def prepare_shaft(rcon: RconClient) -> None:
     time.sleep(0.5)
     rcon.command(f"clear {BOT}")
 
-    # Flat support, an open 7x7 shaft volume, and one roof block directly over
-    # the player. The open volume removes every adjacent stair witness while
-    # the roof keeps sky truth false until the final governed break.
+    # A sealed 7x7 chamber keeps every scanned surface physically unreachable.
+    # The open interior removes adjacent stair support, so the player must
+    # pillar twice and break the roof above its own column.
     rcon.command(f"fill {X - 3} {Y - 1} {Z - 3} {X + 3} {Y - 1} {Z + 3} stone")
-    rcon.command(f"fill {X - 3} {Y} {Z - 3} {X + 3} {Y + 3} {Z + 3} air")
-    rcon.command(f"setblock {X} {Y + 3} {Z} stone")
+    rcon.command(f"fill {X - 3} {Y} {Z - 3} {X + 3} {Y + 3} {Z + 3} stone hollow")
+    rcon.command(f"fill {X - 2} {Y} {Z - 2} {X + 2} {Y + 2} {Z + 2} air")
     rcon.command(f"gamemode survival {BOT}")
     rcon.command(f"give {BOT} {SCAFFOLD} 8")
     rcon.command(f"give {BOT} iron_pickaxe 1")
@@ -149,7 +149,7 @@ def main() -> int:
         and roof_open
     )
     artifact["success"] = success
-    out = Path("logs/agentic-runtime/java-body-pillar-recovery-20260728.json")
+    out = Path("logs/agentic-runtime/java-body-pillar-recovery-20260729.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(artifact, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(artifact, indent=2, sort_keys=True))

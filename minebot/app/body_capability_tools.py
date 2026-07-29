@@ -1468,7 +1468,6 @@ def _java_collect_block_domain(body: Body, params: JsonObject) -> ToolResult:
         int(params.get("mutation_budget") or 8),
     )
     max_wall_s = float(params.get("max_wall_s") or 60.0)
-    segment_timeout_s = float(params.get("segment_timeout_s") or 15.0)
     started = time.monotonic()
     collected = 0
     attempts: list[dict[str, object]] = []
@@ -1476,7 +1475,11 @@ def _java_collect_block_domain(body: Body, params: JsonObject) -> ToolResult:
         wall_remaining = max_wall_s - (time.monotonic() - started)
         if wall_remaining <= 0:
             break
-        timeout_ticks = max(20, min(12_000, int(min(segment_timeout_s, wall_remaining) * 20)))
+        # COLLECT_BLOCK is already a tick-driven objective with its own
+        # planning, movement, mining, and pickup phases. Give that objective
+        # the remaining outer deadline instead of terminating the whole
+        # transaction at the legacy provider's per-segment time slice.
+        timeout_ticks = max(20, min(12_000, round(wall_remaining * 20)))
         try:
             result = body.execute(
                 Action.create(

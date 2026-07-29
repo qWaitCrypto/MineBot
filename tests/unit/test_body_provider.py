@@ -446,10 +446,11 @@ def test_java_provider_wires_known_target_movement_to_the_objective_navigator() 
 
 def test_java_provider_uses_canonical_collect_domain_tool() -> None:
     policy = GovernancePolicy(natural_regions=[REGION])
+    server = FakeBodyServer()
     body = JavaBody(
         JavaBodyClient(
             "Bot",
-            lambda: FakeBodyServer(),
+            lambda: server,
             GovernanceAnswerer(policy),
         ),
         "Bot",
@@ -475,15 +476,18 @@ def test_java_provider_uses_canonical_collect_domain_tool() -> None:
     assert result.success is True
     assert result.reason == "collected"
     assert result.metrics["collected_delta"] == 1
+    request = next(item for item in server.requests if item["type"] == "COLLECT_BLOCK")
+    assert request["timeout_ticks"] == 1_200
     assert "collect_block" not in registry.names()
 
 
 def test_java_provider_uses_canonical_go_to_surface_tool() -> None:
+    server = FakeBodyServer()
     runtime = build_body_provider(
         "java",
         bot_name="Bot",
         natural_region=REGION,
-        java_connect=lambda: FakeBodyServer(),
+        java_connect=lambda: server,
     )
     registry = build_phase1_registry(
         runtime.body,
@@ -494,11 +498,18 @@ def test_java_provider_uses_canonical_go_to_surface_tool() -> None:
         ),
     )
 
-    result = registry.get("go_to_surface").callable({})
+    tool = registry.get("go_to_surface")
+    result = tool.callable({"timeout_s": 17})
 
     assert result.success is True
     assert result.reason == "surface_reached"
     assert result.metrics["final_y"] == 70
+    assert tool.input_schema["properties"] == {
+        "timeout_s": {"type": "number", "exclusiveMinimum": 0}
+    }
+    request = next(item for item in server.requests if item["type"] == "ASCEND")
+    assert request["timeout_ticks"] == 340
+    assert "target_y" not in request
     assert registry.sidecar("go_to_surface").source == "java_body"
 
 

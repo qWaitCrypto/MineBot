@@ -2,15 +2,19 @@ package dev.minebot.body.action;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import dev.minebot.body.nav.ApproachController;
+import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MovementControls;
 import dev.minebot.body.nav.NavigateExecutor;
+import dev.minebot.body.nav.WorldView;
 
 import java.util.List;
 
 /**
- * Governed vertical escape to open sky. The executor prefers a carved stair,
- * then pillars in place when no adjacent step exists. Every broken or placed
- * block receives a fresh Python governance verdict.
+ * Return to a dry, supported surface. The executor first follows an ordinary
+ * complete route, then carves a stair or pillars in place when no such route
+ * exists. Every broken or placed block receives a fresh Python governance
+ * verdict.
  */
 public final class AscendExecutor implements ActionRuntime.TickExecutor {
     public static final int MAX_ASCEND_STEPS = 64;
@@ -43,6 +47,15 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         boolean isHazard(String blockId);
     }
 
+    /** Finds and verifies ordinary walk/swim exits before terrain mutation. */
+    public interface SurfaceAccess {
+        boolean isSurfaceStand(int x, int y, int z);
+
+        Goal findSurfaceGoal(NavigateExecutor.PositionSource.Position position);
+
+        WorldView world();
+    }
+
     /** Inventory selection and public /player controls needed by pillar-up. */
     public interface PillarAccess {
         ScaffoldSelection selectScaffold(String bot, List<String> candidates);
@@ -61,6 +74,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
 
     private enum Phase {
         EVALUATE,
+        SURFACE_ROUTING,
         AWAITING_VERDICT,
         BREAKING,
         MOVING,
@@ -85,12 +99,12 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
 
     private final String bot;
     private final String actionId;
-    private final int targetY;
     private final ExactBlockBreaker blockBreaker;
     private final MovementControls movement;
     private final BotControls hygiene;
     private final PillarAccess pillar;
     private final BlockReader blocks;
+    private final SurfaceAccess surface;
     private final HazardPolicy hazards;
     private final MutationGate gate;
     private final CollectExecutor.ProposalSink proposals;
@@ -125,6 +139,12 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     private int pillarCountBefore;
     private String pillarBlock;
     private String pillarFallbackReason;
+    private ApproachController surfaceApproach;
+    private boolean surfaceRouteAttempted;
+    private boolean surfaceRouteUsed;
+    private int surfaceRouteReplans;
+    private int surfaceCandidateCount;
+    private String surfaceRouteFailure;
     private boolean cancelPending;
     private final JsonArray brokenLedger = new JsonArray();
     private final JsonArray placedLedger = new JsonArray();
@@ -132,12 +152,12 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     public AscendExecutor(
         String bot,
         String actionId,
-        int targetY,
         ExactBlockBreaker blockBreaker,
         MovementControls movement,
         BotControls hygiene,
         PillarAccess pillar,
         BlockReader blocks,
+        SurfaceAccess surface,
         HazardPolicy hazards,
         MutationGate gate,
         CollectExecutor.ProposalSink proposals,
@@ -148,12 +168,12 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     ) {
         this.bot = bot;
         this.actionId = actionId;
-        this.targetY = targetY;
         this.blockBreaker = blockBreaker;
         this.movement = movement;
         this.hygiene = hygiene;
         this.pillar = pillar;
         this.blocks = blocks;
+        this.surface = surface;
         this.hazards = hazards;
         this.gate = gate;
         this.proposals = proposals;
@@ -192,6 +212,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         }
         switch (phase) {
             case EVALUATE -> evaluate(serverTick, position);
+            case SURFACE_ROUTING -> surfaceRoutingTick(serverTick, position);
             case AWAITING_VERDICT -> verdictTick(serverTick);
             case BREAKING -> breakingTick(serverTick);
             case MOVING -> movingTick(serverTick, position);
@@ -205,9 +226,31 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         int x = position.blockX();
         int feetY = position.feetBlockY();
         int z = position.blockZ();
-        if (feetY >= targetY || blocks.skyAbove(x, feetY, z)) {
+        if (surface.isSurfaceStand(x, feetY, z)) {
             finishWithLedger(serverTick, ActionRuntime.CLASS_COMPLETED, "surface_reached", feetY);
             return;
+        }
+        if (!surfaceRouteAttempted) {
+            surfaceRouteAttempted = true;
+            Goal surfaceGoal = surface.findSurfaceGoal(position);
+            if (surfaceGoal != null) {
+                surfaceCandidateCount = surfaceGoal instanceof Goal.Composite composite
+                    ? composite.goals().size()
+                    : 1;
+                surfaceApproach = new ApproachController(
+                    bot,
+                    actionId,
+                    surfaceGoal,
+                    surface.world(),
+                    movement,
+                    events,
+                    5,
+                    0.15
+                );
+                phase = Phase.SURFACE_ROUTING;
+                return;
+            }
+            surfaceRouteFailure = "surface_target_unavailable";
         }
         if (ascendSteps >= MAX_ASCEND_STEPS || breakSteps >= MAX_BREAK_STEPS) {
             finishWithLedger(serverTick, ActionRuntime.CLASS_FAILED, "ascend_step_budget_exhausted", feetY);
@@ -253,6 +296,36 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         }
         clearIndex = 0;
         clearNext(serverTick);
+    }
+
+    private void surfaceRoutingTick(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        ApproachController.Outcome outcome = surfaceApproach.tick(
+            serverTick, position.x(), position.y(), position.z()
+        );
+        if (outcome.status() == ApproachController.Status.WORKING) {
+            return;
+        }
+        surfaceRouteReplans += surfaceApproach.replans();
+        surfaceApproach.halt();
+        surfaceApproach = null;
+        if (outcome.status() == ApproachController.Status.COMPLETED
+            && surface.isSurfaceStand(position.blockX(), position.feetBlockY(), position.blockZ())) {
+            surfaceRouteUsed = true;
+            finishWithLedger(
+                serverTick,
+                ActionRuntime.CLASS_COMPLETED,
+                "surface_reached",
+                position.feetBlockY()
+            );
+            return;
+        }
+        surfaceRouteFailure = outcome.status() == ApproachController.Status.FAILED
+            ? outcome.reason()
+            : "surface_postcondition_failed";
+        phase = Phase.EVALUATE;
     }
 
     private void clearNext(int serverTick) {
@@ -687,11 +760,15 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
 
     private void finish(int serverTick, String classification, String reason) {
         NavigateExecutor.PositionSource.Position position = positions.position(bot);
-        int finalY = position == null ? targetY : position.feetBlockY();
+        Integer finalY = position == null ? null : position.feetBlockY();
         finishWithLedger(serverTick, classification, reason, finalY);
     }
 
-    private void finishWithLedger(int serverTick, String classification, String reason, int finalY) {
+    private void finishWithLedger(int serverTick, String classification, String reason, Integer finalY) {
+        if (surfaceApproach != null) {
+            surfaceApproach.halt();
+            surfaceApproach = null;
+        }
         if (proposalId != null) {
             gate.discard(proposalId);
             proposalId = null;
@@ -700,12 +777,20 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         hygiene.clearAll(bot);
         JsonObject facts = new JsonObject();
         facts.addProperty("reason", reason);
-        facts.addProperty("final_y", finalY);
-        facts.addProperty("target_y", targetY);
+        if (finalY != null) {
+            facts.addProperty("final_y", finalY);
+        }
         facts.addProperty("ascend_steps", ascendSteps);
         facts.addProperty("break_steps", breakSteps);
         facts.addProperty("pillar_steps", pillarSteps);
         facts.addProperty("elapsed_ticks", elapsedTicks);
+        facts.addProperty("surface_route_attempted", surfaceRouteAttempted);
+        facts.addProperty("surface_route_used", surfaceRouteUsed);
+        facts.addProperty("surface_route_replans", surfaceRouteReplans);
+        facts.addProperty("surface_candidate_count", surfaceCandidateCount);
+        if (surfaceRouteFailure != null) {
+            facts.addProperty("surface_route_failure", surfaceRouteFailure);
+        }
         if (pillarFallbackReason != null) {
             facts.addProperty("pillar_fallback_from", pillarFallbackReason);
         }

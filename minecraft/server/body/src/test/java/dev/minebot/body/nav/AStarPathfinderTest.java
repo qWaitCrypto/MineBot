@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class AStarPathfinderTest {
@@ -184,6 +185,19 @@ final class AStarPathfinderTest {
     }
 
     @Test
+    void interactGoalRejectsADryButOccludedStand() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        int targetX = 4;
+        int targetY = STAND + 1;
+        world.set(targetX, targetY, 0, WorldView.NodeKind.SOLID);
+        world.wall(2, 0, STAND + 3);
+        Goal goal = new Goal.Interact(targetX, targetY, 0, 4.5);
+
+        assertTrue(goal.isSatisfied(0, STAND, 0), "distance alone would accept this stand");
+        assertFalse(goal.isSatisfied(world, 0, STAND, 0), "the wall blocks every target face");
+    }
+
+    @Test
     void ordinaryDryRouteBeatsASlightlyShorterDeepWaterDrop() {
         FakeWorld world = new FakeWorld(FLOOR);
         int waterY = STAND - 8;
@@ -265,30 +279,49 @@ final class AStarPathfinderTest {
 
     @Test
     void interactGoalUnifiesStandSelectionWithReachability() {
-        // The structural fix for the Scarpet-era failure family: a tree trunk
-        // whose east side is fenced off. The only legal stands are west; the
-        // planner must end at one of them without any separate stand pre-pass.
+        // The direct west approach is occluded. The planner must route to a
+        // stand that has both physical reach and a clear target face.
         FakeWorld world = new FakeWorld(FLOOR);
         int treeX = 12;
         int treeZ = 0;
         for (int y = STAND; y <= STAND + 4; y++) {
             world.set(treeX, y, treeZ, WorldView.NodeKind.SOLID);
         }
-        // A tall fence isolating everything east of the trunk plus the near columns.
-        for (int z = -10; z <= 10; z++) {
+        for (int z = -1; z <= 1; z++) {
             world.wall(treeX - 1, z, STAND + 4);
         }
-        world.set(treeX - 1, STAND, treeZ, WorldView.NodeKind.SOLID);
-        world.set(treeX - 1, STAND + 1, treeZ, WorldView.NodeKind.SOLID);
 
         Goal goal = new Goal.Interact(treeX, STAND + 1, treeZ, 4.5);
         Result result = solve(world, goal, 0, 0);
 
         assertEquals(Outcome.COMPLETE, result.outcome());
         Waypoint stand = result.path().get(result.path().size() - 1);
-        assertTrue(goal.isSatisfied(stand.x(), stand.y(), stand.z()), "the terminal node is a legal stand");
-        assertTrue(stand.x() < treeX - 1, "the stand is on the reachable side of the fence");
+        assertTrue(goal.isSatisfied(world, stand.x(), stand.y(), stand.z()), "the terminal stand can execute the interaction");
+        assertTrue(Math.abs(stand.z()) > 1, "the route goes around the occluding wall");
         assertContiguous(result.path());
+    }
+
+    @Test
+    void interactGoalDoesNotCommitANodeBudgetGuess() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        Goal goal = new Goal.Interact(4_000, STAND + 1, 0, 4.5);
+        AStarPathfinder pathfinder = new AStarPathfinder(
+            world,
+            goal,
+            0,
+            STAND,
+            0,
+            3_000,
+            AStarPathfinder.DEFAULT_UNLOADED_TOUCH_CAP
+        );
+        Result result;
+        do {
+            result = pathfinder.step(1_000);
+        } while (result.outcome() == Outcome.IN_PROGRESS);
+
+        assertEquals(Outcome.NO_PATH, result.outcome());
+        assertEquals("node_budget_without_complete_route", result.reason());
+        assertTrue(result.path().isEmpty());
     }
 
     @Test

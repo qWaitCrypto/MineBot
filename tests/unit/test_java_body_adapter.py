@@ -755,11 +755,15 @@ class FakeBodyServer:
             "classification": "completed",
             "reason": "surface_reached",
             "final_y": 70,
-            "target_y": 320,
             "ascend_steps": 6,
             "break_steps": 12,
             "pillar_steps": 2,
             "pillar_fallback_from": "stair_route_unavailable",
+            "surface_route_attempted": True,
+            "surface_route_used": False,
+            "surface_route_replans": 1,
+            "surface_candidate_count": 12,
+            "surface_route_failure": "no_path",
             "placed": [
                 {"x": 1, "y": 64, "z": 0, "block_id": "minecraft:cobblestone"},
                 {"x": 1, "y": 65, "z": 0, "block_id": "minecraft:cobblestone"},
@@ -1270,6 +1274,11 @@ def test_ascend_maps_verified_surface_terminal() -> None:
     assert result.metrics["ascend_steps"] == 6
     assert result.metrics["pillar_steps"] == 2
     assert result.metrics["pillar_fallback_from"] == "stair_route_unavailable"
+    assert result.metrics["surface_route_attempted"] is True
+    assert result.metrics["surface_route_used"] is False
+    assert result.metrics["surface_route_replans"] == 1
+    assert result.metrics["surface_candidate_count"] == 12
+    assert result.metrics["surface_route_failure"] == "no_path"
     assert len(result.metrics["placed"]) == 2
 
 

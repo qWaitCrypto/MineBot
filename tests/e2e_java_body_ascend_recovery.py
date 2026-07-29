@@ -3,9 +3,9 @@
 The scenario creates a sealed underground stone corridor in the disposable
 golden test world. Production code receives no fixture coordinates: the probe
 invokes the canonical ``go_to_surface`` and ``collect_resource`` tools through
-the composite provider and requires server-authoritative position/inventory
-truth. Every stair break is answered by the real GovernancePolicy over a live
-voxel re-read.
+the Java provider and requires server-authoritative position/inventory truth.
+Every stair break is answered by the real GovernancePolicy over a live voxel
+re-read.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import time
 
 from minebot.app.body_provider import build_body_provider
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime
-from minebot.contract import Region, ToolResult
-from minebot.game import RconClient, ScarpetBody
+from minebot.contract import Body, Region, ToolResult
+from minebot.game import RconClient
 from minebot.game.rcon import RconConfig
 
 
@@ -34,7 +34,7 @@ SURFACE_Y = 100
 TREE_X = 106
 
 
-def inventory_counts(body: ScarpetBody) -> dict[str, int]:
+def inventory_counts(body: Body) -> dict[str, int]:
     counts: dict[str, int] = {}
     start: int | None = 0
     while start is not None:
@@ -133,17 +133,18 @@ def main() -> int:
         "scope": "java_body_ascend_recovery_to_wood",
         "formal_gate": False,
         "bounded": True,
+        "body_provider": "java",
+        "scarpet_body_constructed": False,
+        "rcon_role": "fixture_setup_and_verification_only",
     }
     with RconClient(
         RconConfig(host="127.0.0.1", port=25576, password="test", timeout_s=20)
     ) as rcon:
         prepare_corridor(rcon)
-        scarpet = ScarpetBody(BOT, rcon)
         provider = build_body_provider(
-            "composite",
+            "java",
             bot_name=BOT,
             natural_region=REGION,
-            scarpet_body=scarpet,
             java_body_url=BODY_URL,
         )
         parts = build_phase1_agent_runtime(
@@ -152,17 +153,17 @@ def main() -> int:
             model_provider=None,
             config=Phase1RuntimeConfig(
                 natural_region=REGION,
-                body_provider="composite",
+                body_provider="java",
                 governance_policy=provider.governance,
             ),
             agent_name="JavaAscendProbe",
         )
         try:
             before_state = provider.body.get_state()
-            before_inventory = inventory_counts(scarpet)
+            before_inventory = inventory_counts(provider.body)
             surface = parts.registry.get("go_to_surface").callable({"timeout_s": 120})
             after_surface = provider.body.get_state()
-            before_wood = inventory_counts(scarpet)
+            before_wood = inventory_counts(provider.body)
             if surface.success:
                 wood = parts.registry.get("collect_resource").callable(
                     {
@@ -179,7 +180,7 @@ def main() -> int:
             else:
                 wood = ToolResult(False, "surface_prerequisite_failed", False)
             after_wood_state = provider.body.get_state()
-            after_inventory = inventory_counts(scarpet)
+            after_inventory = inventory_counts(provider.body)
             fixture_floor_intact = "passed" in rcon.command(
                 f"execute if block {START_X} {START_Y - 1} {START_Z} minecraft:sandstone"
             ).lower()
@@ -218,7 +219,7 @@ def main() -> int:
         and fixture_floor_intact
     )
     artifact["success"] = success
-    out = Path("logs/agentic-runtime/java-body-ascend-recovery-20260727.json")
+    out = Path("logs/agentic-runtime/java-body-ascend-recovery-20260729.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(artifact, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(artifact, indent=2, sort_keys=True))

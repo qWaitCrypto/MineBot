@@ -941,17 +941,15 @@ def _go_to_surface_tool(
             return work.go_to_surface(
                 context=BreakContext.COLLECT_APPROACH,
                 timeout_s=float(params.get("timeout_s") or 30.0),
-                surface_scan_height=int(params.get("surface_scan_height") or 32),
-                surface_scan_radius=int(params.get("surface_scan_radius") or 2),
-                max_steps=(int(params["max_steps"]) if params.get("max_steps") is not None else None),
-                world_top_y=int(params.get("world_top_y") or 320),
+                surface_scan_height=32,
+                surface_scan_radius=2,
+                max_steps=None,
+                world_top_y=320,
             )
         timeout_s = float(params.get("timeout_s") or 120.0)
         action_params: JsonObject = {
             "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
         }
-        if params.get("world_top_y") is not None:
-            action_params["target_y"] = int(params["world_top_y"])
         try:
             result = java_objective_body.execute(Action.create("ascend", action_params))
         except Exception as error:
@@ -972,10 +970,6 @@ def _go_to_surface_tool(
             "type": "object",
             "properties": {
                 "timeout_s": {"type": "number", "exclusiveMinimum": 0},
-                "surface_scan_height": {"type": "integer", "minimum": 0},
-                "surface_scan_radius": {"type": "integer", "minimum": 0},
-                "max_steps": {"type": "integer", "minimum": 1},
-                "world_top_y": {"type": "integer"},
             },
             "additionalProperties": False,
         },

@@ -192,7 +192,6 @@
           "classification": "completed",
           "reason": "surface_reached",
           "final_y": 70,
-          "target_y": 320,
           "ascend_steps": 11,
           "break_steps": 24,
           "elapsed_ticks": 280,

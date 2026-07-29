@@ -153,6 +153,15 @@ public final class AStarPathfinder {
 
     /** Budget/boundary stop: usable partial progress or an honest no-path. */
     private Result boundedOutcome(String reason) {
+        if ("node_budget".equals(reason) && !goal.allowsNodeBudgetPartial()) {
+            return new Result(
+                Outcome.NO_PATH,
+                List.of(),
+                "node_budget_without_complete_route",
+                expanded,
+                unloadedTouches
+            );
+        }
         if (!hasBestSoFar) {
             return new Result(
                 Outcome.NO_PATH,

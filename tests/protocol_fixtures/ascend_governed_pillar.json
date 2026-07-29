@@ -27,7 +27,7 @@
     {
       "send": {
         "builder": "ascend",
-        "args": {"bot_name": "MineBot_1", "action_id": "ascend-pillar-1", "target_y": 67, "timeout_ticks": 2400}
+        "args": {"bot_name": "MineBot_1", "action_id": "ascend-pillar-1", "timeout_ticks": 2400}
       },
       "expect_message": {
         "channel": "fakeplayer-body",
@@ -36,7 +36,6 @@
         "request_id": "r-2",
         "bot_name": "MineBot_1",
         "action_id": "ascend-pillar-1",
-        "target_y": 67,
         "timeout_ticks": 2400
       }
     },
@@ -124,7 +123,6 @@
           "classification": "completed",
           "reason": "surface_reached",
           "final_y": 67,
-          "target_y": 67,
           "ascend_steps": 3,
           "break_steps": 0,
           "pillar_steps": 3,

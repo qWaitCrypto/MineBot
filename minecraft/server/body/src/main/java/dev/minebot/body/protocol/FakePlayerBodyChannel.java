@@ -16,6 +16,7 @@ import dev.minebot.body.action.EngageExecutor;
 import dev.minebot.body.action.FollowExecutor;
 import dev.minebot.body.action.MutationGate;
 import dev.minebot.body.action.MinecraftSurvivalEnvironment;
+import dev.minebot.body.action.MinecraftSurfaceAccess;
 import dev.minebot.body.action.PlayerPrimitiveActions;
 import dev.minebot.body.action.SpecialUseActions;
 import dev.minebot.body.action.SurvivalReflexController;
@@ -806,7 +807,6 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
                 return;
             }
-            int targetY = boundedOptionalInt(request, "target_y", level.getMaxY(), level.getMinY(), level.getMaxY());
             int timeoutTicks = boundedOptionalInt(request, "timeout_ticks", MAX_TIMEOUT_TICKS, 20, MAX_TIMEOUT_TICKS);
             ActionRuntime.Submission submission = runtime.submit(
                 botName, actionId, "ASCEND", OwnerPriority.RECOVERY, serverTick
@@ -829,12 +829,12 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     AscendExecutor executor = new AscendExecutor(
                         botName,
                         actionId,
-                        targetY,
                         blockBreaker,
                         adapter,
                         adapter,
                         ascendPillarAccess(player),
                         blockReader,
+                        new MinecraftSurfaceAccess(level),
                         FakePlayerBodyChannel::isAscendHazard,
                         mutationGate,
                         this::publishProposal,
