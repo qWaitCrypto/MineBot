@@ -75,6 +75,26 @@ class MovingPickupBody(PickupBody):
         return super().perceive(scope, params)
 
 
+class TrackingPickupNavigator:
+    def __init__(self, body, *, outcome=(False, "target_lost"), collect=True):
+        self.body = body
+        self.outcome = outcome
+        self.collect = collect
+        self.follow_calls = []
+        self.navigation_calls = []
+
+    def follow_entity(self, target_spec, **kwargs):
+        self.follow_calls.append((target_spec, kwargs))
+        if self.collect:
+            self.body.item_count += 1
+        success, reason = self.outcome
+        return ToolResult(success, reason, not success)
+
+    def navigate_to(self, goal, **kwargs):
+        self.navigation_calls.append((goal, kwargs))
+        return ToolResult(False, "unexpected_static_navigation", False)
+
+
 def item(entity_id, pos, *, name="Dirt"):
     return {"id": entity_id, "type": "minecraft:item", "name": name, "pos": list(pos), "dist2": 1.0}
 
@@ -114,6 +134,24 @@ class PickupRuntimeTests(unittest.TestCase):
         self.assertFalse(config.allow_downward)
         self.assertEqual(config.max_break_steps, 0)
         self.assertEqual(config.max_place_steps, 0)
+
+    def test_single_moving_drop_is_followed_by_entity_id_until_inventory_changes(self):
+        body = PickupBody([item("moving-drop", (3.5, 67.2, 0.5))])
+        navigator = TrackingPickupNavigator(body)
+        runtime = PickupTransactions(body, navigator, settle=lambda _seconds: None)
+
+        result = runtime.pickup_items(
+            expected_items=("dirt",),
+            config=PickupConfig(poll_timeout_s=0, max_scan_rounds=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(navigator.follow_calls[0][0], "moving-drop")
+        self.assertEqual(navigator.follow_calls[0][1]["keep_distance"], 1.25)
+        self.assertEqual(navigator.navigation_calls, [])
+        plan = result.metrics["pickup_process"]["plans"][0]
+        self.assertEqual(plan["mode"], "follow_entity")
+        self.assertEqual(plan["selected_keys"], ["entity:moving-drop"])
 
     def test_expected_item_filter_skips_unrelated_nearby_drops(self):
         body = PickupBody(

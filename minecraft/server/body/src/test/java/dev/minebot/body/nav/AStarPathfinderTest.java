@@ -117,6 +117,22 @@ final class AStarPathfinderTest {
     }
 
     @Test
+    void routeAvoidsPassableNodesThatWouldRetriggerSurvivalReflex() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int z = -2; z <= 2; z++) {
+            world.hazardBodyPosition(5, STAND, z);
+        }
+
+        Result result = solve(world, new Goal.Near(10, STAND, 0, 0.5), 0, 0);
+
+        assertEquals(Outcome.COMPLETE, result.outcome());
+        result.path().forEach(waypoint -> assertTrue(
+            !world.isBodyPositionHazardous(waypoint.x(), waypoint.y(), waypoint.z()),
+            "ordinary route must not enter the survival hazard envelope"
+        ));
+    }
+
+    @Test
     void aWaterChannelIsSwumAcrossToReachTheGoal() {
         FakeWorld world = new FakeWorld(FLOOR);
         // A 3-wide water channel the route must cross (feet + head are water).

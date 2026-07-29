@@ -47,7 +47,9 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         if (player == null || !(player.level() instanceof ServerLevel level)) {
             return null;
         }
-        if (lavaNear(level, position.blockX(), position.blockY(), position.blockZ())) {
+        if (MinecraftWorldView.isLavaNearBody(
+            level, position.blockX(), position.blockY(), position.blockZ()
+        )) {
             return SurvivalReflexController.Kind.LAVA;
         }
         if (player.isOnFire()) {
@@ -70,7 +72,9 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
             return false;
         }
         return switch (kind) {
-            case LAVA -> lavaNear(level, position.blockX(), position.blockY(), position.blockZ());
+            case LAVA -> MinecraftWorldView.isLavaNearBody(
+                level, position.blockX(), position.blockY(), position.blockZ()
+            );
             case FIRE -> player.isOnFire();
             case WATER -> waterRisk(player, level, position);
         };
@@ -207,7 +211,8 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         if (!isDryStand(world, x, y, z)) {
             return null;
         }
-        if (kind == SurvivalReflexController.Kind.LAVA && lavaNear(level, x, y, z)) {
+        if (kind == SurvivalReflexController.Kind.LAVA
+            && world.isBodyPositionHazardous(x, y, z)) {
             return null;
         }
         return new SurvivalReflexController.Target(
@@ -288,19 +293,6 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
             && player.getAirSupply() <= WATER_AIR_THRESHOLD;
     }
 
-    private static boolean lavaNear(ServerLevel level, int x, int y, int z) {
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 0; dy++) {
-                for (int dz = -1; dz <= 1; dz++) {
-                    if (isLava(level, x + dx, y + dy, z + dz)) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
     private static boolean isWater(ServerLevel level, int x, int y, int z) {
         LevelChunk chunk = level.getChunkSource().getChunkNow(x >> 4, z >> 4);
         if (chunk == null) {
@@ -308,15 +300,6 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         }
         var fluid = chunk.getBlockState(new BlockPos(x, y, z)).getFluidState();
         return fluid.is(Fluids.WATER) || fluid.is(Fluids.FLOWING_WATER);
-    }
-
-    private static boolean isLava(ServerLevel level, int x, int y, int z) {
-        LevelChunk chunk = level.getChunkSource().getChunkNow(x >> 4, z >> 4);
-        if (chunk == null) {
-            return false;
-        }
-        var fluid = chunk.getBlockState(new BlockPos(x, y, z)).getFluidState();
-        return fluid.is(Fluids.LAVA) || fluid.is(Fluids.FLOWING_LAVA);
     }
 
     private ServerPlayer player(String botName) {

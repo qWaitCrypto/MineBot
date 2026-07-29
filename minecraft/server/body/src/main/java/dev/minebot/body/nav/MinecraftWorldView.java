@@ -52,4 +52,32 @@ public final class MinecraftWorldView implements WorldView {
         }
         return NodeKind.SOLID;
     }
+
+    @Override
+    public boolean isBodyPositionHazardous(int x, int y, int z) {
+        return isLavaNearBody(level, x, y, z);
+    }
+
+    /** Exact lava envelope used by both ordinary routing and survival reflexes. */
+    public static boolean isLavaNearBody(ServerLevel level, int x, int y, int z) {
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 0; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    LevelChunk chunk = level.getChunkSource().getChunkNow(
+                        (x + dx) >> 4, (z + dz) >> 4
+                    );
+                    if (chunk == null) {
+                        continue;
+                    }
+                    var fluid = chunk.getBlockState(
+                        new BlockPos(x + dx, y + dy, z + dz)
+                    ).getFluidState();
+                    if (fluid.is(Fluids.LAVA) || fluid.is(Fluids.FLOWING_LAVA)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
 }

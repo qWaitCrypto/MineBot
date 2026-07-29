@@ -15,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from minebot.app.body_provider import build_body_provider
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry
+from minebot.body import ObjectiveNavigationTransactions, PickupConfig, PickupTransactions
+from minebot.body.inventory_read import read_inventory_counts
 from minebot.contract import Region
 from minebot.game.rcon import RconClient, RconConfig
 
@@ -136,6 +138,37 @@ def main() -> int:
             moved.metrics,
         )
 
+        command(rcon, f"player {TARGET} kill")
+        command(rcon, f"clear {BOT}")
+        command(rcon, "fill -8 199 -8 8 206 8 air")
+        command(rcon, "fill -8 199 -8 8 199 8 stone")
+        command(rcon, "fill -2 200 -2 5 204 2 water")
+        command(rcon, f"tp {BOT} 0.5 200 0.5")
+        command(
+            rcon,
+            'summon item 3.5 203.2 0.5 '
+            '{Tags:["minebot.java.pickup"],PickupDelay:0,Item:{id:"minecraft:raw_iron",count:1}}',
+        )
+        pickup = PickupTransactions(body, ObjectiveNavigationTransactions(body))
+        picked = pickup.pickup_items(
+            expected_items=("raw_iron",),
+            minimum_count=1,
+            config=PickupConfig(
+                radius=8,
+                max_scan_rounds=2,
+                candidate_budget=2,
+                max_wall_s=12.0,
+                poll_timeout_s=1.0,
+                segment_timeout_s=4.0,
+                max_segments=3,
+            ),
+        )
+        counts = read_inventory_counts(body)
+        assert picked.success, picked
+        assert isinstance(counts, dict) and counts.get("raw_iron", 0) >= 1, counts
+        pickup_plan = (picked.metrics or {})["pickup_process"]["plans"][0]
+        assert pickup_plan["mode"] == "follow_entity", pickup_plan
+
         artifact = {
             "scope": "java_body_follow",
             "formal_gate": False,
@@ -155,8 +188,14 @@ def main() -> int:
                 "target_replans": moved.metrics.get("target_replans"),
                 "elapsed_ticks": moved.metrics.get("elapsed_ticks"),
             },
+            "moving_item_pickup": {
+                "reason": picked.reason,
+                "raw_iron": counts.get("raw_iron", 0),
+                "mode": pickup_plan["mode"],
+                "tracking_reason": pickup_plan["tracking"]["reason"],
+            },
         }
-        output = Path("logs/agentic-runtime/java-body-follow-20260728.json")
+        output = Path("logs/agentic-runtime/java-body-follow-20260729.json")
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
         print(json.dumps(artifact, indent=2))

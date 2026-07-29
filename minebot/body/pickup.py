@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 class PickupNavigator(Protocol):
     def navigate_to(self, goal, **kwargs) -> ToolResult: ...
 
+    def follow_entity(self, target_spec: str, **kwargs) -> ToolResult: ...
+
 
 @dataclass(frozen=True)
 class PickupConfig:
@@ -203,6 +205,44 @@ class PickupTransactions:
                 reason = "pickup_partial_candidate_exhausted" if collected_total > 0 else "pickup_candidate_domain_exhausted"
                 return _pickup_outcome(after, deltas, collected_total, assist, reason)
 
+            tracked = _single_trackable_candidate(scanned_candidates)
+            tracking = self._track_candidate(tracked, config)
+            if tracking is not None and tracked is not None:
+                assist["plans"].append({
+                    "mode": "follow_entity",
+                    "goal_set": [list(tracked.pos)],
+                    "selected_goal": list(tracked.pos),
+                    "selected_keys": [tracked.key],
+                    "tracking": tracking.to_payload(),
+                })
+                assist["moved"] = True
+                assist["candidate_attempts"] = int(assist["candidate_attempts"]) + 1
+                after, deltas, collected_total = self._poll_inventory_delta(
+                    before,
+                    expected_items,
+                    config.poll_timeout_s,
+                    assist,
+                )
+                if isinstance(after, ToolResult):
+                    return {"failed": after, "assist": assist}
+                if collected_total >= minimum_count:
+                    return _pickup_outcome(after, deltas, collected_total, assist, "pickup_collected")
+                if tracking.reason in {"preempted", "body_missing", "death", "respawned", "progress_yielded"}:
+                    failure = ToolResult(
+                        success=False,
+                        reason=f"pickup_navigation_{tracking.reason}",
+                        can_retry=True,
+                        metrics={"pickup_process": assist, "tracking": tracking.to_payload()},
+                    )
+                    return {"failed": failure, "assist": assist}
+                blacklist.add(tracked.key)
+                blacklist_positions[tracked.key] = tracked.pos
+                _append_fallback_neighbors(dynamic_fallback, [tracked])
+                assist["candidate_blacklist"] = sorted(blacklist)
+                if int(assist["candidate_attempts"]) >= config.candidate_budget:
+                    return _pickup_outcome(after, deltas, collected_total, assist, "pickup_budget_exhausted")
+                continue
+
             goals = tuple(candidate.pos for candidate in candidates)
             from minebot.body.navigation import NavigationRunConfig, pure_movement_navigation_config
 
@@ -318,6 +358,25 @@ class PickupTransactions:
         ]
         return tuple(candidates), metrics
 
+    def _track_candidate(
+        self,
+        candidate: _PickupCandidate | None,
+        config: PickupConfig,
+    ) -> ToolResult | None:
+        if candidate is None or candidate.entity_id is None or self.navigator is None:
+            return None
+        follow = getattr(self.navigator, "follow_entity", None)
+        if not callable(follow):
+            return None
+        return follow(
+            candidate.entity_id,
+            keep_distance=max(0.75, min(1.25, config.arrival_radius + 1.0)),
+            timeout_s=min(
+                config.segment_timeout_s,
+                max(1.0, config.poll_timeout_s + 1.0),
+            ),
+        )
+
     def _poll_inventory_delta(
         self,
         before: dict[str, int],
@@ -393,6 +452,13 @@ def _selected_goal(result: ToolResult, goals: tuple[Position, ...]) -> Position:
         if selected in goals:
             return selected
     return goals[0]
+
+
+def _single_trackable_candidate(
+    candidates: list[_PickupCandidate],
+) -> _PickupCandidate | None:
+    trackable = [candidate for candidate in candidates if candidate.entity_id is not None]
+    return trackable[0] if len(trackable) == 1 else None
 
 
 def _unique_positions(positions: tuple[Position, ...]) -> tuple[Position, ...]:

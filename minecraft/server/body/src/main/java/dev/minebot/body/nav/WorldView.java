@@ -23,4 +23,14 @@ public interface WorldView {
     }
 
     NodeKind kindAt(int x, int y, int z);
+
+    /**
+     * Whether placing the player's feet at this node enters a server-observed
+     * danger envelope even though the node itself may be passable. Live world
+     * views use this for hazards such as adjacent lava; synthetic worlds are
+     * safe by default unless a test marks an envelope explicitly.
+     */
+    default boolean isBodyPositionHazardous(int x, int y, int z) {
+        return false;
+    }
 }

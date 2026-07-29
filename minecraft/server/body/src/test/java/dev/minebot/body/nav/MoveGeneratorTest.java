@@ -39,6 +39,17 @@ final class MoveGeneratorTest {
     }
 
     @Test
+    void passableNodeInsideSurvivalHazardEnvelopeIsNeverAMoveTarget() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        world.hazardBodyPosition(1, STAND, 0);
+
+        List<MoveGenerator.Move> moves = new MoveGenerator(world).movesFrom(0, STAND, 0).moves();
+
+        assertEquals(WorldView.NodeKind.PASSABLE, world.kindAt(1, STAND, 0));
+        assertFalse(hasMoveTo(moves, 1, STAND, 0));
+    }
+
+    @Test
     void waterCanBeEnteredHorizontallyAtSwimCost() {
         FakeWorld world = new FakeWorld(FLOOR);
         world.set(1, STAND, 0, WorldView.NodeKind.LIQUID);

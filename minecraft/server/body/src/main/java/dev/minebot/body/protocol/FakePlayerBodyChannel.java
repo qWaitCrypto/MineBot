@@ -1456,7 +1456,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         acquireRadius,
                         new MinecraftWorldView(level),
                         adapter,
-                        engageTargetSource(player, level),
+                        entityTargetSource(player, level, false),
                         this::observedPosition,
                         this::publishEvent,
                         runtime,
@@ -1529,7 +1529,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         new MinecraftWorldView(level),
                         adapter,
                         adapter,
-                        engageTargetSource(player, level),
+                        entityTargetSource(player, level, true),
                         this::observedPosition,
                         this::publishEvent,
                         runtime,
@@ -1564,7 +1564,11 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         }
     }
 
-    private EngageExecutor.TargetSource engageTargetSource(ServerPlayer actor, ServerLevel level) {
+    private EngageExecutor.TargetSource entityTargetSource(
+        ServerPlayer actor,
+        ServerLevel level,
+        boolean livingOnly
+    ) {
         return new EngageExecutor.TargetSource() {
             @Override
             public EngageExecutor.Lookup acquire(String botName, String targetSpec, double radius) {
@@ -1574,7 +1578,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 if (actor.getGameProfile().name().equals(targetSpec)) {
                     return EngageExecutor.Lookup.missing("self_target_disallowed");
                 }
-                List<net.minecraft.world.entity.Entity> matches = nearbyLivingEntities(radius, entity -> {
+                List<net.minecraft.world.entity.Entity> matches = nearbyEntities(radius, entity -> {
                     if ("nearest_hostile".equals(targetSpec)) {
                         return entity instanceof Enemy;
                     }
@@ -1593,7 +1597,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
 
             @Override
             public EngageExecutor.Lookup refresh(String botName, String targetId, double radius) {
-                List<net.minecraft.world.entity.Entity> matches = nearbyLivingEntities(
+                List<net.minecraft.world.entity.Entity> matches = nearbyEntities(
                     radius, entity -> targetId.equals(entity.getUUID().toString())
                 );
                 return closestLookup(matches);
@@ -1606,13 +1610,13 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
 
             @Override
             public boolean hasLineOfSight(String botName, EngageExecutor.Target target) {
-                List<net.minecraft.world.entity.Entity> matches = nearbyLivingEntities(
+                List<net.minecraft.world.entity.Entity> matches = nearbyEntities(
                     64.0, entity -> target.id().equals(entity.getUUID().toString())
                 );
                 return !matches.isEmpty() && actor.hasLineOfSight(matches.get(0));
             }
 
-            private List<net.minecraft.world.entity.Entity> nearbyLivingEntities(
+            private List<net.minecraft.world.entity.Entity> nearbyEntities(
                 double radius,
                 java.util.function.Predicate<net.minecraft.world.entity.Entity> predicate
             ) {
@@ -1623,8 +1627,8 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     entity -> !entity.isRemoved()
                         && !entity.getUUID().equals(actor.getUUID())
                         && !entity.entityTags().contains("minebot.camera.observer")
-                        && entity instanceof LivingEntity living
-                        && living.isAlive()
+                        && (!livingOnly
+                            || (entity instanceof LivingEntity living && living.isAlive()))
                         && predicate.test(entity)
                 );
             }
@@ -1636,7 +1640,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 if (closest == null) {
                     return EngageExecutor.Lookup.missing("target_not_found");
                 }
-                LivingEntity living = (LivingEntity) closest;
+                LivingEntity living = closest instanceof LivingEntity value ? value : null;
                 return EngageExecutor.Lookup.found(new EngageExecutor.Target(
                     closest.getUUID().toString(),
                     BuiltInRegistries.ENTITY_TYPE.getKey(closest.getType()).toString(),
@@ -1644,8 +1648,8 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     closest.getX(),
                     closest.getY(),
                     closest.getZ(),
-                    (double) living.getHealth(),
-                    living.isAlive()
+                    living == null ? null : (double) living.getHealth(),
+                    living == null || living.isAlive()
                 ));
             }
         };

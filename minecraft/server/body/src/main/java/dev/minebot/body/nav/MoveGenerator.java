@@ -78,6 +78,9 @@ public final class MoveGenerator {
         List<Move> moves,
         int[] unloaded
     ) {
+        if (world.isBodyPositionHazardous(nx, y, nz)) {
+            return;
+        }
         WorldView.NodeKind bodyLow = world.kindAt(nx, y, nz);
         WorldView.NodeKind bodyHigh = world.kindAt(nx, y + 1, nz);
         if (bodyLow == WorldView.NodeKind.UNLOADED || bodyHigh == WorldView.NodeKind.UNLOADED) {
@@ -94,7 +97,8 @@ public final class MoveGenerator {
                 && !diagonal
                 && occupiable(bodyHigh)
                 && occupiable(world.kindAt(nx, y + 2, nz))
-                && occupiable(world.kindAt(startX, y + 2, startZ))) {
+                && occupiable(world.kindAt(startX, y + 2, startZ))
+                && !world.isBodyPositionHazardous(nx, y + 1, nz)) {
                 moves.add(new Move(nx, y + 1, nz, STEP_UP_COST));
             }
             return;
@@ -141,6 +145,9 @@ public final class MoveGenerator {
         // Bounded fall: solid ground within MAX_FALL_BLOCKS, or water (a safe
         // landing) within the deeper MAX_WATER_FALL_BLOCKS.
         for (int drop = 2; drop <= MAX_WATER_FALL_BLOCKS + 1; drop++) {
+            if (world.isBodyPositionHazardous(nx, y - drop + 1, nz)) {
+                return;
+            }
             WorldView.NodeKind below = world.kindAt(nx, y - drop, nz);
             if (below == WorldView.NodeKind.UNLOADED) {
                 unloaded[0]++;
@@ -176,18 +183,23 @@ public final class MoveGenerator {
             // A surface-swimming node keeps the feet in air so ordinary travel
             // does not dive. It must still connect downward when the actual
             // objective is submerged, such as a settled item pickup.
-            moves.add(new Move(x, y - 1, z, SWIM_DOWN_COST));
+            if (!world.isBodyPositionHazardous(x, y - 1, z)) {
+                moves.add(new Move(x, y - 1, z, SWIM_DOWN_COST));
+            }
             return;
         }
         if (current != WorldView.NodeKind.LIQUID) {
             return;
         }
         // Swim up: the body rises to occupy (y+1, y+2). Water or air above both.
-        if (occupiable(world.kindAt(x, y + 1, z)) && occupiable(world.kindAt(x, y + 2, z))) {
+        if (occupiable(world.kindAt(x, y + 1, z))
+            && occupiable(world.kindAt(x, y + 2, z))
+            && !world.isBodyPositionHazardous(x, y + 1, z)) {
             moves.add(new Move(x, y + 1, z, SWIM_UP_COST));
         }
         // Sink one cell if the cell below is still water.
-        if (below == WorldView.NodeKind.LIQUID) {
+        if (below == WorldView.NodeKind.LIQUID
+            && !world.isBodyPositionHazardous(x, y - 1, z)) {
             moves.add(new Move(x, y - 1, z, SWIM_DOWN_COST));
         }
     }
@@ -199,17 +211,22 @@ public final class MoveGenerator {
         }
         // Climb up: rise to occupy (y+1, y+2); the head cell must be clear so
         // the body can exit at the top onto air or continue up the ladder.
-        if (occupiable(world.kindAt(x, y + 1, z)) && occupiable(world.kindAt(x, y + 2, z))) {
+        if (occupiable(world.kindAt(x, y + 1, z))
+            && occupiable(world.kindAt(x, y + 2, z))
+            && !world.isBodyPositionHazardous(x, y + 1, z)) {
             moves.add(new Move(x, y + 1, z, CLIMB_UP_COST));
         }
         // Climb down one cell while the column below is still climbable.
-        if (world.kindAt(x, y - 1, z) == WorldView.NodeKind.CLIMBABLE) {
+        if (world.kindAt(x, y - 1, z) == WorldView.NodeKind.CLIMBABLE
+            && !world.isBodyPositionHazardous(x, y - 1, z)) {
             moves.add(new Move(x, y - 1, z, CLIMB_DOWN_COST));
         }
     }
 
     private boolean bodyClear(int x, int y, int z) {
-        return occupiable(world.kindAt(x, y, z)) && occupiable(world.kindAt(x, y + 1, z));
+        return !world.isBodyPositionHazardous(x, y, z)
+            && occupiable(world.kindAt(x, y, z))
+            && occupiable(world.kindAt(x, y + 1, z));
     }
 
     private static boolean occupiable(WorldView.NodeKind kind) {
