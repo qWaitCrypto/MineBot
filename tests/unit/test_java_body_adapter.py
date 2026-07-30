@@ -18,6 +18,7 @@ from minebot.game.java_body_adapter import (
     JavaBodyClient,
     TransportClosed,
 )
+from minebot.game.errors import BodyProtocolError
 from minebot.game.java_body_protocol import ServerProposal
 
 
@@ -1182,6 +1183,23 @@ def test_client_serializes_complete_exchanges_on_one_connection() -> None:
     assert sum(request["type"] == "BODY_STATE" for request in server.requests) == 2
 
 
+def test_read_exchange_ignores_late_response_from_abandoned_request() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+    client.connect()
+    abandoned = client.protocol.inventory("Bot", start=0, limit=46)
+    client._send(abandoned)
+
+    response = client.request_response(lambda protocol: protocol.body_state("Bot"))
+
+    assert response.request_type == "BODY_STATE"
+    assert response.payload["health"] == 18.0
+    assert [request["type"] for request in server.requests[-2:]] == [
+        "INVENTORY",
+        "BODY_STATE",
+    ]
+
+
 def test_navigate_complete_maps_to_arrived_with_metrics() -> None:
     client = _client(FakeBodyServer())
     client.connect()
@@ -1569,6 +1587,25 @@ def test_java_body_lifecycle_requires_presence_truth_and_emits_respawn() -> None
     assert any(event.name == "respawned" and event.data["final_pos"] == [3.0, 59.0, 0.0] for event in events)
     assert despawned.ok and despawned.accepted
     assert body.get_state().missing is True
+
+
+def test_java_body_rejects_incomplete_state_instead_of_synthesizing_death() -> None:
+    class IncompleteStateServer(FakeBodyServer):
+        def _react(self, message: dict) -> None:
+            if message.get("type") != "BODY_STATE":
+                super()._react(message)
+                return
+            self.requests.append(dict(message))
+            self._emit_response(
+                message.get("request_id"),
+                "BODY_STATE_RESULT",
+                {"bot": "Bot", "missing": False},
+            )
+
+    body = JavaBody(_client(IncompleteStateServer()), "Bot")
+
+    with pytest.raises(BodyProtocolError, match="state response is incomplete"):
+        body.get_state()
 
 
 def test_java_body_interrupt_uses_independent_control_connection() -> None:

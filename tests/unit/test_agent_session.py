@@ -29,7 +29,7 @@ from minebot.brain.lifecycle import LifecycleController, LifecycleState
 from minebot.brain.modes import ModeRuntime
 from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import ToolResult, execution_checkpoint
+from minebot.contract import BodyState, ToolResult, execution_checkpoint
 
 from tests.unit.test_agent_runner_spine import FakeBody
 
@@ -1696,6 +1696,90 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(final.lifecycle, LifecycleState.IDLE)
         self.assertEqual(attempts, [1, 2, 3])
         self.assertTrue(any(event["event"] == "session_recovery_gave_up" for event in session.parts.runtime.trace.snapshot()))
+
+    def test_recovery_success_with_dead_confirmation_retries_without_hot_loop(self):
+        attempts: list[int] = []
+        bodies: list[FakeBody] = []
+
+        class ConfirmationBody(FakeBody):
+            dead = False
+
+            def get_state(self):
+                if not self.dead:
+                    return super().get_state()
+                return BodyState(
+                    bot=self.bot_name,
+                    pos=(0.0, 0.0, 0.0),
+                    yaw=None,
+                    pitch=None,
+                    health=0.0,
+                    food=0,
+                    oxygen=None,
+                    inventory_raw="",
+                    inventory_hash="",
+                    effects=None,
+                    time=1000,
+                    weather=None,
+                    dimension=None,
+                    complete=True,
+                    missing=False,
+                )
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = ConfirmationBody()
+            bodies.append(body)
+
+            async def fake_runner(*args, **kwargs):
+                return {"ok": True}
+
+            def recover(_runtime: AgentRuntime) -> RecoveryOutcome:
+                attempts.append(len(attempts) + 1)
+                return RecoveryOutcome(True, "body_reconciled", can_retry=False)
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=fake_runner,
+                recovery_handler=recover,
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+        bodies[0].dead = True
+        session.parts.lifecycle.enter_recovery()
+
+        first = asyncio.run(session.step())
+        second = asyncio.run(session.step())
+        final = asyncio.run(session.step())
+
+        self.assertEqual(first.status, "recovery_retry")
+        self.assertEqual(second.status, "recovery_retry")
+        self.assertEqual(final.status, "yielded")
+        self.assertEqual(final.lifecycle, LifecycleState.IDLE)
+        self.assertEqual(attempts, [1, 2, 3])
+        queued = [
+            event
+            for event in session.parts.runtime.trace.snapshot()
+            if event["event"] == "recovery_intent_queued"
+        ]
+        self.assertEqual(len({event["intent_id"] for event in queued}), 3)
 
     def test_continue_during_recovering_does_not_bypass_recovery_driver(self):
         attempts: list[int] = []

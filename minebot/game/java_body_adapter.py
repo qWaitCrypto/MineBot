@@ -207,13 +207,22 @@ class JavaBodyClient:
             self._transport = self._connect()
             self._protocol = JavaBodyProtocol()
             self._request_times.clear()
-            self._send(self._protocol.hello())
-            self._await_response("HELLO")
+            hello = self._protocol.hello()
+            self._send(hello)
+            self._await_response(
+                hello["type"],
+                request_id=hello["request_id"],
+            )
             if self._survival_owner is not None:
-                self._send(self._protocol.set_survival_owner(
-                    self._bot, self._survival_owner
-                ))
-                ownership = self._await_response("SET_SURVIVAL_OWNER")
+                ownership_request = self._protocol.set_survival_owner(
+                    self._bot,
+                    self._survival_owner,
+                )
+                self._send(ownership_request)
+                ownership = self._await_response(
+                    ownership_request["type"],
+                    request_id=ownership_request["request_id"],
+                )
                 if isinstance(ownership, ErrorResponse):
                     raise TransportClosed(
                         f"survival ownership negotiation failed: {ownership.code}"
@@ -255,7 +264,10 @@ class JavaBodyClient:
                 self.connect()
             message = build(self._protocol)
             self._send(message)
-            return self._await_response(message["type"])
+            return self._await_response(
+                message["type"],
+                request_id=message["request_id"],
+            )
 
     def drain_events(self) -> list[BotEvent]:
         """Buffered pushed events since the last drain, in per-bot order."""
@@ -421,7 +433,10 @@ class JavaBodyClient:
         self._last_terminal = None
         try:
             self._send(request)
-            ack = self._await_response(request["type"])
+            ack = self._await_response(
+                request["type"],
+                request_id=request["request_id"],
+            )
         except TransportClosed:
             return self._reconcile_after_drop(action_id, kind, terminals)
         if isinstance(ack, ErrorResponse):
@@ -542,8 +557,12 @@ class JavaBodyClient:
             replay = self.resume_events(after_seq)
             if isinstance(replay, ErrorResponse):
                 return ToolResult(success=False, reason="action_reconciliation_unknown", can_retry=True)
-            self._send(self._protocol.query_action(action_id))
-            reply = self._await_response("QUERY_ACTION")
+            query = self._protocol.query_action(action_id)
+            self._send(query)
+            reply = self._await_response(
+                query["type"],
+                request_id=query["request_id"],
+            )
         except TransportClosed:
             return ToolResult(success=False, reason="action_reconciliation_unknown", can_retry=True)
         if isinstance(reply, ErrorResponse):
@@ -562,15 +581,37 @@ class JavaBodyClient:
                 return self._terminal_result(terminal, kind, terminals)
         return ToolResult(success=False, reason="action_reconciliation_unknown", can_retry=True)
 
-    def _await_response(self, request_type: str) -> Response | ErrorResponse:
+    def _await_response(
+        self,
+        request_type: str,
+        *,
+        request_id: str | None = None,
+    ) -> Response | ErrorResponse:
         import time
 
         deadline = time.monotonic() + self._wall_timeout
         while time.monotonic() < deadline:
             for item in self._pump_once():
-                if isinstance(item, (Response, ErrorResponse)):
+                if isinstance(item, Response):
+                    if request_id is not None and item.request_id != request_id:
+                        continue
+                    if request_id is None and item.request_type != request_type:
+                        continue
                     return item
-        raise TransportClosed(f"no response to {request_type}")
+                if isinstance(item, ErrorResponse):
+                    # A request-less transport error applies to the active
+                    # exchange. A late application response belongs to the
+                    # abandoned request whose id it carries and must not be
+                    # reinterpreted as this request's payload.
+                    if item.request_id is None:
+                        return item
+                    if request_id is not None and item.request_id != request_id:
+                        continue
+                    if request_id is None and item.request_type != request_type:
+                        continue
+                    return item
+        suffix = "" if request_id is None else f" ({request_id})"
+        raise TransportClosed(f"no response to {request_type}{suffix}")
 
     def _await_terminal(self, action_id: str) -> dict | None:
         import time

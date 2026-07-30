@@ -30,6 +30,7 @@ from minebot.contract import (
 )
 from minebot.game.java_body_adapter import JavaBodyClient
 from minebot.game.chat import sanitize_chat_text
+from minebot.game.errors import BodyProtocolError
 from minebot.game.java_body_protocol import BotEvent, ErrorResponse, Response
 
 _CAPABILITY_GAP = "capability_unavailable"
@@ -90,18 +91,46 @@ class JavaBody:
 
     def get_state(self) -> BodyState:
         reply = self._read_client.request_response(lambda p: p.body_state(self.bot_name))
-        if isinstance(reply, ErrorResponse) or reply.payload.get("missing") is True:
+        if isinstance(reply, ErrorResponse):
+            if reply.code == "body_missing" or reply.payload.get("missing") is True:
+                return _missing_state(self.bot_name)
+            raise BodyProtocolError(f"Java Body state read failed: {reply.code}")
+        if reply.payload.get("missing") is True:
             return _missing_state(self.bot_name)
         payload = reply.payload
-        position = payload.get("position") or {}
-        counts = payload.get("inventory_counts") or {}
+        position = payload.get("position")
+        counts = payload.get("inventory_counts")
+        position_numbers = (
+            tuple(position.get(axis) for axis in ("x", "y", "z"))
+            if isinstance(position, dict)
+            else ()
+        )
+        required_numbers = (
+            *position_numbers,
+            payload.get("health"),
+            payload.get("food"),
+        )
+        if (
+            payload.get("missing") is not False
+            or not isinstance(position, dict)
+            or len(required_numbers) != 5
+            or any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in required_numbers
+            )
+            or not isinstance(counts, dict)
+            or not isinstance(payload.get("inventory_raw"), str)
+            or not isinstance(payload.get("inventory_hash"), str)
+            or not isinstance(payload.get("dimension"), str)
+        ):
+            raise BodyProtocolError("Java Body state response is incomplete")
         return BodyState(
             bot=self.bot_name,
-            pos=(float(position.get("x", 0.0)), float(position.get("y", 0.0)), float(position.get("z", 0.0))),
+            pos=(float(position["x"]), float(position["y"]), float(position["z"])),
             yaw=_opt_float(payload.get("yaw")),
             pitch=_opt_float(payload.get("pitch")),
-            health=float(payload.get("health", 0.0)),
-            food=int(payload.get("food", 0)),
+            health=float(payload["health"]),
+            food=int(payload["food"]),
             oxygen=int(payload["air"]) if isinstance(payload.get("air"), int) else None,
             inventory_raw=str(payload.get("inventory_raw") or ""),
             inventory_hash=str(payload.get("inventory_hash") or ""),

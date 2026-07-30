@@ -522,13 +522,31 @@ class AgentSession:
                 return SessionStep("recovery_retry", self.parts.lifecycle.state, f"recovery_retry:{outcome.reason}")
             return self._yield_recovery_failure(outcome.reason, outcome.facts)
 
-        self._recovery_attempts = 0
         signals = [AgentSignal.recovery_completed(outcome.reason, **outcome.facts)]
         recovered = await self.parts.runtime.run_turn(
             extra_signals=signals,
             intent_kind=WorkIntentKind.RECOVERY_RECONCILE.value,
             has_durable_goal=self.has_active_goal,
         )
+        if recovered.lifecycle is LifecycleState.RECOVERING:
+            reason = recovered.message or "recovery_confirmation_failed"
+            self._trace(
+                "session_recovery_confirmation_failed",
+                reason=reason,
+                attempt=self._recovery_attempts,
+                max_attempts=self.max_recovery_attempts,
+            )
+            if self._recovery_attempts < self.max_recovery_attempts:
+                return SessionStep(
+                    "recovery_retry",
+                    recovered.lifecycle,
+                    f"recovery_retry:{reason}",
+                )
+            return self._yield_recovery_failure(
+                "recovery_confirmation_failed",
+                {"reason": reason},
+            )
+        self._recovery_attempts = 0
         return SessionStep(recovered.status, recovered.lifecycle, recovered.message)
 
     def _yield_recovery_failure(self, reason: str, facts: dict[str, object]) -> SessionStep:

@@ -67,8 +67,14 @@ def main() -> int:
         spawned = body.spawn((0, 59, 0), gamemode="survival", timeout_s=10.0)
         assert spawned.ok and spawned.accepted, spawned
         command(rcon, f"item replace entity {BOT} hotbar.0 with bread 2")
+        baseline_state = body.get_state()
+        read_client = provider.java_body._read_client
+        abandoned = read_client.protocol.inventory(BOT, start=0, limit=46)
+        read_client._send(abandoned)
         state_before = body.get_state()
         assert not state_before.missing
+        assert state_before.health == baseline_state.health
+        assert math.dist(state_before.pos, baseline_state.pos) <= 0.01
         assert state_before.inventory_counts.get("minecraft:bread") == 2
 
         command(rcon, f"tp {BOT} 0 -80 0", delay=0.2)
@@ -126,6 +132,11 @@ def main() -> int:
             "spawn": {
                 "ok": spawned.ok,
                 "final_pos": spawned.data.get("final_pos"),
+            },
+            "read_correlation": {
+                "abandoned_request_id": abandoned.get("request_id"),
+                "health": state_before.health,
+                "position_matches": math.dist(state_before.pos, baseline_state.pos) <= 0.01,
             },
             "death": {
                 "event_pos": death.data.get("pos"),
