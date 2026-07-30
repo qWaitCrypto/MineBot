@@ -6,13 +6,14 @@ import re
 import socket
 import struct
 import time
+from pathlib import Path
 
 
 HOST = "127.0.0.1"
 PORT = 25576
 PASSWORD = "test"
 BOT = "PhysBot"
-OUT_PATH = "/home/qwait/MineBot/test-server/body-fidelity-results.json"
+OUT_PATH = Path(__file__).resolve().parents[1] / "test-server" / "body-fidelity-results.json"
 MARKER = (0, 120, 0)
 
 

@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, "/home/qwait/MineBot")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from minebot.game.rcon import RconClient, RconConfig
 from minebot.game import ScarpetBody

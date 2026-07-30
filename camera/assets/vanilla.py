@@ -85,7 +85,9 @@ def resolve_client_jar(explicit: str | Path | None = None) -> Path:
     if explicit:
         candidates.append(Path(explicit))
     candidates.extend(CLIENT_JAR_CANDIDATES)
-    candidates.extend(Path("/mnt/c/Users/qwait/AppData/Roaming/.minecraft/versions").glob("*/26.1.2.jar"))
+    candidates.extend(
+        Path("/mnt/c/Users").glob("*/AppData/Roaming/.minecraft/versions/*/26.1.2.jar")
+    )
     for candidate in candidates:
         if candidate.exists() and _has_required_assets(candidate):
             return candidate
