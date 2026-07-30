@@ -3,6 +3,7 @@ and JavaBodyClient drives the protocol into ToolResults over a fake duplex."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -10,6 +11,7 @@ import time
 import pytest
 
 from minebot.contract.governance import Region
+from minebot.app.execution_lane import SerialExecutionLane
 from minebot.game.governance import GovernancePolicy
 from minebot.game.java_body_adapter import (
     GovernanceAnswerer,
@@ -573,6 +575,8 @@ class FakeBodyServer:
             })
         elif self.scenario == "drop_before_terminal":
             self._pending_action = action
+        elif self.scenario == "navigate_running":
+            pass
         else:
             self._emit_event("path_planned", action, {"waypoints": 20, "partial": False})
             terminal = {"classification": "completed", "reason": "goal_satisfied",
@@ -1199,6 +1203,38 @@ def test_navigate_no_path_keeps_typed_failure() -> None:
     assert result.success is False
     assert result.reason == "no_path"
     assert result.can_retry is True
+
+
+def test_execution_lane_cancellation_interrupts_java_terminal_wait() -> None:
+    server = FakeBodyServer()
+    server.scenario = "navigate_running"
+    client = JavaBodyClient(
+        "Bot",
+        lambda: server,
+        action_wall_timeout_s=2.0,
+        recv_timeout_s=0.01,
+    )
+    lane = SerialExecutionLane(thread_name="java-body-cancel-test")
+
+    async def scenario() -> tuple[int, bool]:
+        task = asyncio.create_task(
+            lane.run(client.navigate, {"kind": "xz", "x": 99, "z": 0})
+        )
+        while not any(request.get("type") == "NAVIGATE" for request in server.requests):
+            await asyncio.sleep(0.002)
+        cancelled_count = lane.request_cancel("session_command:quit")
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.5)
+        return cancelled_count, await lane.wait_idle(timeout_s=0.25)
+
+    try:
+        cancelled_count, idle = asyncio.run(scenario())
+    finally:
+        lane.close()
+
+    assert cancelled_count == 1
+    assert idle is True
+    assert lane.active_count == 0
 
 
 def test_survival_preemption_stays_typed_retryable_and_paused() -> None:

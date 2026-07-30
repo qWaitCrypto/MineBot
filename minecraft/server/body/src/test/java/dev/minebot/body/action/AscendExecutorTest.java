@@ -178,8 +178,11 @@ final class AscendExecutorTest {
             if (block.equals(AIR)) {
                 return NodeKind.PASSABLE;
             }
-            if (block.equals("minecraft:lava") || block.equals("minecraft:water")) {
+            if (block.equals("minecraft:lava")) {
                 return NodeKind.HAZARD;
+            }
+            if (block.equals("minecraft:water")) {
+                return NodeKind.LIQUID;
             }
             return NodeKind.SOLID;
         }
@@ -396,6 +399,42 @@ final class AscendExecutorTest {
         assertEquals("recovery", proposal.context());
         assertEquals(60, proposal.y());
         assertEquals(1, terminal.getAsJsonArray("placed").size());
+    }
+
+    @Test
+    void movesToNearbySafeColumnBeforePillaringFromHazardousColumn() {
+        World world = openPillarStart();
+        world.set(0, 60, 0, "minecraft:water");
+        world.set(0, 61, 0, "minecraft:water");
+        world.set(1, 60, 0, AIR);
+        world.set(1, 61, 0, AIR);
+        world.set(1, 62, 0, AIR);
+        world.set(2, 60, 0, AIR);
+        world.set(1, 60, 1, AIR);
+        world.set(1, 60, -1, AIR);
+        FakeBody body = new FakeBody(60);
+        body.scaffoldCount = 2;
+        Harness h = Harness.create(world, body, 2_000);
+
+        JsonObject terminal = h.run(1_000, () -> {
+            for (var proposal : h.proposals) {
+                h.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (h.body.y >= 61) {
+                h.world.sky = true;
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("surface_reached", terminal.get("reason").getAsString());
+        assertTrue(terminal.get("recovery_staging_attempted").getAsBoolean());
+        assertTrue(terminal.get("recovery_staging_used").getAsBoolean());
+        assertTrue(terminal.get("recovery_staging_candidate_count").getAsInt() >= 1);
+        assertEquals(1, terminal.get("pillar_steps").getAsInt());
+        assertTrue(body.x >= 1.4, "the player must leave the hazardous source column: " + body.x);
+        assertEquals("minecraft:water", world.at(0, 60, 0));
+        assertEquals("minecraft:water", world.at(0, 61, 0));
+        assertEquals(COBBLESTONE, world.at(1, 60, 0));
     }
 
     @Test

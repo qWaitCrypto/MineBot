@@ -21,6 +21,7 @@ import time
 from typing import Callable, Protocol
 from uuid import uuid4
 
+from minebot.contract.execution import execution_checkpoint
 from minebot.contract.governance import BreakContext, InteractionContext, PlaceContext
 from minebot.contract.messages import ToolResult
 from minebot.game.governance import GovernancePolicy
@@ -501,6 +502,12 @@ class JavaBodyClient:
                 "surface_route_replans",
                 "surface_candidate_count",
                 "surface_route_failure",
+                "recovery_staging_attempted",
+                "recovery_staging_used",
+                "recovery_staging_candidate_count",
+                "recovery_staging_replans",
+                "recovery_staging_failure",
+                "recovery_staging_source_failure",
                 "broken",
                 "placed",
                 "paused",
@@ -573,6 +580,7 @@ class JavaBodyClient:
         assert self._transport is not None
         import json as _json
 
+        execution_checkpoint()
         try:
             frame = self._transport.recv(self._recv_timeout)
         except TimeoutError:

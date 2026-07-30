@@ -8,6 +8,7 @@ import dev.minebot.body.nav.MovementControls;
 import dev.minebot.body.nav.NavigateExecutor;
 import dev.minebot.body.nav.WorldView;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -22,11 +23,13 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     public static final int BREAK_TIMEOUT_TICKS = 300;
     public static final int STEP_TIMEOUT_TICKS = 80;
     public static final int PILLAR_TIMEOUT_TICKS = 100;
+    public static final int RECOVERY_STAGING_RADIUS = 6;
     private static final int JUMP_INTERVAL_TICKS = 5;
     private static final int LANDING_STABLE_TICKS = 3;
     private static final int CENTER_STABLE_TICKS = 2;
     private static final double CENTER_TOLERANCE = 0.10;
     private static final double PILLAR_JUMP_MIN_GAIN = 0.15;
+    private static final int[] RECOVERY_STAGING_Y_OFFSETS = {0, 1, -1, 2, -2};
     private static final List<String> PILLAR_BLOCKS = List.of(
         "minecraft:cobblestone",
         "minecraft:cobbled_deepslate",
@@ -87,6 +90,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     private enum Phase {
         EVALUATE,
         SURFACE_ROUTING,
+        RECOVERY_STAGING,
         AWAITING_VERDICT,
         BREAKING,
         MOVING,
@@ -153,11 +157,18 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     private String pillarBlock;
     private String pillarFallbackReason;
     private ApproachController surfaceApproach;
+    private ApproachController recoveryStagingApproach;
     private boolean surfaceRouteAttempted;
     private boolean surfaceRouteUsed;
     private int surfaceRouteReplans;
     private int surfaceCandidateCount;
     private String surfaceRouteFailure;
+    private boolean recoveryStagingAttempted;
+    private boolean recoveryStagingUsed;
+    private int recoveryStagingCandidateCount;
+    private int recoveryStagingReplans;
+    private String recoveryStagingFailure;
+    private String recoveryStagingSourceFailure;
     private boolean cancelPending;
     private final JsonArray brokenLedger = new JsonArray();
     private final JsonArray placedLedger = new JsonArray();
@@ -226,6 +237,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         switch (phase) {
             case EVALUATE -> evaluate(serverTick, position);
             case SURFACE_ROUTING -> surfaceRoutingTick(serverTick, position);
+            case RECOVERY_STAGING -> recoveryStagingTick(serverTick, position);
             case AWAITING_VERDICT -> verdictTick(serverTick);
             case BREAKING -> breakingTick(serverTick);
             case MOVING -> movingTick(serverTick, position);
@@ -503,25 +515,19 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         int x = position.blockX();
         int feetY = position.feetBlockY();
         int z = position.blockZ();
-        String support = blocks.blockIdAt(x, feetY - 1, z);
-        String feet = blocks.blockIdAt(x, feetY, z);
-        String head = blocks.blockIdAt(x, feetY + 1, z);
-        String cap = blocks.blockIdAt(x, feetY + 2, z);
-        if (support == null || feet == null || head == null || cap == null) {
-            finish(serverTick, ActionRuntime.CLASS_FAILED, "pillar_column_unloaded");
-            return;
-        }
-        if (hazards.isHazard(support) || hazards.isHazard(feet)
-            || hazards.isHazard(head) || hazards.isHazard(cap)) {
-            finish(serverTick, ActionRuntime.CLASS_UNSAFE, "hazard_in_pillar_column");
-            return;
-        }
-        if (isPassable(support)) {
-            finish(serverTick, ActionRuntime.CLASS_FAILED, "pillar_support_missing");
-            return;
-        }
-        if (!isPassable(feet)) {
-            finish(serverTick, ActionRuntime.CLASS_FAILED, "pillar_target_occupied");
+        String columnFailure = pillarColumnFailure(x, feetY, z);
+        if (columnFailure != null) {
+            if (!recoveryStagingAttempted && canStageFrom(columnFailure)) {
+                beginRecoveryStaging(serverTick, position, columnFailure);
+            } else {
+                finish(
+                    serverTick,
+                    columnFailure.startsWith("hazard_")
+                        ? ActionRuntime.CLASS_UNSAFE
+                        : ActionRuntime.CLASS_FAILED,
+                    columnFailure
+                );
+            }
             return;
         }
         ScaffoldSelection selection = pillar.selectScaffold(bot, PILLAR_BLOCKS);
@@ -544,6 +550,153 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         pillarFallbackReason = fallbackReason;
         clearIndex = 0;
         clearNext(serverTick);
+    }
+
+    private String pillarColumnFailure(int x, int feetY, int z) {
+        String support = blocks.blockIdAt(x, feetY - 1, z);
+        String feet = blocks.blockIdAt(x, feetY, z);
+        String head = blocks.blockIdAt(x, feetY + 1, z);
+        String cap = blocks.blockIdAt(x, feetY + 2, z);
+        if (support == null || feet == null || head == null || cap == null) {
+            return "pillar_column_unloaded";
+        }
+        if (hazards.isHazard(support) || hazards.isHazard(feet)
+            || hazards.isHazard(head) || hazards.isHazard(cap)) {
+            return "hazard_in_pillar_column";
+        }
+        if (isPassable(support)) {
+            return "pillar_support_missing";
+        }
+        if (!isPassable(feet)) {
+            return "pillar_target_occupied";
+        }
+        return null;
+    }
+
+    private static boolean canStageFrom(String columnFailure) {
+        return columnFailure.equals("hazard_in_pillar_column")
+            || columnFailure.equals("pillar_support_missing")
+            || columnFailure.equals("pillar_target_occupied");
+    }
+
+    private void beginRecoveryStaging(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position,
+        String sourceFailure
+    ) {
+        recoveryStagingAttempted = true;
+        recoveryStagingSourceFailure = sourceFailure;
+        List<Goal> candidates = findRecoveryStagingGoals(position);
+        recoveryStagingCandidateCount = candidates.size();
+        if (candidates.isEmpty()) {
+            recoveryStagingFailure = "safe_column_unavailable";
+            finish(
+                serverTick,
+                sourceFailure.startsWith("hazard_")
+                    ? ActionRuntime.CLASS_UNSAFE
+                    : ActionRuntime.CLASS_FAILED,
+                sourceFailure
+            );
+            return;
+        }
+        Goal goal = candidates.size() == 1
+            ? candidates.getFirst()
+            : new Goal.Composite(candidates);
+        recoveryStagingApproach = new ApproachController(
+            bot,
+            actionId,
+            goal,
+            surface.world(),
+            movement,
+            events,
+            5,
+            0.15
+        );
+        phase = Phase.RECOVERY_STAGING;
+    }
+
+    private List<Goal> findRecoveryStagingGoals(
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        List<Goal> candidates = new ArrayList<>();
+        int baseX = position.blockX();
+        int baseY = position.feetBlockY();
+        int baseZ = position.blockZ();
+        for (int radius = 1; radius <= RECOVERY_STAGING_RADIUS
+            && candidates.size() < Goal.MAX_COMPOSITE_MEMBERS; radius++) {
+            for (int delta = -radius; delta <= radius; delta++) {
+                addRecoveryStagingColumn(candidates, baseX + radius, baseY, baseZ + delta);
+                addRecoveryStagingColumn(candidates, baseX - radius, baseY, baseZ + delta);
+            }
+            for (int delta = -radius + 1; delta < radius; delta++) {
+                addRecoveryStagingColumn(candidates, baseX + delta, baseY, baseZ + radius);
+                addRecoveryStagingColumn(candidates, baseX + delta, baseY, baseZ - radius);
+            }
+        }
+        return candidates;
+    }
+
+    private void addRecoveryStagingColumn(
+        List<Goal> candidates,
+        int x,
+        int baseY,
+        int z
+    ) {
+        if (candidates.size() >= Goal.MAX_COMPOSITE_MEMBERS) {
+            return;
+        }
+        for (int offset : RECOVERY_STAGING_Y_OFFSETS) {
+            int y = baseY + offset;
+            Goal.Stand stand = new Goal.Stand(x, y, z);
+            if (pillarColumnFailure(x, y, z) == null
+                && stand.isSatisfied(surface.world(), x, y, z)) {
+                candidates.add(stand);
+                return;
+            }
+        }
+    }
+
+    private void recoveryStagingTick(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        ApproachController.Outcome outcome = recoveryStagingApproach.tick(
+            serverTick, position.x(), position.y(), position.z()
+        );
+        if (outcome.status() == ApproachController.Status.WORKING) {
+            return;
+        }
+        recoveryStagingReplans += recoveryStagingApproach.replans();
+        recoveryStagingApproach.halt();
+        recoveryStagingApproach = null;
+        if (outcome.status() == ApproachController.Status.COMPLETED) {
+            String columnFailure = pillarColumnFailure(
+                position.blockX(), position.feetBlockY(), position.blockZ()
+            );
+            if (columnFailure == null) {
+                recoveryStagingUsed = true;
+                JsonObject data = new JsonObject();
+                data.addProperty("x", position.blockX());
+                data.addProperty("y", position.feetBlockY());
+                data.addProperty("z", position.blockZ());
+                data.addProperty("candidate_count", recoveryStagingCandidateCount);
+                events.emit(bot, serverTick, "ascent_recovery_staged", actionId, data);
+                surfaceRouteAttempted = false;
+                phase = Phase.EVALUATE;
+                return;
+            }
+            recoveryStagingFailure = "postcondition:" + columnFailure;
+        } else {
+            recoveryStagingFailure = outcome.reason();
+        }
+        finish(
+            serverTick,
+            recoveryStagingSourceFailure != null
+                && recoveryStagingSourceFailure.startsWith("hazard_")
+                ? ActionRuntime.CLASS_UNSAFE
+                : ActionRuntime.CLASS_FAILED,
+            "recovery_staging_failed:" + recoveryStagingFailure
+        );
     }
 
     private void beginPillarCentering(int serverTick) {
@@ -797,6 +950,10 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
             surfaceApproach.halt();
             surfaceApproach = null;
         }
+        if (recoveryStagingApproach != null) {
+            recoveryStagingApproach.halt();
+            recoveryStagingApproach = null;
+        }
         if (proposalId != null) {
             gate.discard(proposalId);
             proposalId = null;
@@ -818,6 +975,16 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         facts.addProperty("surface_candidate_count", surfaceCandidateCount);
         if (surfaceRouteFailure != null) {
             facts.addProperty("surface_route_failure", surfaceRouteFailure);
+        }
+        facts.addProperty("recovery_staging_attempted", recoveryStagingAttempted);
+        facts.addProperty("recovery_staging_used", recoveryStagingUsed);
+        facts.addProperty("recovery_staging_candidate_count", recoveryStagingCandidateCount);
+        facts.addProperty("recovery_staging_replans", recoveryStagingReplans);
+        if (recoveryStagingFailure != null) {
+            facts.addProperty("recovery_staging_failure", recoveryStagingFailure);
+        }
+        if (recoveryStagingSourceFailure != null) {
+            facts.addProperty("recovery_staging_source_failure", recoveryStagingSourceFailure);
         }
         if (pillarFallbackReason != null) {
             facts.addProperty("pillar_fallback_from", pillarFallbackReason);
