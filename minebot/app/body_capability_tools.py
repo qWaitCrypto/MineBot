@@ -1461,6 +1461,11 @@ def _java_collect_block_domain(body: Body, params: JsonObject) -> ToolResult:
     block_types = tuple(_minecraft_id(item) for item in _strings(params["block_types"]))
     if not block_types:
         return ToolResult(False, "no_block_types", False)
+    expected_item_ids = tuple(
+        _minecraft_id(item) for item in _strings(params["expected_drops"])
+    )
+    if not expected_item_ids:
+        return ToolResult(False, "resource_expected_drops_missing", False)
     remaining = int(params["remaining_count"])
     call_limit = min(
         remaining,
@@ -1486,6 +1491,7 @@ def _java_collect_block_domain(body: Body, params: JsonObject) -> ToolResult:
                     "collectBlock",
                     {
                         "block_types": list(block_types),
+                        "expected_item_ids": list(expected_item_ids),
                         "radius": int(params.get("search_radius") or 16),
                         "vertical_radius": min(64, int(params.get("search_radius") or 16)),
                         "timeout_ticks": timeout_ticks,

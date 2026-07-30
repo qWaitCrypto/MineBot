@@ -655,8 +655,18 @@ class JavaBody:
                                             final_reach_distance=_opt_float(action.params.get("final_reach_distance")),
                                             survival_recovery=bool(action.params.get("survival_recovery", False)))
         elif action.name == "collectBlock":
+            block_types = [str(b) for b in (action.params.get("block_types") or ())]
+            expected_item_ids = action.params.get("expected_item_ids")
             outcome = self._client.collect_block(
-                [str(b) for b in (action.params.get("block_types") or ())],
+                block_types,
+                expected_item_ids=[
+                    str(item)
+                    for item in (
+                        block_types
+                        if expected_item_ids is None
+                        else expected_item_ids
+                    )
+                ],
                 radius=_opt_int(action.params.get("radius")),
                 timeout_ticks=_opt_int(action.params.get("timeout_ticks")),
             )

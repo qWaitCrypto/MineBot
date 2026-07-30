@@ -3,6 +3,7 @@ package dev.minebot.body.action;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import dev.minebot.body.nav.ApproachController;
+import dev.minebot.body.nav.ExcavationPlanner;
 import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MovementControls;
 import dev.minebot.body.nav.NavigateExecutor;
@@ -11,8 +12,10 @@ import dev.minebot.body.nav.WorldView;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Runs one COLLECT_BLOCK action: submit the complete live candidate domain to
@@ -32,6 +35,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     public static final double DROP_SEARCH_RADIUS = 8.0;
     public static final double PICKUP_FINAL_REACH_DISTANCE = 0.15;
     public static final int APPROACH_REPLAN_LIMIT = 3;
+    public static final int MAX_APPROACH_BREAKS = 8;
+    public static final int MAX_EXCAVATION_REPLANS = 3;
+    public static final int EXCAVATION_MOVE_TIMEOUT_TICKS = 100;
+    private static final int DESCENT_STABLE_TICKS = 3;
 
     /** Live block truth; null id when the position is unloaded. */
     public interface BlockReader {
@@ -62,6 +69,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private enum Phase {
         NEXT_CANDIDATE,
         APPROACHING,
+        EXCAVATION_AWAITING_VERDICT,
+        EXCAVATION_BREAKING,
+        EXCAVATION_MOVING,
+        EXCAVATION_DESCENDING,
         AWAITING_VERDICT,
         MINING,
         PICKUP_LOCATE,
@@ -73,7 +84,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private final String actionId;
     private final List<Candidate> candidates;
     private final List<Candidate> remainingCandidates;
-    private final Map<String, String> itemIdByBlockId;
+    private final List<String> expectedItemIds;
     private final JsonObject searchFacts;
     private final WorldView world;
     private final MovementControls movement;
@@ -105,12 +116,26 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private boolean pickupApproachFailed;
     private final JsonArray attemptFailures = new JsonArray();
     private final Map<String, Integer> baselineCounts;
+    private ExcavationPlanner.Plan excavationPlan;
+    private Candidate excavationTarget;
+    private ExcavationPlanner.Cell excavationBlock;
+    private String excavationBlockId;
+    private int excavationStepIndex;
+    private int excavationBlockerIndex;
+    private int excavationBreaks;
+    private int excavationReplans;
+    private int descentStableTicks;
+    private boolean excavationAttempted;
+    private boolean excavationUsed;
+    private String excavationFailure;
+    private final Set<ExcavationPlanner.Cell> excavationDenied = new HashSet<>();
+    private final JsonArray approachBrokenLedger = new JsonArray();
 
     public CollectExecutor(
         String bot,
         String actionId,
         List<Candidate> candidates,
-        Map<String, String> itemIdByBlockId,
+        List<String> expectedItemIds,
         JsonObject searchFacts,
         WorldView world,
         MovementControls movement,
@@ -130,7 +155,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         this.actionId = actionId;
         this.candidates = List.copyOf(candidates);
         this.remainingCandidates = new ArrayList<>(candidates);
-        this.itemIdByBlockId = Map.copyOf(itemIdByBlockId);
+        this.expectedItemIds = List.copyOf(expectedItemIds);
         this.searchFacts = searchFacts;
         this.world = world;
         this.movement = movement;
@@ -146,7 +171,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         this.runtime = runtime;
         this.timeoutTicks = timeoutTicks;
         this.baselineCounts = new HashMap<>();
-        for (String itemId : itemIdByBlockId.values()) {
+        for (String itemId : expectedItemIds) {
             baselineCounts.putIfAbsent(itemId, inventory.countOf(itemId));
         }
     }
@@ -170,6 +195,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         switch (phase) {
             case NEXT_CANDIDATE -> nextCandidate(serverTick);
             case APPROACHING -> approachTick(serverTick, position);
+            case EXCAVATION_AWAITING_VERDICT -> excavationVerdictTick(serverTick, position);
+            case EXCAVATION_BREAKING -> excavationBreakingTick(serverTick, position);
+            case EXCAVATION_MOVING -> excavationMovingTick(serverTick, position);
+            case EXCAVATION_DESCENDING -> excavationDescendingTick(serverTick, position);
             case AWAITING_VERDICT -> verdictTick(serverTick);
             case MINING -> miningTick(serverTick);
             case PICKUP_LOCATE -> pickupLocateTick(serverTick);
@@ -228,12 +257,14 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 replansTotal += approach.replans();
                 approach.halt();
                 approach = null;
-                recordDomainFailure("approach_failed:" + outcome.reason());
-                finish(
-                    serverTick,
-                    ActionRuntime.CLASS_FAILED,
-                    "candidate_domain_unreachable:" + outcome.reason()
-                );
+                if (!beginExcavation(serverTick, position, outcome.reason())) {
+                    recordDomainFailure("approach_failed:" + outcome.reason());
+                    finish(
+                        serverTick,
+                        ActionRuntime.CLASS_FAILED,
+                        "candidate_domain_unreachable:" + outcome.reason()
+                    );
+                }
             }
             case COMPLETED -> {
                 replansTotal += approach.replans();
@@ -257,20 +288,381 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 }
                 remainingCandidates.remove(current);
                 candidateAttempts++;
-                emitCandidateSelected(serverTick);
-                MutationGate.Proposal proposal = gate.propose(
-                    bot, actionId, "break", current.x(), current.y(), current.z(), current.blockId(),
-                    "collect", serverTick
-                );
-                proposalId = proposal.proposalId();
-                proposals.send(proposal);
-                JsonObject data = new JsonObject();
-                data.addProperty("proposal_id", proposalId);
-                data.addProperty("block_id", current.blockId());
-                events.emit(bot, serverTick, "mutation_proposed", actionId, data);
-                phase = Phase.AWAITING_VERDICT;
+                beginTargetMutation(serverTick);
             }
         }
+    }
+
+    private boolean beginExcavation(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position,
+        String sourceFailure
+    ) {
+        excavationAttempted = true;
+        return planExcavation(serverTick, position, sourceFailure);
+    }
+
+    private boolean planExcavation(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position,
+        String sourceFailure
+    ) {
+        List<ExcavationPlanner.Target> targets = activeDomain.stream()
+            .filter(remainingCandidates::contains)
+            .filter(candidate -> candidate.blockId().equals(
+                blocks.blockIdAt(candidate.x(), candidate.y(), candidate.z())
+            ))
+            .map(candidate -> new ExcavationPlanner.Target(candidate.x(), candidate.y(), candidate.z()))
+            .toList();
+        int remainingBreaks = MAX_APPROACH_BREAKS - excavationBreaks;
+        ExcavationPlanner.Result result = ExcavationPlanner.plan(
+            world,
+            new ExcavationPlanner.Cell(position.blockX(), position.feetBlockY(), position.blockZ()),
+            targets,
+            excavationDenied,
+            remainingBreaks
+        );
+        if (!result.success()) {
+            excavationFailure = sourceFailure + ":" + result.reason();
+            return false;
+        }
+        excavationPlan = result.plan();
+        excavationTarget = activeDomain.stream()
+            .filter(candidate -> candidate.x() == excavationPlan.target().x())
+            .filter(candidate -> candidate.y() == excavationPlan.target().y())
+            .filter(candidate -> candidate.z() == excavationPlan.target().z())
+            .findFirst()
+            .orElse(null);
+        if (excavationTarget == null) {
+            excavationFailure = sourceFailure + ":target_mapping_failed";
+            return false;
+        }
+        excavationStepIndex = 0;
+        excavationBlockerIndex = 0;
+        excavationBlock = null;
+        excavationBlockId = null;
+
+        JsonObject data = new JsonObject();
+        data.addProperty("target_x", excavationTarget.x());
+        data.addProperty("target_y", excavationTarget.y());
+        data.addProperty("target_z", excavationTarget.z());
+        data.addProperty("steps", excavationPlan.steps().size());
+        data.addProperty("planned_breaks", excavationPlan.breakCount());
+        data.addProperty("break_budget_remaining", remainingBreaks);
+        data.addProperty("expanded_nodes", excavationPlan.expandedNodes());
+        events.emit(bot, serverTick, "collect_excavation_planned", actionId, data);
+        advanceExcavation(serverTick, position);
+        return true;
+    }
+
+    private void advanceExcavation(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        if (excavationStepIndex >= excavationPlan.steps().size()) {
+            completeExcavationApproach(serverTick, position);
+            return;
+        }
+        ExcavationPlanner.Step step = excavationPlan.steps().get(excavationStepIndex);
+        while (excavationBlockerIndex < step.blockers().size()) {
+            ExcavationPlanner.Cell blocker = step.blockers().get(excavationBlockerIndex);
+            WorldView.NodeKind kind = world.kindAt(blocker.x(), blocker.y(), blocker.z());
+            if (kind == WorldView.NodeKind.PASSABLE || kind == WorldView.NodeKind.CLIMBABLE) {
+                excavationBlockerIndex++;
+                continue;
+            }
+            if (kind != WorldView.NodeKind.SOLID) {
+                failOrReplanExcavation(serverTick, position, "blocker_not_solid:" + kind.name().toLowerCase());
+                return;
+            }
+            String blockId = blocks.blockIdAt(blocker.x(), blocker.y(), blocker.z());
+            if (blockId == null) {
+                failOrReplanExcavation(serverTick, position, "blocker_unloaded");
+                return;
+            }
+            excavationBlock = blocker;
+            excavationBlockId = blockId;
+            MutationGate.Proposal proposal = gate.propose(
+                bot,
+                actionId,
+                "break",
+                blocker.x(),
+                blocker.y(),
+                blocker.z(),
+                blockId,
+                "collect_approach",
+                serverTick
+            );
+            proposalId = proposal.proposalId();
+            proposals.send(proposal);
+            JsonObject data = new JsonObject();
+            data.addProperty("proposal_id", proposalId);
+            data.addProperty("block_id", blockId);
+            data.addProperty("x", blocker.x());
+            data.addProperty("y", blocker.y());
+            data.addProperty("z", blocker.z());
+            events.emit(bot, serverTick, "collect_excavation_mutation_proposed", actionId, data);
+            phase = Phase.EXCAVATION_AWAITING_VERDICT;
+            return;
+        }
+
+        excavationBlockerIndex = 0;
+        ExcavationPlanner.Cell stand = step.stand();
+        if (step.mode() == ExcavationPlanner.StepMode.DESCEND
+            && position.blockX() == stand.x()
+            && position.blockZ() == stand.z()
+            && position.y() <= stand.y() + 1.05) {
+            hygiene.clearAll(bot);
+            descentStableTicks = 0;
+            phaseStartedTick = serverTick;
+            phase = Phase.EXCAVATION_DESCENDING;
+            return;
+        }
+        if (position.blockX() == stand.x()
+            && position.feetBlockY() == stand.y()
+            && position.blockZ() == stand.z()) {
+            excavationStepIndex++;
+            advanceExcavation(serverTick, position);
+            return;
+        }
+        phaseStartedTick = serverTick;
+        approach = new ApproachController(
+            bot,
+            actionId,
+            new Goal.Stand(stand.x(), stand.y(), stand.z()),
+            world,
+            movement,
+            events,
+            APPROACH_REPLAN_LIMIT,
+            0.15
+        );
+        phase = Phase.EXCAVATION_MOVING;
+    }
+
+    private void excavationVerdictTick(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        MutationGate.State state = gate.poll(proposalId, serverTick);
+        if (state == MutationGate.State.PENDING) {
+            return;
+        }
+        if (state != MutationGate.State.ALLOWED) {
+            String reason = state == MutationGate.State.DENIED
+                ? "governance_denied:" + gate.reason(proposalId)
+                : "governance_verdict_timeout";
+            emitVerdict(serverTick, "collect_excavation_mutation_denied", reason);
+            gate.discard(proposalId);
+            proposalId = null;
+            excavationDenied.add(excavationBlock);
+            failOrReplanExcavation(serverTick, position, reason);
+            return;
+        }
+
+        emitVerdict(serverTick, "collect_excavation_mutation_allowed", gate.reason(proposalId));
+        gate.discard(proposalId);
+        proposalId = null;
+        String observed = blocks.blockIdAt(
+            excavationBlock.x(), excavationBlock.y(), excavationBlock.z()
+        );
+        if (observed == null) {
+            failOrReplanExcavation(serverTick, position, "approved_block_unloaded");
+            return;
+        }
+        if (!observed.equals(excavationBlockId)) {
+            if (world.kindAt(excavationBlock.x(), excavationBlock.y(), excavationBlock.z())
+                == WorldView.NodeKind.PASSABLE) {
+                excavationBlockerIndex++;
+                advanceExcavation(serverTick, position);
+            } else {
+                failOrReplanExcavation(serverTick, position, "approved_block_changed");
+            }
+            return;
+        }
+        movement.lookAt(
+            bot,
+            excavationBlock.x() + 0.5,
+            excavationBlock.y() + 0.5,
+            excavationBlock.z() + 0.5
+        );
+        ExactBlockBreaker.Outcome outcome = blockBreaker.begin(
+            bot,
+            excavationBlock.x(),
+            excavationBlock.y(),
+            excavationBlock.z(),
+            excavationBlockId,
+            serverTick
+        );
+        if (outcome.state() == ExactBlockBreaker.State.FAILED) {
+            failOrReplanExcavation(serverTick, position, "exact_break_failed:" + outcome.reason());
+            return;
+        }
+        phaseStartedTick = serverTick;
+        phase = Phase.EXCAVATION_BREAKING;
+    }
+
+    private void excavationBreakingTick(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        String observed = blocks.blockIdAt(
+            excavationBlock.x(), excavationBlock.y(), excavationBlock.z()
+        );
+        if (observed == null) {
+            failOrReplanExcavation(serverTick, position, "blocker_unloaded_during_break");
+            return;
+        }
+        if (!observed.equals(excavationBlockId)) {
+            blockBreaker.abort(bot);
+            hygiene.clearAll(bot);
+            WorldView.NodeKind kind = world.kindAt(
+                excavationBlock.x(), excavationBlock.y(), excavationBlock.z()
+            );
+            if (kind != WorldView.NodeKind.PASSABLE && kind != WorldView.NodeKind.CLIMBABLE) {
+                failOrReplanExcavation(serverTick, position, "blocker_changed_to_solid");
+                return;
+            }
+            excavationBreaks++;
+            excavationUsed = true;
+            JsonObject broken = new JsonObject();
+            broken.addProperty("x", excavationBlock.x());
+            broken.addProperty("y", excavationBlock.y());
+            broken.addProperty("z", excavationBlock.z());
+            broken.addProperty("block_id", excavationBlockId);
+            approachBrokenLedger.add(broken);
+            events.emit(bot, serverTick, "collect_excavation_block_verified", actionId, broken.deepCopy());
+            excavationBlockerIndex++;
+            advanceExcavation(serverTick, position);
+            return;
+        }
+        ExactBlockBreaker.Outcome outcome = blockBreaker.tick(bot, serverTick);
+        if (outcome.state() == ExactBlockBreaker.State.FAILED) {
+            failOrReplanExcavation(serverTick, position, "exact_break_failed:" + outcome.reason());
+            return;
+        }
+        if (serverTick - phaseStartedTick > BREAK_TIMEOUT_TICKS) {
+            failOrReplanExcavation(serverTick, position, "break_timeout");
+        }
+    }
+
+    private void excavationMovingTick(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        ApproachController.Outcome outcome = approach.tick(
+            serverTick, position.x(), position.y(), position.z()
+        );
+        if (outcome.status() == ApproachController.Status.WORKING) {
+            return;
+        }
+        replansTotal += approach.replans();
+        approach.halt();
+        approach = null;
+        if (outcome.status() == ApproachController.Status.FAILED) {
+            failOrReplanExcavation(serverTick, position, "movement_failed:" + outcome.reason());
+            return;
+        }
+        excavationUsed = true;
+        excavationStepIndex++;
+        advanceExcavation(serverTick, position);
+    }
+
+    private void excavationDescendingTick(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        ExcavationPlanner.Cell stand = excavationPlan.steps().get(excavationStepIndex).stand();
+        boolean settled = position.blockX() == stand.x()
+            && position.blockZ() == stand.z()
+            && Math.abs(position.y() - stand.y()) <= 0.08;
+        descentStableTicks = settled ? descentStableTicks + 1 : 0;
+        if (descentStableTicks >= DESCENT_STABLE_TICKS) {
+            excavationUsed = true;
+            excavationStepIndex++;
+            advanceExcavation(serverTick, position);
+            return;
+        }
+        if (position.y() < stand.y() - 0.1) {
+            failOrReplanExcavation(serverTick, position, "descent_overshot");
+            return;
+        }
+        if (serverTick - phaseStartedTick > EXCAVATION_MOVE_TIMEOUT_TICKS) {
+            failOrReplanExcavation(serverTick, position, "descent_timeout");
+        }
+    }
+
+    private void completeExcavationApproach(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        String observed = blocks.blockIdAt(
+            excavationTarget.x(), excavationTarget.y(), excavationTarget.z()
+        );
+        if (!excavationTarget.blockId().equals(observed)) {
+            remainingCandidates.remove(excavationTarget);
+            current = excavationTarget;
+            recordCandidateRetired("target_changed", observed);
+            current = null;
+            phase = Phase.NEXT_CANDIDATE;
+            return;
+        }
+        if (!interactGoal(excavationTarget).isSatisfied(
+            world, position.blockX(), position.feetBlockY(), position.blockZ()
+        )) {
+            failOrReplanExcavation(serverTick, position, "terminal_interaction_unsatisfied");
+            return;
+        }
+        current = excavationTarget;
+        remainingCandidates.remove(current);
+        candidateAttempts++;
+        beginTargetMutation(serverTick);
+    }
+
+    private void failOrReplanExcavation(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position,
+        String reason
+    ) {
+        excavationFailure = reason;
+        blockBreaker.abort(bot);
+        hygiene.clearAll(bot);
+        if (proposalId != null) {
+            gate.discard(proposalId);
+            proposalId = null;
+        }
+        if (approach != null) {
+            approach.halt();
+            approach = null;
+        }
+        if (excavationReplans >= MAX_EXCAVATION_REPLANS) {
+            recordDomainFailure("excavation_failed:" + reason);
+            finish(serverTick, ActionRuntime.CLASS_FAILED, "candidate_domain_unreachable:excavation_" + reason);
+            return;
+        }
+        excavationReplans++;
+        if (!planExcavation(serverTick, position, reason)) {
+            recordDomainFailure("excavation_failed:" + excavationFailure);
+            finish(
+                serverTick,
+                ActionRuntime.CLASS_FAILED,
+                "candidate_domain_unreachable:excavation_" + excavationFailure
+            );
+        }
+    }
+
+    private void beginTargetMutation(int serverTick) {
+        emitCandidateSelected(serverTick);
+        MutationGate.Proposal proposal = gate.propose(
+            bot, actionId, "break", current.x(), current.y(), current.z(), current.blockId(),
+            "collect", serverTick
+        );
+        proposalId = proposal.proposalId();
+        proposals.send(proposal);
+        JsonObject data = new JsonObject();
+        data.addProperty("proposal_id", proposalId);
+        data.addProperty("block_id", current.blockId());
+        events.emit(bot, serverTick, "mutation_proposed", actionId, data);
+        phase = Phase.AWAITING_VERDICT;
     }
 
     private void verdictTick(int serverTick) {
@@ -479,13 +871,17 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     private List<Drop> nearbyDrops() {
-        return drops.nearby(
-            itemIdByBlockId.get(current.blockId()),
-            current.x(),
-            current.y(),
-            current.z(),
-            DROP_SEARCH_RADIUS
-        );
+        List<Drop> found = new ArrayList<>();
+        for (String itemId : expectedItemIds) {
+            found.addAll(drops.nearby(
+                itemId,
+                current.x(),
+                current.y(),
+                current.z(),
+                DROP_SEARCH_RADIUS
+            ));
+        }
+        return List.copyOf(found);
     }
 
     private double distanceFromMinedBlockSquared(Drop drop) {
@@ -665,6 +1061,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
 
     private void finishWithFacts(int serverTick, String classification, String reason, JsonObject facts) {
         blockBreaker.abort(bot);
+        if (proposalId != null) {
+            gate.discard(proposalId);
+            proposalId = null;
+        }
         if (approach != null) {
             approach.halt();
         }
@@ -672,6 +1072,14 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         facts.addProperty("elapsed_ticks", elapsedTicks);
         facts.addProperty("candidates_tried", candidateAttempts);
         facts.addProperty("replans", replansTotal);
+        facts.addProperty("approach_excavation_attempted", excavationAttempted);
+        facts.addProperty("approach_excavation_used", excavationUsed);
+        facts.addProperty("approach_excavation_breaks", excavationBreaks);
+        facts.addProperty("approach_excavation_replans", excavationReplans);
+        if (excavationFailure != null) {
+            facts.addProperty("approach_excavation_failure", excavationFailure);
+        }
+        facts.add("approach_broken", approachBrokenLedger.deepCopy());
         facts.add("attempt_failures", attemptFailures.deepCopy());
         facts.add("search", searchFacts.deepCopy());
         runtime.finish(bot, actionId, classification, facts, serverTick);

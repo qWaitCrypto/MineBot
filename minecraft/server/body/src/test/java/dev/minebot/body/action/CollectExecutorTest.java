@@ -13,8 +13,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -25,6 +27,8 @@ final class CollectExecutorTest {
     private static final int FLOOR = 63;
     private static final int STAND = FLOOR + 1;
     private static final String LOG = "minecraft:oak_log";
+    private static final String IRON_ORE = "minecraft:iron_ore";
+    private static final String RAW_IRON = "minecraft:raw_iron";
 
     /** Fake body: walks toward the look target; records every control call. */
     private static final class FakeBody
@@ -126,12 +130,21 @@ final class CollectExecutorTest {
         }
 
         CollectExecutor build(WorldView world, List<CollectExecutor.Candidate> candidates, int timeoutTicks) {
+            return build(world, candidates, List.of(LOG), timeoutTicks);
+        }
+
+        CollectExecutor build(
+            WorldView world,
+            List<CollectExecutor.Candidate> candidates,
+            List<String> expectedItemIds,
+            int timeoutTicks
+        ) {
             runtime.submit("Bot", "collect-1", "COLLECT_BLOCK", OwnerPriority.ACTION, 0);
             CollectExecutor executor = new CollectExecutor(
                 "Bot",
                 "collect-1",
                 candidates,
-                Map.of(LOG, LOG),
+                expectedItemIds,
                 new JsonObject(),
                 world,
                 body,
@@ -175,15 +188,49 @@ final class CollectExecutorTest {
         return world;
     }
 
+    private static FakeWorld sealedTunnelWorld(Harness harness, int targetX) {
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int x = -1; x <= targetX + 1; x++) {
+            for (int y = STAND; y <= STAND + 2; y++) {
+                for (int z = -1; z <= 1; z++) {
+                    world.set(x, y, z, WorldView.NodeKind.SOLID);
+                    harness.blockStates.put(Harness.key(x, y, z), "minecraft:stone");
+                }
+            }
+        }
+        world.set(0, STAND, 0, WorldView.NodeKind.PASSABLE);
+        world.set(0, STAND + 1, 0, WorldView.NodeKind.PASSABLE);
+        harness.blockStates.put(Harness.key(0, STAND, 0), "minecraft:air");
+        harness.blockStates.put(Harness.key(0, STAND + 1, 0), "minecraft:air");
+        world.set(targetX, STAND, 0, WorldView.NodeKind.SOLID);
+        harness.blockStates.put(Harness.key(targetX, STAND, 0), LOG);
+        for (int x = -8; x <= targetX + 8; x++) {
+            for (int y = STAND - 4; y <= STAND + 5; y++) {
+                for (int z = -8; z <= 8; z++) {
+                    boolean intendedTunnel = z == 0 && y == STAND && x >= 0 && x < targetX;
+                    if (!intendedTunnel) {
+                        world.hazardBodyPosition(x, y, z);
+                    }
+                }
+            }
+        }
+        return world;
+    }
+
     @Test
     void governedMineWithPickupTruthCompletes() {
         int treeX = 6;
         Harness harness = new Harness();
-        harness.blockStates.put(Harness.key(treeX, STAND, 0), LOG);
+        harness.blockStates.put(Harness.key(treeX, STAND, 0), IRON_ORE);
         FakeWorld world = worldWithTrunk(treeX);
         double dropX = treeX - 0.25;
         double dropZ = 3.25;
-        harness.build(world, List.of(new CollectExecutor.Candidate(treeX, STAND, 0, LOG)), 2_400);
+        harness.build(
+            world,
+            List.of(new CollectExecutor.Candidate(treeX, STAND, 0, IRON_ORE)),
+            List.of(RAW_IRON),
+            2_400
+        );
 
         JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
             // Governance allows as soon as the proposal arrives.
@@ -199,12 +246,12 @@ final class CollectExecutorTest {
                     world.set(treeX, STAND, 0, WorldView.NodeKind.PASSABLE);
                     harness.dropPresent = true;
                     harness.drops.add(new CollectExecutor.Drop(
-                        "mined-drop", LOG, 1, dropX, STAND, dropZ
+                        "mined-drop", RAW_IRON, 1, dropX, STAND, dropZ
                     ));
                 }
             }
             if (harness.dropPresent && insidePlayerTouchVolume(harness.body, dropX, STAND, dropZ)) {
-                harness.itemCounts.put(LOG, 1);
+                harness.itemCounts.put(RAW_IRON, 1);
                 harness.dropPresent = false;
                 harness.drops.clear();
             }
@@ -217,18 +264,108 @@ final class CollectExecutorTest {
         );
         assertEquals("collected", terminal.get("reason").getAsString());
         JsonObject delta = terminal.getAsJsonObject("inventory_delta");
-        assertEquals(LOG, delta.get("item_id").getAsString());
+        assertEquals(RAW_IRON, delta.get("item_id").getAsString());
         assertEquals(0, delta.get("before").getAsInt());
         assertEquals(1, delta.get("after").getAsInt());
         assertEquals(1, harness.proposals.size(), "exactly one proposal for one mine");
         assertEquals(
-            List.of(treeX + "," + STAND + ",0:" + LOG),
+            List.of(treeX + "," + STAND + ",0:" + IRON_ORE),
             harness.body.breakTargets
         );
         assertTrue(
             insidePlayerTouchVolume(harness.body, dropX, STAND, dropZ),
             "pickup must physically reach the drop, x=" + harness.body.x
         );
+    }
+
+    @Test
+    void governedExcavationBuildsAPlayerSizedTunnelAndCollectsTheBuriedTarget() {
+        int targetX = 4;
+        Harness harness = new Harness();
+        FakeWorld world = sealedTunnelWorld(harness, targetX);
+        harness.build(
+            world,
+            List.of(new CollectExecutor.Candidate(targetX, STAND, 0, LOG)),
+            2_400
+        );
+        Set<String> changed = new HashSet<>();
+        double dropX = targetX + 0.25;
+        double dropZ = 0.5;
+
+        JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (harness.body.attacking) {
+                String key = Harness.key(
+                    harness.body.breakX, harness.body.breakY, harness.body.breakZ
+                );
+                if (changed.add(key)) {
+                    harness.blockStates.put(key, "minecraft:air");
+                    world.set(
+                        harness.body.breakX,
+                        harness.body.breakY,
+                        harness.body.breakZ,
+                        WorldView.NodeKind.PASSABLE
+                    );
+                    if (harness.body.breakX == targetX
+                        && harness.body.breakY == STAND
+                        && harness.body.breakZ == 0) {
+                        harness.dropPresent = true;
+                        harness.drops.add(new CollectExecutor.Drop(
+                            "buried-drop", LOG, 1, dropX, STAND, dropZ
+                        ));
+                    }
+                }
+            }
+            if (harness.dropPresent
+                && insidePlayerTouchVolume(harness.body, dropX, STAND, dropZ)) {
+                harness.itemCounts.put(LOG, 1);
+                harness.dropPresent = false;
+                harness.drops.clear();
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("collected", terminal.get("reason").getAsString());
+        assertTrue(terminal.get("approach_excavation_attempted").getAsBoolean());
+        assertTrue(terminal.get("approach_excavation_used").getAsBoolean());
+        assertEquals(6, terminal.get("approach_excavation_breaks").getAsInt());
+        assertEquals(6, terminal.getAsJsonArray("approach_broken").size());
+        assertEquals(7, harness.proposals.size(), "six corridor blocks plus the target");
+        assertTrue(harness.proposals.subList(0, 6).stream().allMatch(
+            proposal -> proposal.context().equals("collect_approach")
+        ));
+        assertEquals("collect", harness.proposals.getLast().context());
+        assertEquals("minecraft:air", harness.blockStates.get(Harness.key(targetX, STAND, 0)));
+        assertEquals(1, harness.itemCounts.get(LOG));
+        assertTrue(harness.body.x >= 3.35, "player must physically enter the opened tunnel");
+    }
+
+    @Test
+    void deniedExcavationBlockLeavesTheTunnelAndTargetUntouched() {
+        int targetX = 4;
+        Harness harness = new Harness();
+        FakeWorld world = sealedTunnelWorld(harness, targetX);
+        harness.build(
+            world,
+            List.of(new CollectExecutor.Candidate(targetX, STAND, 0, LOG)),
+            2_400
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(1_000, () -> {
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), false, "player_structure");
+            }
+        });
+
+        assertEquals("failed", terminal.get("classification").getAsString());
+        assertTrue(terminal.get("reason").getAsString().contains("governance_denied:player_structure"));
+        assertTrue(harness.body.breakTargets.isEmpty(), "denial must happen before physical mining");
+        assertEquals(LOG, harness.blockStates.get(Harness.key(targetX, STAND, 0)));
+        assertEquals("minecraft:stone", harness.blockStates.get(Harness.key(1, STAND, 0)));
+        assertEquals(1, harness.proposals.size());
+        assertEquals("collect_approach", harness.proposals.getFirst().context());
     }
 
     @Test

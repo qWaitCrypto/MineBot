@@ -478,7 +478,68 @@ def test_java_provider_uses_canonical_collect_domain_tool() -> None:
     assert result.metrics["collected_delta"] == 1
     request = next(item for item in server.requests if item["type"] == "COLLECT_BLOCK")
     assert request["timeout_ticks"] == 1_200
+    assert request["expected_item_ids"] == ["minecraft:oak_log"]
     assert "collect_block" not in registry.names()
+
+
+def test_java_provider_keeps_block_targets_separate_from_expected_drops() -> None:
+    policy = GovernancePolicy(natural_regions=[REGION])
+    server = FakeBodyServer()
+    body = JavaBody(
+        JavaBodyClient(
+            "Bot",
+            lambda: server,
+            GovernanceAnswerer(policy),
+        ),
+        "Bot",
+    )
+    registry = build_phase1_registry(
+        body,
+        Phase1RuntimeConfig(
+            natural_region=REGION,
+            body_provider="java",
+            governance_policy=policy,
+        ),
+    )
+
+    result = registry.get("collect_block_domain").callable(
+        {
+            "block_types": ["iron_ore", "deepslate_iron_ore"],
+            "expected_drops": ["raw_iron"],
+            "remaining_count": 1,
+            "search_radius": 16,
+        }
+    )
+
+    assert result.success is True
+    request = next(item for item in server.requests if item["type"] == "COLLECT_BLOCK")
+    assert request["block_ids"] == [
+        "minecraft:iron_ore",
+        "minecraft:deepslate_iron_ore",
+    ]
+    assert request["expected_item_ids"] == ["minecraft:raw_iron"]
+
+
+def test_java_body_does_not_replace_explicit_empty_expected_items() -> None:
+    policy = GovernancePolicy(natural_regions=[REGION])
+    server = FakeBodyServer()
+    body = JavaBody(
+        JavaBodyClient("Bot", lambda: server, GovernanceAnswerer(policy)),
+        "Bot",
+    )
+
+    body.execute(
+        Action.create(
+            "collectBlock",
+            {
+                "block_types": ["minecraft:iron_ore"],
+                "expected_item_ids": [],
+            },
+        )
+    )
+
+    request = next(item for item in server.requests if item["type"] == "COLLECT_BLOCK")
+    assert request["expected_item_ids"] == []
 
 
 def test_java_provider_uses_canonical_go_to_surface_tool() -> None:

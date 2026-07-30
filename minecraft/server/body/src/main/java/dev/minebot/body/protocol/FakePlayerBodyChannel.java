@@ -896,6 +896,10 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 return;
             }
             Map<Block, String> requestedBlocks = requiredBlocks(request);
+            List<String> expectedItemIds = requiredExpectedItemIds(
+                request,
+                requestedBlocks.values()
+            );
             int radius = boundedOptionalInt(request, "radius", 48, 4, 64);
             int verticalRadius = boundedOptionalInt(request, "vertical_radius", 16, 1, MAX_VERTICAL_RADIUS);
             int timeoutTicks = boundedOptionalInt(request, "timeout_ticks", NavigateExecutor.DEFAULT_TIMEOUT_TICKS, 20, MAX_TIMEOUT_TICKS);
@@ -921,13 +925,11 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                             break;
                         }
                     }
-                    Map<String, String> itemIds = new LinkedHashMap<>();
-                    requestedBlocks.values().forEach(blockId -> itemIds.put(blockId, blockId));
                     CollectExecutor executor = new CollectExecutor(
                         botName,
                         actionId,
                         candidates,
-                        itemIds,
+                        expectedItemIds,
                         searchFacts,
                         new MinecraftWorldView(level),
                         adapter,
@@ -2203,6 +2205,42 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         }
         validateRequestedBlockCount(blocks.size());
         return Map.copyOf(blocks);
+    }
+
+    private static List<String> requiredExpectedItemIds(
+        JsonObject request,
+        Iterable<String> defaults
+    ) {
+        LinkedHashSet<String> itemIds = new LinkedHashSet<>();
+        if (!request.has("expected_item_ids")) {
+            defaults.forEach(itemIds::add);
+        } else {
+            if (!request.get("expected_item_ids").isJsonArray()) {
+                throw new IllegalArgumentException("expected_item_ids must be a nonempty array");
+            }
+            for (var element : request.getAsJsonArray("expected_item_ids")) {
+                if (!element.isJsonPrimitive()) {
+                    throw new IllegalArgumentException("expected_item_ids must contain strings");
+                }
+                String itemId = element.getAsString();
+                if (!itemId.matches("[a-z0-9_.-]+:[a-z0-9_/.-]+")) {
+                    throw new IllegalArgumentException("expected_item_ids contains an invalid identifier");
+                }
+                Identifier location = Identifier.tryParse(itemId);
+                if (location == null || BuiltInRegistries.ITEM.getOptional(location).isEmpty()) {
+                    throw new IllegalArgumentException("unknown item id: " + itemId);
+                }
+                itemIds.add(itemId);
+            }
+        }
+        if (itemIds.isEmpty() || itemIds.size() > MAX_REQUESTED_BLOCK_IDS) {
+            throw new IllegalArgumentException(
+                "expected_item_ids must contain 1 to "
+                    + MAX_REQUESTED_BLOCK_IDS
+                    + " identifiers"
+            );
+        }
+        return List.copyOf(itemIds);
     }
 
     static void validateRequestedBlockCount(int count) {

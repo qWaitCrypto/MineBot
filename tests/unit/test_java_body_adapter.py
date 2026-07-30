@@ -1291,6 +1291,27 @@ def test_collect_allow_completes_with_inventory_delta() -> None:
     assert server.verdict_seen == [("mp-1", True)]
 
 
+def test_collect_request_carries_expected_item_ids_independently_of_blocks() -> None:
+    server = FakeBodyServer()
+    policy = GovernancePolicy(natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))])
+    client = _client(server, GovernanceAnswerer(policy))
+    client.connect()
+
+    result = client.collect_block(
+        ["minecraft:iron_ore", "minecraft:deepslate_iron_ore"],
+        expected_item_ids=["minecraft:raw_iron"],
+        radius=16,
+    )
+
+    assert result.success is True
+    request = next(item for item in server.requests if item["type"] == "COLLECT_BLOCK")
+    assert request["block_ids"] == [
+        "minecraft:iron_ore",
+        "minecraft:deepslate_iron_ore",
+    ]
+    assert request["expected_item_ids"] == ["minecraft:raw_iron"]
+
+
 def test_collect_denied_by_governance_never_relabels_success() -> None:
     server = FakeBodyServer()
     policy = GovernancePolicy(

@@ -316,12 +316,15 @@ class JavaBodyProtocol:
         action_id: str,
         block_ids: list[str],
         *,
+        expected_item_ids: list[str] | None = None,
         radius: int | None = None,
         vertical_radius: int | None = None,
         timeout_ticks: int | None = None,
     ) -> dict:
         self._require_capability("COLLECT_BLOCK")
         body: dict = {"bot_name": bot_name, "action_id": action_id, "block_ids": list(block_ids)}
+        if expected_item_ids is not None:
+            body["expected_item_ids"] = list(expected_item_ids)
         if radius is not None:
             body["radius"] = radius
         if vertical_radius is not None:

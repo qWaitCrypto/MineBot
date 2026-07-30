@@ -60,6 +60,10 @@
             "minecraft:oak_log",
             "minecraft:spruce_log"
           ],
+          "expected_item_ids": [
+            "minecraft:oak_log",
+            "minecraft:spruce_log"
+          ],
           "radius": 48,
           "timeout_ticks": 2400
         }
@@ -72,6 +76,10 @@
         "bot_name": "MineBot_1",
         "action_id": "collect-0001",
         "block_ids": [
+          "minecraft:oak_log",
+          "minecraft:spruce_log"
+        ],
+        "expected_item_ids": [
           "minecraft:oak_log",
           "minecraft:spruce_log"
         ],
