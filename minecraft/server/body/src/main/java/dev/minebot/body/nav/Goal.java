@@ -133,13 +133,15 @@ public sealed interface Goal {
         public boolean isSatisfied(WorldView world, int nx, int ny, int nz) {
             return isSatisfied(nx, ny, nz)
                 && isOccupiable(world.kindAt(nx, ny, nz))
-                && isOccupiable(world.kindAt(nx, ny + 1, nz));
+                && isOccupiable(world.kindAt(nx, ny + 1, nz))
+                && !world.isBodyPositionHazardous(nx, ny, nz);
         }
 
         @Override
         public boolean acceptsPartialEndpoint(WorldView world, int nx, int ny, int nz) {
             return isOccupiable(world.kindAt(nx, ny, nz))
-                && isOccupiable(world.kindAt(nx, ny + 1, nz));
+                && isOccupiable(world.kindAt(nx, ny + 1, nz))
+                && !world.isBodyPositionHazardous(nx, ny, nz);
         }
 
         @Override

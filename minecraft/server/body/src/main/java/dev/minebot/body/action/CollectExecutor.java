@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -26,10 +27,10 @@ import java.util.Set;
  * are typed and bounded; success is never inferred from a dispatched command.
  */
 public final class CollectExecutor implements ActionRuntime.TickExecutor {
-    public static final int MAX_CANDIDATE_ATTEMPTS = 8;
+    public static final int MAX_CANDIDATE_ATTEMPTS = 128;
     public static final int MAX_PLANNING_CANDIDATES = Goal.MAX_COMPOSITE_MEMBERS;
     public static final int BREAK_TIMEOUT_TICKS = 300;
-    public static final int PICKUP_TIMEOUT_TICKS = 120;
+    public static final int PICKUP_TIMEOUT_TICKS = 20;
     public static final int DROP_LOCATE_TIMEOUT_TICKS = 60;
     public static final double DROP_REPLAN_DISTANCE = 0.5;
     public static final double DROP_SEARCH_RADIUS = 8.0;
@@ -38,6 +39,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     public static final int MAX_APPROACH_BREAKS = 8;
     public static final int MAX_EXCAVATION_REPLANS = 3;
     public static final int EXCAVATION_MOVE_TIMEOUT_TICKS = 100;
+    public static final int DROP_URGENT_AFTER_TICKS = 200;
+    public static final int DROP_LOST_AFTER_TICKS = 80;
+    public static final int MAX_ACTIVE_DROP_GOALS = 8;
+    public static final int MAX_DROP_APPROACH_ATTEMPTS = 8;
     private static final int DESCENT_STABLE_TICKS = 3;
 
     /** Live block truth; null id when the position is unloaded. */
@@ -64,6 +69,12 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     public record Drop(String entityId, String itemId, int count, double x, double y, double z) {
+    }
+
+    private record TrackedDrop(Drop drop, int firstSeenTick, int lastSeenTick) {
+        TrackedDrop observed(Drop current, int serverTick) {
+            return new TrackedDrop(current, firstSeenTick, serverTick);
+        }
     }
 
     private enum Phase {
@@ -99,6 +110,9 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private final NavigateExecutor.EventSink events;
     private final ActionRuntime runtime;
     private final int timeoutTicks;
+    private final int targetCount;
+    private final int maxCandidateAttempts;
+    private final int maxTargetMutations;
 
     private Phase phase = Phase.NEXT_CANDIDATE;
     private int candidateAttempts;
@@ -110,12 +124,25 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private int phaseStartedTick = -1;
     private int elapsedTicks;
     private int replansTotal;
-    private Map<String, Integer> dropsBeforeBreak = Map.of();
     private Drop pickupDrop;
     private Drop plannedPickupDrop;
-    private boolean pickupApproachFailed;
     private final JsonArray attemptFailures = new JsonArray();
     private final Map<String, Integer> baselineCounts;
+    private final List<Candidate> minedTargets = new ArrayList<>();
+    private final Map<String, TrackedDrop> pendingDrops = new LinkedHashMap<>();
+    private final Set<String> retiredDropIds = new HashSet<>();
+    private final Set<String> reportedLostDropIds = new HashSet<>();
+    private final Map<String, Integer> dropApproachAttempts = new HashMap<>();
+    private List<Drop> activePickupDomain = List.of();
+    private final JsonArray minedLedger = new JsonArray();
+    private final JsonArray pickupLedger = new JsonArray();
+    private final JsonArray dropLossLedger = new JsonArray();
+    private int targetBreaks;
+    private int mutationsCompleted;
+    private int collectedAtCycleStart;
+    private int recordedCollectedTotal;
+    private int pickupCredit;
+    private String lastFailureReason;
     private ExcavationPlanner.Plan excavationPlan;
     private Candidate excavationTarget;
     private ExcavationPlanner.Cell excavationBlock;
@@ -151,6 +178,54 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         ActionRuntime runtime,
         int timeoutTicks
     ) {
+        this(
+            bot,
+            actionId,
+            candidates,
+            expectedItemIds,
+            searchFacts,
+            world,
+            movement,
+            blockBreaker,
+            hygiene,
+            blocks,
+            inventory,
+            drops,
+            gate,
+            proposals,
+            positions,
+            events,
+            runtime,
+            timeoutTicks,
+            1,
+            8,
+            8
+        );
+    }
+
+    public CollectExecutor(
+        String bot,
+        String actionId,
+        List<Candidate> candidates,
+        List<String> expectedItemIds,
+        JsonObject searchFacts,
+        WorldView world,
+        MovementControls movement,
+        ExactBlockBreaker blockBreaker,
+        BotControls hygiene,
+        BlockReader blocks,
+        InventoryReader inventory,
+        DropReader drops,
+        MutationGate gate,
+        ProposalSink proposals,
+        NavigateExecutor.PositionSource positions,
+        NavigateExecutor.EventSink events,
+        ActionRuntime runtime,
+        int timeoutTicks,
+        int targetCount,
+        int maxCandidateAttempts,
+        int maxTargetMutations
+    ) {
         this.bot = bot;
         this.actionId = actionId;
         this.candidates = List.copyOf(candidates);
@@ -170,6 +245,9 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         this.events = events;
         this.runtime = runtime;
         this.timeoutTicks = timeoutTicks;
+        this.targetCount = targetCount;
+        this.maxCandidateAttempts = Math.min(MAX_CANDIDATE_ATTEMPTS, maxCandidateAttempts);
+        this.maxTargetMutations = maxTargetMutations;
         this.baselineCounts = new HashMap<>();
         for (String itemId : expectedItemIds) {
             baselineCounts.putIfAbsent(itemId, inventory.countOf(itemId));
@@ -184,7 +262,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             return;
         }
         if (elapsedTicks > timeoutTicks) {
-            finish(serverTick, ActionRuntime.CLASS_TIMEOUT, "timeout_ticks_exhausted");
+            finishProgressAware(serverTick, "timeout_ticks_exhausted");
             return;
         }
         NavigateExecutor.PositionSource.Position position = positions.position(bot);
@@ -192,8 +270,13 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             finish(serverTick, ActionRuntime.CLASS_FAILED, "body_missing");
             return;
         }
+        if (phase != Phase.MINING
+            && phase != Phase.EXCAVATION_BREAKING
+            && completeFromInventoryTarget(serverTick)) {
+            return;
+        }
         switch (phase) {
-            case NEXT_CANDIDATE -> nextCandidate(serverTick);
+            case NEXT_CANDIDATE -> nextObjective(serverTick, position);
             case APPROACHING -> approachTick(serverTick, position);
             case EXCAVATION_AWAITING_VERDICT -> excavationVerdictTick(serverTick, position);
             case EXCAVATION_BREAKING -> excavationBreakingTick(serverTick, position);
@@ -201,41 +284,107 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             case EXCAVATION_DESCENDING -> excavationDescendingTick(serverTick, position);
             case AWAITING_VERDICT -> verdictTick(serverTick);
             case MINING -> miningTick(serverTick);
-            case PICKUP_LOCATE -> pickupLocateTick(serverTick);
+            case PICKUP_LOCATE -> pickupLocateTick(serverTick, position);
             case PICKUP_APPROACH -> pickupApproachTick(serverTick, position);
             case PICKUP_WAIT -> pickupWaitTick(serverTick, position);
         }
     }
 
-    private void nextCandidate(int serverTick) {
+    private void nextObjective(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
         current = null;
         approach = null;
-        if (candidateAttempts >= MAX_CANDIDATE_ATTEMPTS || remainingCandidates.isEmpty()) {
-            String reason = candidates.isEmpty() ? "target_not_found" : "candidate_targets_exhausted";
-            finish(serverTick, ActionRuntime.CLASS_FAILED, reason);
+        pickupDrop = null;
+        plannedPickupDrop = null;
+        if (completeFromInventoryTarget(serverTick)) {
             return;
         }
 
         refreshLiveCandidates();
-        if (candidateAttempts >= MAX_CANDIDATE_ATTEMPTS || remainingCandidates.isEmpty()) {
-            finish(serverTick, ActionRuntime.CLASS_FAILED, "candidate_targets_exhausted");
+        refreshPendingDrops(position, serverTick);
+        for (TrackedDrop tracked : List.copyOf(pendingDrops.values())) {
+            if (hasSafePickupStand(tracked.drop())) {
+                continue;
+            }
+            Drop unsafe = tracked.drop();
+            pendingDrops.remove(unsafe.entityId());
+            retiredDropIds.add(unsafe.entityId());
+            recordDropLoss(serverTick, unsafe, "unsafe_pickup_domain");
+        }
+
+        boolean candidateBudgetAvailable = candidateAttempts < maxCandidateAttempts
+            && targetBreaks < maxTargetMutations
+            && !remainingCandidates.isEmpty();
+        List<Drop> availableDrops = pendingDrops.values().stream()
+            .map(TrackedDrop::drop)
+            .sorted(Comparator
+                .comparingInt((Drop drop) -> pendingDrops.get(drop.entityId()).firstSeenTick())
+                .thenComparingDouble(drop -> distanceFromPositionSquared(position, drop)))
+            .limit(MAX_ACTIVE_DROP_GOALS)
+            .toList();
+        if (!candidateBudgetAvailable && availableDrops.isEmpty()) {
+            String reason = candidates.isEmpty() ? "target_not_found" : "candidate_targets_exhausted";
+            finishProgressAware(serverTick, reason);
             return;
         }
 
-        int domainSize = Math.min(
-            remainingCandidates.size(),
-            MAX_PLANNING_CANDIDATES
-        );
-        activeDomain = List.copyOf(remainingCandidates.subList(0, domainSize));
-        List<Goal> goals = activeDomain.stream()
-            .map(candidate -> (Goal) interactGoal(candidate))
-            .toList();
+        int remainingNeeded = Math.max(1, targetCount - collectedTotal());
+        int pendingCount = availableDrops.stream().mapToInt(Drop::count).sum();
+        int oldestDropAge = availableDrops.stream()
+            .mapToInt(drop -> serverTick - pendingDrops.get(drop.entityId()).firstSeenTick())
+            .max()
+            .orElse(0);
+        boolean pickupUrgent = !availableDrops.isEmpty()
+            && (!candidateBudgetAvailable
+                || pendingCount >= remainingNeeded
+                || oldestDropAge >= DROP_URGENT_AFTER_TICKS);
+
+        activePickupDomain = pickupUrgent
+            ? availableDrops
+            : availableDrops.stream()
+                .filter(drop -> dropApproachAttempts.getOrDefault(drop.entityId(), 0) == 0)
+                .toList();
+        if (pickupUrgent) {
+            pickupDrop = activePickupDomain.stream()
+                .min(Comparator.comparingDouble(drop -> distanceFromPositionSquared(position, drop)))
+                .orElseThrow();
+            plannedPickupDrop = null;
+            collectedAtCycleStart = collectedTotal();
+            phase = Phase.PICKUP_APPROACH;
+            return;
+        }
+        int candidateSlots = pickupUrgent
+            ? 0
+            : MAX_PLANNING_CANDIDATES - activePickupDomain.size();
+        int domainSize = candidateBudgetAvailable
+            ? Math.min(remainingCandidates.size(), Math.max(0, candidateSlots))
+            : 0;
+        activeDomain = domainSize == 0
+            ? List.of()
+            : List.copyOf(remainingCandidates.subList(0, domainSize));
+        List<Goal> goals = new ArrayList<>();
+        for (Drop drop : activePickupDomain) {
+            goals.add(pickupGoal(drop));
+        }
+        for (Candidate candidate : activeDomain) {
+            goals.add(interactGoal(candidate));
+        }
+        if (goals.isEmpty()) {
+            finishProgressAware(serverTick, "resource_objective_domain_empty");
+            return;
+        }
         Goal domainGoal = goals.size() == 1 ? goals.get(0) : new Goal.Composite(goals);
 
         JsonObject data = new JsonObject();
         data.addProperty("candidate_count", activeDomain.size());
+        data.addProperty("pickup_count", activePickupDomain.size());
+        data.addProperty("pickup_urgent", pickupUrgent);
+        data.addProperty("remaining_count", remainingNeeded);
         data.addProperty("candidates_retired", candidatesRetired);
-        events.emit(bot, serverTick, "candidate_domain_planned", actionId, data);
+        events.emit(bot, serverTick, "collection_objective_domain_planned", actionId, data);
+        collectedAtCycleStart = collectedTotal();
         approach = new ApproachController(
             bot,
             actionId,
@@ -250,6 +399,16 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     private void approachTick(int serverTick, NavigateExecutor.PositionSource.Position position) {
+        if (completeFromInventoryTarget(serverTick)) {
+            return;
+        }
+        if (collectedTotal() > collectedAtCycleStart) {
+            approach.halt();
+            approach = null;
+            recordPickupProgress(serverTick, "inventory_changed_during_route", null);
+            phase = Phase.NEXT_CANDIDATE;
+            return;
+        }
         ApproachController.Outcome outcome = approach.tick(serverTick, position.x(), position.y(), position.z());
         switch (outcome.status()) {
             case WORKING -> {
@@ -258,30 +417,47 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 replansTotal += approach.replans();
                 approach.halt();
                 approach = null;
+                refreshPendingDrops(position, serverTick);
+                if (activeDropMovedSincePlanning()) {
+                    phase = Phase.NEXT_CANDIDATE;
+                    return;
+                }
+                if (activeDomain.isEmpty()) {
+                    retryOrRetireActiveDrops(serverTick, position, outcome.reason());
+                    phase = Phase.NEXT_CANDIDATE;
+                    return;
+                }
                 if (!beginExcavation(serverTick, position, outcome.reason())) {
                     recordDomainFailure("approach_failed:" + outcome.reason());
-                    finish(
-                        serverTick,
-                        ActionRuntime.CLASS_FAILED,
-                        "candidate_domain_unreachable:" + outcome.reason()
-                    );
+                    retireActiveCandidateDomain("candidate_domain_unreachable:" + outcome.reason());
+                    phase = Phase.NEXT_CANDIDATE;
                 }
             }
             case COMPLETED -> {
                 replansTotal += approach.replans();
                 approach.halt();
                 approach = null;
+                refreshPendingDrops(position, serverTick);
+                if (completeFromInventoryTarget(serverTick)) {
+                    return;
+                }
+                Drop reachedDrop = selectReachedDrop(position);
+                if (reachedDrop != null) {
+                    pickupDrop = reachedDrop;
+                    plannedPickupDrop = reachedDrop;
+                    collectedAtCycleStart = collectedTotal();
+                    phaseStartedTick = serverTick;
+                    phase = Phase.PICKUP_WAIT;
+                    return;
+                }
                 current = selectReachedCandidate(position);
                 if (current == null) {
                     boolean liveDomainRemains = activeDomain.stream()
                         .anyMatch(remainingCandidates::contains);
                     if (liveDomainRemains) {
                         recordDomainFailure("reached_stand_candidate_mismatch");
-                        finish(
-                            serverTick,
-                            ActionRuntime.CLASS_FAILED,
-                            "reached_stand_candidate_mismatch"
-                        );
+                        retireActiveCandidateDomain("reached_stand_candidate_mismatch");
+                        phase = Phase.NEXT_CANDIDATE;
                         return;
                     }
                     phase = Phase.NEXT_CANDIDATE;
@@ -316,6 +492,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             .map(candidate -> new ExcavationPlanner.Target(candidate.x(), candidate.y(), candidate.z()))
             .toList();
         int remainingBreaks = MAX_APPROACH_BREAKS - excavationBreaks;
+        if (remainingBreaks <= 0) {
+            excavationFailure = sourceFailure + ":mutation_budget_exhausted";
+            return false;
+        }
         ExcavationPlanner.Result result = ExcavationPlanner.planWithReturnPath(
             world,
             new ExcavationPlanner.Cell(position.blockX(), position.feetBlockY(), position.blockZ()),
@@ -537,6 +717,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 return;
             }
             excavationBreaks++;
+            mutationsCompleted++;
             excavationUsed = true;
             JsonObject broken = new JsonObject();
             broken.addProperty("x", excavationBlock.x());
@@ -547,6 +728,9 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             events.emit(bot, serverTick, "collect_excavation_block_verified", actionId, broken.deepCopy());
             excavationBlockerIndex++;
             advanceExcavation(serverTick, position);
+            return;
+        }
+        if (completeFromInventoryTarget(serverTick)) {
             return;
         }
         ExactBlockBreaker.Outcome outcome = blockBreaker.tick(bot, serverTick);
@@ -650,21 +834,25 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
         if (excavationReplans >= MAX_EXCAVATION_REPLANS) {
             recordDomainFailure("excavation_failed:" + reason);
-            finish(serverTick, ActionRuntime.CLASS_FAILED, "candidate_domain_unreachable:excavation_" + reason);
+            retireActiveCandidateDomain("candidate_domain_unreachable:excavation_" + reason);
+            phase = Phase.NEXT_CANDIDATE;
             return;
         }
         excavationReplans++;
         if (!planExcavation(serverTick, position, reason)) {
             recordDomainFailure("excavation_failed:" + excavationFailure);
-            finish(
-                serverTick,
-                ActionRuntime.CLASS_FAILED,
-                "candidate_domain_unreachable:excavation_" + excavationFailure
-            );
+            retireActiveCandidateDomain("candidate_domain_unreachable:excavation_" + excavationFailure);
+            phase = Phase.NEXT_CANDIDATE;
         }
     }
 
     private void beginTargetMutation(int serverTick) {
+        if (targetBreaks >= maxTargetMutations) {
+            recordAttemptFailure("mutation_budget_exhausted", null);
+            phase = Phase.NEXT_CANDIDATE;
+            return;
+        }
+        collectedAtCycleStart = collectedTotal();
         emitCandidateSelected(serverTick);
         MutationGate.Proposal proposal = gate.propose(
             bot, actionId, "break", current.x(), current.y(), current.z(), current.blockId(),
@@ -687,7 +875,6 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             case ALLOWED -> {
                 emitVerdict(serverTick, "mutation_allowed", gate.reason(proposalId));
                 gate.discard(proposalId);
-                dropsBeforeBreak = nearbyDropCounts();
                 movement.lookAt(bot, current.x() + 0.5, current.y() + 0.5, current.z() + 0.5);
                 ExactBlockBreaker.Outcome outcome = blockBreaker.begin(
                     bot, current.x(), current.y(), current.z(), current.blockId(), serverTick
@@ -729,12 +916,20 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             data.addProperty("now", observed);
             data.addProperty("break_ticks", serverTick - phaseStartedTick);
             events.emit(bot, serverTick, "mutation_verified", actionId, data);
+            targetBreaks++;
+            mutationsCompleted++;
+            minedTargets.add(current);
+            JsonObject mined = blockFacts();
+            mined.addProperty("break_ticks", serverTick - phaseStartedTick);
+            minedLedger.add(mined);
             approach = null;
             pickupDrop = null;
             plannedPickupDrop = null;
-            pickupApproachFailed = false;
             phaseStartedTick = serverTick;
             phase = Phase.PICKUP_LOCATE;
+            return;
+        }
+        if (completeFromInventoryTarget(serverTick)) {
             return;
         }
         ExactBlockBreaker.Outcome outcome = blockBreaker.tick(bot, serverTick);
@@ -752,36 +947,45 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
     }
 
-    private void pickupLocateTick(int serverTick) {
-        if (completeFromInventoryDelta(serverTick)) {
+    private void pickupLocateTick(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        if (completeFromInventoryTarget(serverTick)) {
             return;
         }
-        Drop observed = attributableDrops().stream()
-            .min(Comparator.comparingDouble(this::distanceFromMinedBlockSquared))
-            .orElse(null);
-        if (observed == null) {
-            if (serverTick - phaseStartedTick > DROP_LOCATE_TIMEOUT_TICKS) {
-                recordAttemptFailure("pickup_not_observed", null);
-                phase = Phase.NEXT_CANDIDATE;
-            }
+        if (collectedTotal() > collectedAtCycleStart) {
+            recordPickupProgress(serverTick, "inventory_changed_after_break", null);
+            phase = Phase.NEXT_CANDIDATE;
             return;
         }
-        pickupDrop = observed;
-        JsonObject data = new JsonObject();
-        data.addProperty("entity_id", pickupDrop.entityId());
-        data.addProperty("item_id", pickupDrop.itemId());
-        data.addProperty("x", pickupDrop.x());
-        data.addProperty("y", pickupDrop.y());
-        data.addProperty("z", pickupDrop.z());
-        events.emit(bot, serverTick, "pickup_target_acquired", actionId, data);
-        phase = Phase.PICKUP_APPROACH;
+        refreshPendingDrops(position, serverTick);
+        if (!pendingDrops.isEmpty()) {
+            // The next planner domain contains both remaining resource blocks
+            // and these live item entities, so it can choose by actual route
+            // cost instead of forcing one mine -> one pickup serialization.
+            phase = Phase.NEXT_CANDIDATE;
+            return;
+        }
+        if (serverTick - phaseStartedTick > DROP_LOCATE_TIMEOUT_TICKS) {
+            recordAttemptFailure("drop_not_observed_after_break", null);
+            phase = Phase.NEXT_CANDIDATE;
+        }
     }
 
     private void pickupApproachTick(int serverTick, NavigateExecutor.PositionSource.Position position) {
-        if (completeFromInventoryDelta(serverTick)) {
+        if (completeFromInventoryTarget(serverTick)) {
             return;
         }
+        refreshPendingDrops(position, serverTick);
         Drop observed = currentPickupDrop();
+        if (observed == null) {
+            if (pickupDrop != null && !retiredDropIds.contains(pickupDrop.entityId())) {
+                recordDropLoss(serverTick, pickupDrop, "drop_no_longer_observed");
+            }
+            phase = Phase.NEXT_CANDIDATE;
+            return;
+        }
         if (observed != null) {
             boolean moved = plannedPickupDrop != null
                 && distanceSquared(plannedPickupDrop, observed)
@@ -791,7 +995,6 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 approach.halt();
                 approach = null;
                 plannedPickupDrop = null;
-                pickupApproachFailed = false;
             }
         }
         if (approach == null) {
@@ -812,11 +1015,13 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         if (outcome.status() == ApproachController.Status.WORKING) {
             return;
         }
-        // Whether or not the walk-in fully succeeded, give the drop time to
-        // arrive and let the inventory delta be the only truth.
         approach.halt();
         approach = null;
-        pickupApproachFailed = outcome.status() == ApproachController.Status.FAILED;
+        if (outcome.status() == ApproachController.Status.FAILED) {
+            retryOrRetireDrop(serverTick, position, pickupDrop, outcome.reason());
+            phase = Phase.NEXT_CANDIDATE;
+            return;
+        }
         phaseStartedTick = serverTick;
         phase = Phase.PICKUP_WAIT;
     }
@@ -825,9 +1030,15 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         int serverTick,
         NavigateExecutor.PositionSource.Position position
     ) {
-        if (completeFromInventoryDelta(serverTick)) {
+        if (completeFromInventoryTarget(serverTick)) {
             return;
         }
+        if (collectedTotal() > collectedAtCycleStart) {
+            recordPickupProgress(serverTick, "pickup_verified", pickupDrop);
+            phase = Phase.NEXT_CANDIDATE;
+            return;
+        }
+        refreshPendingDrops(position, serverTick);
         Drop observed = currentPickupDrop();
         if (observed != null) {
             boolean moved = plannedPickupDrop != null
@@ -838,27 +1049,40 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             int y = (int) Math.floor(position.y());
             int z = (int) Math.floor(position.z());
             boolean outsidePickupVolume = !pickupGoal(pickupDrop).isSatisfied(world, x, y, z);
-            if (outsidePickupVolume && (!pickupApproachFailed || moved)) {
+            if (outsidePickupVolume || moved) {
                 plannedPickupDrop = null;
-                pickupApproachFailed = false;
-                phase = Phase.PICKUP_APPROACH;
+                phase = Phase.NEXT_CANDIDATE;
                 return;
             }
+        } else if (pickupDrop != null
+            && !pendingDrops.containsKey(pickupDrop.entityId())
+            && !retiredDropIds.contains(pickupDrop.entityId())) {
+            recordDropLoss(serverTick, pickupDrop, "drop_no_longer_observed");
+            phase = Phase.NEXT_CANDIDATE;
+            return;
+        } else if (pickupDrop != null && retiredDropIds.contains(pickupDrop.entityId())) {
+            phase = Phase.NEXT_CANDIDATE;
+            return;
         }
         if (serverTick - phaseStartedTick > PICKUP_TIMEOUT_TICKS) {
-            recordAttemptFailure("pickup_not_observed", null);
+            retryOrRetireDrop(serverTick, position, pickupDrop, "pickup_timeout");
             phase = Phase.NEXT_CANDIDATE;
         }
     }
 
-    private boolean completeFromInventoryDelta(int serverTick) {
+    private boolean completeFromInventoryTarget(int serverTick) {
         JsonObject delta = inventoryDelta();
-        if (delta == null) {
+        if (delta.get("total").getAsInt() < targetCount) {
             return false;
         }
+        reconcileCompletionPickups(serverTick);
         JsonObject facts = new JsonObject();
         facts.add("inventory_delta", delta);
-        facts.add("mined_block", blockFacts());
+        facts.addProperty("target_count", targetCount);
+        facts.addProperty("collected_count", delta.get("total").getAsInt());
+        if (current != null) {
+            facts.add("mined_block", blockFacts());
+        }
         if (pickupDrop != null) {
             JsonObject drop = new JsonObject();
             drop.addProperty("entity_id", pickupDrop.entityId());
@@ -871,39 +1095,236 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         return true;
     }
 
-    private Map<String, Integer> nearbyDropCounts() {
-        Map<String, Integer> counts = new HashMap<>();
-        for (Drop drop : nearbyDrops()) {
-            counts.put(drop.entityId(), drop.count());
+    private void reconcileCompletionPickups(int serverTick) {
+        int collected = collectedTotal();
+        int gained = Math.max(0, collected - recordedCollectedTotal);
+        recordedCollectedTotal = Math.max(recordedCollectedTotal, collected);
+        pickupCredit += gained;
+        for (TrackedDrop tracked : List.copyOf(pendingDrops.values())) {
+            Drop drop = tracked.drop();
+            if (pickupCredit < drop.count()) {
+                continue;
+            }
+            pickupCredit -= drop.count();
+            pendingDrops.remove(drop.entityId());
+            retiredDropIds.add(drop.entityId());
+            recordReconciledPickup(serverTick, drop);
         }
-        return Map.copyOf(counts);
     }
 
-    private List<Drop> attributableDrops() {
-        return nearbyDrops().stream()
-            .filter(drop -> drop.count() > dropsBeforeBreak.getOrDefault(drop.entityId(), 0))
-            .toList();
-    }
-
-    private List<Drop> nearbyDrops() {
-        List<Drop> found = new ArrayList<>();
+    private void refreshPendingDrops(
+        NavigateExecutor.PositionSource.Position position,
+        int serverTick
+    ) {
+        Map<String, Drop> observed = new LinkedHashMap<>();
+        List<int[]> centers = new ArrayList<>();
+        centers.add(new int[] {position.blockX(), position.feetBlockY(), position.blockZ()});
+        int firstRecent = Math.max(0, minedTargets.size() - MAX_ACTIVE_DROP_GOALS);
+        for (int index = firstRecent; index < minedTargets.size(); index++) {
+            Candidate mined = minedTargets.get(index);
+            centers.add(new int[] {mined.x(), mined.y(), mined.z()});
+        }
+        List<Drop> trackingCenters = new ArrayList<>(activePickupDomain);
+        if (pickupDrop != null) {
+            trackingCenters.add(pickupDrop);
+        }
+        for (Drop drop : trackingCenters) {
+            centers.add(new int[] {
+                (int) Math.floor(drop.x()),
+                (int) Math.floor(drop.y()),
+                (int) Math.floor(drop.z()),
+            });
+        }
         for (String itemId : expectedItemIds) {
-            found.addAll(drops.nearby(
-                itemId,
-                current.x(),
-                current.y(),
-                current.z(),
-                DROP_SEARCH_RADIUS
-            ));
+            for (int[] center : centers) {
+                for (Drop drop : drops.nearby(
+                    itemId,
+                    center[0],
+                    center[1],
+                    center[2],
+                    DROP_SEARCH_RADIUS
+                )) {
+                    if (!retiredDropIds.contains(drop.entityId())) {
+                        observed.put(drop.entityId(), drop);
+                    }
+                }
+            }
         }
-        return List.copyOf(found);
+
+        for (Drop drop : observed.values()) {
+            TrackedDrop prior = pendingDrops.get(drop.entityId());
+            pendingDrops.put(
+                drop.entityId(),
+                prior == null
+                    ? new TrackedDrop(drop, serverTick, serverTick)
+                    : prior.observed(drop, serverTick)
+            );
+        }
+        for (TrackedDrop tracked : List.copyOf(pendingDrops.values())) {
+            if (observed.containsKey(tracked.drop().entityId())) {
+                continue;
+            }
+            if (serverTick - tracked.lastSeenTick() <= DROP_LOST_AFTER_TICKS) {
+                continue;
+            }
+            pendingDrops.remove(tracked.drop().entityId());
+            retiredDropIds.add(tracked.drop().entityId());
+            if (pickupCredit >= tracked.drop().count()) {
+                pickupCredit -= tracked.drop().count();
+                recordReconciledPickup(serverTick, tracked.drop());
+            } else {
+                recordDropLoss(serverTick, tracked.drop(), "drop_no_longer_observed");
+            }
+        }
     }
 
-    private double distanceFromMinedBlockSquared(Drop drop) {
-        double dx = drop.x() - (current.x() + 0.5);
-        double dy = drop.y() - (current.y() + 0.5);
-        double dz = drop.z() - (current.z() + 0.5);
-        return dx * dx + dy * dy + dz * dz;
+    private Drop selectReachedDrop(NavigateExecutor.PositionSource.Position position) {
+        int x = position.blockX();
+        int y = position.feetBlockY();
+        int z = position.blockZ();
+        return activePickupDomain.stream()
+            .map(drop -> {
+                TrackedDrop tracked = pendingDrops.get(drop.entityId());
+                return tracked == null ? null : tracked.drop();
+            })
+            .filter(drop -> drop != null && pickupGoal(drop).isSatisfied(world, x, y, z))
+            .min(Comparator.comparingDouble(drop -> distanceFromPositionSquared(position, drop)))
+            .orElse(null);
+    }
+
+    private boolean activeDropMovedSincePlanning() {
+        for (Drop planned : activePickupDomain) {
+            TrackedDrop tracked = pendingDrops.get(planned.entityId());
+            if (tracked != null
+                && distanceSquared(planned, tracked.drop())
+                    >= DROP_REPLAN_DISTANCE * DROP_REPLAN_DISTANCE) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasSafePickupStand(Drop drop) {
+        Goal.Pickup goal = pickupGoal(drop);
+        int centerX = (int) Math.floor(drop.x());
+        int centerY = (int) Math.floor(drop.y());
+        int centerZ = (int) Math.floor(drop.z());
+        for (int y = centerY - 2; y <= centerY + 1; y++) {
+            for (int x = centerX - 2; x <= centerX + 2; x++) {
+                for (int z = centerZ - 2; z <= centerZ + 2; z++) {
+                    if (goal.isSatisfied(world, x, y, z)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private void retryOrRetireActiveDrops(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position,
+        String reason
+    ) {
+        refreshPendingDrops(position, serverTick);
+        for (Drop planned : activePickupDomain) {
+            TrackedDrop tracked = pendingDrops.get(planned.entityId());
+            if (tracked == null) {
+                continue;
+            }
+            int attempts = dropApproachAttempts.merge(planned.entityId(), 1, Integer::sum);
+            if (attempts < MAX_DROP_APPROACH_ATTEMPTS) {
+                continue;
+            }
+            Drop currentDrop = tracked.drop();
+            pendingDrops.remove(currentDrop.entityId());
+            retiredDropIds.add(currentDrop.entityId());
+            recordDropLoss(serverTick, currentDrop, "pickup_unreachable:" + reason);
+        }
+        activePickupDomain = List.of();
+    }
+
+    private void retryOrRetireDrop(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position,
+        Drop planned,
+        String reason
+    ) {
+        refreshPendingDrops(position, serverTick);
+        if (planned == null) {
+            return;
+        }
+        TrackedDrop tracked = pendingDrops.get(planned.entityId());
+        if (tracked == null) {
+            return;
+        }
+        int attempts = dropApproachAttempts.merge(planned.entityId(), 1, Integer::sum);
+        if (attempts < MAX_DROP_APPROACH_ATTEMPTS) {
+            return;
+        }
+        Drop currentDrop = tracked.drop();
+        pendingDrops.remove(currentDrop.entityId());
+        retiredDropIds.add(currentDrop.entityId());
+        recordDropLoss(serverTick, currentDrop, "pickup_unreachable:" + reason);
+    }
+
+    private void retireActiveCandidateDomain(String reason) {
+        for (Candidate candidate : List.copyOf(activeDomain)) {
+            if (!remainingCandidates.remove(candidate)) {
+                continue;
+            }
+            current = candidate;
+            recordCandidateRetired(reason, blocks.blockIdAt(candidate.x(), candidate.y(), candidate.z()));
+        }
+        current = null;
+        activeDomain = List.of();
+    }
+
+    private void recordPickupProgress(int serverTick, String reason, Drop drop) {
+        int collected = collectedTotal();
+        int gained = Math.max(0, collected - recordedCollectedTotal);
+        recordedCollectedTotal = Math.max(recordedCollectedTotal, collected);
+        pickupCredit += gained;
+        JsonObject progress = new JsonObject();
+        progress.addProperty("reason", reason);
+        progress.addProperty("collected_count", collected);
+        progress.addProperty("gained_count", gained);
+        if (drop != null) {
+            progress.addProperty("entity_id", drop.entityId());
+            progress.addProperty("item_id", drop.itemId());
+            pendingDrops.remove(drop.entityId());
+            retiredDropIds.add(drop.entityId());
+            pickupCredit = Math.max(0, pickupCredit - drop.count());
+        }
+        pickupLedger.add(progress);
+        events.emit(bot, serverTick, "collection_inventory_progress", actionId, progress.deepCopy());
+    }
+
+    private void recordReconciledPickup(int serverTick, Drop drop) {
+        JsonObject pickup = new JsonObject();
+        pickup.addProperty("reason", "pickup_entity_reconciled");
+        pickup.addProperty("entity_id", drop.entityId());
+        pickup.addProperty("item_id", drop.itemId());
+        pickup.addProperty("count", drop.count());
+        pickup.addProperty("collected_count", collectedTotal());
+        pickupLedger.add(pickup);
+        events.emit(bot, serverTick, "collection_pickup_reconciled", actionId, pickup.deepCopy());
+    }
+
+    private void recordDropLoss(int serverTick, Drop drop, String reason) {
+        if (!reportedLostDropIds.add(drop.entityId())) {
+            return;
+        }
+        JsonObject loss = new JsonObject();
+        loss.addProperty("entity_id", drop.entityId());
+        loss.addProperty("item_id", drop.itemId());
+        loss.addProperty("count", drop.count());
+        loss.addProperty("x", drop.x());
+        loss.addProperty("y", drop.y());
+        loss.addProperty("z", drop.z());
+        loss.addProperty("reason", reason);
+        dropLossLedger.add(loss);
+        events.emit(bot, serverTick, "collection_drop_retired", actionId, loss.deepCopy());
     }
 
     private static double distanceSquared(Drop left, Drop right) {
@@ -913,32 +1334,68 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         return dx * dx + dy * dy + dz * dz;
     }
 
+    private static double distanceFromPositionSquared(
+        NavigateExecutor.PositionSource.Position position,
+        Drop drop
+    ) {
+        double dx = position.x() - drop.x();
+        double dy = position.y() - drop.y();
+        double dz = position.z() - drop.z();
+        return dx * dx + dy * dy + dz * dz;
+    }
+
     private Drop currentPickupDrop() {
         if (pickupDrop == null) {
             return null;
         }
-        return attributableDrops().stream()
-            .filter(drop -> pickupDrop.entityId().equals(drop.entityId()))
-            .findFirst()
-            .orElse(null);
+        TrackedDrop tracked = pendingDrops.get(pickupDrop.entityId());
+        return tracked == null ? null : tracked.drop();
     }
 
     private static Goal.Pickup pickupGoal(Drop drop) {
         return new Goal.Pickup(drop.x(), drop.y(), drop.z());
     }
 
+    private int collectedTotal() {
+        int total = 0;
+        for (Map.Entry<String, Integer> entry : baselineCounts.entrySet()) {
+            total += Math.max(0, inventory.countOf(entry.getKey()) - entry.getValue());
+        }
+        return total;
+    }
+
     private JsonObject inventoryDelta() {
+        JsonObject delta = new JsonObject();
+        JsonObject items = new JsonObject();
+        int total = 0;
+        String firstChangedItem = null;
+        int firstBefore = 0;
+        int firstAfter = 0;
         for (Map.Entry<String, Integer> entry : baselineCounts.entrySet()) {
             int now = inventory.countOf(entry.getKey());
-            if (now > entry.getValue()) {
-                JsonObject delta = new JsonObject();
-                delta.addProperty("item_id", entry.getKey());
-                delta.addProperty("before", entry.getValue());
-                delta.addProperty("after", now);
-                return delta;
+            int gained = Math.max(0, now - entry.getValue());
+            JsonObject item = new JsonObject();
+            item.addProperty("before", entry.getValue());
+            item.addProperty("after", now);
+            item.addProperty("delta", gained);
+            items.add(entry.getKey(), item);
+            total += gained;
+            if (gained > 0 && firstChangedItem == null) {
+                firstChangedItem = entry.getKey();
+                firstBefore = entry.getValue();
+                firstAfter = now;
             }
         }
-        return null;
+        delta.addProperty("total", total);
+        delta.add("items", items);
+        if (firstChangedItem != null) {
+            // Preserve the original single-item shape for old readers while
+            // exposing aggregate truth for interchangeable resource families.
+            delta.addProperty("item_id", firstChangedItem);
+            delta.addProperty("before", firstBefore);
+            delta.addProperty("after", firstAfter);
+        }
+        return delta;
     }
 
     private void emitVerdict(int serverTick, String eventName, String reason) {
@@ -951,6 +1408,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     private void recordAttemptFailure(String reason, String observedBlock) {
+        lastFailureReason = reason;
         JsonObject failure = new JsonObject();
         failure.addProperty("attempt", candidateAttempts);
         if (current != null) {
@@ -967,6 +1425,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     private void recordDomainFailure(String reason) {
+        lastFailureReason = reason;
         JsonObject failure = new JsonObject();
         failure.addProperty("attempt", candidateAttempts + 1);
         failure.addProperty("candidate_count", activeDomain.size());
@@ -975,6 +1434,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     private void recordCandidateRetired(String reason, String observedBlock) {
+        lastFailureReason = reason;
         candidatesRetired++;
         JsonObject failure = new JsonObject();
         failure.addProperty("candidate_retired", candidatesRetired);
@@ -992,9 +1452,14 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     private void refreshLiveCandidates() {
+        int liveCandidates = 0;
         for (Candidate candidate : List.copyOf(remainingCandidates)) {
             String observed = blocks.blockIdAt(candidate.x(), candidate.y(), candidate.z());
             if (observed != null && observed.equals(candidate.blockId())) {
+                liveCandidates++;
+                if (liveCandidates >= MAX_PLANNING_CANDIDATES) {
+                    break;
+                }
                 continue;
             }
             current = candidate;
@@ -1074,6 +1539,21 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         finishWithFacts(serverTick, classification, reason, new JsonObject());
     }
 
+    private void finishProgressAware(int serverTick, String blocker) {
+        int collected = collectedTotal();
+        JsonObject facts = new JsonObject();
+        facts.addProperty("blocker", blocker);
+        String terminalReason = collected > 0
+            ? "partial"
+            : (lastFailureReason == null ? blocker : lastFailureReason);
+        finishWithFacts(
+            serverTick,
+            collected > 0 ? ActionRuntime.CLASS_PARTIAL : ActionRuntime.CLASS_FAILED,
+            terminalReason,
+            facts
+        );
+    }
+
     private void finishWithFacts(int serverTick, String classification, String reason, JsonObject facts) {
         blockBreaker.abort(bot);
         if (proposalId != null) {
@@ -1085,7 +1565,14 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
         facts.addProperty("reason", reason);
         facts.addProperty("elapsed_ticks", elapsedTicks);
+        facts.addProperty("target_count", targetCount);
+        facts.addProperty("collected_count", collectedTotal());
+        facts.addProperty("remaining_count", Math.max(0, targetCount - collectedTotal()));
         facts.addProperty("candidates_tried", candidateAttempts);
+        facts.addProperty("target_breaks", targetBreaks);
+        facts.addProperty("mutations_completed", mutationsCompleted);
+        facts.addProperty("max_candidate_attempts", maxCandidateAttempts);
+        facts.addProperty("max_target_mutations", maxTargetMutations);
         facts.addProperty("replans", replansTotal);
         facts.addProperty("approach_excavation_attempted", excavationAttempted);
         facts.addProperty("approach_excavation_used", excavationUsed);
@@ -1095,6 +1582,11 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             facts.addProperty("approach_excavation_failure", excavationFailure);
         }
         facts.add("approach_broken", approachBrokenLedger.deepCopy());
+        facts.add("mined", minedLedger.deepCopy());
+        facts.add("pickups", pickupLedger.deepCopy());
+        facts.add("drop_losses", dropLossLedger.deepCopy());
+        facts.addProperty("pending_drop_count", pendingDrops.size());
+        facts.add("inventory_delta", inventoryDelta());
         facts.add("attempt_failures", attemptFailures.deepCopy());
         facts.add("search", searchFacts.deepCopy());
         runtime.finish(bot, actionId, classification, facts, serverTick);

@@ -1342,6 +1342,20 @@ class AgentRunnerSpineTests(unittest.TestCase):
             [16, 68, 16],
         )
 
+    def test_model_tool_payload_exposes_partial_progress_as_an_outcome(self):
+        result = ToolResult(
+            False,
+            "partial",
+            True,
+            metrics={"collected_delta": 2, "remaining_count": 1},
+        ).to_payload()
+
+        payload = _model_tool_payload("collect_resource", result, trace_ref="partial-trace")
+
+        self.assertEqual(payload["outcome"], "partial")
+        self.assertFalse(payload["success"])
+        self.assertTrue(payload["complete"])
+
     def test_model_tool_payload_preserves_task_revisions_and_step_statuses(self):
         result = ToolResult(
             True,

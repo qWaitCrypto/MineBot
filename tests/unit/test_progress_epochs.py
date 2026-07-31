@@ -227,6 +227,34 @@ def test_governance_confirmation_settles_as_decision_required_not_failure():
     assert archive.records[0]["members"][0]["status"] == "decision_required"
 
 
+def test_partial_progress_settles_as_partial_not_failure():
+    body = EpochBody()
+    tool = make_tool(
+        "collect_block_domain",
+        lambda _params: ToolResult(
+            False,
+            "partial",
+            True,
+            metrics={"collected_delta": 2, "remaining_count": 1},
+        ),
+        mutating=True,
+    )
+    archive = RecordingEpochArchive()
+    runtime, adapter, context = runtime_with(body, [tool], epoch_archive=archive)
+
+    async def scenario():
+        await adapter.open(response(("call-partial", "collect_block_domain")))
+        return await invoke(tool, context, "call-partial")
+
+    result = asyncio.run(scenario())
+    runtime.close()
+
+    assert result["success"] is False
+    assert result["outcome"] == "partial"
+    assert runtime.authority.failure_steps == 0
+    assert archive.records[0]["members"][0]["status"] == "partial"
+
+
 def test_epoch_defers_progress_abort_until_read_only_sibling_settles():
     body = EpochBody()
     authority = ProgressAuthority()

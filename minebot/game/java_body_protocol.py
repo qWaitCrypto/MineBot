@@ -320,6 +320,9 @@ class JavaBodyProtocol:
         expected_item_ids: list[str] | None = None,
         radius: int | None = None,
         vertical_radius: int | None = None,
+        target_count: int | None = None,
+        candidate_budget: int | None = None,
+        mutation_budget: int | None = None,
         timeout_ticks: int | None = None,
     ) -> dict:
         self._require_capability("COLLECT_BLOCK")
@@ -330,9 +333,39 @@ class JavaBodyProtocol:
             body["radius"] = radius
         if vertical_radius is not None:
             body["vertical_radius"] = vertical_radius
+        if target_count is not None:
+            body["target_count"] = target_count
+        if candidate_budget is not None:
+            body["candidate_budget"] = candidate_budget
+        if mutation_budget is not None:
+            body["mutation_budget"] = mutation_budget
         if timeout_ticks is not None:
             body["timeout_ticks"] = timeout_ticks
         return self._request("COLLECT_BLOCK", body)
+
+    def dig_down(
+        self,
+        bot_name: str,
+        action_id: str,
+        target_y: int,
+        *,
+        max_steps: int | None = None,
+        max_clear_fall: int | None = None,
+        timeout_ticks: int | None = None,
+    ) -> dict:
+        self._require_capability("DIG_DOWN")
+        body: dict = {
+            "bot_name": bot_name,
+            "action_id": action_id,
+            "target_y": target_y,
+        }
+        if max_steps is not None:
+            body["max_steps"] = max_steps
+        if max_clear_fall is not None:
+            body["max_clear_fall"] = max_clear_fall
+        if timeout_ticks is not None:
+            body["timeout_ticks"] = timeout_ticks
+        return self._request("DIG_DOWN", body)
 
     def ascend(
         self,
@@ -482,6 +515,7 @@ class JavaBodyProtocol:
             "HELLO": "HELLO_ACK",
             "NAVIGATE": "NAVIGATE_ACK",
             "COLLECT_BLOCK": "COLLECT_BLOCK_ACK",
+            "DIG_DOWN": "DIG_DOWN_ACK",
             "ASCEND": "ASCEND_ACK",
             "FOLLOW_ENTITY": "FOLLOW_ENTITY_ACK",
             "ENGAGE_ENTITY": "ENGAGE_ENTITY_ACK",

@@ -620,6 +620,7 @@ def build_phase1_registry(
     )
     container_txn = ContainerTransactions(body, navigator=approach_navigator, governance=policy)
     surface_objective_body = catalog.objective_body("go_to_surface", body)
+    dig_down_objective_body = catalog.objective_body("dig_down", body)
     collect_objective_body = catalog.objective_body("collect_block_domain", body)
     combat = CombatTransactions(body, progress=progress)
     catalog.register_many(
@@ -650,6 +651,7 @@ def build_phase1_registry(
                 resource_collection=resource_collection,
                 use=use_txn,
                 java_objective_body=collect_objective_body,
+                dig_down_objective_body=dig_down_objective_body,
             ),
         )
     )
@@ -1479,9 +1481,10 @@ def _search_tool(work: BlockWork) -> RegisteredTool:
 def _mine_collect_tool(work: BlockWork) -> RegisteredTool:
     return RegisteredTool(
         "mine_block_collect",
-        "Mine one already selected exact block through governed approach and verify pickup by authoritative "
-        "inventory delta. It does not discover or choose alternative resource candidates; use "
-        "collect_resource for count-based acquisition.",
+        "Surgically mine one deliberately selected exact coordinate and verify any immediate pickup by "
+        "authoritative inventory delta. Use this only when the exact block position itself is the intent. "
+        "Never use it to acquire a resource quantity: collect_resource owns discovery, alternative targets, "
+        "continuous mining, deferred pickup, and the final inventory goal.",
         {
             "type": "object",
             "properties": {

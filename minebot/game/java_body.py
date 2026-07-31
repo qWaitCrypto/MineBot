@@ -697,6 +697,17 @@ class JavaBody:
                     )
                 ],
                 radius=_opt_int(action.params.get("radius")),
+                vertical_radius=_opt_int(action.params.get("vertical_radius")),
+                target_count=_opt_int(action.params.get("target_count")),
+                candidate_budget=_opt_int(action.params.get("candidate_budget")),
+                mutation_budget=_opt_int(action.params.get("mutation_budget")),
+                timeout_ticks=_opt_int(action.params.get("timeout_ticks")),
+            )
+        elif action.name == "digDown":
+            outcome = self._client.dig_down(
+                int(action.params["target_y"]),
+                max_steps=_opt_int(action.params.get("max_steps")),
+                max_clear_fall=_opt_int(action.params.get("max_clear_fall")),
                 timeout_ticks=_opt_int(action.params.get("timeout_ticks")),
             )
         elif action.name == "ascend":

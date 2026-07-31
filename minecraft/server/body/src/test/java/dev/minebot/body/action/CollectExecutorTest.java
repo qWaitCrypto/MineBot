@@ -43,6 +43,7 @@ final class CollectExecutorTest {
         int breakX;
         int breakY;
         int breakZ;
+        double maxZ = z;
         final List<String> log = new ArrayList<>();
         final List<String> breakTargets = new ArrayList<>();
 
@@ -108,6 +109,7 @@ final class CollectExecutorTest {
             if (distance > 1e-6) {
                 x += dx / distance * step;
                 z += dz / distance * step;
+                maxZ = Math.max(maxZ, z);
             }
         }
     }
@@ -139,6 +141,18 @@ final class CollectExecutorTest {
             List<String> expectedItemIds,
             int timeoutTicks
         ) {
+            return build(world, candidates, expectedItemIds, timeoutTicks, 1, 8, 8);
+        }
+
+        CollectExecutor build(
+            WorldView world,
+            List<CollectExecutor.Candidate> candidates,
+            List<String> expectedItemIds,
+            int timeoutTicks,
+            int targetCount,
+            int candidateBudget,
+            int mutationBudget
+        ) {
             runtime.submit("Bot", "collect-1", "COLLECT_BLOCK", OwnerPriority.ACTION, 0);
             CollectExecutor executor = new CollectExecutor(
                 "Bot",
@@ -160,7 +174,10 @@ final class CollectExecutorTest {
                 bot -> new NavigateExecutor.PositionSource.Position(body.x, body.y, body.z),
                 (bot, tick, name, actionId, data) -> events.emit(bot, tick, name, actionId, data),
                 runtime,
-                timeoutTicks
+                timeoutTicks,
+                targetCount,
+                candidateBudget,
+                mutationBudget
             );
             runtime.attachExecutor("collect-1", executor);
             return executor;
@@ -276,6 +293,163 @@ final class CollectExecutorTest {
             insidePlayerTouchVolume(harness.body, dropX, STAND, dropZ),
             "pickup must physically reach the drop, x=" + harness.body.x
         );
+    }
+
+    @Test
+    void oneQuantityObjectiveMinesNearbyBlocksBeforeBatchPickup() {
+        Harness harness = new Harness();
+        FakeWorld world = new FakeWorld(FLOOR);
+        List<CollectExecutor.Candidate> candidates = new ArrayList<>();
+        for (int x : List.of(4, 6, 8)) {
+            harness.blockStates.put(Harness.key(x, STAND, 0), LOG);
+            world.set(x, STAND, 0, WorldView.NodeKind.SOLID);
+            candidates.add(new CollectExecutor.Candidate(x, STAND, 0, LOG));
+        }
+        harness.build(world, candidates, List.of(LOG), 2_400, 3, 8, 8);
+        Set<String> changed = new HashSet<>();
+        double dropX = 0.5;
+        double dropY = STAND;
+        double dropZ = 4.5;
+        int[] breaksBeforePickup = {-1};
+
+        JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (harness.body.attacking) {
+                String key = Harness.key(harness.body.breakX, harness.body.breakY, harness.body.breakZ);
+                if (changed.add(key)) {
+                    harness.blockStates.put(key, "minecraft:air");
+                    world.set(
+                        harness.body.breakX,
+                        harness.body.breakY,
+                        harness.body.breakZ,
+                        WorldView.NodeKind.PASSABLE
+                    );
+                    harness.drops.add(new CollectExecutor.Drop(
+                        "batch-drop-" + changed.size(), LOG, 1, dropX, dropY, dropZ
+                    ));
+                }
+            }
+            if (!harness.drops.isEmpty()
+                && insidePlayerTouchVolume(harness.body, dropX, dropY, dropZ)) {
+                breaksBeforePickup[0] = changed.size();
+                harness.itemCounts.put(LOG, harness.drops.size());
+                harness.drops.clear();
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("collected", terminal.get("reason").getAsString());
+        assertEquals(3, terminal.get("target_breaks").getAsInt());
+        assertEquals(3, terminal.get("collected_count").getAsInt());
+        assertEquals(3, breaksBeforePickup[0], "pickup should be batched after the nearby mining run");
+        assertEquals(3, harness.body.breakTargets.size());
+        assertEquals(3, harness.proposals.size());
+    }
+
+    @Test
+    void unsafeDropIsNotChasedAndTheObjectiveChoosesAnotherResource() {
+        Harness harness = new Harness();
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int x : List.of(4, 8)) {
+            harness.blockStates.put(Harness.key(x, STAND, 0), LOG);
+            world.set(x, STAND, 0, WorldView.NodeKind.SOLID);
+        }
+        for (int x = 2; x <= 10; x++) {
+            for (int y = STAND - 2; y <= STAND + 1; y++) {
+                for (int z = 2; z <= 6; z++) {
+                    world.hazardBodyPosition(x, y, z);
+                }
+            }
+        }
+        harness.build(
+            world,
+            List.of(
+                new CollectExecutor.Candidate(4, STAND, 0, LOG),
+                new CollectExecutor.Candidate(8, STAND, 0, LOG)
+            ),
+            List.of(LOG),
+            2_400,
+            1,
+            8,
+            8
+        );
+        Set<String> changed = new HashSet<>();
+
+        JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (!harness.body.attacking) {
+                return;
+            }
+            String key = Harness.key(harness.body.breakX, harness.body.breakY, harness.body.breakZ);
+            if (!changed.add(key)) {
+                return;
+            }
+            harness.blockStates.put(key, "minecraft:air");
+            world.set(
+                harness.body.breakX,
+                harness.body.breakY,
+                harness.body.breakZ,
+                WorldView.NodeKind.PASSABLE
+            );
+            if (changed.size() == 1) {
+                harness.drops.add(new CollectExecutor.Drop(
+                    "unsafe-drop", LOG, 1, harness.body.breakX + 0.5, STAND, 4.5
+                ));
+            } else {
+                harness.itemCounts.put(LOG, 1);
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals(2, terminal.get("target_breaks").getAsInt(), terminal.toString());
+        assertTrue(terminal.getAsJsonArray("drop_losses").toString().contains("unsafe_pickup_domain"));
+        assertTrue(harness.body.maxZ < 2.0, "the player must not walk toward the hazardous drop");
+        assertEquals(2, harness.body.breakTargets.size());
+    }
+
+    @Test
+    void usefulInventoryGainBelowTheQuantityGoalReturnsPartial() {
+        Harness harness = new Harness();
+        FakeWorld world = new FakeWorld(FLOOR);
+        List<CollectExecutor.Candidate> candidates = new ArrayList<>();
+        for (int x : List.of(4, 6)) {
+            harness.blockStates.put(Harness.key(x, STAND, 0), LOG);
+            world.set(x, STAND, 0, WorldView.NodeKind.SOLID);
+            candidates.add(new CollectExecutor.Candidate(x, STAND, 0, LOG));
+        }
+        harness.build(world, candidates, List.of(LOG), 2_400, 3, 8, 8);
+        Set<String> changed = new HashSet<>();
+
+        JsonObject terminal = harness.runUntilTerminal(1_000, () -> {
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (!harness.body.attacking) {
+                return;
+            }
+            String key = Harness.key(harness.body.breakX, harness.body.breakY, harness.body.breakZ);
+            if (!changed.add(key)) {
+                return;
+            }
+            harness.blockStates.put(key, "minecraft:air");
+            world.set(
+                harness.body.breakX,
+                harness.body.breakY,
+                harness.body.breakZ,
+                WorldView.NodeKind.PASSABLE
+            );
+            harness.itemCounts.put(LOG, changed.size());
+        });
+
+        assertEquals("partial", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("partial", terminal.get("reason").getAsString());
+        assertEquals(2, terminal.get("collected_count").getAsInt());
+        assertEquals(1, terminal.get("remaining_count").getAsInt());
+        assertEquals(2, terminal.get("target_breaks").getAsInt());
     }
 
     @Test
@@ -585,7 +759,7 @@ final class CollectExecutorTest {
         });
 
         assertEquals("failed", terminal.get("classification").getAsString());
-        assertEquals("candidate_targets_exhausted", terminal.get("reason").getAsString());
+        assertEquals("governance_denied:protected_region", terminal.get("reason").getAsString());
         assertFalse(harness.body.log.contains("exactBreak"), "a denied mutation must never break");
         String failures = terminal.getAsJsonArray("attempt_failures").toString();
         assertTrue(failures.contains("governance_denied:protected_region"), failures);
@@ -632,7 +806,7 @@ final class CollectExecutorTest {
 
         assertEquals("failed", terminal.get("classification").getAsString());
         String failures = terminal.getAsJsonArray("attempt_failures").toString();
-        assertTrue(failures.contains("pickup_not_observed"), failures);
+        assertTrue(failures.contains("drop_not_observed_after_break"), failures);
     }
 
     @Test

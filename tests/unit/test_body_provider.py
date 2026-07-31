@@ -498,7 +498,50 @@ def test_java_provider_uses_canonical_collect_domain_tool() -> None:
     request = next(item for item in server.requests if item["type"] == "COLLECT_BLOCK")
     assert request["timeout_ticks"] == 1_200
     assert request["expected_item_ids"] == ["minecraft:oak_log"]
+    assert request["target_count"] == 1
+    assert request["candidate_budget"] == 8
+    assert request["mutation_budget"] == 8
     assert "collect_block" not in registry.names()
+
+
+def test_java_collect_quantity_is_one_continuous_body_action() -> None:
+    policy = GovernancePolicy(natural_regions=[REGION])
+    server = FakeBodyServer()
+    body = JavaBody(
+        JavaBodyClient("Bot", lambda: server, GovernanceAnswerer(policy)),
+        "Bot",
+    )
+    registry = build_phase1_registry(
+        body,
+        Phase1RuntimeConfig(
+            natural_region=REGION,
+            body_provider="java",
+            governance_policy=policy,
+        ),
+    )
+
+    result = registry.get("collect_block_domain").callable(
+        {
+            "block_types": ["iron_ore", "deepslate_iron_ore"],
+            "expected_drops": ["raw_iron"],
+            "remaining_count": 3,
+            "search_radius": 24,
+            "candidate_budget": 7,
+            "mutation_budget": 6,
+            "max_wall_s": 90,
+        }
+    )
+
+    requests = [item for item in server.requests if item["type"] == "COLLECT_BLOCK"]
+    assert len(requests) == 1
+    assert requests[0]["target_count"] == 3
+    assert requests[0]["candidate_budget"] == 7
+    assert requests[0]["mutation_budget"] == 6
+    assert requests[0]["timeout_ticks"] == 1_800
+    assert result.success is False
+    assert result.reason == "partial"
+    assert result.metrics["collected_delta"] == 1
+    assert result.metrics["remaining_count"] == 2
 
 
 def test_java_provider_keeps_block_targets_separate_from_expected_drops() -> None:
@@ -591,6 +634,40 @@ def test_java_provider_uses_canonical_go_to_surface_tool() -> None:
     assert request["timeout_ticks"] == 340
     assert "target_y" not in request
     assert registry.sidecar("go_to_surface").source == "java_body"
+
+
+def test_java_provider_uses_one_dig_down_objective_without_legacy_move_to() -> None:
+    server = FakeBodyServer()
+    runtime = build_body_provider(
+        "java",
+        bot_name="Bot",
+        natural_region=REGION,
+        java_connect=lambda: server,
+    )
+    registry = build_phase1_registry(
+        runtime.body,
+        Phase1RuntimeConfig(
+            natural_region=REGION,
+            body_provider="java",
+            governance_policy=runtime.governance,
+        ),
+    )
+
+    result = registry.get("dig_down").callable(
+        {"target_y": 62, "max_steps": 3, "max_clear_fall": 1}
+    )
+
+    assert result.success is True
+    assert result.reason == "dig_down_target_reached"
+    dig_requests = [item for item in server.requests if item["type"] == "DIG_DOWN"]
+    assert len(dig_requests) == 1
+    assert dig_requests[0]["target_y"] == 62
+    assert dig_requests[0]["max_steps"] == 3
+    assert dig_requests[0]["max_clear_fall"] == 1
+    assert not any(
+        item["type"] == "PLAYER_ACTION" and item.get("action") == "moveTo"
+        for item in server.requests
+    )
 
 
 def test_java_only_provider_denies_collection_without_structure_read_coverage() -> None:

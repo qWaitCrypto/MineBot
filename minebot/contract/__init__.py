@@ -37,6 +37,7 @@ from .messages import (
     ToolResult,
     is_candidate_skip,
     is_governance_decision_required,
+    is_partial_progress,
     perception_next_cursor,
     perception_resume_params,
 )
@@ -98,6 +99,7 @@ __all__ = [
     "execution_checkpoint",
     "is_candidate_skip",
     "is_governance_decision_required",
+    "is_partial_progress",
     "required_pickaxe_tier",
     "tier_satisfies",
     "terminal_event_to_tool_result",

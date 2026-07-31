@@ -42,6 +42,7 @@ from minebot.contract import (
     ToolResult,
     is_candidate_skip,
     is_governance_decision_required,
+    is_partial_progress,
 )
 
 # A tool's callable: takes validated input params, returns a ToolResult whose
@@ -319,6 +320,7 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
             result.reason == "preempted"
             or is_candidate_skip(result.reason)
             or is_governance_decision_required(result.reason, result.metrics)
+            or is_partial_progress(result.reason, result.metrics)
         )
         ctx.authority.note_step(                          # step 6: feed sensors
             action_key, success=result.success, fingerprint=post_fingerprint, neutral=neutral

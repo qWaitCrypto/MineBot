@@ -93,6 +93,7 @@ from minebot.contract import (
     ProgressFacts,
     execution_cancellation_scope,
     is_governance_decision_required,
+    is_partial_progress,
 )
 from minebot.contract.tool_trace import (
     canonical_args_hash_from_json as _shared_canonical_args_hash_from_json,
@@ -556,6 +557,11 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             result.get("metrics") if isinstance(result.get("metrics"), dict) else None,
         ):
             settlement_status = "decision_required"
+        if settlement_status is None and is_partial_progress(
+            str(result.get("reason") or ""),
+            result.get("metrics") if isinstance(result.get("metrics"), dict) else None,
+        ):
+            settlement_status = "partial"
 
         if runtime is not None:
             runtime.remember_tool_result(tool.name, result, run_context=ctx.context)
@@ -900,6 +906,7 @@ def _model_tool_payload(
     success = bool(result.get("success"))
     metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
     decision_required = is_governance_decision_required(reason, metrics)
+    partial = is_partial_progress(reason, metrics)
     payload: JsonObject = {
         "success": success,
         "reason": reason,
@@ -910,6 +917,8 @@ def _model_tool_payload(
     }
     if decision_required:
         payload["outcome"] = "decision_required"
+    elif partial:
+        payload["outcome"] = "partial"
     summary = _metrics_summary(tool_name, reason, metrics, projector=projector)
     if summary:
         payload["summary"] = summary

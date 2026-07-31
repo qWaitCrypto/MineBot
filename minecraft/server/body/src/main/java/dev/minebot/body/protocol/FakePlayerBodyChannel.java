@@ -11,6 +11,7 @@ import dev.minebot.body.action.BlockPrimitiveActions;
 import dev.minebot.body.action.CollectExecutor;
 import dev.minebot.body.action.ContainerPrimitiveActions;
 import dev.minebot.body.action.CraftPrimitiveActions;
+import dev.minebot.body.action.DigDownExecutor;
 import dev.minebot.body.action.FurnacePrimitiveActions;
 import dev.minebot.body.action.EngageExecutor;
 import dev.minebot.body.action.FollowExecutor;
@@ -84,13 +85,13 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         "SPAWN", "DESPAWN", "INTERRUPT",
         "SET_SURVIVAL_OWNER",
         "FIND_BLOCKS", "BODY_STATE", "INVENTORY", "CONTAINER_READ", "RECIPE_READ",
-        "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "ASCEND",
+        "WORLD_READ", "ENTITY_READ", "NAVIGATE", "COLLECT_BLOCK", "DIG_DOWN", "ASCEND",
         "FOLLOW_ENTITY", "ENGAGE_ENTITY",
         "PLAYER_ACTION", "CONTAINER_TRANSFER", "CRAFT_ITEM", "FURNACE_TRANSFER",
         "MUTATION_VERDICT", "RESUME_EVENTS", "CANCEL_ACTION", "QUERY_ACTION"
     );
     private static final Set<String> HAZARD_GATED_REQUEST_TYPES = Set.of(
-        "NAVIGATE", "COLLECT_BLOCK", "ASCEND", "FOLLOW_ENTITY", "ENGAGE_ENTITY", "PLAYER_ACTION",
+        "NAVIGATE", "COLLECT_BLOCK", "DIG_DOWN", "ASCEND", "FOLLOW_ENTITY", "ENGAGE_ENTITY", "PLAYER_ACTION",
         "CONTAINER_TRANSFER", "CRAFT_ITEM", "FURNACE_TRANSFER"
     );
     private static final int MAX_RADIUS = 128;
@@ -276,6 +277,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             case "ENTITY_READ" -> handleEntityRead(connection, request, serverTick);
             case "NAVIGATE" -> handleNavigate(connection, request, serverTick);
             case "COLLECT_BLOCK" -> handleCollectBlock(connection, request, serverTick);
+            case "DIG_DOWN" -> handleDigDown(connection, request, serverTick);
             case "ASCEND" -> handleAscend(connection, request, serverTick);
             case "FOLLOW_ENTITY" -> handleFollowEntity(connection, request, serverTick);
             case "ENGAGE_ENTITY" -> handleEngageEntity(connection, request, serverTick);
@@ -905,6 +907,11 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             int radius = boundedOptionalInt(request, "radius", 48, 4, 64);
             int verticalRadius = boundedOptionalInt(request, "vertical_radius", 16, 1, MAX_VERTICAL_RADIUS);
             int timeoutTicks = boundedOptionalInt(request, "timeout_ticks", NavigateExecutor.DEFAULT_TIMEOUT_TICKS, 20, MAX_TIMEOUT_TICKS);
+            int targetCount = boundedOptionalInt(request, "target_count", 1, 1, 128);
+            int candidateBudget = boundedOptionalInt(
+                request, "candidate_budget", 8, 1, CollectExecutor.MAX_CANDIDATE_ATTEMPTS
+            );
+            int mutationBudget = boundedOptionalInt(request, "mutation_budget", 8, 1, 128);
 
             ActionRuntime.Submission submission = runtime.submit(botName, actionId, "COLLECT_BLOCK", OwnerPriority.ACTION, serverTick);
             JsonObject response = baseResponse(request, "COLLECT_BLOCK_ACK");
@@ -918,14 +925,12 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     searchFacts.addProperty("matches", search.matches().size());
                     searchFacts.addProperty("coverage_complete", search.coverageComplete());
                     searchFacts.addProperty("unloaded_chunk_count", search.unloadedChunkCount());
+                    searchFacts.addProperty("result_capped", search.resultCapped());
                     List<CollectExecutor.Candidate> candidates = new ArrayList<>();
                     for (SearchMatch match : search.matches()) {
                         candidates.add(new CollectExecutor.Candidate(
                             match.x(), match.y(), match.z(), match.blockId()
                         ));
-                        if (candidates.size() >= CollectExecutor.MAX_PLANNING_CANDIDATES) {
-                            break;
-                        }
                     }
                     CollectExecutor executor = new CollectExecutor(
                         botName,
@@ -947,11 +952,15 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         this::observedPosition,
                         this::publishEvent,
                         runtime,
-                        timeoutTicks
+                        timeoutTicks,
+                        targetCount,
+                        candidateBudget,
+                        mutationBudget
                     );
                     runtime.attachExecutor(actionId, executor);
                     response.addProperty("state", "accepted");
                     response.addProperty("candidates", candidates.size());
+                    response.addProperty("target_count", targetCount);
                 }
                 case ActionRuntime.Submission.Duplicate duplicate -> {
                     response.addProperty("state", duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal");
@@ -961,6 +970,83 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 }
                 case ActionRuntime.Submission.Rejected rejected -> {
                     JsonObject error = MineBotChannelRouter.error(CHANNEL, requestId(request), rejected.code(), "another action owns this bot", true);
+                    error.addProperty("owner_action_id", rejected.currentOwner().actionId());
+                    error.addProperty("owner_priority", rejected.currentOwner().priority().name());
+                    connection.send(error, serverTick);
+                    return;
+                }
+            }
+            connection.send(response, serverTick);
+        } catch (IllegalArgumentException error) {
+            sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
+        }
+    }
+
+    private void handleDigDown(MineBotConnection connection, JsonObject request, int serverTick) {
+        try {
+            String botName = requiredString(request, "bot_name", 64);
+            String actionId = requiredString(request, "action_id", 128);
+            int targetY = requiredInt(request, "target_y");
+            int maxSteps = boundedOptionalInt(
+                request, "max_steps", DigDownExecutor.MAX_STEPS, 1, DigDownExecutor.MAX_STEPS
+            );
+            int maxClearFall = boundedOptionalInt(request, "max_clear_fall", 2, 1, 4);
+            int timeoutTicks = boundedOptionalInt(
+                request, "timeout_ticks", NavigateExecutor.DEFAULT_TIMEOUT_TICKS, 20, MAX_TIMEOUT_TICKS
+            );
+            ServerPlayer player = server.getPlayerList().getPlayerByName(botName);
+            if (player == null || player.isRemoved() || !(player.level() instanceof ServerLevel level)) {
+                sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
+                return;
+            }
+
+            ActionRuntime.Submission submission = runtime.submit(
+                botName, actionId, "DIG_DOWN", OwnerPriority.ACTION, serverTick
+            );
+            JsonObject response = baseResponse(request, "DIG_DOWN_ACK");
+            response.addProperty("action_id", actionId);
+            switch (submission) {
+                case ActionRuntime.Submission.Accepted ignored -> {
+                    DigDownExecutor executor = new DigDownExecutor(
+                        botName,
+                        actionId,
+                        targetY,
+                        maxSteps,
+                        maxClearFall,
+                        new MinecraftWorldView(level),
+                        adapter,
+                        blockBreaker,
+                        adapter,
+                        (x, y, z) -> observedBlockId(level, x, y, z),
+                        FakePlayerBodyChannel::isAscendHazard,
+                        mutationGate,
+                        this::publishProposal,
+                        this::observedPosition,
+                        this::publishEvent,
+                        runtime,
+                        timeoutTicks
+                    );
+                    runtime.attachExecutor(actionId, executor);
+                    response.addProperty("state", "accepted");
+                    response.addProperty("target_y", targetY);
+                }
+                case ActionRuntime.Submission.Duplicate duplicate -> {
+                    response.addProperty(
+                        "state",
+                        duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal"
+                    );
+                    if (duplicate.status().terminal() != null) {
+                        response.add("terminal", duplicate.status().terminal());
+                    }
+                }
+                case ActionRuntime.Submission.Rejected rejected -> {
+                    JsonObject error = MineBotChannelRouter.error(
+                        CHANNEL,
+                        requestId(request),
+                        rejected.code(),
+                        "another action owns this bot",
+                        true
+                    );
                     error.addProperty("owner_action_id", rejected.currentOwner().actionId());
                     error.addProperty("owner_priority", rejected.currentOwner().priority().name());
                     connection.send(error, serverTick);

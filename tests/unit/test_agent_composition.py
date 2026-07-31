@@ -1083,6 +1083,30 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(authority.failure_steps, 0)
         authority.require_can_continue("collect 1 dirt")
 
+    def test_weld_treats_partial_inventory_progress_as_neutral_not_failure(self):
+        body = FakeBody()
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 7 raw iron")
+        tool = RegisteredTool(
+            "collect_block_domain",
+            "collect",
+            {"type": "object"},
+            lambda _params: ToolResult(
+                False,
+                "partial",
+                True,
+                metrics={"collected_delta": 2, "remaining_count": 5},
+            ),
+            ToolSidecar("collect_block_domain", mutating=True, permission="collect"),
+        )
+
+        for _ in range(FAILURE_STORM_LIMIT + 2):
+            payload = execute_tool(tool, {}, weld)
+            self.assertFalse(payload["success"])
+
+        self.assertEqual(authority.failure_steps, 0)
+        authority.require_can_continue("collect 7 raw iron")
+
     def test_weld_counts_repeated_read_only_observation_loops(self):
         # Read-only tools do not acquire the Body writer and do not feed the
         # failure-storm sensor, but repeated identical observations with no world

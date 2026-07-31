@@ -87,18 +87,21 @@ BODY_OBJECTIVE_PROVIDER_TABLE: dict[str, dict[str, str]] = {
         "move_to": "scarpet",
         "follow_entity": "scarpet",
         "go_to_surface": "scarpet",
+        "dig_down": "scarpet",
         "collect_block_domain": "scarpet",
     },
     "java": {
         "move_to": "java",
         "follow_entity": "java",
         "go_to_surface": "java",
+        "dig_down": "java",
         "collect_block_domain": "java",
     },
     "composite": {
         "move_to": "java",
         "follow_entity": "java",
         "go_to_surface": "java",
+        "dig_down": "java",
         "collect_block_domain": "java",
     },
 }

@@ -343,6 +343,7 @@ def body_capability_tools(
     resource_collection: ResourceCollectionTransactions,
     use: UseTransactions,
     java_objective_body: Body | None = None,
+    dig_down_objective_body: Body | None = None,
 ) -> tuple[RegisteredTool, ...]:
     tools = (
         _move_away_tool(navigator),
@@ -367,7 +368,7 @@ def body_capability_tools(
         _use_on_block_tool(use),
         _place_block_tool(work),
         _place_here_tool(work),
-        _dig_down_tool(work),
+        _dig_down_tool(work, dig_down_objective_body),
         _dig_up_tool(work),
         _pickup_items_tool(pickup),
         _collect_block_domain_tool(resource_collection, java_objective_body),
@@ -1211,7 +1212,17 @@ def _place_here_tool(work: BlockWork) -> RegisteredTool:
     )
 
 
-def _dig_down_tool(work: BlockWork) -> RegisteredTool:
+def _dig_down_tool(work: BlockWork, java_objective_body: Body | None = None) -> RegisteredTool:
+    def run(params: JsonObject) -> ToolResult:
+        if java_objective_body is not None:
+            return _java_dig_down(java_objective_body, params)
+        return work.dig_down_to_y(
+            int(params["target_y"]),
+            context=BreakContext.DIRECT,
+            max_clear_fall=int(_param(params, "max_clear_fall", 2)),
+            max_steps=int(params["max_steps"]) if params.get("max_steps") is not None else None,
+        )
+
     return _tool(
         "dig_down",
         "Dig a guarded vertical shaft down to target Y with liquid, fall, and player-build protection checks.",
@@ -1219,23 +1230,51 @@ def _dig_down_tool(work: BlockWork) -> RegisteredTool:
             {
                 "target_y": {"type": "integer"},
                 "max_steps": {"type": "integer", "minimum": 1, "maximum": 64},
-                "max_clear_fall": {"type": "integer", "minimum": 0, "maximum": 4},
+                "max_clear_fall": {"type": "integer", "minimum": 1, "maximum": 4},
             },
             required=("target_y",),
         ),
-        lambda params: work.dig_down_to_y(
-            int(params["target_y"]),
-            context=BreakContext.DIRECT,
-            max_clear_fall=int(_param(params, "max_clear_fall", 2)),
-            max_steps=int(params["max_steps"]) if params.get("max_steps") is not None else None,
-        ),
+        run,
         mutating=True,
-        source="body.block_work",
+        source=("java_body" if java_objective_body is not None else "body.block_work"),
         tool_type="navigation",
         permission="dig_vertical",
         body_scope=("mine", "navigation", "blocks"),
         terminal_truth=("mineDone", "position", "ToolResult"),
         timeout_s=240.0,
+    )
+
+
+def _java_dig_down(body: Body, params: JsonObject) -> ToolResult:
+    target_y = int(params["target_y"])
+    max_steps = int(params["max_steps"]) if params.get("max_steps") is not None else None
+    max_clear_fall = int(_param(params, "max_clear_fall", 2))
+    try:
+        result = body.execute(
+            Action.create(
+                "digDown",
+                {
+                    "target_y": target_y,
+                    "max_steps": max_steps,
+                    "max_clear_fall": max_clear_fall,
+                    "timeout_ticks": 4_800,
+                },
+            )
+        )
+    except Exception as error:
+        return ToolResult(
+            False,
+            "java_body_unavailable",
+            True,
+            metrics={"error": type(error).__name__, "target_y": target_y},
+        )
+    success = bool(result.ok and result.accepted and result.complete)
+    reason = result.error or ("dig_down_target_reached" if success else "body_rejected")
+    return ToolResult(
+        success,
+        reason,
+        not success and reason not in {"canceled", "dig_down_start_liquid", "dig_down_target_liquid"},
+        metrics=dict(result.data),
     )
 
 
@@ -1467,99 +1506,70 @@ def _java_collect_block_domain(body: Body, params: JsonObject) -> ToolResult:
     if not expected_item_ids:
         return ToolResult(False, "resource_expected_drops_missing", False)
     remaining = int(params["remaining_count"])
-    call_limit = min(
-        remaining,
-        int(params.get("candidate_budget") or 8),
-        int(params.get("mutation_budget") or 8),
-    )
     max_wall_s = float(params.get("max_wall_s") or 60.0)
-    started = time.monotonic()
-    collected = 0
-    attempts: list[dict[str, object]] = []
-    for _ in range(call_limit):
-        wall_remaining = max_wall_s - (time.monotonic() - started)
-        if wall_remaining <= 0:
-            break
-        # COLLECT_BLOCK is already a tick-driven objective with its own
-        # planning, movement, mining, and pickup phases. Give that objective
-        # the remaining outer deadline instead of terminating the whole
-        # transaction at the legacy provider's per-segment time slice.
-        timeout_ticks = max(20, min(12_000, round(wall_remaining * 20)))
+    timeout_ticks = max(20, min(12_000, round(max_wall_s * 20)))
+    try:
+        result = body.execute(
+            Action.create(
+                "collectBlock",
+                {
+                    "block_types": list(block_types),
+                    "expected_item_ids": list(expected_item_ids),
+                    "radius": int(params.get("search_radius") or 16),
+                    "vertical_radius": min(64, int(params.get("search_radius") or 16)),
+                    "target_count": remaining,
+                    "candidate_budget": int(params.get("candidate_budget") or 8),
+                    "mutation_budget": int(params.get("mutation_budget") or 8),
+                    "timeout_ticks": timeout_ticks,
+                },
+            )
+        )
+    except Exception as error:  # transport/provider availability
+        return ToolResult(
+            False,
+            "java_body_unavailable",
+            True,
+            metrics={"error": type(error).__name__, "attempts": []},
+        )
+    success = bool(result.ok and result.accepted and result.complete)
+    reason = result.error or ("collected" if success else "body_rejected")
+    body_metrics = dict(result.data)
+    delta = body_metrics.get("inventory_delta")
+    gained = 0
+    if isinstance(delta, dict):
         try:
-            result = body.execute(
-                Action.create(
-                    "collectBlock",
-                    {
-                        "block_types": list(block_types),
-                        "expected_item_ids": list(expected_item_ids),
-                        "radius": int(params.get("search_radius") or 16),
-                        "vertical_radius": min(64, int(params.get("search_radius") or 16)),
-                        "timeout_ticks": timeout_ticks,
-                    },
-                )
-            )
-        except Exception as error:  # transport/provider availability
-            return ToolResult(
-                False,
-                "java_body_unavailable",
-                True,
-                metrics={"error": type(error).__name__, "attempts": attempts},
-            )
-        attempt = {
-            "success": bool(result.ok and result.accepted and result.complete),
-            "reason": result.error or ("collected" if result.ok else "body_rejected"),
-            "metrics": dict(result.data),
-        }
-        attempts.append(attempt)
-        if not attempt["success"]:
-            reason = str(attempt["reason"])
-            return ToolResult(
-                False,
-                reason,
-                _java_failure_retryable(reason),
-                metrics={
-                    "attempts": attempts,
-                    "collected_delta": collected,
-                    "remaining_count": max(0, remaining - collected),
-                },
-            )
-        delta = result.data.get("inventory_delta")
-        gained = 0
-        if isinstance(delta, dict):
-            try:
+            gained = max(0, int(delta.get("total") or 0))
+            if gained == 0:
                 gained = max(0, int(delta.get("after") or 0) - int(delta.get("before") or 0))
-            except (TypeError, ValueError):
-                gained = 0
-        if gained <= 0:
-            return ToolResult(
-                False,
-                "collect_no_inventory_delta",
-                True,
-                metrics={"attempts": attempts, "collected_delta": collected},
-            )
-        collected += gained
-        if collected >= remaining:
-            return ToolResult(
-                True,
-                "collected",
-                False,
-                metrics={
-                    "attempts": attempts,
-                    "collected_delta": collected,
-                    "remaining_count": 0,
-                    "candidates_tried": len(attempts),
-                },
-            )
+        except (TypeError, ValueError):
+            gained = 0
+    attempt = {
+        "success": success,
+        "reason": reason,
+        "metrics": body_metrics,
+    }
+    metrics = {
+        **body_metrics,
+        "attempts": [attempt],
+        "collected_delta": gained,
+        "remaining_count": max(0, remaining - gained),
+        "candidates_tried": int(body_metrics.get("candidates_tried") or 0),
+    }
+    if success and gained >= remaining:
+        return ToolResult(True, "collected", False, metrics=metrics)
+    if gained > 0:
+        return ToolResult(
+            False,
+            "partial",
+            True,
+            next_suggestion="continue the same resource objective from current world and inventory truth",
+            metrics=metrics,
+        )
     return ToolResult(
         False,
-        "resource_domain_budget_exhausted",
-        True,
-        metrics={
-            "attempts": attempts,
-            "collected_delta": collected,
-            "remaining_count": max(0, remaining - collected),
-            "candidates_tried": len(attempts),
-        },
+        str(reason),
+        _java_failure_retryable(str(reason)),
+        metrics=metrics,
     )
 
 

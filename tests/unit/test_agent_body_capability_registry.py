@@ -344,7 +344,10 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         manifest = {row["name"]: row for row in tool_manifest(registry)}
         for name in expected:
             with self.subTest(tool=name):
-                self.assertTrue(manifest[name]["source"].startswith("body."))
+                if name == "dig_down":
+                    self.assertEqual(manifest[name]["source"], "java_body")
+                else:
+                    self.assertTrue(manifest[name]["source"].startswith("body."))
                 self.assertTrue(manifest[name]["permission"])
                 self.assertTrue(manifest[name]["body_scope"])
                 self.assertTrue(manifest[name]["terminal_truth"])
@@ -394,8 +397,9 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         self.assertIn("never invent a coordinate", move)
         self.assertIn("go_to_surface", move)
         self.assertIn("does not prove line of sight", move)
-        self.assertIn("one already selected exact block", mine)
-        self.assertIn("does not discover or choose alternative", mine)
+        self.assertIn("one deliberately selected exact coordinate", mine)
+        self.assertIn("Never use it to acquire a resource quantity", mine)
+        self.assertIn("collect_resource owns discovery, alternative targets", mine)
 
         self.assertEqual(
             {"search_for_block", "get_to_block", "move_to", "mine_block_collect"}
@@ -491,6 +495,7 @@ class JavaBodyProviderRegistryTests(unittest.TestCase):
                     "move_to",
                     "follow_entity",
                     "go_to_surface",
+                    "dig_down",
                     "collect_block_domain",
                 }
                 for bindings in BODY_OBJECTIVE_PROVIDER_TABLE.values()

@@ -276,7 +276,7 @@ class FakeBodyServer:
                 "max_request_bytes": 16384,
                 "max_requests_per_second": 40,
                 "request_types": [
-                    "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "ENGAGE_ENTITY", "ENTITY_READ", "FIND_BLOCKS", "FOLLOW_ENTITY", "FURNACE_TRANSFER",
+                    "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "DIG_DOWN", "ENGAGE_ENTITY", "ENTITY_READ", "FIND_BLOCKS", "FOLLOW_ENTITY", "FURNACE_TRANSFER",
                     "HELLO", "EVENT_HEAD", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY",
                     "SPAWN", "DESPAWN", "INTERRUPT", "INVENTORY", "CONTAINER_READ", "CONTAINER_TRANSFER", "CRAFT_ITEM", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
                     "RECIPE_READ", "RESUME_EVENTS", "SET_SURVIVAL_OWNER", "WORLD_READ",
@@ -358,6 +358,8 @@ class FakeBodyServer:
             self._handle_navigate(message, rid)
         elif kind == "COLLECT_BLOCK":
             self._handle_collect(message, rid)
+        elif kind == "DIG_DOWN":
+            self._handle_dig_down(message, rid)
         elif kind == "ASCEND":
             self._handle_ascend(message, rid)
         elif kind == "FOLLOW_ENTITY":
@@ -752,6 +754,26 @@ class FakeBodyServer:
         self._emit_event("owner_acquired", action, {"type": "COLLECT_BLOCK", "priority": "ACTION"})
         self._emit_event("candidate_selected", action, {"x": 5, "y": 64, "z": 5, "block_id": "minecraft:oak_log"})
         self._emit_proposal(action, "mp-1", "minecraft:oak_log", 5, 64, 5)
+
+    def _handle_dig_down(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        self._emit_response(rid, "DIG_DOWN_ACK", {"action_id": action, "state": "accepted"})
+        self._emit_event("owner_acquired", action, {"type": "DIG_DOWN", "priority": "ACTION"})
+        self._emit_terminal(action, {
+            "classification": "completed",
+            "reason": "dig_down_target_reached",
+            "target_y": message["target_y"],
+            "steps_completed": 2,
+            "blocks_descended": 2,
+            "final_x": 10.5,
+            "final_y": float(message["target_y"]),
+            "final_z": -3.5,
+            "final_feet_y": message["target_y"],
+            "broken": [
+                {"x": 10, "y": message["target_y"] + 1, "z": -4, "block_id": "minecraft:stone"},
+                {"x": 10, "y": message["target_y"], "z": -4, "block_id": "minecraft:stone"},
+            ],
+        })
 
     def _handle_ascend(self, message: dict, rid: str) -> None:
         action = message["action_id"]
@@ -1336,6 +1358,64 @@ def test_collect_request_carries_expected_item_ids_independently_of_blocks() -> 
         "minecraft:deepslate_iron_ore",
     ]
     assert request["expected_item_ids"] == ["minecraft:raw_iron"]
+
+
+def test_collect_partial_preserves_inventory_progress_without_claiming_completion() -> None:
+    class PartialCollectServer(FakeBodyServer):
+        def _handle_collect(self, message: dict, rid: str) -> None:
+            action = message["action_id"]
+            self._emit_response(
+                rid,
+                "COLLECT_BLOCK_ACK",
+                {"action_id": action, "state": "accepted", "candidates": 2},
+            )
+            self._emit_terminal(action, {
+                "classification": "partial",
+                "reason": "partial",
+                "target_count": 3,
+                "collected_count": 2,
+                "remaining_count": 1,
+                "inventory_delta": {
+                    "total": 2,
+                    "items": {
+                        "minecraft:raw_iron": {"before": 0, "after": 2, "delta": 2},
+                    },
+                },
+            })
+
+    server = PartialCollectServer()
+    client = _client(server)
+    client.connect()
+
+    result = client.collect_block(
+        ["minecraft:iron_ore"],
+        expected_item_ids=["minecraft:raw_iron"],
+        target_count=3,
+    )
+
+    assert result.success is False
+    assert result.reason == "partial"
+    assert result.can_retry is True
+    assert result.metrics["inventory_delta"]["total"] == 2
+    assert result.metrics["remaining_count"] == 1
+
+
+def test_dig_down_is_one_java_objective_with_final_position_truth() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+    client.connect()
+
+    result = client.dig_down(62, max_steps=3, max_clear_fall=1, timeout_ticks=600)
+
+    assert result.success is True
+    assert result.reason == "dig_down_target_reached"
+    assert result.metrics["final_feet_y"] == 62
+    assert result.metrics["steps_completed"] == 2
+    request = next(item for item in server.requests if item["type"] == "DIG_DOWN")
+    assert request["target_y"] == 62
+    assert request["max_steps"] == 3
+    assert request["max_clear_fall"] == 1
+    assert request["timeout_ticks"] == 600
 
 
 def test_collect_denied_by_governance_never_relabels_success() -> None:

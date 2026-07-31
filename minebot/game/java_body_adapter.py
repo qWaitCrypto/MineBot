@@ -151,8 +151,15 @@ _NAVIGATE_TERMINALS: dict[str, tuple[bool, str, bool]] = {
 }
 _COLLECT_TERMINALS: dict[str, tuple[bool, str, bool]] = {
     "completed": (True, "collected", False),
+    "partial": (False, "partial", True),
     "canceled": (False, "canceled", False),
     "timeout": (False, "collect_timeout", True),
+}
+_DIG_DOWN_TERMINALS: dict[str, tuple[bool, str, bool]] = {
+    "completed": (True, "dig_down_target_reached", False),
+    "partial": (False, "dig_down_partial", True),
+    "canceled": (False, "canceled", False),
+    "timeout": (False, "dig_down_timeout", True),
 }
 _ASCEND_TERMINALS: dict[str, tuple[bool, str, bool]] = {
     "completed": (True, "surface_reached", False),
@@ -375,6 +382,9 @@ class JavaBodyClient:
         expected_item_ids: list[str] | None = None,
         radius: int | None = None,
         vertical_radius: int | None = None,
+        target_count: int | None = None,
+        candidate_budget: int | None = None,
+        mutation_budget: int | None = None,
         timeout_ticks: int | None = None,
     ) -> ToolResult:
         with self._exchange_lock:
@@ -387,9 +397,33 @@ class JavaBodyClient:
                 expected_item_ids=expected_item_ids,
                 radius=radius,
                 vertical_radius=vertical_radius,
+                target_count=target_count,
+                candidate_budget=candidate_budget,
+                mutation_budget=mutation_budget,
                 timeout_ticks=timeout_ticks,
             )
             return self._run_action(request, action_id, "collect", _COLLECT_TERMINALS)
+
+    def dig_down(
+        self,
+        target_y: int,
+        *,
+        max_steps: int | None = None,
+        max_clear_fall: int | None = None,
+        timeout_ticks: int | None = None,
+    ) -> ToolResult:
+        with self._exchange_lock:
+            self._ensure_connected()
+            action_id = self._new_action_id("dig-down")
+            request = self._protocol.dig_down(
+                self._bot,
+                action_id,
+                target_y,
+                max_steps=max_steps,
+                max_clear_fall=max_clear_fall,
+                timeout_ticks=timeout_ticks,
+            )
+            return self._run_action(request, action_id, "dig_down", _DIG_DOWN_TERMINALS)
 
     def ascend(
         self,
@@ -559,7 +593,7 @@ class JavaBodyClient:
         mapped = terminals.get(classification)
         if mapped is not None:
             success, reason, can_retry = mapped
-            if success and kind in {"collect", "player_action", "container_transfer", "craft_item", "furnace_transfer", "engage_entity", "follow_entity"}:
+            if success and kind in {"collect", "dig_down", "player_action", "container_transfer", "craft_item", "furnace_transfer", "engage_entity", "follow_entity"}:
                 reason = str(terminal.get("reason", reason))
             return ToolResult(
                 success=success,
@@ -597,6 +631,20 @@ class JavaBodyClient:
                 "expanded_nodes",
                 "unloaded_touches",
                 "candidates_tried",
+                "target_count",
+                "collected_count",
+                "remaining_count",
+                "target_breaks",
+                "mutations_completed",
+                "max_candidate_attempts",
+                "max_target_mutations",
+                "pending_drop_count",
+                "target_y",
+                "steps_completed",
+                "blocks_descended",
+                "max_steps",
+                "max_clear_fall",
+                "final_feet_y",
                 "final_x",
                 "final_y",
                 "final_z",
@@ -628,8 +676,13 @@ class JavaBodyClient:
                 "approach_excavation_replans",
                 "approach_excavation_failure",
                 "approach_broken",
+                "mined",
+                "pickups",
+                "drop_losses",
+                "blocker",
                 "broken",
                 "placed",
+                "steps",
                 "paused",
                 "preempted_by",
                 "preempted_by_priority",

@@ -270,6 +270,50 @@ def is_governance_decision_required(
     )
 
 
+def is_partial_progress(
+    reason: str | None,
+    metrics: Mapping[str, object] | None = None,
+    *,
+    _depth: int = 0,
+) -> bool:
+    """True when a bounded action stopped short after authoritative progress."""
+
+    if not reason or _depth > 5:
+        return False
+    normalized = str(reason)
+    partial_reason = (
+        normalized == "partial"
+        or normalized.startswith("partial_")
+        or ":partial" in normalized
+        or "_partial" in normalized
+    )
+    if not partial_reason or metrics is None:
+        return False
+    for key in ("collected_delta", "collected_count", "blocks_descended"):
+        value = metrics.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return True
+    before = metrics.get("before_count")
+    after = metrics.get("after_count")
+    if (
+        isinstance(before, (int, float))
+        and not isinstance(before, bool)
+        and isinstance(after, (int, float))
+        and not isinstance(after, bool)
+        and after > before
+    ):
+        return True
+    for key in ("body_process", "last_failure", "result"):
+        nested = metrics.get(key)
+        if isinstance(nested, Mapping) and is_partial_progress(
+            str(nested.get("reason") or normalized),
+            nested.get("metrics") if isinstance(nested.get("metrics"), Mapping) else nested,
+            _depth=_depth + 1,
+        ):
+            return True
+    return False
+
+
 def stable_hash(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
 

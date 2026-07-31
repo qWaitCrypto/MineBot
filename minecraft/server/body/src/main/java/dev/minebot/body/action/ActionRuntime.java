@@ -20,6 +20,7 @@ import java.util.Map;
  */
 public final class ActionRuntime {
     public static final String CLASS_COMPLETED = "completed";
+    public static final String CLASS_PARTIAL = "partial";
     public static final String CLASS_FAILED = "failed";
     public static final String CLASS_TIMEOUT = "timeout";
     public static final String CLASS_PREEMPTED = "preempted";

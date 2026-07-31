@@ -1,9 +1,21 @@
 import unittest
 
-from minebot.contract import Action, BodyState, Result, body_rejection_to_tool_result
+from minebot.contract import (
+    Action,
+    BodyState,
+    Result,
+    body_rejection_to_tool_result,
+    is_partial_progress,
+)
 
 
 class BodyStateMessageTests(unittest.TestCase):
+    def test_partial_progress_requires_authoritative_gain(self):
+        self.assertTrue(is_partial_progress("partial", {"collected_delta": 2}))
+        self.assertTrue(is_partial_progress("dig_down_partial:timeout", {"blocks_descended": 1}))
+        self.assertFalse(is_partial_progress("partial", {"collected_delta": 0}))
+        self.assertFalse(is_partial_progress("blocked", {"collected_delta": 2}))
+
     def test_from_envelope_data_parses_quality_trace_fields(self):
         state = BodyState.from_envelope_data(
             "Bot",
