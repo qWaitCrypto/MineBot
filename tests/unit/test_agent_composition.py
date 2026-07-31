@@ -1028,6 +1028,28 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["holder"], "other_mutation")
         ctx.weld_context.writer.release("other_mutation")
 
+    def test_weld_observes_authoritative_state_immediately_after_mutating_leaf(self):
+        body = FakeBody()
+        observed = []
+        weld = WeldContext(
+            body=body,
+            authority=ProgressAuthority(),
+            goal_text="collect 1 dirt",
+            body_state_observer=lambda current, source: observed.append((current, source)),
+        )
+        miner, _calls = mine_tool(body)
+
+        result = execute_tool(
+            miner,
+            {"pos": [1, 59, 0], "expected_drops": ["dirt"]},
+            weld,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][1], "mutation:mine_block_collect")
+        self.assertIn("'dirt': 1", observed[0][0].inventory_hash)
+
 
 
 

@@ -18,6 +18,8 @@ from minebot.app.phase1_runtime import (
     tool_manifest,
 )
 from minebot.app.runner import tool_is_enabled
+from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
+from minebot.app.tasks import TaskWorkspace
 from minebot.body import (
     BlockApproachTransactions,
     BlockWork,
@@ -150,6 +152,8 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
                 bot="Bot1",
             )
             challenge_id = decision.details["governance_confirmation"]["challenge_id"]
+            for _ in range(3):
+                parts.authority.next_generation()
             confirmation = parts.registry.get("confirm_governance_scope").callable(
                 {
                     "challenge_id": challenge_id,
@@ -171,6 +175,56 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
             self.assertFalse(manifest["confirm_governance_scope"]["body_mutating"])
         finally:
             parts.runtime.close()
+
+    def test_governance_confirmation_is_invalidated_when_durable_task_changes(self):
+        class AmbiguousRisk:
+            def assess(self, pos, block_type, context, *, bot_placements=None):
+                return StructureRiskAssessment(
+                    pos=pos,
+                    block_type=block_type,
+                    level=StructureRiskLevel.AMBIGUOUS,
+                    score=0.4,
+                    complete=True,
+                    sampled_cells=63,
+                    signals=("local_axis_symmetry",),
+                )
+
+        store = RuntimeStateStore(":memory:")
+        workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
+        workspace.start("collect stone", source="test")
+        body = _body()
+        policy = GovernancePolicy(
+            structure_risk_assessor=AmbiguousRisk(),
+            require_structure_assessment=True,
+            bot_name="Bot1",
+        )
+        parts = build_phase1_agent_runtime(
+            body=body,
+            goal_text="collect stone",
+            model_provider=None,
+            config=Phase1RuntimeConfig(
+                natural_region=Region("test", (-64, -64, -64), (64, 320, 64)),
+                governance_policy=policy,
+                task_workspace=workspace,
+            ),
+        )
+        try:
+            first = policy.can_break((0, 64, 0), "stone", "direct", bot="Bot1")
+            confirmed = policy.confirm_scope(
+                first.details["governance_confirmation"]["challenge_id"],
+                "collect natural stone for the active task",
+            )
+            self.assertTrue(confirmed["confirmed"])
+            self.assertTrue(policy.can_break((1, 64, 0), "stone", "direct", bot="Bot1").allowed)
+
+            workspace.replace("collect sand", source="test")
+            after_replacement = policy.can_break((1, 64, 0), "stone", "direct", bot="Bot1")
+
+            self.assertFalse(after_replacement.allowed)
+            self.assertEqual(after_replacement.reason, "governance_confirmation_required")
+        finally:
+            parts.runtime.close()
+            store.close()
 
     def test_uncatalogued_player_tool_is_rejected_before_registration(self):
         registry = ToolRegistry()

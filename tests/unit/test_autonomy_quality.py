@@ -202,6 +202,53 @@ class AutonomyQualityTests(unittest.TestCase):
         self.assertEqual(episode["attempts"], 1)
         self.assertEqual(len(episode["attempt_refs"]), 1)
 
+    def test_immediate_authoritative_mutation_state_ends_recovery_before_later_actions(self):
+        events = _healthy_material_incomplete_trace(include_obstacle=False)
+        events.extend(
+            [
+                _result(
+                    100,
+                    300,
+                    "explore_for",
+                    "blocked",
+                    "explore:blocked",
+                    success=False,
+                    reason="mobility_blocked:no_path",
+                ),
+                *[
+                    _invoke(
+                        101 + index,
+                        310 + index * 10,
+                        "collect_resource",
+                        f"collect-{index}",
+                        f"collect:tactic-{index}",
+                    )
+                    for index in range(6)
+                ],
+            ]
+        )
+        delayed = evaluate_autonomy_quality(
+            sorted(events, key=lambda event: (event["ts"], event["seq"])),
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+        self.assertEqual(
+            delayed["signals"]["recovery"]["episodes"][0]["reason"],
+            "recovery_attempt_limit_exceeded",
+        )
+
+        events.append(_body_state(200, 325, x=6.0, counts={"oak_log": 2}))
+        immediate = evaluate_autonomy_quality(
+            sorted(events, key=lambda event: (event["ts"], event["seq"])),
+            yardstick=AG_FP30_X_YARDSTICK,
+            active_window_s=1800,
+        )
+
+        episode = immediate["signals"]["recovery"]["episodes"][0]
+        self.assertEqual(episode["verdict"], "pass")
+        self.assertEqual(episode["attempts"], 2)
+        self.assertEqual(episode["recovered_at"], 325.0)
+
     def test_ag_fp30_counts_prerequisite_chain_as_effective_output(self):
         early = {"oak_log": 2, "oak_planks": 5, "stick": 4}
         tools = {**early, "crafting_table": 1, "wooden_pickaxe": 1, "cobblestone": 4}

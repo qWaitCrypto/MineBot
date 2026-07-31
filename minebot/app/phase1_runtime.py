@@ -116,7 +116,7 @@ def build_phase1_agent_runtime(
         require_structure_assessment=True,
         bot_name=body.bot_name,
     )
-    policy.begin_confirmation_epoch(authority.current_generation)
+    policy.begin_confirmation_epoch(_governance_confirmation_scope(config.task_workspace))
     runtime_config = replace(config, governance_policy=policy)
     registry = build_phase1_registry(body, runtime_config, authority=authority)
     parts = build_agent_runtime(
@@ -177,6 +177,21 @@ def build_phase1_agent_runtime(
     parts.runtime.agent = parts.runtime.agent.clone(tools=[sdk_tool_for(registry.get(name)) for name in registry.names()])
     parts.runtime.trace.emit("tool_manifest", tools=tool_manifest(registry))
     return replace(parts, skill_workspace=config.skill_workspace)
+
+
+def _governance_confirmation_scope(
+    workspace: TaskWorkspace | None,
+) -> Callable[[], object]:
+    """Keep bounded permits for one durable task, not one physical action."""
+
+    if workspace is None:
+        return lambda: "single-goal-runtime"
+
+    def current_task_id() -> object:
+        task = workspace.current_task
+        return None if task is None else task.task_id
+
+    return current_task_id
 
 
 def _phase1_recovery_handler(body: Body, config: Phase1RuntimeConfig):

@@ -1202,6 +1202,7 @@ class AgentRuntime:
             body=body,
             authority=authority,
             goal_text=agent_context.goal_text,
+            body_state_observer=self._trace_mutation_body_state,
         )
         self.agent = Agent[RuntimeRunContext](
             name=agent_name,
@@ -1948,6 +1949,34 @@ class AgentRuntime:
             "pending_action_count": getattr(state, "pending_action_count", None),
             "hazard_unresolved": getattr(state, "hazard_unresolved", None),
         }
+
+    def _trace_mutation_body_state(self, state: Any, source: str) -> None:
+        """Trace one post-mutation server snapshot without inferring a delta."""
+
+        if getattr(state, "missing", False):
+            self.trace.emit(
+                "body_state",
+                source=source,
+                bot=getattr(state, "bot", None),
+                pos=list(getattr(state, "pos", ())),
+                health=getattr(state, "health", None),
+                food=getattr(state, "food", None),
+                oxygen=getattr(state, "oxygen", None),
+                inventory_hash=getattr(state, "inventory_hash", None),
+                inventory_counts=dict(getattr(state, "inventory_counts", None) or {}),
+                selected_slot=getattr(state, "selected_slot", None),
+                selected_item=getattr(state, "selected_item", None),
+                offhand_item=getattr(state, "offhand_item", None),
+                body_owner=getattr(state, "body_owner", None),
+                pending_action_count=getattr(state, "pending_action_count", None),
+                hazard_unresolved=getattr(state, "hazard_unresolved", None),
+                dimension=getattr(state, "dimension", None),
+                complete=bool(getattr(state, "complete", False)),
+                missing=True,
+            )
+            return
+        self._remember_body_state(state)
+        self._emit_last_known_body_state_trace(source=source)
 
     def trace_body_events(self, events: object, *, source: str = "turn_boundary") -> None:
         """Emit a complete, non-consuming Body-event observation.

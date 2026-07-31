@@ -401,9 +401,9 @@ class GovernanceTests(unittest.TestCase):
         self.assertEqual((high.allowed, high.reason), (False, "player_structure_risk"))
         self.assertEqual((incomplete.allowed, incomplete.reason), (False, "structure_risk_unknown"))
 
-    def test_confirmation_expires_and_is_invalidated_by_task_generation(self):
+    def test_confirmation_expires_and_is_invalidated_by_task_scope(self):
         now = [10.0]
-        generation = [0]
+        task_scope = ["task-1"]
         assessor = StaticRiskAssessor(StructureRiskLevel.AMBIGUOUS)
         policy = GovernancePolicy(
             structure_risk_assessor=assessor,
@@ -411,7 +411,7 @@ class GovernanceTests(unittest.TestCase):
             confirmation_ttl_s=5.0,
             clock=lambda: now[0],
         )
-        policy.begin_confirmation_epoch(lambda: generation[0])
+        policy.begin_confirmation_epoch(lambda: task_scope[0])
         first = policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT)
         policy.confirm_scope(
             first.details["governance_confirmation"]["challenge_id"],
@@ -419,11 +419,11 @@ class GovernanceTests(unittest.TestCase):
         )
         self.assertTrue(policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT).allowed)
 
-        generation[0] += 1
-        generation_invalid = policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT)
-        self.assertEqual(generation_invalid.reason, "governance_confirmation_required")
+        task_scope[0] = "task-2"
+        scope_invalid = policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT)
+        self.assertEqual(scope_invalid.reason, "governance_confirmation_required")
         policy.confirm_scope(
-            generation_invalid.details["governance_confirmation"]["challenge_id"],
+            scope_invalid.details["governance_confirmation"]["challenge_id"],
             "clear natural stone",
         )
         now[0] += 6.0

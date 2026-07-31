@@ -307,7 +307,7 @@ class _GovernanceChallenge:
     max_unique_blocks: int
     created_at: float
     expires_at: float
-    generation: int
+    epoch: str
     evidence: dict[str, object]
     action_ids: set[str] = field(default_factory=set)
 
@@ -322,7 +322,7 @@ class _GovernancePermit:
     region: Region
     max_unique_blocks: int
     expires_at: float
-    generation: int
+    epoch: str
     purpose: str
     authorized_positions: set[Position] = field(default_factory=set)
 
@@ -353,18 +353,18 @@ class GovernancePolicy:
         self._confirmation_vertical_radius = max(0, int(confirmation_vertical_radius))
         self._clock = clock
         self._confirmation_lock = RLock()
-        self._confirmation_generation: Callable[[], int] = lambda: 0
+        self._confirmation_scope: Callable[[], object] = lambda: None
         self._confirmation_epoch = uuid4().hex
         self._pending_challenges: dict[str, _GovernanceChallenge] = {}
         self._active_permits: dict[str, _GovernancePermit] = {}
 
-    def begin_confirmation_epoch(self, generation: Callable[[], int] | None = None) -> None:
-        """Invalidate review state when a task/runtime generation is rebuilt."""
+    def begin_confirmation_epoch(self, scope: Callable[[], object] | None = None) -> None:
+        """Bind review state to a task/runtime scope and discard older authority."""
 
         with self._confirmation_lock:
             self._pending_challenges.clear()
             self._active_permits.clear()
-            self._confirmation_generation = generation or (lambda: 0)
+            self._confirmation_scope = scope or (lambda: None)
             self._confirmation_epoch = uuid4().hex
 
     def invalidate_confirmation_state(self) -> None:
@@ -421,7 +421,7 @@ class GovernancePolicy:
                 region=challenge.region,
                 max_unique_blocks=challenge.max_unique_blocks,
                 expires_at=challenge.expires_at,
-                generation=challenge.generation,
+                epoch=challenge.epoch,
                 purpose=normalized_purpose,
             )
             self._active_permits[permit_id] = permit
@@ -773,10 +773,10 @@ class GovernancePolicy:
         with self._confirmation_lock:
             now = self._clock()
             self._prune_confirmation_state(now)
-            generation = self._current_confirmation_generation()
+            epoch = self._current_confirmation_epoch()
             for challenge in self._pending_challenges.values():
                 if (
-                    challenge.generation == generation
+                    challenge.epoch == epoch
                     and challenge.bot == bot
                     and challenge.context is context
                     and block_type in challenge.block_types
@@ -818,7 +818,7 @@ class GovernancePolicy:
                 max_unique_blocks=_CONFIRMATION_MAX_UNIQUE_BLOCKS.get(context, 8),
                 created_at=now,
                 expires_at=now + self._confirmation_ttl_s,
-                generation=generation,
+                epoch=epoch,
                 evidence=_structure_risk_payload(assessment),
                 action_ids={action_id} if action_id else set(),
             )
@@ -836,10 +836,10 @@ class GovernancePolicy:
         with self._confirmation_lock:
             now = self._clock()
             self._prune_confirmation_state(now)
-            generation = self._current_confirmation_generation()
+            epoch = self._current_confirmation_epoch()
             for permit_id, permit in list(self._active_permits.items()):
                 if (
-                    permit.generation != generation
+                    permit.epoch != epoch
                     or permit.bot != bot
                     or permit.context is not context
                     or block_type not in permit.block_types
@@ -857,23 +857,24 @@ class GovernancePolicy:
             return None
 
     def _prune_confirmation_state(self, now: float) -> None:
-        generation = self._current_confirmation_generation()
+        epoch = self._current_confirmation_epoch()
         self._pending_challenges = {
             challenge_id: challenge
             for challenge_id, challenge in self._pending_challenges.items()
-            if challenge.expires_at > now and challenge.generation == generation
+            if challenge.expires_at > now and challenge.epoch == epoch
         }
         self._active_permits = {
             permit_id: permit
             for permit_id, permit in self._active_permits.items()
-            if permit.expires_at > now and permit.generation == generation
+            if permit.expires_at > now and permit.epoch == epoch
         }
 
-    def _current_confirmation_generation(self) -> int:
+    def _current_confirmation_epoch(self) -> str:
         try:
-            return int(self._confirmation_generation())
-        except (TypeError, ValueError):
-            return 0
+            scope = self._confirmation_scope()
+        except Exception:
+            scope = None
+        return f"{self._confirmation_epoch}:{scope!s}"
 
     def _challenge_payload(self, challenge: _GovernanceChallenge, now: float) -> dict[str, object]:
         return {

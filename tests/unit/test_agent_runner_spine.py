@@ -2423,6 +2423,69 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(body_state_event["body_owner"], "read_state")
         self.assertEqual(body_state_event["pending_action_count"], 0)
 
+    def test_sdk_mutation_traces_immediate_authoritative_body_state(self):
+        class MutationBody(FakeBody):
+            def __init__(self):
+                super().__init__()
+                self.counts = {}
+
+            def get_state(self):
+                current = body_state(self.x)
+                return BodyState(
+                    **{
+                        **current.__dict__,
+                        "inventory_hash": json.dumps(self.counts, sort_keys=True),
+                        "inventory_counts": dict(self.counts),
+                    }
+                )
+
+        body = MutationBody()
+
+        def callable_(_params):
+            body.counts["oak_log"] = 1
+            return ToolResult(True, "collected", False)
+
+        tool = RegisteredTool(
+            name="collect_block_domain",
+            description="Collect",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=callable_,
+            sidecar=ToolSidecar(
+                progress_key="collect_block_domain",
+                mutating=True,
+                source="body.resource",
+                body_scope=("collect",),
+            ),
+        )
+        trace = RuntimeTrace()
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            trace=trace,
+        )
+        runtime_context = RuntimeRunContext(
+            agent_context=runtime.agent_context,
+            weld_context=runtime.weld_context,
+            profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+            trace=trace,
+            runtime=runtime,
+        )
+
+        class Wrapper:
+            context = runtime_context
+
+        asyncio.run(sdk_tool_for(tool).on_invoke_tool(Wrapper(), "{}"))
+
+        snapshots = [event for event in trace.snapshot() if event["event"] == "body_state"]
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["source"], "mutation:collect_block_domain")
+        self.assertEqual(snapshots[0]["inventory_counts"], {"oak_log": 1})
+        self.assertEqual(runtime.last_known_body_state["inventory_counts"], {"oak_log": 1})
+
     def test_sdk_tool_inventory_metrics_emit_body_state_with_cached_position(self):
         def callable_(_params):
             return ToolResult(
