@@ -20,7 +20,12 @@ from agents.exceptions import MaxTurnsExceeded, UserError
 from agents.items import ItemHelpers, MessageOutputItem, ToolCallItem, ToolCallOutputItem
 from agents.tool import FunctionTool
 
-from minebot.app.conversation import WindowedConversationSession, bounded_session_input
+from minebot.app.conversation import (
+    WindowedConversationSession,
+    bounded_model_input,
+    bounded_session_input,
+    model_input_chars,
+)
 # Spine modules extracted from this file (framework §12 H1/B). They are
 # re-exported here so every existing consumer keeps importing one runtime
 # surface; the split is about auditability, not a new public boundary.
@@ -41,7 +46,7 @@ from minebot.app.progress_epoch_adapter import (
     _ProgressEpochMember,
 )
 from minebot.app.runtime_trace import RuntimeTrace
-from minebot.app.model_provider import ModelProviderRegistry
+from minebot.app.model_provider import ModelProviderRegistry, is_retryable_model_error
 from minebot.app.observation_artifacts import ToolObservationArchive
 from minebot.app.progress_epochs import ProgressEpochArchive
 from minebot.app.skills import SkillOperationError
@@ -145,6 +150,14 @@ class RecoveryOutcome:
     reason: str
     facts: dict[str, object] = field(default_factory=dict)
     can_retry: bool = False
+
+
+class ModelTurnTransportError(RuntimeError):
+    """A transient model failure that must resume without replaying the turn."""
+
+    def __init__(self, error_type: str) -> None:
+        super().__init__(f"transient model transport failure: {error_type}")
+        self.error_type = error_type
 
 
 class RuntimeHooks(RunHooks[RuntimeRunContext]):
@@ -1013,6 +1026,7 @@ def _metrics_summary(
         "inventory_hash",
         "error_type",
         "reflex_handoff",
+        "governance_confirmation",
     )
     summary: JsonObject = {}
     if projector is not None:
@@ -1350,13 +1364,15 @@ class AgentRuntime:
                 recovery_required = _find_body_recovery_required(exc)
                 if recovery_required is not None:
                     return self._enter_recovery_from_body_fact(recovery_required.reason, recovery_required.facts)
+                self._raise_model_transport_error_if_retryable(exc)
                 raise
             return self._yield_from_progress_abort(progress_abort)
         except SkillOperationError as exc:
             progress_epochs.finalize_unsettled("skill_operation_error")
             return self._yield_from_skill_context_error(exc, profile)
-        except Exception:
+        except Exception as exc:
             progress_epochs.finalize_unsettled("runner_error")
+            self._raise_model_transport_error_if_retryable(exc)
             raise
 
         deferred = progress_epochs.finalize_unsettled("runner_completed_with_unsettled_epoch")
@@ -1371,6 +1387,17 @@ class AgentRuntime:
             profile=profile,
             result=result,
         )
+
+    def _raise_model_transport_error_if_retryable(self, exc: BaseException) -> None:
+        if not is_retryable_model_error(exc):
+            return
+        error_type = type(exc).__name__
+        self.trace.emit(
+            "model_turn_transport_failed",
+            error_type=error_type,
+            retryable=True,
+        )
+        raise ModelTurnTransportError(error_type) from exc
 
     async def run_sync(
         self,
@@ -1699,13 +1726,34 @@ class AgentRuntime:
 
     def _run_config(self, profile: RuntimeProfile) -> RunConfig:
         if self.model_provider is None:
-            return RunConfig(session_input_callback=bounded_session_input)
+            return RunConfig(
+                session_input_callback=bounded_session_input,
+                call_model_input_filter=self._bounded_model_input,
+            )
         logical_model = self._route_model_for(profile)
         return RunConfig(
             model_provider=self.model_provider,
             model_settings=self.model_provider.model_settings_for(logical_model),
             session_input_callback=bounded_session_input,
+            call_model_input_filter=self._bounded_model_input,
         )
+
+    def _bounded_model_input(self, data: Any) -> Any:
+        before_count = len(data.model_data.input)
+        before_chars = model_input_chars(data.model_data.input)
+        filtered = bounded_model_input(data)
+        after_count = len(filtered.input)
+        if after_count < before_count:
+            self.trace.emit(
+                "model_input_compacted",
+                before_count=before_count,
+                after_count=after_count,
+                omitted_count=before_count - after_count,
+                before_chars=before_chars,
+                after_chars=model_input_chars(filtered.input),
+                complete=True,
+            )
+        return filtered
 
     def _inject_resume_context(self) -> None:
         slot = self.mode_runtime.consume_suspend_slot()
@@ -2675,6 +2723,7 @@ def _optional_bool_attr(value: object, name: str) -> bool | None:
 __all__ = [
     "AgentRuntime",
     "AgentTurnOutcome",
+    "ModelTurnTransportError",
     "RuntimeHooks",
     "RuntimeRunContext",
     "RuntimeTrace",

@@ -610,7 +610,7 @@ def register_fake_acquisition_leaf_tools(registry, body, *, fail_tool=None):
             item = str(params["item"]).removeprefix("minecraft:")
             count = int(params.get("count") or 1)
             stored_item = "oak_log" if item == "logs" else item
-            body.inventory_counts[stored_item] = body.inventory_counts.get(stored_item, 0) + count
+            body.inventory_counts[stored_item] = max(body.inventory_counts.get(stored_item, 0), count)
         elif name == "craft_item":
             item = str(params["item"]).removeprefix("minecraft:")
             count = int(params.get("count") or 1)
@@ -679,7 +679,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.reason, "ensured")
         self.assertEqual(result.metrics["current_count"], 1)
-        self.assertEqual(calls[0], ("collect_resource", {"item": "oak_log", "count": 4, "constraints": {"auto_prerequisites": False}}))
+        self.assertEqual(calls[0], ("collect_resource", {"item": "oak_log", "count": 1, "constraints": {"auto_prerequisites": False}}))
         self.assertIn(("smelt_item", {"input_item": "raw_iron", "count": 3}), calls)
         self.assertEqual(calls[-1], ("craft_item", {"item": "iron_pickaxe", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True}))
         self.assertFalse(registry.get("collect_resource").sidecar.mutating)
@@ -703,11 +703,12 @@ class AgentCompositionTests(unittest.TestCase):
                 count = int(params.get("count") or 1)
                 if item == "crafting_table":
                     body.inventory_counts[item] = body.inventory_counts.get(item, 0) + count
-                elif params.get("keep_temporary_table"):
-                    body.inventory_counts["crafting_table"] = 0
-                elif params.get("cleanup_existing_bot_table"):
-                    body.inventory_counts["crafting_table"] = body.inventory_counts.get("crafting_table", 0) + 1
-                body.inventory_counts[item] = max(body.inventory_counts.get(item, 0), count)
+                else:
+                    if params.get("keep_temporary_table"):
+                        body.inventory_counts["crafting_table"] = 0
+                    elif params.get("cleanup_existing_bot_table"):
+                        body.inventory_counts["crafting_table"] = body.inventory_counts.get("crafting_table", 0) + 1
+                    body.inventory_counts[item] = body.inventory_counts.get(item, 0) + count
             elif name == "smelt_item":
                 body.inventory_counts["iron_ingot"] = body.inventory_counts.get("iron_ingot", 0) + int(params.get("count") or 1)
             return ToolResult(True, "completed", False, metrics={"params": dict(params)})
@@ -749,7 +750,22 @@ class AgentCompositionTests(unittest.TestCase):
 
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.metrics["item"], "iron_pickaxe")
-        self.assertEqual(calls[-1], ("craft_item", {"item": "iron_pickaxe", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True}))
+        self.assertEqual(calls[-1], ("equip_item", {"item": "iron_pickaxe", "target": "mainhand"}))
+        self.assertEqual(result.metrics["completed_steps"][-1]["step"]["kind"], "equip")
+
+    def test_ensure_tool_for_equips_an_owned_pickaxe_without_recrafting(self):
+        body = FakeBody()
+        body.inventory_counts = {"stone_pickaxe": 1}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_tool_for({"resource": "stone_pickaxe"}, ctx, acquisition_recipe_lookup)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(calls, [("equip_item", {"item": "stone_pickaxe", "target": "mainhand"})])
+        self.assertEqual([step["step"]["kind"] for step in result.metrics["completed_steps"]], ["equip"])
 
     def test_ensure_item_failure_reports_failed_step_and_plan(self):
         body = FakeBody()
@@ -766,6 +782,64 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.metrics["resume_hint"], "reinvoke_ensure")
         self.assertGreater(len(result.metrics["plan"]), 1)
         self.assertEqual(result.metrics["failed_step"]["step"]["kind"], "smelt")
+
+    def test_ensure_tool_failure_retreats_to_its_starting_position(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        position = [10.5, 79.0, 4.5]
+        calls = []
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+
+        def read_state(_params):
+            return ToolResult(
+                True,
+                "state_read",
+                False,
+                metrics={"pos": list(position), "dimension": "overworld"},
+            )
+
+        def collect(_params):
+            position[:] = [-2.5, 62.0, 9.5]
+            return ToolResult(False, "candidate_domain_unreachable:no_path", True)
+
+        def move(params):
+            calls.append(dict(params))
+            position[:] = [10.5, 79.0, 4.5]
+            return ToolResult(True, "arrived", False, metrics={"final_pos": list(position)})
+
+        registry.register(RegisteredTool(
+            "read_state",
+            "state",
+            {"type": "object"},
+            read_state,
+            ToolSidecar("read_state", mutating=False, source="body.perception", permission="read_state"),
+        ))
+        registry.register(RegisteredTool(
+            "collect_resource",
+            "collect",
+            {"type": "object"},
+            collect,
+            ToolSidecar("collect_resource", mutating=False, source="agent.composition", permission="compose_collect", body_mutating=True),
+        ))
+        registry.register(RegisteredTool(
+            "move_to",
+            "move",
+            {"type": "object"},
+            move,
+            ToolSidecar("move_to", mutating=True, source="java_body", permission="move"),
+        ))
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_tool_for({"resource": "stone_pickaxe"}, ctx, acquisition_recipe_lookup)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "ensure_step_failed:candidate_domain_unreachable:no_path")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["pos"], [10, 79, 4])
+        self.assertTrue(result.metrics["retreat"]["attempted"])
+        self.assertTrue(result.metrics["retreat"]["restored"])
+        self.assertEqual(result.metrics["retreat"]["reason"], "retreated_to_checkpoint")
 
     def test_composition_tool_result_trace_summarizes_leaf_result_metrics(self):
         body = FakeBody()
@@ -843,15 +917,15 @@ class AgentCompositionTests(unittest.TestCase):
         def record(name, params):
             calls.append((name, dict(params)))
             if name == "collect_resource":
-                body.inventory_counts["oak_log"] = 3
+                body.inventory_counts["oak_log"] = 0
                 return ToolResult(
                     True,
                     "partial_candidate_targets_exhausted",
                     True,
                     metrics={
                         "item": "oak_log",
-                        "target_count": 4,
-                        "after_count": 3,
+                        "target_count": 1,
+                        "after_count": 0,
                         "remaining_count": 1,
                         "resume_hint": "reselect_candidates",
                     },
@@ -874,9 +948,9 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.can_retry)
         self.assertEqual(result.metrics["resume_hint"], "reinvoke_ensure")
         self.assertEqual(result.metrics["failed_step"]["step"]["kind"], "collect")
-        self.assertEqual(result.metrics["failed_step"]["current_count"], 3)
+        self.assertEqual(result.metrics["failed_step"]["current_count"], 0)
         self.assertEqual(result.metrics["failed_step"]["remaining_count"], 1)
-        self.assertEqual(calls, [("collect_resource", {"item": "oak_log", "count": 4, "constraints": {"auto_prerequisites": False}})])
+        self.assertEqual(calls, [("collect_resource", {"item": "oak_log", "count": 1, "constraints": {"auto_prerequisites": False}})])
 
     def test_ensure_item_requires_step_delta_not_total_count_after_resume(self):
         body = FakeBody()
@@ -1165,6 +1239,76 @@ class AgentCompositionTests(unittest.TestCase):
         )
         self.assertEqual(invoke["args_hash"], canonical_args_hash(calls[0]))
         self.assertEqual(invoke["tactic_signature"], tool_tactic_signature("collect_block_domain", calls[0]))
+
+    def test_collect_resource_preserves_governance_confirmation_from_body_domain(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        confirmation = {
+            "challenge_id": "gc-collect-1",
+            "context": "collect",
+            "block_types": ["dirt"],
+            "region": {"min": [-8, 55, -8], "max": [8, 63, 8]},
+            "max_unique_blocks": 12,
+        }
+        domain, _calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "governance_confirmation_required",
+                "can_retry": True,
+                "metrics": {"governance_confirmation": confirmation},
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource({"item": "dirt", "count": 1}, ctx)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "governance_confirmation_required")
+        self.assertEqual(result.metrics["governance_confirmation"], confirmation)
+
+    def test_ensure_tool_preserves_governance_confirmation_from_nested_collect(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        confirmation = {
+            "challenge_id": "gc-ensure-1",
+            "context": "collect",
+            "block_types": ["oak_log"],
+            "region": {"min": [-8, 55, -8], "max": [8, 63, 8]},
+            "max_unique_blocks": 12,
+        }
+        registry.register(RegisteredTool(
+            "collect_resource",
+            "collect",
+            {"type": "object"},
+            lambda _params: ToolResult(
+                False,
+                "governance_confirmation_required",
+                True,
+                metrics={"governance_confirmation": confirmation},
+            ),
+            ToolSidecar(
+                "collect_resource",
+                mutating=False,
+                source="agent.composition",
+                permission="compose_collect",
+                body_mutating=True,
+            ),
+        ))
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_tool_for({"resource": "stone_pickaxe"}, ctx, acquisition_recipe_lookup)
+
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.reason,
+            "ensure_step_failed:governance_confirmation_required",
+        )
+        self.assertEqual(result.metrics["governance_confirmation"], confirmation)
 
     def test_collect_resource_framework_contract_exposes_the_full_collect_n_process(self):
         body = FakeBody()

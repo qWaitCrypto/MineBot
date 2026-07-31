@@ -1,10 +1,17 @@
 import asyncio
 import unittest
 
+from agents.run_config import CallModelData, ModelInputData
+
 from minebot.app.conversation import (
     CONVERSATION_WINDOW_TURNS,
+    MODEL_INPUT_MAX_CHARS,
+    MODEL_INPUT_MAX_ITEMS,
     WindowedConversationSession,
+    bounded_model_input,
+    bounded_model_input_items,
     bounded_session_input,
+    model_input_chars,
 )
 from minebot.app.runner import AgentRuntime
 from minebot.app.session import AgentSession, SessionCommand
@@ -253,6 +260,69 @@ class AgentContextTests(unittest.TestCase):
         self.assertEqual(len(items), 4)
         self.assertEqual(items[0]["role"], "user")
         self.assertEqual(items[-1]["role"], "assistant")
+
+    def test_active_sdk_run_window_keeps_goal_and_complete_recent_tool_pairs(self):
+        items = [{"role": "user", "content": "collect resources and keep going"}]
+        for turn in range(60):
+            items.extend(
+                [
+                    {"type": "message", "role": "assistant", "content": f"step-{turn}"},
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{turn}",
+                        "name": "read_state",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": f"call-{turn}",
+                        "output": "x" * 900,
+                    },
+                ]
+            )
+
+        bounded = bounded_model_input_items(items)
+
+        self.assertLessEqual(len(bounded), MODEL_INPUT_MAX_ITEMS)
+        self.assertLessEqual(model_input_chars(bounded), MODEL_INPUT_MAX_CHARS)
+        self.assertEqual(bounded[0]["role"], "user")
+        self.assertEqual(bounded[0]["content"], "collect resources and keep going")
+        calls = {item["call_id"] for item in bounded if item.get("type") == "function_call"}
+        outputs = {
+            item["call_id"] for item in bounded if item.get("type") == "function_call_output"
+        }
+        self.assertEqual(calls, outputs)
+        self.assertIn("call-59", calls)
+
+    def test_model_input_filter_marks_compaction_without_changing_current_goal(self):
+        items = [{"role": "user", "content": "reach the surface"}]
+        for turn in range(50):
+            items.extend(
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{turn}",
+                        "name": "read_state",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": f"call-{turn}",
+                        "output": "observed" * 200,
+                    },
+                ]
+            )
+        data = CallModelData(
+            model_data=ModelInputData(input=items, instructions="CURRENT_TASK: reach the surface"),
+            agent=None,
+            context=None,
+        )
+
+        filtered = bounded_model_input(data)
+
+        self.assertEqual(filtered.input[0]["content"], "reach the surface")
+        self.assertIn("MODEL_INPUT_WINDOW complete=true", filtered.instructions)
+        self.assertIn("CURRENT_TASK: reach the surface", filtered.instructions)
 
 
 def build_parts(goal: str, calls: list[str]) -> AgentRuntimeParts:

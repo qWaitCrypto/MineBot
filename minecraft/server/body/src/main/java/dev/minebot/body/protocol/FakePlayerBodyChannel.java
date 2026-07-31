@@ -37,6 +37,7 @@ import dev.minebot.body.perception.EntityReadService;
 import dev.minebot.body.perception.RecipeReadService;
 import dev.minebot.body.perception.WorldReadService;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
 import dev.minebot.server.common.transport.MineBotChannel;
 import dev.minebot.server.common.transport.MineBotChannelRouter;
@@ -64,6 +65,7 @@ import net.minecraft.world.level.block.entity.BarrelBlockEntity;
 import net.minecraft.world.phys.AABB;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -1742,16 +1744,26 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     }
 
     private void handleHello(MineBotConnection connection, JsonObject request, int serverTick) {
-        subscribers.add(connection);
+        boolean subscribeEvents = eventSubscriptionRequested(request);
+        if (subscribeEvents) {
+            subscribers.add(connection);
+        } else {
+            subscribers.remove(connection);
+        }
         JsonObject response = baseResponse(request, "HELLO_ACK");
         response.addProperty("protocol", PROTOCOL);
         response.addProperty("minecraft_version", server.getServerVersion());
         response.addProperty("max_request_bytes", MineBotWebSocketServer.MAX_REQUEST_BYTES);
         response.addProperty("max_requests_per_second", MineBotConnection.MAX_REQUESTS_PER_SECOND);
+        response.addProperty("event_subscribed", subscribeEvents);
         JsonArray requestTypes = new JsonArray();
         REQUEST_TYPES.stream().sorted().forEach(requestTypes::add);
         response.add("request_types", requestTypes);
         connection.send(response, serverTick);
+    }
+
+    static boolean eventSubscriptionRequested(JsonObject request) {
+        return optionalBoolean(request, "subscribe_events", true);
     }
 
     private void handleSetSurvivalOwner(
@@ -2544,7 +2556,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         PlayerPrimitiveActions.PlayerAccess access = playerAccess(player);
         return new AscendExecutor.PillarAccess() {
             @Override
-            public AscendExecutor.ScaffoldSelection selectScaffold(String botName, List<String> candidates) {
+            public AscendExecutor.ScaffoldSelection selectScaffold(String botName) {
                 if (!access.present()) {
                     return new AscendExecutor.ScaffoldSelection(false, null, 0, "body_missing");
                 }
@@ -2552,27 +2564,36 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     PlayerPrimitiveActions.CARRY_END_EXCLUSIVE,
                     access.inventorySize()
                 );
-                for (String candidate : candidates) {
-                    boolean found = false;
-                    for (int slot = 0; slot < inventoryEnd; slot++) {
-                        if (candidate.equals(access.itemIdAt(slot)) && access.itemCountAt(slot) > 0) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
+                List<ScaffoldInventoryCandidate> candidates = new ArrayList<>();
+                for (int slot = 0; slot < inventoryEnd; slot++) {
+                    String itemId = access.itemIdAt(slot);
+                    int count = access.itemCountAt(slot);
+                    if (count <= 0 || !isSafeEmergencyScaffold(player, itemId)) {
                         continue;
                     }
+                    candidates.add(new ScaffoldInventoryCandidate(
+                        itemId,
+                        slot,
+                        count,
+                        emergencyScaffoldPriority(itemId)
+                    ));
+                }
+                candidates.sort(
+                    Comparator.comparingInt(ScaffoldInventoryCandidate::priority)
+                        .thenComparing(Comparator.comparingInt(ScaffoldInventoryCandidate::count).reversed())
+                        .thenComparingInt(ScaffoldInventoryCandidate::slot)
+                );
+                for (ScaffoldInventoryCandidate candidate : candidates) {
                     PlayerPrimitiveActions.Outcome selected = PlayerPrimitiveActions.selectItem(
                         botName,
-                        candidate,
+                        candidate.itemId(),
                         access,
                         adapter
                     );
                     int count = access.itemCountAt(access.selectedHotbarSlot());
                     return new AscendExecutor.ScaffoldSelection(
                         selected.success(),
-                        selected.success() ? candidate : null,
+                        selected.success() ? candidate.itemId() : null,
                         selected.success() ? count : 0,
                         selected.success() ? selected.reason() : "pillar_scaffold_selection_failed:" + selected.reason()
                     );
@@ -2583,6 +2604,47 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     0,
                     "pillar_no_scaffold_available"
                 );
+            }
+
+            @Override
+            public boolean selectBreakTool(String botName, String blockId) {
+                Identifier identifier = Identifier.tryParse(blockId);
+                Block block = identifier == null
+                    ? null
+                    : BuiltInRegistries.BLOCK.getOptional(identifier).orElse(null);
+                if (block == null) {
+                    return false;
+                }
+                var state = block.defaultBlockState();
+                int inventoryEnd = Math.min(
+                    PlayerPrimitiveActions.CARRY_END_EXCLUSIVE,
+                    player.getInventory().getContainerSize()
+                );
+                int bestSlot = -1;
+                boolean bestCorrect = false;
+                float bestSpeed = 1.0F;
+                for (int slot = 0; slot < inventoryEnd; slot++) {
+                    ItemStack stack = player.getInventory().getItem(slot);
+                    if (stack.isEmpty()) {
+                        continue;
+                    }
+                    boolean correct = stack.isCorrectToolForDrops(state);
+                    float speed = stack.getDestroySpeed(state);
+                    if (bestSlot < 0
+                        || (correct && !bestCorrect)
+                        || (correct == bestCorrect && speed > bestSpeed)) {
+                        bestSlot = slot;
+                        bestCorrect = correct;
+                        bestSpeed = speed;
+                    }
+                }
+                if (bestSlot < 0) {
+                    return true;
+                }
+                String itemId = BuiltInRegistries.ITEM.getKey(
+                    player.getInventory().getItem(bestSlot).getItem()
+                ).toString();
+                return PlayerPrimitiveActions.selectItem(botName, itemId, access, adapter).success();
             }
 
             @Override
@@ -2606,6 +2668,55 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 adapter.sneak(botName);
             }
         };
+    }
+
+    private record ScaffoldInventoryCandidate(String itemId, int slot, int count, int priority) {
+    }
+
+    private static boolean isSafeEmergencyScaffold(ServerPlayer player, String itemId) {
+        Identifier identifier = itemId == null ? null : Identifier.tryParse(itemId);
+        if (identifier == null) {
+            return false;
+        }
+        var item = BuiltInRegistries.ITEM.getOptional(identifier).orElse(null);
+        if (!(item instanceof BlockItem blockItem)) {
+            return false;
+        }
+        var state = blockItem.getBlock().defaultBlockState();
+        return !state.hasBlockEntity()
+            && state.blocksMotion()
+            && state.isCollisionShapeFullBlock(player.level(), player.blockPosition())
+            && !isAscendHazard(itemId)
+            && !itemId.equals("minecraft:tnt");
+    }
+
+    private static int emergencyScaffoldPriority(String itemId) {
+        if (Set.of(
+            "minecraft:cobblestone",
+            "minecraft:cobbled_deepslate",
+            "minecraft:deepslate",
+            "minecraft:stone",
+            "minecraft:dirt",
+            "minecraft:coarse_dirt",
+            "minecraft:netherrack"
+        ).contains(itemId)) {
+            return 0;
+        }
+        if (itemId.endsWith("_planks")) {
+            return 1;
+        }
+        if (itemId.endsWith("_log")
+            || itemId.endsWith("_wood")
+            || itemId.endsWith("_stem")
+            || itemId.endsWith("_hyphae")) {
+            return 2;
+        }
+        if (itemId.equals("minecraft:crafting_table")
+            || itemId.endsWith("_ore")
+            || itemId.endsWith("_block")) {
+            return 4;
+        }
+        return 3;
     }
 
     private SpecialUseActions.WorldAccess specialUseAccess(ServerPlayer player, ServerLevel level) {

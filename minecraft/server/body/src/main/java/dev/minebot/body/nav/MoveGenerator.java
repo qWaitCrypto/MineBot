@@ -66,6 +66,12 @@ public final class MoveGenerator {
         return new Moves(List.copyOf(moves), unloaded[0]);
     }
 
+    /** True when the destination has a legal direct edge back to the source. */
+    public boolean hasDirectReturnMove(int x, int y, int z, Move outbound) {
+        return movesFrom(outbound.x(), outbound.y(), outbound.z()).moves().stream()
+            .anyMatch(move -> move.x() == x && move.y() == y && move.z() == z);
+    }
+
     private void probeColumn(
         int startX,
         int y,

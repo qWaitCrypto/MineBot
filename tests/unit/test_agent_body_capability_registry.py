@@ -36,8 +36,9 @@ from minebot.body import (
 from minebot.brain.lifecycle import LifecycleState
 from minebot.brain.modes import ModeRuntime
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import Region, ToolResult
+from minebot.contract import Region, StructureRiskAssessment, StructureRiskLevel, ToolResult
 from minebot.game import ScarpetBody
+from minebot.game.governance import GovernancePolicy
 from minebot.game.composite_body import CompositeBody
 from minebot.game.java_body import JavaBody
 from minebot.game.java_body_adapter import JavaBodyClient
@@ -110,6 +111,64 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
                 {binding.tool_name for binding in body_bindings},
                 set(canonical_body_tool_names()),
             )
+        finally:
+            parts.runtime.close()
+
+    def test_governance_confirmation_is_support_tool_not_a_duplicate_player_intent(self):
+        class AmbiguousRisk:
+            def assess(self, pos, block_type, context, *, bot_placements=None):
+                return StructureRiskAssessment(
+                    pos=pos,
+                    block_type=block_type,
+                    level=StructureRiskLevel.AMBIGUOUS,
+                    score=0.4,
+                    complete=True,
+                    sampled_cells=63,
+                    signals=("local_axis_symmetry",),
+                )
+
+        body = _body()
+        policy = GovernancePolicy(
+            structure_risk_assessor=AmbiguousRisk(),
+            require_structure_assessment=True,
+            bot_name="Bot1",
+        )
+        parts = build_phase1_agent_runtime(
+            body=body,
+            goal_text="collect stone",
+            model_provider=None,
+            config=Phase1RuntimeConfig(
+                natural_region=Region("test", (-64, -64, -64), (64, 320, 64)),
+                governance_policy=policy,
+            ),
+        )
+        try:
+            decision = policy.can_break(
+                (0, 64, 0),
+                "stone",
+                "direct",
+                bot="Bot1",
+            )
+            challenge_id = decision.details["governance_confirmation"]["challenge_id"]
+            confirmation = parts.registry.get("confirm_governance_scope").callable(
+                {
+                    "challenge_id": challenge_id,
+                    "purpose": "collect natural stone for the active goal",
+                }
+            )
+            allowed = policy.can_break((1, 64, 0), "stone", "direct", bot="Bot1")
+
+            self.assertTrue(confirmation.success)
+            self.assertEqual(confirmation.reason, "governance_scope_confirmed")
+            self.assertTrue(allowed.allowed)
+            self.assertEqual(allowed.reason, "allowed_governance_scope")
+            self.assertNotIn(
+                "body:confirm_governance_scope",
+                {binding.intent for binding in parts.registry.canonical_bindings()},
+            )
+            manifest = {row["name"]: row for row in tool_manifest(parts.registry)}
+            self.assertEqual(manifest["confirm_governance_scope"]["source"], "governance.policy")
+            self.assertFalse(manifest["confirm_governance_scope"]["body_mutating"])
         finally:
             parts.runtime.close()
 
@@ -278,6 +337,8 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         self.assertIn("Approach one usable block", approach)
         self.assertIn("does not mine", approach)
         self.assertIn("generic spatial travel", move)
+        self.assertIn("never invent a coordinate", move)
+        self.assertIn("go_to_surface", move)
         self.assertIn("does not prove line of sight", move)
         self.assertIn("one already selected exact block", mine)
         self.assertIn("does not discover or choose alternative", mine)

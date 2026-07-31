@@ -26,13 +26,20 @@ exhausted without a materially different strategy.
 ## Method
 
 1. Read current task context and authoritative Body state. Choose target classes
-   that answer the active objective, grouping compatible block and entity targets
-   into one `explore_for` call instead of rewalking the same area. Use supported
-   groups such as `#logs` and `#flowers` when any family member satisfies the
-   objective; use exact block names only when the exact species is required.
+   from all compatible unresolved objectives, not only the first serialized plan
+   step, and group those block and entity targets into one `explore_for` call
+   instead of rewalking the same area. Do not spend a second frontier budget on
+   one non-gating target while other useful targets could be observed along the
+   same route. Use supported groups such as `#logs` and `#flowers` when any family
+   member satisfies the objective; use exact block names only when the exact
+   species is required.
 2. Set finite distance and region budgets. Ask for target predicates, never
-   invent reconnaissance coordinates or steer movement step by step.
-3. On `found`, use the returned block positions or entity identities to choose a
+   invent reconnaissance coordinates or steer movement step by step. For
+   ordinary resource or task progress, omit `return_policy` or use
+   `first_match`: act as soon as one requested target is seen, and retain the
+   returned cursor for the remaining search. Use `region_budget` only when an
+   explicit area survey is itself the objective.
+3. On `found`, retain the resume cursor, then use the returned block positions or entity identities to choose a
    governed material operation. For a concrete block position, prefer
    `mine_block_collect(pos=...)` (and use `engage_entity` for a concrete entity);
    `collect_resource` is a fresh local candidate transaction and does not consume
@@ -40,7 +47,9 @@ exhausted without a materially different strategy.
    of that material objective.
 4. On `budget_exhausted`, retain the resume cursor and coverage evidence. Continue
    only when the active durable task, checkpoint budget, and new evidence justify
-   another model-authored commitment.
+   another model-authored commitment. Before extending the same sparse target,
+   either add compatible outstanding targets to the request or switch to a
+   capability-unlocking objective.
 5. On `mobility_blocked`, `unloaded_boundary`, interruption, or death, adapt from
    the typed cause and fresh state. Do not replay the same frontier request as if
    wording changes created new evidence.

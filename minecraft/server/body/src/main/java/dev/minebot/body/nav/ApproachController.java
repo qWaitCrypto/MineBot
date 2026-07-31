@@ -41,6 +41,7 @@ public final class ApproachController {
     private final NavigateExecutor.EventSink events;
     private final int replanLimit;
     private final double finalWaypointReachDistance;
+    private final boolean directReturnRequired;
 
     private Phase phase = Phase.PLANNING;
     private AStarPathfinder pathfinder;
@@ -72,7 +73,31 @@ public final class ApproachController {
             controls,
             events,
             replanLimit,
-            PathFollower.WAYPOINT_REACH_DISTANCE
+            PathFollower.WAYPOINT_REACH_DISTANCE,
+            false
+        );
+    }
+
+    public ApproachController(
+        String bot,
+        String actionId,
+        Goal goal,
+        WorldView world,
+        MovementControls controls,
+        NavigateExecutor.EventSink events,
+        int replanLimit,
+        boolean directReturnRequired
+    ) {
+        this(
+            bot,
+            actionId,
+            goal,
+            world,
+            controls,
+            events,
+            replanLimit,
+            PathFollower.WAYPOINT_REACH_DISTANCE,
+            directReturnRequired
         );
     }
 
@@ -86,6 +111,30 @@ public final class ApproachController {
         int replanLimit,
         double finalWaypointReachDistance
     ) {
+        this(
+            bot,
+            actionId,
+            goal,
+            world,
+            controls,
+            events,
+            replanLimit,
+            finalWaypointReachDistance,
+            false
+        );
+    }
+
+    public ApproachController(
+        String bot,
+        String actionId,
+        Goal goal,
+        WorldView world,
+        MovementControls controls,
+        NavigateExecutor.EventSink events,
+        int replanLimit,
+        double finalWaypointReachDistance,
+        boolean directReturnRequired
+    ) {
         this.bot = bot;
         this.actionId = actionId;
         this.goal = goal;
@@ -97,6 +146,7 @@ public final class ApproachController {
             finalWaypointReachDistance,
             goal.finalReachDistanceLimit()
         );
+        this.directReturnRequired = directReturnRequired;
     }
 
     public int replans() {
@@ -135,7 +185,12 @@ public final class ApproachController {
         maintainPlanningPosture(px, py, pz);
         if (pathfinder == null) {
             pathfinder = new AStarPathfinder(
-                world, goal, (int) Math.floor(px), (int) Math.floor(py), (int) Math.floor(pz)
+                world,
+                goal,
+                (int) Math.floor(px),
+                (int) Math.floor(py),
+                (int) Math.floor(pz),
+                directReturnRequired
             );
         }
         AStarPathfinder.Result result = pathfinder.step(NavigateExecutor.NODES_PER_TICK);

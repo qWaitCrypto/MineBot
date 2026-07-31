@@ -878,6 +878,9 @@ class JavaBody:
             "success": outcome.success,
             "stopped_reason": outcome.reason,
         })
+        terminal_delivery = dict(outcome.metrics or {}).get("terminal_delivery")
+        if isinstance(terminal_delivery, dict):
+            data["terminal_delivery"] = dict(terminal_delivery)
         self._action_terminals[action.id] = Event(
             seq=terminal_event.seq if terminal_event is not None else 0,
             tick=terminal_event.tick if terminal_event is not None else 0,

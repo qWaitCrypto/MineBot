@@ -4,9 +4,10 @@ import unittest
 import httpx
 from agents import ModelRetryAdvice, ModelRetryNormalizedError, RetryDecision, RetryPolicyContext
 from agents.run_internal.model_retry import stream_response_with_retry
-from openai import APIError
+from openai import APIError, RateLimitError
 
 from minebot.app.config import AppConfigError, provider_registry_from_env
+from minebot.app.model_provider import is_retryable_model_error
 
 
 class AgentConfigTests(unittest.TestCase):
@@ -60,7 +61,36 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(rows[0]["base_url_host"], "https://maas-openapi.wanjiedata.com")
         self.assertEqual(rows[0]["api_key_env"], "ANTHROPIC_AUTH_TOKEN")
         self.assertEqual(rows[0]["model_retry"]["max_retries"], 2)
+        self.assertEqual(rows[0]["model_retry"]["client_max_retries"], 0)
+        self.assertEqual(rows[0]["model_retry"]["request_timeout_s"], 120.0)
         self.assertNotIn("secret-token-value", repr(rows))
+
+    def test_provider_configures_one_retry_layer_and_bounded_request_timeout(self):
+        provider = provider_registry_from_env(
+            {
+                "MINEBOT_LLM_MODEL": "gpt-5.6-luna",
+                "MINEBOT_LLM_KIND": "openai_responses",
+                "MINEBOT_LLM_API_KEY": "provider-key",
+                "MINEBOT_LLM_REQUEST_TIMEOUT_S": "45",
+            }
+        )
+
+        provider.resolve("primary")
+        client = provider._clients[0]
+        self.assertEqual(client.max_retries, 0)
+        self.assertEqual(client.timeout, 45.0)
+        asyncio.run(provider.aclose())
+
+    def test_provider_rejects_invalid_request_timeout(self):
+        for value in ("soon", "9", "601"):
+            with self.subTest(value=value), self.assertRaises(AppConfigError):
+                provider_registry_from_env(
+                    {
+                        "MINEBOT_LLM_MODEL": "gpt-5.6-luna",
+                        "MINEBOT_LLM_API_KEY": "provider-key",
+                        "MINEBOT_LLM_REQUEST_TIMEOUT_S": value,
+                    }
+                )
 
     def test_provider_retries_explicit_overload_but_honours_unsafe_veto(self):
         provider = provider_registry_from_env(
@@ -139,6 +169,43 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(attempts, 2)
         self.assertEqual(rewinds, 1)
 
+    def test_stream_retry_honours_provider_retry_directive(self):
+        provider = provider_registry_from_env(
+            {
+                "MINEBOT_LLM_MODEL": "gpt-5.6-luna",
+                "MINEBOT_LLM_KIND": "openai_responses",
+                "MINEBOT_LLM_API_KEY": "provider-key",
+            }
+        )
+        retry = provider.model_settings_for("primary").retry
+        attempts = 0
+
+        def get_stream():
+            async def stream():
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise _provider_retry_directive_error()
+                yield {"type": "response.created"}
+
+            return stream()
+
+        async def run():
+            return [
+                event
+                async for event in stream_response_with_retry(
+                    get_stream=get_stream,
+                    rewind=lambda: _noop(),
+                    retry_settings=retry,
+                    get_retry_advice=lambda _request: None,
+                    previous_response_id=None,
+                    conversation_id=None,
+                )
+            ]
+
+        self.assertEqual(asyncio.run(run()), [{"type": "response.created"}])
+        self.assertEqual(attempts, 2)
+
     def test_stream_retry_does_not_replay_after_model_output(self):
         provider = provider_registry_from_env(
             {
@@ -179,6 +246,98 @@ class AgentConfigTests(unittest.TestCase):
             asyncio.run(run())
         self.assertEqual(attempts, 1)
         self.assertEqual(rewinds, 0)
+
+    def test_stream_retry_does_not_replay_insufficient_quota(self):
+        provider = provider_registry_from_env(
+            {
+                "MINEBOT_LLM_MODEL": "gpt-5.6-luna",
+                "MINEBOT_LLM_KIND": "openai_responses",
+                "MINEBOT_LLM_API_KEY": "provider-key",
+            }
+        )
+        model = provider.resolve("primary")
+        retry = provider.model_settings_for("primary").retry
+        attempts = 0
+        rewinds = 0
+
+        def get_stream():
+            async def stream():
+                nonlocal attempts
+                attempts += 1
+                raise _rate_limit_error("insufficient_quota")
+                yield
+
+            return stream()
+
+        async def rewind():
+            nonlocal rewinds
+            rewinds += 1
+
+        async def run():
+            async for _event in stream_response_with_retry(
+                get_stream=get_stream,
+                rewind=rewind,
+                retry_settings=retry,
+                get_retry_advice=model.get_retry_advice,
+                previous_response_id=None,
+                conversation_id=None,
+            ):
+                pass
+
+        try:
+            with self.assertRaises(RateLimitError):
+                asyncio.run(run())
+            self.assertEqual(attempts, 1)
+            self.assertEqual(rewinds, 0)
+            self.assertFalse(is_retryable_model_error(_rate_limit_error("insufficient_quota")))
+        finally:
+            asyncio.run(provider.aclose())
+
+    def test_typed_rate_limit_and_retry_after_remain_retryable(self):
+        provider = provider_registry_from_env(
+            {
+                "MINEBOT_LLM_MODEL": "gpt-5.6-luna",
+                "MINEBOT_LLM_KIND": "openai_responses",
+                "MINEBOT_LLM_API_KEY": "provider-key",
+            }
+        )
+        model = provider.resolve("primary")
+        retry = provider.model_settings_for("primary").retry
+        attempts = 0
+
+        def get_stream():
+            async def stream():
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise _rate_limit_error("rate_limit_exceeded", retry_after="0")
+                yield {"type": "response.created"}
+
+            return stream()
+
+        async def run():
+            return [
+                event
+                async for event in stream_response_with_retry(
+                    get_stream=get_stream,
+                    rewind=lambda: _noop(),
+                    retry_settings=retry,
+                    get_retry_advice=model.get_retry_advice,
+                    previous_response_id=None,
+                    conversation_id=None,
+                )
+            ]
+
+        try:
+            self.assertEqual(asyncio.run(run()), [{"type": "response.created"}])
+            self.assertEqual(attempts, 2)
+            self.assertTrue(
+                is_retryable_model_error(
+                    _rate_limit_error("rate_limit_exceeded", retry_after="0")
+                )
+            )
+        finally:
+            asyncio.run(provider.aclose())
 
     def test_provider_config_maps_responses_reasoning_effort(self):
         provider = provider_registry_from_env(
@@ -222,6 +381,40 @@ def _overload_error() -> APIError:
         request=httpx.Request("POST", "https://provider.example/v1/responses"),
         body=None,
     )
+
+
+def _provider_retry_directive_error() -> APIError:
+    return APIError(
+        "An error occurred while processing your request. You can retry your request.",
+        request=httpx.Request("POST", "https://provider.example/v1/responses"),
+        body=None,
+    )
+
+
+def _rate_limit_error(code: str, *, retry_after: str | None = None) -> RateLimitError:
+    body = {
+        "error": {
+            "message": (
+                "You exceeded your current quota"
+                if code == "insufficient_quota"
+                else "Rate limit reached"
+            ),
+            "type": code,
+            "code": code,
+        }
+    }
+    headers = {} if retry_after is None else {"retry-after": retry_after}
+    response = httpx.Response(
+        429,
+        request=httpx.Request("POST", "https://provider.example/v1/responses"),
+        headers=headers,
+        json=body,
+    )
+    return RateLimitError("Error code: 429", response=response, body=body)
+
+
+async def _noop() -> None:
+    return None
 
 
 if __name__ == "__main__":

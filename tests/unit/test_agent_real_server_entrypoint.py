@@ -1175,6 +1175,28 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(final.status, "quit")
         self.assertEqual(session.step_count, 2)
 
+    def test_interactive_loop_returns_immediately_after_failed_step(self):
+        session = ReplacedGoalSession(
+            steps=[
+                SessionStep("failed", LifecycleState.IDLE, "runtime_error:RateLimitError"),
+                SessionStep("completed_turn", LifecycleState.ACTIVE),
+            ],
+            goals=["collect 64 logs"],
+        )
+
+        final = asyncio.run(
+            _run_interactive_loop(
+                session,
+                fallback_goal="collect 64 logs",
+                body=InventoryBody({}),
+                max_steps=10,
+            )
+        )
+
+        self.assertEqual(final.status, "failed")
+        self.assertEqual(final.message, "runtime_error:RateLimitError")
+        self.assertEqual(session.step_count, 1)
+
     def test_idle_body_state_sampler_emits_authoritative_state_with_rate_limit(self):
         trace = RuntimeTrace()
         body = HarnessBody()

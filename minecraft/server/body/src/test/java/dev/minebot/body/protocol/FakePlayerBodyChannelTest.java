@@ -1,5 +1,6 @@
 package dev.minebot.body.protocol;
 
+import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -24,5 +25,15 @@ final class FakePlayerBodyChannelTest {
             IllegalArgumentException.class,
             () -> FakePlayerBodyChannel.validateRequestedBlockCount(65)
         );
+    }
+
+    @Test
+    void helloEventSubscriptionIsExplicitAndBackwardCompatible() {
+        JsonObject legacy = new JsonObject();
+        assertEquals(true, FakePlayerBodyChannel.eventSubscriptionRequested(legacy));
+
+        JsonObject readOnly = new JsonObject();
+        readOnly.addProperty("subscribe_events", false);
+        assertEquals(false, FakePlayerBodyChannel.eventSubscriptionRequested(readOnly));
     }
 }

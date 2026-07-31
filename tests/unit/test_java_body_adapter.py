@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from minebot.contract.governance import Region
+from minebot.contract.governance import Region, StructureRiskAssessment, StructureRiskLevel
 from minebot.app.execution_lane import SerialExecutionLane
 from minebot.game.governance import GovernancePolicy
 from minebot.game.java_body_adapter import (
@@ -576,6 +576,8 @@ class FakeBodyServer:
             })
         elif self.scenario == "drop_before_terminal":
             self._pending_action = action
+        elif self.scenario == "silent_terminal":
+            self._pending_action = action
         elif self.scenario == "navigate_running":
             pass
         else:
@@ -775,6 +777,12 @@ class FakeBodyServer:
             "surface_route_replans": 1,
             "surface_candidate_count": 12,
             "surface_route_failure": "no_path",
+            "recovery_staging_attempts": 3,
+            "recovery_staging_candidate_total": 9,
+            "recovery_staging_best_headroom": 6,
+            "recovery_staging_frontier_y": 76,
+            "pillar_continuation_preflight_count": 2,
+            "pillar_continuation_preflight_allowed": 1,
             "placed": [
                 {"x": 1, "y": 64, "z": 0, "block_id": "minecraft:cobblestone"},
                 {"x": 1, "y": 65, "z": 0, "block_id": "minecraft:cobblestone"},
@@ -1344,6 +1352,51 @@ def test_collect_denied_by_governance_never_relabels_success() -> None:
     assert server.verdict_seen == [("mp-1", False)]
 
 
+def test_collect_complete_ambiguous_risk_returns_model_actionable_scope_confirmation() -> None:
+    class AmbiguousRisk:
+        def assess(self, pos, block_type, context, *, bot_placements=None):
+            return StructureRiskAssessment(
+                pos=pos,
+                block_type=block_type,
+                level=StructureRiskLevel.AMBIGUOUS,
+                score=0.4,
+                complete=True,
+                sampled_cells=63,
+                signals=("local_axis_symmetry",),
+            )
+
+    server = FakeBodyServer()
+    policy = GovernancePolicy(
+        natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))],
+        structure_risk_assessor=AmbiguousRisk(),
+        require_structure_assessment=True,
+        bot_name="Bot",
+    )
+    client = _client(server, GovernanceAnswerer(policy))
+    client.connect()
+
+    result = client.collect_block(["minecraft:oak_log"], radius=16)
+
+    assert result.success is False
+    assert result.reason == "governance_confirmation_required"
+    assert result.can_retry is True
+    confirmation = result.metrics["governance_confirmation"]
+    assert confirmation["challenge_id"].startswith("gc-")
+    assert confirmation["context"] == "collect"
+    verdict = next(request for request in server.requests if request.get("type") == "MUTATION_VERDICT")
+    assert verdict["reason"] == (
+        f"governance_confirmation_required:{confirmation['challenge_id']}"
+    )
+    confirmed = policy.confirm_scope(
+        confirmation["challenge_id"],
+        "collect the requested natural log",
+    )
+    retried = client.collect_block(["minecraft:oak_log"], radius=16)
+    assert confirmed["confirmed"] is True
+    assert retried.success is True
+    assert server.verdict_seen == [("mp-1", False), ("mp-1", True)]
+
+
 def test_ascend_maps_verified_surface_terminal() -> None:
     client = _client(FakeBodyServer())
 
@@ -1360,6 +1413,12 @@ def test_ascend_maps_verified_surface_terminal() -> None:
     assert result.metrics["surface_route_replans"] == 1
     assert result.metrics["surface_candidate_count"] == 12
     assert result.metrics["surface_route_failure"] == "no_path"
+    assert result.metrics["recovery_staging_attempts"] == 3
+    assert result.metrics["recovery_staging_candidate_total"] == 9
+    assert result.metrics["recovery_staging_best_headroom"] == 6
+    assert result.metrics["recovery_staging_frontier_y"] == 76
+    assert result.metrics["pillar_continuation_preflight_count"] == 2
+    assert result.metrics["pillar_continuation_preflight_allowed"] == 1
     assert len(result.metrics["placed"]) == 2
 
 
@@ -1461,6 +1520,29 @@ def test_transport_drop_reconciles_via_query_action() -> None:
     assert reconnects["n"] == 2
     reconnect_types = [request.get("type") for request in connections[1].requests]
     assert reconnect_types.index("RESUME_EVENTS") < reconnect_types.index("QUERY_ACTION")
+
+
+def test_silent_terminal_is_reconciled_without_waiting_for_wall_timeout() -> None:
+    server = FakeBodyServer()
+    server.scenario = "silent_terminal"
+    client = JavaBodyClient(
+        "Bot",
+        lambda: server,
+        action_wall_timeout_s=5.0,
+        recv_timeout_s=0.01,
+        terminal_query_interval_s=0.02,
+    )
+
+    started = time.monotonic()
+    result = client.navigate({"kind": "near", "x": 10, "y": 64, "z": 0, "range": 1.5})
+    elapsed = time.monotonic() - started
+
+    assert result.success is True
+    assert result.reason == "arrived"
+    assert elapsed < 0.5
+    assert result.metrics["terminal_delivery"]["source"] == "query"
+    assert result.metrics["terminal_delivery"]["query_count"] == 1
+    assert any(request["type"] == "QUERY_ACTION" for request in server.requests)
 
 
 def test_action_ids_do_not_collide_across_client_process_epochs() -> None:

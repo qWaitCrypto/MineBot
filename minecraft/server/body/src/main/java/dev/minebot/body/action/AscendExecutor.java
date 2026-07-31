@@ -9,7 +9,10 @@ import dev.minebot.body.nav.NavigateExecutor;
 import dev.minebot.body.nav.WorldView;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Return to a dry, supported surface. The executor first follows an ordinary
@@ -24,33 +27,13 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     public static final int STEP_TIMEOUT_TICKS = 80;
     public static final int PILLAR_TIMEOUT_TICKS = 100;
     public static final int RECOVERY_STAGING_RADIUS = 6;
+    public static final int RECOVERY_STAGING_HEADROOM_SCAN = 8;
     private static final int JUMP_INTERVAL_TICKS = 5;
     private static final int LANDING_STABLE_TICKS = 3;
     private static final int CENTER_STABLE_TICKS = 2;
     private static final double CENTER_TOLERANCE = 0.10;
     private static final double PILLAR_JUMP_MIN_GAIN = 0.15;
     private static final int[] RECOVERY_STAGING_Y_OFFSETS = {0, 1, -1, 2, -2};
-    private static final List<String> PILLAR_BLOCKS = List.of(
-        "minecraft:cobblestone",
-        "minecraft:cobbled_deepslate",
-        "minecraft:deepslate",
-        "minecraft:stone",
-        "minecraft:dirt",
-        "minecraft:netherrack",
-        "minecraft:oak_planks",
-        "minecraft:spruce_planks",
-        "minecraft:birch_planks",
-        "minecraft:jungle_planks",
-        "minecraft:acacia_planks",
-        "minecraft:dark_oak_planks",
-        "minecraft:mangrove_planks",
-        "minecraft:cherry_planks",
-        "minecraft:pale_oak_planks",
-        "minecraft:bamboo_planks",
-        "minecraft:crimson_planks",
-        "minecraft:warped_planks"
-    );
-
     /** Live block truth; null id when the position is unloaded. */
     public interface BlockReader {
         String blockIdAt(int x, int y, int z);
@@ -73,7 +56,9 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
 
     /** Inventory selection and public /player controls needed by pillar-up. */
     public interface PillarAccess {
-        ScaffoldSelection selectScaffold(String bot, List<String> candidates);
+        ScaffoldSelection selectScaffold(String bot);
+
+        boolean selectBreakTool(String bot, String blockId);
 
         String selectedItemId();
 
@@ -106,7 +91,17 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
 
     private enum PendingMutation {
         BREAK,
+        PILLAR_CONTINUATION_PREFLIGHT,
         PILLAR_PLACE
+    }
+
+    private record RecoveryStagingCandidate(Goal.Stand goal, int openHeadroom) {
+        int frontierY() {
+            return goal.y() + openHeadroom;
+        }
+    }
+
+    private record BlockPosition(int x, int y, int z) {
     }
 
     private static final int[][] DIRECTIONS = {
@@ -137,6 +132,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     private int breakY;
     private int breakZ;
     private String breakBlock;
+    private String breakTool;
     private int targetX;
     private int targetFeetY;
     private int targetZ;
@@ -153,9 +149,12 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     private int ascendSteps;
     private int breakSteps;
     private int pillarSteps;
+    private int pillarContinuationPreflightCount;
+    private int pillarContinuationPreflightAllowed;
     private int pillarCountBefore;
     private String pillarBlock;
     private String pillarFallbackReason;
+    private String lastDeniedBreakReason;
     private ApproachController surfaceApproach;
     private ApproachController recoveryStagingApproach;
     private boolean surfaceRouteAttempted;
@@ -165,10 +164,17 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     private String surfaceRouteFailure;
     private boolean recoveryStagingAttempted;
     private boolean recoveryStagingUsed;
+    private int recoveryStagingAttempts;
     private int recoveryStagingCandidateCount;
+    private int recoveryStagingCandidateTotal;
+    private int recoveryStagingBestHeadroom;
+    private int recoveryStagingFrontierY = Integer.MIN_VALUE;
     private int recoveryStagingReplans;
     private String recoveryStagingFailure;
     private String recoveryStagingSourceFailure;
+    private List<Goal.Stand> activeRecoveryStagingGoals = List.of();
+    private final Set<String> visitedRecoveryStagingGoals = new HashSet<>();
+    private final Set<BlockPosition> deniedBreakPositions = new HashSet<>();
     private boolean cancelPending;
     private final JsonArray brokenLedger = new JsonArray();
     private final JsonArray placedLedger = new JsonArray();
@@ -302,6 +308,9 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
             if (isPassable(support)) {
                 continue;
             }
+            if (stairClearanceContainsDeniedBreak(x, feetY, z, candidateX, candidateZ)) {
+                continue;
+            }
             targetX = candidateX;
             targetFeetY = feetY + 1;
             targetZ = candidateZ;
@@ -384,6 +393,14 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                 clearIndex++;
                 continue;
             }
+            if (deniedBreakPositions.contains(new BlockPosition(breakX, breakY, breakZ))) {
+                if (mode == AscentMode.STAIR) {
+                    retryAfterDeniedStair(serverTick);
+                } else {
+                    stageAfterDeniedPillarClearance(serverTick);
+                }
+                return;
+            }
             MutationGate.Proposal proposal = gate.propose(
                 bot, actionId, "break", breakX, breakY, breakZ, breakBlock, "recovery", serverTick
             );
@@ -401,7 +418,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
             return;
         }
         if (mode == AscentMode.PILLAR) {
-            beginPillarCentering(serverTick);
+            preflightPillarContinuation(serverTick);
         } else {
             beginMove(serverTick);
         }
@@ -415,6 +432,11 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
             case ALLOWED -> {
                 gate.discard(proposalId);
                 proposalId = null;
+                if (pendingMutation == PendingMutation.PILLAR_CONTINUATION_PREFLIGHT) {
+                    pillarContinuationPreflightAllowed++;
+                    beginPillarCentering(serverTick);
+                    return;
+                }
                 if (pendingMutation == PendingMutation.PILLAR_PLACE) {
                     String invalid = pillarPrecondition();
                     if (invalid != null) {
@@ -425,6 +447,11 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                     return;
                 }
                 movement.lookAt(bot, breakX + 0.5, breakY + 0.5, breakZ + 0.5);
+                if (!pillar.selectBreakTool(bot, breakBlock)) {
+                    breakFailed(serverTick, "break_tool_selection_failed");
+                    return;
+                }
+                breakTool = pillar.selectedItemId();
                 ExactBlockBreaker.Outcome outcome = blockBreaker.begin(
                     bot, breakX, breakY, breakZ, breakBlock, serverTick
                 );
@@ -441,8 +468,41 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                     : "governance_verdict_timeout";
                 gate.discard(proposalId);
                 proposalId = null;
-                if (pendingMutation == PendingMutation.BREAK && mode == AscentMode.STAIR) {
-                    fallbackFromStair(serverTick, reason);
+                if (state == MutationGate.State.DENIED) {
+                    lastDeniedBreakReason = reason;
+                    rememberDeniedBreakPosition();
+                }
+                if (pendingMutation == PendingMutation.PILLAR_CONTINUATION_PREFLIGHT) {
+                    NavigateExecutor.PositionSource.Position position = positions.position(bot);
+                    if (state == MutationGate.State.DENIED
+                        && position != null
+                        && canRetryRecoveryStaging()) {
+                        beginRecoveryStaging(serverTick, position, reason);
+                    } else {
+                        finish(
+                            serverTick,
+                            state == MutationGate.State.DENIED
+                                ? ActionRuntime.CLASS_FAILED
+                                : ActionRuntime.CLASS_TIMEOUT,
+                            position == null ? "body_missing" : reason
+                        );
+                    }
+                } else if (pendingMutation == PendingMutation.BREAK && mode == AscentMode.STAIR) {
+                    if (state == MutationGate.State.DENIED) {
+                        retryAfterDeniedStair(serverTick);
+                    } else {
+                        fallbackFromStair(serverTick, reason);
+                    }
+                } else if (pendingMutation == PendingMutation.BREAK
+                    && mode == AscentMode.PILLAR
+                    && state == MutationGate.State.DENIED
+                    && canRetryRecoveryStaging()) {
+                    NavigateExecutor.PositionSource.Position position = positions.position(bot);
+                    if (position == null) {
+                        finish(serverTick, ActionRuntime.CLASS_FAILED, "body_missing");
+                    } else {
+                        beginRecoveryStaging(serverTick, position, reason);
+                    }
                 } else {
                     finish(
                         serverTick,
@@ -470,6 +530,9 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
             broken.addProperty("y", breakY);
             broken.addProperty("z", breakZ);
             broken.addProperty("block_id", breakBlock);
+            if (breakTool != null) {
+                broken.addProperty("tool_id", breakTool);
+            }
             brokenLedger.add(broken);
             breakSteps++;
             clearIndex++;
@@ -496,6 +559,60 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         }
     }
 
+    private void preflightPillarContinuation(int serverTick) {
+        int continuationY = originFeetY + 3;
+        String continuation = blocks.blockIdAt(originX, continuationY, originZ);
+        if (continuation == null) {
+            NavigateExecutor.PositionSource.Position position = positions.position(bot);
+            if (position != null && canRetryRecoveryStaging()) {
+                beginRecoveryStaging(serverTick, position, "pillar_continuation_unloaded");
+            } else {
+                finish(serverTick, ActionRuntime.CLASS_FAILED, "pillar_continuation_unloaded");
+            }
+            return;
+        }
+        if (hazards.isHazard(continuation)) {
+            NavigateExecutor.PositionSource.Position position = positions.position(bot);
+            if (position != null && canRetryRecoveryStaging()) {
+                beginRecoveryStaging(serverTick, position, "hazard_in_pillar_continuation");
+            } else {
+                finish(serverTick, ActionRuntime.CLASS_UNSAFE, "hazard_in_pillar_continuation");
+            }
+            return;
+        }
+        if (isPassable(continuation)) {
+            beginPillarCentering(serverTick);
+            return;
+        }
+        if (deniedBreakPositions.contains(new BlockPosition(originX, continuationY, originZ))) {
+            stageAfterDeniedPillarClearance(serverTick);
+            return;
+        }
+        MutationGate.Proposal proposal = gate.propose(
+            bot,
+            actionId,
+            "break",
+            originX,
+            continuationY,
+            originZ,
+            continuation,
+            "recovery",
+            serverTick
+        );
+        proposalId = proposal.proposalId();
+        pendingMutation = PendingMutation.PILLAR_CONTINUATION_PREFLIGHT;
+        pillarContinuationPreflightCount++;
+        proposals.send(proposal);
+        JsonObject data = new JsonObject();
+        data.addProperty("proposal_id", proposalId);
+        data.addProperty("block_id", continuation);
+        data.addProperty("x", originX);
+        data.addProperty("y", continuationY);
+        data.addProperty("z", originZ);
+        events.emit(bot, serverTick, "ascent_continuation_preflight_proposed", actionId, data);
+        phase = Phase.AWAITING_VERDICT;
+    }
+
     private void fallbackFromStair(int serverTick, String reason) {
         blockBreaker.abort(bot);
         hygiene.clearAll(bot);
@@ -505,6 +622,58 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
             return;
         }
         beginPillar(serverTick, position, reason);
+    }
+
+    private void retryAfterDeniedStair(int serverTick) {
+        blockBreaker.abort(bot);
+        hygiene.clearAll(bot);
+        NavigateExecutor.PositionSource.Position position = positions.position(bot);
+        if (position == null) {
+            finish(serverTick, ActionRuntime.CLASS_FAILED, "body_missing");
+            return;
+        }
+        phase = Phase.EVALUATE;
+        evaluate(serverTick, position);
+    }
+
+    private void stageAfterDeniedPillarClearance(int serverTick) {
+        NavigateExecutor.PositionSource.Position position = positions.position(bot);
+        if (position == null) {
+            finish(serverTick, ActionRuntime.CLASS_FAILED, "body_missing");
+            return;
+        }
+        String reason = lastDeniedBreakReason == null
+            ? "governance_denied:pillar_clearance"
+            : lastDeniedBreakReason;
+        if (canRetryRecoveryStaging()) {
+            beginRecoveryStaging(serverTick, position, reason);
+        } else {
+            finish(serverTick, ActionRuntime.CLASS_FAILED, reason);
+        }
+    }
+
+    private void rememberDeniedBreakPosition() {
+        if (pendingMutation == PendingMutation.PILLAR_CONTINUATION_PREFLIGHT) {
+            deniedBreakPositions.add(new BlockPosition(originX, originFeetY + 3, originZ));
+        } else if (pendingMutation == PendingMutation.BREAK) {
+            deniedBreakPositions.add(new BlockPosition(breakX, breakY, breakZ));
+        }
+    }
+
+    private boolean stairClearanceContainsDeniedBreak(
+        int originX,
+        int originFeetY,
+        int originZ,
+        int candidateX,
+        int candidateZ
+    ) {
+        return deniedBreakPositions.contains(new BlockPosition(originX, originFeetY + 2, originZ))
+            || deniedBreakPositions.contains(new BlockPosition(
+                candidateX, originFeetY + 1, candidateZ
+            ))
+            || deniedBreakPositions.contains(new BlockPosition(
+                candidateX, originFeetY + 2, candidateZ
+            ));
     }
 
     private void beginPillar(
@@ -517,20 +686,24 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         int z = position.blockZ();
         String columnFailure = pillarColumnFailure(x, feetY, z);
         if (columnFailure != null) {
-            if (!recoveryStagingAttempted && canStageFrom(columnFailure)) {
-                beginRecoveryStaging(serverTick, position, columnFailure);
+            String effectiveFailure = columnFailure.equals("pillar_clearance_governance_denied")
+                && lastDeniedBreakReason != null
+                ? lastDeniedBreakReason
+                : columnFailure;
+            if (canRetryRecoveryStaging() && canStageFrom(columnFailure)) {
+                beginRecoveryStaging(serverTick, position, effectiveFailure);
             } else {
                 finish(
                     serverTick,
-                    columnFailure.startsWith("hazard_")
+                    effectiveFailure.startsWith("hazard_")
                         ? ActionRuntime.CLASS_UNSAFE
                         : ActionRuntime.CLASS_FAILED,
-                    columnFailure
+                    effectiveFailure
                 );
             }
             return;
         }
-        ScaffoldSelection selection = pillar.selectScaffold(bot, PILLAR_BLOCKS);
+        ScaffoldSelection selection = pillar.selectScaffold(bot);
         if (!selection.success() || selection.blockId() == null || selection.count() <= 0) {
             pillarFallbackReason = fallbackReason;
             finish(
@@ -570,13 +743,19 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         if (!isPassable(feet)) {
             return "pillar_target_occupied";
         }
+        if (deniedBreakPositions.contains(new BlockPosition(x, feetY + 1, z))
+            || deniedBreakPositions.contains(new BlockPosition(x, feetY + 2, z))
+            || deniedBreakPositions.contains(new BlockPosition(x, feetY + 3, z))) {
+            return "pillar_clearance_governance_denied";
+        }
         return null;
     }
 
     private static boolean canStageFrom(String columnFailure) {
         return columnFailure.equals("hazard_in_pillar_column")
             || columnFailure.equals("pillar_support_missing")
-            || columnFailure.equals("pillar_target_occupied");
+            || columnFailure.equals("pillar_target_occupied")
+            || columnFailure.equals("pillar_clearance_governance_denied");
     }
 
     private void beginRecoveryStaging(
@@ -585,9 +764,22 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         String sourceFailure
     ) {
         recoveryStagingAttempted = true;
+        recoveryStagingAttempts++;
         recoveryStagingSourceFailure = sourceFailure;
+        recoveryStagingFailure = null;
+        recoveryStagingFrontierY = Math.max(
+            recoveryStagingFrontierY,
+            position.feetBlockY() + openPillarHeadroom(
+                position.blockX(), position.feetBlockY(), position.blockZ()
+            )
+        );
         List<Goal> candidates = findRecoveryStagingGoals(position);
         recoveryStagingCandidateCount = candidates.size();
+        recoveryStagingCandidateTotal += candidates.size();
+        activeRecoveryStagingGoals = candidates.stream()
+            .filter(Goal.Stand.class::isInstance)
+            .map(Goal.Stand.class::cast)
+            .toList();
         if (candidates.isEmpty()) {
             recoveryStagingFailure = "safe_column_unavailable";
             finish(
@@ -618,12 +810,11 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     private List<Goal> findRecoveryStagingGoals(
         NavigateExecutor.PositionSource.Position position
     ) {
-        List<Goal> candidates = new ArrayList<>();
+        List<RecoveryStagingCandidate> candidates = new ArrayList<>();
         int baseX = position.blockX();
         int baseY = position.feetBlockY();
         int baseZ = position.blockZ();
-        for (int radius = 1; radius <= RECOVERY_STAGING_RADIUS
-            && candidates.size() < Goal.MAX_COMPOSITE_MEMBERS; radius++) {
+        for (int radius = 1; radius <= RECOVERY_STAGING_RADIUS; radius++) {
             for (int delta = -radius; delta <= radius; delta++) {
                 addRecoveryStagingColumn(candidates, baseX + radius, baseY, baseZ + delta);
                 addRecoveryStagingColumn(candidates, baseX - radius, baseY, baseZ + delta);
@@ -633,27 +824,84 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                 addRecoveryStagingColumn(candidates, baseX + delta, baseY, baseZ - radius);
             }
         }
-        return candidates;
+        candidates.sort(
+            Comparator.comparingInt(RecoveryStagingCandidate::frontierY).reversed()
+                .thenComparing(Comparator.comparingInt(
+                    RecoveryStagingCandidate::openHeadroom
+                ).reversed())
+                .thenComparingDouble(candidate -> candidate.goal().heuristic(baseX, baseY, baseZ))
+                .thenComparingInt(candidate -> candidate.goal().x())
+                .thenComparingInt(candidate -> candidate.goal().y())
+                .thenComparingInt(candidate -> candidate.goal().z())
+        );
+        recoveryStagingBestHeadroom = candidates.isEmpty() ? 0 : candidates.getFirst().openHeadroom();
+        int bestFrontierY = candidates.isEmpty()
+            ? Integer.MIN_VALUE
+            : candidates.getFirst().frontierY();
+        return candidates.stream()
+            .filter(candidate -> candidate.frontierY() == bestFrontierY)
+            .limit(Goal.MAX_COMPOSITE_MEMBERS)
+            .map(candidate -> (Goal) candidate.goal())
+            .toList();
     }
 
     private void addRecoveryStagingColumn(
-        List<Goal> candidates,
+        List<RecoveryStagingCandidate> candidates,
         int x,
         int baseY,
         int z
     ) {
-        if (candidates.size() >= Goal.MAX_COMPOSITE_MEMBERS) {
-            return;
-        }
+        RecoveryStagingCandidate best = null;
         for (int offset : RECOVERY_STAGING_Y_OFFSETS) {
             int y = baseY + offset;
             Goal.Stand stand = new Goal.Stand(x, y, z);
             if (pillarColumnFailure(x, y, z) == null
                 && stand.isSatisfied(surface.world(), x, y, z)) {
-                candidates.add(stand);
-                return;
+                int openHeadroom = openPillarHeadroom(x, y, z);
+                if (openHeadroom < 2) {
+                    continue;
+                }
+                RecoveryStagingCandidate candidate = new RecoveryStagingCandidate(
+                    stand,
+                    openHeadroom
+                );
+                if (candidate.frontierY() < recoveryStagingFrontierY
+                    || visitedRecoveryStagingGoals.contains(stagingGoalKey(stand))) {
+                    continue;
+                }
+                if (best == null
+                    || candidate.frontierY() > best.frontierY()
+                    || (candidate.frontierY() == best.frontierY()
+                        && candidate.openHeadroom() > best.openHeadroom())) {
+                    best = candidate;
+                }
             }
         }
+        if (best != null) {
+            candidates.add(best);
+        }
+    }
+
+    private static String stagingGoalKey(Goal.Stand goal) {
+        return goal.x() + "," + goal.y() + "," + goal.z();
+    }
+
+    private boolean canRetryRecoveryStaging() {
+        return elapsedTicks <= timeoutTicks
+            && ascendSteps < MAX_ASCEND_STEPS
+            && breakSteps < MAX_BREAK_STEPS;
+    }
+
+    private int openPillarHeadroom(int x, int feetY, int z) {
+        int clear = 0;
+        for (int offset = 1; offset <= RECOVERY_STAGING_HEADROOM_SCAN; offset++) {
+            String block = blocks.blockIdAt(x, feetY + offset, z);
+            if (block == null || hazards.isHazard(block) || !isPassable(block)) {
+                break;
+            }
+            clear++;
+        }
+        return clear;
     }
 
     private void recoveryStagingTick(
@@ -674,20 +922,57 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                 position.blockX(), position.feetBlockY(), position.blockZ()
             );
             if (columnFailure == null) {
+                int stagedFrontierY = position.feetBlockY() + openPillarHeadroom(
+                    position.blockX(), position.feetBlockY(), position.blockZ()
+                );
+                if (stagedFrontierY < recoveryStagingFrontierY) {
+                    recoveryStagingFailure = "frontier_regressed";
+                    finish(
+                        serverTick,
+                        ActionRuntime.CLASS_FAILED,
+                        "recovery_staging_failed:" + recoveryStagingFailure
+                    );
+                    return;
+                }
+                recoveryStagingFrontierY = stagedFrontierY;
+                visitedRecoveryStagingGoals.add(stagingGoalKey(new Goal.Stand(
+                    position.blockX(), position.feetBlockY(), position.blockZ()
+                )));
                 recoveryStagingUsed = true;
                 JsonObject data = new JsonObject();
                 data.addProperty("x", position.blockX());
                 data.addProperty("y", position.feetBlockY());
                 data.addProperty("z", position.blockZ());
                 data.addProperty("candidate_count", recoveryStagingCandidateCount);
+                data.addProperty("open_headroom", openPillarHeadroom(
+                    position.blockX(), position.feetBlockY(), position.blockZ()
+                ));
                 events.emit(bot, serverTick, "ascent_recovery_staged", actionId, data);
-                surfaceRouteAttempted = false;
-                phase = Phase.EVALUATE;
+                beginPillar(
+                    serverTick,
+                    position,
+                    recoveryStagingSourceFailure == null
+                        ? "recovery_staged"
+                        : recoveryStagingSourceFailure
+                );
                 return;
             }
             recoveryStagingFailure = "postcondition:" + columnFailure;
         } else {
             recoveryStagingFailure = outcome.reason();
+        }
+        for (Goal.Stand goal : activeRecoveryStagingGoals) {
+            visitedRecoveryStagingGoals.add(stagingGoalKey(goal));
+        }
+        if (canRetryRecoveryStaging()) {
+            beginRecoveryStaging(
+                serverTick,
+                position,
+                recoveryStagingSourceFailure == null
+                    ? "recovery_staging_retry"
+                    : recoveryStagingSourceFailure
+            );
+            return;
         }
         finish(
             serverTick,
@@ -700,6 +985,16 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     }
 
     private void beginPillarCentering(int serverTick) {
+        ScaffoldSelection selection = pillar.selectScaffold(bot);
+        if (!selection.success() || selection.blockId() == null || selection.count() <= 0) {
+            finish(
+                serverTick,
+                ActionRuntime.CLASS_FAILED,
+                selection.reason() == null ? "pillar_no_scaffold_available" : selection.reason()
+            );
+            return;
+        }
+        pillarBlock = selection.blockId();
         hygiene.clearAll(bot);
         phaseStartedTick = serverTick;
         centeringStableTicks = 0;
@@ -968,6 +1263,8 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         facts.addProperty("ascend_steps", ascendSteps);
         facts.addProperty("break_steps", breakSteps);
         facts.addProperty("pillar_steps", pillarSteps);
+        facts.addProperty("pillar_continuation_preflight_count", pillarContinuationPreflightCount);
+        facts.addProperty("pillar_continuation_preflight_allowed", pillarContinuationPreflightAllowed);
         facts.addProperty("elapsed_ticks", elapsedTicks);
         facts.addProperty("surface_route_attempted", surfaceRouteAttempted);
         facts.addProperty("surface_route_used", surfaceRouteUsed);
@@ -978,7 +1275,13 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         }
         facts.addProperty("recovery_staging_attempted", recoveryStagingAttempted);
         facts.addProperty("recovery_staging_used", recoveryStagingUsed);
+        facts.addProperty("recovery_staging_attempts", recoveryStagingAttempts);
         facts.addProperty("recovery_staging_candidate_count", recoveryStagingCandidateCount);
+        facts.addProperty("recovery_staging_candidate_total", recoveryStagingCandidateTotal);
+        facts.addProperty("recovery_staging_best_headroom", recoveryStagingBestHeadroom);
+        if (recoveryStagingFrontierY != Integer.MIN_VALUE) {
+            facts.addProperty("recovery_staging_frontier_y", recoveryStagingFrontierY);
+        }
         facts.addProperty("recovery_staging_replans", recoveryStagingReplans);
         if (recoveryStagingFailure != null) {
             facts.addProperty("recovery_staging_failure", recoveryStagingFailure);

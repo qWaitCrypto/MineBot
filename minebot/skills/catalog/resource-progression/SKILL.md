@@ -26,29 +26,35 @@ observations.
 ## Method
 
 1. Read the durable task and current authoritative inventory before planning.
-2. Query live recipe data for exact ingredients and station requirements. Do
-   not infer recipe counts from general knowledge or Wiki prose. If a recipe
-   ingredient group accepts interchangeable materials, keep that equivalence:
-   request `collect_resource(item="logs")` for any log/stem instead of picking
-   `oak_log` as a representative, then craft the concrete plank/item variant
-   matching the owned material. Use exact species only when the task or recipe
-   output truly requires that species.
-3. Check whether the target block requires a tool tier before breaking it.
-   Prefer `ensure_tool_for` when the missing prerequisite is itself a bounded
-   acquisition chain; use finer tools when the situation needs explicit control.
-4. For count-based acquisition, or when search candidates have not been proven
+2. Order a multi-objective plan by capability dependencies, not by the order
+   nouns appear in the goal. From empty or minimal inventory, acquire the
+   smallest reusable capability that unlocks later work before spending a full
+   frontier budget on an independent collectible. Keep independent visible
+   objectives opportunistic rather than making one of them a blocking first
+   step.
+3. For ordinary tool progression, choose the desired outcome and call
+   `ensure_tool_for` once. It owns live inventory and recipe reads, equivalent
+   material selection, prerequisite collection, crafting-table use, crafting,
+   and main-hand equipment. Do not pre-read every recipe or issue one model
+   call per plank, stick, table, or pickaxe. Use `read_recipe` and finer tools
+   only after a typed composition failure exposes a real strategic choice or
+   when the task explicitly requires manual control.
+4. Check whether the target block requires a tool tier before breaking it.
+   Pass either that resource or the desired pickaxe to `ensure_tool_for`; use
+   finer tools only when its returned facts require a different strategy.
+5. For count-based acquisition, or when search candidates have not been proven
    interactable, prefer `collect_resource`. It owns bounded candidate discovery,
    stand-point selection, navigation, governed mining, pickup, and authoritative
    inventory completion. Do not replace that transaction with a manual
    `search_for_block` -> `move_to` -> `mine_block_collect` chain.
-5. Use `mine_block_collect` only for one deliberately selected exact block.
+6. Use `mine_block_collect` only for one deliberately selected exact block.
    Use `get_to_block` for one block-approach objective. Generic `move_to` is
    coordinate travel and does not prove line of sight or block interaction
    readiness.
-6. Use `craft_item`, `smelt_item`, and `equip_item` as governed physical
-   transactions. The model chooses the sequence; each Body transaction owns
-   only its local HOW.
-7. Update the visible plan when prerequisites change. Checkpoint only after
+7. Use `craft_item`, `smelt_item`, and `equip_item` directly for isolated work
+   or typed recovery. For a routine prerequisite chain, the model chooses the
+   outcome while `ensure_tool_for` executes the deterministic sequence.
+8. Update the visible plan when prerequisites change. Checkpoint only after
    meaningful world progress or with a concrete wait or yield condition.
 
 ## Evidence Of Success

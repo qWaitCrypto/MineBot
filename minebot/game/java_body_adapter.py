@@ -53,8 +53,16 @@ class GovernanceAnswerer:
                 proposal.block_id,
                 context,
                 explicit_target=True,
+                bot=proposal.bot,
+                action_id=proposal.action_id,
             )
-            return decision.allowed, decision.reason
+            reason = decision.reason
+            confirmation = decision.details.get("governance_confirmation")
+            if reason == "governance_confirmation_required" and isinstance(confirmation, dict):
+                challenge_id = confirmation.get("challenge_id")
+                if isinstance(challenge_id, str) and challenge_id:
+                    reason = f"{reason}:{challenge_id}"
+            return decision.allowed, reason
         if proposal.kind in {"open", "interact"}:
             if proposal.context is None:
                 return False, "unsupported_interaction_context:None"
@@ -89,6 +97,9 @@ class GovernanceAnswerer:
     def observe_event(self, event: BotEvent) -> None:
         """Commit server-verified temporary placements to the shared ledger."""
 
+        if event.name in {"death", "respawned", "bodyMissing"}:
+            self._policy.invalidate_confirmation_state()
+
         purpose = {
             "ascent_pillar_verified": "pillar",
         }.get(event.name)
@@ -104,6 +115,12 @@ class GovernanceAnswerer:
         ):
             return
         self._policy.record_bot_placement(coordinates, block_id, purpose, event.bot)
+
+    def pending_confirmations(self, action_id: str) -> list[dict[str, object]]:
+        return self._policy.pending_confirmations(action_id=action_id)
+
+    def dismiss_action_confirmations(self, action_id: str) -> None:
+        self._policy.dismiss_action_confirmations(action_id)
 
 
 class DuplexTransport(Protocol):
@@ -182,6 +199,9 @@ class JavaBodyClient:
         action_wall_timeout_s: float = 90.0,
         recv_timeout_s: float = 2.0,
         survival_owner: bool | None = None,
+        subscribe_events: bool = True,
+        terminal_query_interval_s: float = 0.5,
+        terminal_delivery_grace_s: float = 5.0,
     ) -> None:
         self._bot = bot_name
         self._connect = connect
@@ -189,6 +209,9 @@ class JavaBodyClient:
         self._wall_timeout = action_wall_timeout_s
         self._recv_timeout = recv_timeout_s
         self._survival_owner = survival_owner
+        self._subscribe_events = bool(subscribe_events)
+        self._terminal_query_interval = max(0.05, float(terminal_query_interval_s))
+        self._terminal_delivery_grace = max(0.1, float(terminal_delivery_grace_s))
         self._transport: DuplexTransport | None = None
         self._protocol = JavaBodyProtocol()
         self._action_counter = 0
@@ -207,7 +230,7 @@ class JavaBodyClient:
             self._transport = self._connect()
             self._protocol = JavaBodyProtocol()
             self._request_times.clear()
-            hello = self._protocol.hello()
+            hello = self._protocol.hello(subscribe_events=self._subscribe_events)
             self._send(hello)
             self._await_response(
                 hello["type"],
@@ -299,6 +322,9 @@ class JavaBodyClient:
             action_wall_timeout_s=self._wall_timeout,
             recv_timeout_s=self._recv_timeout,
             survival_owner=self._survival_owner,
+            subscribe_events=False,
+            terminal_query_interval_s=self._terminal_query_interval,
+            terminal_delivery_grace_s=self._terminal_delivery_grace,
         )
         try:
             control.connect()
@@ -429,6 +455,7 @@ class JavaBodyClient:
         kind: str,
         terminals: dict[str, tuple[bool, str, bool]],
     ) -> ToolResult:
+        started = time.monotonic()
         self._last_events = []
         self._last_terminal = None
         try:
@@ -438,7 +465,7 @@ class JavaBodyClient:
                 request_id=request["request_id"],
             )
         except TransportClosed:
-            return self._reconcile_after_drop(action_id, kind, terminals)
+            return self._reconcile_after_drop(action_id, kind, terminals, started=started)
         if isinstance(ack, ErrorResponse):
             return ToolResult(
                 success=False,
@@ -448,15 +475,79 @@ class JavaBodyClient:
             )
         if ack.payload.get("state") not in ("accepted",):
             # Duplicate/running/terminal on submit: reconcile rather than guess.
-            return self._reconcile_after_drop(action_id, kind, terminals)
+            return self._reconcile_after_drop(action_id, kind, terminals, started=started)
         try:
-            terminal = self._await_terminal(action_id)
+            terminal, delivery = self._await_terminal(
+                action_id,
+                timeout_s=self._action_wait_timeout_s(request),
+                started=started,
+            )
         except TransportClosed:
-            return self._reconcile_after_drop(action_id, kind, terminals)
+            return self._reconcile_after_drop(action_id, kind, terminals, started=started)
         if terminal is None:
-            return ToolResult(success=False, reason=f"{kind}_no_terminal", can_retry=True)
+            return ToolResult(
+                success=False,
+                reason=f"{kind}_no_terminal",
+                can_retry=True,
+                metrics={"terminal_delivery": delivery},
+            )
         self._last_terminal = (action_id, dict(terminal))
-        return self._terminal_result(terminal, kind, terminals)
+        return self._with_governance_confirmation(
+            self._with_terminal_delivery(
+                self._terminal_result(terminal, kind, terminals),
+                delivery,
+            ),
+            action_id,
+        )
+
+    def _with_governance_confirmation(self, result: ToolResult, action_id: str) -> ToolResult:
+        if self._governance is None:
+            return result
+        if result.success:
+            self._governance.dismiss_action_confirmations(action_id)
+            return result
+        confirmations = self._governance.pending_confirmations(action_id)
+        if not confirmations:
+            return result
+        metrics = dict(result.metrics or {})
+        metrics["governance_confirmation"] = confirmations[0]
+        if len(confirmations) > 1:
+            metrics["additional_governance_confirmations"] = confirmations[1:8]
+        return ToolResult(
+            success=False,
+            reason="governance_confirmation_required",
+            can_retry=True,
+            next_suggestion=(
+                "Review the bounded natural-work scope and call confirm_governance_scope with its "
+                "challenge_id, or choose another candidate; hard governance denials cannot be confirmed."
+            ),
+            metrics=metrics,
+        )
+
+    def _action_wait_timeout_s(self, request: dict) -> float:
+        timeout_ticks = request.get("timeout_ticks")
+        params = request.get("params")
+        if timeout_ticks is None and isinstance(params, dict):
+            timeout_ticks = params.get("timeout_ticks")
+        if isinstance(timeout_ticks, bool) or not isinstance(timeout_ticks, (int, float)):
+            return self._wall_timeout
+        declared_s = max(0.05, float(timeout_ticks) / 20.0)
+        # The configured wall timeout remains a low-TPS floor. Explicitly long
+        # server actions extend it rather than being cut off by the old global
+        # 90-second client deadline.
+        return max(self._wall_timeout, declared_s + self._terminal_delivery_grace)
+
+    @staticmethod
+    def _with_terminal_delivery(result: ToolResult, delivery: dict) -> ToolResult:
+        metrics = dict(result.metrics or {})
+        metrics["terminal_delivery"] = dict(delivery)
+        return ToolResult(
+            success=result.success,
+            reason=result.reason,
+            can_retry=result.can_retry,
+            next_suggestion=result.next_suggestion,
+            metrics=metrics,
+        )
 
     def _terminal_result(
         self,
@@ -521,10 +612,16 @@ class JavaBodyClient:
                 "surface_route_failure",
                 "recovery_staging_attempted",
                 "recovery_staging_used",
+                "recovery_staging_attempts",
                 "recovery_staging_candidate_count",
+                "recovery_staging_candidate_total",
+                "recovery_staging_best_headroom",
+                "recovery_staging_frontier_y",
                 "recovery_staging_replans",
                 "recovery_staging_failure",
                 "recovery_staging_source_failure",
+                "pillar_continuation_preflight_count",
+                "pillar_continuation_preflight_allowed",
                 "approach_excavation_attempted",
                 "approach_excavation_used",
                 "approach_excavation_breaks",
@@ -550,7 +647,10 @@ class JavaBodyClient:
         action_id: str,
         kind: str,
         terminals: dict[str, tuple[bool, str, bool]],
+        *,
+        started: float | None = None,
     ) -> ToolResult:
+        started = time.monotonic() if started is None else started
         after_seq = self._protocol.last_seq(self._bot)
         try:
             self.connect()
@@ -570,15 +670,25 @@ class JavaBodyClient:
         state = reply.payload.get("state")
         if state == "terminal" and isinstance(reply.payload.get("terminal"), dict):
             self._last_terminal = (action_id, dict(reply.payload["terminal"]))
-            return self._terminal_result(reply.payload["terminal"], kind, terminals)
+            return self._with_terminal_delivery(
+                self._terminal_result(reply.payload["terminal"], kind, terminals),
+                self._terminal_delivery("reconnect_query", started, query_count=1),
+            )
         if state == "running":
             try:
-                terminal = self._await_terminal(action_id)
+                terminal, delivery = self._await_terminal(
+                    action_id,
+                    timeout_s=self._wall_timeout,
+                    started=started,
+                )
             except TransportClosed:
                 return ToolResult(success=False, reason="action_reconciliation_unknown", can_retry=True)
             if terminal is not None:
                 self._last_terminal = (action_id, dict(terminal))
-                return self._terminal_result(terminal, kind, terminals)
+                return self._with_terminal_delivery(
+                    self._terminal_result(terminal, kind, terminals),
+                    delivery,
+                )
         return ToolResult(success=False, reason="action_reconciliation_unknown", can_retry=True)
 
     def _await_response(
@@ -613,25 +723,65 @@ class JavaBodyClient:
         suffix = "" if request_id is None else f" ({request_id})"
         raise TransportClosed(f"no response to {request_type}{suffix}")
 
-    def _await_terminal(self, action_id: str) -> dict | None:
-        import time
-
-        deadline = time.monotonic() + self._wall_timeout
+    def _await_terminal(
+        self,
+        action_id: str,
+        *,
+        timeout_s: float,
+        started: float,
+    ) -> tuple[dict | None, dict]:
+        deadline = time.monotonic() + max(0.1, float(timeout_s))
+        next_query = time.monotonic() + self._terminal_query_interval
+        pending_query_id: str | None = None
+        pending_query_started = 0.0
+        query_count = 0
         while time.monotonic() < deadline:
-            for item in self._pump_once():
+            now = time.monotonic()
+            if pending_query_id is None and now >= next_query:
+                query = self._protocol.query_action(action_id)
+                self._send(query)
+                pending_query_id = str(query["request_id"])
+                pending_query_started = now
+                query_count += 1
+            if pending_query_id is not None and now - pending_query_started > max(2.0, self._recv_timeout * 2.0):
+                raise TransportClosed("no QUERY_ACTION response during terminal wait")
+            wake_in = max(0.01, next_query - now) if pending_query_id is None else self._recv_timeout
+            recv_timeout = min(self._recv_timeout, wake_in, max(0.01, deadline - now))
+            for item in self._pump_once(timeout_s=recv_timeout):
                 if isinstance(item, BotEvent):
                     self._last_events.append(item)
                     if item.name == "action_terminal" and item.action_id == action_id:
-                        return item.data
-        return None
+                        return item.data, self._terminal_delivery("event", started, query_count)
+                elif isinstance(item, Response) and item.request_id == pending_query_id:
+                    pending_query_id = None
+                    state = item.payload.get("state")
+                    terminal = item.payload.get("terminal")
+                    if state == "terminal" and isinstance(terminal, dict):
+                        return terminal, self._terminal_delivery("query", started, query_count)
+                    if state == "unknown":
+                        raise TransportClosed("accepted action became unknown during terminal wait")
+                    next_query = time.monotonic() + self._terminal_query_interval
+                elif isinstance(item, ErrorResponse) and item.request_id == pending_query_id:
+                    raise TransportClosed(f"QUERY_ACTION failed: {item.code}")
+        return None, self._terminal_delivery("deadline", started, query_count)
 
-    def _pump_once(self):
+    @staticmethod
+    def _terminal_delivery(source: str, started: float, query_count: int) -> dict:
+        return {
+            "source": source,
+            "action_wall_ms": round(max(0.0, time.monotonic() - started) * 1000.0, 3),
+            "query_count": int(query_count),
+        }
+
+    def _pump_once(self, *, timeout_s: float | None = None):
         assert self._transport is not None
         import json as _json
 
         execution_checkpoint()
         try:
-            frame = self._transport.recv(self._recv_timeout)
+            frame = self._transport.recv(
+                self._recv_timeout if timeout_s is None else max(0.001, float(timeout_s))
+            )
         except TimeoutError:
             return []
         except TransportClosed:

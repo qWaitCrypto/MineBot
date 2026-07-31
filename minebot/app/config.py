@@ -10,6 +10,10 @@ import os
 from collections.abc import Mapping
 
 from minebot.app.model_provider import ModelProviderRegistry
+from minebot.app.model_provider import (
+    MAX_MODEL_REQUEST_TIMEOUT_S,
+    MIN_MODEL_REQUEST_TIMEOUT_S,
+)
 from minebot.brain.provider import ProviderConfig
 
 
@@ -60,7 +64,7 @@ def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelPro
             settings=settings,
         ),
     ]
-    return ModelProviderRegistry(configs, default="primary")
+    return ModelProviderRegistry(configs, default="primary", env=env)
 
 
 def agent_language_from_env(
@@ -89,6 +93,18 @@ def _settings_from_env(env: Mapping[str, str]) -> dict[str, object]:
                 f"MINEBOT_LLM_REASONING_EFFORT must be one of: {allowed}"
             )
         settings["reasoning"] = {"effort": effort}
+    if env.get("MINEBOT_LLM_REQUEST_TIMEOUT_S"):
+        raw_timeout = env["MINEBOT_LLM_REQUEST_TIMEOUT_S"]
+        try:
+            request_timeout_s = float(raw_timeout)
+        except ValueError as exc:
+            raise AppConfigError("MINEBOT_LLM_REQUEST_TIMEOUT_S must be numeric") from exc
+        if not MIN_MODEL_REQUEST_TIMEOUT_S <= request_timeout_s <= MAX_MODEL_REQUEST_TIMEOUT_S:
+            raise AppConfigError(
+                "MINEBOT_LLM_REQUEST_TIMEOUT_S must be between "
+                f"{MIN_MODEL_REQUEST_TIMEOUT_S:g} and {MAX_MODEL_REQUEST_TIMEOUT_S:g} seconds"
+            )
+        settings["request_timeout_s"] = request_timeout_s
     return settings
 
 

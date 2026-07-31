@@ -1307,6 +1307,40 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["terminal_tick"], 8123)
         self.assertTrue(payload["projection"]["complete"])
 
+    def test_model_tool_payload_exposes_governance_confirmation_scope(self):
+        confirmation = {
+            "challenge_id": "gc-review-1",
+            "operation": "break",
+            "context": "collect",
+            "block_types": ["stone"],
+            "region": {"min": [0, 60, 0], "max": [16, 68, 16]},
+            "max_unique_blocks": 12,
+            "ttl_remaining_s": 240.0,
+            "evidence": {
+                "level": "ambiguous",
+                "score": 0.4,
+                "complete": True,
+                "signals": ["local_axis_symmetry"],
+            },
+        }
+        result = ToolResult(
+            False,
+            "governance_confirmation_required",
+            True,
+            metrics={"governance_confirmation": confirmation},
+        ).to_payload()
+
+        payload = _model_tool_payload("collect_resource", result, trace_ref="governance-trace")
+
+        self.assertEqual(
+            payload["summary"]["governance_confirmation"]["challenge_id"],
+            "gc-review-1",
+        )
+        self.assertEqual(
+            payload["summary"]["governance_confirmation"]["region"]["max"],
+            [16, 68, 16],
+        )
+
     def test_model_tool_payload_preserves_task_revisions_and_step_statuses(self):
         result = ToolResult(
             True,

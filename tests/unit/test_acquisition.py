@@ -88,16 +88,83 @@ class AcquisitionResolverTests(unittest.TestCase):
         self.assertEqual(smelt_step.detail["input_count"], 3)
         self.assertIn(smelt_step.detail["fuel_item"], {"oak_planks", "oak_log"})
 
-    def test_merged_craft_steps_keep_ingredient_counts_precise(self):
+    def test_compaction_preserves_tool_upgrade_dependency_order(self):
         steps = resolve_acquisition("iron_pickaxe", 1, {}, recipe_lookup, max_depth=16)
 
         self.assertIsInstance(steps, list)
-        planks = next(step for step in steps if step.kind == "craft" and step.item == "oak_planks")
-        self.assertEqual(planks.count, 16)
-        self.assertEqual(planks.detail["ingredients"], {"oak_log": 4})
-        sticks = next(step for step in steps if step.kind == "craft" and step.item == "stick")
-        self.assertEqual(sticks.count, 8)
-        self.assertEqual(sticks.detail["ingredients"], {"oak_planks": 4})
+        cobblestone = [
+            (index, step.count)
+            for index, step in enumerate(steps)
+            if step.kind == "collect" and step.item == "cobblestone"
+        ]
+        stone_pickaxe_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.kind == "craft" and step.item == "stone_pickaxe"
+        )
+        self.assertEqual([count for _index, count in cobblestone], [3, 8])
+        self.assertLess(cobblestone[0][0], stone_pickaxe_index)
+        self.assertGreater(cobblestone[1][0], stone_pickaxe_index)
+        self.assertEqual(
+            sum(step.count for step in steps if step.kind == "craft" and step.item == "oak_planks"),
+            16,
+        )
+
+    def test_flexible_wood_recipes_continue_with_owned_log_species(self):
+        plank_options = ("oak_planks", "spruce_planks", "birch_planks")
+
+        def flexible_wood_lookup(item: str) -> list[RecipeVariant] | None:
+            if item == "spruce_planks":
+                return [
+                    RecipeVariant(
+                        output_item="spruce_planks",
+                        output_count=4,
+                        ingredient_groups=(("spruce_log",),),
+                    )
+                ]
+            if item == "stick":
+                return [
+                    RecipeVariant(
+                        output_item="stick",
+                        output_count=4,
+                        ingredient_groups=(plank_options, plank_options),
+                    )
+                ]
+            if item == "crafting_table":
+                return [
+                    RecipeVariant(
+                        output_item="crafting_table",
+                        output_count=1,
+                        ingredient_groups=(plank_options,) * 4,
+                    )
+                ]
+            if item == "wooden_pickaxe":
+                return [
+                    RecipeVariant(
+                        output_item="wooden_pickaxe",
+                        output_count=1,
+                        ingredient_groups=(plank_options,) * 3 + (("stick",), ("stick",)),
+                        requires_table=True,
+                    )
+                ]
+            return recipe_lookup(item)
+
+        steps = resolve_acquisition(
+            "iron_pickaxe",
+            1,
+            {"spruce_log": 3},
+            flexible_wood_lookup,
+            max_depth=16,
+        )
+
+        self.assertIsInstance(steps, list)
+        sequence = [(step.kind, step.item) for step in steps]
+        self.assertIn(("collect", "spruce_log"), sequence)
+        self.assertIn(("craft", "spruce_planks"), sequence)
+        self.assertNotIn(("collect", "oak_log"), sequence)
+        self.assertNotIn(("craft", "oak_planks"), sequence)
+        spruce_collect = next(step for step in steps if step.kind == "collect" and step.item == "spruce_log")
+        self.assertEqual(spruce_collect.count, 1)
 
     def test_empty_backpack_plans_diamond_after_iron_pickaxe(self):
         steps = resolve_acquisition("diamond", 3, {}, recipe_lookup, max_depth=18)

@@ -108,8 +108,9 @@ class JavaBodyProtocol:
     # Request builders. Each registers the pending request id.
     # ------------------------------------------------------------------
 
-    def hello(self) -> dict:
-        return self._request("HELLO", {})
+    def hello(self, *, subscribe_events: bool = True) -> dict:
+        body = {} if subscribe_events else {"subscribe_events": False}
+        return self._request("HELLO", body)
 
     def find_blocks(
         self,

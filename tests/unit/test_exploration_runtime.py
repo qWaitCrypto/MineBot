@@ -341,6 +341,8 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertEqual(result.metrics["blocks"][0]["pos"], [2, 64, 3])
         self.assertFalse(navigator.calls)
         self.assertEqual(body.perceptions[0][1]["types"][0], "oak_log")
+        self.assertIsNotNone(result.metrics["resume_cursor"])
+        self.assertEqual(result.metrics["budget"]["regions_consumed"], 1)
 
     def test_frontier_navigation_uses_dry_non_mutating_profile(self):
         runtime, _, navigator = _runtime()
@@ -1229,7 +1231,7 @@ class ExplorationTransactionsTests(unittest.TestCase):
             },
         )
 
-    def test_found_result_has_no_exploration_continuation(self):
+    def test_found_result_preserves_exploration_continuation(self):
         body = ExplorationBody(
             blocks={
                 (0, 0): [
@@ -1243,8 +1245,21 @@ class ExplorationTransactionsTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "found")
-        self.assertIsNone(result.metrics["resume_cursor"])
-        self.assertIsNone(result.metrics["continuation"])
+        cursor = result.metrics["resume_cursor"]
+        self.assertIsNotNone(cursor)
+        self.assertEqual(
+            result.metrics["continuation"],
+            {
+                "kind": "resume_operation",
+                "tool": "explore_for",
+                "target_descriptor": {
+                    "block_targets": ["#logs"],
+                    "entity_targets": [],
+                },
+                "resume_cursor": cursor,
+                "target_descriptor_must_match": True,
+            },
+        )
 
     def test_repeated_negative_scan_emits_stable_evidence_key(self):
         coverage = MemoryExplorationCoverageStore()

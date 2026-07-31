@@ -3539,6 +3539,12 @@ _INSPECTION_DECISION_REASONS = frozenset(
     }
 )
 
+_CONFIRMATION_DECISION_REASONS = frozenset(
+    {
+        "governance_confirmation_required",
+    }
+)
+
 
 def _governance_needs_inspection(reason: str | None) -> bool:
     """Identify an action-local uncertainty that needs more evidence."""
@@ -3549,23 +3555,42 @@ def _governance_needs_inspection(reason: str | None) -> bool:
     return normalized.removeprefix("break_denied:").removeprefix("dig_down_denied:") in _INSPECTION_DECISION_REASONS
 
 
+def _governance_confirmation_required(reason: str | None) -> bool:
+    if not reason:
+        return False
+    normalized = str(reason)
+    return normalized.removeprefix("break_denied:").removeprefix("dig_down_denied:") in _CONFIRMATION_DECISION_REASONS
+
+
 def _denied_result(prefix: str, pos: Position, block_type: str, decision) -> ToolResult:
     needs_inspection = _governance_needs_inspection(decision.reason)
+    confirmation_required = _governance_confirmation_required(decision.reason)
+    details = dict(getattr(decision, "details", {}) or {})
+    evidence_state = (
+        "confirmation_required"
+        if confirmation_required
+        else "needs_inspection" if needs_inspection else "denied"
+    )
+    metrics = {
+        "target": list(pos),
+        "block_type": block_type,
+        "legality": _decision_payload(decision),
+        "evidence_state": evidence_state,
+    }
+    if confirmation_required and isinstance(details.get("governance_confirmation"), dict):
+        metrics["governance_confirmation"] = details["governance_confirmation"]
     return ToolResult(
         success=False,
         reason=f"{prefix}:{decision.reason}",
-        can_retry=needs_inspection,
+        can_retry=needs_inspection or confirmation_required,
         next_suggestion=(
-            "inspect the bounded structure context or choose another candidate before retrying this mutation"
+            "review and confirm the bounded natural-work scope once, or choose another candidate"
+            if confirmation_required
+            else "inspect the bounded structure context or choose another candidate before retrying this mutation"
             if needs_inspection
             else "choose another target or register a safe work region/provenance before mutating this block"
         ),
-        metrics={
-            "target": list(pos),
-            "block_type": block_type,
-            "legality": _decision_payload(decision),
-            "evidence_state": "needs_inspection" if needs_inspection else "denied",
-        },
+        metrics=metrics,
     )
 
 

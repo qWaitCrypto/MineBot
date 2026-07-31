@@ -5,7 +5,9 @@ import time
 import unittest
 from pathlib import Path
 
+import httpx
 from agents.exceptions import MaxTurnsExceeded
+from openai import APIError, RateLimitError
 
 from minebot.app.autonomy import AutonomyCoordinator
 from minebot.app.progress_epochs import PersistentProgressEpochArchive
@@ -1412,6 +1414,158 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(failed.message, "runtime_error:RuntimeError")
         self.assertTrue(any(event["event"] == "session_step_failed" for event in session.parts.runtime.trace.snapshot()))
 
+    def test_transient_model_failure_continues_without_replaying_start_input(self):
+        calls: list[str] = []
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = FakeBody()
+
+            async def interrupted_then_healthy(agent, input_text, *, context=None, **kwargs):
+                calls.append(input_text)
+                if len(calls) == 1:
+                    raise httpx.RemoteProtocolError(
+                        "peer closed connection without sending complete message body"
+                    )
+                return {"ok": True}
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=interrupted_then_healthy,
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("collect 64 logs"))
+
+        retrying = asyncio.run(session.step())
+        self.assertEqual(retrying.status, "retrying")
+        self.assertTrue(session.has_pending_work)
+
+        resumed = asyncio.run(session.step())
+        self.assertEqual(resumed.status, "completed_turn")
+        self.assertIn("collect 64 logs", calls[0])
+        self.assertIn("RECOVERY_RECONCILE", calls[1])
+        self.assertIn("Read current state, inventory, and task evidence", calls[1])
+        self.assertNotIn("collect 64 logs", calls[1])
+        events = session.parts.runtime.trace.snapshot()
+        self.assertTrue(any(event["event"] == "model_transport_recovery_queued" for event in events))
+        self.assertTrue(any(event["event"] == "model_transport_recovered" for event in events))
+        self.assertFalse(any(event["event"] == "session_step_failed" for event in events))
+        session.close()
+
+    def test_transient_model_recovery_is_bounded(self):
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = FakeBody()
+
+            async def unavailable_model(*args, **kwargs):
+                raise _retryable_model_error()
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=unavailable_model,
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        session = AgentSession(parts_factory, max_model_recovery_attempts=2)
+        session.submit(SessionCommand.start("collect 64 logs"))
+
+        self.assertEqual(asyncio.run(session.step()).status, "retrying")
+        self.assertEqual(asyncio.run(session.step()).status, "retrying")
+        exhausted = asyncio.run(session.step())
+
+        self.assertEqual(exhausted.status, "failed")
+        self.assertEqual(exhausted.message, "model_transport_recovery_exhausted")
+        self.assertFalse(session.has_pending_work)
+        events = session.parts.runtime.trace.snapshot()
+        self.assertEqual(
+            sum(event["event"] == "model_transport_recovery_queued" for event in events),
+            2,
+        )
+        self.assertTrue(
+            any(event["event"] == "model_transport_recovery_exhausted" for event in events)
+        )
+        session.close()
+
+    def test_insufficient_quota_fails_once_without_outer_recovery(self):
+        calls = 0
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = FakeBody()
+
+            async def quota_exhausted(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                raise _quota_model_error()
+
+            context = AgentContext(system_prompt="sys", goal_text=goal)
+            lifecycle = LifecycleController()
+            modes = ModeRuntime()
+            authority = ProgressAuthority()
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=context,
+                lifecycle=lifecycle,
+                mode_runtime=modes,
+                authority=authority,
+                runner_run=quota_exhausted,
+            )
+            return AgentRuntimeParts(
+                runtime=runtime,
+                registry=runtime.registry,
+                context=context,
+                lifecycle=lifecycle,
+                modes=modes,
+                authority=authority,
+            )
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("collect 64 logs"))
+
+        failed = asyncio.run(session.step())
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.message, "runtime_error:RateLimitError")
+        self.assertEqual(calls, 1)
+        self.assertFalse(session.has_pending_work)
+        events = session.parts.runtime.trace.snapshot()
+        self.assertFalse(
+            any(event["event"] == "model_transport_recovery_queued" for event in events)
+        )
+        session.close()
+
     def test_sdk_runaway_guard_yields_session_instead_of_failing(self):
         bodies: list[FakeBody] = []
 
@@ -1876,6 +2030,30 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(len(calls), 2, calls)
         self.assertIn("请继续当前任务", calls[-1])
         self.assertEqual(bodies[0].interrupt_reasons, [])
+
+
+def _retryable_model_error() -> APIError:
+    return APIError(
+        "An error occurred while processing your request. You can retry your request.",
+        request=httpx.Request("POST", "https://provider.example/v1/responses"),
+        body=None,
+    )
+
+
+def _quota_model_error() -> RateLimitError:
+    body = {
+        "error": {
+            "message": "You exceeded your current quota",
+            "type": "insufficient_quota",
+            "code": "insufficient_quota",
+        }
+    }
+    response = httpx.Response(
+        429,
+        request=httpx.Request("POST", "https://provider.example/v1/responses"),
+        json=body,
+    )
+    return RateLimitError("Error code: 429", response=response, body=body)
 
 
 if __name__ == "__main__":

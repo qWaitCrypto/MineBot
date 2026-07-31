@@ -21,7 +21,7 @@ from minebot.app.autonomy import AutonomyAction, AutonomyCoordinator
 from minebot.app.body_events import event_matches_wait_conditions
 from minebot.app.principals import AdmissionCapability, PrincipalRegistry
 from minebot.app.wiring import AgentRuntimeParts
-from minebot.app.runner import RecoveryOutcome
+from minebot.app.runner import ModelTurnTransportError, RecoveryOutcome
 from minebot.app.runtime_state import CheckpointDisposition, CompletionAuthority, TaskStatus
 from minebot.app.skills import SkillWorkspace
 from minebot.app.tasks import TaskWorkspace
@@ -160,6 +160,7 @@ class AgentSession:
     # only when owner names are configured.
     principals: PrincipalRegistry | None = None
     max_recovery_attempts: int = 3
+    max_model_recovery_attempts: int = 3
     _goal_principal_id: str | None = None
     _recovery_attempts: int = 0
     _goal_active: bool = False
@@ -170,11 +171,14 @@ class AgentSession:
     _execution_quarantined: bool = False
     _execution_quarantine_reported: bool = False
     _body_cleanup_generation: int | None = None
+    _model_recovery_attempts: int = 0
     _scheduler_id: str = field(default_factory=lambda: f"session-{uuid4().hex}")
 
     def __post_init__(self) -> None:
         if self.work_queue is None:
             self.work_queue = MemoryWorkIntentQueue()
+        if self.max_model_recovery_attempts < 1:
+            raise ValueError("max_model_recovery_attempts must be at least 1")
 
     def submit(
         self,
@@ -436,6 +440,8 @@ class AgentSession:
             )
             if outcome is _WORK_PREEMPTED:
                 return SessionStep("preempted", self.parts.lifecycle.state, "superseded_during_agent_turn")
+        except ModelTurnTransportError as exc:
+            return self._schedule_model_recovery(exc)
         except Exception as exc:
             self._trace(
                 "session_step_failed",
@@ -448,10 +454,72 @@ class AgentSession:
             self._stand_down()
             self._turn_pending = False
             return SessionStep("failed", self.parts.lifecycle.state, f"runtime_error:{type(exc).__name__}")
+        if self._model_recovery_attempts:
+            self._trace(
+                "model_transport_recovered",
+                attempts=self._model_recovery_attempts,
+            )
+            self._model_recovery_attempts = 0
         return self._finish_step(
             SessionStep(outcome.status, outcome.lifecycle, outcome.message),
             intent=intent,
             checkpoint_before=checkpoint_before,
+        )
+
+    def _schedule_model_recovery(self, exc: ModelTurnTransportError) -> SessionStep:
+        assert self.parts is not None
+        assert self.work_queue is not None
+        attempt = self._model_recovery_attempts + 1
+        self._turn_pending = False
+        if attempt > self.max_model_recovery_attempts:
+            self._trace(
+                "model_transport_recovery_exhausted",
+                attempts=self._model_recovery_attempts,
+                error_type=exc.error_type,
+            )
+            self._stand_down()
+            return SessionStep(
+                "failed",
+                self.parts.lifecycle.state,
+                "model_transport_recovery_exhausted",
+            )
+
+        self._model_recovery_attempts = attempt
+        task = self.task_workspace.current_task if self.task_workspace is not None else None
+        generation = self.parts.authority.current_generation()
+        recovery = self.work_queue.enqueue(
+            WorkIntentKind.RECOVERY_RECONCILE,
+            source="model_transport_recovery",
+            payload={
+                "decision": "resume",
+                "reason": "transient_model_error",
+                "attempt": attempt,
+                "error_type": exc.error_type,
+                "instruction": (
+                    "The previous model turn ended before completion. Body and tool effects "
+                    "already committed remain authoritative. Read current state, inventory, "
+                    "and task evidence, then continue without replaying prior actions."
+                ),
+            },
+            dedupe_key=(
+                f"{self._scheduler_id}:model-recovery:g{generation}:a{attempt}"
+            ),
+            task_id=None if task is None else task.task_id,
+            generation=generation,
+        )
+        self._trace(
+            "model_transport_recovery_queued",
+            attempt=attempt,
+            max_attempts=self.max_model_recovery_attempts,
+            error_type=exc.error_type,
+            intent_id=recovery.intent_id,
+            task_id=None if task is None else task.task_id,
+            generation=generation,
+        )
+        return SessionStep(
+            "retrying",
+            self.parts.lifecycle.state,
+            "model_transport_recovery_queued",
         )
 
     async def _settle_command_body_interrupt(self, command: SessionCommand) -> None:
@@ -649,6 +717,15 @@ class AgentSession:
         return SessionStep("completed", self.parts.lifecycle.state, reason)
 
     async def _apply_command(self, command: SessionCommand) -> list[AgentSignal]:
+        if command.kind in {
+            SessionCommandKind.START,
+            SessionCommandKind.REPLACE_GOAL,
+            SessionCommandKind.CONTINUE,
+            SessionCommandKind.CANCEL,
+            SessionCommandKind.MESSAGE,
+            SessionCommandKind.QUIT,
+        }:
+            self._model_recovery_attempts = 0
         if command.kind is SessionCommandKind.START:
             had_parts = self.parts is not None
             if self.parts is None:

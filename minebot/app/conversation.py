@@ -11,11 +11,14 @@ from typing import Any
 from uuid import uuid4
 
 from agents import SQLiteSession, SessionSettings
+from agents.run_config import CallModelData, ModelInputData
 
 from minebot.app.observability import sanitize_observation
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
 
 CONVERSATION_WINDOW_TURNS = 12
+MODEL_INPUT_MAX_ITEMS = 96
+MODEL_INPUT_MAX_CHARS = 64_000
 
 
 class WindowedConversationSession:
@@ -250,6 +253,85 @@ def bounded_session_input(
     return combined[user_turn_starts[-max_turns] :]
 
 
+def bounded_model_input(data: CallModelData[Any]) -> ModelInputData:
+    """Bound one long SDK run while retaining the current request and closed tool pairs."""
+
+    original = data.model_data.input
+    bounded = bounded_model_input_items(original)
+    if len(bounded) == len(original):
+        return data.model_data
+    omitted = len(original) - len(bounded)
+    notice = (
+        "MODEL_INPUT_WINDOW complete=true "
+        f"omitted_items={omitted} retained_items={len(bounded)}. "
+        "Current task, Body state, active Skills, and recent complete tool results in this "
+        "request are authoritative. Use conversation archive tools only when an older exact "
+        "exchange is materially needed."
+    )
+    instructions = data.model_data.instructions or ""
+    return ModelInputData(
+        input=bounded,
+        instructions=f"{instructions}\n\n{notice}" if instructions else notice,
+    )
+
+
+def bounded_model_input_items(
+    items: list[Any],
+    *,
+    max_items: int = MODEL_INPUT_MAX_ITEMS,
+    max_chars: int = MODEL_INPUT_MAX_CHARS,
+) -> list[Any]:
+    """Keep a recent coherent suffix without splitting function call/result pairs."""
+
+    max_items = max(1, int(max_items))
+    max_chars = max(1, int(max_chars))
+    if len(items) <= max_items and model_input_chars(items) <= max_chars:
+        return list(items)
+
+    latest_user = next(
+        (index for index in range(len(items) - 1, -1, -1) if _session_item_role(items[index]) == "user"),
+        None,
+    )
+    selected: set[int] = set()
+    if latest_user is not None:
+        selected.add(latest_user)
+
+    pair_indices: dict[str, set[int]] = {}
+    for index, item in enumerate(items):
+        if _session_item_type(item) not in {"function_call", "function_call_output"}:
+            continue
+        call_id = _session_item_call_id(item)
+        if call_id:
+            pair_indices.setdefault(call_id, set()).add(index)
+
+    selected_chars = sum(_model_item_chars(items[index]) for index in selected)
+    retained_suffix_item = False
+    for index in range(len(items) - 1, -1, -1):
+        if index in selected:
+            continue
+        group = {index}
+        call_id = _session_item_call_id(items[index])
+        if call_id and _session_item_type(items[index]) in {"function_call", "function_call_output"}:
+            group.update(pair_indices.get(call_id, ()))
+        group.difference_update(selected)
+        group_chars = sum(_model_item_chars(items[item_index]) for item_index in group)
+        exceeds_window = (
+            len(selected) + len(group) > max_items
+            or selected_chars + group_chars > max_chars
+        )
+        if exceeds_window and retained_suffix_item:
+            break
+        selected.update(group)
+        selected_chars += group_chars
+        retained_suffix_item = True
+
+    return [item for index, item in enumerate(items) if index in selected]
+
+
+def model_input_chars(items: list[Any]) -> int:
+    return sum(_model_item_chars(item) for item in items)
+
+
 def _complete_turn_item_limit(items: list[Any], limit: int) -> list[Any]:
     if limit <= 0 or not items:
         return []
@@ -276,6 +358,22 @@ def _session_item_role(item: Any) -> object:
     if isinstance(item, dict):
         return item.get("role")
     return getattr(item, "role", None)
+
+
+def _session_item_type(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("type") or "")
+    return str(getattr(item, "type", "") or "")
+
+
+def _session_item_call_id(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("call_id") or item.get("id") or "")
+    return str(getattr(item, "call_id", None) or getattr(item, "id", None) or "")
+
+
+def _model_item_chars(item: Any) -> int:
+    return len(json.dumps(_json_item(item), ensure_ascii=False, sort_keys=True))
 
 
 def _json_item(item: Any) -> object:
@@ -417,7 +515,12 @@ def _item_text(item: dict[str, object]) -> str:
 
 __all__ = [
     "CONVERSATION_WINDOW_TURNS",
+    "MODEL_INPUT_MAX_CHARS",
+    "MODEL_INPUT_MAX_ITEMS",
     "PersistentWindowedConversationSession",
     "WindowedConversationSession",
+    "bounded_model_input",
+    "bounded_model_input_items",
     "bounded_session_input",
+    "model_input_chars",
 ]

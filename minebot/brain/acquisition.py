@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from dataclasses import dataclass
 from math import ceil
 from typing import Callable, Literal
@@ -160,6 +159,7 @@ class _Planner:
         self.counts = _normalize_counts(counts)
         self.recipe_lookup = recipe_lookup
         self.max_depth = max_depth
+        self.preferred_plank = _preferred_plank(self.counts)
         self.steps: list[AcquisitionStep] = []
 
     def resolve(self, item: str, count: int, chain: tuple[str, ...]) -> AcquisitionError | None:
@@ -300,7 +300,13 @@ class _Planner:
         missing = max(0, count - self.counts.get(item, 0))
         if missing <= 0:
             return None
-        variant = _choose_variant(item, missing, variants, self.counts)
+        variant = _choose_variant(
+            item,
+            missing,
+            variants,
+            self.counts,
+            preferred_plank=self.preferred_plank,
+        )
         if variant is None:
             return self._error("recipe_not_found", item, count, chain, {"variant_count": len(variants)})
 
@@ -310,7 +316,12 @@ class _Planner:
                 return error
 
         crafts = ceil(missing / variant.output_count)
-        required = _select_requirements(variant, crafts, self.counts)
+        required = _select_requirements(
+            variant,
+            crafts,
+            self.counts,
+            preferred_plank=self.preferred_plank,
+        )
         for _ in range(self.max_depth + 1):
             error = self._resolve_requirements(required, chain, item)
             if error is not None:
@@ -382,6 +393,8 @@ def _choose_variant(
     missing: int,
     variants: list[RecipeVariant],
     counts: dict[str, int],
+    *,
+    preferred_plank: str | None,
 ) -> RecipeVariant | None:
     normalized = _normalize_item(item)
     candidates = [
@@ -394,7 +407,12 @@ def _choose_variant(
 
     def score(variant: RecipeVariant) -> tuple[int, int, int]:
         crafts = ceil(missing / variant.output_count)
-        requirements = _select_requirements(variant, crafts, counts)
+        requirements = _select_requirements(
+            variant,
+            crafts,
+            counts,
+            preferred_plank=preferred_plank,
+        )
         deficit = sum(max(0, required - counts.get(ingredient, 0)) for ingredient, required in requirements)
         return (deficit, int(variant.requires_table), len(variant.ingredient_groups))
 
@@ -405,6 +423,8 @@ def _select_requirements(
     variant: RecipeVariant,
     crafts: int,
     counts: dict[str, int],
+    *,
+    preferred_plank: str | None,
 ) -> tuple[tuple[str, int], ...]:
     selected: dict[str, int] = {}
     for group in variant.ingredient_groups:
@@ -414,13 +434,48 @@ def _select_requirements(
         option = sorted(
             normalized_group,
             key=lambda candidate: (
-                0 if counts.get(candidate, 0) > selected.get(candidate, 0) else 1,
+                _material_availability(
+                    candidate,
+                    counts,
+                    selected,
+                    preferred_plank=preferred_plank,
+                ),
                 _item_preference(candidate),
                 candidate,
             ),
         )[0]
         selected[option] = selected.get(option, 0) + crafts
     return tuple(sorted(selected.items()))
+
+
+def _material_availability(
+    item: str,
+    counts: dict[str, int],
+    selected: dict[str, int],
+    *,
+    preferred_plank: str | None,
+) -> int:
+    if counts.get(item, 0) > selected.get(item, 0):
+        return 0
+    if item == preferred_plank:
+        return 1
+    source_log = PLANK_FROM_LOG.get(item)
+    if source_log is not None and counts.get(source_log, 0) > 0:
+        return 2
+    return 3
+
+
+def _preferred_plank(counts: dict[str, int]) -> str | None:
+    candidates = [
+        (
+            counts.get(plank, 0) + counts.get(PLANK_FROM_LOG[plank], 0) * 4,
+            -index,
+            plank,
+        )
+        for index, plank in enumerate(PLANK_ITEMS)
+    ]
+    available, _preference, plank = max(candidates)
+    return plank if available > 0 else None
 
 
 def _missing_requirements(
@@ -488,15 +543,13 @@ def _usable_fuels(counts: dict[str, int]) -> list[dict[str, object]]:
 
 
 def _compact_steps(steps: list[AcquisitionStep]) -> list[AcquisitionStep]:
-    merged: OrderedDict[tuple[object, ...], AcquisitionStep] = OrderedDict()
+    merged: list[AcquisitionStep] = []
     for step in steps:
-        key = _step_key(step)
-        existing = merged.get(key)
-        if existing is None:
-            merged[key] = step
-            continue
-        merged[key] = _merge_step(existing, step)
-    return list(merged.values())
+        if merged and _step_key(merged[-1]) == _step_key(step):
+            merged[-1] = _merge_step(merged[-1], step)
+        else:
+            merged.append(step)
+    return merged
 
 
 def _step_key(step: AcquisitionStep) -> tuple[object, ...]:

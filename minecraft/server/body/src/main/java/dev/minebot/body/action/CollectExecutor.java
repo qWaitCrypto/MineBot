@@ -243,7 +243,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             world,
             movement,
             events,
-            APPROACH_REPLAN_LIMIT
+            APPROACH_REPLAN_LIMIT,
+            true
         );
         phase = Phase.APPROACHING;
     }
@@ -315,7 +316,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             .map(candidate -> new ExcavationPlanner.Target(candidate.x(), candidate.y(), candidate.z()))
             .toList();
         int remainingBreaks = MAX_APPROACH_BREAKS - excavationBreaks;
-        ExcavationPlanner.Result result = ExcavationPlanner.plan(
+        ExcavationPlanner.Result result = ExcavationPlanner.planWithReturnPath(
             world,
             new ExcavationPlanner.Cell(position.blockX(), position.feetBlockY(), position.blockZ()),
             targets,
@@ -434,7 +435,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             movement,
             events,
             APPROACH_REPLAN_LIMIT,
-            0.15
+            0.15,
+            true
         );
         phase = Phase.EXCAVATION_MOVING;
     }
@@ -789,7 +791,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 movement,
                 events,
                 APPROACH_REPLAN_LIMIT,
-                PICKUP_FINAL_REACH_DISTANCE
+                PICKUP_FINAL_REACH_DISTANCE,
+                true
             );
             plannedPickupDrop = pickupDrop;
         }

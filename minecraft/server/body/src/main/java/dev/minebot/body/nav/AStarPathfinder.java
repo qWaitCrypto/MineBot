@@ -47,6 +47,7 @@ public final class AStarPathfinder {
     private final int startZ;
     private final int totalNodeCap;
     private final int unloadedTouchCap;
+    private final boolean directReturnRequired;
 
     private final PriorityQueue<Open> open = new PriorityQueue<>((a, b) -> Double.compare(a.f, b.f));
     private final Map<Long, Double> gScore = new HashMap<>();
@@ -59,7 +60,36 @@ public final class AStarPathfinder {
     private Result finished;
 
     public AStarPathfinder(WorldView world, Goal goal, int startX, int startY, int startZ) {
-        this(world, goal, startX, startY, startZ, DEFAULT_TOTAL_NODE_CAP, DEFAULT_UNLOADED_TOUCH_CAP);
+        this(
+            world,
+            goal,
+            startX,
+            startY,
+            startZ,
+            DEFAULT_TOTAL_NODE_CAP,
+            DEFAULT_UNLOADED_TOUCH_CAP,
+            false
+        );
+    }
+
+    public AStarPathfinder(
+        WorldView world,
+        Goal goal,
+        int startX,
+        int startY,
+        int startZ,
+        boolean directReturnRequired
+    ) {
+        this(
+            world,
+            goal,
+            startX,
+            startY,
+            startZ,
+            DEFAULT_TOTAL_NODE_CAP,
+            DEFAULT_UNLOADED_TOUCH_CAP,
+            directReturnRequired
+        );
     }
 
     public AStarPathfinder(
@@ -71,6 +101,19 @@ public final class AStarPathfinder {
         int totalNodeCap,
         int unloadedTouchCap
     ) {
+        this(world, goal, startX, startY, startZ, totalNodeCap, unloadedTouchCap, false);
+    }
+
+    public AStarPathfinder(
+        WorldView world,
+        Goal goal,
+        int startX,
+        int startY,
+        int startZ,
+        int totalNodeCap,
+        int unloadedTouchCap,
+        boolean directReturnRequired
+    ) {
         this.world = world;
         this.moves = new MoveGenerator(world);
         this.goal = goal;
@@ -79,6 +122,7 @@ public final class AStarPathfinder {
         this.startZ = startZ;
         this.totalNodeCap = totalNodeCap;
         this.unloadedTouchCap = unloadedTouchCap;
+        this.directReturnRequired = directReturnRequired;
         long startKey = pack(startX, startY, startZ);
         gScore.put(startKey, 0.0);
         open.add(new Open(startKey, goal.heuristic(startX, startY, startZ), 0.0));
@@ -113,6 +157,9 @@ public final class AStarPathfinder {
             MoveGenerator.Moves neighbors = moves.movesFrom(x, y, z);
             unloadedTouches += neighbors.unloadedTouches();
             for (MoveGenerator.Move move : neighbors.moves()) {
+                if (directReturnRequired && !moves.hasDirectReturnMove(x, y, z, move)) {
+                    continue;
+                }
                 long key = pack(move.x(), move.y(), move.z());
                 double tentative = current.g() + move.cost();
                 Double known = gScore.get(key);

@@ -1020,7 +1020,7 @@ async def _run_interactive_loop(
                 await asyncio.sleep(0.25 if body_event_pump is not None else 0.05)
                 continue
             last = await session.step()
-            if last.status == "quit":
+            if last.status in {"quit", "failed"}:
                 return last
             truth = safe_evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last, session=session)
             if truth.satisfied:

@@ -73,6 +73,25 @@ def test_composite_constructs_java_body_without_connecting_at_startup() -> None:
     assert runtime.java_body._read_client._governance is runtime.java_body._client._governance
 
 
+def test_java_read_lane_does_not_subscribe_to_live_action_events() -> None:
+    server = FakeBodyServer()
+    runtime = build_body_provider(
+        "java",
+        bot_name="Bot",
+        natural_region=REGION,
+        java_connect=lambda: server,
+    )
+    assert runtime.java_body is not None
+
+    runtime.java_body.get_state()
+    runtime.java_body.event_head("subscription-test")
+
+    hellos = [request for request in server.requests if request.get("type") == "HELLO"]
+    assert len(hellos) == 2
+    assert hellos[0]["subscribe_events"] is False
+    assert "subscribe_events" not in hellos[1]
+
+
 def test_java_backed_providers_enable_the_single_java_survival_owner() -> None:
     java_server = FakeBodyServer()
     java_runtime = build_body_provider(

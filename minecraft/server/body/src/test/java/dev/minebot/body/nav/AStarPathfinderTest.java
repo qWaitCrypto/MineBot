@@ -28,6 +28,15 @@ final class AStarPathfinderTest {
         return result;
     }
 
+    private static Result solveReturnSafe(WorldView world, Goal goal, int sx, int sy, int sz) {
+        AStarPathfinder pathfinder = new AStarPathfinder(world, goal, sx, sy, sz, true);
+        Result result;
+        do {
+            result = pathfinder.step(10_000);
+        } while (result.outcome() == Outcome.IN_PROGRESS);
+        return result;
+    }
+
     private static void assertContiguous(List<Waypoint> path) {
         for (int i = 1; i < path.size(); i++) {
             Waypoint a = path.get(i - 1);
@@ -79,6 +88,27 @@ final class AStarPathfinderTest {
         assertEquals(Outcome.COMPLETE, result.outcome());
         assertTrue(result.path().stream().anyMatch(w -> w.y() == STAND + 1), "the ridge is climbed");
         assertContiguous(result.path());
+    }
+
+    @Test
+    void returnSafePlanningRejectsADropThatCannotBeClimbedBack() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int y = FLOOR + 1; y <= STAND + 3; y++) {
+            world.set(0, y, 0, WorldView.NodeKind.SOLID);
+        }
+        for (int[] direction : new int[][] {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+            world.set(direction[0], FLOOR + 1, direction[1], WorldView.NodeKind.SOLID);
+        }
+        int ledgeY = STAND + 4;
+        int landingY = FLOOR + 2;
+        Goal goal = new Goal.Near(1, landingY, 0, 0.1);
+
+        Result ordinary = solveAt(world, goal, 0, ledgeY, 0);
+        Result returnSafe = solveReturnSafe(world, goal, 0, ledgeY, 0);
+
+        assertEquals(Outcome.COMPLETE, ordinary.outcome());
+        assertEquals(Outcome.NO_PATH, returnSafe.outcome());
+        assertTrue(returnSafe.path().isEmpty());
     }
 
     @Test

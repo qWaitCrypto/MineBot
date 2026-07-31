@@ -93,6 +93,16 @@ final class ExcavationPlannerTest {
             new ExcavationPlanner.Cell(0, STAND + 1, 0),
             result.plan().steps().getLast().stand()
         );
+
+        ExcavationPlanner.Result returnSafe = ExcavationPlanner.planWithReturnPath(
+            world,
+            new ExcavationPlanner.Cell(0, STAND + 4, 0),
+            List.of(new ExcavationPlanner.Target(0, STAND, 0)),
+            Set.of(),
+            3
+        );
+        assertFalse(returnSafe.success());
+        assertEquals("no_excavation_route", returnSafe.reason());
     }
 
     private static FakeWorld sealedHorizontalTunnelWorld() {

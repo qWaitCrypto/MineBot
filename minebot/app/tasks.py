@@ -366,7 +366,10 @@ def _update_plan_tool(workspace: TaskWorkspace) -> RegisteredTool:
 
     return RegisteredTool(
         "update_plan",
-        "Create or revise the inspectable plan for the current durable task. This records steps, not hidden reasoning and not a second execution graph.",
+        "Create or revise the inspectable plan for the current durable task. Order work by "
+        "capability dependencies and keep compatible opportunistic objectives visible instead "
+        "of turning an independent collectible into a blocking first step. This records steps, "
+        "not hidden reasoning and not a second execution graph.",
         {
             "type": "object",
             "properties": {

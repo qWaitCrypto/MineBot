@@ -147,6 +147,7 @@ def main() -> int:
     events = [event for event in body.event_log if event.seq > start_seq]
     attempts = list((result.metrics or {}).get("attempts") or [])
     action_metrics = dict(attempts[0].get("metrics") or {}) if len(attempts) == 1 else {}
+    terminal_delivery = dict(action_metrics.get("terminal_delivery") or {})
     single_candidate_completion = bool(
         len(attempts) == 1
         and action_metrics.get("candidates_tried") == 1
@@ -169,11 +170,14 @@ def main() -> int:
         "result": result.to_payload(),
         "path_events": [event_payload(event) for event in events],
         "wood_delta": after_wood - before_wood,
+        "terminal_delivery": terminal_delivery,
         "single_candidate_completion": single_candidate_completion,
         "success": bool(
             result.success
             and after_wood > before_wood
             and single_candidate_completion
+            and terminal_delivery.get("source") in {"event", "query", "reconnect_query"}
+            and float(terminal_delivery.get("action_wall_ms") or 0.0) < 30_000.0
         ),
     }
     ARTIFACT.write_text(json.dumps(artifact, indent=2), encoding="utf-8")

@@ -170,11 +170,21 @@ class GovernanceTests(unittest.TestCase):
         self.assertTrue(decision.protected)
         self.assertEqual(decision.reason, "not_natural_breakable")
 
-    def test_recovery_context_is_bounded_and_does_not_break_resource_targets(self):
-        decision = self.policy.can_break((0, 64, 0), "iron_ore", BreakContext.RECOVERY)
+    def test_recovery_context_routes_around_deliberate_resource_targets(self):
+        for block_type in ("iron_ore", "oak_log"):
+            with self.subTest(block_type=block_type):
+                decision = self.policy.can_break((0, 64, 0), block_type, BreakContext.RECOVERY)
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "recovery_no_resource_break")
+                self.assertFalse(decision.allowed)
+                self.assertEqual(decision.reason, "recovery_no_resource_break")
+
+    def test_recovery_context_can_clear_ordinary_surface_cover(self):
+        for block_type in ("dirt", "grass_block", "gravel", "sand"):
+            with self.subTest(block_type=block_type):
+                decision = self.policy.can_break((0, 64, 0), block_type, BreakContext.RECOVERY)
+
+                self.assertTrue(decision.allowed)
+                self.assertEqual(decision.reason, "allowed_natural")
 
     def test_farm_context_allows_supported_crop_inside_natural_region(self):
         decision = self.policy.can_break((0, 64, 0), "wheat", BreakContext.FARM)
@@ -297,8 +307,128 @@ class GovernanceTests(unittest.TestCase):
         decision = policy.can_break((100, 64, 100), "dirt", BreakContext.COLLECT)
 
         self.assertFalse(decision.allowed)
-        self.assertTrue(decision.protected)
-        self.assertEqual(decision.reason, "structure_risk_unknown")
+        self.assertFalse(decision.protected)
+        self.assertEqual(decision.reason, "governance_confirmation_required")
+        confirmation = decision.details["governance_confirmation"]
+        self.assertEqual(confirmation["context"], "collect")
+        self.assertEqual(confirmation["block_types"], ["dirt"])
+        self.assertEqual(confirmation["max_unique_blocks"], 12)
+
+    def test_confirmed_scope_allows_multiple_matching_blocks_after_fresh_assessment(self):
+        assessor = StaticRiskAssessor(StructureRiskLevel.AMBIGUOUS)
+        policy = GovernancePolicy(
+            structure_risk_assessor=assessor,
+            require_structure_assessment=True,
+            bot_name="Bot1",
+        )
+
+        first = policy.can_break(
+            (100, 64, 100),
+            "stone",
+            BreakContext.DIRECT,
+            bot="Bot1",
+            action_id="action-1",
+        )
+        challenge_id = first.details["governance_confirmation"]["challenge_id"]
+        confirmed = policy.confirm_scope(challenge_id, "mine natural stone for the current task")
+        same_target = policy.can_break((100, 64, 100), "stone", BreakContext.DIRECT, bot="Bot1")
+        nearby_target = policy.can_break((107, 67, 100), "stone", BreakContext.DIRECT, bot="Bot1")
+
+        self.assertTrue(confirmed["confirmed"])
+        self.assertTrue(same_target.allowed)
+        self.assertTrue(nearby_target.allowed)
+        self.assertEqual(same_target.reason, "allowed_governance_scope")
+        self.assertEqual(nearby_target.reason, "allowed_governance_scope")
+        self.assertEqual(len(assessor.calls), 3)
+        permit = nearby_target.details["governance_permit"]
+        self.assertEqual(permit["authorized_unique_blocks"], 2)
+
+    def test_scope_confirmation_does_not_cover_other_type_context_or_region(self):
+        assessor = StaticRiskAssessor(StructureRiskLevel.AMBIGUOUS)
+        policy = GovernancePolicy(
+            structure_risk_assessor=assessor,
+            require_structure_assessment=True,
+        )
+        first = policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT)
+        policy.confirm_scope(
+            first.details["governance_confirmation"]["challenge_id"],
+            "clear natural stone",
+        )
+
+        other_type = policy.can_break((1, 64, 0), "deepslate", BreakContext.DIRECT)
+        other_context = policy.can_break((1, 64, 0), "stone", BreakContext.RECOVERY)
+        outside_region = policy.can_break((9, 64, 0), "stone", BreakContext.DIRECT)
+
+        for decision in (other_type, other_context, outside_region):
+            self.assertFalse(decision.allowed)
+            self.assertEqual(decision.reason, "governance_confirmation_required")
+
+    def test_recovery_confirmation_covers_one_bounded_vertical_escape_corridor(self):
+        assessor = StaticRiskAssessor(StructureRiskLevel.AMBIGUOUS)
+        policy = GovernancePolicy(
+            structure_risk_assessor=assessor,
+            require_structure_assessment=True,
+        )
+
+        decision = policy.can_break((0, 64, 0), "stone", BreakContext.RECOVERY)
+        challenge = decision.details["governance_confirmation"]
+
+        self.assertEqual(challenge["region"]["min"], [-16, 32, -16])
+        self.assertEqual(challenge["region"]["max"], [16, 96, 16])
+        self.assertEqual(challenge["max_unique_blocks"], 96)
+
+    def test_confirmation_never_overrides_high_risk_incomplete_reads_or_protected_regions(self):
+        assessor = StaticRiskAssessor(StructureRiskLevel.AMBIGUOUS)
+        policy = GovernancePolicy(
+            protected_regions=[Region("base", (1, 0, -1), (2, 100, 1))],
+            structure_risk_assessor=assessor,
+            require_structure_assessment=True,
+        )
+        first = policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT)
+        policy.confirm_scope(
+            first.details["governance_confirmation"]["challenge_id"],
+            "clear natural stone",
+        )
+
+        protected = policy.can_break((1, 64, 0), "stone", BreakContext.DIRECT)
+        assessor.level = StructureRiskLevel.HIGH
+        high = policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT)
+        assessor.level = StructureRiskLevel.AMBIGUOUS
+        assessor.complete = False
+        incomplete = policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT)
+
+        self.assertEqual((protected.allowed, protected.reason), (False, "protected_region"))
+        self.assertEqual((high.allowed, high.reason), (False, "player_structure_risk"))
+        self.assertEqual((incomplete.allowed, incomplete.reason), (False, "structure_risk_unknown"))
+
+    def test_confirmation_expires_and_is_invalidated_by_task_generation(self):
+        now = [10.0]
+        generation = [0]
+        assessor = StaticRiskAssessor(StructureRiskLevel.AMBIGUOUS)
+        policy = GovernancePolicy(
+            structure_risk_assessor=assessor,
+            require_structure_assessment=True,
+            confirmation_ttl_s=5.0,
+            clock=lambda: now[0],
+        )
+        policy.begin_confirmation_epoch(lambda: generation[0])
+        first = policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT)
+        policy.confirm_scope(
+            first.details["governance_confirmation"]["challenge_id"],
+            "clear natural stone",
+        )
+        self.assertTrue(policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT).allowed)
+
+        generation[0] += 1
+        generation_invalid = policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT)
+        self.assertEqual(generation_invalid.reason, "governance_confirmation_required")
+        policy.confirm_scope(
+            generation_invalid.details["governance_confirmation"]["challenge_id"],
+            "clear natural stone",
+        )
+        now[0] += 6.0
+        expired = policy.can_break((0, 64, 0), "stone", BreakContext.DIRECT)
+        self.assertEqual(expired.reason, "governance_confirmation_required")
 
     def test_low_structure_risk_allows_context_legal_natural_target(self):
         assessor = StaticRiskAssessor(StructureRiskLevel.LOW)
@@ -338,7 +468,7 @@ class GovernanceTests(unittest.TestCase):
         stand_decision = policy.can_stand((0, 63, 0), "stone")
 
         self.assertFalse(break_decision.allowed)
-        self.assertEqual(break_decision.reason, "structure_risk_unknown")
+        self.assertEqual(break_decision.reason, "governance_confirmation_required")
         self.assertTrue(stand_decision.allowed)
         self.assertEqual(stand_decision.reason, "allowed_stand")
         self.assertEqual(stand_decision.natural_region, "surface")

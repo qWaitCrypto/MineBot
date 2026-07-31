@@ -107,9 +107,12 @@ class SkillFormatTests(unittest.TestCase):
         self.assertIn("prefer `collect_resource`", loaded.content)
         self.assertIn("manual\n   `search_for_block` -> `move_to` -> `mine_block_collect` chain", loaded.content)
         self.assertIn("Generic `move_to` is\n   coordinate travel", loaded.content)
+        self.assertIn("capability dependencies", loaded.content)
         self.assertNotIn("/player", loaded.content)
         self.assertIn("Create, revise, merge, or retire", catalog.load("skill-authoring").description)
-        self.assertIn("bounded multi-target coverage", catalog.load("evidence-led-exploration").description)
+        exploration = catalog.load("evidence-led-exploration")
+        self.assertIn("bounded multi-target coverage", exploration.description)
+        self.assertIn("all compatible unresolved objectives", exploration.content)
 
     def test_parser_rejects_alias_duplicate_unknown_field_and_raw_command(self):
         base = f"""---
@@ -275,6 +278,19 @@ class SkillCrudTests(unittest.TestCase):
 
 
 class SkillActivationTests(unittest.TestCase):
+    def test_load_by_name_pins_the_current_exact_builtin_version(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = SkillWorkspace(store, RuntimeScope("server", "world", "Bot1"), SkillCatalog())
+        registry = bind_workspace(workspace)
+        document = workspace.catalog.load("resource-progression")
+
+        loaded = registry.get("load_skill").callable({"name": document.name})
+
+        self.assertTrue(loaded.success)
+        self.assertEqual(loaded.metrics["version"], document.version)
+        self.assertEqual(loaded.metrics["activation"]["skill_version"], document.version)
+        store.close()
+
     def test_advertised_builtin_version_round_trips_through_load_skill(self):
         store = RuntimeStateStore(":memory:")
         workspace = SkillWorkspace(store, RuntimeScope("server", "world", "Bot1"), SkillCatalog())
@@ -294,12 +310,28 @@ class SkillActivationTests(unittest.TestCase):
             snapshot.rendered,
         )
         self.assertIn(
-            "Exact head_version value",
+            "Omit for normal activation",
             registry.get("load_skill").input_schema["properties"]["version"]["description"],
         )
         self.assertTrue(loaded.success)
         self.assertEqual(loaded.reason, "skill_loaded")
         self.assertEqual(loaded.metrics["version"], document.version)
+        store.close()
+
+    def test_wrong_explicit_version_reports_current_head_as_retryable(self):
+        store = RuntimeStateStore(":memory:")
+        workspace = SkillWorkspace(store, RuntimeScope("server", "world", "Bot1"), SkillCatalog())
+        registry = bind_workspace(workspace)
+        document = workspace.catalog.load("resource-progression")
+
+        loaded = registry.get("load_skill").callable(
+            {"name": document.name, "version": "sha256:" + "0" * 64}
+        )
+
+        self.assertFalse(loaded.success)
+        self.assertEqual(loaded.reason, "skill_version_mismatch")
+        self.assertTrue(loaded.can_retry)
+        self.assertIn(document.version, loaded.metrics["error"])
         store.close()
 
     def test_active_and_descriptor_budgets_reject_instead_of_silently_omitting(self):

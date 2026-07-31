@@ -92,6 +92,25 @@ public final class ExcavationPlanner {
         );
     }
 
+    public static Result planWithReturnPath(
+        WorldView world,
+        Cell start,
+        List<Target> targets,
+        Set<Cell> deniedBlocks,
+        int maxBreaks
+    ) {
+        return plan(
+            world,
+            start,
+            targets,
+            deniedBlocks,
+            maxBreaks,
+            DEFAULT_NODE_CAP,
+            DEFAULT_STEP_CAP,
+            true
+        );
+    }
+
     static Result plan(
         WorldView world,
         Cell start,
@@ -100,6 +119,19 @@ public final class ExcavationPlanner {
         int maxBreaks,
         int nodeCap,
         int stepCap
+    ) {
+        return plan(world, start, targets, deniedBlocks, maxBreaks, nodeCap, stepCap, false);
+    }
+
+    private static Result plan(
+        WorldView world,
+        Cell start,
+        List<Target> targets,
+        Set<Cell> deniedBlocks,
+        int maxBreaks,
+        int nodeCap,
+        int stepCap,
+        boolean returnPathRequired
     ) {
         if (targets.isEmpty()) {
             return new Result(null, "no_targets", 0);
@@ -150,7 +182,8 @@ public final class ExcavationPlanner {
                 current.state().cell(),
                 terminals,
                 targetCells,
-                deniedBlocks
+                deniedBlocks,
+                returnPathRequired
             )) {
                 int nextBreaks = current.state().breaks() + transition.breaks();
                 if (nextBreaks > maxBreaks) {
@@ -233,14 +266,16 @@ public final class ExcavationPlanner {
         Cell current,
         Map<Cell, Target> terminals,
         Set<Cell> targetCells,
-        Set<Cell> deniedBlocks
+        Set<Cell> deniedBlocks,
+        boolean returnPathRequired
     ) {
         List<Transition> transitions = new ArrayList<>();
 
         // A straight, supported shaft down costs one governed floor break.
         Cell below = new Cell(current.x(), current.y() - 1, current.z());
         Cell belowSupport = new Cell(current.x(), current.y() - 2, current.z());
-        if (world.kindAt(belowSupport.x(), belowSupport.y(), belowSupport.z()) == WorldView.NodeKind.SOLID
+        if (!returnPathRequired
+            && world.kindAt(belowSupport.x(), belowSupport.y(), belowSupport.z()) == WorldView.NodeKind.SOLID
             && world.kindAt(below.x(), below.y(), below.z()) == WorldView.NodeKind.SOLID
             && !targetCells.contains(below)
             && !deniedBlocks.contains(below)
@@ -266,12 +301,46 @@ public final class ExcavationPlanner {
                     targetCells,
                     deniedBlocks
                 );
-                if (transition != null) {
+                if (transition != null && (!returnPathRequired || hasWalkReturn(
+                    world,
+                    current,
+                    transition,
+                    terminals,
+                    targetCells,
+                    deniedBlocks
+                ))) {
                     transitions.add(transition);
                 }
             }
         }
         return transitions;
+    }
+
+    private static boolean hasWalkReturn(
+        WorldView world,
+        Cell source,
+        Transition outbound,
+        Map<Cell, Target> terminals,
+        Set<Cell> targetCells,
+        Set<Cell> deniedBlocks
+    ) {
+        Transition reverse = walkTransition(
+            world,
+            outbound.step().stand(),
+            source,
+            terminals,
+            targetCells,
+            deniedBlocks
+        );
+        if (reverse == null) {
+            return false;
+        }
+        Cell sourceHead = new Cell(source.x(), source.y() + 1, source.z());
+        return reverse.step().blockers().stream().allMatch(
+            blocker -> blocker.equals(source)
+                || blocker.equals(sourceHead)
+                || outbound.step().blockers().contains(blocker)
+        );
     }
 
     private static Transition walkTransition(

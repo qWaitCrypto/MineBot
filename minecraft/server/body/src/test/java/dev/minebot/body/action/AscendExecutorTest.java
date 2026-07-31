@@ -80,17 +80,18 @@ final class AscendExecutorTest {
             wantJump = false;
             log.add("clearAll");
         }
-        @Override public AscendExecutor.ScaffoldSelection selectScaffold(
-            String b,
-            List<String> candidates
-        ) {
-            if (scaffoldCount <= 0 || !candidates.contains(scaffoldItem)) {
+        @Override public AscendExecutor.ScaffoldSelection selectScaffold(String b) {
+            if (scaffoldCount <= 0) {
                 return new AscendExecutor.ScaffoldSelection(
                     false, null, 0, "pillar_no_scaffold_available"
                 );
             }
             log.add("selectScaffold");
             return new AscendExecutor.ScaffoldSelection(true, scaffoldItem, scaffoldCount, "completed");
+        }
+        @Override public boolean selectBreakTool(String b, String blockId) {
+            log.add("selectBreakTool:" + blockId);
+            return true;
         }
         @Override public String selectedItemId() { return scaffoldCount > 0 ? scaffoldItem : null; }
         @Override public int selectedItemCount() { return scaffoldCount; }
@@ -346,6 +347,44 @@ final class AscendExecutorTest {
     }
 
     @Test
+    void deniedStairDirectionIsRememberedAndAnotherDirectionIsTried() {
+        World world = enclosedStart();
+        world.set(0, 62, 0, AIR);
+        FakeBody body = new FakeBody(60);
+        Harness h = Harness.create(world, body, 2_000);
+
+        JsonObject terminal = h.run(1_500, () -> {
+            for (var proposal : h.proposals) {
+                boolean deniedEast = proposal.mutationKind().equals("break")
+                    && proposal.x() == 1
+                    && proposal.y() == 61
+                    && proposal.z() == 0;
+                h.gate.verdict(
+                    proposal.proposalId(),
+                    !deniedEast,
+                    deniedEast ? "structure_risk_unknown" : "natural_terrain"
+                );
+            }
+            if (h.body.attacking) {
+                h.world.set(h.body.breakX, h.body.breakY, h.body.breakZ, AIR);
+            }
+            if (h.body.y >= 61) {
+                h.world.sky = true;
+            }
+        });
+
+        long deniedProposalCount = h.proposals.stream()
+            .filter(proposal -> proposal.mutationKind().equals("break"))
+            .filter(proposal -> proposal.x() == 1 && proposal.y() == 61 && proposal.z() == 0)
+            .count();
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals(1, deniedProposalCount, "a denied block must not be proposed again");
+        assertEquals(STONE, world.at(1, 61, 0), "the denied block must remain unchanged");
+        assertTrue(body.z >= 1.4, "the player must take the alternate stair direction: " + body.z);
+        assertFalse(body.breakTargets.contains("1,61,0:" + STONE));
+    }
+
+    @Test
     void hazardInEveryStairDirectionIsUnsafeAndUntouched() {
         World world = enclosedStart();
         for (int[] direction : new int[][] {{1, 0}, {0, 1}, {-1, 0}, {0, -1}}) {
@@ -438,6 +477,251 @@ final class AscendExecutorTest {
     }
 
     @Test
+    void movesToOpenColumnWhenCurrentPillarHeadroomBreakIsDenied() {
+        World world = enclosedStart();
+        for (int[] direction : DIRECTIONS) {
+            world.set(direction[0], 60, direction[1], AIR);
+        }
+        world.set(1, 60, 0, AIR);
+        world.set(1, 61, 0, AIR);
+        world.set(1, 62, 0, AIR);
+        for (int y = 60; y <= 65; y++) {
+            world.set(2, y, 0, AIR);
+        }
+        FakeBody body = new FakeBody(60);
+        body.scaffoldCount = 2;
+        Harness h = Harness.create(world, body, 2_000);
+
+        JsonObject terminal = h.run(1_000, () -> {
+            for (var proposal : h.proposals) {
+                boolean deniedCurrentRoof = proposal.mutationKind().equals("break")
+                    && proposal.x() == 0
+                    && proposal.y() == 62
+                    && proposal.z() == 0;
+                h.gate.verdict(
+                    proposal.proposalId(),
+                    !deniedCurrentRoof,
+                    deniedCurrentRoof ? "structure_risk_unknown" : "natural_terrain"
+                );
+            }
+            if (h.body.y >= 61) {
+                h.world.sky = true;
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("surface_reached", terminal.get("reason").getAsString());
+        assertTrue(terminal.get("recovery_staging_attempted").getAsBoolean());
+        assertTrue(terminal.get("recovery_staging_used").getAsBoolean());
+        assertTrue(terminal.get("recovery_staging_best_headroom").getAsInt() >= 2);
+        assertTrue(body.x >= 1.8, "the player must leave the denied roof column: " + body.x);
+        assertEquals(STONE, world.at(0, 62, 0));
+        assertEquals(COBBLESTONE, world.at(2, 60, 0));
+        assertFalse(body.breakTargets.contains("0,62,0:" + STONE));
+    }
+
+    @Test
+    void preflightsNextRoofBeforePillaringIntoATrappedPosition() {
+        World world = enclosedStart();
+        world.set(0, 62, 0, AIR);
+        for (int[] direction : DIRECTIONS) {
+            world.set(direction[0], 60, direction[1], AIR);
+        }
+        world.set(1, 60, 0, AIR);
+        world.set(1, 61, 0, AIR);
+        for (int y = 60; y <= 65; y++) {
+            world.set(2, y, 0, AIR);
+        }
+        world.set(3, 60, 0, AIR);
+        world.set(2, 60, 1, AIR);
+        world.set(2, 60, -1, AIR);
+        FakeBody body = new FakeBody(60);
+        body.scaffoldCount = 2;
+        Harness h = Harness.create(world, body, 2_000);
+
+        JsonObject terminal = h.run(1_000, () -> {
+            for (var proposal : h.proposals) {
+                boolean deniedNextRoof = proposal.mutationKind().equals("break")
+                    && proposal.x() == 0
+                    && proposal.y() == 63
+                    && proposal.z() == 0;
+                h.gate.verdict(
+                    proposal.proposalId(),
+                    !deniedNextRoof,
+                    deniedNextRoof ? "structure_risk_unknown" : "natural_terrain"
+                );
+            }
+            if (h.body.y >= 61) {
+                h.world.sky = true;
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertTrue(terminal.get("recovery_staging_used").getAsBoolean());
+        assertEquals(1, terminal.get("pillar_continuation_preflight_count").getAsInt());
+        assertEquals(0, terminal.get("pillar_continuation_preflight_allowed").getAsInt());
+        assertEquals(AIR, world.at(0, 60, 0), "the denied column must not receive a pillar");
+        assertEquals(STONE, world.at(0, 63, 0), "the denied roof must remain intact");
+        assertEquals(COBBLESTONE, world.at(2, 60, 0));
+        assertTrue(body.x >= 1.8, "the player must stage while still mobile: " + body.x);
+    }
+
+    @Test
+    void repeatedStagingMustAdvanceTheVerticalFrontier() {
+        World world = enclosedStart();
+        world.set(0, 62, 0, AIR);
+        for (int[] direction : DIRECTIONS) {
+            world.set(direction[0], 60, direction[1], AIR);
+        }
+        for (int y = 60; y <= 62; y++) {
+            world.set(1, y, 0, AIR);
+        }
+        for (int y = 60; y <= 64; y++) {
+            world.set(2, y, 0, AIR);
+        }
+        world.set(3, 60, 0, AIR);
+        world.set(3, 61, 0, AIR);
+        for (int y = 60; y <= 62; y++) {
+            world.set(2, y, 1, AIR);
+            world.set(2, y, -1, AIR);
+        }
+        FakeBody body = new FakeBody(60);
+        body.scaffoldCount = 5;
+        Harness h = Harness.create(world, body, 3_000);
+        boolean[] upperRouteOpened = {false};
+
+        JsonObject terminal = h.run(2_000, () -> {
+            if (h.body.y >= 62 && !upperRouteOpened[0]) {
+                for (int x = 3; x <= 8; x++) {
+                    h.world.set(x, 61, 0, STONE);
+                    h.world.set(x, 62, 0, AIR);
+                    h.world.set(x, 63, 0, AIR);
+                }
+                for (int y = 64; y <= 68; y++) {
+                    h.world.set(8, y, 0, AIR);
+                }
+                upperRouteOpened[0] = true;
+            }
+            for (var proposal : h.proposals) {
+                boolean deniedRoof = proposal.mutationKind().equals("break")
+                    && ((proposal.x() == 0 && proposal.y() == 63 && proposal.z() == 0)
+                        || (proposal.x() == 2 && proposal.y() == 65 && proposal.z() == 0));
+                h.gate.verdict(
+                    proposal.proposalId(),
+                    !deniedRoof,
+                    deniedRoof ? "structure_risk_unknown" : "natural_terrain"
+                );
+            }
+            if (h.body.x >= 7.5 && h.body.y >= 63) {
+                h.world.sky = true;
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals(2, terminal.get("recovery_staging_attempts").getAsInt());
+        assertTrue(terminal.get("recovery_staging_frontier_y").getAsInt() >= 68);
+        assertTrue(body.x >= 7.5, "the player must reach the second higher frontier: " + body.x);
+        assertEquals(STONE, world.at(0, 63, 0));
+        assertEquals(STONE, world.at(2, 65, 0));
+    }
+
+    @Test
+    void equalHeightNewColumnIsProgressWhenItExposesAnotherExit() {
+        World world = enclosedStart();
+        world.set(0, 62, 0, AIR);
+        for (int[] direction : DIRECTIONS) {
+            world.set(direction[0], 60, direction[1], AIR);
+        }
+        world.set(1, 61, 0, AIR);
+        for (int y = 60; y <= 62; y++) {
+            world.set(2, y, 0, AIR);
+        }
+        FakeBody body = new FakeBody(60);
+        body.scaffoldCount = 2;
+        Harness h = Harness.create(world, body, 2_000);
+
+        JsonObject terminal = h.run(1_000, () -> {
+            for (var proposal : h.proposals) {
+                boolean deniedSourceRoof = proposal.mutationKind().equals("break")
+                    && proposal.x() == 0
+                    && proposal.y() == 63
+                    && proposal.z() == 0;
+                h.gate.verdict(
+                    proposal.proposalId(),
+                    !deniedSourceRoof,
+                    deniedSourceRoof ? "structure_risk_unknown" : "natural_terrain"
+                );
+            }
+            if (h.body.y >= 61) {
+                h.world.sky = true;
+            }
+        });
+
+        long deniedSourceProposals = h.proposals.stream()
+            .filter(proposal -> proposal.mutationKind().equals("break"))
+            .filter(proposal -> proposal.x() == 0 && proposal.y() == 63 && proposal.z() == 0)
+            .count();
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals(1, deniedSourceProposals);
+        assertEquals(62, terminal.get("recovery_staging_frontier_y").getAsInt());
+        assertEquals(STONE, world.at(0, 63, 0));
+        assertTrue(body.x >= 1.8, "the player must test the new equal-height exit: " + body.x);
+    }
+
+    @Test
+    void equalHeightColumnsAreTriedOnceThenExhaustHonestly() {
+        World world = enclosedStart();
+        world.set(0, 62, 0, AIR);
+        for (int[] direction : DIRECTIONS) {
+            world.set(direction[0], 60, direction[1], AIR);
+        }
+        world.set(1, 61, 0, AIR);
+        world.set(0, 61, 1, AIR);
+        for (int y = 60; y <= 62; y++) {
+            world.set(2, y, 0, AIR);
+            world.set(0, y, 2, AIR);
+        }
+        FakeBody body = new FakeBody(60);
+        Harness h = Harness.create(world, body, 2_000);
+
+        JsonObject terminal = h.run(1_500, () -> {
+            for (var proposal : h.proposals) {
+                h.gate.verdict(
+                    proposal.proposalId(),
+                    !proposal.mutationKind().equals("break"),
+                    proposal.mutationKind().equals("break")
+                        ? "structure_risk_unknown"
+                        : "natural_terrain"
+                );
+            }
+        });
+
+        long sourceRoofProposals = h.proposals.stream()
+            .filter(proposal -> proposal.mutationKind().equals("break"))
+            .filter(proposal -> proposal.x() == 0 && proposal.y() == 63 && proposal.z() == 0)
+            .count();
+        long eastRoofProposals = h.proposals.stream()
+            .filter(proposal -> proposal.mutationKind().equals("break"))
+            .filter(proposal -> proposal.x() == 2 && proposal.y() == 63 && proposal.z() == 0)
+            .count();
+        long southRoofProposals = h.proposals.stream()
+            .filter(proposal -> proposal.mutationKind().equals("break"))
+            .filter(proposal -> proposal.x() == 0 && proposal.y() == 63 && proposal.z() == 2)
+            .count();
+        long allRoofProposals = h.proposals.stream()
+            .filter(proposal -> proposal.mutationKind().equals("break") && proposal.y() == 63)
+            .count();
+        assertEquals("failed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals(1, sourceRoofProposals);
+        assertEquals(1, eastRoofProposals);
+        assertEquals(1, southRoofProposals);
+        assertEquals(3, allRoofProposals);
+        assertEquals(STONE, world.at(0, 63, 0));
+        assertEquals(STONE, world.at(2, 63, 0));
+        assertEquals(STONE, world.at(0, 63, 2));
+    }
+
+    @Test
     void brakesAtCenterAndContinuesPillaringAcrossMultipleBlocks() {
         World world = openPillarShaft(64);
         FakeBody body = new FakeBody(60);
@@ -483,6 +767,29 @@ final class AscendExecutorTest {
         assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
         assertEquals("surface_reached", terminal.get("reason").getAsString());
         assertEquals("minecraft:spruce_planks", world.at(0, 60, 0));
+        assertEquals(0, body.scaffoldCount);
+    }
+
+    @Test
+    void ordinaryLogsAreValidEmergencyScaffold() {
+        World world = openPillarStart();
+        FakeBody body = new FakeBody(60);
+        body.scaffoldItem = "minecraft:spruce_log";
+        body.scaffoldCount = 1;
+        Harness h = Harness.create(world, body, 2_000);
+
+        JsonObject terminal = h.run(500, () -> {
+            for (var proposal : h.proposals) {
+                h.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (h.body.y >= 61) {
+                h.world.sky = true;
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("surface_reached", terminal.get("reason").getAsString());
+        assertEquals("minecraft:spruce_log", world.at(0, 60, 0));
         assertEquals(0, body.scaffoldCount);
     }
 
@@ -536,6 +843,34 @@ final class AscendExecutorTest {
 
         assertEquals("completed", terminal.get("classification").getAsString());
         assertEquals(0, terminal.get("ascend_steps").getAsInt());
+    }
+
+    @Test
+    void visibleSkyAtDryOneByOneShaftBottomIsNotASurfaceTerminal() {
+        World world = enclosedStart();
+
+        assertFalse(MinecraftSurfaceAccess.isMobilitySurfaceStand(
+            world,
+            true,
+            0,
+            60,
+            0
+        ));
+    }
+
+    @Test
+    void visibleSkyWithARealHorizontalDryMoveIsASurfaceTerminal() {
+        World world = enclosedStart();
+        world.set(1, 60, 0, AIR);
+        world.set(1, 61, 0, AIR);
+
+        assertTrue(MinecraftSurfaceAccess.isMobilitySurfaceStand(
+            world,
+            true,
+            0,
+            60,
+            0
+        ));
     }
 
     @Test

@@ -121,6 +121,16 @@ def test_requests_before_negotiation_are_a_capability_gap() -> None:
         protocol.navigate("MineBot_1", "nav-1", {"kind": "xz", "x": 1, "z": 2})
 
 
+def test_hello_can_disable_live_event_subscription_without_changing_legacy_default() -> None:
+    protocol = JavaBodyProtocol()
+
+    legacy = protocol.hello()
+    read_only = protocol.hello(subscribe_events=False)
+
+    assert "subscribe_events" not in legacy
+    assert read_only["subscribe_events"] is False
+
+
 def test_unoffered_request_type_is_a_capability_gap_never_a_silent_substitute() -> None:
     protocol = JavaBodyProtocol()
     hello = protocol.hello()

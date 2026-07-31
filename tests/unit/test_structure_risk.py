@@ -128,6 +128,41 @@ class StructureRiskTests(unittest.TestCase):
         self.assertIn("bot_owned_neighbors:1", with_receipt.signals)
         self.assertEqual(mismatched_receipt.level, StructureRiskLevel.HIGH)
 
+    def test_matching_temporary_furnace_receipts_do_not_make_natural_stone_a_structure(self):
+        body = VoxelBody(
+            {
+                (0, 64, 0): "stone",
+                (0, 65, 0): "stone",
+                (0, 63, 0): "stone",
+                (1, 64, 0): "furnace",
+                (-1, 64, 0): "crafting_table",
+            }
+        )
+
+        assessment = VoxelStructureRiskAssessor(body).assess(
+            (0, 64, 0),
+            "stone",
+            BreakContext.COLLECT,
+            bot_placements={
+                (1, 64, 0): BotPlacement(
+                    (1, 64, 0),
+                    "furnace",
+                    "temporary_furnace_auto_site",
+                    "Bot1",
+                ),
+                (-1, 64, 0): BotPlacement(
+                    (-1, 64, 0),
+                    "crafting_table",
+                    "workstation",
+                    "Bot1",
+                ),
+            },
+        )
+
+        self.assertEqual(assessment.level, StructureRiskLevel.LOW)
+        self.assertIn("bot_owned_neighbors:2", assessment.signals)
+        self.assertNotIn("functional_blocks:1", assessment.signals)
+
     def test_exposed_regular_raw_stone_plane_is_ambiguous(self):
         blocks = {
             (0, y, z): "stone"

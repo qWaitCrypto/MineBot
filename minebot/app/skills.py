@@ -281,6 +281,14 @@ class SkillWorkspace:
     def load(self, name: str, version: str | None = None) -> tuple[SkillDocument, SkillActivationRecord]:
         document = self.read(name, version)
         if document is None or document.status != "active":
+            current = self.read(name)
+            if current is not None and current.status == "active" and version is not None:
+                raise SkillOperationError(
+                    "skill_version_mismatch",
+                    f"Skill version is unavailable: {name}; current_head_version={current.version}. "
+                    "Omit version to activate and pin the current head.",
+                    can_retry=True,
+                )
             raise SkillOperationError("skill_not_found", f"Skill is not active: {name}")
         if not document.loadable:
             raise SkillOperationError(
@@ -832,7 +840,7 @@ def _load_skill_tool(workspace: SkillWorkspace) -> RegisteredTool:
 
     return RegisteredTool(
         "load_skill",
-        "Activate one exact methodology version for the runtime-owned turn, task, or maintenance lifetime. It advises but never grants capability.",
+        "Activate a methodology for the runtime-owned turn, task, or maintenance lifetime. Omit version for the current head; the runtime pins the exact resolved version. It advises but never grants capability.",
         _skill_reference_schema(),
         load_skill,
         _skill_sidecar("load_skill", "load_skill", "skill_activation"),
@@ -1130,8 +1138,9 @@ def _skill_reference_schema() -> dict[str, object]:
                 "type": "string",
                 "maxLength": 128,
                 "description": (
-                    "Exact head_version value (sha256:...) from AVAILABLE_SKILLS. "
-                    "Omit it to load the current head; do not include origin."
+                    "Omit for normal activation: the runtime resolves and pins the current exact head. "
+                    "Provide an exact head_version (sha256:...) only when replaying a known version; "
+                    "do not include origin."
                 ),
             },
         },

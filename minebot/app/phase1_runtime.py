@@ -110,7 +110,15 @@ def build_phase1_agent_runtime(
     trace: RuntimeTrace | None = None,
 ) -> AgentRuntimeParts:
     authority = ProgressAuthority()
-    registry = build_phase1_registry(body, config, authority=authority)
+    policy = config.governance_policy or GovernancePolicy(
+        natural_regions=[config.natural_region],
+        structure_risk_assessor=VoxelStructureRiskAssessor(body),
+        require_structure_assessment=True,
+        bot_name=body.bot_name,
+    )
+    policy.begin_confirmation_epoch(authority.current_generation)
+    runtime_config = replace(config, governance_policy=policy)
+    registry = build_phase1_registry(body, runtime_config, authority=authority)
     parts = build_agent_runtime(
         body=body,
         registry=registry,
@@ -138,6 +146,7 @@ def build_phase1_agent_runtime(
     catalog.register(collect_resource_tool(context))
     catalog.register(ensure_tool_for_tool(context, _recipe_lookup(body)))
     catalog.assert_stage_complete("composition")
+    registry.register(_confirm_governance_scope_tool(policy))
     if config.task_workspace is not None:
         register_task_tools(
             registry,
@@ -546,6 +555,7 @@ def build_phase1_registry(
         natural_regions=[config.natural_region],
         structure_risk_assessor=VoxelStructureRiskAssessor(body),
         require_structure_assessment=True,
+        bot_name=body.bot_name,
     )
     progress = authority or ProgressAuthority()
     legacy_navigator = NavigationTransactions.server_side(body, policy, progress=progress)
@@ -725,6 +735,76 @@ def _read_state_tool(body: Body) -> RegisteredTool:
     )
 
 
+def _confirm_governance_scope_tool(policy: GovernancePolicy) -> RegisteredTool:
+    def confirm(params: JsonObject) -> ToolResult:
+        result = policy.confirm_scope(
+            str(params.get("challenge_id") or ""),
+            str(params.get("purpose") or ""),
+        )
+        confirmed = result.get("confirmed") is True
+        return ToolResult(
+            confirmed,
+            str(result.get("reason") or "governance_confirmation_failed"),
+            False,
+            next_suggestion=(
+                "Retry the original player objective; every affected block will still receive a fresh exact governance check."
+                if confirmed
+                else "Use a currently pending challenge_id or choose another resource candidate."
+            ),
+            metrics={
+                key: value
+                for key, value in result.items()
+                if key != "confirmed"
+            },
+        )
+
+    def project(_reason: str, metrics: dict[str, object]) -> JsonObject:
+        return {
+            key: bounded_summary_value(metrics[key])
+            for key in ("challenge_id", "permit")
+            if key in metrics
+        }
+
+    return RegisteredTool(
+        "confirm_governance_scope",
+        "Confirm one Body-issued discretionary natural-work scope after reviewing its evidence. "
+        "This does not override protected regions, functional blocks, high structure risk, incomplete reads, "
+        "changed blocks, another context, another block type, or an expired/task-stale challenge. "
+        "One confirmation covers the bounded region and block count shown in the challenge, so do not confirm per block.",
+        {
+            "type": "object",
+            "properties": {
+                "challenge_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Exact challenge_id returned by a governance_confirmation_required result.",
+                },
+                "purpose": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160,
+                    "description": "Short task reason for approving this bounded natural-work scope.",
+                },
+            },
+            "required": ["challenge_id", "purpose"],
+            "additionalProperties": False,
+        },
+        confirm,
+        ToolSidecar(
+            "confirm_governance_scope",
+            mutating=False,
+            source="governance.policy",
+            tool_type="governance",
+            permission="confirm_governance_scope",
+            terminal_truth=("GovernancePolicy",),
+            timeout_s=1.0,
+            body_mutating=False,
+        ),
+        projector=project,
+    )
+
+
 def _move_to_tool(
     navigator: NavigationTransactions,
     java_objective_body: Body | None = None,
@@ -774,6 +854,9 @@ def _move_to_tool(
     return RegisteredTool(
         "move_to",
         "Travel to a coordinate or coordinate radius through the Body navigation transaction. "
+        "Use only a destination supplied by the user/task or returned by authoritative world "
+        "observation; never invent a coordinate to search or escape. Use explore_for to discover "
+        "new terrain and go_to_surface for vertical egress. "
         "This is generic spatial travel: arrival does not prove line of sight, interaction readiness, "
         "or access to a nearby block. Use get_to_block for one block-approach objective and "
         "collect_resource for count-based acquisition.",
@@ -857,7 +940,9 @@ def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
         "explore_for",
         "Explore safe new world frontiers for one or more block or entity target classes. "
         "Choose WHAT to find; the Body owns frontier selection, navigation, coverage, and "
-        "terminal verification. Use supported target groups such as '#logs' and '#flowers' "
+        "terminal verification. Ordinary task progress returns immediately when the first requested "
+        "target is seen, so act on that fact before exploring farther; the result carries a cursor "
+        "for resuming the same search later. Use supported target groups such as '#logs' and '#flowers' "
         "when any member of that family satisfies the objective; reserve exact block names "
         "such as 'oak_log' for exact-species goals. If a result includes concrete block coordinates, use "
         "mine_block_collect for one of those exact positions; collect_resource starts a "
@@ -885,6 +970,12 @@ def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
                 "return_policy": {
                     "type": "string",
                     "enum": ["first_match", "region_budget"],
+                    "default": "first_match",
+                    "description": (
+                        "Use first_match (the default) for ordinary task progress: return as soon as any "
+                        "requested target is found. Use region_budget only when completing an explicit "
+                        "area survey is itself the objective; it keeps walking after useful targets are seen."
+                    ),
                 },
                 "scan_radius": {"type": "integer", "minimum": 4, "maximum": 32},
                 "resume_cursor": {

@@ -1026,7 +1026,7 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(body.actions, [])
         self.assertEqual(result.metrics["legality"]["allowed"], False)
 
-    def test_mine_block_marks_ambiguous_structure_as_retryable_inspection(self):
+    def test_mine_block_marks_complete_ambiguous_structure_as_confirmation_required(self):
         class AmbiguousRisk:
             def assess(self, pos, block_type, context, *, bot_placements=None):
                 return StructureRiskAssessment(
@@ -1056,9 +1056,10 @@ class BlockWorkTests(unittest.TestCase):
         result = BlockWork(body, policy).mine_block((100, 64, 100), context=BreakContext.DIRECT)
 
         self.assertFalse(result.success)
-        self.assertEqual(result.reason, "break_denied:structure_risk_unknown")
+        self.assertEqual(result.reason, "break_denied:governance_confirmation_required")
         self.assertTrue(result.can_retry)
-        self.assertEqual(result.metrics["evidence_state"], "needs_inspection")
+        self.assertEqual(result.metrics["evidence_state"], "confirmation_required")
+        self.assertIn("challenge_id", result.metrics["governance_confirmation"])
         self.assertEqual(body.actions, [])
 
     def test_mine_block_executes_when_governance_allows_collect_target(self):

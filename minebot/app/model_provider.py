@@ -28,11 +28,13 @@ from agents import (
     ModelSettings,
     OpenAIChatCompletionsModel,
     OpenAIResponsesModel,
+    RetryDecision,
     RetryPolicyContext,
     retry_policies,
     set_tracing_disabled,
 )
-from openai import AsyncOpenAI
+from httpx import TransportError
+from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from minebot.brain.provider import ApiShape, Capabilities, ProviderConfig, ProviderKind
 
@@ -64,7 +66,10 @@ _SETTINGS_ALLOWLIST = (
 )
 
 _MODEL_RETRY_MAX_RETRIES = 2
-_MODEL_RETRY_HTTP_STATUSES = frozenset({408, 409, 425, 429, *range(500, 600)})
+DEFAULT_MODEL_REQUEST_TIMEOUT_S = 120.0
+MIN_MODEL_REQUEST_TIMEOUT_S = 10.0
+MAX_MODEL_REQUEST_TIMEOUT_S = 600.0
+_MODEL_RETRY_HTTP_STATUSES = frozenset({408, 409, 425, *range(500, 600)})
 _MODEL_RETRY_ERROR_CODES = frozenset(
     {
         "overloaded",
@@ -80,6 +85,36 @@ _MODEL_RETRY_MESSAGE_FRAGMENTS = (
     "service unavailable",
     "temporarily unavailable",
     "try again later",
+    "you can retry your request",
+)
+_PERMANENT_MODEL_ERROR_CODES = frozenset(
+    {
+        "account_deactivated",
+        "account_suspended",
+        "billing_hard_limit_reached",
+        "billing_not_active",
+        "credit_balance_too_low",
+        "insufficient_balance",
+        "insufficient_quota",
+        "organization_deactivated",
+        "organization_suspended",
+        "payment_required",
+        "usage_limit_reached",
+    }
+)
+_PERMANENT_MODEL_ERROR_MESSAGE_FRAGMENTS = (
+    "account has been deactivated",
+    "account is deactivated",
+    "account is suspended",
+    "billing hard limit",
+    "billing is not active",
+    "credit balance is too low",
+    "exceeded your current quota",
+    "insufficient balance",
+    "insufficient quota",
+    "insufficient_quota",
+    "organization has been deactivated",
+    "organization is suspended",
 )
 
 
@@ -181,6 +216,8 @@ class ModelProviderRegistry(ModelProvider):
                     "tracing": cfg.tracing,
                     "model_retry": {
                         "max_retries": _MODEL_RETRY_MAX_RETRIES,
+                        "client_max_retries": 0,
+                        "request_timeout_s": _request_timeout_s(cfg),
                         "replay_guard": "sdk_stream_events",
                     },
                 }
@@ -229,7 +266,15 @@ class ModelProviderRegistry(ModelProvider):
         )
 
     def _client(self, cfg: ProviderConfig) -> AsyncOpenAI:
-        client = AsyncOpenAI(api_key=self._api_key(cfg), base_url=cfg.base_url)
+        # The agents SDK owns replay-aware retries. Disabling the OpenAI
+        # client's hidden retry layer keeps one bounded attempt budget and
+        # prevents nested retries from multiplying model wait time.
+        client = AsyncOpenAI(
+            api_key=self._api_key(cfg),
+            base_url=cfg.base_url,
+            max_retries=0,
+            timeout=_request_timeout_s(cfg),
+        )
         self._clients.append(client)
         return client
 
@@ -293,11 +338,18 @@ def _model_retry_settings() -> ModelRetrySettings:
             multiplier=2.0,
             jitter=True,
         ),
-        policy=retry_policies.any(
-            retry_policies.provider_suggested(),
-            retry_policies.network_error(),
-            retry_policies.http_status(_MODEL_RETRY_HTTP_STATUSES),
-            _retry_explicit_transient_model_error,
+        # OpenAI's generic advice marks every HTTP 429 retryable. The leading
+        # guard keeps real rate limiting recoverable while preventing quota and
+        # billing failures from being replayed as if waiting could fix them.
+        policy=retry_policies.all(
+            _retry_unless_permanent_model_error,
+            retry_policies.any(
+                retry_policies.provider_suggested(),
+                retry_policies.network_error(),
+                retry_policies.retry_after(),
+                retry_policies.http_status(_MODEL_RETRY_HTTP_STATUSES),
+                _retry_explicit_transient_model_error,
+            ),
         ),
     )
 
@@ -309,3 +361,128 @@ def _retry_explicit_transient_model_error(context: RetryPolicyContext) -> bool:
         return True
     message = str(normalized.message or "").strip().lower()
     return any(fragment in message for fragment in _MODEL_RETRY_MESSAGE_FRAGMENTS)
+
+
+def _retry_unless_permanent_model_error(
+    context: RetryPolicyContext,
+) -> bool | RetryDecision:
+    if not _is_permanent_model_error(
+        context.error,
+        error_code=context.normalized.error_code,
+        message=context.normalized.message,
+    ):
+        return True
+    return RetryDecision(retry=False, reason="permanent_model_provider_error")
+
+
+def is_retryable_model_error(exc: BaseException) -> bool:
+    """Return whether a failed model turn may continue from current world truth.
+
+    SDK request replay remains guarded separately. This classifier is for the
+    outer session, which starts a new continuation turn instead of replaying
+    the interrupted turn and its already committed tool effects.
+    """
+
+    errors = tuple(_iter_model_error_chain(exc))
+    if _is_permanent_model_error(exc):
+        return False
+
+    error_codes = _model_error_codes(errors)
+    for current in errors:
+        if isinstance(current, (APIConnectionError, APITimeoutError, TransportError)):
+            return True
+        if isinstance(current, APIStatusError):
+            if current.status_code in _MODEL_RETRY_HTTP_STATUSES:
+                return True
+            if current.status_code == 429 and (
+                bool(error_codes & _MODEL_RETRY_ERROR_CODES)
+                or _has_retry_after(current)
+            ):
+                return True
+        if isinstance(current, APIError):
+            message = str(current).strip().lower()
+            if any(fragment in message for fragment in _MODEL_RETRY_MESSAGE_FRAGMENTS):
+                return True
+    return False
+
+
+def _is_permanent_model_error(
+    exc: BaseException,
+    *,
+    error_code: str | None = None,
+    message: str | None = None,
+) -> bool:
+    errors = tuple(_iter_model_error_chain(exc))
+    codes = _model_error_codes(errors)
+    if error_code:
+        codes.add(error_code.strip().lower())
+    if codes & _PERMANENT_MODEL_ERROR_CODES:
+        return True
+
+    messages = [str(current).strip().lower() for current in errors]
+    if message:
+        messages.append(message.strip().lower())
+    return any(
+        fragment in candidate
+        for candidate in messages
+        for fragment in _PERMANENT_MODEL_ERROR_MESSAGE_FRAGMENTS
+    )
+
+
+def _iter_model_error_chain(exc: BaseException):
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _model_error_codes(errors: Sequence[BaseException]) -> set[str]:
+    codes: set[str] = set()
+    for error in errors:
+        for value in (getattr(error, "code", None), getattr(error, "type", None)):
+            if isinstance(value, str) and value.strip():
+                codes.add(value.strip().lower())
+        body = getattr(error, "body", None)
+        if not isinstance(body, Mapping):
+            continue
+        nested = body.get("error")
+        payloads = (body, nested) if isinstance(nested, Mapping) else (body,)
+        for payload in payloads:
+            for key in ("code", "type"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    codes.add(value.strip().lower())
+    return codes
+
+
+def _has_retry_after(error: BaseException) -> bool:
+    response = getattr(error, "response", None)
+    header_sources = [getattr(response, "headers", None)]
+    header_sources.extend(
+        (getattr(error, "headers", None), getattr(error, "response_headers", None))
+    )
+    for headers in header_sources:
+        if not isinstance(headers, Mapping):
+            continue
+        for key, value in headers.items():
+            if str(key).lower() in {"retry-after", "retry-after-ms"} and str(value).strip():
+                return True
+    return False
+
+
+def _request_timeout_s(cfg: ProviderConfig) -> float:
+    raw = cfg.settings.get("request_timeout_s", DEFAULT_MODEL_REQUEST_TIMEOUT_S)
+    try:
+        timeout_s = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ProviderConfigError(
+            f"provider {cfg.name!r}: request_timeout_s must be numeric"
+        ) from exc
+    if not MIN_MODEL_REQUEST_TIMEOUT_S <= timeout_s <= MAX_MODEL_REQUEST_TIMEOUT_S:
+        raise ProviderConfigError(
+            f"provider {cfg.name!r}: request_timeout_s must be between "
+            f"{MIN_MODEL_REQUEST_TIMEOUT_S:g} and {MAX_MODEL_REQUEST_TIMEOUT_S:g} seconds"
+        )
+    return timeout_s

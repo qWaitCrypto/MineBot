@@ -2,6 +2,7 @@ package dev.minebot.body.action;
 
 import dev.minebot.body.nav.Goal;
 import dev.minebot.body.nav.MinecraftWorldView;
+import dev.minebot.body.nav.MoveGenerator;
 import dev.minebot.body.nav.NavigateExecutor;
 import dev.minebot.body.nav.WorldView;
 import net.minecraft.core.BlockPos;
@@ -25,8 +26,29 @@ public final class MinecraftSurfaceAccess implements AscendExecutor.SurfaceAcces
 
     @Override
     public boolean isSurfaceStand(int x, int y, int z) {
-        return new Goal.Stand(x, y, z).isSatisfied(world, x, y, z)
-            && level.canSeeSky(new BlockPos(x, y + 1, z));
+        return isMobilitySurfaceStand(
+            world,
+            level.canSeeSky(new BlockPos(x, y + 1, z)),
+            x,
+            y,
+            z
+        );
+    }
+
+    static boolean isMobilitySurfaceStand(
+        WorldView world,
+        boolean canSeeSky,
+        int x,
+        int y,
+        int z
+    ) {
+        if (!canSeeSky || !new Goal.Stand(x, y, z).isSatisfied(world, x, y, z)) {
+            return false;
+        }
+        return new MoveGenerator(world).movesFrom(x, y, z).moves().stream()
+            .filter(move -> move.x() != x || move.z() != z)
+            .anyMatch(move -> new Goal.Stand(move.x(), move.y(), move.z())
+                .isSatisfied(world, move.x(), move.y(), move.z()));
     }
 
     @Override

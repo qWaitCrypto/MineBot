@@ -26,7 +26,8 @@ X = 104
 Y = 100
 Z = 104
 SCAFFOLD = "cobblestone"
-PILLAR_STEPS = 6
+SHAFT_HEIGHT = 6
+EXPECTED_PILLAR_STEPS = SHAFT_HEIGHT + 1
 
 
 def inventory_counts(body: Body) -> dict[str, int]:
@@ -58,21 +59,21 @@ def prepare_chamber(rcon: RconClient) -> None:
     rcon.command(f"player {BOT} spawn")
     wait_for_player(rcon)
     rcon.command(f"gamemode spectator {BOT}")
-    rcon.command(f"tp {BOT} {X + 0.5} {Y + PILLAR_STEPS + 8} {Z + 0.5}")
+    rcon.command(f"tp {BOT} {X + 0.5} {Y + SHAFT_HEIGHT + 8} {Z + 0.5}")
     time.sleep(0.5)
     rcon.command(f"clear {BOT}")
     rcon.command(f"fill {X - 4} {Y - 1} {Z - 4} {X + 4} {Y - 1} {Z + 4} stone")
     rcon.command(
         f"fill {X - 4} {Y} {Z - 4} "
-        f"{X + 4} {Y + PILLAR_STEPS + 1} {Z + 4} stone hollow"
+        f"{X + 4} {Y + SHAFT_HEIGHT + 1} {Z + 4} stone hollow"
     )
     rcon.command(
         f"fill {X - 3} {Y} {Z - 3} "
-        f"{X + 3} {Y + PILLAR_STEPS} {Z + 3} air"
+        f"{X + 3} {Y + SHAFT_HEIGHT} {Z + 3} air"
     )
     rcon.command(f"setblock {X} {Y - 1} {Z} magma_block")
     rcon.command(f"gamemode survival {BOT}")
-    rcon.command(f"give {BOT} {SCAFFOLD} {PILLAR_STEPS + 2}")
+    rcon.command(f"give {BOT} {SCAFFOLD} {EXPECTED_PILLAR_STEPS + 1}")
     rcon.command(f"give {BOT} iron_pickaxe 1")
     rcon.command(f"tp {BOT} {X + 0.5} {Y} {Z + 0.5}")
     time.sleep(0.5)
@@ -131,7 +132,7 @@ def main() -> int:
             pillar_blocks = (
                 [
                     block_is(rcon, stage_column[0], Y + offset, stage_column[1], SCAFFOLD)
-                    for offset in range(PILLAR_STEPS)
+                    for offset in range(EXPECTED_PILLAR_STEPS)
                 ]
                 if stage_column is not None
                 else []
@@ -140,9 +141,37 @@ def main() -> int:
                 block_is(
                     rcon,
                     stage_column[0],
-                    Y + PILLAR_STEPS + 1,
+                    Y + SHAFT_HEIGHT + 1,
                     stage_column[1],
                     "air",
+                )
+                if stage_column is not None
+                else False
+            )
+            horizontal_egress = (
+                any(
+                    block_is(
+                        rcon,
+                        stage_column[0] + dx,
+                        Y + SHAFT_HEIGHT + 1,
+                        stage_column[1] + dz,
+                        "stone",
+                    )
+                    and block_is(
+                        rcon,
+                        stage_column[0] + dx,
+                        Y + SHAFT_HEIGHT + 2,
+                        stage_column[1] + dz,
+                        "air",
+                    )
+                    and block_is(
+                        rcon,
+                        stage_column[0] + dx,
+                        Y + SHAFT_HEIGHT + 3,
+                        stage_column[1] + dz,
+                        "air",
+                    )
+                    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
                 )
                 if stage_column is not None
                 else False
@@ -165,6 +194,7 @@ def main() -> int:
             "stage_column": stage_column,
             "pillar_blocks": pillar_blocks,
             "roof_open": roof_open,
+            "horizontal_egress": horizontal_egress,
             "source_hazard_preserved": source_hazard_preserved,
             "wall_s": wall_s,
         }
@@ -179,13 +209,14 @@ def main() -> int:
         and bool(metrics.get("recovery_staging_attempted"))
         and bool(metrics.get("recovery_staging_used"))
         and int(metrics.get("recovery_staging_candidate_count") or 0) >= 1
-        and int(metrics.get("pillar_steps") or 0) == PILLAR_STEPS
+        and int(metrics.get("pillar_steps") or 0) == EXPECTED_PILLAR_STEPS
         and moved_horizontally >= 0.8
-        and after.pos[1] >= before.pos[1] + PILLAR_STEPS
-        and scaffold_after == scaffold_before - PILLAR_STEPS
-        and len(pillar_blocks) == PILLAR_STEPS
+        and after.pos[1] >= before.pos[1] + EXPECTED_PILLAR_STEPS
+        and scaffold_after == scaffold_before - EXPECTED_PILLAR_STEPS + 1
+        and len(pillar_blocks) == EXPECTED_PILLAR_STEPS
         and all(pillar_blocks)
         and roof_open
+        and horizontal_egress
         and source_hazard_preserved
     )
     artifact["success"] = success

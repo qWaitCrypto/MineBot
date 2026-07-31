@@ -17,6 +17,7 @@ class FakeInventoryBody:
         select_success: bool = True,
         select_reason: str = "completed",
         select_rejected: bool = False,
+        craft_outcomes: list[tuple[bool, str]] | None = None,
         recipe_data: dict[str, str] | None = None,
     ):
         self.pages = list(pages)
@@ -25,6 +26,7 @@ class FakeInventoryBody:
         self.select_success = select_success
         self.select_reason = select_reason
         self.select_rejected = select_rejected
+        self.craft_outcomes = list(craft_outcomes or [])
         self.recipe_data = recipe_data or {}
         self.actions: list[Action] = []
         self.perceptions: list[tuple[str, dict[str, object]]] = []
@@ -112,6 +114,11 @@ class FakeInventoryBody:
                 },
             )
         if action.name == "craftItem":
+            craft_success, craft_reason = (
+                self.craft_outcomes.pop(0)
+                if self.craft_outcomes
+                else (True, "completed")
+            )
             remainders = {entry["slot"]: entry for entry in action.params.get("remainders") or []}
             input_after = []
             for entry in action.params["inputs"]:
@@ -134,11 +141,11 @@ class FakeInventoryBody:
                 name="craftDone",
                 data={
                     "action_id": action_id,
-                    "success": True,
+                    "success": craft_success,
                     "item": action.params["output"]["item"],
                     "count": action.params["output"]["count"],
                     "output_slot": action.params["output"]["slot"],
-                    "stopped_reason": "completed",
+                    "stopped_reason": craft_reason,
                     "inputs_after": input_after,
                 },
             )
@@ -810,6 +817,69 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertEqual(work.mine_calls, [])
         self.assertTrue(result.metrics["workspace"]["retained"])
         self.assertNotIn("reclaim", result.metrics)
+
+    def test_craft_recipe_replans_once_when_workspace_activity_fills_output_slot(self):
+        before_workspace = [
+            slot(0, "minecraft:crafting_table", 1),
+            slot(1, "minecraft:cobblestone", 8),
+            slot(2),
+            slot(3),
+            slot(41),
+            slot(42),
+        ]
+        after_workspace = [
+            slot(0),
+            slot(1, "minecraft:cobblestone", 8),
+            slot(2, "minecraft:dirt", 1),
+            slot(3),
+            slot(41),
+            slot(42),
+        ]
+        after_craft = [
+            slot(0, "minecraft:furnace", 1),
+            slot(1),
+            slot(2, "minecraft:dirt", 1),
+            slot(3),
+            slot(41),
+            slot(42),
+        ]
+        body = FakeInventoryBody(
+            [
+                perception([slot(41), slot(42)]),
+                perception(before_workspace),
+                perception(after_workspace),
+                perception(after_workspace),
+                perception(after_workspace),
+                perception(after_craft),
+                perception(after_craft),
+            ],
+            craft_outcomes=[(False, "destination_occupied"), (True, "completed")],
+            recipe_data={
+                "minecraft:furnace": '[[[[furnace, 1, {count:1,id:"minecraft:furnace"}]], [[cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone]], [shaped, 3, 3]]]'
+            },
+        )
+
+        class FakeWork:
+            def place_here(self, block_type, *, radius, context, purpose, timeout_s):
+                return ToolResult(
+                    True,
+                    "completed",
+                    False,
+                    metrics={"place_here": {"chosen_target": [2, 64, 0]}},
+                )
+
+            def mine_block(self, pos, *, context, timeout_s):
+                return ToolResult(True, "completed", False)
+
+        runtime = InventoryTransactions(body, work=FakeWork())
+
+        result = runtime.craft_recipe(item="minecraft:furnace", count=1)
+
+        self.assertTrue(result.success, result.to_payload())
+        crafts = [action for action in body.actions if action.name == "craftItem"]
+        self.assertEqual([action.params["output"]["slot"] for action in crafts], [2, 0])
+        self.assertEqual(result.metrics["craft_reconciliation"]["reason"], "inventory_drift_replanned")
+        self.assertEqual([attempt["reason"] for attempt in result.metrics["craft_attempts"]], ["destination_occupied", "completed"])
 
     def test_cleanup_crafting_residue_merges_then_moves_to_empty_inventory_slot(self):
         body = FakeInventoryBody(

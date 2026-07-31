@@ -100,6 +100,12 @@ OFFHAND_AUTO_ITEMS = {
     "firework_rocket",
 }
 
+CRAFT_PLAN_DRIFT_REASONS = {
+    "destination_occupied",
+    "destination_full",
+    "missing_inputs",
+}
+
 
 class InventoryTransactions:
     """Inventory workflows above raw hotbar/slot primitives."""
@@ -635,6 +641,48 @@ class InventoryTransactions:
             remainders=[dict(entry) for entry in plan.remainders],
             timeout_s=craft_timeout_s,
         )
+        craft_attempts = [craft.to_payload()]
+        craft_reconciliation = None
+        if not craft.success and craft.reason in CRAFT_PLAN_DRIFT_REASONS:
+            refreshed_inventory = _read_inventory(self.body)
+            refreshed_failure = _perception_failure(refreshed_inventory)
+            if refreshed_failure is not None:
+                craft_reconciliation = {
+                    "reason": "inventory_refresh_failed",
+                    "result": refreshed_failure.to_payload(),
+                }
+            else:
+                refreshed_slots = [
+                    InventorySlot.from_payload(slot)
+                    for slot in refreshed_inventory.data.get("slots") or []
+                ]
+                refreshed_plan = _choose_craft_plan(
+                    refreshed_slots,
+                    item=item,
+                    count=count,
+                    output_slot=output_slot,
+                    variants=variants,
+                )
+                if isinstance(refreshed_plan, ToolResult):
+                    craft_reconciliation = {
+                        "reason": "craft_replan_failed",
+                        "result": refreshed_plan.to_payload(),
+                    }
+                else:
+                    previous_plan = plan
+                    plan = refreshed_plan
+                    craft = self.craft_exact(
+                        inputs=[dict(entry) for entry in plan.inputs],
+                        output={"slot": plan.output_slot, "item": plan.item, "count": plan.crafted_count},
+                        remainders=[dict(entry) for entry in plan.remainders],
+                        timeout_s=craft_timeout_s,
+                    )
+                    craft_attempts.append(craft.to_payload())
+                    craft_reconciliation = {
+                        "reason": "inventory_drift_replanned",
+                        "previous_plan": _craft_plan_metrics(previous_plan),
+                        "current_plan": _craft_plan_metrics(plan),
+                    }
 
         cleanup_after = self.cleanup_crafting_residue(
             residue_slots=residue_slots,
@@ -668,8 +716,11 @@ class InventoryTransactions:
             "cleanup_before": cleanup_before.to_payload(),
             "craft_plan": _craft_plan_metrics(plan),
             "craft": craft.to_payload(),
+            "craft_attempts": craft_attempts,
             "cleanup_after": cleanup_after.to_payload(),
         }
+        if craft_reconciliation is not None:
+            metrics["craft_reconciliation"] = craft_reconciliation
         if workspace is not None:
             metrics["workspace"] = workspace if isinstance(workspace, dict) else workspace.to_payload()
         if reclaim is not None:

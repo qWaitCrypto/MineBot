@@ -1237,7 +1237,13 @@ class ExplorationTransactions:
             for item in record.uncertainty:
                 if item not in uncertainty:
                     uncertainty.append(dict(item))
-        resumable = reason in {"budget_exhausted", "mobility_blocked", "unloaded_boundary", "preempted"}
+        resumable = reason in {
+            "found",
+            "budget_exhausted",
+            "mobility_blocked",
+            "unloaded_boundary",
+            "preempted",
+        }
         resume_cursor = (
             {
                 "query_signature": targets.query_signature,

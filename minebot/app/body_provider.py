@@ -84,7 +84,7 @@ def build_body_provider(
             connect,
             survival_owner=name in {BodyProviderName.JAVA, BodyProviderName.COMPOSITE},
         )
-        java_read_client = JavaBodyClient(bot_name, connect)
+        java_read_client = JavaBodyClient(bot_name, connect, subscribe_events=False)
         java_body = JavaBody(java_client, bot_name, read_client=java_read_client)
 
     if name is BodyProviderName.SCARPET:
@@ -103,6 +103,7 @@ def build_body_provider(
         natural_regions=[natural_region],
         structure_risk_assessor=VoxelStructureRiskAssessor(selected),
         require_structure_assessment=True,
+        bot_name=bot_name,
     )
     if java_client is not None:
         answerer = GovernanceAnswerer(governance)
