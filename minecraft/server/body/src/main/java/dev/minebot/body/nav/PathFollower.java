@@ -53,26 +53,48 @@ public final class PathFollower {
 
     public Directive tick(double px, double py, double pz) {
         advanceThroughReachedWaypoints(px, py, pz);
-        if (index >= path.size()) {
+        if (finalWaypointReached(px, py, pz)) {
             return new Directive(State.ARRIVED, path.get(path.size() - 1), false, false, path.size() - 1);
         }
         if (!resync(px, py, pz)) {
             return new Directive(State.DEVIATED, path.get(index), false, false, index);
         }
+        if (finalWaypointReached(px, py, pz)) {
+            return new Directive(State.ARRIVED, path.get(path.size() - 1), false, false, path.size() - 1);
+        }
         if (trackStuck(px, py, pz)) {
             return new Directive(State.STUCK, path.get(index), false, false, index);
         }
         Waypoint target = path.get(index);
-        boolean jump = target.y() > Math.floor(py) + 0.1 && horizontalDistance(px, pz, target) < 1.1;
+        boolean jump = target.y() > NavigateExecutor.PositionSource.Position.feetBlockY(py) + 0.1
+            && horizontalDistance(px, pz, target) < 1.1;
         return new Directive(State.CONTINUE, target, true, jump, index);
     }
 
     private void advanceThroughReachedWaypoints(double px, double py, double pz) {
-        while (index < path.size() && reached(px, py, pz, path.get(index), reachDistance(index))) {
+        while (index < path.size() - 1 && reached(
+            px,
+            py,
+            pz,
+            path.get(index),
+            reachDistance(index),
+            false
+        )) {
             index++;
             bestProgress = -Double.MAX_VALUE;
             ticksWithoutProgress = 0;
         }
+    }
+
+    private boolean finalWaypointReached(double px, double py, double pz) {
+        return index == path.size() - 1 && reached(
+            px,
+            py,
+            pz,
+            path.get(index),
+            finalWaypointReachDistance,
+            true
+        );
     }
 
     /** After lag or drift, snap to the nearest of the next few waypoints. */
@@ -125,13 +147,18 @@ public final class PathFollower {
         double py,
         double pz,
         Waypoint waypoint,
-        double reachDistance
+        double reachDistance,
+        boolean finalWaypoint
     ) {
         // Upward waypoints must actually be climbed; downward ones tolerate
-        // the airborne tail of a fall.
+        // the airborne tail of a fall. The final waypoint is stricter: handing
+        // off one block early releases movement and can carry the player past
+        // the intended stand before the goal gets to verify it.
+        boolean verticalReached = finalWaypoint
+            ? NavigateExecutor.PositionSource.Position.feetBlockY(py) == waypoint.y()
+            : py >= waypoint.y() - 0.05 && py - waypoint.y() <= 1.5;
         return horizontalDistance(px, pz, waypoint) <= reachDistance
-            && py >= waypoint.y() - 0.05
-            && py - waypoint.y() <= 1.5;
+            && verticalReached;
     }
 
     private static double horizontalDistance(double px, double pz, Waypoint waypoint) {

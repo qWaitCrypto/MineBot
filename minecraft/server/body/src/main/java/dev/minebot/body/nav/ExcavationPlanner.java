@@ -251,6 +251,9 @@ public final class ExcavationPlanner {
             || !canClearBodyCell(world.kindAt(stand.x(), stand.y() + 1, stand.z()))) {
             return;
         }
+        if (!interactionSatisfiedAfterClearingBody(world, stand, target)) {
+            return;
+        }
         // Standing on the target is safe only when the post-mine landing is solid.
         if (stand.x() == target.x() && stand.y() == target.y() + 1 && stand.z() == target.z()) {
             if (world.kindAt(target.x(), target.y() - 1, target.z()) != WorldView.NodeKind.SOLID
@@ -259,6 +262,33 @@ public final class ExcavationPlanner {
             }
         }
         terminals.putIfAbsent(stand, target);
+    }
+
+    private static boolean interactionSatisfiedAfterClearingBody(
+        WorldView world,
+        Cell stand,
+        Target target
+    ) {
+        WorldView clearedBody = new WorldView() {
+            @Override
+            public NodeKind kindAt(int x, int y, int z) {
+                boolean bodyCell = x == stand.x()
+                    && z == stand.z()
+                    && (y == stand.y() || y == stand.y() + 1);
+                if (bodyCell && !(x == target.x() && y == target.y() && z == target.z())) {
+                    return NodeKind.PASSABLE;
+                }
+                return world.kindAt(x, y, z);
+            }
+
+            @Override
+            public boolean isBodyPositionHazardous(int x, int y, int z) {
+                return world.isBodyPositionHazardous(x, y, z);
+            }
+        };
+        return new Goal.Interact(
+            target.x(), target.y(), target.z(), Goal.Interact.MINE_RANGE
+        ).isSatisfied(clearedBody, stand.x(), stand.y(), stand.z());
     }
 
     private static List<Transition> transitions(

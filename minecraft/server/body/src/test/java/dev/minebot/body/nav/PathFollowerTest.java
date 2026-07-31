@@ -44,6 +44,42 @@ final class PathFollowerTest {
     }
 
     @Test
+    void finalDownwardWaypointWaitsUntilTheBodyEntersItsVerticalCell() {
+        PathFollower follower = new PathFollower(List.of(
+            new Waypoint(-81, 69, -28),
+            new Waypoint(-81, 68, -29)
+        ), 0.15);
+
+        assertEquals(State.CONTINUE, follower.tick(-80.5, 69.0, -27.5).state());
+        assertEquals(
+            State.CONTINUE,
+            follower.tick(-80.5, 69.0, -28.5).state(),
+            "horizontal alignment one block above the final stand is not arrival"
+        );
+        assertEquals(
+            State.CONTINUE,
+            follower.tick(-80.5, 67.99, -28.5).state(),
+            "horizontal alignment one block below the final stand is not arrival"
+        );
+        assertEquals(State.ARRIVED, follower.tick(-80.5, 68.95, -28.5).state());
+    }
+
+    @Test
+    void finalArrivalIsLevelTriggeredAndRecoversAfterDrift() {
+        PathFollower follower = new PathFollower(
+            List.of(new Waypoint(0, 64, 0)),
+            0.15
+        );
+
+        assertEquals(State.ARRIVED, follower.tick(0.5, 64.0, 0.5).state());
+        assertEquals(
+            State.CONTINUE,
+            follower.tick(0.5, 64.0, 0.9).state(),
+            "leaving the final tolerance must resume correction"
+        );
+    }
+
+    @Test
     void jumpIsRequestedApproachingAStepUp() {
         PathFollower follower = new PathFollower(List.of(
             new Waypoint(0, 64, 0),

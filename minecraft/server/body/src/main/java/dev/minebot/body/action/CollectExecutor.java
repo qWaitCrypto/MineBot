@@ -351,6 +351,18 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         data.addProperty("planned_breaks", excavationPlan.breakCount());
         data.addProperty("break_budget_remaining", remainingBreaks);
         data.addProperty("expanded_nodes", excavationPlan.expandedNodes());
+        JsonArray preview = new JsonArray();
+        for (int index = 0; index < Math.min(excavationPlan.steps().size(), 16); index++) {
+            ExcavationPlanner.Step step = excavationPlan.steps().get(index);
+            JsonObject item = new JsonObject();
+            item.addProperty("x", step.stand().x());
+            item.addProperty("y", step.stand().y());
+            item.addProperty("z", step.stand().z());
+            item.addProperty("mode", step.mode().name().toLowerCase());
+            item.addProperty("blockers", step.blockers().size());
+            preview.add(item);
+        }
+        data.add("step_preview", preview);
         events.emit(bot, serverTick, "collect_excavation_planned", actionId, data);
         advanceExcavation(serverTick, position);
         return true;

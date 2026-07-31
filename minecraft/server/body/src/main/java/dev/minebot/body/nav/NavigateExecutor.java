@@ -34,6 +34,10 @@ public final class NavigateExecutor implements ActionRuntime.TickExecutor {
              * mapping the player's feet to a voxel.
              */
             public int feetBlockY() {
+                return feetBlockY(y);
+            }
+
+            public static int feetBlockY(double y) {
                 double nearestInteger = Math.rint(y);
                 if (Math.abs(y - nearestInteger) <= FEET_Y_INTEGER_EPSILON) {
                     return (int) nearestInteger;

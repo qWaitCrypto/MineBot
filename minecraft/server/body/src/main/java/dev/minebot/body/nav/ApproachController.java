@@ -188,7 +188,7 @@ public final class ApproachController {
                 world,
                 goal,
                 (int) Math.floor(px),
-                (int) Math.floor(py),
+                NavigateExecutor.PositionSource.Position.feetBlockY(py),
                 (int) Math.floor(pz),
                 directReturnRequired
             );
@@ -288,7 +288,7 @@ public final class ApproachController {
             case ARRIVED -> {
                 halt();
                 int fx = (int) Math.floor(px);
-                int fy = (int) Math.floor(py);
+                int fy = NavigateExecutor.PositionSource.Position.feetBlockY(py);
                 int fz = (int) Math.floor(pz);
                 if (goal.isSatisfied(world, fx, fy, fz)) {
                     if (isDrySupportedStand(fx, fy, fz)) {
@@ -308,6 +308,29 @@ public final class ApproachController {
                     }
                     return new Outcome(Status.COMPLETED, "goal_satisfied");
                 }
+                JsonObject rejected = new JsonObject();
+                JsonArray position = new JsonArray();
+                position.add(px);
+                position.add(py);
+                position.add(pz);
+                rejected.add("position", position);
+                JsonArray voxel = new JsonArray();
+                voxel.add(fx);
+                voxel.add(fy);
+                voxel.add(fz);
+                rejected.add("voxel", voxel);
+                rejected.addProperty("feet", world.kindAt(fx, fy, fz).name().toLowerCase());
+                rejected.addProperty("head", world.kindAt(fx, fy + 1, fz).name().toLowerCase());
+                rejected.addProperty("support", world.kindAt(fx, fy - 1, fz).name().toLowerCase());
+                rejected.addProperty("hazardous", world.isBodyPositionHazardous(fx, fy, fz));
+                if (goal instanceof Goal.Stand stand) {
+                    JsonArray expected = new JsonArray();
+                    expected.add(stand.x());
+                    expected.add(stand.y());
+                    expected.add(stand.z());
+                    rejected.add("expected_stand", expected);
+                }
+                events.emit(bot, serverTick, "arrival_rejected", actionId, rejected);
                 stableArrivalTicks = 0;
                 return replanOrFail(
                     serverTick,
@@ -349,12 +372,12 @@ public final class ApproachController {
     private static long cellOf(double px, double py, double pz) {
         return (((long) Math.floor(px) & 0x3FFFFFF) << 38)
             | (((long) Math.floor(pz) & 0x3FFFFFF) << 12)
-            | ((long) Math.floor(py) & 0xFFF);
+            | ((long) NavigateExecutor.PositionSource.Position.feetBlockY(py) & 0xFFF);
     }
 
     private boolean swimmingAt(double px, double py, double pz) {
         int x = (int) Math.floor(px);
-        int y = (int) Math.floor(py);
+        int y = NavigateExecutor.PositionSource.Position.feetBlockY(py);
         int z = (int) Math.floor(pz);
         return world.kindAt(x, y, z) == WorldView.NodeKind.LIQUID
             || world.kindAt(x, y - 1, z) == WorldView.NodeKind.LIQUID;

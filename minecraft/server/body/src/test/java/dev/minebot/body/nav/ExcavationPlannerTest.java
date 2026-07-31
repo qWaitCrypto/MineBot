@@ -105,6 +105,36 @@ final class ExcavationPlannerTest {
         assertEquals("no_excavation_route", returnSafe.reason());
     }
 
+    @Test
+    void rejectsAGeometricTerminalWhoseTargetFaceRemainsOccluded() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        ExcavationPlanner.Target target = new ExcavationPlanner.Target(0, STAND, 0);
+        ExcavationPlanner.Cell occludedStart = new ExcavationPlanner.Cell(0, STAND + 1, -1);
+        world.set(target.x(), target.y(), target.z(), WorldView.NodeKind.SOLID);
+        world.set(0, STAND + 1, 0, WorldView.NodeKind.SOLID);
+        world.set(0, STAND, -1, WorldView.NodeKind.SOLID);
+
+        Goal.Interact interaction = new Goal.Interact(
+            target.x(), target.y(), target.z(), Goal.Interact.MINE_RANGE
+        );
+        assertFalse(interaction.isSatisfied(
+            world, occludedStart.x(), occludedStart.y(), occludedStart.z()
+        ));
+
+        ExcavationPlanner.Result result = ExcavationPlanner.planWithReturnPath(
+            world,
+            occludedStart,
+            List.of(target),
+            Set.of(),
+            4
+        );
+
+        assertTrue(result.success(), result.reason());
+        assertFalse(result.plan().steps().isEmpty(), "the occluded current cell must not be a zero-step terminal");
+        ExcavationPlanner.Cell terminal = result.plan().steps().getLast().stand();
+        assertTrue(interaction.isSatisfied(world, terminal.x(), terminal.y(), terminal.z()));
+    }
+
     private static FakeWorld sealedHorizontalTunnelWorld() {
         FakeWorld world = new FakeWorld(FLOOR);
         for (int x = -1; x <= 5; x++) {
