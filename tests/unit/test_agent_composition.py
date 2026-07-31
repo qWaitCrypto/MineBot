@@ -1070,6 +1070,19 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(authority.failure_steps, 0)
         authority.require_can_continue("collect 1 dirt")  # does not raise
 
+    def test_weld_treats_governance_confirmation_as_neutral_not_failure(self):
+        body = FakeBody()
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 1 dirt")
+        miner, _ = mine_tool(body, fail_reason="governance_confirmation_required")
+
+        for _ in range(FAILURE_STORM_LIMIT + 2):
+            payload = execute_tool(miner, {"pos": [1, 59, 0]}, weld)
+            self.assertFalse(payload["success"])
+
+        self.assertEqual(authority.failure_steps, 0)
+        authority.require_can_continue("collect 1 dirt")
+
     def test_weld_counts_repeated_read_only_observation_loops(self):
         # Read-only tools do not acquire the Body writer and do not feed the
         # failure-storm sensor, but repeated identical observations with no world

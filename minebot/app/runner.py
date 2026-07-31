@@ -92,6 +92,7 @@ from minebot.contract import (
     ProgressAbort,
     ProgressFacts,
     execution_cancellation_scope,
+    is_governance_decision_required,
 )
 from minebot.contract.tool_trace import (
     canonical_args_hash_from_json as _shared_canonical_args_hash_from_json,
@@ -550,6 +551,12 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             )
             raise BodyRecoveryRequired(_recovery_reason_from_tool_result(result, facts), facts=facts)
 
+        if settlement_status is None and is_governance_decision_required(
+            str(result.get("reason") or ""),
+            result.get("metrics") if isinstance(result.get("metrics"), dict) else None,
+        ):
+            settlement_status = "decision_required"
+
         if runtime is not None:
             runtime.remember_tool_result(tool.name, result, run_context=ctx.context)
             runtime.remember_tool_body_facts(result, trace=trace)
@@ -892,6 +899,7 @@ def _model_tool_payload(
     reason = str(result.get("reason") or "")
     success = bool(result.get("success"))
     metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+    decision_required = is_governance_decision_required(reason, metrics)
     payload: JsonObject = {
         "success": success,
         "reason": reason,
@@ -900,6 +908,8 @@ def _model_tool_payload(
         "complete": _result_complete(result),
         "traceRef": trace_ref,
     }
+    if decision_required:
+        payload["outcome"] = "decision_required"
     summary = _metrics_summary(tool_name, reason, metrics, projector=projector)
     if summary:
         payload["summary"] = summary

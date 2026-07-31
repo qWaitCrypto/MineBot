@@ -1332,6 +1332,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
 
         payload = _model_tool_payload("collect_resource", result, trace_ref="governance-trace")
 
+        self.assertEqual(payload["outcome"], "decision_required")
         self.assertEqual(
             payload["summary"]["governance_confirmation"]["challenge_id"],
             "gc-review-1",

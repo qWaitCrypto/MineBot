@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 from uuid import uuid4
 
 
@@ -249,6 +249,25 @@ def is_candidate_skip(reason: str | None) -> bool:
     if reason in CANDIDATE_SKIP_REASONS:
         return True
     return reason.startswith(CANDIDATE_SKIP_PREFIXES)
+
+
+def is_governance_decision_required(
+    reason: str | None,
+    metrics: Mapping[str, object] | None = None,
+) -> bool:
+    """True when a mutation paused for bounded Agent review, not on failure."""
+
+    if metrics is not None and isinstance(metrics.get("governance_confirmation"), Mapping):
+        return True
+    if not reason:
+        return False
+    marker = "governance_confirmation_required"
+    normalized = str(reason)
+    return (
+        normalized == marker
+        or normalized.endswith(f":{marker}")
+        or f":{marker}:" in normalized
+    )
 
 
 def stable_hash(value: str) -> str:

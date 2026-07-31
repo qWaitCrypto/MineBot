@@ -199,6 +199,34 @@ def test_epoch_preflight_rejects_every_conflicting_body_call_without_execution()
     ]
 
 
+def test_governance_confirmation_settles_as_decision_required_not_failure():
+    body = EpochBody()
+    tool = make_tool(
+        "go_to_surface",
+        lambda _params: ToolResult(
+            False,
+            "governance_confirmation_required",
+            True,
+            metrics={"governance_confirmation": {"challenge_id": "gc-test"}},
+        ),
+        mutating=True,
+    )
+    archive = RecordingEpochArchive()
+    runtime, adapter, context = runtime_with(body, [tool], epoch_archive=archive)
+
+    async def scenario():
+        await adapter.open(response(("call-review", "go_to_surface")))
+        return await invoke(tool, context, "call-review")
+
+    result = asyncio.run(scenario())
+    runtime.close()
+
+    assert result["success"] is False
+    assert result["outcome"] == "decision_required"
+    assert runtime.authority.failure_steps == 0
+    assert archive.records[0]["members"][0]["status"] == "decision_required"
+
+
 def test_epoch_defers_progress_abort_until_read_only_sibling_settles():
     body = EpochBody()
     authority = ProgressAuthority()
