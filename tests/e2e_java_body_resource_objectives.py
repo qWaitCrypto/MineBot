@@ -24,8 +24,8 @@ NATURAL = Region("resource-objectives", (192, 80, 192), (288, 160, 288))
 DIG_ORIGIN = (220.82, 120.0, 220.18)
 DIG_TARGET_Y = 118
 COLLECT_ORIGIN = (240.5, 100.0, 240.5)
-ORE_TARGETS = ((252, 100, 240), (262, 100, 240), (265, 100, 240))
-ARTIFACT = Path("logs/agentic-runtime/java-body-persistent-resource-objective-20260801.json")
+ORE_TARGETS = ((220, 100, 248), (216, 100, 248), (212, 100, 248))
+ARTIFACT = Path("logs/agentic-runtime/java-body-zero-candidate-frontier-objective-20260801.json")
 
 
 def command(rcon: RconClient, value: str, delay: float = 0.03) -> str:
@@ -106,14 +106,24 @@ def prepare_dig_fixture(rcon: RconClient, body) -> None:
 def prepare_collect_fixture(rcon: RconClient, body) -> None:
     command(rcon, f"gamemode spectator {BOT}")
     command(rcon, f"tp {BOT} 240.5 112 240.5")
-    time.sleep(0.5)
-    command(rcon, "fill 232 96 232 272 104 248 stone")
-    command(rcon, "fill 232 100 232 272 104 248 air")
-    for x, y, z in ORE_TARGETS:
-        command(rcon, f"setblock {x} {y} {z} minecraft:iron_ore")
+    force_loaded = command(rcon, "forceload add 208 224 272 264")
+    assert "marked" in force_loaded.lower(), force_loaded
+    try:
+        filled = command(rcon, "fill 208 96 224 272 104 264 stone")
+        cleared = command(rcon, "fill 208 100 224 272 104 264 air")
+        assert "successfully filled" in filled.lower(), filled
+        assert "successfully filled" in cleared.lower(), cleared
+        for x, y, z in ORE_TARGETS:
+            command(rcon, f"setblock {x} {y} {z} minecraft:iron_ore")
+        assert block_is(rcon, (232, 99, 248), "stone")
+        assert block_is(rcon, (232, 100, 248), "air")
+        assert all(block_is(rcon, target, "iron_ore") for target in ORE_TARGETS)
+    finally:
+        force_removed = command(rcon, "forceload remove 208 224 272 264")
+        assert "unmarked" in force_removed.lower(), force_removed
     command(
         rcon,
-        "execute positioned 252 100 240 run kill @e[type=minecraft:item,distance=..32]",
+        "execute positioned 220 100 248 run kill @e[type=minecraft:item,distance=..48]",
     )
     command(rcon, f"clear {BOT}")
     command(rcon, f"item replace entity {BOT} hotbar.0 with minecraft:stone_pickaxe 1")
@@ -225,6 +235,24 @@ def main() -> int:
                 for event in collect_events
                 if event.name == "collection_candidate_domain_refreshed"
             ]
+            frontier_events = [
+                event_payload(event)
+                for event in collect_events
+                if event.name in {
+                    "collection_frontier_planned",
+                    "collection_frontier_reached",
+                    "collection_frontier_failed",
+                }
+            ]
+            collect_terminal = next(
+                event_payload(event)
+                for event in reversed(collect_events)
+                if event.name == "action_terminal"
+            )
+            terminal_data = dict(collect_terminal["data"])
+            terminal_search = dict(terminal_data.get("search") or {})
+            attempt_failures = list(terminal_data.get("attempt_failures") or [])
+            drop_losses = list(terminal_data.get("drop_losses") or [])
             collect_actions = executed_actions[action_index:]
             collect_case = {
                 "result": collect_result.to_payload(),
@@ -236,6 +264,11 @@ def main() -> int:
                 "targets_are_air": [block_is(rcon, target, "air") for target in ORE_TARGETS],
                 "body_actions": collect_actions,
                 "candidate_refreshes": candidate_refreshes,
+                "frontier_events": frontier_events,
+                "initial_matches": int(terminal_search.get("matches", -1)),
+                "attempt_failures": attempt_failures,
+                "drop_losses": drop_losses,
+                "terminal_search": terminal_search,
                 "events": [event_payload(event) for event in collect_events],
             }
             artifact["collect_quantity"] = collect_case
@@ -251,10 +284,14 @@ def main() -> int:
                 and raw_after - raw_before >= 3
                 and all(collect_case["targets_are_air"])
                 and collect_actions == ["collectBlock"]
+                and int(terminal_search.get("matches", -1)) == 0
+                and any(event["name"] == "collection_frontier_reached" for event in frontier_events)
+                and not attempt_failures
+                and not drop_losses
                 and sum(
                     int(refresh["data"].get("new_candidates") or 0)
                     for refresh in candidate_refreshes
-                ) >= 2
+                ) >= 3
             )
             artifact["success"] = dig_ok and collect_ok
     finally:

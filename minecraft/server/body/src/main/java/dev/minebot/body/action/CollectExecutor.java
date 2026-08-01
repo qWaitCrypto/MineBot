@@ -43,6 +43,13 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     public static final int DROP_LOST_AFTER_TICKS = 80;
     public static final int MAX_ACTIVE_DROP_GOALS = 8;
     public static final int MAX_DROP_APPROACH_ATTEMPTS = 8;
+    public static final int FRONTIER_REGION_SIZE = 16;
+    public static final int MAX_FRONTIER_ATTEMPTS = 12;
+    private static final int FRONTIER_VERTICAL_RADIUS = 12;
+    private static final int[][] FRONTIER_COLUMN_OFFSETS = {
+        {0, 0}, {-4, 0}, {4, 0}, {0, -4}, {0, 4},
+        {-6, -6}, {-6, 6}, {6, -6}, {6, 6}
+    };
     private static final int DESCENT_STABLE_TICKS = 3;
 
     /** Live block truth; null id when the position is unloaded. */
@@ -93,8 +100,12 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
     }
 
+    private record FrontierRegion(int x, int z) {
+    }
+
     private enum Phase {
         NEXT_CANDIDATE,
+        EXPLORING,
         APPROACHING,
         EXCAVATION_AWAITING_VERDICT,
         EXCAVATION_BREAKING,
@@ -114,6 +125,9 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private final Set<String> seenCandidateKeys = new HashSet<>();
     private final Set<String> retiredCandidateKeys = new HashSet<>();
     private final CandidateSource candidateSource;
+    private final Set<FrontierRegion> reachedFrontierRegions = new HashSet<>();
+    private final Set<FrontierRegion> failedFrontierRegions = new HashSet<>();
+    private final JsonArray frontierFailures = new JsonArray();
     private final List<String> expectedItemIds;
     private final JsonObject searchFacts;
     private final WorldView world;
@@ -149,6 +163,11 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private int lastScanUnloadedChunks;
     private boolean lastScanCoverageComplete = true;
     private boolean anyScanResultCapped;
+    private boolean skipNextEmptyRescan;
+    private int frontierAttempts;
+    private int frontiersReached;
+    private FrontierRegion frontierOrigin;
+    private FrontierRegion activeFrontier;
     private Drop pickupDrop;
     private Drop plannedPickupDrop;
     private final JsonArray attemptFailures = new JsonArray();
@@ -321,6 +340,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             : 0;
         this.anyScanResultCapped = searchFacts.has("result_capped")
             && searchFacts.get("result_capped").getAsBoolean();
+        this.skipNextEmptyRescan = candidates.isEmpty() && searchFacts.has("matches");
         this.world = world;
         this.movement = movement;
         this.blockBreaker = blockBreaker;
@@ -367,6 +387,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
         switch (phase) {
             case NEXT_CANDIDATE -> nextObjective(serverTick, position);
+            case EXPLORING -> explorationTick(serverTick, position);
             case APPROACHING -> approachTick(serverTick, position);
             case EXCAVATION_AWAITING_VERDICT -> excavationVerdictTick(serverTick, position);
             case EXCAVATION_BREAKING -> excavationBreakingTick(serverTick, position);
@@ -396,7 +417,11 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         if (remainingCandidates.isEmpty()
             && candidateAttempts < maxCandidateAttempts
             && targetBreaks < maxTargetMutations) {
-            rescanCandidateDomain(serverTick, position);
+            if (skipNextEmptyRescan) {
+                skipNextEmptyRescan = false;
+            } else {
+                rescanCandidateDomain(serverTick, position);
+            }
             refreshLiveCandidates();
         }
         refreshPendingDrops(position, serverTick);
@@ -421,6 +446,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             .limit(MAX_ACTIVE_DROP_GOALS)
             .toList();
         if (!candidateBudgetAvailable && availableDrops.isEmpty()) {
+            if (canExploreFrontier()) {
+                beginFrontierExploration(serverTick, position);
+                return;
+            }
             String reason = candidates.isEmpty() ? "target_not_found" : "candidate_targets_exhausted";
             finishProgressAware(serverTick, reason);
             return;
@@ -494,6 +523,193 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         phase = Phase.APPROACHING;
     }
 
+    private boolean canExploreFrontier() {
+        return candidateSource != null
+            && candidateAttempts < maxCandidateAttempts
+            && targetBreaks < maxTargetMutations
+            && frontierAttempts < Math.min(MAX_FRONTIER_ATTEMPTS, maxCandidateAttempts);
+    }
+
+    private void beginFrontierExploration(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        FrontierRegion currentRegion = frontierRegion(position.blockX(), position.blockZ());
+        if (frontierOrigin == null) {
+            frontierOrigin = currentRegion;
+            reachedFrontierRegions.add(currentRegion);
+        }
+        activeFrontier = selectFrontier(currentRegion);
+        if (activeFrontier == null) {
+            finishProgressAware(serverTick, candidates.isEmpty() ? "target_not_found" : "candidate_targets_exhausted");
+            return;
+        }
+        frontierAttempts++;
+        List<Goal> stands = safeFrontierStands(activeFrontier, position.feetBlockY()).stream()
+            .map(cell -> (Goal) new Goal.Stand(cell[0], cell[1], cell[2]))
+            .limit(3)
+            .toList();
+        if (stands.isEmpty()) {
+            recordFrontierFailure(serverTick, activeFrontier, "frontier_stands_unavailable");
+            failedFrontierRegions.add(activeFrontier);
+            skipNextEmptyRescan = true;
+            activeFrontier = null;
+            phase = Phase.NEXT_CANDIDATE;
+            updateSearchFacts();
+            return;
+        }
+        Goal goal = stands.size() == 1 ? stands.get(0) : new Goal.Composite(stands);
+        approach = new ApproachController(
+            bot,
+            actionId,
+            goal,
+            world,
+            movement,
+            events,
+            APPROACH_REPLAN_LIMIT,
+            false
+        );
+        JsonObject data = new JsonObject();
+        data.addProperty("region_x", activeFrontier.x());
+        data.addProperty("region_z", activeFrontier.z());
+        data.addProperty("attempt", frontierAttempts);
+        data.addProperty("stand_count", stands.size());
+        events.emit(bot, serverTick, "collection_frontier_planned", actionId, data);
+        phase = Phase.EXPLORING;
+        updateSearchFacts();
+    }
+
+    private void explorationTick(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        ApproachController.Outcome outcome = approach.tick(serverTick, position.x(), position.y(), position.z());
+        switch (outcome.status()) {
+            case WORKING -> {
+            }
+            case FAILED -> {
+                replansTotal += approach.replans();
+                approach.halt();
+                approach = null;
+                recordFrontierFailure(serverTick, activeFrontier, "frontier_unreachable:" + outcome.reason());
+                failedFrontierRegions.add(activeFrontier);
+                activeFrontier = null;
+                phase = Phase.NEXT_CANDIDATE;
+                updateSearchFacts();
+            }
+            case COMPLETED -> {
+                replansTotal += approach.replans();
+                approach.halt();
+                approach = null;
+                reachedFrontierRegions.add(activeFrontier);
+                frontiersReached++;
+                JsonObject data = new JsonObject();
+                data.addProperty("region_x", activeFrontier.x());
+                data.addProperty("region_z", activeFrontier.z());
+                data.addProperty("frontiers_reached", frontiersReached);
+                events.emit(bot, serverTick, "collection_frontier_reached", actionId, data);
+                activeFrontier = null;
+                phase = Phase.NEXT_CANDIDATE;
+                updateSearchFacts();
+            }
+        }
+    }
+
+    private FrontierRegion selectFrontier(FrontierRegion current) {
+        Set<FrontierRegion> candidates = new HashSet<>();
+        for (FrontierRegion reached : reachedFrontierRegions) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    if (dx == 0 && dz == 0) {
+                        continue;
+                    }
+                    FrontierRegion candidate = new FrontierRegion(reached.x() + dx, reached.z() + dz);
+                    if (!reachedFrontierRegions.contains(candidate) && !failedFrontierRegions.contains(candidate)) {
+                        candidates.add(candidate);
+                    }
+                }
+            }
+        }
+        return candidates.stream()
+            .min(Comparator
+                .comparingInt(this::frontierDirectionLoad)
+                .thenComparing(Comparator.comparingInt(this::frontierInformationGain).reversed())
+                .thenComparingDouble(region -> frontierDistanceSquared(region, current))
+                .thenComparingInt(FrontierRegion::x)
+                .thenComparingInt(FrontierRegion::z))
+            .orElse(null);
+    }
+
+    private int frontierDirectionLoad(FrontierRegion region) {
+        int directionX = Integer.compare(region.x(), frontierOrigin.x());
+        int directionZ = Integer.compare(region.z(), frontierOrigin.z());
+        return (int) reachedFrontierRegions.stream()
+            .filter(reached -> Integer.compare(reached.x(), frontierOrigin.x()) == directionX)
+            .filter(reached -> Integer.compare(reached.z(), frontierOrigin.z()) == directionZ)
+            .count();
+    }
+
+    private int frontierInformationGain(FrontierRegion region) {
+        int gain = 0;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if ((dx != 0 || dz != 0)
+                    && !reachedFrontierRegions.contains(new FrontierRegion(region.x() + dx, region.z() + dz))) {
+                    gain++;
+                }
+            }
+        }
+        return gain;
+    }
+
+    private static double frontierDistanceSquared(FrontierRegion left, FrontierRegion right) {
+        int dx = left.x() - right.x();
+        int dz = left.z() - right.z();
+        return dx * dx + dz * dz;
+    }
+
+    private List<int[]> safeFrontierStands(FrontierRegion region, int currentY) {
+        int centerX = region.x() * FRONTIER_REGION_SIZE + FRONTIER_REGION_SIZE / 2;
+        int centerZ = region.z() * FRONTIER_REGION_SIZE + FRONTIER_REGION_SIZE / 2;
+        List<int[]> stands = new ArrayList<>();
+        for (int[] offset : FRONTIER_COLUMN_OFFSETS) {
+            int x = centerX + offset[0];
+            int z = centerZ + offset[1];
+            for (int distance = 0; distance <= FRONTIER_VERTICAL_RADIUS; distance++) {
+                int upper = currentY + distance;
+                if (new Goal.Stand(x, upper, z).isSatisfied(world, x, upper, z)) {
+                    stands.add(new int[] {x, upper, z});
+                    break;
+                }
+                int lower = currentY - distance;
+                if (distance > 0 && new Goal.Stand(x, lower, z).isSatisfied(world, x, lower, z)) {
+                    stands.add(new int[] {x, lower, z});
+                    break;
+                }
+            }
+        }
+        stands.sort(Comparator
+            .comparingInt((int[] stand) -> Math.abs(stand[1] - currentY))
+            .thenComparingInt(stand -> Math.abs(stand[0] - centerX) + Math.abs(stand[2] - centerZ))
+            .thenComparingInt(stand -> stand[0])
+            .thenComparingInt(stand -> stand[2]));
+        return stands;
+    }
+
+    private void recordFrontierFailure(int serverTick, FrontierRegion region, String reason) {
+        JsonObject failure = new JsonObject();
+        failure.addProperty("attempt", frontierAttempts);
+        failure.addProperty("region_x", region.x());
+        failure.addProperty("region_z", region.z());
+        failure.addProperty("reason", reason);
+        frontierFailures.add(failure);
+        events.emit(bot, serverTick, "collection_frontier_failed", actionId, failure.deepCopy());
+    }
+
+    private static FrontierRegion frontierRegion(int x, int z) {
+        return new FrontierRegion(Math.floorDiv(x, FRONTIER_REGION_SIZE), Math.floorDiv(z, FRONTIER_REGION_SIZE));
+    }
+
     private void approachTick(int serverTick, NavigateExecutor.PositionSource.Position position) {
         if (completeFromInventoryTarget(serverTick)) {
             return;
@@ -551,6 +767,14 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                     boolean liveDomainRemains = activeDomain.stream()
                         .anyMatch(remainingCandidates::contains);
                     if (liveDomainRemains) {
+                        if (!activePickupDomain.isEmpty()) {
+                            // A composite route can finish at a pickup stand just as
+                            // the entity is collected, moves, or ages out of tracking.
+                            // Rebuild from authoritative truth without blaming the
+                            // still-live resource candidates for that handoff race.
+                            phase = Phase.NEXT_CANDIDATE;
+                            return;
+                        }
                         recordDomainFailure("reached_stand_candidate_mismatch");
                         retireActiveCandidateDomain("reached_stand_candidate_mismatch");
                         phase = Phase.NEXT_CANDIDATE;
@@ -1603,7 +1827,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     private static String candidateKey(Candidate candidate) {
-        return candidate.x() + "," + candidate.y() + "," + candidate.z() + ":" + candidate.blockId();
+        return candidate.x() + "," + candidate.y() + "," + candidate.z();
     }
 
     private void updateSearchFacts() {
@@ -1614,6 +1838,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         searchFacts.addProperty("last_coverage_complete", lastScanCoverageComplete);
         searchFacts.addProperty("last_unloaded_chunk_count", lastScanUnloadedChunks);
         searchFacts.addProperty("any_result_capped", anyScanResultCapped);
+        searchFacts.addProperty("frontier_attempts", frontierAttempts);
+        searchFacts.addProperty("frontiers_reached", frontiersReached);
+        searchFacts.addProperty("frontier_budget", Math.min(MAX_FRONTIER_ATTEMPTS, maxCandidateAttempts));
+        searchFacts.add("frontier_failures", frontierFailures.deepCopy());
     }
 
     private void refreshLiveCandidates() {
@@ -1739,6 +1967,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         facts.addProperty("max_candidate_attempts", maxCandidateAttempts);
         facts.addProperty("max_target_mutations", maxTargetMutations);
         facts.addProperty("replans", replansTotal);
+        facts.addProperty("frontier_attempts", frontierAttempts);
+        facts.addProperty("frontiers_reached", frontiersReached);
         facts.addProperty("approach_excavation_attempted", excavationAttempted);
         facts.addProperty("approach_excavation_used", excavationUsed);
         facts.addProperty("approach_excavation_breaks", excavationBreaks);

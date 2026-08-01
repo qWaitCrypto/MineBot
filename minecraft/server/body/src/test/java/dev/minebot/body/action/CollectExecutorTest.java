@@ -178,12 +178,17 @@ final class CollectExecutorTest {
             CollectExecutor.CandidateSource candidateSource
         ) {
             runtime.submit("Bot", "collect-1", "COLLECT_BLOCK", OwnerPriority.ACTION, 0);
+            JsonObject searchFacts = new JsonObject();
+            searchFacts.addProperty("matches", candidates.size());
+            searchFacts.addProperty("coverage_complete", true);
+            searchFacts.addProperty("unloaded_chunk_count", 0);
+            searchFacts.addProperty("result_capped", false);
             CollectExecutor executor = new CollectExecutor(
                 "Bot",
                 "collect-1",
                 candidates,
                 expectedItemIds,
-                new JsonObject(),
+                searchFacts,
                 world,
                 body,
                 body,
@@ -374,6 +379,77 @@ final class CollectExecutorTest {
     }
 
     @Test
+    void vanishedPickupGoalDoesNotRetireLiveCandidatesFromTheCompositeDomain() {
+        Harness harness = new Harness();
+        FakeWorld world = new FakeWorld(FLOOR);
+        List<CollectExecutor.Candidate> candidates = new ArrayList<>();
+        for (int x : List.of(-40, -44)) {
+            harness.blockStates.put(Harness.key(x, STAND, 0), IRON_ORE);
+            world.set(x, STAND, 0, WorldView.NodeKind.SOLID);
+            candidates.add(new CollectExecutor.Candidate(x, STAND, 0, IRON_ORE));
+        }
+        harness.drops.add(new CollectExecutor.Drop(
+            "vanishing-drop", RAW_IRON, 1, 25.5, STAND, 0.5
+        ));
+        harness.build(
+            world,
+            candidates,
+            List.of(RAW_IRON),
+            4_000,
+            2,
+            8,
+            8
+        );
+        Set<String> changed = new HashSet<>();
+        int[] ticks = {0};
+
+        JsonObject terminal = harness.runUntilTerminal(3_500, () -> {
+            ticks[0]++;
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (ticks[0] == 5) {
+                harness.drops.clear();
+            }
+            if (!harness.body.attacking) {
+                return;
+            }
+            String key = Harness.key(
+                harness.body.breakX, harness.body.breakY, harness.body.breakZ
+            );
+            if (!changed.add(key)) {
+                return;
+            }
+            harness.blockStates.put(key, "minecraft:air");
+            world.set(
+                harness.body.breakX,
+                harness.body.breakY,
+                harness.body.breakZ,
+                WorldView.NodeKind.PASSABLE
+            );
+            harness.itemCounts.put(RAW_IRON, changed.size());
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals(2, terminal.get("target_breaks").getAsInt(), terminal.toString());
+        assertEquals(2, terminal.get("collected_count").getAsInt(), terminal.toString());
+        assertEquals(2, harness.proposals.size(), terminal.toString());
+        assertEquals(2, harness.body.breakTargets.size(), terminal.toString());
+        assertTrue(
+            terminal.getAsJsonArray("drop_losses").toString()
+                .contains("drop_no_longer_observed"),
+            terminal.toString()
+        );
+        assertFalse(
+            terminal.getAsJsonArray("attempt_failures").toString()
+                .contains("reached_stand_candidate_mismatch"),
+            terminal.toString()
+        );
+        assertEquals("minecraft:air", harness.blockStates.get(Harness.key(-40, STAND, 0)));
+        assertEquals("minecraft:air", harness.blockStates.get(Harness.key(-44, STAND, 0)));
+    }
+
+    @Test
     void persistentQuantityProcessRescansTheSameWayForWoodStoneAndIron() {
         record Material(String blockId, String itemId) {
         }
@@ -384,25 +460,24 @@ final class CollectExecutorTest {
         )) {
             Harness harness = new Harness();
             FakeWorld world = new FakeWorld(FLOOR);
-            for (int x : List.of(8, 14)) {
-                harness.blockStates.put(Harness.key(x, STAND, 0), material.blockId());
-                world.set(x, STAND, 0, WorldView.NodeKind.SOLID);
-            }
+            int targetX = -12;
+            harness.blockStates.put(Harness.key(targetX, STAND, 0), material.blockId());
+            world.set(targetX, STAND, 0, WorldView.NodeKind.SOLID);
             CollectExecutor.CandidateSource source = (x, _y, _z, _tick) -> {
                 List<CollectExecutor.Candidate> discovered = new ArrayList<>();
-                if (x >= 3 && material.blockId().equals(
-                    harness.blockStates.get(Harness.key(14, STAND, 0))
+                if (x < 0 && material.blockId().equals(
+                    harness.blockStates.get(Harness.key(targetX, STAND, 0))
                 )) {
-                    discovered.add(new CollectExecutor.Candidate(14, STAND, 0, material.blockId()));
+                    discovered.add(new CollectExecutor.Candidate(targetX, STAND, 0, material.blockId()));
                 }
                 return new CollectExecutor.CandidateScan(discovered, true, 0, false);
             };
             harness.build(
                 world,
-                List.of(new CollectExecutor.Candidate(8, STAND, 0, material.blockId())),
+                List.of(),
                 List.of(material.itemId()),
                 2_400,
-                2,
+                1,
                 8,
                 8,
                 source
@@ -433,31 +508,64 @@ final class CollectExecutorTest {
             });
 
             assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
-            assertEquals(2, terminal.get("target_breaks").getAsInt(), terminal.toString());
-            assertEquals(2, terminal.get("collected_count").getAsInt(), terminal.toString());
-            assertEquals(2, harness.proposals.size(), terminal.toString());
+            assertEquals(1, terminal.get("target_breaks").getAsInt(), terminal.toString());
+            assertEquals(1, terminal.get("collected_count").getAsInt(), terminal.toString());
+            assertEquals(1, harness.proposals.size(), terminal.toString());
             JsonObject search = terminal.getAsJsonObject("search");
             assertEquals(1, search.get("discovered_after_start").getAsInt(), search.toString());
-            assertTrue(search.get("scans").getAsInt() >= 1, search.toString());
+            assertTrue(search.get("scans").getAsInt() >= 2, search.toString());
+            assertTrue(search.get("frontiers_reached").getAsInt() >= 1, search.toString());
+            assertTrue(harness.body.x < 0, "the same action must move before its first candidate appears");
         }
     }
 
     @Test
+    void unavailableFrontiersDoNotRescanAnUnchangedPosition() {
+        Harness harness = new Harness();
+        int[] scans = {0};
+        CollectExecutor.CandidateSource source = (_x, _y, _z, _tick) -> {
+            scans[0]++;
+            return new CollectExecutor.CandidateScan(List.of(), true, 0, false);
+        };
+        harness.build(
+            (_x, _y, _z) -> WorldView.NodeKind.HAZARD,
+            List.of(),
+            List.of(LOG),
+            1_200,
+            1,
+            2,
+            1,
+            source
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(20, () -> {
+        });
+
+        assertEquals("failed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("target_not_found", terminal.get("reason").getAsString(), terminal.toString());
+        assertEquals(0, scans[0], "no movement means the authoritative scan center did not change");
+        JsonObject search = terminal.getAsJsonObject("search");
+        assertEquals(1, search.get("scans").getAsInt(), search.toString());
+        assertEquals(2, search.get("frontier_attempts").getAsInt(), search.toString());
+        assertEquals(0, search.get("frontiers_reached").getAsInt(), search.toString());
+    }
+
+    @Test
     void objectiveBlacklistPreventsARescanFromReaddingADeniedCandidate() {
-        int treeX = 6;
+        int treeX = -12;
         Harness harness = new Harness();
         harness.blockStates.put(Harness.key(treeX, STAND, 0), LOG);
         CollectExecutor.Candidate candidate = new CollectExecutor.Candidate(treeX, STAND, 0, LOG);
-        CollectExecutor.CandidateSource source = (_x, _y, _z, _tick) ->
-            new CollectExecutor.CandidateScan(List.of(candidate), true, 0, false);
+        CollectExecutor.CandidateSource source = (x, _y, _z, _tick) ->
+            new CollectExecutor.CandidateScan(x < 0 ? List.of(candidate) : List.of(), true, 0, false);
         harness.build(
             worldWithTrunk(treeX),
-            List.of(candidate),
+            List.of(),
             List.of(LOG),
             2_400,
             1,
-            8,
-            8,
+            1,
+            1,
             source
         );
 
@@ -471,6 +579,7 @@ final class CollectExecutorTest {
         assertEquals("governance_denied:protected_region", terminal.get("reason").getAsString());
         assertEquals(1, harness.proposals.size(), "a denied coordinate must stay blacklisted");
         assertFalse(harness.body.log.contains("exactBreak"));
+        assertTrue(terminal.getAsJsonObject("search").get("frontiers_reached").getAsInt() >= 1);
     }
 
     @Test
