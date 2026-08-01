@@ -24,8 +24,8 @@ NATURAL = Region("resource-objectives", (192, 80, 192), (288, 160, 288))
 DIG_ORIGIN = (220.82, 120.0, 220.18)
 DIG_TARGET_Y = 118
 COLLECT_ORIGIN = (240.5, 100.0, 240.5)
-ORE_TARGETS = ((244, 100, 240), (247, 100, 240), (250, 100, 240))
-ARTIFACT = Path("logs/agentic-runtime/java-body-resource-objectives-20260731.json")
+ORE_TARGETS = ((252, 100, 240), (262, 100, 240), (265, 100, 240))
+ARTIFACT = Path("logs/agentic-runtime/java-body-persistent-resource-objective-20260801.json")
 
 
 def command(rcon: RconClient, value: str, delay: float = 0.03) -> str:
@@ -107,13 +107,13 @@ def prepare_collect_fixture(rcon: RconClient, body) -> None:
     command(rcon, f"gamemode spectator {BOT}")
     command(rcon, f"tp {BOT} 240.5 112 240.5")
     time.sleep(0.5)
-    command(rcon, "fill 232 96 232 256 104 248 stone")
-    command(rcon, "fill 232 100 232 256 104 248 air")
+    command(rcon, "fill 232 96 232 272 104 248 stone")
+    command(rcon, "fill 232 100 232 272 104 248 air")
     for x, y, z in ORE_TARGETS:
         command(rcon, f"setblock {x} {y} {z} minecraft:iron_ore")
     command(
         rcon,
-        "execute positioned 244 100 240 run kill @e[type=minecraft:item,distance=..24]",
+        "execute positioned 252 100 240 run kill @e[type=minecraft:item,distance=..32]",
     )
     command(rcon, f"clear {BOT}")
     command(rcon, f"item replace entity {BOT} hotbar.0 with minecraft:stone_pickaxe 1")
@@ -220,6 +220,11 @@ def main() -> int:
             collect_after = body.get_state()
             raw_after = inventory_count(body, "raw_iron")
             collect_events = [event for event in body.event_log if event.seq > collect_start_seq]
+            candidate_refreshes = [
+                event_payload(event)
+                for event in collect_events
+                if event.name == "collection_candidate_domain_refreshed"
+            ]
             collect_actions = executed_actions[action_index:]
             collect_case = {
                 "result": collect_result.to_payload(),
@@ -230,6 +235,7 @@ def main() -> int:
                 "elapsed_wall_s": round(collect_elapsed, 3),
                 "targets_are_air": [block_is(rcon, target, "air") for target in ORE_TARGETS],
                 "body_actions": collect_actions,
+                "candidate_refreshes": candidate_refreshes,
                 "events": [event_payload(event) for event in collect_events],
             }
             artifact["collect_quantity"] = collect_case
@@ -245,6 +251,10 @@ def main() -> int:
                 and raw_after - raw_before >= 3
                 and all(collect_case["targets_are_air"])
                 and collect_actions == ["collectBlock"]
+                and sum(
+                    int(refresh["data"].get("new_candidates") or 0)
+                    for refresh in candidate_refreshes
+                ) >= 2
             )
             artifact["success"] = dig_ok and collect_ok
     finally:

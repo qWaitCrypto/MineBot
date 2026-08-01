@@ -961,9 +961,11 @@ def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
         "target is seen, so act on that fact before exploring farther; the result carries a cursor "
         "for resuming the same search later. Use supported target groups such as '#logs' and '#flowers' "
         "when any member of that family satisfies the objective; reserve exact block names "
-        "such as 'oak_log' for exact-species goals. If a result includes concrete block coordinates, use "
-        "mine_block_collect for one of those exact positions; collect_resource starts a "
-        "separate count-based local search. Resumable results include a typed continuation "
+        "such as 'oak_log' for exact-species goals. Do not use exploration as a pre-step for a "
+        "resource-count objective: call collect_resource directly so its persistent Body process owns "
+        "discovery, rescanning, candidate blacklisting, mining, and pickup. If the exact coordinate itself "
+        "is the task intent, a returned block coordinate may be passed to mine_block_collect. "
+        "Resumable exploration results include a typed continuation "
         "whose target descriptor must remain unchanged.",
         {
             "type": "object",

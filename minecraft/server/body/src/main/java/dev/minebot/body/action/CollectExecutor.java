@@ -65,7 +65,23 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         void send(MutationGate.Proposal proposal);
     }
 
+    /** Re-reads the authoritative loaded-world candidate domain during one objective. */
+    public interface CandidateSource {
+        CandidateScan scan(int x, int y, int z, int serverTick);
+    }
+
     public record Candidate(int x, int y, int z, String blockId) {
+    }
+
+    public record CandidateScan(
+        List<Candidate> candidates,
+        boolean coverageComplete,
+        int unloadedChunkCount,
+        boolean resultCapped
+    ) {
+        public CandidateScan {
+            candidates = List.copyOf(candidates);
+        }
     }
 
     public record Drop(String entityId, String itemId, int count, double x, double y, double z) {
@@ -93,8 +109,11 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
 
     private final String bot;
     private final String actionId;
-    private final List<Candidate> candidates;
-    private final List<Candidate> remainingCandidates;
+    private final List<Candidate> candidates = new ArrayList<>();
+    private final List<Candidate> remainingCandidates = new ArrayList<>();
+    private final Set<String> seenCandidateKeys = new HashSet<>();
+    private final Set<String> retiredCandidateKeys = new HashSet<>();
+    private final CandidateSource candidateSource;
     private final List<String> expectedItemIds;
     private final JsonObject searchFacts;
     private final WorldView world;
@@ -124,6 +143,12 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private int phaseStartedTick = -1;
     private int elapsedTicks;
     private int replansTotal;
+    private int candidateScans;
+    private int candidatesDiscoveredAfterStart;
+    private int lastScanMatches;
+    private int lastScanUnloadedChunks;
+    private boolean lastScanCoverageComplete = true;
+    private boolean anyScanResultCapped;
     private Drop pickupDrop;
     private Drop plannedPickupDrop;
     private final JsonArray attemptFailures = new JsonArray();
@@ -199,7 +224,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             timeoutTicks,
             1,
             8,
-            8
+            8,
+            null
         );
     }
 
@@ -226,12 +252,75 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         int maxCandidateAttempts,
         int maxTargetMutations
     ) {
+        this(
+            bot,
+            actionId,
+            candidates,
+            expectedItemIds,
+            searchFacts,
+            world,
+            movement,
+            blockBreaker,
+            hygiene,
+            blocks,
+            inventory,
+            drops,
+            gate,
+            proposals,
+            positions,
+            events,
+            runtime,
+            timeoutTicks,
+            targetCount,
+            maxCandidateAttempts,
+            maxTargetMutations,
+            null
+        );
+    }
+
+    public CollectExecutor(
+        String bot,
+        String actionId,
+        List<Candidate> candidates,
+        List<String> expectedItemIds,
+        JsonObject searchFacts,
+        WorldView world,
+        MovementControls movement,
+        ExactBlockBreaker blockBreaker,
+        BotControls hygiene,
+        BlockReader blocks,
+        InventoryReader inventory,
+        DropReader drops,
+        MutationGate gate,
+        ProposalSink proposals,
+        NavigateExecutor.PositionSource positions,
+        NavigateExecutor.EventSink events,
+        ActionRuntime runtime,
+        int timeoutTicks,
+        int targetCount,
+        int maxCandidateAttempts,
+        int maxTargetMutations,
+        CandidateSource candidateSource
+    ) {
         this.bot = bot;
         this.actionId = actionId;
-        this.candidates = List.copyOf(candidates);
-        this.remainingCandidates = new ArrayList<>(candidates);
+        for (Candidate candidate : candidates) {
+            addDiscoveredCandidate(candidate);
+        }
+        this.candidateSource = candidateSource;
         this.expectedItemIds = List.copyOf(expectedItemIds);
         this.searchFacts = searchFacts;
+        this.candidateScans = searchFacts.has("matches") ? 1 : 0;
+        this.lastScanMatches = searchFacts.has("matches")
+            ? searchFacts.get("matches").getAsInt()
+            : candidates.size();
+        this.lastScanCoverageComplete = !searchFacts.has("coverage_complete")
+            || searchFacts.get("coverage_complete").getAsBoolean();
+        this.lastScanUnloadedChunks = searchFacts.has("unloaded_chunk_count")
+            ? searchFacts.get("unloaded_chunk_count").getAsInt()
+            : 0;
+        this.anyScanResultCapped = searchFacts.has("result_capped")
+            && searchFacts.get("result_capped").getAsBoolean();
         this.world = world;
         this.movement = movement;
         this.blockBreaker = blockBreaker;
@@ -248,6 +337,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         this.targetCount = targetCount;
         this.maxCandidateAttempts = Math.min(MAX_CANDIDATE_ATTEMPTS, maxCandidateAttempts);
         this.maxTargetMutations = maxTargetMutations;
+        updateSearchFacts();
         this.baselineCounts = new HashMap<>();
         for (String itemId : expectedItemIds) {
             baselineCounts.putIfAbsent(itemId, inventory.countOf(itemId));
@@ -303,6 +393,12 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
 
         refreshLiveCandidates();
+        if (remainingCandidates.isEmpty()
+            && candidateAttempts < maxCandidateAttempts
+            && targetBreaks < maxTargetMutations) {
+            rescanCandidateDomain(serverTick, position);
+            refreshLiveCandidates();
+        }
         refreshPendingDrops(position, serverTick);
         for (TrackedDrop tracked : List.copyOf(pendingDrops.values())) {
             if (hasSafePickupStand(tracked.drop())) {
@@ -463,7 +559,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                     phase = Phase.NEXT_CANDIDATE;
                     return;
                 }
-                remainingCandidates.remove(current);
+                retireCandidate(current);
                 candidateAttempts++;
                 beginTargetMutation(serverTick);
             }
@@ -797,7 +893,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             excavationTarget.x(), excavationTarget.y(), excavationTarget.z()
         );
         if (!excavationTarget.blockId().equals(observed)) {
-            remainingCandidates.remove(excavationTarget);
+            retireCandidate(excavationTarget);
             current = excavationTarget;
             recordCandidateRetired("target_changed", observed);
             current = null;
@@ -811,7 +907,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             return;
         }
         current = excavationTarget;
-        remainingCandidates.remove(current);
+        retireCandidate(current);
         candidateAttempts++;
         beginTargetMutation(serverTick);
     }
@@ -1270,7 +1366,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
 
     private void retireActiveCandidateDomain(String reason) {
         for (Candidate candidate : List.copyOf(activeDomain)) {
-            if (!remainingCandidates.remove(candidate)) {
+            if (!retireCandidate(candidate)) {
                 continue;
             }
             current = candidate;
@@ -1451,6 +1547,75 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         attemptFailures.add(failure);
     }
 
+    private void rescanCandidateDomain(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        if (candidateSource == null) {
+            return;
+        }
+        CandidateScan scan = candidateSource.scan(
+            position.blockX(),
+            position.feetBlockY(),
+            position.blockZ(),
+            serverTick
+        );
+        candidateScans++;
+        lastScanMatches = scan.candidates().size();
+        lastScanCoverageComplete = scan.coverageComplete();
+        lastScanUnloadedChunks = scan.unloadedChunkCount();
+        anyScanResultCapped |= scan.resultCapped();
+        int discovered = 0;
+        for (Candidate candidate : scan.candidates()) {
+            if (addDiscoveredCandidate(candidate)) {
+                discovered++;
+            }
+        }
+        candidatesDiscoveredAfterStart += discovered;
+        updateSearchFacts();
+
+        JsonObject data = new JsonObject();
+        data.addProperty("scan", candidateScans);
+        data.addProperty("matches", scan.candidates().size());
+        data.addProperty("new_candidates", discovered);
+        data.addProperty("known_candidates", candidates.size());
+        data.addProperty("remaining_candidates", remainingCandidates.size());
+        data.addProperty("coverage_complete", scan.coverageComplete());
+        data.addProperty("unloaded_chunk_count", scan.unloadedChunkCount());
+        data.addProperty("result_capped", scan.resultCapped());
+        events.emit(bot, serverTick, "collection_candidate_domain_refreshed", actionId, data);
+    }
+
+    private boolean addDiscoveredCandidate(Candidate candidate) {
+        String key = candidateKey(candidate);
+        if (seenCandidateKeys.contains(key) || retiredCandidateKeys.contains(key)) {
+            return false;
+        }
+        seenCandidateKeys.add(key);
+        candidates.add(candidate);
+        remainingCandidates.add(candidate);
+        return true;
+    }
+
+    private boolean retireCandidate(Candidate candidate) {
+        retiredCandidateKeys.add(candidateKey(candidate));
+        return remainingCandidates.remove(candidate);
+    }
+
+    private static String candidateKey(Candidate candidate) {
+        return candidate.x() + "," + candidate.y() + "," + candidate.z() + ":" + candidate.blockId();
+    }
+
+    private void updateSearchFacts() {
+        searchFacts.addProperty("scans", candidateScans);
+        searchFacts.addProperty("unique_candidates", candidates.size());
+        searchFacts.addProperty("discovered_after_start", candidatesDiscoveredAfterStart);
+        searchFacts.addProperty("last_matches", lastScanMatches);
+        searchFacts.addProperty("last_coverage_complete", lastScanCoverageComplete);
+        searchFacts.addProperty("last_unloaded_chunk_count", lastScanUnloadedChunks);
+        searchFacts.addProperty("any_result_capped", anyScanResultCapped);
+    }
+
     private void refreshLiveCandidates() {
         int liveCandidates = 0;
         for (Candidate candidate : List.copyOf(remainingCandidates)) {
@@ -1463,7 +1628,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 continue;
             }
             current = candidate;
-            remainingCandidates.remove(candidate);
+            retireCandidate(candidate);
             recordCandidateRetired("target_changed", observed);
         }
         current = null;
@@ -1482,7 +1647,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             String observed = blocks.blockIdAt(candidate.x(), candidate.y(), candidate.z());
             if (observed == null || !observed.equals(candidate.blockId())) {
                 current = candidate;
-                remainingCandidates.remove(candidate);
+                retireCandidate(candidate);
                 recordCandidateRetired("target_changed", observed);
                 current = null;
                 continue;

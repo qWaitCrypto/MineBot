@@ -27,6 +27,8 @@ final class CollectExecutorTest {
     private static final int FLOOR = 63;
     private static final int STAND = FLOOR + 1;
     private static final String LOG = "minecraft:oak_log";
+    private static final String STONE = "minecraft:stone";
+    private static final String COBBLESTONE = "minecraft:cobblestone";
     private static final String IRON_ORE = "minecraft:iron_ore";
     private static final String RAW_IRON = "minecraft:raw_iron";
 
@@ -153,6 +155,28 @@ final class CollectExecutorTest {
             int candidateBudget,
             int mutationBudget
         ) {
+            return build(
+                world,
+                candidates,
+                expectedItemIds,
+                timeoutTicks,
+                targetCount,
+                candidateBudget,
+                mutationBudget,
+                null
+            );
+        }
+
+        CollectExecutor build(
+            WorldView world,
+            List<CollectExecutor.Candidate> candidates,
+            List<String> expectedItemIds,
+            int timeoutTicks,
+            int targetCount,
+            int candidateBudget,
+            int mutationBudget,
+            CollectExecutor.CandidateSource candidateSource
+        ) {
             runtime.submit("Bot", "collect-1", "COLLECT_BLOCK", OwnerPriority.ACTION, 0);
             CollectExecutor executor = new CollectExecutor(
                 "Bot",
@@ -177,7 +201,8 @@ final class CollectExecutorTest {
                 timeoutTicks,
                 targetCount,
                 candidateBudget,
-                mutationBudget
+                mutationBudget,
+                candidateSource
             );
             runtime.attachExecutor("collect-1", executor);
             return executor;
@@ -346,6 +371,106 @@ final class CollectExecutorTest {
         assertEquals(3, breaksBeforePickup[0], "pickup should be batched after the nearby mining run");
         assertEquals(3, harness.body.breakTargets.size());
         assertEquals(3, harness.proposals.size());
+    }
+
+    @Test
+    void persistentQuantityProcessRescansTheSameWayForWoodStoneAndIron() {
+        record Material(String blockId, String itemId) {
+        }
+        for (Material material : List.of(
+            new Material(LOG, LOG),
+            new Material(STONE, COBBLESTONE),
+            new Material(IRON_ORE, RAW_IRON)
+        )) {
+            Harness harness = new Harness();
+            FakeWorld world = new FakeWorld(FLOOR);
+            for (int x : List.of(8, 14)) {
+                harness.blockStates.put(Harness.key(x, STAND, 0), material.blockId());
+                world.set(x, STAND, 0, WorldView.NodeKind.SOLID);
+            }
+            CollectExecutor.CandidateSource source = (x, _y, _z, _tick) -> {
+                List<CollectExecutor.Candidate> discovered = new ArrayList<>();
+                if (x >= 3 && material.blockId().equals(
+                    harness.blockStates.get(Harness.key(14, STAND, 0))
+                )) {
+                    discovered.add(new CollectExecutor.Candidate(14, STAND, 0, material.blockId()));
+                }
+                return new CollectExecutor.CandidateScan(discovered, true, 0, false);
+            };
+            harness.build(
+                world,
+                List.of(new CollectExecutor.Candidate(8, STAND, 0, material.blockId())),
+                List.of(material.itemId()),
+                2_400,
+                2,
+                8,
+                8,
+                source
+            );
+            Set<String> changed = new HashSet<>();
+
+            JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
+                for (MutationGate.Proposal proposal : harness.proposals) {
+                    harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+                }
+                if (!harness.body.attacking) {
+                    return;
+                }
+                String key = Harness.key(
+                    harness.body.breakX, harness.body.breakY, harness.body.breakZ
+                );
+                if (!changed.add(key)) {
+                    return;
+                }
+                harness.blockStates.put(key, "minecraft:air");
+                world.set(
+                    harness.body.breakX,
+                    harness.body.breakY,
+                    harness.body.breakZ,
+                    WorldView.NodeKind.PASSABLE
+                );
+                harness.itemCounts.put(material.itemId(), changed.size());
+            });
+
+            assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+            assertEquals(2, terminal.get("target_breaks").getAsInt(), terminal.toString());
+            assertEquals(2, terminal.get("collected_count").getAsInt(), terminal.toString());
+            assertEquals(2, harness.proposals.size(), terminal.toString());
+            JsonObject search = terminal.getAsJsonObject("search");
+            assertEquals(1, search.get("discovered_after_start").getAsInt(), search.toString());
+            assertTrue(search.get("scans").getAsInt() >= 1, search.toString());
+        }
+    }
+
+    @Test
+    void objectiveBlacklistPreventsARescanFromReaddingADeniedCandidate() {
+        int treeX = 6;
+        Harness harness = new Harness();
+        harness.blockStates.put(Harness.key(treeX, STAND, 0), LOG);
+        CollectExecutor.Candidate candidate = new CollectExecutor.Candidate(treeX, STAND, 0, LOG);
+        CollectExecutor.CandidateSource source = (_x, _y, _z, _tick) ->
+            new CollectExecutor.CandidateScan(List.of(candidate), true, 0, false);
+        harness.build(
+            worldWithTrunk(treeX),
+            List.of(candidate),
+            List.of(LOG),
+            2_400,
+            1,
+            8,
+            8,
+            source
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), false, "protected_region");
+            }
+        });
+
+        assertEquals("failed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("governance_denied:protected_region", terminal.get("reason").getAsString());
+        assertEquals(1, harness.proposals.size(), "a denied coordinate must stay blacklisted");
+        assertFalse(harness.body.log.contains("exactBreak"));
     }
 
     @Test

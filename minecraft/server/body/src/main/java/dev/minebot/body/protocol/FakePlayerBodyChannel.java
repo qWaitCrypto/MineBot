@@ -920,18 +920,23 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 case ActionRuntime.Submission.Accepted ignored -> {
                     BlockPos center = player.blockPosition();
                     LoadedSearchResult search = scanner.scan(level, center, requestedBlocks, radius, verticalRadius, serverTick);
+                    CollectExecutor.CandidateScan initialScan = collectCandidateScan(search);
                     JsonObject searchFacts = new JsonObject();
                     searchFacts.addProperty("radius", radius);
                     searchFacts.addProperty("matches", search.matches().size());
                     searchFacts.addProperty("coverage_complete", search.coverageComplete());
                     searchFacts.addProperty("unloaded_chunk_count", search.unloadedChunkCount());
                     searchFacts.addProperty("result_capped", search.resultCapped());
-                    List<CollectExecutor.Candidate> candidates = new ArrayList<>();
-                    for (SearchMatch match : search.matches()) {
-                        candidates.add(new CollectExecutor.Candidate(
-                            match.x(), match.y(), match.z(), match.blockId()
+                    List<CollectExecutor.Candidate> candidates = initialScan.candidates();
+                    CollectExecutor.CandidateSource candidateSource = (x, y, z, tick) ->
+                        collectCandidateScan(scanner.scan(
+                            level,
+                            new BlockPos(x, y, z),
+                            requestedBlocks,
+                            radius,
+                            verticalRadius,
+                            tick
                         ));
-                    }
                     CollectExecutor executor = new CollectExecutor(
                         botName,
                         actionId,
@@ -955,7 +960,8 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         timeoutTicks,
                         targetCount,
                         candidateBudget,
-                        mutationBudget
+                        mutationBudget,
+                        candidateSource
                     );
                     runtime.attachExecutor(actionId, executor);
                     response.addProperty("state", "accepted");
@@ -980,6 +986,21 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         } catch (IllegalArgumentException error) {
             sendError(connection, request, serverTick, "invalid_request", String.valueOf(error.getMessage()), false);
         }
+    }
+
+    private static CollectExecutor.CandidateScan collectCandidateScan(LoadedSearchResult search) {
+        List<CollectExecutor.Candidate> candidates = new ArrayList<>();
+        for (SearchMatch match : search.matches()) {
+            candidates.add(new CollectExecutor.Candidate(
+                match.x(), match.y(), match.z(), match.blockId()
+            ));
+        }
+        return new CollectExecutor.CandidateScan(
+            candidates,
+            search.coverageComplete(),
+            search.unloadedChunkCount(),
+            search.resultCapped()
+        );
     }
 
     private void handleDigDown(MineBotConnection connection, JsonObject request, int serverTick) {
