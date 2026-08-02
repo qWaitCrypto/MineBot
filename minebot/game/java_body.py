@@ -584,7 +584,7 @@ class JavaBody:
         return normalized
 
     def event_head(self, proposed_epoch: str) -> dict[str, object]:
-        reply = self._client.request_response(
+        reply = self._read_client.request_response(
             lambda protocol: protocol.event_head(self.bot_name, proposed_epoch)
         )
         if isinstance(reply, ErrorResponse):
@@ -911,7 +911,10 @@ class JavaBody:
 
 
 def _contract_event(item: BotEvent) -> Event:
-    return Event(seq=item.seq, tick=item.tick, bot=item.bot, name=item.name, data=dict(item.data))
+    data = dict(item.data)
+    if item.action_id is not None:
+        data.setdefault("action_id", item.action_id)
+    return Event(seq=item.seq, tick=item.tick, bot=item.bot, name=item.name, data=data)
 
 
 def _gap_result(action: Action, bot: str) -> Result:

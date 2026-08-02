@@ -24,6 +24,7 @@ from uuid import uuid4
 from minebot.contract.execution import execution_checkpoint
 from minebot.contract.governance import BreakContext, InteractionContext, PlaceContext
 from minebot.contract.messages import ToolResult
+from minebot.game.errors import BodyActionTimeoutError
 from minebot.game.governance import GovernancePolicy
 from minebot.game.java_body_protocol import (
     BotEvent,
@@ -229,40 +230,54 @@ class JavaBodyClient:
         self._last_terminal: tuple[str, dict] | None = None
         self._request_times: deque[float] = deque()
         self._exchange_lock = threading.RLock()
+        self._reconciliation_client: JavaBodyClient = self
 
     # -- lifecycle ------------------------------------------------------
 
     def connect(self) -> None:
         with self._exchange_lock:
+            self._discard_transport()
             self._transport = self._connect()
             self._protocol = JavaBodyProtocol()
             self._request_times.clear()
-            hello = self._protocol.hello(subscribe_events=self._subscribe_events)
-            self._send(hello)
-            self._await_response(
-                hello["type"],
-                request_id=hello["request_id"],
-            )
-            if self._survival_owner is not None:
-                ownership_request = self._protocol.set_survival_owner(
-                    self._bot,
-                    self._survival_owner,
+            try:
+                hello = self._protocol.hello(subscribe_events=self._subscribe_events)
+                self._send(hello)
+                self._await_response(
+                    hello["type"],
+                    request_id=hello["request_id"],
                 )
-                self._send(ownership_request)
-                ownership = self._await_response(
-                    ownership_request["type"],
-                    request_id=ownership_request["request_id"],
-                )
-                if isinstance(ownership, ErrorResponse):
-                    raise TransportClosed(
-                        f"survival ownership negotiation failed: {ownership.code}"
+                if self._survival_owner is not None:
+                    ownership_request = self._protocol.set_survival_owner(
+                        self._bot,
+                        self._survival_owner,
                     )
+                    self._send(ownership_request)
+                    ownership = self._await_response(
+                        ownership_request["type"],
+                        request_id=ownership_request["request_id"],
+                    )
+                    if isinstance(ownership, ErrorResponse):
+                        raise TransportClosed(
+                            f"survival ownership negotiation failed: {ownership.code}"
+                        )
+            except Exception:
+                self._discard_transport()
+                raise
 
     def close(self) -> None:
         with self._exchange_lock:
-            if self._transport is not None:
-                self._transport.close()
-                self._transport = None
+            self._discard_transport()
+
+    def _discard_transport(self) -> None:
+        transport = self._transport
+        self._transport = None
+        if transport is None:
+            return
+        try:
+            transport.close()
+        except Exception:
+            pass
 
     @property
     def negotiated(self) -> bool:
@@ -282,6 +297,17 @@ class JavaBodyClient:
             raise ValueError("Java Body governance is already configured")
         self._governance = governance
 
+    def configure_reconciliation_client(self, client: JavaBodyClient) -> None:
+        """Use the provider's existing read lane for action control queries."""
+
+        if client is self:
+            return
+        if client._bot != self._bot:
+            raise ValueError("Java Body reconciliation client bot_name does not match")
+        if self._reconciliation_client is not self and self._reconciliation_client is not client:
+            raise ValueError("Java Body reconciliation client is already configured")
+        self._reconciliation_client = client
+
     def request_response(self, build) -> Response | ErrorResponse:
         """One read-side request/response exchange.
 
@@ -292,12 +318,20 @@ class JavaBodyClient:
         with self._exchange_lock:
             if self._transport is None or not self._protocol.negotiated:
                 self.connect()
-            message = build(self._protocol)
-            self._send(message)
-            return self._await_response(
-                message["type"],
-                request_id=message["request_id"],
-            )
+            try:
+                message = build(self._protocol)
+                self._send(message)
+                return self._await_response(
+                    message["type"],
+                    request_id=message["request_id"],
+                )
+            except TransportClosed:
+                # Never leave a closed socket looking negotiated. Read-side
+                # callers may safely retry and rebuild their request against a
+                # fresh protocol epoch; mutation callers still decide their
+                # own reconciliation semantics.
+                self._discard_transport()
+                raise
 
     def drain_events(self) -> list[BotEvent]:
         """Buffered pushed events since the last drain, in per-bot order."""
@@ -314,11 +348,22 @@ class JavaBodyClient:
 
     def resume_events(self, after_seq: int) -> Response | ErrorResponse:
         with self._exchange_lock:
-            self._ensure_connected()
-            self._protocol.seed_last_seq(self._bot, max(0, int(after_seq)))
-            return self.request_response(
-                lambda protocol: protocol.resume_events(self._bot, max(0, int(after_seq)))
-            )
+            cursor = max(0, int(after_seq))
+            for attempt in range(2):
+                try:
+                    self._ensure_connected()
+                    self._protocol.seed_last_seq(self._bot, cursor)
+                    message = self._protocol.resume_events(self._bot, cursor)
+                    self._send(message)
+                    return self._await_response(
+                        message["type"],
+                        request_id=message["request_id"],
+                    )
+                except TransportClosed:
+                    self._discard_transport()
+                    if attempt > 0:
+                        raise
+            raise AssertionError("unreachable event-resume retry state")
 
     def interrupt_body(self, reason: str | None = None) -> Response | ErrorResponse:
         """Use an independent connection so cancellation can preempt a blocking action."""
@@ -519,11 +564,12 @@ class JavaBodyClient:
         except TransportClosed:
             return self._reconcile_after_drop(action_id, kind, terminals, started=started)
         if terminal is None:
-            return ToolResult(
-                success=False,
-                reason=f"{kind}_no_terminal",
-                can_retry=True,
-                metrics={"terminal_delivery": delivery},
+            return self._cancel_and_reconcile_deadline(
+                action_id,
+                kind,
+                terminals,
+                started=started,
+                deadline_delivery=delivery,
             )
         self._last_terminal = (action_id, dict(terminal))
         return self._with_governance_confirmation(
@@ -532,6 +578,129 @@ class JavaBodyClient:
                 delivery,
             ),
             action_id,
+        )
+
+    def _cancel_and_reconcile_deadline(
+        self,
+        action_id: str,
+        kind: str,
+        terminals: dict[str, tuple[bool, str, bool]],
+        *,
+        started: float,
+        deadline_delivery: dict,
+    ) -> ToolResult:
+        """Settle a wall-expired action through the existing control/read lane."""
+
+        control = self._reconciliation_client
+        try:
+            reply = control.request_response(
+                lambda protocol: protocol.cancel_action(action_id)
+            )
+        except TransportClosed:
+            raise self._deadline_timeout_error(
+                action_id,
+                kind,
+                deadline_delivery,
+                cancel_state="transport_closed",
+            )
+        if isinstance(reply, ErrorResponse):
+            raise self._deadline_timeout_error(
+                action_id,
+                kind,
+                deadline_delivery,
+                cancel_state=reply.code,
+            )
+        state = str(reply.payload.get("state") or "unknown")
+        terminal = reply.payload.get("terminal")
+        if state == "terminal" and isinstance(terminal, dict):
+            return self._deadline_cancel_terminal(
+                action_id,
+                kind,
+                terminals,
+                terminal,
+                started=started,
+                query_count=0,
+            )
+        if state != "cancel_requested":
+            raise self._deadline_timeout_error(
+                action_id,
+                kind,
+                deadline_delivery,
+                cancel_state=state,
+            )
+        try:
+            terminal, delivery = control._await_terminal(
+                action_id,
+                timeout_s=self._terminal_delivery_grace,
+                started=started,
+                query_immediately=True,
+            )
+        except TransportClosed:
+            raise self._deadline_timeout_error(
+                action_id,
+                kind,
+                deadline_delivery,
+                cancel_state="query_transport_closed",
+            )
+        if terminal is None:
+            raise self._deadline_timeout_error(
+                action_id,
+                kind,
+                delivery,
+                cancel_state="cancel_requested",
+            )
+        return self._deadline_cancel_terminal(
+            action_id,
+            kind,
+            terminals,
+            terminal,
+            started=started,
+            query_count=int(delivery.get("query_count") or 0),
+        )
+
+    def _deadline_cancel_terminal(
+        self,
+        action_id: str,
+        kind: str,
+        terminals: dict[str, tuple[bool, str, bool]],
+        terminal: dict,
+        *,
+        started: float,
+        query_count: int,
+    ) -> ToolResult:
+        self._last_terminal = (action_id, dict(terminal))
+        result = self._terminal_result(terminal, kind, terminals)
+        metrics = dict(result.metrics or {})
+        metrics["deadline_cancel_requested"] = True
+        result = ToolResult(
+            result.success,
+            result.reason,
+            result.can_retry,
+            result.next_suggestion,
+            metrics=metrics,
+        )
+        return self._with_terminal_delivery(
+            result,
+            self._terminal_delivery("deadline_cancel_query", started, query_count),
+        )
+
+    @staticmethod
+    def _deadline_timeout_error(
+        action_id: str,
+        kind: str,
+        delivery: dict,
+        *,
+        cancel_state: str,
+    ) -> BodyActionTimeoutError:
+        return BodyActionTimeoutError(
+            f"{kind} action {action_id} exceeded its wall deadline without a confirmed terminal",
+            diagnostics={
+                "action_id": action_id,
+                "action_kind": kind,
+                "terminal_delivery": dict(delivery),
+                "deadline_cancel_requested": True,
+                "cancel_state": cancel_state,
+            },
         )
 
     def _with_governance_confirmation(self, result: ToolResult, action_id: str) -> ToolResult:
@@ -782,9 +951,14 @@ class JavaBodyClient:
         *,
         timeout_s: float,
         started: float,
+        query_immediately: bool = False,
     ) -> tuple[dict | None, dict]:
         deadline = time.monotonic() + max(0.1, float(timeout_s))
-        next_query = time.monotonic() + self._terminal_query_interval
+        next_query = (
+            time.monotonic()
+            if query_immediately
+            else time.monotonic() + self._terminal_query_interval
+        )
         pending_query_id: str | None = None
         pending_query_started = 0.0
         query_count = 0

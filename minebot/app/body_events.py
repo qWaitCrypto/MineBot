@@ -26,6 +26,7 @@ ALWAYS_MATERIAL_BODY_EVENTS = {
 }
 
 TASK_TERMINAL_BODY_EVENTS = {
+    "action_terminal",
     "moveDone",
     "navigateDone",
     "lookDone",

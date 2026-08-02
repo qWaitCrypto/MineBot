@@ -18,7 +18,8 @@ from minebot.game.java_body_adapter import (
     JavaBodyClient,
     TransportClosed,
 )
-from minebot.game.errors import BodyProtocolError
+from minebot.game.errors import BodyActionTimeoutError, BodyProtocolError
+from minebot.game.java_body import JavaBody
 from minebot.game.java_body_protocol import ServerProposal
 
 
@@ -378,6 +379,8 @@ class FakeBodyServer:
             self._handle_verdict(message)
         elif kind == "QUERY_ACTION":
             self._handle_query(message, rid)
+        elif kind == "CANCEL_ACTION":
+            self._handle_cancel(message, rid)
         elif kind == "BODY_STATE":
             self._emit_response(rid, "BODY_STATE_RESULT", {
                 "bot": message.get("bot_name"),
@@ -581,7 +584,7 @@ class FakeBodyServer:
         elif self.scenario == "silent_terminal":
             self._pending_action = action
         elif self.scenario == "navigate_running":
-            pass
+            self._pending_action = action
         else:
             self._emit_event("path_planned", action, {"waypoints": 20, "partial": False})
             terminal = {"classification": "completed", "reason": "goal_satisfied",
@@ -1127,6 +1130,26 @@ class FakeBodyServer:
     def _handle_query(self, message: dict, rid: str) -> None:
         action = message["action_id"]
         pending = getattr(self, "_pending_action", None)
+        if self.scenario == "navigate_running" and action == pending:
+            if getattr(self, "_cancel_requested", False):
+                self._emit_response(rid, "QUERY_ACTION_RESULT", {
+                    "action_id": action,
+                    "state": "terminal",
+                    "terminal": {
+                        "classification": "canceled",
+                        "reason": "cancel_requested",
+                        "elapsed_ticks": 9,
+                    },
+                })
+            else:
+                self._emit_response(rid, "QUERY_ACTION_RESULT", {
+                    "action_id": action,
+                    "state": "running",
+                    "bot": "Bot",
+                    "action_type": "NAVIGATE",
+                    "cancel_requested": False,
+                })
+            return
         if action == pending:
             self._emit_response(rid, "QUERY_ACTION_RESULT", {
                 "action_id": action, "state": "terminal",
@@ -1135,6 +1158,20 @@ class FakeBodyServer:
             })
         else:
             self._emit_response(rid, "QUERY_ACTION_RESULT", {"action_id": action, "state": "unknown"})
+
+    def _handle_cancel(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        if action != getattr(self, "_pending_action", None):
+            self._emit_response(rid, "CANCEL_ACTION_RESULT", {
+                "action_id": action,
+                "state": "unknown",
+            })
+            return
+        self._cancel_requested = True
+        self._emit_response(rid, "CANCEL_ACTION_RESULT", {
+            "action_id": action,
+            "state": "cancel_requested",
+        })
 
     def _emit_response(self, rid, kind, payload) -> None:
         frame = {"channel": self.CHANNEL, "type": kind, "request_id": rid, "server_tick": self._tick, **payload}
@@ -1625,6 +1662,90 @@ def test_silent_terminal_is_reconciled_without_waiting_for_wall_timeout() -> Non
     assert any(request["type"] == "QUERY_ACTION" for request in server.requests)
 
 
+def test_wall_deadline_cancels_and_reconciles_running_action_before_return() -> None:
+    server = FakeBodyServer()
+    server.scenario = "navigate_running"
+    client = JavaBodyClient(
+        "Bot",
+        lambda: server,
+        action_wall_timeout_s=0.03,
+        recv_timeout_s=0.005,
+        terminal_query_interval_s=1.0,
+        terminal_delivery_grace_s=0.1,
+    )
+
+    result = client.navigate({"kind": "xz", "x": 99, "z": 0})
+
+    assert result.success is False
+    assert result.reason == "cancel_requested"
+    assert result.can_retry is False
+    assert result.metrics["deadline_cancel_requested"] is True
+    assert result.metrics["terminal_delivery"]["source"] == "deadline_cancel_query"
+    request_types = [request["type"] for request in server.requests]
+    assert request_types.count("CANCEL_ACTION") == 1
+    assert request_types.index("CANCEL_ACTION") < request_types.index("QUERY_ACTION")
+
+
+def test_closed_read_transport_is_discarded_and_next_event_resume_reconnects() -> None:
+    class CloseOnResumeServer(FakeBodyServer):
+        def send(self, text: str) -> None:
+            message = json.loads(text)
+            if message.get("type") == "RESUME_EVENTS":
+                self.requests.append(dict(message))
+                self._closed = True
+                raise TransportClosed("closed during resume")
+            super().send(text)
+
+    first = CloseOnResumeServer()
+    second = FakeBodyServer()
+    connections = iter((first, second))
+    client = JavaBodyClient("Bot", lambda: next(connections), recv_timeout_s=0.01)
+    client.connect()
+    body = JavaBody(client, "Bot")
+    body.last_seq = 7
+
+    assert body.poll_events() == []
+    assert client.negotiated is True
+    resume = next(request for request in second.requests if request["type"] == "RESUME_EVENTS")
+    assert resume["after_seq"] == 7
+
+
+def test_wall_deadline_without_terminal_enters_existing_timeout_fence() -> None:
+    class NeverTerminalServer(FakeBodyServer):
+        def _handle_query(self, message: dict, rid: str) -> None:
+            action = message["action_id"]
+            self._emit_response(rid, "QUERY_ACTION_RESULT", {
+                "action_id": action,
+                "state": "running",
+                "bot": "Bot",
+                "action_type": "NAVIGATE",
+                "cancel_requested": bool(getattr(self, "_cancel_requested", False)),
+            })
+
+    server = NeverTerminalServer()
+    server.scenario = "navigate_running"
+    client = JavaBodyClient(
+        "Bot",
+        lambda: server,
+        action_wall_timeout_s=0.03,
+        recv_timeout_s=0.005,
+        terminal_query_interval_s=1.0,
+        terminal_delivery_grace_s=0.1,
+    )
+
+    with pytest.raises(BodyActionTimeoutError) as raised:
+        client.navigate({"kind": "xz", "x": 99, "z": 0})
+
+    diagnostics = raised.value.diagnostics
+    assert diagnostics["action_id"].startswith("Bot-nav-")
+    assert diagnostics["action_kind"] == "navigate"
+    assert diagnostics["deadline_cancel_requested"] is True
+    assert diagnostics["cancel_state"] == "cancel_requested"
+    request_types = [request["type"] for request in server.requests]
+    assert request_types.count("CANCEL_ACTION") == 1
+    assert "QUERY_ACTION" in request_types
+
+
 def test_action_ids_do_not_collide_across_client_process_epochs() -> None:
     first_server = FakeBodyServer()
     second_server = FakeBodyServer()
@@ -1642,9 +1763,6 @@ def test_action_ids_do_not_collide_across_client_process_epochs() -> None:
 # ---------------------------------------------------------------------------
 
 from minebot.contract import Action
-from minebot.game.java_body import JavaBody
-
-
 def test_java_body_get_state_maps_authoritative_wire_state() -> None:
     client = _client(FakeBodyServer())
     body = JavaBody(client, "Bot")
@@ -1710,11 +1828,10 @@ def test_java_body_keeps_short_reads_off_the_action_connection() -> None:
     assert [event.data["message"] for event in events] == ["/quit now"]
     action_types = [request["type"] for request in action_server.requests]
     read_types = [request["type"] for request in read_server.requests]
-    assert "EVENT_HEAD" in action_types
-    assert not {"BODY_STATE", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY"}.intersection(
+    assert not {"EVENT_HEAD", "BODY_STATE", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY"}.intersection(
         action_types
     )
-    assert {"BODY_STATE", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY"}.issubset(read_types)
+    assert {"EVENT_HEAD", "BODY_STATE", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY"}.issubset(read_types)
 
 
 def test_java_body_rejects_malformed_chat_instead_of_silently_dropping_it() -> None:
@@ -2314,4 +2431,6 @@ def test_java_body_poll_events_drains_contract_events() -> None:
     assert "owner_acquired" in names
     assert "action_terminal" in names
     assert all(event.bot == "Bot" for event in events)
+    terminal = next(event for event in events if event.name == "action_terminal")
+    assert terminal.data["action_id"].startswith("Bot-nav-")
     assert body.poll_events() == []

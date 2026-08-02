@@ -22,6 +22,7 @@ from minebot.app.real_server_session import (
     TerminalTruth,
     _ensure_scarpet_global_app,
     _announce_interactive_terminal,
+    _body_event_poll_retry_delay,
     _chat_command_reader,
     _interactive_speech_sink,
     _maybe_trace_idle_body_state,
@@ -56,6 +57,14 @@ from minebot.contract import Event
 
 
 class AgentRealServerEntrypointTests(unittest.TestCase):
+    def test_body_event_poll_retry_delay_is_bounded_exponential_backoff(self):
+        self.assertEqual(_body_event_poll_retry_delay(0), 0.25)
+        self.assertEqual(_body_event_poll_retry_delay(1), 0.25)
+        self.assertEqual(_body_event_poll_retry_delay(2), 0.5)
+        self.assertEqual(_body_event_poll_retry_delay(5), 4.0)
+        self.assertEqual(_body_event_poll_retry_delay(6), 5.0)
+        self.assertEqual(_body_event_poll_retry_delay(100), 5.0)
+
     def test_interactive_scenario_context_only_exposes_fixture_facts(self):
         commands = []
         trace = []

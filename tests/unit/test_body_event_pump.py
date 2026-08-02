@@ -152,6 +152,30 @@ class BodyEventPumpTests(unittest.TestCase):
             {2, 3},
         )
 
+    def test_waiting_task_accepts_java_action_terminal_by_action_id(self):
+        body = EventBody()
+        body.events = [
+            event(
+                1,
+                "action_terminal",
+                data={"action_id": "java-action", "classification": "canceled"},
+            )
+        ]
+        pump = BodyEventPump(body, self.queue, self.store, self.scope)
+
+        result = pump.poll_once(
+            task_id="task-1",
+            generation=7,
+            task_waiting=True,
+            wait_checkpoint_id="checkpoint-1",
+            wait_for=("action:java-action",),
+        )
+        intent = self.queue.lease_next()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(intent.payload["event"]["name"], "action_terminal")
+        self.assertEqual(intent.payload["event"]["data"]["action_id"], "java-action")
+
     def test_waiting_task_free_text_condition_does_not_guess_a_wake(self):
         body = EventBody()
         body.events = [event(1, "furnaceDone", data={"action_id": "smelt-1"})]

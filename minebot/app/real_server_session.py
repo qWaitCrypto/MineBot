@@ -59,6 +59,8 @@ from minebot.contract import Body, InventorySlot, Region
 from minebot.game.errors import BodyProtocolError
 
 IDLE_BODY_STATE_SAMPLE_INTERVAL_S = 120.0
+IDLE_BODY_EVENT_POLL_BASE_DELAY_S = 0.25
+IDLE_BODY_EVENT_POLL_MAX_DELAY_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -975,6 +977,7 @@ async def _run_interactive_loop(
 ) -> SessionStep:
     last = None
     remaining = max_steps
+    body_event_poll_failures = 0
     state_sampler = asyncio.create_task(_trace_active_body_state_loop(session, body))
     try:
         while remaining is None or remaining > 0:
@@ -1012,12 +1015,23 @@ async def _run_interactive_loop(
                             wait_for=() if checkpoint is None else checkpoint.wait_for,
                         )
                     except Exception as exc:
-                        _trace_body_event_poll_failure(session, exc)
+                        body_event_poll_failures += 1
+                        poll_delay_s = _body_event_poll_retry_delay(body_event_poll_failures)
+                        _trace_body_event_poll_failure(
+                            session,
+                            exc,
+                            failure_streak=body_event_poll_failures,
+                            retry_in_s=poll_delay_s,
+                        )
                     else:
+                        body_event_poll_failures = 0
+                        poll_delay_s = IDLE_BODY_EVENT_POLL_BASE_DELAY_S
                         _trace_body_event_poll(session, poll_result)
                         _maybe_trace_idle_body_state(session, body)
                         _maybe_trace_body_events(session, body, source="idle_body_event_poll")
-                await asyncio.sleep(0.25 if body_event_pump is not None else 0.05)
+                await asyncio.sleep(
+                    poll_delay_s if body_event_pump is not None else 0.05
+                )
                 continue
             last = await session.step()
             if last.status in {"quit", "failed"}:
@@ -1260,13 +1274,31 @@ def _maybe_trace_body_events(
     return True
 
 
-def _trace_body_event_poll_failure(session: AgentSession, exc: Exception) -> None:
+def _body_event_poll_retry_delay(failure_streak: int) -> float:
+    if failure_streak <= 0:
+        return IDLE_BODY_EVENT_POLL_BASE_DELAY_S
+    exponent = min(8, failure_streak - 1)
+    return min(
+        IDLE_BODY_EVENT_POLL_MAX_DELAY_S,
+        IDLE_BODY_EVENT_POLL_BASE_DELAY_S * (2**exponent),
+    )
+
+
+def _trace_body_event_poll_failure(
+    session: AgentSession,
+    exc: Exception,
+    *,
+    failure_streak: int = 1,
+    retry_in_s: float = IDLE_BODY_EVENT_POLL_BASE_DELAY_S,
+) -> None:
     parts = getattr(session, "parts", None)
     if parts is not None:
         parts.runtime.trace.emit(
             "idle_body_event_poll_failed",
             error_type=type(exc).__name__,
             error_message=str(exc),
+            failure_streak=max(1, int(failure_streak)),
+            retry_in_s=max(0.0, float(retry_in_s)),
         )
 
 

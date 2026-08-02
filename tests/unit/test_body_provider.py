@@ -85,11 +85,13 @@ def test_java_read_lane_does_not_subscribe_to_live_action_events() -> None:
 
     runtime.java_body.get_state()
     runtime.java_body.event_head("subscription-test")
+    runtime.java_body.poll_events()
 
     hellos = [request for request in server.requests if request.get("type") == "HELLO"]
     assert len(hellos) == 2
     assert hellos[0]["subscribe_events"] is False
     assert "subscribe_events" not in hellos[1]
+    assert runtime.java_body._client._reconciliation_client is runtime.java_body._read_client
 
 
 def test_java_backed_providers_enable_the_single_java_survival_owner() -> None:
@@ -103,6 +105,7 @@ def test_java_backed_providers_enable_the_single_java_survival_owner() -> None:
     assert java_runtime.java_body is not None
     java_runtime.java_body.event_head("java-provider-test")
     java_runtime.body.get_state()
+    java_runtime.java_body.poll_events()
 
     composite_server = FakeBodyServer()
     composite_runtime = build_body_provider(
@@ -115,6 +118,7 @@ def test_java_backed_providers_enable_the_single_java_survival_owner() -> None:
     assert composite_runtime.java_body is not None
     composite_runtime.java_body.event_head("composite-provider-test")
     composite_runtime.java_body.get_state()
+    composite_runtime.java_body.poll_events()
 
     assert next(
         request for request in java_server.requests
