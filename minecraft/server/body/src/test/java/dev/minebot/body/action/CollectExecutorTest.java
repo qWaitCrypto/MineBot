@@ -534,7 +534,7 @@ final class CollectExecutorTest {
             return base.kindAt(x, y, z);
         };
         CollectExecutor.CandidateSource source = (x, _y, _z, _tick) -> {
-            vantageObserved[0] |= x < 0;
+            vantageObserved[0] |= x <= -4;
             return new CollectExecutor.CandidateScan(List.of(candidate), true, 0, false);
         };
         harness.build(
@@ -584,6 +584,87 @@ final class CollectExecutorTest {
     }
 
     @Test
+    void unloadedFrontierLoadsThroughColumnGoalThenDiscoversAndCollects() {
+        int targetX = -4;
+        int targetZ = 8;
+        Harness harness = new Harness();
+        FakeWorld loadedWorld = new FakeWorld(FLOOR);
+        loadedWorld.set(targetX, STAND, targetZ, WorldView.NodeKind.SOLID);
+        harness.blockStates.put(Harness.key(targetX, STAND, targetZ), LOG);
+        boolean[] targetChunkLoaded = {false};
+        boolean[] enteredUnknown = {false};
+        WorldView world = new WorldView() {
+            @Override
+            public NodeKind kindAt(int x, int y, int z) {
+                if (!targetChunkLoaded[0] && x >= -16 && x < 0 && z >= 0 && z < 16) {
+                    return NodeKind.UNLOADED;
+                }
+                return loadedWorld.kindAt(x, y, z);
+            }
+
+            @Override
+            public boolean isBodyPositionHazardous(int x, int y, int z) {
+                return loadedWorld.isBodyPositionHazardous(x, y, z);
+            }
+        };
+        CollectExecutor.Candidate candidate = new CollectExecutor.Candidate(
+            targetX, STAND, targetZ, LOG
+        );
+        CollectExecutor.CandidateSource source = (x, _y, _z, _tick) ->
+            new CollectExecutor.CandidateScan(x < 0 ? List.of(candidate) : List.of(), true, 0, false);
+        harness.build(
+            world,
+            List.of(),
+            List.of(LOG),
+            2_400,
+            1,
+            8,
+            8,
+            source
+        );
+        Set<String> changed = new HashSet<>();
+
+        JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
+            if (!targetChunkLoaded[0] && harness.body.z >= 5.0) {
+                targetChunkLoaded[0] = true;
+            }
+            enteredUnknown[0] |= !targetChunkLoaded[0] && harness.body.x < 0.0;
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (!harness.body.attacking) {
+                return;
+            }
+            String key = Harness.key(harness.body.breakX, harness.body.breakY, harness.body.breakZ);
+            if (!changed.add(key)) {
+                return;
+            }
+            harness.blockStates.put(key, "minecraft:air");
+            loadedWorld.set(
+                harness.body.breakX,
+                harness.body.breakY,
+                harness.body.breakZ,
+                WorldView.NodeKind.PASSABLE
+            );
+            harness.itemCounts.put(LOG, 1);
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("collected", terminal.get("reason").getAsString(), terminal.toString());
+        assertTrue(targetChunkLoaded[0], "movement toward the unloaded frontier must load it");
+        assertFalse(enteredUnknown[0], "an unloaded cell must never become a movement waypoint");
+        assertTrue(harness.body.x < 0.0, "the same collect action must enter the target region");
+        assertEquals(1, harness.proposals.size(), "only the discovered resource is mutated");
+        assertEquals(1, terminal.get("frontiers_reached").getAsInt(), terminal.toString());
+        BotEventStream.Event planned = harness.events.replay("Bot", 0).events().stream()
+            .filter(event -> event.name().equals("collection_frontier_planned"))
+            .findFirst()
+            .orElseThrow();
+        assertEquals("xz_unloaded", planned.data().get("goal_kind").getAsString());
+        assertEquals(0, planned.data().get("stand_count").getAsInt());
+    }
+
+    @Test
     void unavailableFrontiersDoNotRescanAnUnchangedPosition() {
         Harness harness = new Harness();
         int[] scans = {0};
@@ -612,6 +693,12 @@ final class CollectExecutorTest {
         assertEquals(1, search.get("scans").getAsInt(), search.toString());
         assertEquals(2, search.get("frontier_attempts").getAsInt(), search.toString());
         assertEquals(0, search.get("frontiers_reached").getAsInt(), search.toString());
+        assertTrue(
+            search.getAsJsonArray("frontier_failures").asList().stream()
+                .allMatch(failure -> failure.getAsJsonObject().get("reason").getAsString()
+                    .equals("frontier_stands_unavailable")),
+            search.toString()
+        );
     }
 
     @Test

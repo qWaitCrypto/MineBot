@@ -180,6 +180,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private int frontiersReached;
     private FrontierRegion frontierOrigin;
     private FrontierRegion activeFrontier;
+    private boolean activeFrontierUsesColumnGoal;
     private boolean candidateDomainAwaitingVantage;
     private List<CandidateCluster> deferredCandidateClusters = List.of();
     private Drop pickupDrop;
@@ -587,7 +588,9 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             .map(cell -> (Goal) new Goal.Stand(cell[0], cell[1], cell[2]))
             .limit(3)
             .toList();
-        if (stands.isEmpty()) {
+        boolean unloadedFrontier = stands.isEmpty()
+            && frontierCenterIsUnloaded(activeFrontier, position.feetBlockY());
+        if (stands.isEmpty() && !unloadedFrontier) {
             recordFrontierFailure(serverTick, activeFrontier, "frontier_stands_unavailable");
             failedFrontierRegions.add(activeFrontier);
             skipNextEmptyRescan = true;
@@ -596,7 +599,12 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             updateSearchFacts();
             return;
         }
-        Goal goal = stands.size() == 1 ? stands.get(0) : new Goal.Composite(stands);
+        int centerX = activeFrontier.x() * FRONTIER_REGION_SIZE + FRONTIER_REGION_SIZE / 2;
+        int centerZ = activeFrontier.z() * FRONTIER_REGION_SIZE + FRONTIER_REGION_SIZE / 2;
+        Goal goal = unloadedFrontier
+            ? new Goal.XZ(centerX, centerZ)
+            : stands.size() == 1 ? stands.get(0) : new Goal.Composite(stands);
+        activeFrontierUsesColumnGoal = unloadedFrontier;
         approach = new ApproachController(
             bot,
             actionId,
@@ -612,6 +620,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         data.addProperty("region_z", activeFrontier.z());
         data.addProperty("attempt", frontierAttempts);
         data.addProperty("stand_count", stands.size());
+        data.addProperty("goal_kind", unloadedFrontier ? "xz_unloaded" : "stand_domain");
         events.emit(bot, serverTick, "collection_frontier_planned", actionId, data);
         phase = Phase.EXPLORING;
         updateSearchFacts();
@@ -621,6 +630,11 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         int serverTick,
         NavigateExecutor.PositionSource.Position position
     ) {
+        if (activeFrontierUsesColumnGoal
+            && frontierRegion(position.blockX(), position.blockZ()).equals(activeFrontier)) {
+            completeFrontierExploration(serverTick, position);
+            return;
+        }
         ApproachController.Outcome outcome = approach.tick(serverTick, position.x(), position.y(), position.z());
         switch (outcome.status()) {
             case WORKING -> {
@@ -632,31 +646,38 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 recordFrontierFailure(serverTick, activeFrontier, "frontier_unreachable:" + outcome.reason());
                 failedFrontierRegions.add(activeFrontier);
                 activeFrontier = null;
+                activeFrontierUsesColumnGoal = false;
                 phase = Phase.NEXT_CANDIDATE;
                 updateSearchFacts();
             }
-            case COMPLETED -> {
-                replansTotal += approach.replans();
-                approach.halt();
-                approach = null;
-                reachedFrontierRegions.add(activeFrontier);
-                frontiersReached++;
-                JsonObject data = new JsonObject();
-                data.addProperty("region_x", activeFrontier.x());
-                data.addProperty("region_z", activeFrontier.z());
-                data.addProperty("frontiers_reached", frontiersReached);
-                events.emit(bot, serverTick, "collection_frontier_reached", actionId, data);
-                activeFrontier = null;
-                if (candidateDomainAwaitingVantage) {
-                    rescanCandidateDomain(serverTick, position);
-                    refreshLiveCandidates();
-                    candidateDomainAwaitingVantage = false;
-                    deferredCandidateClusters = List.of();
-                }
-                phase = Phase.NEXT_CANDIDATE;
-                updateSearchFacts();
-            }
+            case COMPLETED -> completeFrontierExploration(serverTick, position);
         }
+    }
+
+    private void completeFrontierExploration(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        replansTotal += approach.replans();
+        approach.halt();
+        approach = null;
+        reachedFrontierRegions.add(activeFrontier);
+        frontiersReached++;
+        JsonObject data = new JsonObject();
+        data.addProperty("region_x", activeFrontier.x());
+        data.addProperty("region_z", activeFrontier.z());
+        data.addProperty("frontiers_reached", frontiersReached);
+        events.emit(bot, serverTick, "collection_frontier_reached", actionId, data);
+        activeFrontier = null;
+        activeFrontierUsesColumnGoal = false;
+        if (candidateDomainAwaitingVantage) {
+            rescanCandidateDomain(serverTick, position);
+            refreshLiveCandidates();
+            candidateDomainAwaitingVantage = false;
+            deferredCandidateClusters = List.of();
+        }
+        phase = Phase.NEXT_CANDIDATE;
+        updateSearchFacts();
     }
 
     private FrontierRegion selectFrontier(FrontierRegion current) {
@@ -738,6 +759,12 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             .thenComparingInt(stand -> stand[0])
             .thenComparingInt(stand -> stand[2]));
         return stands;
+    }
+
+    private boolean frontierCenterIsUnloaded(FrontierRegion region, int currentY) {
+        int centerX = region.x() * FRONTIER_REGION_SIZE + FRONTIER_REGION_SIZE / 2;
+        int centerZ = region.z() * FRONTIER_REGION_SIZE + FRONTIER_REGION_SIZE / 2;
+        return world.kindAt(centerX, currentY, centerZ) == WorldView.NodeKind.UNLOADED;
     }
 
     private void recordFrontierFailure(int serverTick, FrontierRegion region, String reason) {
