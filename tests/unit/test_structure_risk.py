@@ -128,7 +128,7 @@ class StructureRiskTests(unittest.TestCase):
         self.assertIn("bot_owned_neighbors:1", with_receipt.signals)
         self.assertEqual(mismatched_receipt.level, StructureRiskLevel.HIGH)
 
-    def test_matching_temporary_furnace_receipts_do_not_make_natural_stone_a_structure(self):
+    def test_matching_bot_receipts_do_not_make_natural_stone_a_structure(self):
         body = VoxelBody(
             {
                 (0, 64, 0): "stone",
@@ -147,7 +147,7 @@ class StructureRiskTests(unittest.TestCase):
                 (1, 64, 0): BotPlacement(
                     (1, 64, 0),
                     "furnace",
-                    "temporary_furnace_auto_site",
+                    "combat_preparation",
                     "Bot1",
                 ),
                 (-1, 64, 0): BotPlacement(

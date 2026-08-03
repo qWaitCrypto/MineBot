@@ -859,10 +859,27 @@ final class AscendExecutorTest {
     }
 
     @Test
-    void visibleSkyWithARealHorizontalDryMoveIsASurfaceTerminal() {
+    void visibleSkyWithOnlyOneHorizontalDryMoveIsNotASurfaceTerminal() {
         World world = enclosedStart();
         world.set(1, 60, 0, AIR);
         world.set(1, 61, 0, AIR);
+
+        assertFalse(MinecraftSurfaceAccess.isMobilitySurfaceStand(
+            world,
+            true,
+            0,
+            60,
+            0
+        ));
+    }
+
+    @Test
+    void visibleSkyWithReachableDryEgressIsASurfaceTerminal() {
+        World world = enclosedStart();
+        for (int x = 1; x <= 4; x++) {
+            world.set(x, 60, 0, AIR);
+            world.set(x, 61, 0, AIR);
+        }
 
         assertTrue(MinecraftSurfaceAccess.isMobilitySurfaceStand(
             world,

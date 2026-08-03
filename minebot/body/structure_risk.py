@@ -16,7 +16,6 @@ from minebot.contract import (
 )
 from minebot.game.governance import (
     STRONGLY_PROTECTED_TYPES,
-    TEMPORARY_BOT_PURPOSES,
     normalize_block_type,
 )
 
@@ -144,7 +143,6 @@ def _classify_voxels(
         receipt = bot_placements.get(sample_pos)
         if (
             receipt is not None
-            and receipt.purpose in TEMPORARY_BOT_PURPOSES
             and normalize_block_type(receipt.block_type) == observed_type
         ):
             assessment_cells[sample_pos] = "air"

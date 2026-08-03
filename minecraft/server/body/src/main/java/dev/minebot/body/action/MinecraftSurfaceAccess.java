@@ -9,12 +9,20 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.levelgen.Heightmap;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /** Loaded-world surface targets for the canonical vertical recovery objective. */
 public final class MinecraftSurfaceAccess implements AscendExecutor.SurfaceAccess {
     public static final int SEARCH_RADIUS = 16;
+    private static final int MIN_SURFACE_EGRESS_BLOCKS = 4;
+    private static final int MAX_SURFACE_EGRESS_VISITS = 64;
+
+    private record StandCell(int x, int y, int z) {
+    }
 
     private final ServerLevel level;
     private final WorldView world;
@@ -45,10 +53,32 @@ public final class MinecraftSurfaceAccess implements AscendExecutor.SurfaceAcces
         if (!canSeeSky || !new Goal.Stand(x, y, z).isSatisfied(world, x, y, z)) {
             return false;
         }
-        return new MoveGenerator(world).movesFrom(x, y, z).moves().stream()
-            .filter(move -> move.x() != x || move.z() != z)
-            .anyMatch(move -> new Goal.Stand(move.x(), move.y(), move.z())
-                .isSatisfied(world, move.x(), move.y(), move.z()));
+        MoveGenerator moves = new MoveGenerator(world);
+        ArrayDeque<StandCell> frontier = new ArrayDeque<>();
+        Set<StandCell> visited = new HashSet<>();
+        StandCell origin = new StandCell(x, y, z);
+        frontier.add(origin);
+        visited.add(origin);
+        while (!frontier.isEmpty() && visited.size() < MAX_SURFACE_EGRESS_VISITS) {
+            StandCell current = frontier.removeFirst();
+            for (MoveGenerator.Move move : moves.movesFrom(current.x(), current.y(), current.z()).moves()) {
+                StandCell next = new StandCell(move.x(), move.y(), move.z());
+                if (!visited.add(next)) {
+                    continue;
+                }
+                int dx = next.x() - x;
+                int dz = next.z() - z;
+                if (dx * dx + dz * dz >= MIN_SURFACE_EGRESS_BLOCKS * MIN_SURFACE_EGRESS_BLOCKS
+                    && new Goal.Stand(next.x(), next.y(), next.z())
+                        .isSatisfied(world, next.x(), next.y(), next.z())) {
+                    return true;
+                }
+                if (visited.size() < MAX_SURFACE_EGRESS_VISITS) {
+                    frontier.addLast(next);
+                }
+            }
+        }
+        return false;
     }
 
     @Override
