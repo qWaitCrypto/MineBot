@@ -283,10 +283,16 @@ def navigation_governed_mobility_upgrade_reason(reason: object) -> bool:
     """
 
     value = str(reason or "")
-    if value in {"no_path", "budget_exceeded"}:
+    if value in {
+        "no_path",
+        "budget_exceeded",
+        "node_budget_without_progress",
+        "unloaded_boundary_without_progress",
+        "no_path_incomplete_coverage_without_progress",
+    }:
         return True
-    if value.startswith("recovery_exhausted:"):
-        return value.split(":", 1)[1] in {"no_path", "budget_exceeded"}
+    if value.startswith(("recovery_exhausted:", "replan_budget_exhausted:")):
+        return navigation_governed_mobility_upgrade_reason(value.split(":", 1)[1])
     return False
 
 

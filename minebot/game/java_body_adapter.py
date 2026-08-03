@@ -242,11 +242,17 @@ class JavaBodyClient:
             self._request_times.clear()
             try:
                 hello = self._protocol.hello(subscribe_events=self._subscribe_events)
+                hello_sent_at = time.monotonic()
                 self._send(hello)
                 self._await_response(
                     hello["type"],
                     request_id=hello["request_id"],
                 )
+                if self._protocol.max_requests_per_second > 0:
+                    # HELLO is charged by the server before its response tells
+                    # us the limit. Account for it in the same local window so
+                    # the first burst cannot become 1 HELLO + N requests.
+                    self._request_times.append(hello_sent_at)
                 if self._survival_owner is not None:
                     ownership_request = self._protocol.set_survival_owner(
                         self._bot,

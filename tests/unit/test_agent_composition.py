@@ -581,12 +581,15 @@ def resource_domain_tool(body, *outcomes):
 
 
 def acquisition_recipe_lookup(item):
+    plank_options = ("oak_planks", "spruce_planks", "birch_planks")
     recipes = {
         "oak_planks": [RecipeVariant("oak_planks", 4, (("oak_log",),))],
-        "stick": [RecipeVariant("stick", 4, (("oak_planks",), ("oak_planks",)))],
-        "crafting_table": [RecipeVariant("crafting_table", 1, (("oak_planks",),) * 4)],
+        "spruce_planks": [RecipeVariant("spruce_planks", 4, (("spruce_log",),))],
+        "birch_planks": [RecipeVariant("birch_planks", 4, (("birch_log",),))],
+        "stick": [RecipeVariant("stick", 4, (plank_options, plank_options))],
+        "crafting_table": [RecipeVariant("crafting_table", 1, (plank_options,) * 4)],
         "wooden_pickaxe": [
-            RecipeVariant("wooden_pickaxe", 1, (("oak_planks",), ("oak_planks",), ("oak_planks",), ("stick",), ("stick",)), requires_table=True)
+            RecipeVariant("wooden_pickaxe", 1, (plank_options,) * 3 + (("stick",), ("stick",)), requires_table=True)
         ],
         "stone_pickaxe": [
             RecipeVariant("stone_pickaxe", 1, (("cobblestone",), ("cobblestone",), ("cobblestone",), ("stick",), ("stick",)), requires_table=True)
@@ -679,7 +682,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.reason, "ensured")
         self.assertEqual(result.metrics["current_count"], 1)
-        self.assertEqual(calls[0], ("collect_resource", {"item": "oak_log", "count": 1, "constraints": {"auto_prerequisites": False}}))
+        self.assertEqual(calls[0], ("collect_resource", {"item": "logs", "count": 1, "constraints": {"auto_prerequisites": False}}))
         self.assertIn(("smelt_item", {"input_item": "raw_iron", "count": 3}), calls)
         self.assertEqual(calls[-1], ("craft_item", {"item": "iron_pickaxe", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True}))
         self.assertFalse(registry.get("collect_resource").sidecar.mutating)
@@ -697,7 +700,8 @@ class AgentCompositionTests(unittest.TestCase):
             if name == "collect_resource":
                 item = str(params["item"]).removeprefix("minecraft:")
                 count = int(params.get("count") or 1)
-                body.inventory_counts[item] = max(body.inventory_counts.get(item, 0), count)
+                stored_item = "spruce_log" if item == "logs" else item
+                body.inventory_counts[stored_item] = max(body.inventory_counts.get(stored_item, 0), count)
             elif name == "craft_item":
                 item = str(params["item"]).removeprefix("minecraft:")
                 count = int(params.get("count") or 1)
@@ -725,7 +729,12 @@ class AgentCompositionTests(unittest.TestCase):
         result = ensure_item({"item": "iron_pickaxe", "count": 1}, ctx, acquisition_recipe_lookup)
 
         self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(calls[0], ("collect_resource", {"item": "logs", "count": 1, "constraints": {"auto_prerequisites": False}}))
+        self.assertEqual(result.metrics["plan"][0]["item"], "logs")
+        self.assertEqual(result.metrics["completed_steps"][0]["step"]["item"], "logs")
         craft_calls = [params for tool, params in calls if tool == "craft_item"]
+        self.assertIn("spruce_planks", [str(params.get("item")) for params in craft_calls])
+        self.assertNotIn("oak_planks", [str(params.get("item")) for params in craft_calls])
         table_recipe_calls = [params for params in craft_calls if params["item"] in {"wooden_pickaxe", "stone_pickaxe", "furnace", "iron_pickaxe"}]
         self.assertEqual(
             table_recipe_calls,
@@ -783,7 +792,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertGreater(len(result.metrics["plan"]), 1)
         self.assertEqual(result.metrics["failed_step"]["step"]["kind"], "smelt")
 
-    def test_ensure_tool_failure_retreats_to_its_starting_position(self):
+    def test_ensure_tool_failure_preserves_safe_forward_position(self):
         body = FakeBody()
         body.inventory_counts = {}
         position = [10.5, 79.0, 4.5]
@@ -835,11 +844,9 @@ class AgentCompositionTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "ensure_step_failed:candidate_domain_unreachable:no_path")
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["pos"], [10, 79, 4])
-        self.assertTrue(result.metrics["retreat"]["attempted"])
-        self.assertTrue(result.metrics["retreat"]["restored"])
-        self.assertEqual(result.metrics["retreat"]["reason"], "retreated_to_checkpoint")
+        self.assertEqual(calls, [])
+        self.assertEqual(position, [-2.5, 62.0, 9.5])
+        self.assertNotIn("retreat", result.metrics)
 
     def test_composition_tool_result_trace_summarizes_leaf_result_metrics(self):
         body = FakeBody()
@@ -950,7 +957,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.metrics["failed_step"]["step"]["kind"], "collect")
         self.assertEqual(result.metrics["failed_step"]["current_count"], 0)
         self.assertEqual(result.metrics["failed_step"]["remaining_count"], 1)
-        self.assertEqual(calls, [("collect_resource", {"item": "oak_log", "count": 1, "constraints": {"auto_prerequisites": False}})])
+        self.assertEqual(calls, [("collect_resource", {"item": "logs", "count": 1, "constraints": {"auto_prerequisites": False}})])
 
     def test_ensure_item_requires_step_delta_not_total_count_after_resume(self):
         body = FakeBody()

@@ -7,7 +7,6 @@ do not import Body transactions or game transport.
 from __future__ import annotations
 
 import re
-import math
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -435,44 +434,11 @@ def ensure_item(
         return ToolResult(False, "invalid_count", False, metrics={"item": item, "target_count": count})
 
     started = time.monotonic()
-    origin_checkpoint = _body_checkpoint(context)
-    inventory = _read_count(context, (item,))
-    if not inventory.success:
-        return inventory
-    counts = _inventory_counts_from_result(inventory)
-    plan = resolve_acquisition(item, count, counts, recipe_lookup, max_depth=18)
-    if isinstance(plan, AcquisitionError):
-        return ToolResult(
-            False,
-            plan.reason,
-            False,
-            next_suggestion="choose a reachable item/resource or add a recipe/acquisition route",
-            metrics={"item": item, "target_count": count, "error": _acquisition_error_payload(plan)},
-        )
-    if equip_target:
-        plan = [
-            *plan,
-            AcquisitionStep(
-                kind="equip",
-                item=item,
-                count=1,
-                detail={"target": "mainhand", "requested_by": "ensure_tool_for"},
-            ),
-        ]
-    if not plan:
-        return ToolResult(
-            True,
-            "already_satisfied",
-            False,
-            metrics={"item": item, "target_count": count, "plan": [], "completed_steps": []},
-        )
-
     completed_steps: list[dict[str, object]] = []
-    step_payloads = [_acquisition_step_payload(step) for step in plan]
-    last_table_craft_index = _last_table_craft_index(plan)
-    for index, step in enumerate(plan):
-        if time.monotonic() - started > context.budget.max_wall_s:
-            return _ensure_failure_with_retreat(context, _ensure_result(
+    step_payloads: list[dict[str, object]] = []
+    while True:
+        if step_payloads and time.monotonic() - started > context.budget.max_wall_s:
+            return _ensure_result(
                 False,
                 "partial_budget_exhausted",
                 True,
@@ -480,204 +446,167 @@ def ensure_item(
                 count,
                 plan=step_payloads,
                 completed_steps=completed_steps,
-                failed_step={"index": index, "step": _acquisition_step_payload(step), "reason": "max_wall_s"},
+                failed_step={"index": len(step_payloads), "phase": "replan", "reason": "max_wall_s"},
                 resume_hint="reinvoke_ensure",
-            ), origin_checkpoint, started)
-        before_step_count = _acquisition_step_inventory_count(context, step)
-        if before_step_count is None:
-            failed_step = {
-                "index": index,
-                "step": _acquisition_step_payload(step),
-                "reason": "inventory_read_failed_before_step",
-            }
-            return _ensure_failure_with_retreat(context, _ensure_result(
-                False,
-                "ensure_step_failed:inventory_read_failed",
-                True,
-                item,
-                count,
-                plan=step_payloads,
-                completed_steps=completed_steps,
-                failed_step=failed_step,
-                resume_hint="reinvoke_ensure",
-            ), origin_checkpoint, started)
-        result = _execute_acquisition_step(
-            context,
-            step,
-            before_count=before_step_count,
-            keep_workstation=_should_keep_workstation(step, index, last_table_craft_index),
-            cleanup_workstation=_should_cleanup_workstation(step, index, last_table_craft_index),
-        )
-        step_record = {"index": index, "step": _acquisition_step_payload(step), "result": result}
-        if not result.get("success"):
-            return _ensure_failure_with_retreat(context, _ensure_result(
-                False,
-                f"ensure_step_failed:{result.get('reason') or 'unknown'}",
-                bool(result.get("canRetry", True)),
-                item,
-                count,
-                plan=step_payloads,
-                completed_steps=completed_steps,
-                failed_step=step_record,
-                resume_hint="reinvoke_ensure",
-            ), origin_checkpoint, started)
-        step_count = _acquisition_step_inventory_count(context, step)
-        if step_count is None:
-            return _ensure_failure_with_retreat(context, _ensure_result(
-                False,
-                "ensure_step_failed:inventory_read_failed",
-                True,
-                item,
-                count,
-                plan=step_payloads,
-                completed_steps=completed_steps,
-                failed_step=step_record,
-                resume_hint="reinvoke_ensure",
-            ), origin_checkpoint, started)
-        required_step_count = before_step_count if step.kind == "equip" else before_step_count + step.count
-        if step_count < required_step_count:
-            step_record = dict(step_record)
-            step_record["before_count"] = before_step_count
-            step_record["current_count"] = step_count
-            step_record["required_count"] = required_step_count
-            step_record["remaining_count"] = max(0, required_step_count - step_count)
-            return _ensure_failure_with_retreat(context, _ensure_result(
-                False,
-                "ensure_step_incomplete",
-                True,
-                item,
-                count,
-                plan=step_payloads,
-                completed_steps=completed_steps,
-                failed_step=step_record,
-                resume_hint="reinvoke_ensure",
-            ), origin_checkpoint, started)
-        completed_steps.append(step_record)
+            )
         inventory = _read_count(context, (item,))
         if not inventory.success:
-            return _ensure_failure_with_retreat(context, inventory, origin_checkpoint, started)
-        current = int((inventory.metrics or {}).get("count") or 0)
-        if current >= count and index == len(plan) - 1:
+            return inventory
+        counts = _inventory_counts_from_result(inventory)
+        plan = resolve_acquisition(item, count, counts, recipe_lookup, max_depth=18)
+        if isinstance(plan, AcquisitionError):
+            error = _acquisition_error_payload(plan)
+            return ToolResult(
+                False,
+                plan.reason,
+                False,
+                next_suggestion="choose a reachable item/resource or add a recipe/acquisition route",
+                metrics={
+                    "item": item,
+                    "target_count": count,
+                    "error": error,
+                    "plan": step_payloads,
+                    "completed_steps": completed_steps,
+                    "failed_step": {"index": len(step_payloads), "phase": "planning", "error": error},
+                    "resume_hint": "reinvoke_ensure",
+                },
+            )
+
+        replan_after = any(bool(step.detail.get("replan_after")) for step in plan)
+        if equip_target and not replan_after:
+            plan = [
+                *plan,
+                AcquisitionStep(
+                    kind="equip",
+                    item=item,
+                    count=1,
+                    detail={"target": "mainhand", "requested_by": "ensure_tool_for"},
+                ),
+            ]
+        if not plan:
+            reason = "ensured" if completed_steps else "already_satisfied"
             return _ensure_result(
                 True,
-                "ensured",
+                reason,
                 False,
                 item,
                 count,
                 plan=step_payloads,
                 completed_steps=completed_steps,
-                current_count=current,
+                current_count=int((inventory.metrics or {}).get("count") or 0),
                 resume_hint="complete",
             )
 
-    inventory = _read_count(context, (item,))
-    if not inventory.success:
-        return _ensure_failure_with_retreat(context, inventory, origin_checkpoint, started)
-    current = int((inventory.metrics or {}).get("count") or 0)
-    result = _ensure_result(
-        current >= count,
-        "ensured" if current >= count else "ensure_no_inventory_delta",
-        current < count,
-        item,
-        count,
-        plan=step_payloads,
-        completed_steps=completed_steps,
-        current_count=current,
-        resume_hint="complete" if current >= count else "reinvoke_ensure",
-    )
-    return result if result.success else _ensure_failure_with_retreat(context, result, origin_checkpoint, started)
+        plan_offset = len(step_payloads)
+        step_payloads.extend(_acquisition_step_payload(step) for step in plan)
+        last_table_craft_index = _last_table_craft_index(plan)
+        should_replan = False
+        for index, step in enumerate(plan):
+            evidence_index = plan_offset + index
+            if time.monotonic() - started > context.budget.max_wall_s:
+                return _ensure_result(
+                    False,
+                    "partial_budget_exhausted",
+                    True,
+                    item,
+                    count,
+                    plan=step_payloads,
+                    completed_steps=completed_steps,
+                    failed_step={"index": evidence_index, "step": _acquisition_step_payload(step), "reason": "max_wall_s"},
+                    resume_hint="reinvoke_ensure",
+                )
+            before_step_count = _acquisition_step_inventory_count(context, step)
+            if before_step_count is None:
+                failed_step = {
+                    "index": evidence_index,
+                    "step": _acquisition_step_payload(step),
+                    "reason": "inventory_read_failed_before_step",
+                }
+                return _ensure_result(
+                    False,
+                    "ensure_step_failed:inventory_read_failed",
+                    True,
+                    item,
+                    count,
+                    plan=step_payloads,
+                    completed_steps=completed_steps,
+                    failed_step=failed_step,
+                    resume_hint="reinvoke_ensure",
+                )
+            result = _execute_acquisition_step(
+                context,
+                step,
+                before_count=before_step_count,
+                keep_workstation=_should_keep_workstation(step, index, last_table_craft_index),
+                cleanup_workstation=_should_cleanup_workstation(step, index, last_table_craft_index),
+            )
+            step_record = {"index": evidence_index, "step": _acquisition_step_payload(step), "result": result}
+            if not result.get("success"):
+                return _ensure_result(
+                    False,
+                    f"ensure_step_failed:{result.get('reason') or 'unknown'}",
+                    bool(result.get("canRetry", True)),
+                    item,
+                    count,
+                    plan=step_payloads,
+                    completed_steps=completed_steps,
+                    failed_step=step_record,
+                    resume_hint="reinvoke_ensure",
+                )
+            step_count = _acquisition_step_inventory_count(context, step)
+            if step_count is None:
+                return _ensure_result(
+                    False,
+                    "ensure_step_failed:inventory_read_failed",
+                    True,
+                    item,
+                    count,
+                    plan=step_payloads,
+                    completed_steps=completed_steps,
+                    failed_step=step_record,
+                    resume_hint="reinvoke_ensure",
+                )
+            required_step_count = before_step_count if step.kind == "equip" else before_step_count + step.count
+            if step_count < required_step_count:
+                step_record = dict(step_record)
+                step_record["before_count"] = before_step_count
+                step_record["current_count"] = step_count
+                step_record["required_count"] = required_step_count
+                step_record["remaining_count"] = max(0, required_step_count - step_count)
+                return _ensure_result(
+                    False,
+                    "ensure_step_incomplete",
+                    True,
+                    item,
+                    count,
+                    plan=step_payloads,
+                    completed_steps=completed_steps,
+                    failed_step=step_record,
+                    resume_hint="reinvoke_ensure",
+                )
+            completed_steps.append(step_record)
+            if bool(step.detail.get("replan_after")):
+                should_replan = True
+                break
 
+        if should_replan:
+            continue
 
-def _body_checkpoint(context: CompositionContext) -> dict[str, object] | None:
-    try:
-        result = context.registry.get("read_state").callable({})
-    except (KeyError, ValueError):
-        return None
-    if not isinstance(result, ToolResult) or not result.success:
-        return None
-    metrics = dict(result.metrics or {})
-    raw_pos = metrics.get("pos")
-    if not isinstance(raw_pos, (list, tuple)) or len(raw_pos) != 3:
-        return None
-    try:
-        pos = tuple(float(value) for value in raw_pos)
-    except (TypeError, ValueError):
-        return None
-    if not all(math.isfinite(value) for value in pos):
-        return None
-    return {"pos": pos, "dimension": metrics.get("dimension")}
-
-
-def _ensure_failure_with_retreat(
-    context: CompositionContext,
-    result: ToolResult,
-    origin: dict[str, object] | None,
-    started: float,
-) -> ToolResult:
-    if origin is None:
-        return result
-    current = _body_checkpoint(context)
-    if current is None:
-        return result
-    origin_pos = tuple(float(value) for value in origin["pos"])
-    current_pos = tuple(float(value) for value in current["pos"])
-    same_dimension = origin.get("dimension") == current.get("dimension")
-    displacement = math.dist(origin_pos, current_pos) if same_dimension else math.inf
-    if displacement <= 1.0:
-        return result
-
-    remaining_s = context.budget.max_wall_s - (time.monotonic() - started)
-    retreat: dict[str, object] = {
-        "attempted": False,
-        "origin": list(origin_pos),
-        "failure_pos": list(current_pos),
-        "displacement": round(displacement, 3),
-    }
-    if remaining_s <= 1.0:
-        retreat["reason"] = "retreat_budget_unavailable"
-        return _with_ensure_retreat(result, retreat)
-    try:
-        move_tool = context.registry.get("move_to")
-    except (KeyError, ValueError):
-        retreat["reason"] = "retreat_tool_unavailable"
-        return _with_ensure_retreat(result, retreat)
-
-    retreat["attempted"] = True
-    move_result = _execute_composition_phase(
-        context,
-        "ensure_retreat",
-        move_tool,
-        {
-            "pos": [math.floor(value) for value in origin_pos],
-            "radius": 1,
-            "timeout_s": min(60.0, remaining_s),
-        },
-    )
-    after = _body_checkpoint(context)
-    restored = False
-    if after is not None and origin.get("dimension") == after.get("dimension"):
-        after_pos = tuple(float(value) for value in after["pos"])
-        retreat["final_pos"] = list(after_pos)
-        retreat["distance_to_origin"] = round(math.dist(origin_pos, after_pos), 3)
-        restored = math.dist(origin_pos, after_pos) <= 2.0
-    retreat["restored"] = restored
-    retreat["result"] = move_result
-    retreat["reason"] = "retreated_to_checkpoint" if restored else str(
-        move_result.get("reason") or "retreat_failed"
-    )
-    return _with_ensure_retreat(result, retreat)
-
-
-def _with_ensure_retreat(result: ToolResult, retreat: dict[str, object]) -> ToolResult:
-    metrics = dict(result.metrics or {})
-    metrics["retreat"] = retreat
-    return ToolResult(
-        result.success,
-        result.reason,
-        result.can_retry,
-        result.next_suggestion,
-        metrics=metrics,
-    )
+        inventory = _read_count(context, (item,))
+        if not inventory.success:
+            return inventory
+        current = int((inventory.metrics or {}).get("count") or 0)
+        return _ensure_result(
+            current >= count,
+            "ensured" if current >= count else "ensure_no_inventory_delta",
+            current < count,
+            item,
+            count,
+            plan=step_payloads,
+            completed_steps=completed_steps,
+            current_count=current,
+            resume_hint="complete" if current >= count else "reinvoke_ensure",
+        )
 
 
 def _budget_from_constraints(default: CompositionBudget, constraints: dict[str, object]) -> CompositionBudget:

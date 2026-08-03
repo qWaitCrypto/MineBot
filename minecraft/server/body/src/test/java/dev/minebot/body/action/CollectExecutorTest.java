@@ -931,10 +931,48 @@ final class CollectExecutorTest {
         }
 
         assertFalse(harness.proposals.isEmpty(), "the lower log should remain a route candidate");
+        BotEventStream.Event planned = harness.events.replay("Bot", 0).events().stream()
+            .filter(event -> event.name().equals("collection_objective_domain_planned"))
+            .findFirst()
+            .orElseThrow();
+        assertEquals(1, planned.data().get("candidate_count").getAsInt(), planned.data().toString());
+        assertEquals(2, planned.data().get("candidate_coordinate_count").getAsInt(), planned.data().toString());
         MutationGate.Proposal proposal = harness.proposals.get(0);
         assertEquals(treeX, proposal.x());
         assertEquals(reachableY, proposal.y());
         assertEquals(0, proposal.z());
+    }
+
+    @Test
+    void failedVerticalClusterConsumesOneSemanticCandidateAttempt() {
+        int treeX = 6;
+        Harness harness = new Harness();
+        List<CollectExecutor.Candidate> candidates = new ArrayList<>();
+        for (int y = STAND; y <= STAND + 3; y++) {
+            harness.blockStates.put(Harness.key(treeX, y, 0), LOG);
+            candidates.add(new CollectExecutor.Candidate(treeX, y, 0, LOG));
+        }
+        harness.build(
+            (_x, _y, _z) -> WorldView.NodeKind.HAZARD,
+            candidates,
+            List.of(LOG),
+            600,
+            1,
+            1,
+            1
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(200, () -> {
+        });
+
+        assertEquals("failed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals(1, terminal.get("candidates_tried").getAsInt(), terminal.toString());
+        BotEventStream.Event planned = harness.events.replay("Bot", 0).events().stream()
+            .filter(event -> event.name().equals("collection_objective_domain_planned"))
+            .findFirst()
+            .orElseThrow();
+        assertEquals(1, planned.data().get("candidate_count").getAsInt(), planned.data().toString());
+        assertEquals(4, planned.data().get("candidate_coordinate_count").getAsInt(), planned.data().toString());
     }
 
     @Test

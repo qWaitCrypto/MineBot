@@ -474,6 +474,38 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertTrue(navigator.calls[1][1]["config"].aquatic_traversal)
         self.assertEqual(result.metrics["navigation_fallback_attempts"], 1)
 
+    def test_java_zero_progress_reason_families_upgrade_to_governed_mobility(self):
+        for reason in (
+            "node_budget_without_progress",
+            "unloaded_boundary_without_progress",
+            "no_path_incomplete_coverage_without_progress",
+            "replan_budget_exhausted:node_budget_without_progress",
+        ):
+            with self.subTest(reason=reason):
+                target = (5, 64, 0)
+                selected = (5, 65, -1)
+                body = ResourceBody([(target, "dirt")])
+                navigator = RecordingNavigator(
+                    body,
+                    [selected, selected],
+                    outcomes=[(False, reason), (True, "arrived")],
+                    metrics=[ZERO_PROGRESS_NAVIGATION_METRICS],
+                )
+                runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+                result = runtime.collect_block_domain(
+                    block_types=("dirt",),
+                    expected_drops=("dirt",),
+                    remaining_count=1,
+                    config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+                )
+
+                self.assertTrue(result.success, result.to_payload())
+                self.assertEqual(len(navigator.calls), 2)
+                self.assertFalse(navigator.calls[0][1]["config"].allow_swim)
+                self.assertTrue(navigator.calls[1][1]["config"].allow_swim)
+                self.assertEqual(result.metrics["navigation_fallback_attempts"], 1)
+
     def test_recovery_exhausted_no_path_upgrades_to_governed_mobility(self):
         target = (5, 64, 0)
         selected = (5, 65, -1)

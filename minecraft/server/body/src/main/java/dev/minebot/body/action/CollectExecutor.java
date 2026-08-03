@@ -45,6 +45,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     public static final int MAX_DROP_APPROACH_ATTEMPTS = 8;
     public static final int FRONTIER_REGION_SIZE = 16;
     public static final int MAX_FRONTIER_ATTEMPTS = 12;
+    private static final int CANDIDATE_CLUSTER_HORIZONTAL_SPAN = 2;
+    private static final int CANDIDATE_CLUSTER_VERTICAL_SPAN = 6;
     private static final int FRONTIER_VERTICAL_RADIUS = 12;
     private static final int[][] FRONTIER_COLUMN_OFFSETS = {
         {0, 0}, {-4, 0}, {4, 0}, {0, -4}, {0, 4},
@@ -103,6 +105,15 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private record FrontierRegion(int x, int z) {
     }
 
+    private record CandidateCluster(Candidate representative, List<Candidate> members) {
+        CandidateCluster {
+            members = List.copyOf(members);
+        }
+    }
+
+    private record CandidateClusterBucket(int x, int y, int z) {
+    }
+
     private enum Phase {
         NEXT_CANDIDATE,
         EXPLORING,
@@ -152,6 +163,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private int candidatesRetired;
     private Candidate current;
     private List<Candidate> activeDomain = List.of();
+    private List<CandidateCluster> activeCandidateClusters = List.of();
     private ApproachController approach;
     private String proposalId;
     private int phaseStartedTick = -1;
@@ -483,12 +495,14 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         int candidateSlots = pickupUrgent
             ? 0
             : MAX_PLANNING_CANDIDATES - activePickupDomain.size();
-        int domainSize = candidateBudgetAvailable
-            ? Math.min(remainingCandidates.size(), Math.max(0, candidateSlots))
+        int remainingCandidateBudget = Math.max(0, maxCandidateAttempts - candidateAttempts);
+        int clusterLimit = candidateBudgetAvailable
+            ? Math.min(Math.max(0, candidateSlots), remainingCandidateBudget)
             : 0;
-        activeDomain = domainSize == 0
-            ? List.of()
-            : List.copyOf(remainingCandidates.subList(0, domainSize));
+        activeCandidateClusters = selectCandidateClusters(position, clusterLimit);
+        activeDomain = activeCandidateClusters.stream()
+            .map(CandidateCluster::representative)
+            .toList();
         List<Goal> goals = new ArrayList<>();
         for (Drop drop : activePickupDomain) {
             goals.add(pickupGoal(drop));
@@ -504,6 +518,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
 
         JsonObject data = new JsonObject();
         data.addProperty("candidate_count", activeDomain.size());
+        data.addProperty(
+            "candidate_coordinate_count",
+            activeCandidateClusters.stream().mapToInt(cluster -> cluster.members().size()).sum()
+        );
         data.addProperty("pickup_count", activePickupDomain.size());
         data.addProperty("pickup_urgent", pickupUrgent);
         data.addProperty("remaining_count", remainingNeeded);
@@ -1589,15 +1607,135 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     private void retireActiveCandidateDomain(String reason) {
-        for (Candidate candidate : List.copyOf(activeDomain)) {
-            if (!retireCandidate(candidate)) {
-                continue;
+        int retiredClusters = 0;
+        for (CandidateCluster cluster : List.copyOf(activeCandidateClusters)) {
+            boolean retiredMember = false;
+            for (Candidate candidate : cluster.members()) {
+                if (!retireCandidate(candidate)) {
+                    continue;
+                }
+                retiredMember = true;
+                current = candidate;
+                recordCandidateRetired(reason, blocks.blockIdAt(candidate.x(), candidate.y(), candidate.z()));
             }
-            current = candidate;
-            recordCandidateRetired(reason, blocks.blockIdAt(candidate.x(), candidate.y(), candidate.z()));
+            if (retiredMember) {
+                retiredClusters++;
+            }
         }
+        candidateAttempts = Math.min(maxCandidateAttempts, candidateAttempts + retiredClusters);
         current = null;
         activeDomain = List.of();
+        activeCandidateClusters = List.of();
+    }
+
+    private List<CandidateCluster> selectCandidateClusters(
+        NavigateExecutor.PositionSource.Position position,
+        int limit
+    ) {
+        if (limit <= 0) {
+            return List.of();
+        }
+        List<List<Candidate>> grouped = new ArrayList<>();
+        Map<CandidateClusterBucket, List<Integer>> clusterBuckets = new HashMap<>();
+        for (Candidate candidate : remainingCandidates) {
+            CandidateClusterBucket bucket = candidateClusterBucket(candidate);
+            int matchingGroup = Integer.MAX_VALUE;
+            for (int bucketX = bucket.x() - 1; bucketX <= bucket.x() + 1; bucketX++) {
+                for (int bucketY = bucket.y() - 1; bucketY <= bucket.y() + 1; bucketY++) {
+                    for (int bucketZ = bucket.z() - 1; bucketZ <= bucket.z() + 1; bucketZ++) {
+                        for (int groupIndex : clusterBuckets.getOrDefault(
+                            new CandidateClusterBucket(bucketX, bucketY, bucketZ),
+                            List.of()
+                        )) {
+                            if (groupIndex < matchingGroup
+                                && sameCandidateCluster(candidate, grouped.get(groupIndex).getFirst())) {
+                                matchingGroup = groupIndex;
+                            }
+                        }
+                    }
+                }
+            }
+            if (matchingGroup == Integer.MAX_VALUE) {
+                matchingGroup = grouped.size();
+                grouped.add(new ArrayList<>());
+                clusterBuckets.computeIfAbsent(bucket, ignored -> new ArrayList<>()).add(matchingGroup);
+            }
+            grouped.get(matchingGroup).add(candidate);
+        }
+
+        List<CandidateCluster> clusters = grouped.stream()
+            .map(members -> new CandidateCluster(
+                members.stream()
+                    .min(Comparator
+                        .comparingDouble((Candidate candidate) -> candidateDistanceSquared(position, candidate))
+                        .thenComparingInt(Candidate::y)
+                        .thenComparingInt(Candidate::x)
+                        .thenComparingInt(Candidate::z))
+                    .orElseThrow(),
+                members
+            ))
+            .sorted(Comparator
+                .comparingDouble((CandidateCluster cluster) ->
+                    candidateDistanceSquared(position, cluster.representative()))
+                .thenComparingInt(cluster -> cluster.representative().x())
+                .thenComparingInt(cluster -> cluster.representative().z())
+                .thenComparingInt(cluster -> cluster.representative().y()))
+            .toList();
+        if (clusters.size() <= limit) {
+            return clusters;
+        }
+
+        List<CandidateCluster> active = new ArrayList<>();
+        List<CandidateCluster> remaining = new ArrayList<>(clusters);
+        active.add(remaining.removeFirst());
+        while (!remaining.isEmpty() && active.size() < limit) {
+            int selectedIndex = 0;
+            long selectedSeparation = Long.MIN_VALUE;
+            for (int index = 0; index < remaining.size(); index++) {
+                Candidate candidate = remaining.get(index).representative();
+                long separation = active.stream()
+                    .map(CandidateCluster::representative)
+                    .mapToLong(selected -> horizontalDistanceSquared(candidate, selected))
+                    .min()
+                    .orElse(0L);
+                if (separation > selectedSeparation) {
+                    selectedIndex = index;
+                    selectedSeparation = separation;
+                }
+            }
+            active.add(remaining.remove(selectedIndex));
+        }
+        return List.copyOf(active);
+    }
+
+    private static boolean sameCandidateCluster(Candidate left, Candidate right) {
+        return Math.abs(left.x() - right.x()) <= CANDIDATE_CLUSTER_HORIZONTAL_SPAN
+            && Math.abs(left.y() - right.y()) <= CANDIDATE_CLUSTER_VERTICAL_SPAN
+            && Math.abs(left.z() - right.z()) <= CANDIDATE_CLUSTER_HORIZONTAL_SPAN;
+    }
+
+    private static CandidateClusterBucket candidateClusterBucket(Candidate candidate) {
+        return new CandidateClusterBucket(
+            Math.floorDiv(candidate.x(), CANDIDATE_CLUSTER_HORIZONTAL_SPAN + 1),
+            Math.floorDiv(candidate.y(), CANDIDATE_CLUSTER_VERTICAL_SPAN + 1),
+            Math.floorDiv(candidate.z(), CANDIDATE_CLUSTER_HORIZONTAL_SPAN + 1)
+        );
+    }
+
+    private static long horizontalDistanceSquared(Candidate left, Candidate right) {
+        long dx = (long) left.x() - right.x();
+        long dz = (long) left.z() - right.z();
+        return dx * dx + dz * dz;
+    }
+
+    private static double candidateDistanceSquared(
+        NavigateExecutor.PositionSource.Position position,
+        Candidate candidate
+    ) {
+        double dx = position.x() - (candidate.x() + 0.5);
+        double dy = position.y() - candidate.y();
+        double dz = position.z() - (candidate.z() + 0.5);
+        return dx * dx + dy * dy + dz * dz;
     }
 
     private void recordPickupProgress(int serverTick, String reason, Drop drop) {

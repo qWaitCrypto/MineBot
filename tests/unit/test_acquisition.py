@@ -3,6 +3,9 @@ import unittest
 from minebot.brain.acquisition import AcquisitionError, RecipeVariant, resolve_acquisition
 
 
+PLANK_OPTIONS = ("oak_planks", "spruce_planks", "birch_planks")
+
+
 def recipe_lookup(item: str) -> list[RecipeVariant] | None:
     recipes = {
         "oak_planks": [
@@ -12,25 +15,39 @@ def recipe_lookup(item: str) -> list[RecipeVariant] | None:
                 ingredient_groups=(("oak_log",),),
             )
         ],
+        "spruce_planks": [
+            RecipeVariant(
+                output_item="spruce_planks",
+                output_count=4,
+                ingredient_groups=(("spruce_log",),),
+            )
+        ],
+        "birch_planks": [
+            RecipeVariant(
+                output_item="birch_planks",
+                output_count=4,
+                ingredient_groups=(("birch_log",),),
+            )
+        ],
         "stick": [
             RecipeVariant(
                 output_item="stick",
                 output_count=4,
-                ingredient_groups=(("oak_planks", "spruce_planks", "birch_planks"), ("oak_planks", "spruce_planks", "birch_planks")),
+                ingredient_groups=(PLANK_OPTIONS, PLANK_OPTIONS),
             )
         ],
         "crafting_table": [
             RecipeVariant(
                 output_item="crafting_table",
                 output_count=1,
-                ingredient_groups=(("oak_planks",), ("oak_planks",), ("oak_planks",), ("oak_planks",)),
+                ingredient_groups=(PLANK_OPTIONS,) * 4,
             )
         ],
         "wooden_pickaxe": [
             RecipeVariant(
                 output_item="wooden_pickaxe",
                 output_count=1,
-                ingredient_groups=(("oak_planks",), ("oak_planks",), ("oak_planks",), ("stick",), ("stick",)),
+                ingredient_groups=(PLANK_OPTIONS,) * 3 + (("stick",), ("stick",)),
                 requires_table=True,
             )
         ],
@@ -63,33 +80,16 @@ def recipe_lookup(item: str) -> list[RecipeVariant] | None:
 
 
 class AcquisitionResolverTests(unittest.TestCase):
-    def test_empty_backpack_plans_iron_pickaxe_ladder(self):
+    def test_empty_backpack_defers_wood_family_before_iron_pickaxe_ladder(self):
         steps = resolve_acquisition("iron_pickaxe", 1, {}, recipe_lookup, max_depth=16)
 
         self.assertIsInstance(steps, list)
-        sequence = [(step.kind, step.item) for step in steps]
-        self.assertIn(("collect", "oak_log"), sequence)
-        self.assertIn(("craft", "oak_planks"), sequence)
-        self.assertIn(("craft", "stick"), sequence)
-        self.assertIn(("craft", "crafting_table"), sequence)
-        self.assertIn(("craft", "wooden_pickaxe"), sequence)
-        self.assertIn(("equip", "wooden_pickaxe"), sequence)
-        self.assertIn(("collect", "cobblestone"), sequence)
-        self.assertIn(("craft", "stone_pickaxe"), sequence)
-        self.assertIn(("equip", "stone_pickaxe"), sequence)
-        self.assertIn(("collect", "raw_iron"), sequence)
-        self.assertIn(("craft", "furnace"), sequence)
-        self.assertIn(("smelt", "iron_ingot"), sequence)
-        self.assertEqual(sequence[-1], ("craft", "iron_pickaxe"))
-
-        smelt_step = next(step for step in steps if step.kind == "smelt" and step.item == "iron_ingot")
-        self.assertEqual(smelt_step.count, 3)
-        self.assertEqual(smelt_step.detail["input_item"], "raw_iron")
-        self.assertEqual(smelt_step.detail["input_count"], 3)
-        self.assertIn(smelt_step.detail["fuel_item"], {"oak_planks", "oak_log"})
+        self.assertEqual([(step.kind, step.item) for step in steps], [("collect", "logs")])
+        self.assertTrue(steps[0].detail["replan_after"])
+        self.assertNotIn("oak_log", [step.item for step in steps])
 
     def test_compaction_preserves_tool_upgrade_dependency_order(self):
-        steps = resolve_acquisition("iron_pickaxe", 1, {}, recipe_lookup, max_depth=16)
+        steps = resolve_acquisition("iron_pickaxe", 1, {"spruce_log": 1}, recipe_lookup, max_depth=16)
 
         self.assertIsInstance(steps, list)
         cobblestone = [
@@ -106,7 +106,7 @@ class AcquisitionResolverTests(unittest.TestCase):
         self.assertLess(cobblestone[0][0], stone_pickaxe_index)
         self.assertGreater(cobblestone[1][0], stone_pickaxe_index)
         self.assertEqual(
-            sum(step.count for step in steps if step.kind == "craft" and step.item == "oak_planks"),
+            sum(step.count for step in steps if step.kind == "craft" and step.item == "spruce_planks"),
             16,
         )
 
@@ -166,8 +166,8 @@ class AcquisitionResolverTests(unittest.TestCase):
         spruce_collect = next(step for step in steps if step.kind == "collect" and step.item == "spruce_log")
         self.assertEqual(spruce_collect.count, 1)
 
-    def test_empty_backpack_plans_diamond_after_iron_pickaxe(self):
-        steps = resolve_acquisition("diamond", 3, {}, recipe_lookup, max_depth=18)
+    def test_owned_wood_family_plans_diamond_after_iron_pickaxe(self):
+        steps = resolve_acquisition("diamond", 3, {"spruce_log": 1}, recipe_lookup, max_depth=18)
 
         self.assertIsInstance(steps, list)
         sequence = [(step.kind, step.item) for step in steps]
@@ -270,26 +270,44 @@ class AcquisitionResolverTests(unittest.TestCase):
         )
 
         self.assertIsInstance(steps, list)
-        self.assertEqual(
-            [(step.kind, step.item) for step in steps],
-            [("collect", "oak_log"), ("craft", "oak_planks"), ("smelt", "iron_ingot")],
+        self.assertEqual([(step.kind, step.item) for step in steps], [("collect", "logs")])
+        self.assertTrue(steps[0].detail["replan_after"])
+
+        rebound = resolve_acquisition(
+            "iron_ingot",
+            1,
+            {"raw_iron": 1, "furnace": 1, "spruce_log": 1},
+            recipe_lookup,
+            max_depth=4,
         )
-        smelt = steps[-1]
-        self.assertEqual(smelt.detail["fuel_item"], "oak_planks")
+        self.assertIsInstance(rebound, list)
+        self.assertEqual([(step.kind, step.item) for step in rebound], [("smelt", "iron_ingot")])
+        smelt = rebound[-1]
+        self.assertEqual(smelt.detail["fuel_item"], "spruce_log")
         self.assertEqual(smelt.detail["fuel_count"], 1)
 
     def test_smelt_reports_unplannable_when_fuel_recipe_missing(self):
-        result = resolve_acquisition(
+        deferred = resolve_acquisition(
             "iron_ingot",
             1,
             {"raw_iron": 1, "furnace": 1},
             lambda item: None,
             max_depth=4,
         )
+        self.assertIsInstance(deferred, list)
+        self.assertEqual([(step.kind, step.item) for step in deferred], [("collect", "logs")])
+
+        result = resolve_acquisition(
+            "iron_ingot",
+            2,
+            {"raw_iron": 2, "furnace": 1, "spruce_log": 1},
+            lambda item: None,
+            max_depth=4,
+        )
 
         self.assertIsInstance(result, AcquisitionError)
         self.assertEqual(result.reason, "unplannable")
-        self.assertEqual(result.item, "oak_planks")
+        self.assertEqual(result.item, "spruce_planks")
 
     def test_recipe_cycle_returns_unplannable_error_with_chain(self):
         def cyclic_lookup(item: str) -> list[RecipeVariant] | None:

@@ -42,14 +42,14 @@ def prepare_fixture(rcon: RconClient) -> None:
     rcon.command(f"fill {X - 9} {Y - 1} {Z - 6} {X + 9} {Y - 1} {Z + 6} grass_block")
     tree_x = X + 5
     for y in range(Y, Y + 5):
-        rcon.command(f"setblock {tree_x} {y} {Z} oak_log")
+        rcon.command(f"setblock {tree_x} {y} {Z} spruce_log")
     for x in range(tree_x - 2, tree_x + 3):
         for y in range(Y + 3, Y + 6):
             for z in range(Z - 2, Z + 3):
                 if x == tree_x and z == Z and y <= Y + 4:
                     continue
                 if abs(x - tree_x) + abs(z - Z) <= 3:
-                    rcon.command(f"setblock {x} {y} {z} oak_leaves")
+                    rcon.command(f"setblock {x} {y} {z} spruce_leaves")
     for stone_x, stone_z in (
         (X - 5, Z - 2),
         (X - 5, Z),
@@ -94,24 +94,12 @@ def main() -> int:
     ) as rcon:
         prepare_fixture(rcon)
         try:
+            start_seq = int(body.event_head("java-resource-progression")["event_seq"])
+            body.last_seq = start_seq
             started = time.monotonic()
-            logs_result = parts.registry.get("collect_resource").callable(
-                {
-                    "item": "logs",
-                    "count": 3,
-                    "constraints": {
-                        "radius": 64,
-                        "max_candidates": 8,
-                        "max_mutating_calls": 8,
-                        "max_wall_s": 180,
-                    },
-                }
-            )
-            logs_elapsed = time.monotonic() - started
-            ensure_started = time.monotonic()
             result = parts.registry.get("ensure_tool_for").callable({"resource": "stone_pickaxe"})
-            ensure_elapsed = time.monotonic() - ensure_started
             elapsed = time.monotonic() - started
+            body.poll_events()
             after = body.get_state()
         finally:
             try:
@@ -129,17 +117,36 @@ def main() -> int:
         for entry in completed_steps
     ]
     inventory = after.inventory_counts or {}
+    planned_items = [str((entry.get("step") or {}).get("item") or "") for entry in completed_steps]
+    objective_domains = [
+        dict(event.data)
+        for event in body.event_log
+        if event.seq > start_seq and event.name == "collection_objective_domain_planned"
+    ]
+    clustered_tree_domain = next(
+        (
+            domain
+            for domain in objective_domains
+            if int(domain.get("candidate_count") or 0) == 1
+            and int(domain.get("candidate_coordinate_count") or 0) >= 2
+        ),
+        None,
+    )
     stone_pickaxe_count = sum(
         int(count)
         for item, count in inventory.items()
         if str(item).removeprefix("minecraft:") == "stone_pickaxe"
     )
     success = bool(
-        logs_result.success
-        and result.success
+        result.success
         and stone_pickaxe_count >= 1
         and str(after.selected_item or "").removeprefix("minecraft:") == "stone_pickaxe"
         and steps
+        and steps[0]["kind"] == "collect"
+        and steps[0]["item"] == "logs"
+        and "spruce_planks" in planned_items
+        and "oak_planks" not in planned_items
+        and clustered_tree_domain is not None
         and steps[-1]["kind"] == "equip"
         and elapsed < 300.0
     )
@@ -151,12 +158,10 @@ def main() -> int:
         "scarpet_constructed": provider.scarpet_body is not None,
         "rcon_role": "fixture_setup_and_verification_only",
         "model_calls": 0,
-        "high_level_calls": 2,
+        "high_level_calls": 1,
         "elapsed_wall_s": round(elapsed, 3),
-        "collect_logs_wall_s": round(logs_elapsed, 3),
-        "ensure_stone_pickaxe_wall_s": round(ensure_elapsed, 3),
-        "collect_logs_reason": logs_result.reason,
         "steps": steps,
+        "clustered_tree_domain": clustered_tree_domain,
         "inventory": inventory,
         "selected_item": after.selected_item,
         "result_reason": result.reason,

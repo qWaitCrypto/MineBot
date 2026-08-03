@@ -160,6 +160,7 @@ class _Planner:
         self.recipe_lookup = recipe_lookup
         self.max_depth = max_depth
         self.preferred_plank = _preferred_plank(self.counts)
+        self.deferred = False
         self.steps: list[AcquisitionStep] = []
 
     def resolve(self, item: str, count: int, chain: tuple[str, ...]) -> AcquisitionError | None:
@@ -170,6 +171,9 @@ class _Planner:
             return self._error("max_depth_exceeded", item, count, chain, {"max_depth": self.max_depth})
         if item in chain:
             return self._error("recipe_cycle", item, count, chain, {"cycle": (*chain, item)})
+
+        if item == "planks":
+            return self._resolve_plank_family(count, chain)
 
         route = COLLECT_ROUTES.get(item)
         if route is not None:
@@ -202,6 +206,8 @@ class _Planner:
                 error = self.resolve(tool_item, 1, (*chain, item))
                 if error is not None:
                     return error
+                if self.deferred:
+                    return None
                 best = best_owned_pickaxe(self.counts)
                 if best is None or not tier_satisfies(best[1], required_tier):
                     return self._error(
@@ -234,6 +240,41 @@ class _Planner:
         self.counts[route.inventory_item] = self.counts.get(route.inventory_item, 0) + missing
         return None
 
+    def _resolve_plank_family(
+        self,
+        count: int,
+        chain: tuple[str, ...],
+    ) -> AcquisitionError | None:
+        """Collect an interchangeable source before binding a concrete recipe.
+
+        Recipe truth names the concrete plank output, but an empty inventory has
+        no evidence for choosing a wood species.  Keep the objective as a log
+        family until authoritative inventory supplies that evidence, then let a
+        fresh resolver pass select the matching plank recipe.
+        """
+
+        preferred = _preferred_plank(self.counts)
+        if preferred is not None:
+            return self.resolve(preferred, count, (*chain, "planks"))
+
+        logs_needed = max(1, ceil(count / 4))
+        route = COLLECT_ROUTES["logs"]
+        self._add_step(
+            "collect",
+            route.collect_item,
+            logs_needed,
+            {
+                "inventory_item": "logs",
+                "block_types": list(route.block_types),
+                "expected_drops": list(route.expected_drops),
+                "required_tier": None,
+                "replan_after": True,
+                "satisfies_family": "planks",
+            },
+        )
+        self.deferred = True
+        return None
+
     def _resolve_smelt(
         self,
         item: str,
@@ -249,18 +290,24 @@ class _Planner:
         error = self.resolve(route.input_item, input_needed, (*chain, item))
         if error is not None:
             return error
+        if self.deferred:
+            return None
         if self.counts.get("furnace", 0) < 1:
             error = self.resolve("furnace", 1, (*chain, item))
             if error is not None:
                 return error
+            if self.deferred:
+                return None
 
         seconds_needed = crafts * SMELT_SECONDS_PER_ITEM
         fuel = _select_fuel(self.counts, seconds_needed)
         if fuel is None:
             planks_needed = ceil(seconds_needed / FUEL_BURN_SECONDS["oak_planks"])
-            error = self.resolve("oak_planks", self.counts.get("oak_planks", 0) + planks_needed, (*chain, item))
+            error = self.resolve("planks", planks_needed, (*chain, item))
             if error is not None:
                 return error
+            if self.deferred:
+                return None
             fuel = _select_fuel(self.counts, seconds_needed)
         if fuel is None:
             return self._error(
@@ -314,6 +361,8 @@ class _Planner:
             error = self.resolve("crafting_table", 1, (*chain, item))
             if error is not None:
                 return error
+            if self.deferred:
+                return None
 
         crafts = ceil(missing / variant.output_count)
         required = _select_requirements(
@@ -326,6 +375,8 @@ class _Planner:
             error = self._resolve_requirements(required, chain, item)
             if error is not None:
                 return error
+            if self.deferred:
+                return None
             remaining = _missing_requirements(required, self.counts)
             if not remaining:
                 break
@@ -366,6 +417,8 @@ class _Planner:
             error = self.resolve(ingredient, ingredient_count, (*chain, item))
             if error is not None:
                 return error
+            if self.deferred:
+                return None
         return None
 
     def _add_step(
@@ -431,21 +484,29 @@ def _select_requirements(
         normalized_group = tuple(_normalize_item(option) for option in group if option)
         if not normalized_group:
             continue
-        option = sorted(
-            normalized_group,
-            key=lambda candidate: (
-                _material_availability(
+        plank_options = tuple(option for option in normalized_group if option in PLANK_ITEMS)
+        if len(plank_options) > 1 and preferred_plank is None and not _owned_plank_family(counts):
+            option = "planks"
+        else:
+            option = sorted(
+                normalized_group,
+                key=lambda candidate: (
+                    _material_availability(
+                        candidate,
+                        counts,
+                        selected,
+                        preferred_plank=preferred_plank,
+                    ),
+                    _item_preference(candidate),
                     candidate,
-                    counts,
-                    selected,
-                    preferred_plank=preferred_plank,
                 ),
-                _item_preference(candidate),
-                candidate,
-            ),
-        )[0]
+            )[0]
         selected[option] = selected.get(option, 0) + crafts
     return tuple(sorted(selected.items()))
+
+
+def _owned_plank_family(counts: dict[str, int]) -> bool:
+    return any(counts.get(plank, 0) > 0 or counts.get(PLANK_FROM_LOG[plank], 0) > 0 for plank in PLANK_ITEMS)
 
 
 def _material_availability(

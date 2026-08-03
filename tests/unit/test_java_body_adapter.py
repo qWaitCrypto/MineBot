@@ -1224,6 +1224,16 @@ def _client(server, governance=None) -> JavaBodyClient:
     return JavaBodyClient("Bot", lambda: server, governance, action_wall_timeout_s=5.0, recv_timeout_s=0.01)
 
 
+def test_connect_accounts_hello_in_negotiated_rate_window() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+
+    client.connect()
+
+    assert [request["type"] for request in server.requests] == ["HELLO"]
+    assert len(client._request_times) == 1
+
+
 def test_client_serializes_complete_exchanges_on_one_connection() -> None:
     server = ConcurrentRecvServer()
     client = _client(server)
