@@ -1362,6 +1362,22 @@ def test_navigate_precision_reach_is_sent_and_preserved_in_terminal_metrics() ->
     assert result.metrics["final_reach_distance"] == 0.1
 
 
+def test_collect_excavation_segments_are_preserved_in_terminal_metrics() -> None:
+    metrics = JavaBodyClient._terminal_metrics(
+        {
+            "classification": "completed",
+            "reason": "collected",
+            "approach_excavation_breaks": 12,
+            "approach_excavation_segments": 2,
+            "mutations_completed": 13,
+        }
+    )
+
+    assert metrics["approach_excavation_segments"] == 2
+    assert metrics["approach_excavation_breaks"] == 12
+    assert metrics["mutations_completed"] == 13
+
+
 def test_owner_busy_ack_becomes_a_retryable_toolresult() -> None:
     server = FakeBodyServer()
     server.scenario = "owner_busy"

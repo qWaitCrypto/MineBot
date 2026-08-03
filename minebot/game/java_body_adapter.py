@@ -849,6 +849,7 @@ class JavaBodyClient:
                 "approach_excavation_used",
                 "approach_excavation_breaks",
                 "approach_excavation_replans",
+                "approach_excavation_segments",
                 "approach_excavation_failure",
                 "approach_broken",
                 "mined",

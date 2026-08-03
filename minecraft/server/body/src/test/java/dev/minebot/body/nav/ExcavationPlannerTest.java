@@ -57,6 +57,28 @@ final class ExcavationPlannerTest {
     }
 
     @Test
+    void returnsADistanceReducingReturnSafeCorridorWhenTheTargetExceedsOneSegment() {
+        int targetX = 7;
+        ExcavationPlanner.Cell start = new ExcavationPlanner.Cell(0, STAND, 0);
+        ExcavationPlanner.Result result = ExcavationPlanner.planWithReturnPath(
+            sealedHorizontalTunnelWorld(targetX),
+            start,
+            List.of(new ExcavationPlanner.Target(targetX, STAND, 0)),
+            Set.of(),
+            8
+        );
+
+        assertTrue(result.success(), result.reason());
+        assertEquals("partial_corridor", result.reason());
+        assertFalse(result.plan().reachesTarget());
+        assertEquals(8, result.plan().breakCount());
+        assertEquals(new ExcavationPlanner.Cell(4, STAND, 0), result.plan().steps().getLast().stand());
+        assertTrue(result.plan().steps().stream().allMatch(
+            step -> step.mode() == ExcavationPlanner.StepMode.WALK
+        ));
+    }
+
+    @Test
     void plansASupportedSameColumnDescentWithoutDoubleBreakingHeadroom() {
         FakeWorld world = new FakeWorld(FLOOR);
         for (int y = STAND; y <= STAND + 4; y++) {
@@ -136,8 +158,12 @@ final class ExcavationPlannerTest {
     }
 
     private static FakeWorld sealedHorizontalTunnelWorld() {
+        return sealedHorizontalTunnelWorld(4);
+    }
+
+    private static FakeWorld sealedHorizontalTunnelWorld(int targetX) {
         FakeWorld world = new FakeWorld(FLOOR);
-        for (int x = -1; x <= 5; x++) {
+        for (int x = -1; x <= targetX + 1; x++) {
             for (int y = STAND; y <= STAND + 2; y++) {
                 for (int z = -1; z <= 1; z++) {
                     world.set(x, y, z, WorldView.NodeKind.SOLID);
@@ -149,7 +175,7 @@ final class ExcavationPlannerTest {
         for (int x = -8; x <= 8; x++) {
             for (int y = STAND - 4; y <= STAND + 5; y++) {
                 for (int z = -8; z <= 8; z++) {
-                    boolean intendedTunnel = z == 0 && y == STAND && x >= 0 && x <= 3;
+                    boolean intendedTunnel = z == 0 && y == STAND && x >= 0 && x < targetX;
                     if (!intendedTunnel) {
                         world.hazardBodyPosition(x, y, z);
                     }

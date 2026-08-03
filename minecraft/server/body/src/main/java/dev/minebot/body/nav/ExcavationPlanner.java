@@ -47,7 +47,13 @@ public final class ExcavationPlanner {
         }
     }
 
-    public record Plan(Target target, List<Step> steps, int breakCount, int expandedNodes) {
+    public record Plan(
+        Target target,
+        List<Step> steps,
+        int breakCount,
+        int expandedNodes,
+        boolean reachesTarget
+    ) {
         public Plan {
             steps = List.copyOf(steps);
         }
@@ -154,8 +160,12 @@ public final class ExcavationPlanner {
         Map<State, Parent> parents = new HashMap<>();
         State initial = new State(start, 0, 0);
         best.put(initial, 0.0);
-        open.add(new Open(initial, 0.0, heuristic(start, terminals.keySet())));
+        double initialDistance = heuristic(start, terminals.keySet());
+        open.add(new Open(initial, 0.0, initialDistance));
         int expanded = 0;
+        State bestPartial = null;
+        double bestPartialDistance = initialDistance;
+        double bestPartialCost = Double.MAX_VALUE;
 
         while (!open.isEmpty() && expanded < nodeCap) {
             Open current = open.poll();
@@ -167,10 +177,21 @@ public final class ExcavationPlanner {
             if (terminal != null) {
                 List<Step> steps = reconstruct(current.state(), parents);
                 return new Result(
-                    new Plan(terminal, steps, current.state().breaks(), expanded),
+                    new Plan(terminal, steps, current.state().breaks(), expanded, true),
                     "planned",
                     expanded
                 );
+            }
+            double currentDistance = heuristic(current.state().cell(), terminals.keySet());
+            if (returnPathRequired
+                && current.state().steps() > 0
+                && currentDistance + 1.0e-9 < initialDistance
+                && (currentDistance + 1.0e-9 < bestPartialDistance
+                    || (Math.abs(currentDistance - bestPartialDistance) <= 1.0e-9
+                        && current.g() < bestPartialCost))) {
+                bestPartial = current.state();
+                bestPartialDistance = currentDistance;
+                bestPartialCost = current.g();
             }
             if (current.state().steps() >= stepCap) {
                 continue;
@@ -206,6 +227,19 @@ public final class ExcavationPlanner {
                 parents.put(next, new Parent(current.state(), transition.step()));
                 open.add(new Open(next, nextG, nextG + heuristic(next.cell(), terminals.keySet())));
             }
+        }
+        if (bestPartial != null) {
+            return new Result(
+                new Plan(
+                    nearestTarget(bestPartial.cell(), terminals),
+                    reconstruct(bestPartial, parents),
+                    bestPartial.breaks(),
+                    expanded,
+                    false
+                ),
+                "partial_corridor",
+                expanded
+            );
         }
         return new Result(
             null,
@@ -448,6 +482,22 @@ public final class ExcavationPlanner {
             best = Math.min(best, Math.sqrt(dx * dx + dy * dy + dz * dz) * MOVE_COST);
         }
         return best;
+    }
+
+    private static Target nearestTarget(Cell cell, Map<Cell, Target> terminals) {
+        Cell nearest = null;
+        double best = Double.MAX_VALUE;
+        for (Cell terminal : terminals.keySet()) {
+            double dx = terminal.x() - cell.x();
+            double dy = terminal.y() - cell.y();
+            double dz = terminal.z() - cell.z();
+            double distanceSquared = dx * dx + dy * dy + dz * dz;
+            if (distanceSquared < best) {
+                nearest = terminal;
+                best = distanceSquared;
+            }
+        }
+        return terminals.get(nearest);
     }
 
     private static List<Step> reconstruct(State state, Map<State, Parent> parents) {

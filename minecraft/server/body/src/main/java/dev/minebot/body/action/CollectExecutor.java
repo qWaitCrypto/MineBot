@@ -210,6 +210,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private int excavationBlockerIndex;
     private int excavationBreaks;
     private int excavationReplans;
+    private int excavationSegments;
     private int descentStableTicks;
     private boolean excavationAttempted;
     private boolean excavationUsed;
@@ -431,7 +432,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         refreshLiveCandidates();
         if (remainingCandidates.isEmpty()
             && candidateAttempts < maxCandidateAttempts
-            && targetBreaks < maxTargetMutations) {
+            && mutationsCompleted < maxTargetMutations) {
             if (skipNextEmptyRescan) {
                 skipNextEmptyRescan = false;
             } else {
@@ -440,18 +441,10 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             refreshLiveCandidates();
         }
         refreshPendingDrops(position, serverTick);
-        for (TrackedDrop tracked : List.copyOf(pendingDrops.values())) {
-            if (hasSafePickupStand(tracked.drop())) {
-                continue;
-            }
-            Drop unsafe = tracked.drop();
-            pendingDrops.remove(unsafe.entityId());
-            retiredDropIds.add(unsafe.entityId());
-            recordDropLoss(serverTick, unsafe, "unsafe_pickup_domain");
-        }
 
         List<Drop> availableDrops = pendingDrops.values().stream()
             .map(TrackedDrop::drop)
+            .filter(this::hasSafePickupStand)
             .sorted(Comparator
                 .comparingInt((Drop drop) -> pendingDrops.get(drop.entityId()).firstSeenTick())
                 .thenComparingDouble(drop -> distanceFromPositionSquared(position, drop)))
@@ -469,9 +462,14 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
 
         boolean candidateBudgetAvailable = !candidateDomainAwaitingVantage
             && candidateAttempts < maxCandidateAttempts
-            && targetBreaks < maxTargetMutations
+            && mutationsCompleted < maxTargetMutations
             && !remainingCandidates.isEmpty();
         if (!candidateBudgetAvailable && availableDrops.isEmpty()) {
+            if (hasSettlingUnsafeDrop(serverTick)) {
+                phase = Phase.PICKUP_LOCATE;
+                return;
+            }
+            retireUnsafePendingDrops(serverTick);
             if (canExploreFrontier()) {
                 beginFrontierExploration(serverTick, position);
                 return;
@@ -479,6 +477,11 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             String reason = candidates.isEmpty() ? "target_not_found" : "candidate_targets_exhausted";
             finishProgressAware(serverTick, reason);
             return;
+        }
+        if (candidateBudgetAvailable || !availableDrops.isEmpty()) {
+            // Preserve batch throughput when another productive route exists.
+            // Settle grace is reserved for the last newly mined drop.
+            retireUnsafePendingDrops(serverTick);
         }
 
         int remainingNeeded = Math.max(1, targetCount - collectedTotal());
@@ -558,7 +561,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private boolean canExploreFrontier() {
         return candidateSource != null
             && candidateAttempts < maxCandidateAttempts
-            && targetBreaks < maxTargetMutations
+            && mutationsCompleted < maxTargetMutations
             && frontierAttempts < Math.min(MAX_FRONTIER_ATTEMPTS, maxCandidateAttempts);
     }
 
@@ -882,7 +885,13 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             ))
             .map(candidate -> new ExcavationPlanner.Target(candidate.x(), candidate.y(), candidate.z()))
             .toList();
-        int remainingBreaks = MAX_APPROACH_BREAKS - excavationBreaks;
+        // The wire's mutation_budget covers every world mutation in this action.
+        // Keep one mutation available for the resource block itself and bound
+        // each planned corridor independently before replanning from live truth.
+        int remainingBreaks = Math.min(
+            MAX_APPROACH_BREAKS,
+            maxTargetMutations - mutationsCompleted - 1
+        );
         if (remainingBreaks <= 0) {
             excavationFailure = sourceFailure + ":mutation_budget_exhausted";
             return false;
@@ -913,6 +922,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         excavationBlockerIndex = 0;
         excavationBlock = null;
         excavationBlockId = null;
+        excavationSegments++;
 
         JsonObject data = new JsonObject();
         data.addProperty("target_x", excavationTarget.x());
@@ -920,6 +930,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         data.addProperty("target_z", excavationTarget.z());
         data.addProperty("steps", excavationPlan.steps().size());
         data.addProperty("planned_breaks", excavationPlan.breakCount());
+        data.addProperty("segment", excavationSegments);
+        data.addProperty("reaches_target", excavationPlan.reachesTarget());
         data.addProperty("break_budget_remaining", remainingBreaks);
         data.addProperty("expanded_nodes", excavationPlan.expandedNodes());
         JsonArray preview = new JsonArray();
@@ -944,7 +956,11 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         NavigateExecutor.PositionSource.Position position
     ) {
         if (excavationStepIndex >= excavationPlan.steps().size()) {
-            completeExcavationApproach(serverTick, position);
+            if (excavationPlan.reachesTarget()) {
+                completeExcavationApproach(serverTick, position);
+            } else {
+                continueExcavationAfterSegment(serverTick, position);
+            }
             return;
         }
         ExcavationPlanner.Step step = excavationPlan.steps().get(excavationStepIndex);
@@ -1207,6 +1223,20 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         beginTargetMutation(serverTick);
     }
 
+    private void continueExcavationAfterSegment(
+        int serverTick,
+        NavigateExecutor.PositionSource.Position position
+    ) {
+        excavationUsed = true;
+        if (!planExcavation(serverTick, position, "partial_corridor")) {
+            recordDomainFailure("excavation_failed:" + excavationFailure);
+            deferOrRetireActiveCandidateDomain(
+                "candidate_domain_unreachable:excavation_" + excavationFailure
+            );
+            phase = Phase.NEXT_CANDIDATE;
+        }
+    }
+
     private void failOrReplanExcavation(
         int serverTick,
         NavigateExecutor.PositionSource.Position position,
@@ -1240,7 +1270,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     }
 
     private void beginTargetMutation(int serverTick) {
-        if (targetBreaks >= maxTargetMutations) {
+        if (mutationsCompleted >= maxTargetMutations) {
             recordAttemptFailure("mutation_budget_exhausted", null);
             phase = Phase.NEXT_CANDIDATE;
             return;
@@ -1354,6 +1384,15 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
         refreshPendingDrops(position, serverTick);
         if (!pendingDrops.isEmpty()) {
+            boolean safeDropObserved = pendingDrops.values().stream()
+                .map(TrackedDrop::drop)
+                .anyMatch(this::hasSafePickupStand);
+            if (!safeDropObserved) {
+                if (hasSettlingUnsafeDrop(serverTick)) {
+                    return;
+                }
+                retireUnsafePendingDrops(serverTick);
+            }
             // The next planner domain contains both remaining resource blocks
             // and these live item entities, so it can choose by actual route
             // cost instead of forcing one mine -> one pickup serialization.
@@ -1612,6 +1651,25 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             }
         }
         return false;
+    }
+
+    private void retireUnsafePendingDrops(int serverTick) {
+        for (TrackedDrop tracked : List.copyOf(pendingDrops.values())) {
+            if (hasSafePickupStand(tracked.drop())) {
+                continue;
+            }
+            Drop unsafe = tracked.drop();
+            pendingDrops.remove(unsafe.entityId());
+            retiredDropIds.add(unsafe.entityId());
+            recordDropLoss(serverTick, unsafe, "unsafe_pickup_domain");
+        }
+    }
+
+    private boolean hasSettlingUnsafeDrop(int serverTick) {
+        return pendingDrops.values().stream().anyMatch(
+            tracked -> !hasSafePickupStand(tracked.drop())
+                && serverTick - tracked.firstSeenTick() <= DROP_LOCATE_TIMEOUT_TICKS
+        );
     }
 
     private void retryOrRetireActiveDrops(
@@ -2186,6 +2244,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         facts.addProperty("approach_excavation_used", excavationUsed);
         facts.addProperty("approach_excavation_breaks", excavationBreaks);
         facts.addProperty("approach_excavation_replans", excavationReplans);
+        facts.addProperty("approach_excavation_segments", excavationSegments);
         if (excavationFailure != null) {
             facts.addProperty("approach_excavation_failure", excavationFailure);
         }

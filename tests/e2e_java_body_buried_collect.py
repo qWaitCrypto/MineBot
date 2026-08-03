@@ -25,7 +25,7 @@ BODY_URL = "ws://127.0.0.1:8767"
 X = 160
 Y = 100
 Z = 160
-TARGET = (X + 4, Y, Z)
+TARGET = (X + 7, Y, Z)
 NATURAL = Region("buried-collect-natural", (144, 80, 144), (180, 120, 180))
 PROTECTED = Region("buried-collect-protected", (152, 92, 152), (172, 112, 168))
 PALETTE = ("stone", "deepslate", "dirt", "sandstone", "clay")
@@ -113,7 +113,7 @@ def collect(parts) -> object:
             "constraints": {
                 "radius": 16,
                 "max_candidates": 1,
-                "max_mutating_calls": 1,
+                "max_mutating_calls": 16,
                 "max_wall_s": 120,
                 "auto_prerequisites": False,
             },
@@ -217,6 +217,10 @@ def main() -> int:
             collected_events = [event for event in body.event_log if event.seq > success_start_seq]
             collected_metrics = first_action_metrics(collected)
             approach_broken = list(collected_metrics.get("approach_broken") or [])
+            excavation_segments = int(
+                collected_metrics.get("approach_excavation_segments") or 0
+            )
+            mutations_completed = int(collected_metrics.get("mutations_completed") or 0)
             broken_cells_are_air = all(
                 block_is(
                     rcon,
@@ -234,6 +238,8 @@ def main() -> int:
                 "raw_iron_after": raw_iron_after,
                 "target_is_air": block_is(rcon, TARGET, "air"),
                 "approach_broken": approach_broken,
+                "excavation_segments": excavation_segments,
+                "mutations_completed": mutations_completed,
                 "broken_cells_are_air": broken_cells_are_air,
                 "excavation_proposals": event_names.count("collect_excavation_mutation_proposed"),
                 "excavation_allows": event_names.count("collect_excavation_mutation_allowed"),
@@ -254,7 +260,10 @@ def main() -> int:
                 collected.success
                 and collected_metrics.get("approach_excavation_attempted") is True
                 and collected_metrics.get("approach_excavation_used") is True
-                and 1 <= excavation_breaks <= 8
+                and excavation_segments >= 2
+                and excavation_breaks == 12
+                and mutations_completed == excavation_breaks + 1
+                and mutations_completed <= 16
                 and len(approach_broken) == excavation_breaks
                 and broken_cells_are_air
                 and allow_case["excavation_proposals"] == excavation_breaks
@@ -262,7 +271,7 @@ def main() -> int:
                 and allow_case["excavation_verified"] == excavation_breaks
                 and raw_iron_after > raw_iron_before
                 and allow_case["target_is_air"] is True
-                and after.pos[0] >= X + 2.5
+                and after.pos[0] >= X + 5.5
             )
             artifact["executed_actions"] = executed_actions
             artifact["success"] = bool(
