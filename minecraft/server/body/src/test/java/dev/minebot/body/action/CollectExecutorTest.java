@@ -520,6 +520,70 @@ final class CollectExecutorTest {
     }
 
     @Test
+    void unreachableKnownCandidateChangesVantageBeforeRetirement() {
+        int treeX = 6;
+        Harness harness = new Harness();
+        CollectExecutor.Candidate candidate = new CollectExecutor.Candidate(treeX, STAND, 0, LOG);
+        harness.blockStates.put(Harness.key(treeX, STAND, 0), LOG);
+        FakeWorld base = worldWithTrunk(treeX);
+        boolean[] vantageObserved = {false};
+        WorldView world = (x, y, z) -> {
+            if (!vantageObserved[0] && x >= 2 && y >= STAND && y <= STAND + 1) {
+                return WorldView.NodeKind.HAZARD;
+            }
+            return base.kindAt(x, y, z);
+        };
+        CollectExecutor.CandidateSource source = (x, _y, _z, _tick) -> {
+            vantageObserved[0] |= x < 0;
+            return new CollectExecutor.CandidateScan(List.of(candidate), true, 0, false);
+        };
+        harness.build(
+            world,
+            List.of(candidate),
+            List.of(LOG),
+            2_400,
+            1,
+            1,
+            1,
+            source
+        );
+        Set<String> changed = new HashSet<>();
+
+        JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (!harness.body.attacking) {
+                return;
+            }
+            String key = Harness.key(harness.body.breakX, harness.body.breakY, harness.body.breakZ);
+            if (!changed.add(key)) {
+                return;
+            }
+            harness.blockStates.put(key, "minecraft:air");
+            base.set(harness.body.breakX, harness.body.breakY, harness.body.breakZ, WorldView.NodeKind.PASSABLE);
+            harness.itemCounts.put(LOG, 1);
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("collected", terminal.get("reason").getAsString(), terminal.toString());
+        assertEquals(1, terminal.get("max_candidate_attempts").getAsInt(), terminal.toString());
+        assertEquals(1, terminal.get("frontier_attempts").getAsInt(), terminal.toString());
+        assertEquals(1, terminal.get("frontiers_reached").getAsInt(), terminal.toString());
+        assertEquals(1, harness.proposals.size(), "the retained candidate still uses one governed mutation");
+        assertEquals(1, harness.body.breakTargets.size(), terminal.toString());
+        assertFalse(
+            terminal.getAsJsonArray("attempt_failures").toString().contains("candidate_retired"),
+            terminal.toString()
+        );
+        long domainPlans = harness.events.replay("Bot", 0).events().stream()
+            .filter(event -> event.name().equals("collection_objective_domain_planned"))
+            .filter(event -> event.actionId().equals("collect-1"))
+            .count();
+        assertTrue(domainPlans >= 2, "one COLLECT_BLOCK action must replan the same candidate after relocation");
+    }
+
+    @Test
     void unavailableFrontiersDoNotRescanAnUnchangedPosition() {
         Harness harness = new Harness();
         int[] scans = {0};

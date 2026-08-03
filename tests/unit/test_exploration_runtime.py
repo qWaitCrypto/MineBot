@@ -1181,6 +1181,43 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertTrue(result.can_retry)
         self.assertIsNotNone(result.metrics["resume_cursor"])
 
+    def test_survival_recovery_retires_route_and_tries_another_frontier(self):
+        body = ExplorationBody()
+
+        class ReflexThenArriveNavigator(ExplorationNavigator):
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                if len(self.calls) == 1:
+                    body.state = _state((1.5, 64.0, 0.5))
+                    return ToolResult(
+                        False,
+                        "survival_reflex_recovered",
+                        True,
+                        metrics={"safe_pos": list(body.state.pos)},
+                    )
+                target = goal.representative((int(body.state.pos[0]), 64, int(body.state.pos[2])))
+                body.state = _state(tuple(float(value) for value in target))
+                return ToolResult(True, "arrived", False)
+
+        navigator = ReflexThenArriveNavigator(body)
+        runtime = ExplorationTransactions(body, navigator, MemoryExplorationCoverageStore())
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "budget_exhausted")
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertNotEqual(
+            navigator.calls[0][0].payload(),
+            navigator.calls[1][0].payload(),
+            "the dangerous frontier route must not be dispatched again",
+        )
+        self.assertEqual(
+            result.metrics["candidate_failures"][0]["reason"],
+            "survival_reflex_recovered",
+        )
+        self.assertNotEqual(body.state.pos, (0.0, 64.0, 0.0))
+
     def test_death_supersedes_exploration(self):
         body = ExplorationBody()
         body.state = _state(health=0.0)

@@ -180,6 +180,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private int frontiersReached;
     private FrontierRegion frontierOrigin;
     private FrontierRegion activeFrontier;
+    private boolean candidateDomainAwaitingVantage;
+    private List<CandidateCluster> deferredCandidateClusters = List.of();
     private Drop pickupDrop;
     private Drop plannedPickupDrop;
     private final JsonArray attemptFailures = new JsonArray();
@@ -447,9 +449,6 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             recordDropLoss(serverTick, unsafe, "unsafe_pickup_domain");
         }
 
-        boolean candidateBudgetAvailable = candidateAttempts < maxCandidateAttempts
-            && targetBreaks < maxTargetMutations
-            && !remainingCandidates.isEmpty();
         List<Drop> availableDrops = pendingDrops.values().stream()
             .map(TrackedDrop::drop)
             .sorted(Comparator
@@ -457,6 +456,20 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 .thenComparingDouble(drop -> distanceFromPositionSquared(position, drop)))
             .limit(MAX_ACTIVE_DROP_GOALS)
             .toList();
+        if (candidateDomainAwaitingVantage && availableDrops.isEmpty()) {
+            if (canExploreFrontier()) {
+                beginFrontierExploration(serverTick, position);
+                return;
+            }
+            retireDeferredCandidateDomain("candidate_domain_unreachable:frontier_exhausted");
+            candidateDomainAwaitingVantage = false;
+            refreshLiveCandidates();
+        }
+
+        boolean candidateBudgetAvailable = !candidateDomainAwaitingVantage
+            && candidateAttempts < maxCandidateAttempts
+            && targetBreaks < maxTargetMutations
+            && !remainingCandidates.isEmpty();
         if (!candidateBudgetAvailable && availableDrops.isEmpty()) {
             if (canExploreFrontier()) {
                 beginFrontierExploration(serverTick, position);
@@ -559,6 +572,13 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
         activeFrontier = selectFrontier(currentRegion);
         if (activeFrontier == null) {
+            if (candidateDomainAwaitingVantage) {
+                retireDeferredCandidateDomain("candidate_domain_unreachable:frontier_exhausted");
+                candidateDomainAwaitingVantage = false;
+                phase = Phase.NEXT_CANDIDATE;
+                updateSearchFacts();
+                return;
+            }
             finishProgressAware(serverTick, candidates.isEmpty() ? "target_not_found" : "candidate_targets_exhausted");
             return;
         }
@@ -627,6 +647,12 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 data.addProperty("frontiers_reached", frontiersReached);
                 events.emit(bot, serverTick, "collection_frontier_reached", actionId, data);
                 activeFrontier = null;
+                if (candidateDomainAwaitingVantage) {
+                    rescanCandidateDomain(serverTick, position);
+                    refreshLiveCandidates();
+                    candidateDomainAwaitingVantage = false;
+                    deferredCandidateClusters = List.of();
+                }
                 phase = Phase.NEXT_CANDIDATE;
                 updateSearchFacts();
             }
@@ -759,7 +785,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 }
                 if (!beginExcavation(serverTick, position, outcome.reason())) {
                     recordDomainFailure("approach_failed:" + outcome.reason());
-                    retireActiveCandidateDomain("candidate_domain_unreachable:" + outcome.reason());
+                    deferOrRetireActiveCandidateDomain("candidate_domain_unreachable:" + outcome.reason());
                     phase = Phase.NEXT_CANDIDATE;
                 }
             }
@@ -1172,14 +1198,16 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
         if (excavationReplans >= MAX_EXCAVATION_REPLANS) {
             recordDomainFailure("excavation_failed:" + reason);
-            retireActiveCandidateDomain("candidate_domain_unreachable:excavation_" + reason);
+            deferOrRetireActiveCandidateDomain("candidate_domain_unreachable:excavation_" + reason);
             phase = Phase.NEXT_CANDIDATE;
             return;
         }
         excavationReplans++;
         if (!planExcavation(serverTick, position, reason)) {
             recordDomainFailure("excavation_failed:" + excavationFailure);
-            retireActiveCandidateDomain("candidate_domain_unreachable:excavation_" + excavationFailure);
+            deferOrRetireActiveCandidateDomain(
+                "candidate_domain_unreachable:excavation_" + excavationFailure
+            );
             phase = Phase.NEXT_CANDIDATE;
         }
     }
@@ -1606,9 +1634,31 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         recordDropLoss(serverTick, currentDrop, "pickup_unreachable:" + reason);
     }
 
+    private void deferOrRetireActiveCandidateDomain(String reason) {
+        if (candidateSource != null && !activeCandidateClusters.isEmpty() && canExploreFrontier()) {
+            deferredCandidateClusters = List.copyOf(activeCandidateClusters);
+            candidateDomainAwaitingVantage = true;
+            activeDomain = List.of();
+            activeCandidateClusters = List.of();
+            return;
+        }
+        retireActiveCandidateDomain(reason);
+    }
+
     private void retireActiveCandidateDomain(String reason) {
+        retireCandidateClusters(List.copyOf(activeCandidateClusters), reason);
+        activeDomain = List.of();
+        activeCandidateClusters = List.of();
+    }
+
+    private void retireDeferredCandidateDomain(String reason) {
+        retireCandidateClusters(deferredCandidateClusters, reason);
+        deferredCandidateClusters = List.of();
+    }
+
+    private void retireCandidateClusters(List<CandidateCluster> clusters, String reason) {
         int retiredClusters = 0;
-        for (CandidateCluster cluster : List.copyOf(activeCandidateClusters)) {
+        for (CandidateCluster cluster : clusters) {
             boolean retiredMember = false;
             for (Candidate candidate : cluster.members()) {
                 if (!retireCandidate(candidate)) {
@@ -1624,8 +1674,6 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
         candidateAttempts = Math.min(maxCandidateAttempts, candidateAttempts + retiredClusters);
         current = null;
-        activeDomain = List.of();
-        activeCandidateClusters = List.of();
     }
 
     private List<CandidateCluster> selectCandidateClusters(

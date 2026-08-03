@@ -2030,7 +2030,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "preempted")
 
-    def test_navigate_to_waits_for_reflex_completed_after_body_preempt(self):
+    def test_navigate_to_invalidates_route_after_completed_body_reflex(self):
         nav = FakeNavigator([])
         body = FakeBody(
             [
@@ -2056,11 +2056,13 @@ class NavigationRuntimeTests(unittest.TestCase):
 
         result = runtime.navigate_to((2, 64, 0), config=NavigationRunConfig(max_segments=4))
 
-        self.assertTrue(result.success)
-        self.assertEqual(result.reason, "arrived")
-        self.assertEqual(len(body.actions), 2)
+        self.assertFalse(result.success)
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.reason, "survival_reflex_recovered")
+        self.assertEqual(result.metrics["reflex_handoff"], "route_invalidated")
+        self.assertEqual(len(body.actions), 1)
 
-    def test_navigate_to_waits_for_reflex_completed_after_owner_preempted_event(self):
+    def test_navigate_to_invalidates_route_after_owner_preempted_event(self):
         nav = FakeNavigator([])
 
         class OwnerPreemptBody(FakeBody):
@@ -2099,11 +2101,13 @@ class NavigationRuntimeTests(unittest.TestCase):
 
         result = runtime.navigate_to((2, 64, 0), config=NavigationRunConfig(max_segments=4))
 
-        self.assertTrue(result.success)
-        self.assertEqual(result.reason, "arrived")
-        self.assertEqual(len(body.actions), 2)
+        self.assertFalse(result.success)
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.reason, "survival_reflex_recovered")
+        self.assertEqual(result.metrics["reflex_handoff"], "route_invalidated")
+        self.assertEqual(len(body.actions), 1)
 
-    def test_navigate_to_uses_buffered_reflex_completion_after_owner_preempted_event(self):
+    def test_navigate_to_invalidates_route_after_buffered_reflex_completion(self):
         nav = FakeNavigator([])
 
         class BufferedOwnerPreemptBody(FakeBody):
@@ -2140,9 +2144,11 @@ class NavigationRuntimeTests(unittest.TestCase):
 
         result = runtime.navigate_to((2, 64, 0), config=NavigationRunConfig(max_segments=4))
 
-        self.assertTrue(result.success)
-        self.assertEqual(result.reason, "arrived")
-        self.assertEqual(len(body.actions), 2)
+        self.assertFalse(result.success)
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.reason, "survival_reflex_recovered")
+        self.assertEqual(result.metrics["reflex_handoff"], "route_invalidated")
+        self.assertEqual(len(body.actions), 1)
 
     def test_navigate_to_waits_for_active_survival_reflex_before_dispatch(self):
         nav = FakeNavigator([])

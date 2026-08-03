@@ -290,7 +290,7 @@ def test_survival_recovery_marker_reaches_the_provider_owned_objective() -> None
     assert body.actions[0].params["survival_recovery"] is True
 
 
-def test_successful_reflex_resumes_the_same_provider_owned_goal_once() -> None:
+def test_successful_reflex_invalidates_the_provider_owned_route() -> None:
     body = PreemptingObjectiveBody()
 
     result = ObjectiveNavigationTransactions(body).navigate_to(
@@ -298,9 +298,11 @@ def test_successful_reflex_resumes_the_same_provider_owned_goal_once() -> None:
         timeout_s=10.0,
     )
 
-    assert result.success is True
-    assert len(body.actions) == 2
-    assert body.actions[0].params["goal"] == body.actions[1].params["goal"]
+    assert result.success is False
+    assert result.can_retry is True
+    assert result.reason == "survival_reflex_recovered"
+    assert len(body.actions) == 1
+    assert result.metrics["reflex_handoff"] == "route_invalidated"
     assert result.metrics["reflex_handoffs"][0]["data"]["kind"] == "lava"
 
 

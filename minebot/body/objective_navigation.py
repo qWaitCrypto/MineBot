@@ -11,7 +11,7 @@ from minebot.body.navigation import (
     NavigationTransactions,
     SERVER_GOAL_SET_LIMIT,
 )
-from minebot.contract import Action, Body, BreakContext, Position, Result, ToolResult
+from minebot.contract import Action, Body, BreakContext, Position, ToolResult
 from minebot.game.navigation import (
     GoalBlock,
     GoalComposite,
@@ -76,59 +76,55 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
         }
         if final_reach_distance is not None:
             action_params["final_reach_distance"] = final_reach_distance
+        action = Action.create("navigate", dict(action_params))
+        after_seq = int(getattr(self.body, "last_seq", 0) or 0)
+        try:
+            result = self.body.execute(action)
+        except Exception as error:
+            return ToolResult(
+                False,
+                "body_unavailable",
+                True,
+                metrics={"error": type(error).__name__, "goal": normalized.payload()},
+            )
         reflex_handoffs: list[dict[str, object]] = []
-        deadline = monotonic() + effective_timeout_s
-        result: Result | None = None
-        max_attempts = max(1, min(8, int(cfg.max_segments)))
-        for resume_index in range(max_attempts):
-            remaining_s = (
-                effective_timeout_s
-                if resume_index == 0
-                else max(0.05, deadline - monotonic())
-            )
-            action_params["timeout_ticks"] = max(
-                20, min(12_000, int(remaining_s * 20))
-            )
-            action = Action.create("navigate", dict(action_params))
-            after_seq = int(getattr(self.body, "last_seq", 0) or 0)
-            try:
-                result = self.body.execute(action)
-            except Exception as error:
-                return ToolResult(
-                    False,
-                    "body_unavailable",
-                    True,
-                    metrics={"error": type(error).__name__, "goal": normalized.payload()},
-                )
-            if str(result.error or "") != "preempted":
-                break
+        if str(result.error or "") == "preempted":
             reflex = _wait_for_reflex_completion(
                 self.body,
                 after_seq=after_seq,
-                timeout_s=min(6.0, max(1.0, remaining_s)),
+                timeout_s=min(6.0, max(1.0, effective_timeout_s)),
             )
-            if reflex is None:
-                break
-            handoff = {"event": reflex.name, "seq": reflex.seq, "data": dict(reflex.data)}
-            reflex_handoffs.append(handoff)
-            escaped = reflex.name == "reflexCompleted" and (
-                reflex.data.get("escaped_hazard") is True
-                and reflex.data.get("final_is_dry_stand") is True
-            )
-            if not escaped:
+            if reflex is not None:
+                handoff = {"event": reflex.name, "seq": reflex.seq, "data": dict(reflex.data)}
+                reflex_handoffs.append(handoff)
+                escaped = reflex.name == "reflexCompleted" and (
+                    reflex.data.get("escaped_hazard") is True
+                    and reflex.data.get("final_is_dry_stand") is True
+                )
+                if not escaped:
+                    return ToolResult(
+                        False,
+                        "reflex_failed",
+                        True,
+                        metrics={
+                            "navigation_goal": normalized.payload(),
+                            "reflex_handoffs": reflex_handoffs,
+                        },
+                    )
+                safe_state = self.body.get_state()
                 return ToolResult(
                     False,
-                    "reflex_failed",
+                    "survival_reflex_recovered",
                     True,
                     metrics={
+                        **dict(result.data),
                         "navigation_goal": normalized.payload(),
+                        "provider_action": "navigate",
                         "reflex_handoffs": reflex_handoffs,
+                        "reflex_handoff": "route_invalidated",
+                        "safe_pos": list(safe_state.pos),
                     },
                 )
-            if resume_index >= max_attempts - 1 or monotonic() >= deadline:
-                break
-
-        assert result is not None
 
         success = bool(result.ok and result.accepted and result.complete)
         metrics = {

@@ -728,6 +728,28 @@ class ExplorationTransactions:
                         }
                     )
                     fallback_failure_recorded = True
+            if navigation_reason == "survival_reflex_recovered":
+                record = self.coverage.record_region(
+                    dimension=dimension,
+                    query_signature=targets.query_signature,
+                    region=region,
+                    status=CoverageStatus.MOBILITY_BLOCKED,
+                    center=stands[0],
+                    reason=navigation_reason,
+                    uncertainty=tuple(navigation_failures),
+                )
+                prior[region] = record
+                failures.append(
+                    {
+                        "region": [region[0], region[1]],
+                        "reason": navigation_reason,
+                        "navigation_attempts": navigation_failures,
+                    }
+                )
+                # The reflex supplied a new authoritative safe position, but
+                # invalidated the route that entered the hazard. Keep that
+                # position and choose another existing frontier.
+                continue
             if not reached:
                 recovery: JsonObject | None = None
                 recovered = after

@@ -948,9 +948,20 @@ class NavigationTransactions:
                             },
                         )
                     state = self.body.get_state()
-                    start = _block_pos(state)
-                    segment_index += 1
-                    continue
+                    return _result(
+                        False,
+                        "survival_reflex_recovered",
+                        True,
+                        goal_anchor,
+                        executed,
+                        {
+                            "navigation_goal": nav_goal.payload(),
+                            "paused": False,
+                            "reflex_handoff": "route_invalidated",
+                            "reflex": dict(reflex.data),
+                            "safe_pos": list(state.pos),
+                        },
+                    )
                 return _result(
                     True,
                     "preempted",

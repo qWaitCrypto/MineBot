@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import re
@@ -95,7 +96,7 @@ def prepare_spawn_area(rcon: RconClient) -> None:
     assert "filled" in floor.lower(), f"spawn floor failed: {floor}"
 
 
-def run_lava_preempt_and_resume(rcon, body) -> dict:
+def run_lava_preempt_and_invalidate(rcon, body) -> dict:
     prepare_flat(rcon)
     teleport(rcon, body, 0, 200, 0)
     command(rcon, f"effect give {BOT} minecraft:fire_resistance 60 0 true")
@@ -158,14 +159,14 @@ def run_lava_preempt_and_resume(rcon, body) -> dict:
     handoffs = [event for event in recent if event.name == "ownerPreempted"]
     final = body.get_state()
 
-    assert result.success and result.reason == "arrived", result
+    assert not result.success and result.reason == "survival_reflex_recovered", result
     assert preempted, recent
     assert handoffs, recent
     assert completed.data.get("escaped_hazard") is True, completed
     assert completed.data.get("final_is_dry_stand") is True, completed
     assert final.body_owner is None and final.pending_action_count == 0, final
     assert final.hazard_unresolved is None, final
-    assert final.pos[0] >= ROUTE_GOAL_X - 2.0, final
+    assert result.metrics.get("reflex_handoff") == "route_invalidated", result
 
     command(rcon, f"setblock {hx} 200 {hz} air")
     return {
@@ -173,8 +174,8 @@ def run_lava_preempt_and_resume(rcon, body) -> dict:
         "preempted_terminals": len(preempted),
         "owner_handoffs": len(handoffs),
         "reflex": dict(completed.data),
-        "continued_goal_reason": result.reason,
-        "continued_final_pos": list(final.pos),
+        "route_terminal_reason": result.reason,
+        "safe_final_pos": list(final.pos),
         "reflex_handoffs": (result.metrics or {}).get("reflex_handoffs"),
     }
 
@@ -208,9 +209,15 @@ def run_lava_no_escape_latch(rcon, body) -> dict:
 
     command(rcon, "fill -8 199 -8 8 199 8 stone")
     wait_until(
-        lambda: body.get_state() if body.get_state().hazard_unresolved is None else None,
+        lambda: state
+        if (
+            (state := body.get_state()).hazard_unresolved is None
+            and state.body_owner is None
+            and state.pending_action_count == 0
+        )
+        else None,
         timeout_s=5.0,
-        label="hazard latch to clear after world change",
+        label="hazard latch and survival owner to clear after world change",
     )
     continued = body.execute(Action.create("navigate", {
         "goal": {"kind": "near", "x": 4, "y": 200, "z": 0, "range": 0.5},
@@ -277,6 +284,13 @@ def run_low_air_water_escape(rcon, body) -> dict:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--case",
+        choices=("all", "route", "no_escape", "water"),
+        default="all",
+    )
+    args = parser.parse_args()
     rcon = RconClient(RconConfig(host="127.0.0.1", port=25576, password="test"))
     rcon.connect()
     provider = build_body_provider(
@@ -301,18 +315,22 @@ def main() -> int:
         assert spawned.ok and spawned.accepted, spawned
         body.poll_events()
 
+        cases = {}
+        if args.case in {"all", "route"}:
+            cases["lava_preempt_route_invalidation"] = run_lava_preempt_and_invalidate(rcon, body)
+        if args.case in {"all", "no_escape"}:
+            cases["lava_no_escape_latch"] = run_lava_no_escape_latch(rcon, body)
+        if args.case in {"all", "water"}:
+            cases["low_air_water_escape"] = run_low_air_water_escape(rcon, body)
         artifact = {
             "scope": "java_body_survival_reflex",
             "formal_gate": False,
             "bounded": True,
+            "selected_case": args.case,
             "provider": "java",
             "scarpet_body_constructed": False,
             "scarpet_action_calls": 0,
-            "cases": {
-                "lava_preempt_resume": run_lava_preempt_and_resume(rcon, body),
-                "lava_no_escape_latch": run_lava_no_escape_latch(rcon, body),
-                "low_air_water_escape": run_low_air_water_escape(rcon, body),
-            },
+            "cases": cases,
         }
         output = Path("logs/agentic-runtime/java-body-survival-reflex-20260728.json")
         output.parent.mkdir(parents=True, exist_ok=True)

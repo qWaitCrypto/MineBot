@@ -25,7 +25,9 @@ DIG_ORIGIN = (220.82, 120.0, 220.18)
 DIG_TARGET_Y = 118
 COLLECT_ORIGIN = (240.5, 100.0, 240.5)
 ORE_TARGETS = ((220, 100, 248), (216, 100, 248), (212, 100, 248))
-ARTIFACT = Path("logs/agentic-runtime/java-body-zero-candidate-frontier-objective-20260801.json")
+VANTAGE_ORIGIN = (240.5, 102.0, 240.5)
+VANTAGE_TARGET = (220, 100, 248)
+ARTIFACT = Path("logs/agentic-runtime/java-body-resource-persistent-vantage-20260803.json")
 
 
 def command(rcon: RconClient, value: str, delay: float = 0.03) -> str:
@@ -134,6 +136,45 @@ def prepare_collect_fixture(rcon: RconClient, body) -> None:
         f"tp {BOT} {COLLECT_ORIGIN[0]} {COLLECT_ORIGIN[1]} {COLLECT_ORIGIN[2]} -90 0",
     )
     wait_for_position(body, COLLECT_ORIGIN)
+
+
+def prepare_known_candidate_vantage_fixture(rcon: RconClient, body) -> None:
+    command(rcon, f"gamemode spectator {BOT}")
+    command(rcon, f"tp {BOT} 240.5 112 240.5")
+    force_loaded = command(rcon, "forceload add 208 224 272 264")
+    assert "marked" in force_loaded.lower(), force_loaded
+    try:
+        filled = command(rcon, "fill 208 96 224 272 104 264 stone")
+        cleared = command(rcon, "fill 208 100 224 272 104 264 air")
+        assert "successfully filled" in filled.lower(), filled
+        assert "successfully filled" in cleared.lower(), cleared
+        # The player starts on a two-block ledge. Candidate work requires a
+        # reversible route, so the initial domain is honestly unreachable.
+        # Existing frontier movement may take the safe drop and replan the
+        # still-live candidate from the lower floor.
+        command(rcon, "fill 239 100 239 241 101 241 stone")
+        command(
+            rcon,
+            f"setblock {VANTAGE_TARGET[0]} {VANTAGE_TARGET[1]} "
+            f"{VANTAGE_TARGET[2]} minecraft:iron_ore",
+        )
+        assert block_is(rcon, VANTAGE_TARGET, "iron_ore")
+    finally:
+        force_removed = command(rcon, "forceload remove 208 224 272 264")
+        assert "unmarked" in force_removed.lower(), force_removed
+    command(
+        rcon,
+        "execute positioned 220 100 248 run kill @e[type=minecraft:item,distance=..48]",
+    )
+    command(rcon, f"clear {BOT}")
+    command(rcon, f"item replace entity {BOT} hotbar.0 with minecraft:stone_pickaxe 1")
+    command(rcon, f"player {BOT} hotbar 1")
+    command(rcon, f"gamemode survival {BOT}")
+    command(
+        rcon,
+        f"tp {BOT} {VANTAGE_ORIGIN[0]} {VANTAGE_ORIGIN[1]} {VANTAGE_ORIGIN[2]} -90 0",
+    )
+    wait_for_position(body, VANTAGE_ORIGIN)
 
 
 def main() -> int:
@@ -273,6 +314,90 @@ def main() -> int:
             }
             artifact["collect_quantity"] = collect_case
 
+            prepare_known_candidate_vantage_fixture(rcon, body)
+            vantage_start_seq = int(body.event_head("java-known-candidate-vantage")["event_seq"])
+            body.last_seq = vantage_start_seq
+            vantage_before = body.get_state()
+            vantage_raw_before = inventory_count(body, "raw_iron")
+            vantage_action_index = len(executed_actions)
+            vantage_started = time.monotonic()
+            vantage_result = registry.get("collect_resource").callable(
+                {
+                    "item": "raw_iron",
+                    "count": 1,
+                    "constraints": {
+                        "radius": 32,
+                        "max_candidates": 1,
+                        "max_mutating_calls": 1,
+                        "max_wall_s": 120,
+                        "auto_prerequisites": False,
+                    },
+                }
+            )
+            vantage_elapsed = time.monotonic() - vantage_started
+            body.poll_events()
+            vantage_after = body.get_state()
+            vantage_raw_after = inventory_count(body, "raw_iron")
+            vantage_events = [event for event in body.event_log if event.seq > vantage_start_seq]
+            vantage_domains = [
+                event_payload(event)
+                for event in vantage_events
+                if event.name == "collection_objective_domain_planned"
+            ]
+            vantage_frontiers = [
+                event_payload(event)
+                for event in vantage_events
+                if event.name in {
+                    "collection_frontier_planned",
+                    "collection_frontier_reached",
+                    "collection_frontier_failed",
+                }
+            ]
+            vantage_candidates = [
+                event_payload(event)
+                for event in vantage_events
+                if event.name == "candidate_selected"
+            ]
+            vantage_proposals = [
+                event_payload(event)
+                for event in vantage_events
+                if event.name in {"mutation_proposed", "collect_excavation_mutation_proposed"}
+            ]
+            vantage_verdicts = [
+                event_payload(event)
+                for event in vantage_events
+                if event.name in {"mutation_allowed", "collect_excavation_mutation_allowed"}
+            ]
+            vantage_terminal = next(
+                event_payload(event)
+                for event in reversed(vantage_events)
+                if event.name == "action_terminal"
+            )
+            vantage_terminal_data = dict(vantage_terminal["data"])
+            vantage_search = dict(vantage_terminal_data.get("search") or {})
+            vantage_failures = list(vantage_terminal_data.get("attempt_failures") or [])
+            vantage_actions = executed_actions[vantage_action_index:]
+            vantage_case = {
+                "result": vantage_result.to_payload(),
+                "start_pos": list(vantage_before.pos),
+                "final_pos": list(vantage_after.pos),
+                "raw_iron_before": vantage_raw_before,
+                "raw_iron_after": vantage_raw_after,
+                "elapsed_wall_s": round(vantage_elapsed, 3),
+                "target_is_air": block_is(rcon, VANTAGE_TARGET, "air"),
+                "body_actions": vantage_actions,
+                "initial_matches": int(vantage_search.get("matches", -1)),
+                "domain_plans": vantage_domains,
+                "frontier_events": vantage_frontiers,
+                "selected_candidates": vantage_candidates,
+                "mutation_proposals": vantage_proposals,
+                "mutation_verdicts": vantage_verdicts,
+                "attempt_failures": vantage_failures,
+                "terminal_search": vantage_search,
+                "events": [event_payload(event) for event in vantage_events],
+            }
+            artifact["known_candidate_persistent_vantage"] = vantage_case
+
             dig_ok = bool(
                 dig_result.success
                 and dig_after.pos[1] <= DIG_TARGET_Y + 0.08
@@ -293,7 +418,40 @@ def main() -> int:
                     for refresh in candidate_refreshes
                 ) >= 3
             )
-            artifact["success"] = dig_ok and collect_ok
+            initial_no_path = any(
+                str(failure.get("reason") or "").startswith("approach_failed:no_path")
+                for failure in vantage_failures
+            )
+            candidate_retired = any(
+                "candidate_retired" in failure for failure in vantage_failures
+            )
+            frontier_reached_seq = next(
+                (
+                    int(event["seq"])
+                    for event in vantage_frontiers
+                    if event["name"] == "collection_frontier_reached"
+                ),
+                -1,
+            )
+            vantage_ok = bool(
+                vantage_result.success
+                and vantage_raw_after - vantage_raw_before >= 1
+                and vantage_case["target_is_air"]
+                and vantage_actions == ["collectBlock"]
+                and int(vantage_search.get("matches", -1)) >= 1
+                and initial_no_path
+                and not candidate_retired
+                and len(vantage_domains) >= 2
+                and frontier_reached_seq > int(vantage_domains[0]["seq"])
+                and int(vantage_domains[-1]["seq"]) > frontier_reached_seq
+                and len(vantage_candidates) == 1
+                and list(vantage_candidates[0]["data"].get(key) for key in ("x", "y", "z"))
+                == list(VANTAGE_TARGET)
+                and len(vantage_proposals) == 1
+                and len(vantage_verdicts) == 1
+                and int(vantage_proposals[0]["seq"]) > frontier_reached_seq
+            )
+            artifact["success"] = dig_ok and collect_ok and vantage_ok
     finally:
         try:
             body.interrupt("bounded_resource_objectives_cleanup")
