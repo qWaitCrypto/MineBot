@@ -1,6 +1,8 @@
 package dev.minebot.body.action;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import dev.minebot.body.control.FakePlayerActionOwner;
 import dev.minebot.body.control.OwnerPriority;
 import dev.minebot.body.event.BotEventStream;
@@ -101,6 +103,15 @@ final class ActionRuntimeTest {
         assertEquals(ActionRegistry.State.TERMINAL, status.state());
         assertEquals("completed", status.terminal().get("classification").getAsString());
         assertEquals(12, status.terminal().get("final_x").getAsInt());
+        assertEquals("completed", status.terminal().get("reason").getAsString());
+        assertEquals("completed", status.terminal().get("reason_class").getAsString());
+        assertEquals("a-1", status.terminal().getAsJsonObject("goal").get("action_id").getAsString());
+        assertEquals("NAVIGATE", status.terminal().getAsJsonObject("goal").get("objective").getAsString());
+        assertEquals(0, status.terminal().get("attempts_consumed").getAsInt());
+        assertTrue(status.terminal().get("budget_remaining").isJsonNull());
+        assertTrue(status.terminal().get("closest_approach_distance").isJsonNull());
+        assertTrue(status.terminal().get("unloaded_chunk_count").isJsonNull());
+        assertEquals(20, status.terminal().get("elapsed_ticks").getAsInt());
         assertNull(owner.current("Bot"));
 
         BotEventStream.Replay replay = events.replay("Bot", 0);
@@ -143,5 +154,44 @@ final class ActionRuntimeTest {
     void unknownActionReconcilesAsUnknown() {
         assertEquals(ActionRegistry.State.UNKNOWN, registry.status("never-seen").state());
         assertFalse(runtime.requestCancel("never-seen"));
+    }
+
+    @Test
+    void oversizedDiagnosticsAreStructurallyTruncatedBeforeStorageAndEmission() {
+        runtime.submit("Bot", "a-large", "COLLECT_BLOCK", OwnerPriority.ACTION, 10);
+        JsonObject facts = new JsonObject();
+        facts.addProperty("reason", "no_path");
+        facts.addProperty("attempts_consumed", 7);
+        facts.addProperty("budget_remaining", 3);
+        JsonArray diagnostics = new JsonArray();
+        for (int index = 0; index < 8_000; index++) {
+            JsonObject row = new JsonObject();
+            row.addProperty("attempt", index);
+            row.addProperty("detail", "x".repeat(128));
+            diagnostics.add(row);
+        }
+        facts.add("planning_attempts", diagnostics);
+
+        assertTrue(runtime.finish("Bot", "a-large", ActionRuntime.CLASS_FAILED, facts, 30));
+
+        JsonObject terminal = registry.status("a-large").terminal();
+        assertTrue(ActionRuntime.serializedBytes(terminal) <= ActionRuntime.MAX_TERMINAL_BYTES);
+        assertTrue(terminal.get("evidence_truncated").getAsBoolean());
+        assertTrue(terminal.getAsJsonArray("evidence_omitted_fields").asList().stream()
+            .anyMatch(value -> value.getAsString().equals("planning_attempts")));
+        assertEquals("no_path", terminal.get("reason").getAsString());
+        assertEquals("blocked", terminal.get("reason_class").getAsString());
+        assertEquals(7, terminal.get("attempts_consumed").getAsInt());
+        assertEquals(3, terminal.get("budget_remaining").getAsInt());
+        assertEquals(
+            terminal,
+            JsonParser.parseString(terminal.toString()).getAsJsonObject(),
+            "the bound must preserve valid JSON rather than cutting bytes"
+        );
+        BotEventStream.Event event = events.replay("Bot", 0).events().stream()
+            .filter(item -> item.name().equals("action_terminal"))
+            .findFirst()
+            .orElseThrow();
+        assertEquals(terminal, event.data());
     }
 }

@@ -31,9 +31,13 @@ from minebot.game.java_body_protocol import (
     ErrorResponse,
     EventGap,
     JavaBodyProtocol,
+    MAX_TERMINAL_BYTES,
     Response,
     ServerProposal,
 )
+
+
+MAX_WEBSOCKET_FRAME_BYTES = 4 * MAX_TERMINAL_BYTES
 
 
 class GovernanceAnswerer:
@@ -806,6 +810,14 @@ class JavaBodyClient:
             key: terminal[key]
             for key in (
                 "elapsed_ticks",
+                "reason_class",
+                "goal",
+                "attempts_consumed",
+                "budget_remaining",
+                "closest_approach_distance",
+                "unloaded_chunk_count",
+                "evidence_truncated",
+                "evidence_omitted_fields",
                 "replans",
                 "expanded_nodes",
                 "unloaded_touches",
@@ -1098,7 +1110,11 @@ def websocket_transport(url: str, *, open_timeout: float = 10.0) -> Callable[[],
     def connect() -> DuplexTransport:
         from websockets.sync.client import connect as ws_connect
 
-        socket = ws_connect(url, open_timeout=open_timeout)
+        socket = ws_connect(
+            url,
+            open_timeout=open_timeout,
+            max_size=MAX_WEBSOCKET_FRAME_BYTES,
+        )
 
         class _WebSocketDuplex:
             def send(self, text: str) -> None:

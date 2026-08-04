@@ -20,6 +20,7 @@ from minebot.game.java_body_protocol import (
     EventGap,
     JavaBodyProtocol,
     MAX_FIND_BLOCK_IDS,
+    MAX_TERMINAL_BYTES,
     ProtocolViolation,
     Response,
     ServerProposal,
@@ -111,6 +112,61 @@ def test_fixture_transcript(fixture_path: Path) -> None:
 
 def test_fixture_directory_is_not_empty() -> None:
     assert FIXTURES, "the protocol fixture suite must exist"
+
+
+def test_bounded_truncated_terminal_is_preserved_from_event() -> None:
+    protocol = JavaBodyProtocol()
+    terminal = {
+        "classification": "failed",
+        "reason": "no_path",
+        "reason_class": "blocked",
+        "goal": {"action_id": "a-1", "objective": "NAVIGATE", "bot": "Bot"},
+        "attempts_consumed": 3,
+        "budget_remaining": 1,
+        "closest_approach_distance": 7.5,
+        "unloaded_chunk_count": 0,
+        "elapsed_ticks": 40,
+        "evidence_truncated": True,
+        "evidence_omitted_fields": ["planning_attempts"],
+    }
+
+    items = protocol.feed(
+        {
+            "channel": "fakeplayer-body",
+            "type": "EVENT",
+            "bot": "Bot",
+            "seq": 1,
+            "tick": 50,
+            "event": "action_terminal",
+            "action_id": "a-1",
+            "data": terminal,
+        }
+    )
+
+    assert len(items) == 1
+    assert isinstance(items[0], BotEvent)
+    assert items[0].data == terminal
+
+
+def test_oversized_terminal_is_a_protocol_violation_not_reconciliation_unknown() -> None:
+    protocol = JavaBodyProtocol()
+    with pytest.raises(ProtocolViolation, match="terminal exceeds"):
+        protocol.feed(
+            {
+                "channel": "fakeplayer-body",
+                "type": "EVENT",
+                "bot": "Bot",
+                "seq": 1,
+                "tick": 50,
+                "event": "action_terminal",
+                "action_id": "a-large",
+                "data": {
+                    "classification": "failed",
+                    "reason": "no_path",
+                    "diagnostics": "x" * MAX_TERMINAL_BYTES,
+                },
+            }
+        )
 
 
 def test_requests_before_negotiation_are_a_capability_gap() -> None:

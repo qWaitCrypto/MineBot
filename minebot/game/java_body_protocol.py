@@ -15,11 +15,13 @@ per-bot event sequence instead. The frame ``type`` disambiguates.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 
 
 PROTOCOL = "fakeplayer-body/1"
 CHANNEL = "fakeplayer-body"
 MAX_FIND_BLOCK_IDS = 64
+MAX_TERMINAL_BYTES = 256 * 1024
 
 
 class ProtocolViolation(Exception):
@@ -526,6 +528,9 @@ class JavaBodyProtocol:
         }.get(request_type, f"{request_type}_RESULT")
         if frame_type != expected:
             raise ProtocolViolation(f"{request_type} answered by {frame_type}")
+        terminal = message.get("terminal")
+        if terminal is not None:
+            _validate_terminal_envelope(terminal)
         if frame_type == "HELLO_ACK":
             self._accept_hello(message)
         items: list[Response | BotEvent | EventGap] = []
@@ -631,13 +636,16 @@ class JavaBodyProtocol:
             raise ProtocolViolation("EVENT frames need bot, integer seq, and event name")
         action_id = message.get("action_id")
         data = message.get("data")
+        parsed_data = dict(data) if isinstance(data, dict) else {}
+        if name == "action_terminal":
+            _validate_terminal_envelope(parsed_data)
         return BotEvent(
             bot=bot,
             seq=seq,
             tick=int(tick) if isinstance(tick, int) else 0,
             name=name,
             action_id=action_id if isinstance(action_id, str) else None,
-            data=dict(data) if isinstance(data, dict) else {},
+            data=parsed_data,
         )
 
     def _sequence_event(self, event: BotEvent) -> list[BotEvent | EventGap]:
@@ -701,3 +709,17 @@ class JavaBodyProtocol:
         }
         self._pending[request_id] = request_type
         return message
+
+
+def _validate_terminal_envelope(terminal: object) -> None:
+    if not isinstance(terminal, dict):
+        raise ProtocolViolation("action terminal must be a JSON object")
+    encoded = json.dumps(
+        terminal,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > MAX_TERMINAL_BYTES:
+        raise ProtocolViolation(
+            f"action terminal exceeds {MAX_TERMINAL_BYTES}-byte contract"
+        )

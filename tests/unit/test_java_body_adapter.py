@@ -1378,6 +1378,34 @@ def test_collect_excavation_segments_are_preserved_in_terminal_metrics() -> None
     assert metrics["mutations_completed"] == 13
 
 
+def test_terminal_metrics_preserve_the_bounded_decision_grade_core() -> None:
+    terminal = {
+        "classification": "failed",
+        "reason": "no_path",
+        "reason_class": "blocked",
+        "goal": {
+            "action_id": "collect-1",
+            "objective": "COLLECT_BLOCK",
+            "bot": "Bot",
+        },
+        "attempts_consumed": 8,
+        "budget_remaining": 0,
+        "closest_approach_distance": 11.5,
+        "unloaded_chunk_count": 0,
+        "elapsed_ticks": 400,
+        "evidence_truncated": True,
+        "evidence_omitted_fields": ["planning_attempts"],
+    }
+
+    metrics = JavaBodyClient._terminal_metrics(terminal)
+
+    assert metrics == {
+        key: value
+        for key, value in terminal.items()
+        if key not in {"classification", "reason"}
+    }
+
+
 def test_owner_busy_ack_becomes_a_retryable_toolresult() -> None:
     server = FakeBodyServer()
     server.scenario = "owner_busy"
