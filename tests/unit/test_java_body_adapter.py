@@ -1712,6 +1712,59 @@ def test_wall_deadline_cancels_and_reconciles_running_action_before_return() -> 
     assert request_types.index("CANCEL_ACTION") < request_types.index("QUERY_ACTION")
 
 
+def test_deadline_reconciliation_excludes_concurrent_body_watch_from_read_lane() -> None:
+    class ReconciliationReadServer(ConcurrentRecvServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scenario = "navigate_running"
+            self.cancel_seen = threading.Event()
+
+        def _handle_cancel(self, message: dict, rid: str) -> None:
+            self._pending_action = message["action_id"]
+            super()._handle_cancel(message, rid)
+            self.cancel_seen.set()
+
+    action_server = FakeBodyServer()
+    action_server.scenario = "navigate_running"
+    read_server = ReconciliationReadServer()
+    read_client = JavaBodyClient(
+        "Bot",
+        lambda: read_server,
+        action_wall_timeout_s=0.03,
+        recv_timeout_s=0.01,
+        terminal_query_interval_s=1.0,
+        terminal_delivery_grace_s=0.2,
+        subscribe_events=False,
+    )
+    action_client = JavaBodyClient(
+        "Bot",
+        lambda: action_server,
+        action_wall_timeout_s=0.03,
+        recv_timeout_s=0.005,
+        terminal_query_interval_s=1.0,
+        terminal_delivery_grace_s=0.2,
+    )
+    action_client.configure_reconciliation_client(read_client)
+    watcher_errors: list[Exception] = []
+
+    def body_watch() -> None:
+        assert read_server.cancel_seen.wait(timeout=1.0)
+        try:
+            read_client.request_response(lambda protocol: protocol.body_state("Bot"))
+        except Exception as exc:
+            watcher_errors.append(exc)
+
+    watcher = threading.Thread(target=body_watch)
+    watcher.start()
+    result = action_client.navigate({"kind": "xz", "x": 99, "z": 0})
+    watcher.join(timeout=2.0)
+
+    assert result.reason == "cancel_requested"
+    assert watcher_errors == []
+    assert not watcher.is_alive()
+    assert read_server.max_active_recvs == 1
+
+
 def test_closed_read_transport_is_discarded_and_next_event_resume_reconnects() -> None:
     class CloseOnResumeServer(FakeBodyServer):
         def send(self, text: str) -> None:

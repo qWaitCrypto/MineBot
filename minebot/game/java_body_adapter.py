@@ -598,56 +598,60 @@ class JavaBodyClient:
         """Settle a wall-expired action through the existing control/read lane."""
 
         control = self._reconciliation_client
-        try:
-            reply = control.request_response(
-                lambda protocol: protocol.cancel_action(action_id)
-            )
-        except TransportClosed:
-            raise self._deadline_timeout_error(
-                action_id,
-                kind,
-                deadline_delivery,
-                cancel_state="transport_closed",
-            )
-        if isinstance(reply, ErrorResponse):
-            raise self._deadline_timeout_error(
-                action_id,
-                kind,
-                deadline_delivery,
-                cancel_state=reply.code,
-            )
-        state = str(reply.payload.get("state") or "unknown")
-        terminal = reply.payload.get("terminal")
-        if state == "terminal" and isinstance(terminal, dict):
-            return self._deadline_cancel_terminal(
-                action_id,
-                kind,
-                terminals,
-                terminal,
-                started=started,
-                query_count=0,
-            )
-        if state != "cancel_requested":
-            raise self._deadline_timeout_error(
-                action_id,
-                kind,
-                deadline_delivery,
-                cancel_state=state,
-            )
-        try:
-            terminal, delivery = control._await_terminal(
-                action_id,
-                timeout_s=self._terminal_delivery_grace,
-                started=started,
-                query_immediately=True,
-            )
-        except TransportClosed:
-            raise self._deadline_timeout_error(
-                action_id,
-                kind,
-                deadline_delivery,
-                cancel_state="query_transport_closed",
-            )
+        # Cancellation and terminal reconciliation are one read-lane exchange.
+        # Keeping the lane lock across both prevents a BODY_STATE watcher from
+        # concurrently receiving the QUERY_ACTION response on the same socket.
+        with control._exchange_lock:
+            try:
+                reply = control.request_response(
+                    lambda protocol: protocol.cancel_action(action_id)
+                )
+            except TransportClosed:
+                raise self._deadline_timeout_error(
+                    action_id,
+                    kind,
+                    deadline_delivery,
+                    cancel_state="transport_closed",
+                )
+            if isinstance(reply, ErrorResponse):
+                raise self._deadline_timeout_error(
+                    action_id,
+                    kind,
+                    deadline_delivery,
+                    cancel_state=reply.code,
+                )
+            state = str(reply.payload.get("state") or "unknown")
+            terminal = reply.payload.get("terminal")
+            if state == "terminal" and isinstance(terminal, dict):
+                return self._deadline_cancel_terminal(
+                    action_id,
+                    kind,
+                    terminals,
+                    terminal,
+                    started=started,
+                    query_count=0,
+                )
+            if state != "cancel_requested":
+                raise self._deadline_timeout_error(
+                    action_id,
+                    kind,
+                    deadline_delivery,
+                    cancel_state=state,
+                )
+            try:
+                terminal, delivery = control._await_terminal(
+                    action_id,
+                    timeout_s=self._terminal_delivery_grace,
+                    started=started,
+                    query_immediately=True,
+                )
+            except TransportClosed:
+                raise self._deadline_timeout_error(
+                    action_id,
+                    kind,
+                    deadline_delivery,
+                    cancel_state="query_transport_closed",
+                )
         if terminal is None:
             raise self._deadline_timeout_error(
                 action_id,
