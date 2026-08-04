@@ -90,6 +90,7 @@ class ToolSidecar:
     terminal_truth: tuple[str, ...] = ()
     timeout_s: float | None = None
     body_mutating: bool | None = None
+    model_visible: bool = True
 
     @property
     def can_mutate_body(self) -> bool:
@@ -177,7 +178,11 @@ class ToolRegistry:
     def framework_tools(self) -> list[JsonObject]:
         """name/description/input_schema only — what the runner turns into
         SDK function tools."""
-        return [tool.framework_view() for tool in self._tools.values()]
+        return [self._tools[name].framework_view() for name in self.model_names()]
+
+    def model_names(self) -> list[str]:
+        """Tools exposed to the model; internal composition leaves stay registered."""
+        return [name for name, tool in self._tools.items() if tool.sidecar.model_visible]
 
     def names(self) -> list[str]:
         return list(self._tools)

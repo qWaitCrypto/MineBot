@@ -201,7 +201,7 @@ class SkillWorkspace:
         self.store.end_terminal_task_skill_activations(self.scope)
 
     def bind_registry(self, registry: ToolRegistry) -> None:
-        names = frozenset(registry.names())
+        names = frozenset(registry.model_names())
         self.catalog.validate_dependencies(names)
         self._registered_tools = names
         self.catalog_snapshot()

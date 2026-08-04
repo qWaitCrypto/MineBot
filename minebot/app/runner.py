@@ -1225,7 +1225,7 @@ class AgentRuntime:
         )
         self.agent = Agent[RuntimeRunContext](
             name=agent_name,
-            tools=[sdk_tool_for(self.registry.get(name)) for name in self.registry.names()],
+            tools=[sdk_tool_for(self.registry.get(name)) for name in self.registry.model_names()],
             instructions=self._instructions,
             model="primary",
         )

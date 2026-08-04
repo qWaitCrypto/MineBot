@@ -174,7 +174,9 @@ def build_phase1_agent_runtime(
         config.skill_workspace.sync_context(parts.context)
         parts.runtime.add_context_refresher(config.skill_workspace.sync_context)
     parts.runtime.registry = registry
-    parts.runtime.agent = parts.runtime.agent.clone(tools=[sdk_tool_for(registry.get(name)) for name in registry.names()])
+    parts.runtime.agent = parts.runtime.agent.clone(
+        tools=[sdk_tool_for(registry.get(name)) for name in registry.model_names()]
+    )
     parts.runtime.trace.emit("tool_manifest", tools=tool_manifest(registry))
     return replace(parts, skill_workspace=config.skill_workspace)
 
@@ -705,6 +707,7 @@ def tool_manifest(registry: ToolRegistry) -> list[dict[str, object]]:
                 "body_mutating": sidecar.can_mutate_body,
                 "body_scope": list(sidecar.body_scope),
                 "terminal_truth": list(sidecar.terminal_truth),
+                "model_visible": sidecar.model_visible,
                 "intent": binding.intent if binding is not None else None,
                 "implementation": binding.implementation if binding is not None else None,
             }

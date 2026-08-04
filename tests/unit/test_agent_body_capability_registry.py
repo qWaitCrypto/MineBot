@@ -261,6 +261,36 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate canonical intent"):
             registry.register(second, intent="body:move", implementation="second")
 
+    def test_registry_keeps_internal_tools_callable_but_out_of_model_view(self):
+        registry = ToolRegistry()
+        visible = RegisteredTool(
+            "visible_tool",
+            "visible",
+            {"type": "object", "properties": {}},
+            lambda _params: ToolResult(True, "visible", False),
+            ToolSidecar("visible_tool", mutating=False),
+        )
+        internal = RegisteredTool(
+            "internal_leaf",
+            "internal",
+            {"type": "object", "properties": {}},
+            lambda _params: ToolResult(True, "internal", False),
+            ToolSidecar("internal_leaf", mutating=False, model_visible=False),
+        )
+        registry.register(visible)
+        registry.register(internal)
+
+        self.assertEqual(registry.names(), ["visible_tool", "internal_leaf"])
+        self.assertEqual(registry.model_names(), ["visible_tool"])
+        self.assertEqual(
+            [tool["name"] for tool in registry.framework_tools()],
+            ["visible_tool"],
+        )
+        self.assertEqual(registry.get("internal_leaf").callable({}).reason, "internal")
+        manifest = {row["name"]: row for row in tool_manifest(registry)}
+        self.assertTrue(manifest["visible_tool"]["model_visible"])
+        self.assertFalse(manifest["internal_leaf"]["model_visible"])
+
     def test_every_public_body_transaction_has_an_explicit_closure_disposition(self):
         public_transactions = {
             f"{cls.__name__}.{name}"
