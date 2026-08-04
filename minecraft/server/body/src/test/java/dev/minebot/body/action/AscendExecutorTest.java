@@ -208,6 +208,10 @@ final class AscendExecutorTest {
         }
 
         static Harness create(World world, FakeBody body, int timeout) {
+            return create(world, body, timeout, Integer.MAX_VALUE);
+        }
+
+        static Harness create(World world, FakeBody body, int timeout, int maxMutations) {
             ActionRegistry registry = new ActionRegistry();
             BotEventStream events = new BotEventStream();
             MutationGate gate = new MutationGate();
@@ -237,7 +241,25 @@ final class AscendExecutorTest {
                 proposals::add,
                 b -> new NavigateExecutor.PositionSource.Position(body.x, body.y, body.z),
                 (b, tick, name, aid, data) -> events.emit(b, tick, name, aid, data),
-                runtime, timeout
+                new AscendExecutor.Lifecycle() {
+                    @Override
+                    public boolean cancelRequested(String actionId) {
+                        return runtime.cancelRequested(actionId);
+                    }
+
+                    @Override
+                    public void finish(
+                        String bot,
+                        String actionId,
+                        String classification,
+                        JsonObject facts,
+                        int serverTick
+                    ) {
+                        runtime.finish(bot, actionId, classification, facts, serverTick);
+                    }
+                },
+                timeout,
+                maxMutations
             );
             runtime.attachExecutor("asc-1", executor);
             return new Harness(runtime, registry, body, gate, world, proposals);
@@ -273,6 +295,26 @@ final class AscendExecutorTest {
             world.set(direction[0], 60, direction[1], AIR);
         }
         return world;
+    }
+
+    @Test
+    void embeddedAscentStopsBeforeExceedingItsSharedMutationBudget() {
+        World world = enclosedStart();
+        FakeBody body = new FakeBody(60.0);
+        Harness harness = Harness.create(world, body, 400, 0);
+
+        JsonObject terminal = harness.run(100, () -> {
+        });
+
+        assertEquals("failed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals(
+            "ascent_mutation_budget_exhausted",
+            terminal.get("reason").getAsString(),
+            terminal.toString()
+        );
+        assertEquals(0, terminal.get("mutations_completed").getAsInt());
+        assertTrue(harness.proposals.isEmpty(), "budget exhaustion must happen before governance or mutation");
+        assertTrue(body.breakTargets.isEmpty(), "budget exhaustion must happen before physical breaking");
     }
 
     private static World openPillarShaft(int topY) {

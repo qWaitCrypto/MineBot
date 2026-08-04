@@ -69,6 +69,19 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         void sneak(String bot);
     }
 
+    /** Lets ASCEND run either as a top-level action or inside another Body process. */
+    public interface Lifecycle {
+        boolean cancelRequested(String actionId);
+
+        void finish(
+            String bot,
+            String actionId,
+            String classification,
+            JsonObject facts,
+            int serverTick
+        );
+    }
+
     public record ScaffoldSelection(boolean success, String blockId, int count, String reason) {
     }
 
@@ -121,8 +134,9 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     private final CollectExecutor.ProposalSink proposals;
     private final NavigateExecutor.PositionSource positions;
     private final NavigateExecutor.EventSink events;
-    private final ActionRuntime runtime;
+    private final Lifecycle lifecycle;
     private final int timeoutTicks;
+    private final int maxMutations;
 
     private Phase phase = Phase.EVALUATE;
     private AscentMode mode = AscentMode.STAIR;
@@ -196,6 +210,60 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         ActionRuntime runtime,
         int timeoutTicks
     ) {
+        this(
+            bot,
+            actionId,
+            blockBreaker,
+            movement,
+            hygiene,
+            pillar,
+            blocks,
+            surface,
+            hazards,
+            gate,
+            proposals,
+            positions,
+            events,
+            new Lifecycle() {
+                @Override
+                public boolean cancelRequested(String nestedActionId) {
+                    return runtime.cancelRequested(nestedActionId);
+                }
+
+                @Override
+                public void finish(
+                    String nestedBot,
+                    String nestedActionId,
+                    String classification,
+                    JsonObject facts,
+                    int serverTick
+                ) {
+                    runtime.finish(nestedBot, nestedActionId, classification, facts, serverTick);
+                }
+            },
+            timeoutTicks,
+            Integer.MAX_VALUE
+        );
+    }
+
+    public AscendExecutor(
+        String bot,
+        String actionId,
+        ExactBlockBreaker blockBreaker,
+        MovementControls movement,
+        BotControls hygiene,
+        PillarAccess pillar,
+        BlockReader blocks,
+        SurfaceAccess surface,
+        HazardPolicy hazards,
+        MutationGate gate,
+        CollectExecutor.ProposalSink proposals,
+        NavigateExecutor.PositionSource positions,
+        NavigateExecutor.EventSink events,
+        Lifecycle lifecycle,
+        int timeoutTicks,
+        int maxMutations
+    ) {
         this.bot = bot;
         this.actionId = actionId;
         this.blockBreaker = blockBreaker;
@@ -209,20 +277,21 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         this.proposals = proposals;
         this.positions = positions;
         this.events = events;
-        this.runtime = runtime;
+        this.lifecycle = lifecycle;
         this.timeoutTicks = timeoutTicks;
+        this.maxMutations = Math.max(0, maxMutations);
     }
 
     @Override
     public void tick(int serverTick) {
         elapsedTicks++;
-        if (runtime.cancelRequested(actionId)
+        if (lifecycle.cancelRequested(actionId)
             && phase != Phase.PILLAR_JUMPING
             && phase != Phase.PILLAR_SETTLING) {
             finish(serverTick, ActionRuntime.CLASS_CANCELED, "cancel_requested");
             return;
         }
-        if (runtime.cancelRequested(actionId)) {
+        if (lifecycle.cancelRequested(actionId)) {
             cancelPending = true;
         }
         if (elapsedTicks > timeoutTicks) {
@@ -399,6 +468,10 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                 } else {
                     stageAfterDeniedPillarClearance(serverTick);
                 }
+                return;
+            }
+            if (verifiedMutationCount() >= maxMutations) {
+                finish(serverTick, ActionRuntime.CLASS_FAILED, "ascent_mutation_budget_exhausted");
                 return;
             }
             MutationGate.Proposal proposal = gate.propose(
@@ -1045,6 +1118,10 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     }
 
     private void proposePillarPlacement(int serverTick) {
+        if (verifiedMutationCount() >= maxMutations) {
+            finish(serverTick, ActionRuntime.CLASS_FAILED, "ascent_mutation_budget_exhausted");
+            return;
+        }
         String invalid = pillarPrecondition();
         if (invalid != null) {
             finish(serverTick, ActionRuntime.CLASS_FAILED, invalid);
@@ -1263,6 +1340,8 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         facts.addProperty("ascend_steps", ascendSteps);
         facts.addProperty("break_steps", breakSteps);
         facts.addProperty("pillar_steps", pillarSteps);
+        facts.addProperty("mutations_completed", verifiedMutationCount());
+        facts.addProperty("max_mutations", maxMutations);
         facts.addProperty("pillar_continuation_preflight_count", pillarContinuationPreflightCount);
         facts.addProperty("pillar_continuation_preflight_allowed", pillarContinuationPreflightAllowed);
         facts.addProperty("elapsed_ticks", elapsedTicks);
@@ -1294,6 +1373,10 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         }
         facts.add("broken", brokenLedger.deepCopy());
         facts.add("placed", placedLedger.deepCopy());
-        runtime.finish(bot, actionId, classification, facts, serverTick);
+        lifecycle.finish(bot, actionId, classification, facts, serverTick);
+    }
+
+    private int verifiedMutationCount() {
+        return breakSteps + pillarSteps;
     }
 }
