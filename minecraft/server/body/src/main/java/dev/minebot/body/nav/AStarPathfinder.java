@@ -48,6 +48,7 @@ public final class AStarPathfinder {
     private final int totalNodeCap;
     private final int unloadedTouchCap;
     private final boolean directReturnRequired;
+    private final boolean allowGoalStaging;
 
     private final PriorityQueue<Open> open = new PriorityQueue<>((a, b) -> Double.compare(a.f, b.f));
     private final Map<Long, Double> gScore = new HashMap<>();
@@ -68,6 +69,7 @@ public final class AStarPathfinder {
             startZ,
             DEFAULT_TOTAL_NODE_CAP,
             DEFAULT_UNLOADED_TOUCH_CAP,
+            false,
             false
         );
     }
@@ -88,7 +90,31 @@ public final class AStarPathfinder {
             startZ,
             DEFAULT_TOTAL_NODE_CAP,
             DEFAULT_UNLOADED_TOUCH_CAP,
-            directReturnRequired
+            directReturnRequired,
+            false
+        );
+    }
+
+    /** Allow a safe best-so-far segment only when a bounded search is interrupted. */
+    public AStarPathfinder(
+        WorldView world,
+        Goal goal,
+        int startX,
+        int startY,
+        int startZ,
+        boolean directReturnRequired,
+        boolean allowGoalStaging
+    ) {
+        this(
+            world,
+            goal,
+            startX,
+            startY,
+            startZ,
+            DEFAULT_TOTAL_NODE_CAP,
+            DEFAULT_UNLOADED_TOUCH_CAP,
+            directReturnRequired,
+            allowGoalStaging
         );
     }
 
@@ -101,7 +127,7 @@ public final class AStarPathfinder {
         int totalNodeCap,
         int unloadedTouchCap
     ) {
-        this(world, goal, startX, startY, startZ, totalNodeCap, unloadedTouchCap, false);
+        this(world, goal, startX, startY, startZ, totalNodeCap, unloadedTouchCap, false, false);
     }
 
     public AStarPathfinder(
@@ -114,6 +140,30 @@ public final class AStarPathfinder {
         int unloadedTouchCap,
         boolean directReturnRequired
     ) {
+        this(
+            world,
+            goal,
+            startX,
+            startY,
+            startZ,
+            totalNodeCap,
+            unloadedTouchCap,
+            directReturnRequired,
+            false
+        );
+    }
+
+    public AStarPathfinder(
+        WorldView world,
+        Goal goal,
+        int startX,
+        int startY,
+        int startZ,
+        int totalNodeCap,
+        int unloadedTouchCap,
+        boolean directReturnRequired,
+        boolean allowGoalStaging
+    ) {
         this.world = world;
         this.moves = new MoveGenerator(world);
         this.goal = goal;
@@ -123,6 +173,7 @@ public final class AStarPathfinder {
         this.totalNodeCap = totalNodeCap;
         this.unloadedTouchCap = unloadedTouchCap;
         this.directReturnRequired = directReturnRequired;
+        this.allowGoalStaging = allowGoalStaging;
         long startKey = pack(startX, startY, startZ);
         gScore.put(startKey, 0.0);
         open.add(new Open(startKey, goal.heuristic(startX, startY, startZ), 0.0));
@@ -200,7 +251,9 @@ public final class AStarPathfinder {
 
     /** Budget/boundary stop: usable partial progress or an honest no-path. */
     private Result boundedOutcome(String reason) {
-        if ("node_budget".equals(reason) && !goal.allowsNodeBudgetPartial()) {
+        if ("node_budget".equals(reason)
+            && !goal.allowsNodeBudgetPartial()
+            && !allowGoalStaging) {
             return new Result(
                 Outcome.NO_PATH,
                 List.of(),
@@ -209,6 +262,10 @@ public final class AStarPathfinder {
                 unloadedTouches
             );
         }
+        return partialOrNoPath(reason);
+    }
+
+    private Result partialOrNoPath(String reason) {
         if (!hasBestSoFar) {
             return new Result(
                 Outcome.NO_PATH,

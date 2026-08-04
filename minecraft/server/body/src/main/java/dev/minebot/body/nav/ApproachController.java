@@ -42,6 +42,7 @@ public final class ApproachController {
     private final int replanLimit;
     private final double finalWaypointReachDistance;
     private final boolean directReturnRequired;
+    private final boolean allowGoalStaging;
 
     private Phase phase = Phase.PLANNING;
     private AStarPathfinder pathfinder;
@@ -74,6 +75,7 @@ public final class ApproachController {
             events,
             replanLimit,
             PathFollower.WAYPOINT_REACH_DISTANCE,
+            false,
             false
         );
     }
@@ -97,7 +99,33 @@ public final class ApproachController {
             events,
             replanLimit,
             PathFollower.WAYPOINT_REACH_DISTANCE,
-            directReturnRequired
+            directReturnRequired,
+            false
+        );
+    }
+
+    public ApproachController(
+        String bot,
+        String actionId,
+        Goal goal,
+        WorldView world,
+        MovementControls controls,
+        NavigateExecutor.EventSink events,
+        int replanLimit,
+        boolean directReturnRequired,
+        boolean allowGoalStaging
+    ) {
+        this(
+            bot,
+            actionId,
+            goal,
+            world,
+            controls,
+            events,
+            replanLimit,
+            PathFollower.WAYPOINT_REACH_DISTANCE,
+            directReturnRequired,
+            allowGoalStaging
         );
     }
 
@@ -120,6 +148,7 @@ public final class ApproachController {
             events,
             replanLimit,
             finalWaypointReachDistance,
+            false,
             false
         );
     }
@@ -135,6 +164,32 @@ public final class ApproachController {
         double finalWaypointReachDistance,
         boolean directReturnRequired
     ) {
+        this(
+            bot,
+            actionId,
+            goal,
+            world,
+            controls,
+            events,
+            replanLimit,
+            finalWaypointReachDistance,
+            directReturnRequired,
+            false
+        );
+    }
+
+    public ApproachController(
+        String bot,
+        String actionId,
+        Goal goal,
+        WorldView world,
+        MovementControls controls,
+        NavigateExecutor.EventSink events,
+        int replanLimit,
+        double finalWaypointReachDistance,
+        boolean directReturnRequired,
+        boolean allowGoalStaging
+    ) {
         this.bot = bot;
         this.actionId = actionId;
         this.goal = goal;
@@ -147,6 +202,7 @@ public final class ApproachController {
             goal.finalReachDistanceLimit()
         );
         this.directReturnRequired = directReturnRequired;
+        this.allowGoalStaging = allowGoalStaging;
     }
 
     public int replans() {
@@ -190,7 +246,8 @@ public final class ApproachController {
                 (int) Math.floor(px),
                 NavigateExecutor.PositionSource.Position.feetBlockY(py),
                 (int) Math.floor(pz),
-                directReturnRequired
+                directReturnRequired,
+                allowGoalStaging
             );
         }
         AStarPathfinder.Result result = pathfinder.step(NavigateExecutor.NODES_PER_TICK);

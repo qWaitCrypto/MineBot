@@ -355,6 +355,62 @@ final class AStarPathfinderTest {
     }
 
     @Test
+    void processOwnedInteractGoalCanYieldAReturnSafeStagingSegment() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        Goal goal = new Goal.Interact(4_000, STAND + 1, 0, 4.5);
+        AStarPathfinder pathfinder = new AStarPathfinder(
+            world,
+            goal,
+            0,
+            STAND,
+            0,
+            3_000,
+            AStarPathfinder.DEFAULT_UNLOADED_TOUCH_CAP,
+            true,
+            true
+        );
+        Result result;
+        do {
+            result = pathfinder.step(1_000);
+        } while (result.outcome() == Outcome.IN_PROGRESS);
+
+        assertEquals(Outcome.PARTIAL, result.outcome());
+        assertEquals("node_budget", result.reason());
+        Waypoint last = result.path().getLast();
+        assertTrue(last.x() >= AStarPathfinder.MIN_PARTIAL_PROGRESS_BLOCKS);
+        assertFalse(goal.isSatisfied(world, last.x(), last.y(), last.z()));
+    }
+
+    @Test
+    void exhaustedGoalStagingReturnsNoPathWithoutMovement() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int x = -10; x <= 10; x++) {
+            for (int z = -10; z <= 10; z++) {
+                if (x == -10 || x == 10 || z == -10 || z == 10) {
+                    world.wall(x, z, STAND + 3);
+                }
+            }
+        }
+        AStarPathfinder pathfinder = new AStarPathfinder(
+            world,
+            new Goal.Interact(20, STAND + 1, 0, 4.5),
+            0,
+            STAND,
+            0,
+            true,
+            true
+        );
+        Result result;
+        do {
+            result = pathfinder.step(1_000);
+        } while (result.outcome() == Outcome.IN_PROGRESS);
+
+        assertEquals(Outcome.NO_PATH, result.outcome());
+        assertEquals("no_path", result.reason());
+        assertTrue(result.path().isEmpty(), "exhausted search must not create staging movement");
+    }
+
+    @Test
     void compositeGoalPicksTheReachableMember() {
         FakeWorld world = new FakeWorld(FLOOR);
         // Box in the near member entirely.
