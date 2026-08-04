@@ -961,7 +961,8 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         targetCount,
                         candidateBudget,
                         mutationBudget,
-                        candidateSource
+                        candidateSource,
+                        (nestedBot, blockId) -> selectBreakTool(player, nestedBot, blockId)
                     );
                     runtime.attachExecutor(actionId, executor);
                     response.addProperty("state", "accepted");
@@ -1000,6 +1001,71 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             search.coverageComplete(),
             search.unloadedChunkCount(),
             search.resultCapped()
+        );
+    }
+
+    private CollectExecutor.BreakToolSelection selectBreakTool(
+        ServerPlayer player,
+        String botName,
+        String blockId
+    ) {
+        Identifier identifier = Identifier.tryParse(blockId);
+        Block block = identifier == null
+            ? null
+            : BuiltInRegistries.BLOCK.getOptional(identifier).orElse(null);
+        if (block == null) {
+            return new CollectExecutor.BreakToolSelection(
+                false, false, null, "unknown_block"
+            );
+        }
+        var state = block.defaultBlockState();
+        int inventoryEnd = Math.min(
+            PlayerPrimitiveActions.CARRY_END_EXCLUSIVE,
+            player.getInventory().getContainerSize()
+        );
+        int bestSlot = -1;
+        boolean bestCorrect = false;
+        float bestSpeed = 1.0F;
+        for (int slot = 0; slot < inventoryEnd; slot++) {
+            ItemStack stack = player.getInventory().getItem(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            boolean correct = stack.isCorrectToolForDrops(state);
+            float speed = stack.getDestroySpeed(state);
+            if (bestSlot < 0
+                || (correct && !bestCorrect)
+                || (correct == bestCorrect && speed > bestSpeed)) {
+                bestSlot = slot;
+                bestCorrect = correct;
+                bestSpeed = speed;
+            }
+        }
+        if (bestSlot < 0) {
+            return new CollectExecutor.BreakToolSelection(
+                true,
+                ItemStack.EMPTY.isCorrectToolForDrops(state),
+                null,
+                "empty_hand"
+            );
+        }
+        String itemId = BuiltInRegistries.ITEM.getKey(
+            player.getInventory().getItem(bestSlot).getItem()
+        ).toString();
+        PlayerPrimitiveActions.Outcome selected = PlayerPrimitiveActions.selectItem(
+            botName,
+            itemId,
+            playerAccess(player),
+            adapter
+        );
+        ItemStack held = player.getMainHandItem();
+        return new CollectExecutor.BreakToolSelection(
+            selected.success(),
+            selected.success() && held.isCorrectToolForDrops(state),
+            selected.success() && !held.isEmpty()
+                ? BuiltInRegistries.ITEM.getKey(held.getItem()).toString()
+                : null,
+            selected.reason()
         );
     }
 

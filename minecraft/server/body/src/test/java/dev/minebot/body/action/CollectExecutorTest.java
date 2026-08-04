@@ -177,6 +177,30 @@ final class CollectExecutorTest {
             int mutationBudget,
             CollectExecutor.CandidateSource candidateSource
         ) {
+            return build(
+                world,
+                candidates,
+                expectedItemIds,
+                timeoutTicks,
+                targetCount,
+                candidateBudget,
+                mutationBudget,
+                candidateSource,
+                null
+            );
+        }
+
+        CollectExecutor build(
+            WorldView world,
+            List<CollectExecutor.Candidate> candidates,
+            List<String> expectedItemIds,
+            int timeoutTicks,
+            int targetCount,
+            int candidateBudget,
+            int mutationBudget,
+            CollectExecutor.CandidateSource candidateSource,
+            CollectExecutor.BreakToolSelector breakToolSelector
+        ) {
             runtime.submit("Bot", "collect-1", "COLLECT_BLOCK", OwnerPriority.ACTION, 0);
             JsonObject searchFacts = new JsonObject();
             searchFacts.addProperty("matches", candidates.size());
@@ -207,7 +231,8 @@ final class CollectExecutorTest {
                 targetCount,
                 candidateBudget,
                 mutationBudget,
-                candidateSource
+                candidateSource,
+                breakToolSelector
             );
             runtime.attachExecutor("collect-1", executor);
             return executor;
@@ -323,6 +348,53 @@ final class CollectExecutorTest {
             insidePlayerTouchVolume(harness.body, dropX, STAND, dropZ),
             "pickup must physically reach the drop, x=" + harness.body.x
         );
+    }
+
+    @Test
+    void reselectsBreakToolAfterApproachBeforeTargetBreak() {
+        int oreX = 5;
+        Harness harness = new Harness();
+        harness.blockStates.put(Harness.key(oreX, STAND, 0), IRON_ORE);
+        FakeWorld world = worldWithTrunk(oreX);
+        boolean[] toolReady = {false};
+        int[] selections = {0};
+        CollectExecutor.BreakToolSelector selector = (bot, blockId) -> {
+            selections[0]++;
+            toolReady[0] = true;
+            return new CollectExecutor.BreakToolSelection(
+                true,
+                true,
+                "minecraft:stone_pickaxe",
+                "completed"
+            );
+        };
+        harness.build(
+            world,
+            List.of(new CollectExecutor.Candidate(oreX, STAND, 0, IRON_ORE)),
+            List.of(RAW_IRON),
+            2_400,
+            1,
+            8,
+            8,
+            null,
+            selector
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(2_000, () -> {
+            for (MutationGate.Proposal proposal : harness.proposals) {
+                harness.gate.verdict(proposal.proposalId(), true, "natural_terrain");
+            }
+            if (harness.body.attacking) {
+                assertTrue(toolReady[0], "the break must not start before tool re-selection");
+                harness.blockStates.put(Harness.key(oreX, STAND, 0), "minecraft:air");
+                world.set(oreX, STAND, 0, WorldView.NodeKind.PASSABLE);
+                harness.itemCounts.put(RAW_IRON, 1);
+            }
+        });
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals(1, selections[0]);
+        assertTrue(toolReady[0]);
     }
 
     @Test

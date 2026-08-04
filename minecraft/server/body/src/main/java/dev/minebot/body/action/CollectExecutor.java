@@ -74,6 +74,19 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         void send(MutationGate.Proposal proposal);
     }
 
+    /** Establishes the held-tool precondition immediately before a break. */
+    public interface BreakToolSelector {
+        BreakToolSelection select(String bot, String blockId);
+    }
+
+    public record BreakToolSelection(
+        boolean success,
+        boolean correctForDrops,
+        String itemId,
+        String reason
+    ) {
+    }
+
     /** Re-reads the authoritative loaded-world candidate domain during one objective. */
     public interface CandidateSource {
         CandidateScan scan(int x, int y, int z, int serverTick);
@@ -144,6 +157,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
     private final WorldView world;
     private final MovementControls movement;
     private final ExactBlockBreaker blockBreaker;
+    private final BreakToolSelector breakToolSelector;
     private final BotControls hygiene;
     private final BlockReader blocks;
     private final InventoryReader inventory;
@@ -309,6 +323,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             targetCount,
             maxCandidateAttempts,
             maxTargetMutations,
+            null,
             null
         );
     }
@@ -337,6 +352,58 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         int maxTargetMutations,
         CandidateSource candidateSource
     ) {
+        this(
+            bot,
+            actionId,
+            candidates,
+            expectedItemIds,
+            searchFacts,
+            world,
+            movement,
+            blockBreaker,
+            hygiene,
+            blocks,
+            inventory,
+            drops,
+            gate,
+            proposals,
+            positions,
+            events,
+            runtime,
+            timeoutTicks,
+            targetCount,
+            maxCandidateAttempts,
+            maxTargetMutations,
+            candidateSource,
+            null
+        );
+    }
+
+    public CollectExecutor(
+        String bot,
+        String actionId,
+        List<Candidate> candidates,
+        List<String> expectedItemIds,
+        JsonObject searchFacts,
+        WorldView world,
+        MovementControls movement,
+        ExactBlockBreaker blockBreaker,
+        BotControls hygiene,
+        BlockReader blocks,
+        InventoryReader inventory,
+        DropReader drops,
+        MutationGate gate,
+        ProposalSink proposals,
+        NavigateExecutor.PositionSource positions,
+        NavigateExecutor.EventSink events,
+        ActionRuntime runtime,
+        int timeoutTicks,
+        int targetCount,
+        int maxCandidateAttempts,
+        int maxTargetMutations,
+        CandidateSource candidateSource,
+        BreakToolSelector breakToolSelector
+    ) {
         this.bot = bot;
         this.actionId = actionId;
         for (Candidate candidate : candidates) {
@@ -360,6 +427,7 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         this.world = world;
         this.movement = movement;
         this.blockBreaker = blockBreaker;
+        this.breakToolSelector = breakToolSelector;
         this.hygiene = hygiene;
         this.blocks = blocks;
         this.inventory = inventory;
@@ -1086,6 +1154,19 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             excavationBlock.y() + 0.5,
             excavationBlock.z() + 0.5
         );
+        BreakToolSelection tool = selectBreakTool(
+            serverTick,
+            excavationBlockId,
+            "excavation"
+        );
+        if (!tool.success()) {
+            failOrReplanExcavation(
+                serverTick,
+                position,
+                "break_tool_selection_failed:" + tool.reason()
+            );
+            return;
+        }
         ExactBlockBreaker.Outcome outcome = blockBreaker.begin(
             bot,
             excavationBlock.x(),
@@ -1299,6 +1380,26 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
                 emitVerdict(serverTick, "mutation_allowed", gate.reason(proposalId));
                 gate.discard(proposalId);
                 movement.lookAt(bot, current.x() + 0.5, current.y() + 0.5, current.z() + 0.5);
+                BreakToolSelection tool = selectBreakTool(
+                    serverTick,
+                    current.blockId(),
+                    "target"
+                );
+                if (!tool.success() || !tool.correctForDrops()) {
+                    String blocker = !tool.success()
+                        ? "break_tool_selection_failed:" + tool.reason()
+                        : "correct_break_tool_unavailable:" + current.blockId();
+                    recordAttemptFailure(blocker, current.blockId());
+                    JsonObject facts = new JsonObject();
+                    facts.addProperty("blocker", blocker);
+                    finishWithFacts(
+                        serverTick,
+                        ActionRuntime.CLASS_FAILED,
+                        "unreachable_in_current_capabilities",
+                        facts
+                    );
+                    return;
+                }
                 ExactBlockBreaker.Outcome outcome = blockBreaker.begin(
                     bot, current.x(), current.y(), current.z(), current.blockId(), serverTick
                 );
@@ -1368,6 +1469,28 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
             recordAttemptFailure("break_timeout", null);
             phase = Phase.NEXT_CANDIDATE;
         }
+    }
+
+    private BreakToolSelection selectBreakTool(
+        int serverTick,
+        String blockId,
+        String purpose
+    ) {
+        if (breakToolSelector == null) {
+            return new BreakToolSelection(true, true, null, "caller_precondition");
+        }
+        BreakToolSelection selection = breakToolSelector.select(bot, blockId);
+        JsonObject data = new JsonObject();
+        data.addProperty("purpose", purpose);
+        data.addProperty("block_id", blockId);
+        data.addProperty("success", selection.success());
+        data.addProperty("correct_for_drops", selection.correctForDrops());
+        if (selection.itemId() != null) {
+            data.addProperty("item_id", selection.itemId());
+        }
+        data.addProperty("reason", selection.reason());
+        events.emit(bot, serverTick, "collect_break_tool_selected", actionId, data);
+        return selection;
     }
 
     private void pickupLocateTick(
