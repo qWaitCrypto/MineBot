@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from uuid import UUID
 
 
 PROTOCOL = "fakeplayer-body/1"
@@ -147,6 +148,18 @@ class JavaBodyProtocol:
         timeout_ticks: int | None = None,
         final_reach_distance: float | None = None,
         survival_recovery: bool = False,
+        grid_radius: int | None = None,
+        max_expand: int | None = None,
+        allow_diagonal: bool | None = None,
+        allow_ascend: bool | None = None,
+        allow_descend: bool | None = None,
+        allow_swim: bool | None = None,
+        max_fall_depth: int | None = None,
+        max_water_drop_depth: int | None = None,
+        allow_break: bool = False,
+        break_budget: int | None = None,
+        break_context: str | None = None,
+        denied_mutations: list[list[int]] | None = None,
     ) -> dict:
         self._require_capability("NAVIGATE")
         body: dict = {"bot_name": bot_name, "action_id": action_id, "goal": dict(goal)}
@@ -156,6 +169,28 @@ class JavaBodyProtocol:
             body["final_reach_distance"] = final_reach_distance
         if survival_recovery:
             body["survival_recovery"] = True
+        for name, value in (
+            ("grid_radius", grid_radius),
+            ("max_expand", max_expand),
+            ("allow_diagonal", allow_diagonal),
+            ("allow_ascend", allow_ascend),
+            ("allow_descend", allow_descend),
+            ("allow_swim", allow_swim),
+            ("max_fall_depth", max_fall_depth),
+            ("max_water_drop_depth", max_water_drop_depth),
+        ):
+            if value is not None:
+                body[name] = value
+        if allow_break:
+            if break_budget is None or break_budget <= 0:
+                raise ValueError("governed NAVIGATE requires a positive break_budget")
+            if not break_context:
+                raise ValueError("governed NAVIGATE requires break_context")
+            body["allow_break"] = True
+            body["break_budget"] = break_budget
+            body["break_context"] = break_context
+            if denied_mutations:
+                body["denied_mutations"] = [list(pos) for pos in denied_mutations]
         return self._request("NAVIGATE", body)
 
     def follow_entity(
@@ -165,10 +200,14 @@ class JavaBodyProtocol:
         params: dict,
     ) -> dict:
         self._require_capability("FOLLOW_ENTITY")
+        normalized = dict(params)
+        if "target_spec" in normalized:
+            raise ValueError("FOLLOW_ENTITY no longer accepts target_spec")
+        normalized["target_uuid"] = _canonical_target_uuid(normalized.get("target_uuid"), "FOLLOW_ENTITY")
         return self._request(
             "FOLLOW_ENTITY",
             {
-                **dict(params),
+                **normalized,
                 "bot_name": bot_name,
                 "action_id": action_id,
             },
@@ -317,30 +356,23 @@ class JavaBodyProtocol:
         self,
         bot_name: str,
         action_id: str,
-        block_ids: list[str],
+        target: tuple[int, int, int],
         *,
-        expected_item_ids: list[str] | None = None,
-        radius: int | None = None,
-        vertical_radius: int | None = None,
-        target_count: int | None = None,
-        candidate_budget: int | None = None,
-        mutation_budget: int | None = None,
+        expected_block_id: str,
+        expected_item_ids: list[str],
+        excavation_budget: int = 0,
         timeout_ticks: int | None = None,
     ) -> dict:
         self._require_capability("COLLECT_BLOCK")
-        body: dict = {"bot_name": bot_name, "action_id": action_id, "block_ids": list(block_ids)}
-        if expected_item_ids is not None:
-            body["expected_item_ids"] = list(expected_item_ids)
-        if radius is not None:
-            body["radius"] = radius
-        if vertical_radius is not None:
-            body["vertical_radius"] = vertical_radius
-        if target_count is not None:
-            body["target_count"] = target_count
-        if candidate_budget is not None:
-            body["candidate_budget"] = candidate_budget
-        if mutation_budget is not None:
-            body["mutation_budget"] = mutation_budget
+        body: dict = {
+            "bot_name": bot_name,
+            "action_id": action_id,
+            "contract_version": 2,
+            "target": list(target),
+            "expected_block_id": expected_block_id,
+            "expected_item_ids": list(expected_item_ids),
+            "excavation_budget": excavation_budget,
+        }
         if timeout_ticks is not None:
             body["timeout_ticks"] = timeout_ticks
         return self._request("COLLECT_BLOCK", body)
@@ -374,10 +406,13 @@ class JavaBodyProtocol:
         bot_name: str,
         action_id: str,
         *,
+        max_mutations: int | None = None,
         timeout_ticks: int | None = None,
     ) -> dict:
         self._require_capability("ASCEND")
         body: dict = {"bot_name": bot_name, "action_id": action_id}
+        if max_mutations is not None:
+            body["max_mutations"] = max_mutations
         if timeout_ticks is not None:
             body["timeout_ticks"] = timeout_ticks
         return self._request("ASCEND", body)
@@ -389,10 +424,14 @@ class JavaBodyProtocol:
         params: dict,
     ) -> dict:
         self._require_capability("ENGAGE_ENTITY")
+        normalized = dict(params)
+        if "target_spec" in normalized:
+            raise ValueError("ENGAGE_ENTITY no longer accepts target_spec")
+        normalized["target_uuid"] = _canonical_target_uuid(normalized.get("target_uuid"), "ENGAGE_ENTITY")
         return self._request(
             "ENGAGE_ENTITY",
             {
-                **dict(params),
+                **normalized,
                 "bot_name": bot_name,
                 "action_id": action_id,
             },
@@ -709,6 +748,15 @@ class JavaBodyProtocol:
         }
         self._pending[request_id] = request_type
         return message
+
+
+def _canonical_target_uuid(value: object, request_type: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{request_type} requires target_uuid")
+    try:
+        return str(UUID(value))
+    except ValueError as error:
+        raise ValueError(f"{request_type} target_uuid must be canonical") from error
 
 
 def _validate_terminal_envelope(terminal: object) -> None:

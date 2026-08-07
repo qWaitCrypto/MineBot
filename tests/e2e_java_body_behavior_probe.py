@@ -9,6 +9,7 @@ recording any naturally occurring replans.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 import time
@@ -74,11 +75,23 @@ def main() -> int:
     artifact: dict = {"scope": "java_body_behavior_probe", "formal_gate": False, "bounded": True, "cases": {}}
     stamp = int(time.time())
 
-    # 1. Absent target: typed not_found with coverage facts, no wandering.
-    action = f"bx-notfound-{stamp}"
-    probe.request(probe.protocol.collect_block(BOT, action, ["minecraft:diamond_block"], radius=16, timeout_ticks=600))
+    # 1. A designated coordinate whose observed block does not match must
+    # terminate locally; COLLECT_BLOCK never searches for another target.
+    action = f"bx-mismatch-{stamp}"
+    start = bot_pos(rcon)
+    target = (math.floor(start[0]), math.floor(start[1]) + 2, math.floor(start[2]))
+    probe.request(probe.protocol.collect_block(
+        BOT,
+        action,
+        target,
+        expected_block_id="minecraft:diamond_block",
+        expected_item_ids=["minecraft:diamond_block"],
+        excavation_budget=0,
+        timeout_ticks=600,
+    ))
     terminal = probe.wait_terminal(action, 40)
-    artifact["cases"]["absent_target"] = {
+    artifact["cases"]["designated_target_mismatch"] = {
+        "target": list(target),
         "terminal": terminal,
         "events": probe.action_event_names(action),
     }

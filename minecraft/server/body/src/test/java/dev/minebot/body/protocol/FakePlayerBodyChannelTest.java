@@ -1,6 +1,10 @@
 package dev.minebot.body.protocol;
 
 import com.google.gson.JsonObject;
+import net.minecraft.SharedConstants;
+import net.minecraft.server.Bootstrap;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.Blocks;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -35,5 +39,25 @@ final class FakePlayerBodyChannelTest {
         JsonObject readOnly = new JsonObject();
         readOnly.addProperty("subscribe_events", false);
         assertEquals(false, FakePlayerBodyChannel.eventSubscriptionRequested(readOnly));
+    }
+
+    @Test
+    void dropToolCheckDistinguishesHandHarvestableBlocksFromToolRequiredBlocks() {
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+        assertEquals(
+            true,
+            FakePlayerBodyChannel.correctToolForDrops(
+                Blocks.OAK_LOG.defaultBlockState(),
+                ItemStack.EMPTY
+            )
+        );
+        assertEquals(
+            false,
+            FakePlayerBodyChannel.correctToolForDrops(
+                Blocks.STONE.defaultBlockState(),
+                ItemStack.EMPTY
+            )
+        );
     }
 }

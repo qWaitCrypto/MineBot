@@ -23,6 +23,10 @@ from minebot.game.java_body import JavaBody
 from minebot.game.java_body_protocol import ServerProposal
 
 
+HOSTILE_UUID = "11111111-1111-4111-8111-111111111111"
+GUIDE_UUID = "22222222-2222-4222-8222-222222222222"
+
+
 def _proposal(
     kind: str = "break",
     block_id: str = "minecraft:oak_log",
@@ -753,10 +757,21 @@ class FakeBodyServer:
     def _handle_collect(self, message: dict, rid: str) -> None:
         action = message["action_id"]
         self._collect_action = action
-        self._emit_response(rid, "COLLECT_BLOCK_ACK", {"action_id": action, "state": "accepted", "candidates": 1})
+        self._collect_request = dict(message)
+        target = list(message["target"])
+        block_id = str(message["expected_block_id"])
+        self._emit_response(rid, "COLLECT_BLOCK_ACK", {
+            "action_id": action,
+            "state": "accepted",
+            "contract_version": 2,
+            "target": target,
+            "excavation_budget": int(message.get("excavation_budget", 0)),
+        })
         self._emit_event("owner_acquired", action, {"type": "COLLECT_BLOCK", "priority": "ACTION"})
-        self._emit_event("candidate_selected", action, {"x": 5, "y": 64, "z": 5, "block_id": "minecraft:oak_log"})
-        self._emit_proposal(action, "mp-1", "minecraft:oak_log", 5, 64, 5)
+        self._emit_event("target_committed", action, {
+            "x": target[0], "y": target[1], "z": target[2], "block_id": block_id,
+        })
+        self._emit_proposal(action, "mp-1", block_id, *target)
 
     def _handle_dig_down(self, message: dict, rid: str) -> None:
         action = message["action_id"]
@@ -823,9 +838,9 @@ class FakeBodyServer:
             "classification": "completed",
             "reason": "killed",
             "success": True,
-            "target_spec": message.get("target_spec"),
+            "target_uuid": message.get("target_uuid"),
             "target_type": "minecraft:husk",
-            "target_id": "husk-uuid",
+            "target_id": message.get("target_uuid"),
             "target_name": "Husk",
             "target_health": 0.0,
             "target_initial_health": 20.0,
@@ -845,10 +860,10 @@ class FakeBodyServer:
             "classification": "completed",
             "reason": "arrived",
             "success": True,
-            "target_spec": message.get("target_spec"),
+            "target_uuid": message.get("target_uuid"),
             "target_type": "minecraft:player",
-            "target_id": "target-uuid",
-            "target_name": message.get("target_spec"),
+            "target_id": message.get("target_uuid"),
+            "target_name": "Guide",
             "keep_radius": message.get("keep_radius", 3.0),
             "final_distance": 2.5,
             "elapsed_ticks": message.get("timeout_ticks", 600),
@@ -1112,19 +1127,34 @@ class FakeBodyServer:
                 })
             return
         action = getattr(self, "_collect_action", "collect-1")
+        collect_request = getattr(self, "_collect_request", {})
+        target = list(collect_request.get("target", [5, 64, 5]))
+        block_id = str(collect_request.get("expected_block_id", "minecraft:oak_log"))
+        expected_items = list(collect_request.get("expected_item_ids") or [block_id])
+        item_id = str(expected_items[0])
         if allow:
             self._emit_event("mutation_allowed", action, {"proposal_id": "mp-1"})
-            self._emit_event("mutation_verified", action, {"block_id": "minecraft:oak_log", "now": "minecraft:air"})
+            self._emit_event("mutation_verified", action, {"block_id": block_id, "now": "minecraft:air"})
             self._emit_terminal(action, {
                 "classification": "completed", "reason": "collected",
-                "inventory_delta": {"item_id": "minecraft:oak_log", "before": 0, "after": 1},
-                "elapsed_ticks": 140, "candidates_tried": 1,
+                "inventory_delta": {"item_id": item_id, "before": 0, "after": 1},
+                "mined_block": {
+                    "x": target[0], "y": target[1], "z": target[2], "block_id": block_id,
+                },
+                "elapsed_ticks": 140,
+                "attempts_consumed": 1,
+                "budget_remaining": int(collect_request.get("excavation_budget", 0)),
+                "mutations_completed": 1,
             })
         else:
             self._emit_event("mutation_denied", action, {"proposal_id": "mp-1", "reason": "protected_region"})
             self._emit_terminal(action, {
-                "classification": "failed", "reason": "candidate_targets_exhausted",
-                "attempt_failures": [{"reason": "governance_denied:protected_region"}],
+                "classification": "failed",
+                "reason": "governance_denied",
+                "phase_reason": "protected_region",
+                "attempts_consumed": 1,
+                "budget_remaining": int(collect_request.get("excavation_budget", 0)),
+                "mutations_completed": 0,
             })
 
     def _handle_query(self, message: dict, rid: str) -> None:
@@ -1362,20 +1392,34 @@ def test_navigate_precision_reach_is_sent_and_preserved_in_terminal_metrics() ->
     assert result.metrics["final_reach_distance"] == 0.1
 
 
-def test_collect_excavation_segments_are_preserved_in_terminal_metrics() -> None:
+def test_collect_terminal_metrics_exclude_deleted_cross_candidate_strategy_ledgers() -> None:
     metrics = JavaBodyClient._terminal_metrics(
         {
             "classification": "completed",
             "reason": "collected",
             "approach_excavation_breaks": 12,
-            "approach_excavation_segments": 2,
             "mutations_completed": 13,
+            "planning_duplicate_skips": [
+                {
+                    "planner_kind": "governed_excavation",
+                    "reason": "planning_context_already_exhausted",
+                }
+            ],
+            "planning_duplicate_skip_total": 84,
+            "planning_duplicate_skips_truncated": True,
+            "candidate_state_transition_total": 11_063,
+            "candidate_state_transitions_truncated": True,
+            "attempt_failure_total": 70,
+            "attempt_failures_truncated": True,
         }
     )
 
-    assert metrics["approach_excavation_segments"] == 2
     assert metrics["approach_excavation_breaks"] == 12
     assert metrics["mutations_completed"] == 13
+    assert "planning_duplicate_skips" not in metrics
+    assert "planning_duplicate_skip_total" not in metrics
+    assert "candidate_state_transition_total" not in metrics
+    assert "attempt_failure_total" not in metrics
 
 
 def test_terminal_metrics_preserve_the_bounded_decision_grade_core() -> None:
@@ -1423,72 +1467,86 @@ def test_collect_allow_completes_with_inventory_delta() -> None:
     policy = GovernancePolicy(natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))])
     client = _client(server, GovernanceAnswerer(policy))
     client.connect()
-    result = client.collect_block(["minecraft:oak_log"], radius=16)
+    result = client.collect_block(
+        (5, 64, 5),
+        expected_block_id="minecraft:oak_log",
+        expected_item_ids=["minecraft:oak_log"],
+    )
     assert result.success is True
     assert result.reason == "collected"
     assert result.metrics["inventory_delta"]["after"] == 1
     assert server.verdict_seen == [("mp-1", True)]
 
 
-def test_collect_request_carries_expected_item_ids_independently_of_blocks() -> None:
+def test_collect_request_carries_exact_target_and_expected_drop_independently() -> None:
     server = FakeBodyServer()
     policy = GovernancePolicy(natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))])
     client = _client(server, GovernanceAnswerer(policy))
     client.connect()
 
     result = client.collect_block(
-        ["minecraft:iron_ore", "minecraft:deepslate_iron_ore"],
+        (5, 63, 5),
+        expected_block_id="minecraft:deepslate_iron_ore",
         expected_item_ids=["minecraft:raw_iron"],
-        radius=16,
+        excavation_budget=3,
     )
 
     assert result.success is True
     request = next(item for item in server.requests if item["type"] == "COLLECT_BLOCK")
-    assert request["block_ids"] == [
-        "minecraft:iron_ore",
-        "minecraft:deepslate_iron_ore",
-    ]
+    assert request["contract_version"] == 2
+    assert request["target"] == [5, 63, 5]
+    assert request["expected_block_id"] == "minecraft:deepslate_iron_ore"
     assert request["expected_item_ids"] == ["minecraft:raw_iron"]
+    assert request["excavation_budget"] == 3
+    assert all(
+        field not in request
+        for field in ("block_ids", "radius", "target_count", "candidate_budget")
+    )
 
 
-def test_collect_partial_preserves_inventory_progress_without_claiming_completion() -> None:
-    class PartialCollectServer(FakeBodyServer):
+def test_collect_failed_designated_target_preserves_bounded_terminal_evidence() -> None:
+    class BlockedCollectServer(FakeBodyServer):
         def _handle_collect(self, message: dict, rid: str) -> None:
             action = message["action_id"]
             self._emit_response(
                 rid,
                 "COLLECT_BLOCK_ACK",
-                {"action_id": action, "state": "accepted", "candidates": 2},
+                {
+                    "action_id": action,
+                    "state": "accepted",
+                    "contract_version": 2,
+                    "target": list(message["target"]),
+                    "excavation_budget": int(message["excavation_budget"]),
+                },
             )
             self._emit_terminal(action, {
-                "classification": "partial",
-                "reason": "partial",
-                "target_count": 3,
-                "collected_count": 2,
-                "remaining_count": 1,
-                "inventory_delta": {
-                    "total": 2,
-                    "items": {
-                        "minecraft:raw_iron": {"before": 0, "after": 2, "delta": 2},
-                    },
-                },
+                "classification": "failed",
+                "reason": "no_path",
+                "reason_class": "blocked",
+                "attempts_consumed": 2,
+                "budget_remaining": 0,
+                "closest_approach_distance": 4.5,
+                "unloaded_chunk_count": 0,
             })
 
-    server = PartialCollectServer()
+    server = BlockedCollectServer()
     client = _client(server)
     client.connect()
 
     result = client.collect_block(
-        ["minecraft:iron_ore"],
+        (5, 63, 5),
+        expected_block_id="minecraft:deepslate_iron_ore",
         expected_item_ids=["minecraft:raw_iron"],
-        target_count=3,
+        excavation_budget=2,
     )
 
     assert result.success is False
-    assert result.reason == "partial"
+    assert result.reason == "no_path"
     assert result.can_retry is True
-    assert result.metrics["inventory_delta"]["total"] == 2
-    assert result.metrics["remaining_count"] == 1
+    assert result.metrics["attempts_consumed"] == 2
+    assert result.metrics["budget_remaining"] == 0
+    assert result.metrics["closest_approach_distance"] == 4.5
+    assert "target_count" not in result.metrics
 
 
 def test_dig_down_is_one_java_objective_with_final_position_truth() -> None:
@@ -1517,9 +1575,13 @@ def test_collect_denied_by_governance_never_relabels_success() -> None:
     )
     client = _client(server, GovernanceAnswerer(policy))
     client.connect()
-    result = client.collect_block(["minecraft:oak_log"], radius=16)
+    result = client.collect_block(
+        (5, 64, 5),
+        expected_block_id="minecraft:oak_log",
+        expected_item_ids=["minecraft:oak_log"],
+    )
     assert result.success is False
-    assert result.reason == "candidate_targets_exhausted"
+    assert result.reason == "governance_denied"
     assert server.verdict_seen == [("mp-1", False)]
 
 
@@ -1546,7 +1608,11 @@ def test_collect_complete_ambiguous_risk_returns_model_actionable_scope_confirma
     client = _client(server, GovernanceAnswerer(policy))
     client.connect()
 
-    result = client.collect_block(["minecraft:oak_log"], radius=16)
+    result = client.collect_block(
+        (5, 64, 5),
+        expected_block_id="minecraft:oak_log",
+        expected_item_ids=["minecraft:oak_log"],
+    )
 
     assert result.success is False
     assert result.reason == "governance_confirmation_required"
@@ -1562,16 +1628,21 @@ def test_collect_complete_ambiguous_risk_returns_model_actionable_scope_confirma
         confirmation["challenge_id"],
         "collect the requested natural log",
     )
-    retried = client.collect_block(["minecraft:oak_log"], radius=16)
+    retried = client.collect_block(
+        (5, 64, 5),
+        expected_block_id="minecraft:oak_log",
+        expected_item_ids=["minecraft:oak_log"],
+    )
     assert confirmed["confirmed"] is True
     assert retried.success is True
     assert server.verdict_seen == [("mp-1", False), ("mp-1", True)]
 
 
 def test_ascend_maps_verified_surface_terminal() -> None:
-    client = _client(FakeBodyServer())
+    server = FakeBodyServer()
+    client = _client(server)
 
-    result = client.ascend(timeout_ticks=2_400)
+    result = client.ascend(max_mutations=7, timeout_ticks=2_400)
 
     assert result.success is True
     assert result.reason == "surface_reached"
@@ -1591,6 +1662,8 @@ def test_ascend_maps_verified_surface_terminal() -> None:
     assert result.metrics["pillar_continuation_preflight_count"] == 2
     assert result.metrics["pillar_continuation_preflight_allowed"] == 1
     assert len(result.metrics["placed"]) == 2
+    request = next(item for item in server.requests if item["type"] == "ASCEND")
+    assert request["max_mutations"] == 7
 
 
 def test_ascend_records_server_verified_pillars_in_shared_governance() -> None:
@@ -1611,7 +1684,7 @@ def test_engage_entity_preserves_server_kill_facts_and_action_identity() -> None
     result = client.engage_entity(
         "engage-1",
         {
-            "target_spec": "nearest_hostile",
+            "target_uuid": HOSTILE_UUID,
             "attack_range": 2.0,
             "cooldown_ticks": 10,
             "acquire_radius": 32,
@@ -1622,10 +1695,10 @@ def test_engage_entity_preserves_server_kill_facts_and_action_identity() -> None
 
     request = next(request for request in server.requests if request.get("type") == "ENGAGE_ENTITY")
     assert request["action_id"] == "engage-1"
-    assert request["target_spec"] == "nearest_hostile"
+    assert request["target_uuid"] == HOSTILE_UUID
     assert result.success is True
     assert result.reason == "killed"
-    assert result.metrics["target_id"] == "husk-uuid"
+    assert result.metrics["target_id"] == HOSTILE_UUID
     assert result.metrics["target_health"] == 0.0
     assert result.metrics["damage_observed"] is True
     assert result.metrics["min_attack_interval_ticks"] == 10
@@ -1638,7 +1711,7 @@ def test_follow_entity_preserves_target_lock_and_final_distance() -> None:
     result = client.follow_entity(
         "follow-1",
         {
-            "target_spec": "Guide",
+            "target_uuid": GUIDE_UUID,
             "keep_radius": 3.0,
             "replan_distance": 2.0,
             "acquire_radius": 32,
@@ -1648,10 +1721,10 @@ def test_follow_entity_preserves_target_lock_and_final_distance() -> None:
 
     request = next(request for request in server.requests if request.get("type") == "FOLLOW_ENTITY")
     assert request["action_id"] == "follow-1"
-    assert request["target_spec"] == "Guide"
+    assert request["target_uuid"] == GUIDE_UUID
     assert result.success is True
     assert result.reason == "arrived"
-    assert result.metrics["target_id"] == "target-uuid"
+    assert result.metrics["target_id"] == GUIDE_UUID
     assert result.metrics["final_distance"] == 2.5
     assert result.metrics["target_replans"] == 1
 
@@ -1659,7 +1732,11 @@ def test_follow_entity_preserves_target_lock_and_final_distance() -> None:
 def test_no_governance_denies_proposals_by_default() -> None:
     client = _client(FakeBodyServer())
     client.connect()
-    result = client.collect_block(["minecraft:oak_log"], radius=16)
+    result = client.collect_block(
+        (5, 64, 5),
+        expected_block_id="minecraft:oak_log",
+        expected_item_ids=["minecraft:oak_log"],
+    )
     assert result.success is False
     assert client._governance is None
     # The proposal was answered with a denial, not left to time out silently.

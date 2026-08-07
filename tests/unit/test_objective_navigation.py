@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from minebot.body.navigation import NavigationRunConfig, SERVER_GOAL_SET_LIMIT
+from minebot.body.navigation import (
+    NavigationRunConfig,
+    SERVER_GOAL_SET_LIMIT,
+    aquatic_navigation_config,
+    governed_mobility_navigation_config,
+)
 from minebot.body.objective_navigation import ObjectiveNavigationTransactions
-from minebot.contract import Action, BodyState, Event, Result
+from minebot.contract import Action, BodyState, BreakContext, Event, PerceptionResult, Result
 from minebot.game.navigation import GoalComposite, GoalNear, GoalYLevel
 
 
@@ -181,6 +186,28 @@ class FollowingObjectiveBody:
     def get_state(self) -> BodyState:
         return _state()
 
+    def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
+        assert scope == "nearbyEntities"
+        return PerceptionResult(
+            bot=self.bot_name,
+            scope=scope,
+            type="perception",
+            ok=True,
+            complete=True,
+            data={
+                "count": 1,
+                "entities": [{
+                    "id": "22222222-2222-4222-8222-222222222222",
+                    "type": "minecraft:player",
+                    "name": "Guide",
+                    "pos": [3.0, 64.0, 0.0],
+                    "health": 20.0,
+                    "dist2": 9.0,
+                }],
+            },
+            uncertainty=[],
+        )
+
     def execute(self, action: Action) -> Result:
         self.actions.append(action)
         return Result(
@@ -202,7 +229,7 @@ class FollowingObjectiveBody:
                 "action_id": action_id,
                 "success": True,
                 "reason": "arrived",
-                "target_id": "target-1",
+                "target_id": "22222222-2222-4222-8222-222222222222",
                 "final_distance": 2.5,
             },
         )
@@ -277,6 +304,73 @@ def test_configured_segment_envelope_becomes_one_objective_timeout() -> None:
     )
 
     assert body.actions[0].params["timeout_ticks"] == 1_200
+    assert body.actions[0].params["grid_radius"] == 64
+    assert body.actions[0].params["max_expand"] == 2_500
+    assert body.actions[0].params["allow_swim"] is True
+    assert body.actions[0].params["allow_ascend"] is True
+    assert body.actions[0].params["allow_descend"] is True
+    assert body.actions[0].params["max_fall_depth"] == 3
+    assert body.actions[0].params["max_water_drop_depth"] == 32
+
+
+def test_dry_first_profile_is_preserved_at_the_java_objective_seam() -> None:
+    body = ObjectiveBody()
+
+    ObjectiveNavigationTransactions(body).navigate_to(
+        (2, 64, 0),
+        config=NavigationRunConfig(
+            server_grid_radius=24,
+            server_max_expand=600,
+            allow_diagonal=False,
+            allow_ascend=False,
+            allow_descend=True,
+            allow_swim=False,
+            max_safe_fall_depth=1,
+            max_water_drop_depth=4,
+        ),
+    )
+
+    params = body.actions[0].params
+    assert params["grid_radius"] == 24
+    assert params["max_expand"] == 600
+    assert params["allow_diagonal"] is False
+    assert params["allow_ascend"] is False
+    assert params["allow_descend"] is True
+    assert params["allow_swim"] is False
+    assert params["max_fall_depth"] == 1
+    assert params["max_water_drop_depth"] == 4
+    assert "allow_break" not in params
+
+
+def test_governed_mobility_explicitly_carries_bounded_break_authority() -> None:
+    body = ObjectiveBody()
+
+    ObjectiveNavigationTransactions(body).navigate_to(
+        (2, 64, 0),
+        break_context=BreakContext.COLLECT_APPROACH,
+        config=governed_mobility_navigation_config(
+            NavigationRunConfig(max_break_steps=3)
+        ),
+        mutation_blacklist={(1, 64, 0)},
+    )
+
+    params = body.actions[0].params
+    assert params["allow_break"] is True
+    assert params["break_budget"] == 3
+    assert params["break_context"] == "collect_approach"
+    assert params["denied_mutations"] == [[1, 64, 0]]
+
+
+def test_pure_aquatic_navigation_never_inherits_break_authority() -> None:
+    body = ObjectiveBody()
+
+    ObjectiveNavigationTransactions(body).navigate_to(
+        (2, 64, 0),
+        config=aquatic_navigation_config(NavigationRunConfig(max_break_steps=3)),
+    )
+
+    assert "allow_break" not in body.actions[0].params
+    assert "break_budget" not in body.actions[0].params
 
 
 def test_survival_recovery_marker_reaches_the_provider_owned_objective() -> None:
@@ -355,9 +449,9 @@ def test_follow_entity_uses_one_provider_owned_moving_target_action() -> None:
 
     assert result.success is True
     assert result.reason == "arrived"
-    assert result.metrics["target_id"] == "target-1"
+    assert result.metrics["target_id"] == "22222222-2222-4222-8222-222222222222"
     assert len(body.actions) == 1
     action = body.actions[0]
     assert action.name == "followEntity"
-    assert action.params["target_spec"] == "Guide"
+    assert action.params["target_uuid"] == "22222222-2222-4222-8222-222222222222"
     assert action.params["timeout_ticks"] == 200

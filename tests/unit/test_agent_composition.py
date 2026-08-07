@@ -688,7 +688,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertFalse(registry.get("collect_resource").sidecar.mutating)
         self.assertNotEqual(ctx.weld_context.authority.last_action[0], "ensure_tool_for")
 
-    def test_ensure_item_keeps_workstation_until_final_table_recipe(self):
+    def test_ensure_item_reclaims_workstation_before_moving_between_table_recipes(self):
         body = FakeBody()
         body.inventory_counts = {}
         registry = ToolRegistry()
@@ -739,9 +739,9 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(
             table_recipe_calls,
             [
-                {"item": "wooden_pickaxe", "count": 1, "search_radius": 64, "keep_temporary_table": True},
-                {"item": "stone_pickaxe", "count": 1, "search_radius": 64, "keep_temporary_table": True},
-                {"item": "furnace", "count": 1, "search_radius": 64, "keep_temporary_table": True},
+                {"item": "wooden_pickaxe", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True},
+                {"item": "stone_pickaxe", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True},
+                {"item": "furnace", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True},
                 {"item": "iron_pickaxe", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True},
             ],
         )
@@ -791,6 +791,60 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.metrics["resume_hint"], "reinvoke_ensure")
         self.assertGreater(len(result.metrics["plan"]), 1)
         self.assertEqual(result.metrics["failed_step"]["step"]["kind"], "smelt")
+
+    def test_ensure_item_retries_smelt_once_after_bounded_surface_recovery(self):
+        body = FakeBody()
+        body.inventory_counts = {
+            "crafting_table": 1,
+            "furnace": 1,
+            "oak_planks": 2,
+            "raw_iron": 3,
+            "stick": 2,
+        }
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = []
+        smelt_attempts = 0
+
+        def record(name, params):
+            nonlocal smelt_attempts
+            calls.append((name, dict(params)))
+            if name == "smelt_item":
+                smelt_attempts += 1
+                if smelt_attempts == 1:
+                    return ToolResult(False, "temporary_furnace_no_supported_site", True)
+                body.inventory_counts["iron_ingot"] = 3
+            elif name == "craft_item":
+                body.inventory_counts[str(params["item"])] = int(params.get("count") or 1)
+            return ToolResult(True, "completed", False)
+
+        for name, sidecar in (
+            ("smelt_item", ToolSidecar("smelt_item", mutating=True, source="body.furnace", permission="smelt")),
+            ("go_to_surface", ToolSidecar("go_to_surface", mutating=True, source="java_body", permission="move")),
+            ("craft_item", ToolSidecar("craft_item", mutating=True, source="body.inventory", permission="craft")),
+            ("equip_item", ToolSidecar("equip_item", mutating=True, source="body.inventory", permission="equip")),
+        ):
+            registry.register(
+                RegisteredTool(
+                    name,
+                    name,
+                    {"type": "object"},
+                    lambda params, tool_name=name: record(tool_name, params),
+                    sidecar,
+                )
+            )
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_item({"item": "iron_pickaxe", "count": 1}, ctx, acquisition_recipe_lookup)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(smelt_attempts, 2)
+        self.assertEqual(
+            [name for name, _params in calls[:3]],
+            ["smelt_item", "go_to_surface", "smelt_item"],
+        )
+        recovery = result.metrics["completed_steps"][0]["result"]["metrics"]["workspace_recovery"]
+        self.assertTrue(recovery["success"])
 
     def test_ensure_tool_failure_preserves_safe_forward_position(self):
         body = FakeBody()
@@ -1385,13 +1439,40 @@ class AgentCompositionTests(unittest.TestCase):
 
         tool = registry.get("collect_resource")
 
-        self.assertIn("bounded high-level transaction", tool.description)
-        self.assertIn("stand-point selection", tool.description)
+        self.assertIn("bounded Python orchestration", tool.description)
+        self.assertIn("candidate ordering", tool.description)
+        self.assertIn("designated target", tool.description)
+        self.assertIn("governed excavation", tool.description)
+        self.assertIn("typed terminal", tool.description)
         self.assertIn("pickup", tool.description)
-        self.assertIn("authoritative inventory completion truth", tool.description)
+        self.assertIn("authoritative truth", tool.description)
+        self.assertNotIn("persistent Java Body process", tool.description)
+        self.assertIsNotNone(tool.projector)
+
+        register_ensure_tool_for_tool(registry, ctx, acquisition_recipe_lookup)
+        ensure = registry.get("ensure_tool_for")
+        self.assertIsNotNone(ensure.projector)
+        ensure_summary = ensure.projector(
+            "ensure_step_failed:new_physics_failure",
+            {
+                "item": "iron_pickaxe",
+                "target_count": 1,
+                "remaining_count": 1,
+                "resume_hint": "replan",
+                "plan": [{"kind": "collect"}, {"kind": "craft"}],
+                "completed_steps": [{"kind": "collect"}],
+                "failed_step": {"phase": "collect", "reason": "new_physics_failure"},
+            },
+        )
+        self.assertEqual(ensure_summary["plan_step_count"], 2)
+        self.assertEqual(ensure_summary["completed_step_count"], 1)
+        self.assertEqual(ensure_summary["failed_step"]["reason"], "new_physics_failure")
+        self.assertNotIn("Body owns discovery", tool.description)
         self.assertIn("item='logs'", tool.description)
         self.assertIn("exact species", tool.description)
         self.assertIn("logs", tool.input_schema["properties"]["item"]["description"])
+        self.assertEqual(set(tool.input_schema["properties"]), {"item", "count"})
+        self.assertNotIn("constraints", tool.input_schema["properties"])
         self.assertEqual(tool.framework_view()["description"], tool.description)
 
     def test_resource_plan_log_family_matches_exploration_yardstick_family(self):
@@ -1439,6 +1520,33 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.can_retry)
         self.assertEqual(result.metrics["after_count"], 0)
         self.assertEqual(result.metrics["resume_hint"], "reselect_candidates")
+
+    def test_collect_resource_surfaces_unknown_terminal_once_without_deterministic_retry(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "new_physics_failure",
+                "can_retry": True,
+                "metrics": {"last_failure": {"reason": "new_physics_failure"}},
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource({"item": "dirt", "count": 1}, ctx)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "new_physics_failure")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result.metrics["resume_hint"], "body_terminal")
+        self.assertEqual(
+            result.metrics["last_failure"]["result"]["metrics"]["last_failure"]["reason"],
+            "new_physics_failure",
+        )
 
     def test_collect_resource_preserves_nested_body_suggestion(self):
         body = FakeBody()

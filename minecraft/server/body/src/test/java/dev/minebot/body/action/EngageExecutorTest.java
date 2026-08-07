@@ -16,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class EngageExecutorTest {
+    private static final String TARGET_UUID = "11111111-1111-4111-8111-111111111111";
     private static final class Harness implements
         MovementControls,
         EngageExecutor.CombatControls,
@@ -23,7 +24,7 @@ final class EngageExecutorTest {
         NavigateExecutor.PositionSource,
         BotControls {
         EngageExecutor.Target target = new EngageExecutor.Target(
-            "target-1", "minecraft:husk", "Husk", 1.5, 64.0, 0.5, 6.0, true
+            TARGET_UUID, "minecraft:husk", "Husk", 1.5, 64.0, 0.5, 6.0, true
         );
         double bodyHealth = 20.0;
         double x = 0.5;
@@ -89,7 +90,7 @@ final class EngageExecutorTest {
         );
         runtime.submit("Bot", "engage-1", "ENGAGE_ENTITY", OwnerPriority.ACTION, 0);
         runtime.attachExecutor("engage-1", new EngageExecutor(
-            "Bot", "engage-1", "nearest_hostile", 2.0, 2, 16, 6.0,
+            "Bot", "engage-1", TARGET_UUID, 2.0, 2, 16, 6.0,
             openWorld(), harness, harness, harness, harness, events::emit, runtime, 20
         ));
 
@@ -106,7 +107,8 @@ final class EngageExecutorTest {
         assertEquals(ActionRegistry.State.TERMINAL, registry.status("engage-1").state());
         assertEquals("completed", terminal.get("classification").getAsString());
         assertEquals("killed", terminal.get("reason").getAsString());
-        assertEquals("target-1", terminal.get("target_id").getAsString());
+        assertEquals(TARGET_UUID, terminal.get("target_id").getAsString());
+        assertEquals(TARGET_UUID, terminal.get("target_uuid").getAsString());
         assertTrue(terminal.get("damage_observed").getAsBoolean());
         assertEquals(2, terminal.get("attacks").getAsInt());
         assertTrue(harness.clears > 0);
@@ -123,7 +125,7 @@ final class EngageExecutorTest {
         );
         runtime.submit("Bot", "engage-2", "ENGAGE_ENTITY", OwnerPriority.ACTION, 0);
         runtime.attachExecutor("engage-2", new EngageExecutor(
-            "Bot", "engage-2", "nearest_hostile", 2.0, 2, 16, 6.0,
+            "Bot", "engage-2", TARGET_UUID, 2.0, 2, 16, 6.0,
             openWorld(), harness, harness, harness, harness, events::emit, runtime, 20
         ));
 

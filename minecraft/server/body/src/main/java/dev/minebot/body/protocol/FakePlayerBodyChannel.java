@@ -32,8 +32,13 @@ import dev.minebot.body.interaction.InteractiveChatStream;
 import dev.minebot.body.interaction.WorldIdentityStore;
 import dev.minebot.body.lifecycle.BodyLifecycleTracker;
 import dev.minebot.body.nav.Goal;
+import dev.minebot.body.nav.AStarPathfinder;
+import dev.minebot.body.nav.ApproachController;
+import dev.minebot.body.nav.ExcavationPlanner;
 import dev.minebot.body.nav.MinecraftWorldView;
+import dev.minebot.body.nav.MoveGenerator;
 import dev.minebot.body.nav.NavigateExecutor;
+import dev.minebot.body.nav.WorldView;
 import dev.minebot.body.perception.EntityReadService;
 import dev.minebot.body.perception.RecipeReadService;
 import dev.minebot.body.perception.WorldReadService;
@@ -57,7 +62,6 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.Container;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.ChestBlock;
@@ -817,6 +821,9 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 return;
             }
             int timeoutTicks = boundedOptionalInt(request, "timeout_ticks", MAX_TIMEOUT_TICKS, 20, MAX_TIMEOUT_TICKS);
+            int maxMutations = boundedOptionalInt(
+                request, "max_mutations", AscendExecutor.MAX_BREAK_STEPS, 0, AscendExecutor.MAX_BREAK_STEPS
+            );
             ActionRuntime.Submission submission = runtime.submit(
                 botName, actionId, "ASCEND", OwnerPriority.RECOVERY, serverTick
             );
@@ -824,17 +831,6 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             response.addProperty("action_id", actionId);
             switch (submission) {
                 case ActionRuntime.Submission.Accepted ignored -> {
-                    AscendExecutor.BlockReader blockReader = new AscendExecutor.BlockReader() {
-                        @Override
-                        public String blockIdAt(int x, int y, int z) {
-                            return observedBlockId(level, x, y, z);
-                        }
-
-                        @Override
-                        public boolean skyAbove(int x, int y, int z) {
-                            return level.canSeeSky(new BlockPos(x, y + 1, z));
-                        }
-                    };
                     AscendExecutor executor = new AscendExecutor(
                         botName,
                         actionId,
@@ -842,7 +838,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         adapter,
                         adapter,
                         ascendPillarAccess(player),
-                        blockReader,
+                        ascendBlockReader(level),
                         new MinecraftSurfaceAccess(level),
                         FakePlayerBodyChannel::isAscendHazard,
                         mutationGate,
@@ -850,10 +846,12 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         this::observedPosition,
                         this::publishEvent,
                         runtime,
-                        timeoutTicks
+                        timeoutTicks,
+                        maxMutations
                     );
                     runtime.attachExecutor(actionId, executor);
                     response.addProperty("state", "accepted");
+                    response.addProperty("max_mutations", maxMutations);
                 }
                 case ActionRuntime.Submission.Duplicate duplicate -> {
                     response.addProperty(
@@ -899,48 +897,41 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 sendError(connection, request, serverTick, "body_missing", "FakePlayer is not present", true);
                 return;
             }
-            Map<Block, String> requestedBlocks = requiredBlocks(request);
-            List<String> expectedItemIds = requiredExpectedItemIds(
-                request,
-                requestedBlocks.values()
-            );
-            int radius = boundedOptionalInt(request, "radius", 48, 4, 64);
-            int verticalRadius = boundedOptionalInt(request, "vertical_radius", 16, 1, MAX_VERTICAL_RADIUS);
+            if (boundedInt(request, "contract_version", 2, 2) != 2) {
+                throw new IllegalArgumentException("COLLECT_BLOCK contract_version must be 2");
+            }
+            for (String forbidden : List.of(
+                "block_ids", "blocks", "radius", "vertical_radius",
+                "target_count", "candidate_budget", "mutation_budget"
+            )) {
+                if (request.has(forbidden)) {
+                    throw new IllegalArgumentException(
+                        forbidden + " is not valid in COLLECT_BLOCK contract_version 2"
+                    );
+                }
+            }
+            BlockPos target = requiredBlockPos(request, "target");
+            String expectedBlockId = requiredBlockId(request, "expected_block_id");
+            List<String> expectedItemIds = requiredExpectedItemIds(request, List.of());
+            int excavationBudget = boundedOptionalInt(request, "excavation_budget", 0, 0, 128);
             int timeoutTicks = boundedOptionalInt(request, "timeout_ticks", NavigateExecutor.DEFAULT_TIMEOUT_TICKS, 20, MAX_TIMEOUT_TICKS);
-            int targetCount = boundedOptionalInt(request, "target_count", 1, 1, 128);
-            int candidateBudget = boundedOptionalInt(
-                request, "candidate_budget", 8, 1, CollectExecutor.MAX_CANDIDATE_ATTEMPTS
-            );
-            int mutationBudget = boundedOptionalInt(request, "mutation_budget", 8, 1, 128);
 
             ActionRuntime.Submission submission = runtime.submit(botName, actionId, "COLLECT_BLOCK", OwnerPriority.ACTION, serverTick);
             JsonObject response = baseResponse(request, "COLLECT_BLOCK_ACK");
             response.addProperty("action_id", actionId);
             switch (submission) {
                 case ActionRuntime.Submission.Accepted ignored -> {
-                    BlockPos center = player.blockPosition();
-                    LoadedSearchResult search = scanner.scan(level, center, requestedBlocks, radius, verticalRadius, serverTick);
-                    CollectExecutor.CandidateScan initialScan = collectCandidateScan(search);
                     JsonObject searchFacts = new JsonObject();
-                    searchFacts.addProperty("radius", radius);
-                    searchFacts.addProperty("matches", search.matches().size());
-                    searchFacts.addProperty("coverage_complete", search.coverageComplete());
-                    searchFacts.addProperty("unloaded_chunk_count", search.unloadedChunkCount());
-                    searchFacts.addProperty("result_capped", search.resultCapped());
-                    List<CollectExecutor.Candidate> candidates = initialScan.candidates();
-                    CollectExecutor.CandidateSource candidateSource = (x, y, z, tick) ->
-                        collectCandidateScan(scanner.scan(
-                            level,
-                            new BlockPos(x, y, z),
-                            requestedBlocks,
-                            radius,
-                            verticalRadius,
-                            tick
-                        ));
+                    searchFacts.addProperty("contract_version", 2);
+                    searchFacts.addProperty("target_x", target.getX());
+                    searchFacts.addProperty("target_y", target.getY());
+                    searchFacts.addProperty("target_z", target.getZ());
                     CollectExecutor executor = new CollectExecutor(
                         botName,
                         actionId,
-                        candidates,
+                        new CollectExecutor.Candidate(
+                            target.getX(), target.getY(), target.getZ(), expectedBlockId
+                        ),
                         expectedItemIds,
                         searchFacts,
                         new MinecraftWorldView(level),
@@ -958,16 +949,14 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         this::publishEvent,
                         runtime,
                         timeoutTicks,
-                        targetCount,
-                        candidateBudget,
-                        mutationBudget,
-                        candidateSource,
+                        excavationBudget,
                         (nestedBot, blockId) -> selectBreakTool(player, nestedBot, blockId)
                     );
                     runtime.attachExecutor(actionId, executor);
                     response.addProperty("state", "accepted");
-                    response.addProperty("candidates", candidates.size());
-                    response.addProperty("target_count", targetCount);
+                    response.addProperty("contract_version", 2);
+                    response.add("target", request.get("target").deepCopy());
+                    response.addProperty("excavation_budget", excavationBudget);
                 }
                 case ActionRuntime.Submission.Duplicate duplicate -> {
                     response.addProperty("state", duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal");
@@ -989,84 +978,18 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         }
     }
 
-    private static CollectExecutor.CandidateScan collectCandidateScan(LoadedSearchResult search) {
-        List<CollectExecutor.Candidate> candidates = new ArrayList<>();
-        for (SearchMatch match : search.matches()) {
-            candidates.add(new CollectExecutor.Candidate(
-                match.x(), match.y(), match.z(), match.blockId()
-            ));
-        }
-        return new CollectExecutor.CandidateScan(
-            candidates,
-            search.coverageComplete(),
-            search.unloadedChunkCount(),
-            search.resultCapped()
-        );
-    }
+    private AscendExecutor.BlockReader ascendBlockReader(ServerLevel level) {
+        return new AscendExecutor.BlockReader() {
+            @Override
+            public String blockIdAt(int x, int y, int z) {
+                return observedBlockId(level, x, y, z);
+            }
 
-    private CollectExecutor.BreakToolSelection selectBreakTool(
-        ServerPlayer player,
-        String botName,
-        String blockId
-    ) {
-        Identifier identifier = Identifier.tryParse(blockId);
-        Block block = identifier == null
-            ? null
-            : BuiltInRegistries.BLOCK.getOptional(identifier).orElse(null);
-        if (block == null) {
-            return new CollectExecutor.BreakToolSelection(
-                false, false, null, "unknown_block"
-            );
-        }
-        var state = block.defaultBlockState();
-        int inventoryEnd = Math.min(
-            PlayerPrimitiveActions.CARRY_END_EXCLUSIVE,
-            player.getInventory().getContainerSize()
-        );
-        int bestSlot = -1;
-        boolean bestCorrect = false;
-        float bestSpeed = 1.0F;
-        for (int slot = 0; slot < inventoryEnd; slot++) {
-            ItemStack stack = player.getInventory().getItem(slot);
-            if (stack.isEmpty()) {
-                continue;
+            @Override
+            public boolean skyAbove(int x, int y, int z) {
+                return level.canSeeSky(new BlockPos(x, y + 1, z));
             }
-            boolean correct = stack.isCorrectToolForDrops(state);
-            float speed = stack.getDestroySpeed(state);
-            if (bestSlot < 0
-                || (correct && !bestCorrect)
-                || (correct == bestCorrect && speed > bestSpeed)) {
-                bestSlot = slot;
-                bestCorrect = correct;
-                bestSpeed = speed;
-            }
-        }
-        if (bestSlot < 0) {
-            return new CollectExecutor.BreakToolSelection(
-                true,
-                ItemStack.EMPTY.isCorrectToolForDrops(state),
-                null,
-                "empty_hand"
-            );
-        }
-        String itemId = BuiltInRegistries.ITEM.getKey(
-            player.getInventory().getItem(bestSlot).getItem()
-        ).toString();
-        PlayerPrimitiveActions.Outcome selected = PlayerPrimitiveActions.selectItem(
-            botName,
-            itemId,
-            playerAccess(player),
-            adapter
-        );
-        ItemStack held = player.getMainHandItem();
-        return new CollectExecutor.BreakToolSelection(
-            selected.success(),
-            selected.success() && held.isCorrectToolForDrops(state),
-            selected.success() && !held.isEmpty()
-                ? BuiltInRegistries.ITEM.getKey(held.getItem()).toString()
-                : null,
-            selected.reason()
-        );
+        };
     }
 
     private void handleDigDown(MineBotConnection connection, JsonObject request, int serverTick) {
@@ -1561,27 +1484,97 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             boolean survivalRecovery = optionalBoolean(
                 request, "survival_recovery", false
             );
+            int gridRadius = boundedOptionalInt(request, "grid_radius", 0, 0, 256);
+            int maxExpand = boundedOptionalInt(
+                request,
+                "max_expand",
+                AStarPathfinder.DEFAULT_TOTAL_NODE_CAP,
+                1,
+                AStarPathfinder.DEFAULT_TOTAL_NODE_CAP
+            );
+            MoveGenerator.Policy movement = new MoveGenerator.Policy(
+                optionalBoolean(request, "allow_diagonal", true),
+                optionalBoolean(request, "allow_ascend", true),
+                optionalBoolean(request, "allow_descend", true),
+                optionalBoolean(request, "allow_swim", true),
+                boundedOptionalInt(
+                    request, "max_fall_depth", MoveGenerator.MAX_FALL_BLOCKS, 0, 32
+                ),
+                boundedOptionalInt(
+                    request,
+                    "max_water_drop_depth",
+                    MoveGenerator.MAX_WATER_FALL_BLOCKS,
+                    0,
+                    64
+                )
+            );
+            ApproachController.Profile navigationProfile = new ApproachController.Profile(
+                maxExpand,
+                gridRadius,
+                movement
+            );
+            boolean allowBreak = optionalBoolean(request, "allow_break", false);
+            int breakBudget = boundedOptionalInt(request, "break_budget", 0, 0, 64);
+            if (!allowBreak && (request.has("break_budget")
+                || request.has("break_context")
+                || request.has("denied_mutations"))) {
+                throw new IllegalArgumentException(
+                    "governed navigation fields require allow_break=true"
+                );
+            }
+            if (allowBreak && breakBudget <= 0) {
+                throw new IllegalArgumentException(
+                    "allow_break=true requires a positive break_budget"
+                );
+            }
+            String breakContext = allowBreak
+                ? requiredString(request, "break_context", 64)
+                : null;
+            Set<ExcavationPlanner.Cell> deniedMutations = allowBreak
+                ? optionalDeniedMutations(request)
+                : Set.of();
 
             ActionRuntime.Submission submission = runtime.submit(botName, actionId, "NAVIGATE", OwnerPriority.ACTION, serverTick);
             JsonObject response = baseResponse(request, "NAVIGATE_ACK");
             response.addProperty("action_id", actionId);
             switch (submission) {
                 case ActionRuntime.Submission.Accepted ignored -> {
+                    WorldView navigationWorld = survivalRecovery
+                        ? survival.recoveryWorld(botName)
+                        : new MinecraftWorldView(level);
                     NavigateExecutor executor = new NavigateExecutor(
                         botName,
                         actionId,
                         goal,
-                        new MinecraftWorldView(level),
+                        navigationWorld,
                         adapter,
                         this::observedPosition,
                         this::publishEvent,
                         runtime,
                         timeoutTicks,
-                        finalReachDistance
+                        finalReachDistance,
+                        navigationProfile,
+                        allowBreak ? blockBreaker : null,
+                        allowBreak ? adapter : null,
+                        allowBreak ? (x, y, z) -> observedBlockId(level, x, y, z) : null,
+                        allowBreak ? mutationGate : null,
+                        allowBreak ? this::publishProposal : null,
+                        allowBreak
+                            ? (nestedBot, blockId) -> selectBreakTool(
+                                player, nestedBot, blockId
+                            ).success()
+                            : null,
+                        breakContext,
+                        breakBudget,
+                        deniedMutations
                     );
                     runtime.attachExecutor(actionId, executor);
                     response.addProperty("state", "accepted");
                     response.addProperty("survival_recovery", survivalRecovery);
+                    response.addProperty("max_expand", maxExpand);
+                    response.addProperty("grid_radius", gridRadius);
+                    response.addProperty("allow_break", allowBreak);
+                    response.addProperty("break_budget", breakBudget);
                 }
                 case ActionRuntime.Submission.Duplicate duplicate -> {
                     response.addProperty("state", duplicate.status().state() == ActionRegistry.State.RUNNING ? "running" : "terminal");
@@ -1607,7 +1600,8 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         try {
             String botName = requiredString(request, "bot_name", 64);
             String actionId = requiredString(request, "action_id", 128);
-            String targetSpec = requiredString(request, "target_spec", 256);
+            rejectLegacyEntitySelector(request);
+            String targetUuid = requiredUuidString(request, "target_uuid");
             double keepRadius = boundedOptionalDouble(request, "keep_radius", 3.0, 0.0, 32.0);
             double replanDistance = boundedOptionalDouble(
                 request, "replan_distance", 2.0, 0.5, 16.0
@@ -1632,7 +1626,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     runtime.attachExecutor(actionId, new FollowExecutor(
                         botName,
                         actionId,
-                        targetSpec,
+                        targetUuid,
                         keepRadius,
                         replanDistance,
                         acquireRadius,
@@ -1677,7 +1671,8 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         try {
             String botName = requiredString(request, "bot_name", 64);
             String actionId = requiredString(request, "action_id", 128);
-            String targetSpec = requiredString(request, "target_spec", 256);
+            rejectLegacyEntitySelector(request);
+            String targetUuid = requiredUuidString(request, "target_uuid");
             double attackRange = boundedOptionalDouble(request, "attack_range", 2.0, 1.2, 3.0);
             int cooldownTicks = boundedOptionalInt(request, "cooldown_ticks", 10, 1, 200);
             int acquireRadius = boundedOptionalInt(request, "acquire_radius", 32, 1, 64);
@@ -1703,7 +1698,7 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                     runtime.attachExecutor(actionId, new EngageExecutor(
                         botName,
                         actionId,
-                        targetSpec,
+                        targetUuid,
                         attackRange,
                         cooldownTicks,
                         acquireRadius,
@@ -1753,36 +1748,16 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
     ) {
         return new EngageExecutor.TargetSource() {
             @Override
-            public EngageExecutor.Lookup acquire(String botName, String targetSpec, double radius) {
-                if ("player".equals(targetSpec) || "minecraft:player".equals(targetSpec)) {
-                    return EngageExecutor.Lookup.missing("player_target_requires_name");
-                }
-                if (actor.getGameProfile().name().equals(targetSpec)) {
+            public EngageExecutor.Lookup acquire(String botName, String targetUuid, double radius) {
+                if (actor.getUUID().toString().equals(targetUuid)) {
                     return EngageExecutor.Lookup.missing("self_target_disallowed");
                 }
-                List<net.minecraft.world.entity.Entity> matches = nearbyEntities(radius, entity -> {
-                    if ("nearest_hostile".equals(targetSpec)) {
-                        return entity instanceof Enemy;
-                    }
-                    if (targetSpec.equals(entity.getUUID().toString())) {
-                        return true;
-                    }
-                    String entityType = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();
-                    String normalizedType = targetSpec.contains(":") ? targetSpec : "minecraft:" + targetSpec;
-                    return normalizedType.equals(entityType)
-                        || targetSpec.equals(entity.getName().getString())
-                        || (entity instanceof ServerPlayer player
-                            && targetSpec.equals(player.getGameProfile().name()));
-                });
-                return closestLookup(matches);
+                return uuidLookup(targetUuid, radius);
             }
 
             @Override
             public EngageExecutor.Lookup refresh(String botName, String targetId, double radius) {
-                List<net.minecraft.world.entity.Entity> matches = nearbyEntities(
-                    radius, entity -> targetId.equals(entity.getUUID().toString())
-                );
-                return closestLookup(matches);
+                return uuidLookup(targetId, radius);
             }
 
             @Override
@@ -1815,21 +1790,21 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 );
             }
 
-            private EngageExecutor.Lookup closestLookup(List<net.minecraft.world.entity.Entity> matches) {
-                net.minecraft.world.entity.Entity closest = matches.stream()
-                    .min(java.util.Comparator.comparingDouble(actor::distanceToSqr))
-                    .orElse(null);
-                if (closest == null) {
+            private EngageExecutor.Lookup uuidLookup(String targetUuid, double radius) {
+                net.minecraft.world.entity.Entity target = nearbyEntities(
+                    radius, entity -> targetUuid.equals(entity.getUUID().toString())
+                ).stream().findFirst().orElse(null);
+                if (target == null) {
                     return EngageExecutor.Lookup.missing("target_not_found");
                 }
-                LivingEntity living = closest instanceof LivingEntity value ? value : null;
+                LivingEntity living = target instanceof LivingEntity value ? value : null;
                 return EngageExecutor.Lookup.found(new EngageExecutor.Target(
-                    closest.getUUID().toString(),
-                    BuiltInRegistries.ENTITY_TYPE.getKey(closest.getType()).toString(),
-                    closest.getName().getString(),
-                    closest.getX(),
-                    closest.getY(),
-                    closest.getZ(),
+                    target.getUUID().toString(),
+                    BuiltInRegistries.ENTITY_TYPE.getKey(target.getType()).toString(),
+                    target.getName().getString(),
+                    target.getX(),
+                    target.getY(),
+                    target.getZ(),
                     living == null ? null : (double) living.getHealth(),
                     living == null || living.isAlive()
                 ));
@@ -2781,43 +2756,9 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
 
             @Override
             public boolean selectBreakTool(String botName, String blockId) {
-                Identifier identifier = Identifier.tryParse(blockId);
-                Block block = identifier == null
-                    ? null
-                    : BuiltInRegistries.BLOCK.getOptional(identifier).orElse(null);
-                if (block == null) {
-                    return false;
-                }
-                var state = block.defaultBlockState();
-                int inventoryEnd = Math.min(
-                    PlayerPrimitiveActions.CARRY_END_EXCLUSIVE,
-                    player.getInventory().getContainerSize()
-                );
-                int bestSlot = -1;
-                boolean bestCorrect = false;
-                float bestSpeed = 1.0F;
-                for (int slot = 0; slot < inventoryEnd; slot++) {
-                    ItemStack stack = player.getInventory().getItem(slot);
-                    if (stack.isEmpty()) {
-                        continue;
-                    }
-                    boolean correct = stack.isCorrectToolForDrops(state);
-                    float speed = stack.getDestroySpeed(state);
-                    if (bestSlot < 0
-                        || (correct && !bestCorrect)
-                        || (correct == bestCorrect && speed > bestSpeed)) {
-                        bestSlot = slot;
-                        bestCorrect = correct;
-                        bestSpeed = speed;
-                    }
-                }
-                if (bestSlot < 0) {
-                    return true;
-                }
-                String itemId = BuiltInRegistries.ITEM.getKey(
-                    player.getInventory().getItem(bestSlot).getItem()
-                ).toString();
-                return PlayerPrimitiveActions.selectItem(botName, itemId, access, adapter).success();
+                return FakePlayerBodyChannel.this
+                    .selectBreakTool(player, botName, blockId)
+                    .success();
             }
 
             @Override
@@ -2841,6 +2782,75 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 adapter.sneak(botName);
             }
         };
+    }
+
+    private CollectExecutor.BreakToolSelection selectBreakTool(
+        ServerPlayer player,
+        String botName,
+        String blockId
+    ) {
+        Identifier identifier = Identifier.tryParse(blockId);
+        Block block = identifier == null
+            ? null
+            : BuiltInRegistries.BLOCK.getOptional(identifier).orElse(null);
+        if (block == null) {
+            return new CollectExecutor.BreakToolSelection(
+                false, false, null, "unknown_block"
+            );
+        }
+        var state = block.defaultBlockState();
+        int inventoryEnd = Math.min(
+            PlayerPrimitiveActions.CARRY_END_EXCLUSIVE,
+            player.getInventory().getContainerSize()
+        );
+        int bestSlot = -1;
+        boolean bestCorrect = false;
+        float bestSpeed = 1.0F;
+        for (int slot = 0; slot < inventoryEnd; slot++) {
+            ItemStack stack = player.getInventory().getItem(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            boolean correct = correctToolForDrops(state, stack);
+            float speed = stack.getDestroySpeed(state);
+            if (bestSlot < 0
+                || (correct && !bestCorrect)
+                || (correct == bestCorrect && speed > bestSpeed)) {
+                bestSlot = slot;
+                bestCorrect = correct;
+                bestSpeed = speed;
+            }
+        }
+        if (bestSlot < 0) {
+            return new CollectExecutor.BreakToolSelection(
+                true,
+                correctToolForDrops(state, ItemStack.EMPTY),
+                null,
+                "empty_hand"
+            );
+        }
+        String itemId = BuiltInRegistries.ITEM.getKey(
+            player.getInventory().getItem(bestSlot).getItem()
+        ).toString();
+        PlayerPrimitiveActions.Outcome selected = PlayerPrimitiveActions.selectItem(
+            botName,
+            itemId,
+            playerAccess(player),
+            adapter
+        );
+        ItemStack held = player.getMainHandItem();
+        return new CollectExecutor.BreakToolSelection(
+            selected.success(),
+            selected.success() && correctToolForDrops(state, held),
+            selected.success() && !held.isEmpty()
+                ? BuiltInRegistries.ITEM.getKey(held.getItem()).toString()
+                : null,
+            selected.reason()
+        );
+    }
+
+    static boolean correctToolForDrops(net.minecraft.world.level.block.state.BlockState state, ItemStack stack) {
+        return !state.requiresCorrectToolForDrops() || stack.isCorrectToolForDrops(state);
     }
 
     private record ScaffoldInventoryCandidate(String itemId, int slot, int count, int priority) {
@@ -3378,6 +3388,21 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
         return value;
     }
 
+    private static String requiredUuidString(JsonObject request, String name) {
+        String value = requiredString(request, name, 36);
+        try {
+            return UUID.fromString(value).toString();
+        } catch (IllegalArgumentException error) {
+            throw new IllegalArgumentException(name + " must be a canonical UUID");
+        }
+    }
+
+    private static void rejectLegacyEntitySelector(JsonObject request) {
+        if (request.has("target_spec")) {
+            throw new IllegalArgumentException("target_spec is not supported; resolve target_uuid in the Agent");
+        }
+    }
+
     private static String requiredBotName(JsonObject request) {
         String value = requiredString(request, "bot_name", 16);
         if (!value.matches("[A-Za-z0-9_]{1,16}")) {
@@ -3391,6 +3416,52 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             return null;
         }
         return requiredBlockPos(request, name);
+    }
+
+    private static Set<ExcavationPlanner.Cell> optionalDeniedMutations(
+        JsonObject request
+    ) {
+        if (!request.has("denied_mutations")) {
+            return Set.of();
+        }
+        if (!request.get("denied_mutations").isJsonArray()) {
+            throw new IllegalArgumentException("denied_mutations must be an array");
+        }
+        JsonArray values = request.getAsJsonArray("denied_mutations");
+        if (values.size() > 64) {
+            throw new IllegalArgumentException(
+                "denied_mutations supports at most 64 coordinates"
+            );
+        }
+        Set<ExcavationPlanner.Cell> denied = new LinkedHashSet<>();
+        for (var value : values) {
+            if (!value.isJsonArray() || value.getAsJsonArray().size() != 3) {
+                throw new IllegalArgumentException(
+                    "denied_mutations entries must be [x,y,z]"
+                );
+            }
+            JsonArray pos = value.getAsJsonArray();
+            denied.add(new ExcavationPlanner.Cell(
+                exactInt(pos.get(0), "denied_mutations.x"),
+                exactInt(pos.get(1), "denied_mutations.y"),
+                exactInt(pos.get(2), "denied_mutations.z")
+            ));
+        }
+        return Set.copyOf(denied);
+    }
+
+    private static int exactInt(com.google.gson.JsonElement value, String name) {
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException(name + " must be an integer");
+        }
+        double number = value.getAsDouble();
+        if (!Double.isFinite(number)
+            || number != Math.floor(number)
+            || number < Integer.MIN_VALUE
+            || number > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(name + " must be an integer");
+        }
+        return (int) number;
     }
 
     private static Float optionalFiniteFloat(JsonObject request, String name) {

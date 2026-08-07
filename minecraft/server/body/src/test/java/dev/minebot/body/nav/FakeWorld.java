@@ -15,6 +15,7 @@ public final class FakeWorld implements WorldView {
     private final Map<Long, NodeKind> overrides = new HashMap<>();
     private final Set<Long> unloadedChunks = new HashSet<>();
     private final Set<Long> hazardousBodyPositions = new HashSet<>();
+    private final Set<Long> hazardousBlockClearances = new HashSet<>();
 
     public FakeWorld(int floorY) {
         this.floorY = floorY;
@@ -43,6 +44,11 @@ public final class FakeWorld implements WorldView {
         return this;
     }
 
+    public FakeWorld hazardBlockClearance(int x, int y, int z) {
+        hazardousBlockClearances.add(key(x, y, z));
+        return this;
+    }
+
     @Override
     public NodeKind kindAt(int x, int y, int z) {
         if (unloadedChunks.contains(((long) (x >> 4) << 32) | ((z >> 4) & 0xFFFFFFFFL))) {
@@ -58,6 +64,11 @@ public final class FakeWorld implements WorldView {
     @Override
     public boolean isBodyPositionHazardous(int x, int y, int z) {
         return hazardousBodyPositions.contains(key(x, y, z));
+    }
+
+    @Override
+    public boolean isBlockClearanceHazardous(int x, int y, int z) {
+        return hazardousBlockClearances.contains(key(x, y, z));
     }
 
     private static long key(int x, int y, int z) {

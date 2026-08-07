@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove repeated Java collection terminals track physical action time."""
+"""Prove each designated Java collection action reports physical action time."""
 
 from __future__ import annotations
 
@@ -119,8 +119,9 @@ def main() -> int:
 
     attempts = list((result.metrics or {}).get("attempts") or [])
     deliveries = [
-        dict((attempt.get("metrics") or {}).get("terminal_delivery") or {})
+        dict(((attempt.get("mine") or {}).get("metrics") or {}).get("terminal_delivery") or {})
         for attempt in attempts
+        if isinstance(attempt.get("mine"), dict)
     ]
     delta = log_count(after.inventory_counts) - log_count(before.inventory_counts)
     artifact = {
@@ -140,7 +141,7 @@ def main() -> int:
         "success": bool(
             result.success
             and delta >= 3
-            and len(deliveries) == 3
+            and len(deliveries) >= 3
             and all(
                 delivery.get("source") in {"event", "query", "reconnect_query"}
                 and float(delivery.get("action_wall_ms") or 0.0) < 30_000.0

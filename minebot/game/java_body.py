@@ -682,25 +682,38 @@ class JavaBody:
             outcome = self._client.navigate(dict(action.params.get("goal") or {}),
                                             timeout_ticks=_opt_int(action.params.get("timeout_ticks")),
                                             final_reach_distance=_opt_float(action.params.get("final_reach_distance")),
-                                            survival_recovery=bool(action.params.get("survival_recovery", False)))
+                                            survival_recovery=bool(action.params.get("survival_recovery", False)),
+                                            grid_radius=_opt_int(action.params.get("grid_radius")),
+                                            max_expand=_opt_int(action.params.get("max_expand")),
+                                            allow_diagonal=_opt_bool(action.params.get("allow_diagonal")),
+                                            allow_ascend=_opt_bool(action.params.get("allow_ascend")),
+                                            allow_descend=_opt_bool(action.params.get("allow_descend")),
+                                            allow_swim=_opt_bool(action.params.get("allow_swim")),
+                                            max_fall_depth=_opt_int(action.params.get("max_fall_depth")),
+                                            max_water_drop_depth=_opt_int(action.params.get("max_water_drop_depth")),
+                                            allow_break=bool(action.params.get("allow_break", False)),
+                                            break_budget=_opt_int(action.params.get("break_budget")),
+                                            break_context=(
+                                                str(action.params["break_context"])
+                                                if action.params.get("break_context") is not None
+                                                else None
+                                            ),
+                                            denied_mutations=[
+                                                [int(value) for value in pos]
+                                                for pos in (action.params.get("denied_mutations") or ())
+                                                if isinstance(pos, (list, tuple)) and len(pos) == 3
+                                            ])
         elif action.name == "collectBlock":
-            block_types = [str(b) for b in (action.params.get("block_types") or ())]
-            expected_item_ids = action.params.get("expected_item_ids")
+            raw_target = action.params.get("target")
+            if not isinstance(raw_target, (list, tuple)) or len(raw_target) != 3:
+                return _gap_result(action, self.bot_name)
             outcome = self._client.collect_block(
-                block_types,
+                tuple(int(value) for value in raw_target),
+                expected_block_id=str(action.params["expected_block_id"]),
                 expected_item_ids=[
-                    str(item)
-                    for item in (
-                        block_types
-                        if expected_item_ids is None
-                        else expected_item_ids
-                    )
+                    str(item) for item in (action.params.get("expected_item_ids") or ())
                 ],
-                radius=_opt_int(action.params.get("radius")),
-                vertical_radius=_opt_int(action.params.get("vertical_radius")),
-                target_count=_opt_int(action.params.get("target_count")),
-                candidate_budget=_opt_int(action.params.get("candidate_budget")),
-                mutation_budget=_opt_int(action.params.get("mutation_budget")),
+                excavation_budget=max(0, int(action.params.get("excavation_budget") or 0)),
                 timeout_ticks=_opt_int(action.params.get("timeout_ticks")),
             )
         elif action.name == "digDown":
@@ -712,6 +725,7 @@ class JavaBody:
             )
         elif action.name == "ascend":
             outcome = self._client.ascend(
+                max_mutations=_opt_int(action.params.get("max_mutations")),
                 timeout_ticks=_opt_int(action.params.get("timeout_ticks")),
             )
         elif action.name in _ACTION_TERMINALS:
@@ -978,6 +992,10 @@ def _opt_float(value: object) -> float | None:
 
 def _opt_int(value: object) -> int | None:
     return int(value) if isinstance(value, (int, float)) else None
+
+
+def _opt_bool(value: object) -> bool | None:
+    return bool(value) if isinstance(value, bool) else None
 
 
 def _find_block_ids(params: dict[str, object]) -> list[str]:

@@ -3,7 +3,10 @@
 import unittest
 
 from minebot.body.combat import CombatTransactions
-from minebot.contract import Action, BodyState, Event, Result
+from minebot.contract import Action, BodyState, Event, PerceptionResult, Result
+
+
+TARGET_UUID = "11111111-1111-4111-8111-111111111111"
 
 
 def state_at(pos):
@@ -38,6 +41,24 @@ class FakeBody:
     def get_state(self):
         return state_at((0, 64, 0))
 
+    def perceive(self, scope, params):
+        entities = [{
+            "id": TARGET_UUID,
+            "type": "minecraft:zombie",
+            "name": name,
+            "pos": [1.0, 64.0, 0.0],
+            "health": 20.0,
+            "dist2": 1.0,
+        } for name in ("Ghost", "Runner", "Brute", "X", "Zombie")]
+        if scope == "nearbyHostiles":
+            entities = entities[:1]
+        elif scope != "nearbyEntities":
+            raise AssertionError(f"unexpected scope {scope}")
+        return PerceptionResult(
+            bot="Bot1", scope=scope, type="perception", ok=True, complete=True,
+            data={"count": len(entities), "entities": entities}, uncertainty=[],
+        )
+
     def execute(self, action: Action) -> Result:
         self.actions.append(action)
         return Result(
@@ -66,7 +87,7 @@ class FakeBody:
                 "success": success,
                 "reason": reason,
                 "attacks": attacks,
-                "target_id": "target-uuid",
+                "target_id": TARGET_UUID,
                 "target_health": 0.0 if success else None,
                 "damage_observed": success,
                 "persistent_target": True,
@@ -88,7 +109,7 @@ class EngageRuntimeTests(unittest.TestCase):
         self.assertEqual(result.reason, "killed")
         self.assertEqual(len(body.actions), 1)
         self.assertEqual(body.actions[0].name, "engageEntity")
-        self.assertEqual(body.actions[0].params["target_spec"], "nearest_hostile")
+        self.assertEqual(body.actions[0].params["target_uuid"], TARGET_UUID)
         self.assertEqual(body.actions[0].params["attack_range"], 2.0)
         self.assertEqual(body.actions[0].params["disengage_health"], 6.0)
 
@@ -132,10 +153,11 @@ class EngageRuntimeTests(unittest.TestCase):
     def test_engage_entity_metrics_carry_target_and_attacks(self):
         body = FakeBody(terminal_reason="killed", terminal_attacks=7)
         result = CombatTransactions(body).engage_entity("Zombie", timeout_s=5.0)
-        self.assertEqual(result.metrics["target_spec"], "Zombie")
+        self.assertEqual(result.metrics["requested_target"], "Zombie")
+        self.assertEqual(result.metrics["target_uuid"], TARGET_UUID)
         self.assertEqual(result.metrics["event"], "engageDone")
         self.assertEqual(result.metrics["attacks"], 7)
-        self.assertEqual(result.metrics["target_id"], "target-uuid")
+        self.assertEqual(result.metrics["target_id"], TARGET_UUID)
         self.assertTrue(result.metrics["damage_observed"])
         self.assertEqual(result.metrics["min_attack_interval_ticks"], 10)
 

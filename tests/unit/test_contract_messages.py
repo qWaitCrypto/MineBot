@@ -5,14 +5,41 @@ from minebot.contract import (
     BodyState,
     Result,
     body_rejection_to_tool_result,
+    governance_confirmation_from,
     is_partial_progress,
 )
 
 
 class BodyStateMessageTests(unittest.TestCase):
+    def test_governance_confirmation_is_found_inside_bounded_attempt_evidence(self):
+        challenge = {"challenge_id": "gc-deep-1", "context": "travel"}
+
+        found = governance_confirmation_from(
+            {"metrics": {"attempts": [{"navigation": {"metrics": {"governance_confirmation": challenge}}}]}}
+        )
+
+        self.assertEqual(found, challenge)
+
+    def test_governance_confirmation_is_not_hidden_by_large_diagnostic_sibling(self):
+        challenge = {"challenge_id": "gc-wide-1", "context": "collect_approach"}
+
+        found = governance_confirmation_from(
+            {
+                "attempts": [
+                    {"path_node": index, "details": {"expanded": index}}
+                    for index in range(5000)
+                ],
+                "last_failure": {
+                    "metrics": {"governance_confirmation": challenge}
+                },
+            }
+        )
+
+        self.assertEqual(found, challenge)
+
     def test_partial_progress_requires_authoritative_gain(self):
         self.assertTrue(is_partial_progress("partial", {"collected_delta": 2}))
-        self.assertTrue(is_partial_progress("dig_down_partial:timeout", {"blocks_descended": 1}))
+        self.assertTrue(is_partial_progress("dig_down_partial", {"blocks_descended": 1}))
         self.assertFalse(is_partial_progress("partial", {"collected_delta": 0}))
         self.assertFalse(is_partial_progress("blocked", {"collected_delta": 2}))
 

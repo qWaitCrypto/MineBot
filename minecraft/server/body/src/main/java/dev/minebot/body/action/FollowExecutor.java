@@ -15,7 +15,7 @@ public final class FollowExecutor implements ActionRuntime.TickExecutor {
 
     private final String bot;
     private final String actionId;
-    private final String targetSpec;
+    private final String targetUuid;
     private final double keepRadius;
     private final double replanDistance;
     private final int acquireRadius;
@@ -39,7 +39,7 @@ public final class FollowExecutor implements ActionRuntime.TickExecutor {
     public FollowExecutor(
         String bot,
         String actionId,
-        String targetSpec,
+        String targetUuid,
         double keepRadius,
         double replanDistance,
         int acquireRadius,
@@ -51,8 +51,8 @@ public final class FollowExecutor implements ActionRuntime.TickExecutor {
         ActionRuntime runtime,
         int timeoutTicks
     ) {
-        if (targetSpec == null || targetSpec.isBlank()) {
-            throw new IllegalArgumentException("target_spec must not be blank");
+        if (targetUuid == null || targetUuid.isBlank()) {
+            throw new IllegalArgumentException("target_uuid must not be blank");
         }
         if (keepRadius < 0.0 || keepRadius > 32.0) {
             throw new IllegalArgumentException("keep_radius is out of bounds");
@@ -68,7 +68,7 @@ public final class FollowExecutor implements ActionRuntime.TickExecutor {
         }
         this.bot = bot;
         this.actionId = actionId;
-        this.targetSpec = targetSpec;
+        this.targetUuid = targetUuid;
         this.keepRadius = keepRadius;
         this.replanDistance = replanDistance;
         this.acquireRadius = acquireRadius;
@@ -150,7 +150,7 @@ public final class FollowExecutor implements ActionRuntime.TickExecutor {
     private boolean refreshTarget(int serverTick) {
         EngageExecutor.Lookup lookup;
         if (lockedTarget == null) {
-            lookup = targets.acquire(bot, targetSpec, acquireRadius);
+            lookup = targets.acquire(bot, targetUuid, acquireRadius);
             if (lookup.target() == null) {
                 finish(
                     serverTick,
@@ -182,7 +182,7 @@ public final class FollowExecutor implements ActionRuntime.TickExecutor {
         recordAndHaltApproach();
         JsonObject facts = new JsonObject();
         facts.addProperty("success", ActionRuntime.CLASS_COMPLETED.equals(classification));
-        facts.addProperty("target_spec", targetSpec);
+        facts.addProperty("target_uuid", targetUuid);
         facts.addProperty("keep_radius", keepRadius);
         facts.addProperty("reason", reason);
         facts.addProperty("elapsed_ticks", elapsedTicks);

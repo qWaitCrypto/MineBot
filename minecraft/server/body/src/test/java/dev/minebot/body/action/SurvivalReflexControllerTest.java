@@ -27,7 +27,9 @@ final class SurvivalReflexControllerTest {
         double lookX;
         double lookZ;
         boolean moving;
+        boolean pathBlocked;
         int clears;
+        int jumpOnceCalls;
         int continuousJumps;
 
         @Override
@@ -87,6 +89,9 @@ final class SurvivalReflexControllerTest {
                 if (y == 63) {
                     return WorldView.NodeKind.SOLID;
                 }
+                if (pathBlocked && (y == 64 || y == 65)) {
+                    return WorldView.NodeKind.SOLID;
+                }
                 if (y == 64 || y == 65) {
                     return WorldView.NodeKind.PASSABLE;
                 }
@@ -112,7 +117,7 @@ final class SurvivalReflexControllerTest {
 
         @Override public void sprint(String botName) { }
 
-        @Override public void jumpOnce(String botName) { }
+        @Override public void jumpOnce(String botName) { jumpOnceCalls++; }
 
         @Override public void jumpContinuous(String botName) { continuousJumps++; }
 
@@ -320,6 +325,10 @@ final class SurvivalReflexControllerTest {
         assertNull(harness.runtime.currentOwner("Bot"));
         assertNull(harness.controller.hazardUnresolved("Bot"));
         assertTrue(harness.environment.position.x() >= 2.5);
+        assertTrue(
+            harness.environment.jumpOnceCalls > 1,
+            "lava ascent input must be refreshed every reflex tick"
+        );
 
         List<BotEventStream.Event> emitted = harness.events.replay("Bot", 0).events();
         assertTrue(emitted.stream().anyMatch(event -> event.name().equals("ownerPreempted")));
@@ -360,6 +369,23 @@ final class SurvivalReflexControllerTest {
         harness.controller.tick(11);
         assertNull(harness.controller.hazardUnresolved("Bot"));
         assertTrue(harness.controller.actionAllowed("Bot", false));
+    }
+
+    @Test
+    void navigationFailureUsesClosedReasonAndStructuredDetail() {
+        Harness harness = Harness.create();
+        harness.environment.pathBlocked = true;
+
+        for (int tick = 1; tick <= 20 && harness.controller.activeOwnerName("Bot") != null || tick == 1; tick++) {
+            harness.tick(tick);
+        }
+
+        BotEventStream.Event completed = harness.events.replay("Bot", 0).events().stream()
+            .filter(event -> event.name().equals("reflexCompleted"))
+            .findFirst()
+            .orElseThrow();
+        assertEquals("escape_navigation_failed", completed.data().get("reason").getAsString());
+        assertFalse(completed.data().get("failure_detail").getAsString().isBlank());
     }
 
     @Test

@@ -713,7 +713,7 @@ class InventoryRuntimeTests(unittest.TestCase):
         class FakeWork:
             def __init__(self):
                 self.place_calls = []
-                self.mine_calls = []
+                self.collect_calls = []
 
             def place_here(self, block_type, *, radius, context, purpose, timeout_s):
                 self.place_calls.append((block_type, radius, context, purpose, timeout_s))
@@ -724,8 +724,8 @@ class InventoryRuntimeTests(unittest.TestCase):
                     metrics={"place_here": {"chosen_target": [2, 64, 0]}},
                 )
 
-            def mine_block(self, pos, *, context, timeout_s):
-                self.mine_calls.append((pos, context, timeout_s))
+            def mine_block_collect(self, pos, **kwargs):
+                self.collect_calls.append((pos, kwargs))
                 return ToolResult(True, "completed", False)
 
         work = FakeWork()
@@ -737,9 +737,11 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertEqual(result.reason, "completed")
         self.assertEqual([action.name for action in body.actions], ["selectItem", "craftItem"])
         self.assertEqual(work.place_calls[0][0], "minecraft:crafting_table")
-        self.assertEqual(work.mine_calls[0][0], (2, 64, 0))
+        self.assertEqual(work.collect_calls[0][0], (2, 64, 0))
+        self.assertEqual(work.collect_calls[0][1]["expected_drops"], ("minecraft:crafting_table",))
+        self.assertEqual(work.collect_calls[0][1]["target_block_types"], ("minecraft:crafting_table",))
 
-    def test_craft_recipe_keeps_success_when_temporary_table_reclaim_times_out(self):
+    def test_craft_recipe_reports_completed_craft_when_workstation_reclaim_times_out(self):
         body = FakeInventoryBody(
             [
                 perception([slot(0), slot(41), slot(42)]),
@@ -762,15 +764,17 @@ class InventoryRuntimeTests(unittest.TestCase):
                     metrics={"place_here": {"chosen_target": [2, 64, 0]}},
                 )
 
-            def mine_block(self, pos, *, context, timeout_s):
+            def mine_block_collect(self, pos, **kwargs):
                 return ToolResult(False, "timeout", True, metrics={"target": list(pos)})
 
         runtime = InventoryTransactions(body, work=FakeWork())
 
         result = runtime.craft_recipe(item="minecraft:furnace", count=1, output_slot=2)
 
-        self.assertTrue(result.success, result.to_payload())
-        self.assertEqual(result.reason, "completed")
+        self.assertFalse(result.success, result.to_payload())
+        self.assertEqual(result.reason, "craft_workstation_reclaim_failed")
+        self.assertTrue(result.can_retry)
+        self.assertTrue(result.metrics["craft"]["success"], "the crafted item remains authoritative progress")
         self.assertFalse(result.metrics["reclaim"]["success"])
         self.assertEqual(result.metrics["reclaim"]["reason"], "timeout")
 
@@ -791,7 +795,7 @@ class InventoryRuntimeTests(unittest.TestCase):
         class FakeWork:
             def __init__(self):
                 self.place_calls = []
-                self.mine_calls = []
+                self.collect_calls = []
 
             def place_here(self, block_type, *, radius, context, purpose, timeout_s):
                 self.place_calls.append((block_type, radius, context, purpose, timeout_s))
@@ -802,8 +806,8 @@ class InventoryRuntimeTests(unittest.TestCase):
                     metrics={"place_here": {"chosen_target": [2, 64, 0]}},
                 )
 
-            def mine_block(self, pos, *, context, timeout_s):
-                self.mine_calls.append((pos, context, timeout_s))
+            def mine_block_collect(self, pos, **kwargs):
+                self.collect_calls.append((pos, kwargs))
                 return ToolResult(True, "completed", False)
 
         work = FakeWork()
@@ -814,7 +818,7 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertTrue(result.success, result.to_payload())
         self.assertEqual(result.reason, "completed")
         self.assertEqual(work.place_calls[0][0], "minecraft:crafting_table")
-        self.assertEqual(work.mine_calls, [])
+        self.assertEqual(work.collect_calls, [])
         self.assertTrue(result.metrics["workspace"]["retained"])
         self.assertNotIn("reclaim", result.metrics)
 
@@ -868,7 +872,7 @@ class InventoryRuntimeTests(unittest.TestCase):
                     metrics={"place_here": {"chosen_target": [2, 64, 0]}},
                 )
 
-            def mine_block(self, pos, *, context, timeout_s):
+            def mine_block_collect(self, pos, **kwargs):
                 return ToolResult(True, "completed", False)
 
         runtime = InventoryTransactions(body, work=FakeWork())

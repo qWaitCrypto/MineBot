@@ -33,7 +33,7 @@
           "bot_name": "MineBot_1",
           "action_id": "follow-0001",
           "params": {
-            "target_spec": "Guide",
+            "target_uuid": "22222222-2222-4222-8222-222222222222",
             "keep_radius": 3.0,
             "replan_distance": 2.0,
             "acquire_radius": 32,
@@ -48,7 +48,7 @@
         "request_id": "r-2",
         "bot_name": "MineBot_1",
         "action_id": "follow-0001",
-        "target_spec": "Guide",
+        "target_uuid": "22222222-2222-4222-8222-222222222222",
         "keep_radius": 3.0,
         "replan_distance": 2.0,
         "acquire_radius": 32,
@@ -84,7 +84,7 @@
         "data": {
           "classification": "completed",
           "reason": "arrived",
-          "target_id": "guide-uuid",
+          "target_id": "22222222-2222-4222-8222-222222222222",
           "keep_radius": 3.0,
           "final_distance": 2.5,
           "target_replans": 1

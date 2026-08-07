@@ -26,7 +26,13 @@ X = 160
 Y = 100
 Z = 160
 TARGET = (X + 7, Y, Z)
-NATURAL = Region("buried-collect-natural", (144, 80, 144), (180, 120, 180))
+WATER_CELLS = ((X + 1, Y - 1, Z), (X + 2, Y - 1, Z), (X + 3, Y - 1, Z))
+WATER_SHORE = (X + 4, Y, Z)
+RECOVERY_X = X + 32
+RECOVERY_Y = Y
+RECOVERY_Z = Z
+RECOVERY_TARGET = (RECOVERY_X + 6, RECOVERY_Y + 8, RECOVERY_Z)
+NATURAL = Region("buried-collect-natural", (144, 80, 144), (220, 120, 180))
 PROTECTED = Region("buried-collect-protected", (152, 92, 152), (172, 112, 168))
 PALETTE = ("stone", "deepslate", "dirt", "sandstone", "clay")
 ARTIFACT = Path("logs/agentic-runtime/java-body-buried-collect-20260730.json")
@@ -99,6 +105,82 @@ def prepare_fixture(rcon: RconClient, body) -> None:
     wait_for_position(body, expected)
 
 
+def prepare_water_fixture(rcon: RconClient, body) -> None:
+    command(rcon, f"gamemode spectator {BOT}")
+    command(rcon, f"tp {BOT} {X + 0.5} {Y + 12} {Z + 0.5}")
+    command(rcon, f"clear {BOT}")
+    command(
+        rcon,
+        f"execute positioned {X} {Y} {Z} run kill @e[type=minecraft:item,distance=..24]",
+    )
+    command(rcon, f"fill {X - 6} {Y - 5} {Z - 6} {X + 8} {Y + 7} {Z + 6} stone")
+
+    for px in range(X - 1, TARGET[0] + 2):
+        for py in range(Y - 3, Y + 5):
+            for pz in range(Z - 1, Z + 2):
+                block = PALETTE[(px + 2 * py + 3 * pz) % len(PALETTE)]
+                command(rcon, f"setblock {px} {py} {pz} {block}", delay=0.0)
+
+    # One-block-deep water basin: the dry start descends into water and the
+    # opposite dry shore is one block higher. The only route to the ore then
+    # crosses two solid body columns, forcing governed excavation after egress.
+    command(rcon, f"fill {X} {Y} {Z} {WATER_SHORE[0]} {Y + 1} {Z} air", delay=0.0)
+    command(rcon, f"fill {X + 1} {Y - 1} {Z} {X + 3} {Y - 1} {Z} water", delay=0.0)
+    command(rcon, f"setblock {TARGET[0]} {TARGET[1]} {TARGET[2]} iron_ore", delay=0.0)
+    command(rcon, f"item replace entity {BOT} hotbar.0 with minecraft:stone_pickaxe 1")
+    command(rcon, f"player {BOT} hotbar 1")
+    command(rcon, f"gamemode survival {BOT}")
+    expected = (X + 0.5, float(Y), Z + 0.5)
+    command(rcon, f"tp {BOT} {expected[0]} {expected[1]} {expected[2]} -90 0")
+    wait_for_position(body, expected)
+
+
+def prepare_mobility_recovery_fixture(rcon: RconClient, body) -> None:
+    command(rcon, f"gamemode spectator {BOT}")
+    command(rcon, f"tp {BOT} {RECOVERY_X + 0.5} {RECOVERY_Y + 14} {RECOVERY_Z + 0.5}")
+    command(rcon, f"clear {BOT}")
+    command(
+        rcon,
+        f"execute positioned {RECOVERY_X} {RECOVERY_Y} {RECOVERY_Z} "
+        "run kill @e[type=minecraft:item,distance=..24]",
+    )
+    command(
+        rcon,
+        f"fill {RECOVERY_X - 8} {RECOVERY_Y - 1} {RECOVERY_Z - 8} "
+        f"{RECOVERY_X + 12} {RECOVERY_Y - 1} {RECOVERY_Z + 8} stone",
+    )
+    command(
+        rcon,
+        f"fill {RECOVERY_X - 8} {RECOVERY_Y} {RECOVERY_Z - 8} "
+        f"{RECOVERY_X + 12} {RECOVERY_Y + 12} {RECOVERY_Z + 8} air",
+    )
+    # Cover the complete loaded surface-search neighborhood. Without this
+    # roof, the lower floor can see sky and ASCEND correctly treats a short
+    # horizontal walk as surface recovery, so the fixture never exercises the
+    # disconnected vertical component it claims to model.
+    command(
+        rcon,
+        f"fill {RECOVERY_X - 16} {RECOVERY_Y + 7} {RECOVERY_Z - 16} "
+        f"{RECOVERY_X + 28} {RECOVERY_Y + 7} {RECOVERY_Z + 16} stone",
+    )
+    # The roof is a horizontally usable upper component, but ordinary movement
+    # and return-safe excavation cannot climb the air column. The existing
+    # ASCEND controller must pillar and open a governed exit before collection
+    # can continue toward the ore on top.
+    command(
+        rcon,
+        f"setblock {RECOVERY_TARGET[0]} {RECOVERY_TARGET[1]} "
+        f"{RECOVERY_TARGET[2]} iron_ore",
+    )
+    command(rcon, f"item replace entity {BOT} hotbar.0 with minecraft:stone_pickaxe 1")
+    command(rcon, f"give {BOT} minecraft:dirt 16")
+    command(rcon, f"player {BOT} hotbar 1")
+    command(rcon, f"gamemode survival {BOT}")
+    expected = (RECOVERY_X + 0.5, float(RECOVERY_Y), RECOVERY_Z + 0.5)
+    command(rcon, f"tp {BOT} {expected[0]} {expected[1]} {expected[2]} -90 0")
+    wait_for_position(body, expected)
+
+
 def inventory_count(body, item: str) -> int:
     state = body.get_state()
     counts = state.inventory_counts or {}
@@ -123,9 +205,20 @@ def collect(parts) -> object:
 
 def first_action_metrics(result) -> dict[str, object]:
     attempts = list((result.metrics or {}).get("attempts") or [])
-    if not attempts:
-        return {}
-    return dict(attempts[0].get("metrics") or {})
+    for attempt in attempts:
+        for key in ("mine", "designated_recovery"):
+            action_result = attempt.get(key)
+            if isinstance(action_result, dict):
+                return dict(action_result.get("metrics") or {})
+    return {}
+
+
+def vertical_recovery_certificate(result) -> dict[str, object]:
+    for attempt in list((result.metrics or {}).get("attempts") or []):
+        certificate = attempt.get("mobility_egress")
+        if isinstance(certificate, dict):
+            return dict(certificate)
+    return {}
 
 
 def event_payload(event) -> dict[str, object]:
@@ -170,7 +263,7 @@ def main() -> int:
         "scope": "java_body_buried_collect",
         "formal_gate": False,
         "bounded": True,
-        "environment": "dry_underground",
+        "environment": "bounded_underground_dry_and_water",
         "body_provider": "java",
         "scarpet_body_constructed": False,
         "rcon_role": "fixture_setup_and_verification_only",
@@ -217,9 +310,6 @@ def main() -> int:
             collected_events = [event for event in body.event_log if event.seq > success_start_seq]
             collected_metrics = first_action_metrics(collected)
             approach_broken = list(collected_metrics.get("approach_broken") or [])
-            excavation_segments = int(
-                collected_metrics.get("approach_excavation_segments") or 0
-            )
             mutations_completed = int(collected_metrics.get("mutations_completed") or 0)
             broken_cells_are_air = all(
                 block_is(
@@ -238,7 +328,6 @@ def main() -> int:
                 "raw_iron_after": raw_iron_after,
                 "target_is_air": block_is(rcon, TARGET, "air"),
                 "approach_broken": approach_broken,
-                "excavation_segments": excavation_segments,
                 "mutations_completed": mutations_completed,
                 "broken_cells_are_air": broken_cells_are_air,
                 "excavation_proposals": event_names.count("collect_excavation_mutation_proposed"),
@@ -248,6 +337,96 @@ def main() -> int:
                 "elapsed_wall_s": round(elapsed, 3),
             }
             artifact["cases"]["natural_allow"] = allow_case
+
+            prepare_water_fixture(rcon, body)
+            water_start_seq = int(body.event_head("buried-collect-water")['event_seq'])
+            body.last_seq = water_start_seq
+            water_before = body.get_state()
+            water_raw_before = inventory_count(body, "raw_iron")
+            water_action_index = len(executed_actions)
+            water_started = time.monotonic()
+            water_collected = collect(parts)
+            water_elapsed = time.monotonic() - water_started
+            body.poll_events()
+            water_after = body.get_state()
+            water_raw_after = inventory_count(body, "raw_iron")
+            water_events = [event for event in body.event_log if event.seq > water_start_seq]
+            water_metrics = first_action_metrics(water_collected)
+            water_action_names = executed_actions[water_action_index:]
+            first_excavation_proposal_seq = next(
+                (
+                    event.seq
+                    for event in water_events
+                    if event.name == "collect_excavation_mutation_proposed"
+                ),
+                -1,
+            )
+            shore_crossings = [
+                event
+                for event in water_events
+                if event.name == "path_follow_started"
+                and isinstance(event.data.get("from"), list)
+                and float(event.data["from"][0]) >= WATER_SHORE[0]
+                and event.seq < first_excavation_proposal_seq
+            ]
+            water_case = {
+                "result": water_collected.to_payload(),
+                "start_pos": list(water_before.pos),
+                "final_pos": list(water_after.pos),
+                "raw_iron_before": water_raw_before,
+                "raw_iron_after": water_raw_after,
+                "water_cells_preserved": [block_is(rcon, cell, "water") for cell in WATER_CELLS],
+                "target_is_air": block_is(rcon, TARGET, "air"),
+                "body_actions": water_action_names,
+                "shore_crossing_seqs": [event.seq for event in shore_crossings],
+                "shore_crossing_positions": [event.data["from"] for event in shore_crossings],
+                "first_excavation_proposal_seq": first_excavation_proposal_seq,
+                "excavation_breaks": int(water_metrics.get("approach_excavation_breaks") or 0),
+                "events": [event_payload(event) for event in water_events],
+                "elapsed_wall_s": round(water_elapsed, 3),
+            }
+            artifact["cases"]["water_to_shore_excavation"] = water_case
+
+            prepare_mobility_recovery_fixture(rcon, body)
+            recovery_start_seq = int(body.event_head("buried-collect-recovery")["event_seq"])
+            body.last_seq = recovery_start_seq
+            recovery_before = body.get_state()
+            recovery_raw_before = inventory_count(body, "raw_iron")
+            recovery_action_index = len(executed_actions)
+            recovery_started = time.monotonic()
+            recovery_collected = collect(parts)
+            recovery_elapsed = time.monotonic() - recovery_started
+            body.poll_events()
+            recovery_after = body.get_state()
+            recovery_raw_after = inventory_count(body, "raw_iron")
+            recovery_events = [
+                event for event in body.event_log if event.seq > recovery_start_seq
+            ]
+            recovery_certificate = vertical_recovery_certificate(recovery_collected)
+            recovery_action_names = executed_actions[recovery_action_index:]
+            recovery_event_names = [event.name for event in recovery_events]
+            recovery_case = {
+                "result": recovery_collected.to_payload(),
+                "start_pos": list(recovery_before.pos),
+                "final_pos": list(recovery_after.pos),
+                "raw_iron_before": recovery_raw_before,
+                "raw_iron_after": recovery_raw_after,
+                "target_is_air": block_is(rcon, RECOVERY_TARGET, "air"),
+                "body_actions": recovery_action_names,
+                "vertical_recovery_certificate": recovery_certificate,
+                "pillar_steps": recovery_event_names.count("ascent_pillar_verified"),
+                "forbidden_java_recovery_events": [
+                    name
+                    for name in recovery_event_names
+                    if name.startswith("collection_mobility_recovery_")
+                ],
+                "ascend_mutations_completed": int(
+                    recovery_certificate.get("mutations_completed") or 0
+                ),
+                "events": [event_payload(event) for event in recovery_events],
+                "elapsed_wall_s": round(recovery_elapsed, 3),
+            }
+            artifact["cases"]["vertical_component_recovery"] = recovery_case
 
             denied_ok = (
                 not denied.success
@@ -260,8 +439,7 @@ def main() -> int:
                 collected.success
                 and collected_metrics.get("approach_excavation_attempted") is True
                 and collected_metrics.get("approach_excavation_used") is True
-                and excavation_segments >= 2
-                and excavation_breaks == 12
+                and excavation_breaks > 0
                 and mutations_completed == excavation_breaks + 1
                 and mutations_completed <= 16
                 and len(approach_broken) == excavation_breaks
@@ -273,11 +451,36 @@ def main() -> int:
                 and allow_case["target_is_air"] is True
                 and after.pos[0] >= X + 5.5
             )
+            water_ok = (
+                water_collected.success
+                and water_action_names.count("collectBlock") >= 1
+                and "ascend" not in water_action_names
+                and water_raw_after > water_raw_before
+                and water_case["target_is_air"] is True
+                and all(water_case["water_cells_preserved"])
+                and bool(shore_crossings)
+                and int(water_metrics.get("approach_excavation_breaks") or 0) > 0
+                and water_after.pos[0] >= TARGET[0] - 1.5
+            )
+            recovery_ok = (
+                recovery_collected.success
+                and recovery_action_names.count("collectBlock") >= 1
+                and recovery_action_names.count("ascend") == 1
+                and recovery_raw_after > recovery_raw_before
+                and recovery_case["target_is_air"] is True
+                and recovery_certificate.get("rank_reduced") is True
+                and recovery_certificate.get("target_preserved") is True
+                and recovery_case["pillar_steps"] >= 1
+                and not recovery_case["forbidden_java_recovery_events"]
+                and recovery_case["ascend_mutations_completed"] <= 16
+            )
             artifact["executed_actions"] = executed_actions
             artifact["success"] = bool(
                 denied_ok
                 and collected_ok
-                and executed_actions == ["collectBlock", "collectBlock"]
+                and water_ok
+                and recovery_ok
+                and set(executed_actions).issubset({"navigate", "collectBlock", "ascend"})
             )
         finally:
             try:

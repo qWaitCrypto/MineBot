@@ -6,10 +6,13 @@ from minebot.body.navigation import (
     RCON_MUTATION_COMMAND_TARGET_CHARS,
     _block_pos,
     aquatic_navigation_config,
+    navigation_governed_mobility_upgrade_allowed,
+    navigation_surface_egress_fallback_allowed,
+    navigation_zero_progress,
 )
 from minebot.body.world_read import read_block_cells_tiled, refresh_grid_world_around
 from minebot.game.governance import GovernancePolicy, Region
-from minebot.contract import Action, BodyState, BreakContext, Event, PerceptionResult, Result
+from minebot.contract import Action, BodyState, BreakContext, Event, PerceptionResult, Result, ToolResult
 from minebot.game.navigation import (
     GoalComposite,
     GoalNear,
@@ -132,6 +135,29 @@ class FakeBody:
 
     def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
         self.perceptions.append((scope, dict(params)))
+        if scope == "nearbyEntities":
+            return PerceptionResult(
+                bot="Bot1",
+                scope=scope,
+                type="perception",
+                ok=True,
+                complete=True,
+                data={
+                    "count": 4,
+                    "entities": [
+                        {
+                            "id": "22222222-2222-4222-8222-222222222222",
+                            "type": "minecraft:player",
+                            "name": name,
+                            "pos": [3.0, 64.0, 0.0],
+                            "health": 20.0,
+                            "dist2": 9.0,
+                        }
+                        for name in ("TargetPlayer", "Ghost", "Runner", "Someone")
+                    ],
+                },
+                uncertainty=[],
+            )
         if scope == "blockCells":
             cells = params.get("cells") or []
             start = int(params.get("start") or 0)
@@ -2348,7 +2374,10 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(result.reason, "arrived")
         self.assertEqual(len(body.actions), 1)
         self.assertEqual(body.actions[0].name, "followEntity")
-        self.assertEqual(body.actions[0].params["target_spec"], "TargetPlayer")
+        self.assertEqual(
+            body.actions[0].params["target_uuid"],
+            "22222222-2222-4222-8222-222222222222",
+        )
         self.assertEqual(body.actions[0].params["keep_radius"], 3.0)
         self.assertEqual(body.actions[0].params["grid_radius"], 48)
         self.assertEqual(body.actions[0].params["max_expand"], 1800)
@@ -2402,14 +2431,18 @@ class NavigationRuntimeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runtime.follow_entity("X", keep_distance=-1, timeout_s=5.0)
 
-    def test_follow_entity_metrics_carry_target_spec(self):
+    def test_follow_entity_metrics_carry_resolved_target(self):
         nav = FakeNavigator([])
         body = FakeBody([state_at((0, 64, 0))], terminal_reasons=["arrived"])
         runtime = NavigationTransactions(body, nav)
 
         result = runtime.follow_entity("TargetPlayer", timeout_s=5.0)
 
-        self.assertEqual(result.metrics["target_spec"], "TargetPlayer")
+        self.assertEqual(result.metrics["requested_target"], "TargetPlayer")
+        self.assertEqual(
+            result.metrics["target_uuid"],
+            "22222222-2222-4222-8222-222222222222",
+        )
         self.assertEqual(result.metrics["event"], "followDone")
 
 
@@ -2638,6 +2671,64 @@ class WorldRefreshNavigationIntegrationTests(unittest.TestCase):
         self.assertEqual(result.reason, "recovery_exhausted:stuck")
         self.assertEqual([action.name for action in body.actions], ["navigateTo", "navigateTo"])
         self.assertEqual(result.metrics["recovery_attempts"][0]["reason"], "no_path")
+
+    def test_java_scalar_terminal_position_proves_zero_progress(self):
+        result = ToolResult(
+            False,
+            "node_budget_without_progress",
+            True,
+            metrics={"final_x": 0.02, "final_y": 64.0, "final_z": -0.01},
+        )
+
+        self.assertTrue(navigation_zero_progress(result, (0.0, 64.0, 0.0), (0.02, 64.0, -0.01)))
+        self.assertTrue(
+            navigation_governed_mobility_upgrade_allowed(
+                result,
+                (0.0, 64.0, 0.0),
+                (0.02, 64.0, -0.01),
+            )
+        )
+
+    def test_java_scalar_terminal_position_preserves_positive_progress_guard(self):
+        result = ToolResult(
+            False,
+            "node_budget_without_progress",
+            True,
+            metrics={"final_x": 4.0, "final_y": 64.0, "final_z": 0.0},
+        )
+
+        self.assertFalse(navigation_zero_progress(result, (0.0, 64.0, 0.0), (4.0, 64.0, 0.0)))
+        self.assertTrue(
+            navigation_governed_mobility_upgrade_allowed(
+                result,
+                (0.0, 64.0, 0.0),
+                (4.0, 64.0, 0.0),
+            )
+        )
+
+    def test_java_scalar_terminal_position_overrides_quantized_summary(self):
+        before = (-47.54823476537398, 73.0, -28.4999691134567)
+        result = ToolResult(
+            False,
+            "no_path",
+            True,
+            metrics={
+                "final_x": before[0],
+                "final_y": before[1],
+                "final_z": before[2],
+                "final_pos": [-48, 73, -29],
+            },
+        )
+
+        self.assertTrue(navigation_zero_progress(result, before, before))
+        self.assertTrue(
+            navigation_governed_mobility_upgrade_allowed(result, before, before)
+        )
+
+    def test_surface_egress_can_escalate_a_stuck_provider_route(self):
+        self.assertTrue(
+            navigation_surface_egress_fallback_allowed("dry_egress_failed:stuck")
+        )
 
 
 

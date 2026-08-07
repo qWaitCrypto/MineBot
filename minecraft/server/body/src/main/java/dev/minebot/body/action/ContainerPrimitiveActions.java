@@ -261,12 +261,17 @@ public final class ContainerPrimitiveActions {
                 return;
             }
             if (state == MutationGate.State.DENIED || state == MutationGate.State.TIMED_OUT) {
+                String governanceReason = gate.reason(proposalId);
                 String reason = state == MutationGate.State.DENIED
-                    ? "governance_denied:" + gate.reason(proposalId)
+                    ? "governance_denied"
                     : "governance_verdict_timeout";
                 emitVerdict(serverTick, "mutation_denied", reason);
                 gate.discard(proposalId);
-                finish(serverTick, ActionRuntime.CLASS_FAILED, reason, null);
+                JsonObject evidence = baseFacts(direction, containerSlot, botSlot);
+                if (state == MutationGate.State.DENIED && governanceReason != null) {
+                    evidence.addProperty("governance_reason", governanceReason);
+                }
+                finish(serverTick, ActionRuntime.CLASS_FAILED, reason, evidence);
                 return;
             }
 

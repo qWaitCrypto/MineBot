@@ -189,7 +189,8 @@ final class FurnacePrimitiveActionsTest {
         assertEquals(2, bot.counts[5]);
         var terminal = registry.status("furnace-2").terminal();
         assertEquals("failed", terminal.get("classification").getAsString());
-        assertEquals("governance_denied:protected_region", terminal.get("reason").getAsString());
+        assertEquals("governance_denied", terminal.get("reason").getAsString());
+        assertEquals("protected_region", terminal.get("governance_reason").getAsString());
     }
 
     @Test

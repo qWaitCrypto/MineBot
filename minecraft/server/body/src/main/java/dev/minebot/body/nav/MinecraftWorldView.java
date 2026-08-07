@@ -58,6 +58,15 @@ public final class MinecraftWorldView implements WorldView {
         return isLavaNearBody(level, x, y, z);
     }
 
+    @Override
+    public boolean isBlockClearanceHazardous(int x, int y, int z) {
+        // Clearing either the feet or head cell can open a same-level lava
+        // pocket or let lava fall from the layer above into the new corridor.
+        // Keep this mutation-only check out of ordinary movement semantics.
+        return isLavaNearBody(level, x, y, z)
+            || isLavaNearBody(level, x, y + 1, z);
+    }
+
     /** Exact lava envelope used by both ordinary routing and survival reflexes. */
     public static boolean isLavaNearBody(ServerLevel level, int x, int y, int z) {
         for (int dx = -1; dx <= 1; dx++) {

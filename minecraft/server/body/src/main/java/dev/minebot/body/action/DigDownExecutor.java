@@ -74,6 +74,9 @@ public final class DigDownExecutor implements ActionRuntime.TickExecutor {
     private int centeredTicks;
     private int landingTicks;
     private boolean moving;
+    private String governanceReason;
+    private String breakFailureReason;
+    private String partialReason;
 
     public DigDownExecutor(
         String bot,
@@ -325,9 +328,13 @@ public final class DigDownExecutor implements ActionRuntime.TickExecutor {
             return;
         }
         if (state != MutationGate.State.ALLOWED) {
-            String reason = state == MutationGate.State.DENIED
-                ? "dig_down_denied:" + gate.reason(proposalId)
-                : "dig_down_governance_timeout";
+            String reason;
+            if (state == MutationGate.State.DENIED) {
+                governanceReason = gate.reason(proposalId);
+                reason = "dig_down_denied";
+            } else {
+                reason = "dig_down_governance_timeout";
+            }
             gate.discard(proposalId);
             proposalId = null;
             finishProgressAware(serverTick, reason, position);
@@ -361,7 +368,8 @@ public final class DigDownExecutor implements ActionRuntime.TickExecutor {
             serverTick
         );
         if (outcome.state() == ExactBlockBreaker.State.FAILED) {
-            finishProgressAware(serverTick, "dig_down_exact_break_failed:" + outcome.reason(), position);
+            breakFailureReason = outcome.reason();
+            finishProgressAware(serverTick, "dig_down_exact_break_failed", position);
             return;
         }
         phaseStartedTick = serverTick;
@@ -395,7 +403,8 @@ public final class DigDownExecutor implements ActionRuntime.TickExecutor {
         ExactBlockBreaker.Outcome outcome = blockBreaker.tick(bot, serverTick);
         if (outcome.state() == ExactBlockBreaker.State.FAILED) {
             blockBreaker.abort(bot);
-            finishProgressAware(serverTick, "dig_down_exact_break_failed:" + outcome.reason(), position);
+            breakFailureReason = outcome.reason();
+            finishProgressAware(serverTick, "dig_down_exact_break_failed", position);
             return;
         }
         if (serverTick - phaseStartedTick > BREAK_TIMEOUT_TICKS) {
@@ -460,10 +469,13 @@ public final class DigDownExecutor implements ActionRuntime.TickExecutor {
         boolean progressed = position != null
             && actionOriginY != null
             && position.feetBlockY() < actionOriginY;
+        if (progressed) {
+            partialReason = reason;
+        }
         finish(
             serverTick,
             progressed ? ActionRuntime.CLASS_PARTIAL : ActionRuntime.CLASS_FAILED,
-            progressed ? "dig_down_partial:" + reason : reason,
+            progressed ? "dig_down_partial" : reason,
             position
         );
     }
@@ -488,6 +500,15 @@ public final class DigDownExecutor implements ActionRuntime.TickExecutor {
         facts.addProperty("blocks_descended", blocksDescended);
         facts.addProperty("max_steps", maxSteps);
         facts.addProperty("max_clear_fall", maxClearFall);
+        if (governanceReason != null) {
+            facts.addProperty("governance_reason", governanceReason);
+        }
+        if (breakFailureReason != null) {
+            facts.addProperty("break_failure_reason", breakFailureReason);
+        }
+        if (partialReason != null) {
+            facts.addProperty("partial_reason", partialReason);
+        }
         if (position != null) {
             facts.addProperty("final_x", position.x());
             facts.addProperty("final_y", position.y());

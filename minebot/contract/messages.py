@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any, Literal, Mapping
@@ -268,6 +269,55 @@ def is_governance_decision_required(
         or normalized.endswith(f":{marker}")
         or f":{marker}:" in normalized
     )
+
+
+def governance_confirmation_from(value: object) -> JsonObject | None:
+    """Find one actionable governance challenge in bounded result evidence."""
+
+    # Control evidence is intentionally shallow while diagnostic payloads can
+    # contain thousands of path nodes and attempts. Breadth-first traversal
+    # keeps the hard inspection bound without letting one early diagnostic
+    # branch hide an actionable sibling challenge.
+    pending = deque([value])
+    seen: set[int] = set()
+    remaining = 4096
+    control_keys = (
+        "last_failure",
+        "failed_step",
+        "body_process",
+        "result",
+        "designated_recovery",
+        "designated_recovery_continuations",
+        "navigation_fallback",
+        "metrics",
+    )
+    while pending and remaining > 0:
+        current = pending.popleft()
+        remaining -= 1
+        if isinstance(current, Mapping):
+            identity = id(current)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            direct = current.get("governance_confirmation")
+            if isinstance(direct, Mapping) and isinstance(direct.get("challenge_id"), str):
+                return dict(direct)
+            prioritized = set(control_keys).intersection(current)
+            for key in reversed(control_keys):
+                if key in current:
+                    pending.appendleft(current[key])
+            pending.extend(
+                item for key, item in current.items() if key not in prioritized
+            )
+        elif isinstance(current, (list, tuple)):
+            identity = id(current)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            # Later attempts are the current blocker; earlier attempts are
+            # retained as evidence but must not hide the newest decision.
+            pending.extend(reversed(current))
+    return None
 
 
 def is_partial_progress(

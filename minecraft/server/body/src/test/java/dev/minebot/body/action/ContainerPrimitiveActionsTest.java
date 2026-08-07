@@ -171,7 +171,8 @@ final class ContainerPrimitiveActionsTest {
         assertEquals(0, bot.counts[1]);
         var terminal = registry.status("container-2").terminal();
         assertEquals("failed", terminal.get("classification").getAsString());
-        assertEquals("governance_denied:protected_region", terminal.get("reason").getAsString());
+        assertEquals("governance_denied", terminal.get("reason").getAsString());
+        assertEquals("protected_region", terminal.get("governance_reason").getAsString());
     }
 
     @Test

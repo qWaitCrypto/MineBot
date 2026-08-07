@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure Java-only progression from collected wood to an equipped stone pickaxe."""
+"""Bounded no-model rehearsal for wood-to-stone-to-iron progression."""
 
 from __future__ import annotations
 
@@ -51,12 +51,26 @@ def prepare_fixture(rcon: RconClient) -> None:
                 if abs(x - tree_x) + abs(z - Z) <= 3:
                     rcon.command(f"setblock {x} {y} {z} spruce_leaves")
     for stone_x, stone_z in (
-        (X - 5, Z - 2),
-        (X - 5, Z),
-        (X - 5, Z + 2),
+        (X - 7, Z - 3),
+        (X - 7, Z - 1),
+        (X - 7, Z + 1),
+        (X - 7, Z + 3),
+        (X - 5, Z - 3),
+        (X - 5, Z - 1),
+        (X - 5, Z + 1),
+        (X - 5, Z + 3),
+        (X - 3, Z - 3),
         (X - 3, Z - 1),
+        (X - 3, Z + 1),
+        (X - 3, Z + 3),
     ):
         rcon.command(f"setblock {stone_x} {Y} {stone_z} stone")
+    for iron_x, iron_z in (
+        (X + 2, Z - 4),
+        (X + 4, Z - 4),
+        (X + 6, Z - 4),
+    ):
+        rcon.command(f"setblock {iron_x} {Y} {iron_z} iron_ore")
     rcon.command(f"clear {BOT}")
     rcon.command(f"effect clear {BOT}")
     rcon.command(f"gamemode survival {BOT}")
@@ -79,7 +93,7 @@ def main() -> int:
     body = provider.body
     parts = build_phase1_agent_runtime(
         body=body,
-        goal_text="acquire and equip a stone pickaxe",
+        goal_text="acquire and equip an iron pickaxe",
         model_provider=None,
         config=Phase1RuntimeConfig(
             natural_region=NATURAL,
@@ -97,7 +111,17 @@ def main() -> int:
             start_seq = int(body.event_head("java-resource-progression")["event_seq"])
             body.last_seq = start_seq
             started = time.monotonic()
-            result = parts.registry.get("ensure_tool_for").callable({"resource": "stone_pickaxe"})
+            stone_started = time.monotonic()
+            stone_result = parts.registry.get("ensure_tool_for").callable(
+                {"resource": "stone_pickaxe"}
+            )
+            stone_elapsed = time.monotonic() - stone_started
+            stone_state = body.get_state()
+            iron_started = time.monotonic()
+            result = parts.registry.get("ensure_tool_for").callable(
+                {"resource": "iron_pickaxe"}
+            )
+            iron_elapsed = time.monotonic() - iron_started
             elapsed = time.monotonic() - started
             body.poll_events()
             after = body.get_state()
@@ -107,7 +131,9 @@ def main() -> int:
             finally:
                 cleanup_fixture(rcon)
 
-    completed_steps = list((result.metrics or {}).get("completed_steps") or [])
+    stone_completed_steps = list((stone_result.metrics or {}).get("completed_steps") or [])
+    iron_completed_steps = list((result.metrics or {}).get("completed_steps") or [])
+    completed_steps = [*stone_completed_steps, *iron_completed_steps]
     steps = [
         {
             "kind": (entry.get("step") or {}).get("kind"),
@@ -118,37 +144,51 @@ def main() -> int:
     ]
     inventory = after.inventory_counts or {}
     planned_items = [str((entry.get("step") or {}).get("item") or "") for entry in completed_steps]
-    objective_domains = [
+    designated_targets = [
         dict(event.data)
         for event in body.event_log
-        if event.seq > start_seq and event.name == "collection_objective_domain_planned"
+        if event.seq > start_seq and event.name == "target_committed"
     ]
-    clustered_tree_domain = next(
-        (
-            domain
-            for domain in objective_domains
-            if int(domain.get("candidate_count") or 0) == 1
-            and int(domain.get("candidate_coordinate_count") or 0) >= 2
-        ),
-        None,
-    )
+    forbidden_strategy_events = [
+        event.name
+        for event in body.event_log
+        if event.seq > start_seq
+        and (
+            event.name.startswith("collection_candidate_")
+            or event.name.startswith("collection_frontier_")
+            or event.name == "collection_objective_domain_planned"
+        )
+    ]
     stone_pickaxe_count = sum(
         int(count)
         for item, count in inventory.items()
         if str(item).removeprefix("minecraft:") == "stone_pickaxe"
     )
+    iron_pickaxe_count = sum(
+        int(count)
+        for item, count in inventory.items()
+        if str(item).removeprefix("minecraft:") == "iron_pickaxe"
+    )
+    first_output_s = stone_elapsed if stone_result.success else None
+    max_no_output_window_s = max(stone_elapsed, iron_elapsed)
     success = bool(
-        result.success
+        stone_result.success
+        and result.success
         and stone_pickaxe_count >= 1
-        and str(after.selected_item or "").removeprefix("minecraft:") == "stone_pickaxe"
+        and iron_pickaxe_count >= 1
+        and str(after.selected_item or "").removeprefix("minecraft:") == "iron_pickaxe"
         and steps
         and steps[0]["kind"] == "collect"
         and steps[0]["item"] == "logs"
         and "spruce_planks" in planned_items
         and "oak_planks" not in planned_items
-        and clustered_tree_domain is not None
+        and designated_targets
+        and not forbidden_strategy_events
         and steps[-1]["kind"] == "equip"
-        and elapsed < 300.0
+        and steps[-1]["item"] == "iron_pickaxe"
+        and first_output_s is not None
+        and first_output_s < 342.0
+        and max_no_output_window_s < 900.0
     )
     artifact = {
         "scope": "java_body_resource_progression",
@@ -158,10 +198,31 @@ def main() -> int:
         "scarpet_constructed": provider.scarpet_body is not None,
         "rcon_role": "fixture_setup_and_verification_only",
         "model_calls": 0,
-        "high_level_calls": 1,
+        "high_level_calls": 2,
         "elapsed_wall_s": round(elapsed, 3),
+        "first_output_s": None if first_output_s is None else round(first_output_s, 3),
+        "max_no_output_window_s": round(max_no_output_window_s, 3),
+        "milestones": [
+            {
+                "name": "stone_pickaxe_equipped",
+                "elapsed_wall_s": round(stone_elapsed, 3),
+                "result_reason": stone_result.reason,
+                "success": stone_result.success,
+                "inventory": stone_state.inventory_counts or {},
+                "selected_item": stone_state.selected_item,
+            },
+            {
+                "name": "iron_pickaxe_equipped",
+                "elapsed_wall_s": round(iron_elapsed, 3),
+                "result_reason": result.reason,
+                "success": result.success,
+                "inventory": inventory,
+                "selected_item": after.selected_item,
+            },
+        ],
         "steps": steps,
-        "clustered_tree_domain": clustered_tree_domain,
+        "designated_targets": designated_targets,
+        "forbidden_java_strategy_events": forbidden_strategy_events,
         "inventory": inventory,
         "selected_item": after.selected_item,
         "result_reason": result.reason,

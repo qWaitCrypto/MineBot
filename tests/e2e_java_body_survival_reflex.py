@@ -144,9 +144,25 @@ def run_lava_preempt_and_invalidate(rcon, body) -> dict:
             timeout_s=8.0,
             label="long Java navigation to begin",
         )
-        hx = math.floor(moving_pos[0]) - 1
+        hx = math.floor(moving_pos[0])
         hz = math.floor(moving_pos[2])
-        command(rcon, f"setblock {hx} 200 {hz} lava")
+        # Put a short hazard strip under the moving route, not behind the
+        # position sample.  The old ``x - 1`` placement could miss the bot and
+        # then wait for a reflex that had never been triggered.
+        command(rcon, f"fill {hx} 200 {hz} {hx + 2} 200 {hz} lava")
+        triggered = wait_until(
+            lambda: next(
+                (
+                    event
+                    for event in events_after(body, start_seq)
+                    if event.name == "reflexTriggered"
+                    and event.data.get("kind") == "lava"
+                ),
+                None,
+            ),
+            timeout_s=5.0,
+            label="lava reflex trigger",
+        )
         result = moving.result(timeout=35.0)
 
     completed = wait_for_reflex(body, start_seq, "lava", timeout_s=8.0)
@@ -168,9 +184,10 @@ def run_lava_preempt_and_invalidate(rcon, body) -> dict:
     assert final.hazard_unresolved is None, final
     assert result.metrics.get("reflex_handoff") == "route_invalidated", result
 
-    command(rcon, f"setblock {hx} 200 {hz} air")
+    command(rcon, f"fill {hx} 200 {hz} {hx + 2} 200 {hz} air")
     return {
-        "hazard_block": [hx, 200, hz],
+        "hazard_blocks": [[x, 200, hz] for x in range(hx, hx + 3)],
+        "trigger": dict(triggered.data),
         "preempted_terminals": len(preempted),
         "owner_handoffs": len(handoffs),
         "reflex": dict(completed.data),

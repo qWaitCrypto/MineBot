@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import fabs
 from math import floor
 from math import dist
@@ -90,6 +90,7 @@ class NearbyBlockSearch:
     pages_read: int
     total_matches: int
     budget_exhausted: bool = False
+    next_cursors: dict[str, object | None] = field(default_factory=dict)
 
 
 def _read_find_blocks_pages(
@@ -100,16 +101,18 @@ def _read_find_blocks_pages(
     y_radius: int,
     limit: int,
     max_pages: int = 32,
+    resume_cursor: object | None = None,
     deadline: float | None = None,
     timeout_s: float | None = None,
 ) -> dict[str, object] | ToolResult:
-    cursor: object | None = 0
+    cursor: object | None = 0 if resume_cursor is None else resume_cursor
     seen_cursors: set[str] = set()
     pages_read = 0
     blocks: list[dict[str, object]] = []
     uncertainty: list[object] = []
     complete = False
     total_matches = 0
+    next_cursor: object | None = None
     while cursor is not None:
         if deadline is not None and time.monotonic() >= deadline:
             uncertainty.append({"reason": "time_budget", "timeout_s": timeout_s})
@@ -175,6 +178,7 @@ def _read_find_blocks_pages(
         "pages_read": pages_read,
         "total_matches": total_matches,
         "budget_exhausted": False,
+        "next_cursor": next_cursor,
     }
 
 
@@ -193,7 +197,7 @@ def find_nearby_block_targets(
 
 
 def _default_find_blocks_y_radius(radius: int) -> int:
-    return min(max(4, radius // 2), 16)
+    return min(max(4, radius), 16)
 
 
 def find_nearby_block_search(
@@ -205,6 +209,7 @@ def find_nearby_block_search(
     limit: int = 64,
     max_pages: int = 1,
     timeout_s: float | None = None,
+    resume_cursors: dict[str, object | None] | None = None,
 ) -> NearbyBlockSearch | ToolResult:
     if timeout_s is not None and timeout_s <= 0:
         return ToolResult(
@@ -224,8 +229,16 @@ def find_nearby_block_search(
     pages_read = 0
     total_matches = 0
     budget_exhausted = False
+    next_cursors: dict[str, object | None] = {}
     y_radius = _default_find_blocks_y_radius(radius)
     for wanted_type in wanted:
+        if resume_cursors is not None and wanted_type in resume_cursors:
+            resume_cursor = resume_cursors[wanted_type]
+            if resume_cursor is None:
+                next_cursors[wanted_type] = None
+                continue
+        else:
+            resume_cursor = None
         if deadline is not None and time.monotonic() >= deadline:
             uncertainty.append({"reason": "time_budget", "timeout_s": timeout_s})
             budget_exhausted = True
@@ -237,12 +250,14 @@ def find_nearby_block_search(
             y_radius=y_radius,
             limit=limit,
             max_pages=max_pages,
+            resume_cursor=resume_cursor,
             deadline=deadline,
             timeout_s=timeout_s,
         )
         if isinstance(pages, ToolResult):
             return pages
         blocks = pages["blocks"]
+        next_cursors[wanted_type] = pages.get("next_cursor")
         uncertainty.extend(pages["uncertainty"])
         pages_read += int(pages["pages_read"])
         total_matches += int(pages["total_matches"])
@@ -299,6 +314,7 @@ def find_nearby_block_search(
         pages_read=pages_read,
         total_matches=total_matches,
         budget_exhausted=budget_exhausted,
+        next_cursors=next_cursors,
     )
 
 

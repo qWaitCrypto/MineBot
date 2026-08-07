@@ -221,7 +221,8 @@ final class DigDownExecutorTest {
         JsonObject terminal = harness.run(300, false);
 
         assertEquals("failed", terminal.get("classification").getAsString());
-        assertEquals("dig_down_denied:protected_region", terminal.get("reason").getAsString());
+        assertEquals("dig_down_denied", terminal.get("reason").getAsString());
+        assertEquals("protected_region", terminal.get("governance_reason").getAsString());
         assertEquals(STONE, harness.blocks.get(Harness.key(0, 63, 0)));
         assertTrue(harness.body.breaks.isEmpty());
         assertEquals(1, harness.proposals.size());

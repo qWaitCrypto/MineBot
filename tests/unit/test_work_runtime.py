@@ -847,7 +847,7 @@ class BlockWorkTests(unittest.TestCase):
         find_calls = [params for scope, params in body.perceptions if scope == "findBlocks"]
         self.assertEqual(len(find_calls), 1)
         self.assertEqual(find_calls[0]["start"], 0)
-        self.assertEqual(find_calls[0]["y_radius"], 6)
+        self.assertEqual(find_calls[0]["y_radius"], 12)
         self.assertEqual(result.metrics["pages_read"], 1)
         self.assertEqual(result.metrics["total_matches"], 2)
         self.assertTrue(result.metrics["truncated"])
@@ -3027,17 +3027,7 @@ class BlockWorkTests(unittest.TestCase):
         self.assertFalse(config.allow_downward)
         self.assertTrue(config.aquatic_traversal)
 
-    def test_egress_to_dry_preserves_non_liquid_surface_navigation_terminal(self):
-        class FailingSurfaceNavigator(FakeNavigator):
-            def navigate_to(self, goal, **kwargs):
-                self.calls.append((goal, kwargs))
-                return ToolResult(
-                    False,
-                    "budget_exceeded",
-                    True,
-                    metrics={"selected_goal": list(goal_position(goal)), "goal_dist": 11.0},
-                )
-
+    def test_egress_to_dry_yields_non_liquid_unsupported_position_to_bounded_ascend(self):
         blocks = {
             (0, 63, 0): ("air", "CLEAR"),
             (0, 64, 0): ("air", "CLEAR"),
@@ -3047,16 +3037,16 @@ class BlockWorkTests(unittest.TestCase):
         body = FakeBody(blocks=blocks)
         body.state_pos = (0.5, 64.0, 0.5)
         policy = GovernancePolicy(natural_regions=[Region("surface", (-20, 0, -20), (20, 120, 20))])
-        navigator = FailingSurfaceNavigator()
+        navigator = FakeNavigator()
         runtime = BlockWork(body, policy, navigator=navigator)
 
         result = runtime.egress_to_dry(timeout_s=1.0)
 
         self.assertFalse(result.success)
-        self.assertEqual(result.reason, "dry_egress_failed:budget_exceeded")
+        self.assertEqual(result.reason, "dry_egress_not_liquid")
         self.assertTrue(result.can_retry)
-        self.assertEqual(result.metrics["recovery"]["reason"], "surface_navigation_failed:budget_exceeded")
-        self.assertEqual(len(navigator.calls), 1)
+        self.assertFalse(result.metrics["initial_stand"]["standable"])
+        self.assertEqual(navigator.calls, [])
 
     def test_go_to_surface_mobile_egress_leaves_an_already_exposed_island(self):
         remote_surface = (-16, 64, -16)

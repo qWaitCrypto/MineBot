@@ -158,7 +158,8 @@ final class SpecialUseActionsTest {
 
         var terminal = registry.status("ignite-denied").terminal();
         assertEquals("unsafe", terminal.get("classification").getAsString());
-        assertEquals("governance_denied:protected_region", terminal.get("reason").getAsString());
+        assertEquals("governance_denied", terminal.get("reason").getAsString());
+        assertEquals("protected_region", terminal.get("governance_reason").getAsString());
         assertEquals(0, controls.uses);
         assertEquals(0, world.substitutes);
         assertEquals("minecraft:air", world.target);

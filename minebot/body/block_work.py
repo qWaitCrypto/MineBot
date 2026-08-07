@@ -1492,54 +1492,16 @@ class BlockWork:
                 },
             )
         if not _stand_has_liquid_contact(initial_stand):
-            # A mining or workspace-reclaim transaction can leave the fake
-            # player briefly over an empty cell without liquid contact.  Use
-            # the existing bounded surface-domain recovery before declaring
-            # the position stale; the mobility-egress profile is pure
-            # movement and verifies a natural support cell on arrival.
-            recovery = self.go_to_surface(
-                current_pos=origin,
-                context=BreakContext.TRAVEL,
-                timeout_s=timeout_s,
-                surface_scan_height=max(self.SURFACE_EGRESS_Y_ABOVE, 2),
-                surface_scan_radius=1,
-                require_mobility_egress=True,
-            )
-            recovery_metrics = {
-                "origin": list(origin),
-                "initial_stand": initial_stand,
-                "recovery": recovery.to_payload(),
-            }
-            if recovery.success:
-                final_pos = _state_block_pos(self.body.get_state().pos)
-                terminal_stand = self._standable_feet_at(final_pos)
-                recovery_metrics["final_pos"] = list(final_pos)
-                recovery_metrics["terminal_stand"] = (
-                    terminal_stand.to_payload()
-                    if isinstance(terminal_stand, ToolResult)
-                    else terminal_stand
-                )
-                if not isinstance(terminal_stand, ToolResult) and terminal_stand["standable"]:
-                    return ToolResult(
-                        success=True,
-                        reason="dry_egress_recovered",
-                        can_retry=False,
-                        metrics=recovery_metrics,
-                    )
-            if str(recovery.reason or "").startswith("surface_navigation_failed:"):
-                return ToolResult(
-                    success=False,
-                    reason="dry_egress_failed:" + str(recovery.reason).split(":", 1)[1],
-                    can_retry=recovery.can_retry,
-                    next_suggestion=recovery.next_suggestion,
-                    metrics=recovery_metrics,
-                )
+            # This is not an aquatic egress.  Yield the typed physical
+            # precondition so the caller can compose the existing bounded
+            # ASCEND objective; hiding that composition here selected a
+            # pure-aquatic profile even for unsupported underground shafts.
             return ToolResult(
                 success=False,
                 reason="dry_egress_not_liquid",
                 can_retry=True,
-                next_suggestion="re-read the body position before choosing a non-liquid recovery",
-                metrics=recovery_metrics,
+                next_suggestion="run one bounded vertical egress before resuming the same objective",
+                metrics={"origin": list(origin), "initial_stand": initial_stand},
             )
 
         egress_domain = self._find_surface_egress_domain(

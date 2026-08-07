@@ -53,6 +53,7 @@
         "args": {
           "bot_name": "MineBot_1",
           "action_id": "ascend-0001",
+          "max_mutations": 8,
           "timeout_ticks": 2400
         }
       },
@@ -63,7 +64,8 @@
         "request_id": "r-2",
         "bot_name": "MineBot_1",
         "action_id": "ascend-0001",
-        "timeout_ticks": 2400
+        "timeout_ticks": 2400,
+        "max_mutations": 8
       }
     },
     {

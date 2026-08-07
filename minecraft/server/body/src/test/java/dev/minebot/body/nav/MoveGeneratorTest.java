@@ -201,4 +201,26 @@ final class MoveGeneratorTest {
         List<MoveGenerator.Move> moves = new MoveGenerator(new FakeWorld(FLOOR)).movesFrom(3, STAND, 3).moves();
         assertEquals(8, moves.size());
     }
+
+    @Test
+    void finiteMovementPolicyIsHonoredByTheSharedMoveGenerator() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        world.set(1, STAND, 0, WorldView.NodeKind.LIQUID);
+        world.set(1, STAND + 1, 0, WorldView.NodeKind.LIQUID);
+
+        MoveGenerator.Policy dryCardinalOnly = new MoveGenerator.Policy(
+            false,
+            true,
+            true,
+            false,
+            MoveGenerator.MAX_FALL_BLOCKS,
+            MoveGenerator.MAX_WATER_FALL_BLOCKS
+        );
+        List<MoveGenerator.Move> moves = new MoveGenerator(world, dryCardinalOnly)
+            .movesFrom(0, STAND, 0)
+            .moves();
+
+        assertFalse(hasMoveTo(moves, 1, STAND, 0), "water is excluded by the dry profile");
+        assertFalse(hasMoveTo(moves, 1, STAND, 1), "diagonal movement is excluded");
+    }
 }

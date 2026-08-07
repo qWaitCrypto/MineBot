@@ -33,4 +33,14 @@ public interface WorldView {
     default boolean isBodyPositionHazardous(int x, int y, int z) {
         return false;
     }
+
+    /**
+     * Whether removing this solid body-volume cell can expose a hazard before
+     * the player occupies the planned destination.  This is intentionally
+     * separate from {@link #isBodyPositionHazardous}: ordinary movement may be
+     * safe beside a sealed fluid pocket while breaking the seal is not.
+     */
+    default boolean isBlockClearanceHazardous(int x, int y, int z) {
+        return false;
+    }
 }

@@ -147,15 +147,18 @@ public final class SpecialUseActions {
             gate.discard(proposalId);
             proposalId = null;
             if (state != MutationGate.State.ALLOWED) {
-                String reason = state == MutationGate.State.TIMED_OUT
-                    ? "governance_verdict_timeout"
-                    : "governance_denied:" + verdictReason;
-                finish(false, reason, ActionRuntime.CLASS_UNSAFE, serverTick);
+                if (state == MutationGate.State.TIMED_OUT) {
+                    finish(false, "governance_verdict_timeout", ActionRuntime.CLASS_UNSAFE, serverTick);
+                } else {
+                    finish(false, "governance_denied", ActionRuntime.CLASS_UNSAFE, serverTick,
+                        "governance_reason", verdictReason);
+                }
                 return;
             }
             String invalid = precondition();
             if (invalid != null) {
-                finish(false, invalid + "_after_allow", ActionRuntime.CLASS_FAILED, serverTick);
+                finish(false, "precondition_failed_after_allow", ActionRuntime.CLASS_FAILED, serverTick,
+                    "precondition_reason", invalid);
                 return;
             }
             if (!blockBefore.equals(observedBlock())) {
@@ -187,7 +190,8 @@ public final class SpecialUseActions {
             if (allowSubstitute && !substituteAttempted && serverTick - physicalStartedTick >= 2) {
                 String invalid = precondition();
                 if (invalid != null) {
-                    finish(false, invalid + "_before_substitute", ActionRuntime.CLASS_FAILED, serverTick);
+                    finish(false, "precondition_failed_before_substitute", ActionRuntime.CLASS_FAILED,
+                        serverTick, "precondition_reason", invalid);
                     return;
                 }
                 if (!blockBefore.equals(observedBlock())) {
@@ -237,6 +241,17 @@ public final class SpecialUseActions {
         }
 
         private void finish(boolean success, String reason, String classification, int serverTick) {
+            finish(success, reason, classification, serverTick, null, null);
+        }
+
+        private void finish(
+            boolean success,
+            String reason,
+            String classification,
+            int serverTick,
+            String detailKey,
+            String detailValue
+        ) {
             if (proposalId != null) {
                 gate.discard(proposalId);
                 proposalId = null;
@@ -244,6 +259,9 @@ public final class SpecialUseActions {
             JsonObject facts = new JsonObject();
             facts.addProperty("success", success);
             facts.addProperty("reason", reason);
+            if (detailKey != null && detailValue != null) {
+                facts.addProperty(detailKey, detailValue);
+            }
             facts.add("target", positionJson(x, y, z));
             if (mode == Mode.SOW) {
                 facts.add("crop_pos", positionJson(x, y + 1, z));

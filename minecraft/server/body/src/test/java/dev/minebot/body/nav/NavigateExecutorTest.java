@@ -4,6 +4,8 @@ import com.google.gson.JsonObject;
 import dev.minebot.body.action.ActionRegistry;
 import dev.minebot.body.action.ActionRuntime;
 import dev.minebot.body.action.BotControls;
+import dev.minebot.body.action.ExactBlockBreaker;
+import dev.minebot.body.action.MutationGate;
 import dev.minebot.body.control.FakePlayerActionOwner;
 import dev.minebot.body.control.OwnerPriority;
 import dev.minebot.body.event.BotEventStream;
@@ -11,6 +13,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -20,7 +23,7 @@ final class NavigateExecutorTest {
     private static final int STAND = FLOOR + 1;
 
     /** Fake body: teleports toward the look target a fixed distance per tick. */
-    private static final class FakeBody implements MovementControls, BotControls {
+    private static final class FakeBody implements MovementControls, BotControls, ExactBlockBreaker {
         double x = 0.5;
         double y = STAND;
         double z = 0.5;
@@ -30,6 +33,12 @@ final class NavigateExecutorTest {
         boolean moving;
         boolean frozen;
         final List<String> log = new ArrayList<>();
+        FakeWorld breakWorld;
+        FakeWorld collisionWorld;
+        int breakX;
+        int breakY;
+        int breakZ;
+        boolean breaking;
 
         @Override
         public void lookAt(String bot, double tx, double ty, double tz) {
@@ -68,6 +77,40 @@ final class NavigateExecutorTest {
             log.add("clearAll");
         }
 
+        @Override
+        public ExactBlockBreaker.Outcome begin(
+            String bot,
+            int x,
+            int y,
+            int z,
+            String expectedBlockId,
+            int serverTick
+        ) {
+            if (breakWorld == null || breakWorld.kindAt(x, y, z) != WorldView.NodeKind.SOLID) {
+                return ExactBlockBreaker.Outcome.failed("block_mismatch");
+            }
+            breakX = x;
+            breakY = y;
+            breakZ = z;
+            breaking = true;
+            return ExactBlockBreaker.Outcome.working();
+        }
+
+        @Override
+        public ExactBlockBreaker.Outcome tick(String bot, int serverTick) {
+            if (!breaking) {
+                return ExactBlockBreaker.Outcome.failed("not_breaking");
+            }
+            breakWorld.set(breakX, breakY, breakZ, WorldView.NodeKind.PASSABLE);
+            breaking = false;
+            return ExactBlockBreaker.Outcome.complete();
+        }
+
+        @Override
+        public void abort(String bot) {
+            breaking = false;
+        }
+
         void physicsTick() {
             if (!moving || frozen) {
                 return;
@@ -77,8 +120,19 @@ final class NavigateExecutorTest {
             double distance = Math.sqrt(dx * dx + dz * dz);
             double step = Math.min(0.25, distance);
             if (distance > 1e-6) {
-                x += dx / distance * step;
-                z += dz / distance * step;
+                double nextX = x + dx / distance * step;
+                double nextZ = z + dz / distance * step;
+                if (collisionWorld != null) {
+                    int bx = (int) Math.floor(nextX);
+                    int by = NavigateExecutor.PositionSource.Position.feetBlockY(y);
+                    int bz = (int) Math.floor(nextZ);
+                    if (collisionWorld.kindAt(bx, by, bz) == WorldView.NodeKind.SOLID
+                        || collisionWorld.kindAt(bx, by + 1, bz) == WorldView.NodeKind.SOLID) {
+                        return;
+                    }
+                }
+                x = nextX;
+                z = nextZ;
             }
         }
     }
@@ -115,6 +169,54 @@ final class NavigateExecutorTest {
                 runtime,
                 timeoutTicks,
                 finalReachDistance
+            );
+            runtime.attachExecutor("nav-1", executor);
+            return new Harness(runtime, registry, body, events);
+        }
+
+        static Harness createGoverned(
+            FakeWorld world,
+            Goal goal,
+            int breakBudget,
+            boolean allowVerdict
+        ) {
+            FakeBody body = new FakeBody();
+            body.breakWorld = world;
+            body.collisionWorld = world;
+            ActionRegistry registry = new ActionRegistry();
+            BotEventStream events = new BotEventStream();
+            ActionRuntime runtime = new ActionRuntime(new FakePlayerActionOwner(), body, registry, events);
+            MutationGate gate = new MutationGate();
+            runtime.submit("Bot", "nav-1", "NAVIGATE", OwnerPriority.ACTION, 0);
+            NavigateExecutor executor = new NavigateExecutor(
+                "Bot",
+                "nav-1",
+                goal,
+                world,
+                body,
+                bot -> new NavigateExecutor.PositionSource.Position(body.x, body.y, body.z),
+                (bot, tick, name, actionId, data) -> events.emit(bot, tick, name, actionId, data),
+                runtime,
+                2_400,
+                PathFollower.WAYPOINT_REACH_DISTANCE,
+                new ApproachController.Profile(
+                    1_200,
+                    8,
+                    MoveGenerator.Policy.defaults()
+                ),
+                body,
+                body,
+                (x, y, z) -> world.kindAt(x, y, z) == WorldView.NodeKind.SOLID
+                    ? "minecraft:stone"
+                    : "minecraft:air",
+                gate,
+                proposal -> gate.verdict(
+                    proposal.proposalId(), allowVerdict, allowVerdict ? "allowed" : "protected"
+                ),
+                (bot, blockId) -> true,
+                "travel",
+                breakBudget,
+                Set.of()
             );
             runtime.attachExecutor("nav-1", executor);
             return new Harness(runtime, registry, body, events);
@@ -207,7 +309,85 @@ final class NavigateExecutorTest {
         JsonObject terminal = harness.runUntilTerminal(2_000);
 
         assertEquals("failed", terminal.get("classification").getAsString());
+        assertEquals("no_path", terminal.get("reason").getAsString(), terminal.toString());
+    }
+
+    @Test
+    void ordinaryNavigationNeverEnablesTerrainMutation() {
+        FakeWorld world = governedTunnelWorld();
+        Harness harness = Harness.createGoverned(
+            world, new Goal.Near(3, STAND, 0, 0.5), 0, true
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(2_000);
+
+        assertEquals("failed", terminal.get("classification").getAsString());
+        assertEquals("no_path", terminal.get("reason").getAsString(), terminal.toString());
+        assertEquals(WorldView.NodeKind.SOLID, world.kindAt(1, STAND, 0));
+        assertEquals(WorldView.NodeKind.SOLID, world.kindAt(1, STAND + 1, 0));
+    }
+
+    @Test
+    void governedNavigationClearsOnlyBudgetedBlockersTowardTheSameGoal() {
+        FakeWorld world = governedTunnelWorld();
+        Harness harness = Harness.createGoverned(
+            world, new Goal.Near(3, STAND, 0, 0.5), 2, true
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(2_000);
+
+        assertEquals("completed", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals(2, terminal.get("break_steps").getAsInt());
+        assertEquals(0, terminal.get("budget_remaining").getAsInt());
+        assertEquals(WorldView.NodeKind.PASSABLE, world.kindAt(1, STAND, 0));
+        assertEquals(WorldView.NodeKind.PASSABLE, world.kindAt(1, STAND + 1, 0));
+    }
+
+    @Test
+    void governedNavigationDoesNotOpenAHazardousSealedCell() {
+        FakeWorld world = governedTunnelWorld();
+        world.hazardBlockClearance(1, STAND + 1, 0);
+        Harness harness = Harness.createGoverned(
+            world, new Goal.Near(3, STAND, 0, 0.5), 2, true
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(2_000);
+
+        assertEquals("failed", terminal.get("classification").getAsString());
         assertEquals("no_path", terminal.get("reason").getAsString());
+        assertEquals(0, terminal.get("break_steps").getAsInt());
+        assertEquals(WorldView.NodeKind.SOLID, world.kindAt(1, STAND + 1, 0));
+    }
+
+    @Test
+    void governedNavigationFailsClosedOnGovernanceDenial() {
+        FakeWorld world = governedTunnelWorld();
+        Harness harness = Harness.createGoverned(
+            world, new Goal.Near(3, STAND, 0, 0.5), 2, false
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(2_000);
+
+        assertEquals("unsafe", terminal.get("classification").getAsString(), terminal.toString());
+        assertEquals("governance_denied", terminal.get("reason").getAsString());
+        assertEquals(0, terminal.get("break_steps").getAsInt());
+        assertEquals(WorldView.NodeKind.SOLID, world.kindAt(1, STAND, 0));
+        assertEquals(WorldView.NodeKind.SOLID, world.kindAt(1, STAND + 1, 0));
+    }
+
+    @Test
+    void governedNavigationCannotReplenishItsBreakBudget() {
+        FakeWorld world = twoSingleBlockerTunnelWorld();
+        Harness harness = Harness.createGoverned(
+            world, new Goal.Near(3, STAND, 0, 0.5), 1, true
+        );
+
+        JsonObject terminal = harness.runUntilTerminal(2_000);
+
+        assertEquals("failed", terminal.get("classification").getAsString());
+        assertEquals("mutation_budget_exhausted", terminal.get("reason").getAsString());
+        assertEquals(1, terminal.get("break_steps").getAsInt());
+        assertEquals(0, terminal.get("budget_remaining").getAsInt());
     }
 
     @Test
@@ -218,8 +398,8 @@ final class NavigateExecutorTest {
         JsonObject terminal = harness.runUntilTerminal(5_000);
 
         assertEquals("failed", terminal.get("classification").getAsString());
-        String reason = terminal.get("reason").getAsString();
-        assertTrue(reason.equals("stuck") || reason.startsWith("replan_budget_exhausted"), reason);
+        assertEquals("no_path", terminal.get("reason").getAsString());
+        assertTrue(terminal.has("failure_detail"));
         assertTrue(terminal.get("replans").getAsInt() <= NavigateExecutor.REPLAN_LIMIT);
     }
 
@@ -354,6 +534,36 @@ final class NavigateExecutorTest {
         assertTrue(distance <= 4.5 + 0.5, "the bot ends within interaction range: " + distance);
         assertTrue(distance >= 0.5, "the bot does not walk inside the trunk");
         assertEquals(0.1, terminal.get("final_reach_distance").getAsDouble());
+    }
+
+    private static FakeWorld governedTunnelWorld() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int x = -1; x <= 4; x++) {
+            world.set(x, STAND + 2, 0, WorldView.NodeKind.SOLID);
+            for (int y = STAND; y <= STAND + 2; y++) {
+                world.set(x, y, -1, WorldView.NodeKind.SOLID);
+                world.set(x, y, 1, WorldView.NodeKind.SOLID);
+            }
+        }
+        world.set(1, STAND, 0, WorldView.NodeKind.SOLID);
+        world.set(1, STAND + 1, 0, WorldView.NodeKind.SOLID);
+        for (int x = -4; x <= 6; x++) {
+            for (int y = -64; y <= 128; y++) {
+                for (int z = -4; z <= 4; z++) {
+                    if (z != 0) {
+                        world.hazardBodyPosition(x, y, z);
+                    }
+                }
+            }
+        }
+        return world;
+    }
+
+    private static FakeWorld twoSingleBlockerTunnelWorld() {
+        FakeWorld world = governedTunnelWorld();
+        world.set(1, STAND, 0, WorldView.NodeKind.PASSABLE);
+        world.set(2, STAND + 1, 0, WorldView.NodeKind.SOLID);
+        return world;
     }
 
 }

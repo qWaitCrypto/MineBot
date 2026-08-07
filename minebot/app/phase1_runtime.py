@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 
 from agents import Session
 
-from minebot.app.body_capability_tools import body_capability_tools
+from minebot.app.body_capability_tools import _java_dig_down, body_capability_tools
 from minebot.app.body_tool_catalog import CanonicalBodyToolCatalog
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.conversation_tools import register_conversation_archive_tools
@@ -579,6 +579,7 @@ def build_phase1_registry(
     registry = ToolRegistry()
     catalog = CanonicalBodyToolCatalog(registry, config.body_provider)
     move_objective_body = catalog.objective_body("move_to", body)
+    surface_objective_body = catalog.objective_body("go_to_surface", body)
     navigator = (
         ObjectiveNavigationTransactions(move_objective_body)
         if move_objective_body is not None
@@ -596,6 +597,22 @@ def build_phase1_registry(
             require_mobility_egress=True,
         )
 
+    def bounded_resource_egress(timeout_s: float, mutation_budget: int) -> ToolResult:
+        if surface_objective_body is not None:
+            return _java_ascend(
+                surface_objective_body,
+                timeout_s=timeout_s,
+                max_mutations=max(0, mutation_budget),
+            )
+        return work.go_to_surface(
+            context=BreakContext.TRAVEL,
+            timeout_s=timeout_s,
+            surface_scan_height=16,
+            surface_scan_radius=2,
+            max_steps=max(1, mutation_budget),
+            require_mobility_egress=True,
+        )
+
     exploration = ExplorationTransactions(
         body,
         navigator,
@@ -603,11 +620,52 @@ def build_phase1_registry(
         mobility_egress=mobility_egress,
     )
     block_approach = BlockApproachTransactions(body, approach_navigator)
+    collect_objective_body = catalog.objective_body("collect_block_domain", body)
+    dig_down_objective_body = catalog.objective_body("dig_down", body)
+    designated_collector = (
+        lambda pos, expected_block_id, expected_item_ids, excavation_budget, timeout_s:
+            _java_break_collect(
+                collect_objective_body,
+                pos,
+                expected_block_id=expected_block_id,
+                expected_item_ids=expected_item_ids,
+                excavation_budget=excavation_budget,
+                timeout_s=timeout_s,
+            )
+        if collect_objective_body is not None
+        else None
+    )
+    def bounded_resource_descent(
+        target_y: int,
+        timeout_s: float,
+        mutation_budget: int,
+    ) -> ToolResult:
+        if dig_down_objective_body is not None:
+            return _java_dig_down(
+                dig_down_objective_body,
+                {
+                    "target_y": target_y,
+                    "max_steps": max(1, mutation_budget),
+                    "max_clear_fall": 2,
+                    "timeout_s": timeout_s,
+                },
+            )
+        return work.dig_down_to_y(
+            target_y,
+            context=BreakContext.COLLECT_APPROACH,
+            max_steps=max(1, mutation_budget),
+            move_timeout_s=min(15.0, timeout_s),
+            dig_timeout_s=min(30.0, timeout_s),
+        )
+
     resource_collection = ResourceCollectionTransactions(
         body,
         navigator,
         work,
         mobility_egress=mobility_egress,
+        bounded_mobility_egress=bounded_resource_egress,
+        bounded_vertical_descent=bounded_resource_descent,
+        designated_collector=designated_collector,
     )
     inventory_txn = InventoryTransactions(body, navigator=approach_navigator, governance=policy, work=work)
     furnace_txn = FurnaceTransactions(body, navigator=approach_navigator, governance=policy, work=work)
@@ -621,9 +679,6 @@ def build_phase1_registry(
         governance=policy,
     )
     container_txn = ContainerTransactions(body, navigator=approach_navigator, governance=policy)
-    surface_objective_body = catalog.objective_body("go_to_surface", body)
-    dig_down_objective_body = catalog.objective_body("dig_down", body)
-    collect_objective_body = catalog.objective_body("collect_block_domain", body)
     combat = CombatTransactions(body, progress=progress)
     catalog.register_many(
         (
@@ -636,7 +691,7 @@ def build_phase1_registry(
             _engage_tool(combat),
             _find_hostiles_tool(body),
             _search_tool(work),
-            _mine_collect_tool(work),
+            _mine_collect_tool(work, collect_objective_body),
             _craft_tool(inventory_txn),
             _equip_tool(inventory_txn),
             _smelt_tool(body, furnace_txn),
@@ -652,7 +707,6 @@ def build_phase1_registry(
                 pickup=pickup,
                 resource_collection=resource_collection,
                 use=use_txn,
-                java_objective_body=collect_objective_body,
                 dig_down_objective_body=dig_down_objective_body,
             ),
         )
@@ -904,7 +958,7 @@ def _move_to_tool(
     )
 
 
-def exploration_observation_projector(_reason: str, metrics: dict[str, object]) -> JsonObject:
+def exploration_observation_projector(reason: str, metrics: dict[str, object]) -> JsonObject:
     """Model-visible projection for explore_for."""
     summary: JsonObject = {
         key: bounded_summary_value(metrics[key])
@@ -936,13 +990,16 @@ def exploration_observation_projector(_reason: str, metrics: dict[str, object]) 
             bounded_summary_value(item) for item in covered[:16]
         ]
         summary["covered_regions_complete"] = len(covered) <= 16
+    candidate_count = 0
     for field_name, count_field in (("blocks", "block_count"), ("entities", "entity_count")):
         values = metrics.get(field_name)
         if not isinstance(values, list):
             continue
+        candidate_count += len(values)
         summary[count_field] = len(values)
         summary[field_name] = [bounded_summary_value(item) for item in values[:8]]
         summary[f"{field_name}_complete"] = len(values) <= 8
+    summary["candidate_count"] = candidate_count
     failures = metrics.get("candidate_failures")
     if isinstance(failures, list):
         summary["candidate_failure_count"] = len(failures)
@@ -952,6 +1009,15 @@ def exploration_observation_projector(_reason: str, metrics: dict[str, object]) 
         summary["evidence_key_count"] = len(evidence_keys)
     if "source_reason" in metrics:
         summary["source_reason"] = bounded_summary_value(metrics["source_reason"])
+    uncertainty = metrics.get("uncertainty")
+    if isinstance(uncertainty, list):
+        summary["uncertainty_count"] = len(uncertainty)
+        summary["uncertainty_reasons"] = top_reasons(uncertainty)
+    summary["unloaded_boundary"] = reason == "unloaded_boundary" or any(
+        isinstance(item, dict)
+        and str(item.get("reason") or "").startswith("unloaded_boundary")
+        for item in (failures if isinstance(failures, list) else ())
+    )
     return summary
 
 
@@ -1059,22 +1125,10 @@ def _go_to_surface_tool(
                 max_steps=None,
                 world_top_y=320,
             )
-        timeout_s = float(params.get("timeout_s") or 120.0)
-        action_params: JsonObject = {
-            "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
-        }
-        try:
-            result = java_objective_body.execute(Action.create("ascend", action_params))
-        except Exception as error:
-            return ToolResult(
-                False,
-                "java_body_unavailable",
-                True,
-                metrics={"error": type(error).__name__},
-            )
-        success = bool(result.ok and result.accepted and result.complete)
-        reason = "surface_reached" if success else str(result.error or "body_rejected")
-        return ToolResult(success, reason, not success, metrics=dict(result.data))
+        return _java_ascend(
+            java_objective_body,
+            timeout_s=float(params.get("timeout_s") or 120.0),
+        )
 
     return RegisteredTool(
         "go_to_surface",
@@ -1098,6 +1152,31 @@ def _go_to_surface_tool(
             timeout_s=120.0,
         ),
     )
+
+
+def _java_ascend(
+    java_objective_body: Body,
+    *,
+    timeout_s: float,
+    max_mutations: int | None = None,
+) -> ToolResult:
+    action_params: JsonObject = {
+        "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
+    }
+    if max_mutations is not None:
+        action_params["max_mutations"] = max(0, int(max_mutations))
+    try:
+        result = java_objective_body.execute(Action.create("ascend", action_params))
+    except Exception as error:
+        return ToolResult(
+            False,
+            "java_body_unavailable",
+            True,
+            metrics={"error": type(error).__name__},
+        )
+    success = bool(result.ok and result.accepted and result.complete)
+    reason = "surface_reached" if success else str(result.error or "body_rejected")
+    return ToolResult(success, reason, not success, metrics=dict(result.data))
 
 
 def _follow_tool(navigator: NavigationTransactions) -> RegisteredTool:
@@ -1483,7 +1562,112 @@ def _search_tool(work: BlockWork) -> RegisteredTool:
     )
 
 
-def _mine_collect_tool(work: BlockWork) -> RegisteredTool:
+def _java_break_collect(
+    body: Body,
+    pos: Position,
+    *,
+    expected_block_id: str,
+    expected_item_ids: tuple[str, ...],
+    excavation_budget: int,
+    timeout_s: float,
+) -> ToolResult:
+    try:
+        result = body.execute(
+            Action.create(
+                "collectBlock",
+                {
+                    "target": list(pos),
+                    "expected_block_id": _namespaced(expected_block_id),
+                    "expected_item_ids": [
+                        _namespaced(item) for item in expected_item_ids
+                    ],
+                    "excavation_budget": max(0, excavation_budget),
+                    "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
+                },
+            )
+        )
+    except Exception as error:
+        return ToolResult(
+            False,
+            "java_body_unavailable",
+            True,
+            metrics={"error": type(error).__name__, "target": list(pos)},
+        )
+    success = bool(result.ok and result.accepted and result.complete)
+    reason = "collected" if success else str(result.error or "body_rejected")
+    metrics = dict(result.data)
+    if (
+        not success
+        and reason == "no_path"
+        and metrics.get("phase_reason") == "missing_required_tool"
+    ):
+        reason = "missing_required_tool"
+    return ToolResult(
+        success,
+        reason,
+        reason in {
+            "target_gone",
+            "target_block_mismatch",
+            "no_path",
+            "excavation_budget_exhausted",
+            "pickup_not_observed",
+            "timeout",
+        },
+        metrics=metrics,
+    )
+
+
+def _namespaced(value: str) -> str:
+    normalized = value.strip().lower()
+    return normalized if ":" in normalized else f"minecraft:{normalized}"
+
+
+def _mine_collect_tool(
+    work: BlockWork,
+    java_objective_body: Body | None = None,
+) -> RegisteredTool:
+    def run(params: JsonObject) -> ToolResult:
+        pos = tuple(int(v) for v in params["pos"])
+        if java_objective_body is None:
+            return work.mine_block_collect(
+                pos,
+                context=BreakContext.COLLECT,
+                expected_drops=tuple(str(item) for item in params.get("expected_drops", [])),
+                target_block_types=tuple(str(item) for item in params.get("target_block_types", [])),
+                dry=bool(params.get("dry", False)),
+                settle_s=0.1,
+                pickup_timeout_s=2.0,
+                timeout_s=10.0,
+            )
+        observed = work.body.perceive(
+            "blockAt",
+            {"x": pos[0], "y": pos[1], "z": pos[2]},
+        )
+        if not observed.ok:
+            return ToolResult(False, "target_gone", True, metrics={"target": list(pos)})
+        expected_block = str(observed.data.get("type") or "minecraft:air")
+        allowed = {
+            _namespaced(str(item)) for item in params.get("target_block_types", [])
+        }
+        if allowed and _namespaced(expected_block) not in allowed:
+            return ToolResult(
+                False,
+                "target_block_mismatch",
+                True,
+                metrics={"target": list(pos), "observed": expected_block},
+            )
+        expected_items = tuple(
+            str(item) for item in params.get("expected_drops", [])
+        ) or (expected_block,)
+        return _java_break_collect(
+            java_objective_body,
+            pos,
+            expected_block_id=expected_block,
+            expected_item_ids=expected_items,
+            excavation_budget=0,
+            timeout_s=10.0,
+        )
+
     return RegisteredTool(
         "mine_block_collect",
         "Surgically mine one deliberately selected exact coordinate and verify any immediate pickup by "
@@ -1501,20 +1685,11 @@ def _mine_collect_tool(work: BlockWork) -> RegisteredTool:
             "required": ["pos"],
             "additionalProperties": True,
         },
-        lambda params: work.mine_block_collect(
-            tuple(int(v) for v in params["pos"]),
-            context=BreakContext.COLLECT,
-            expected_drops=tuple(str(item) for item in params.get("expected_drops", [])),
-            target_block_types=tuple(str(item) for item in params.get("target_block_types", [])),
-            dry=bool(params.get("dry", False)),
-            settle_s=0.1,
-            pickup_timeout_s=2.0,
-            timeout_s=10.0,
-        ),
+        run,
         ToolSidecar(
             "mine_block_collect",
             mutating=True,
-            source="body.block_work",
+            source=("java_body" if java_objective_body is not None else "body.block_work"),
             tool_type="work",
             permission="break_collect",
             body_scope=("mine",),

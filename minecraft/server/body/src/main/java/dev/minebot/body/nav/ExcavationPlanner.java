@@ -65,6 +65,24 @@ public final class ExcavationPlanner {
         }
     }
 
+    /** A governed corridor toward one already-designated navigation goal. */
+    public record RoutePlan(
+        List<Step> steps,
+        int breakCount,
+        int expandedNodes,
+        boolean reachesGoal
+    ) {
+        public RoutePlan {
+            steps = List.copyOf(steps);
+        }
+    }
+
+    public record RouteResult(RoutePlan plan, String reason, int expandedNodes) {
+        public boolean success() {
+            return plan != null;
+        }
+    }
+
     private record State(Cell cell, int breaks, int steps) {
     }
 
@@ -74,7 +92,7 @@ public final class ExcavationPlanner {
     private record Open(State state, double g, double f) {
     }
 
-    private record Transition(Step step, int breaks) {
+    private record Transition(Step step, int breaks, double movementCost) {
     }
 
     private ExcavationPlanner() {
@@ -114,6 +132,132 @@ public final class ExcavationPlanner {
             DEFAULT_NODE_CAP,
             DEFAULT_STEP_CAP,
             true
+        );
+    }
+
+    /**
+     * Search the same governed movement/break graph for one caller-designated
+     * navigation predicate.  Unlike resource excavation this has no target
+     * block set: it may clear only player-volume blockers along the route, and
+     * it never discovers or substitutes another semantic goal.
+     */
+    public static RouteResult planToGoal(
+        WorldView world,
+        Cell start,
+        Goal goal,
+        Set<Cell> deniedBlocks,
+        int maxBreaks,
+        int nodeCap,
+        int stepCap,
+        MoveGenerator.Policy movementPolicy
+    ) {
+        if (maxBreaks <= 0) {
+            return new RouteResult(null, "break_budget_exhausted", 0);
+        }
+        if (goal.isSatisfied(world, start.x(), start.y(), start.z())) {
+            return new RouteResult(new RoutePlan(List.of(), 0, 0, true), "planned", 0);
+        }
+
+        PriorityQueue<Open> open = new PriorityQueue<>((left, right) -> Double.compare(left.f(), right.f()));
+        Map<State, Double> best = new HashMap<>();
+        Map<State, Parent> parents = new HashMap<>();
+        State initial = new State(start, 0, 0);
+        best.put(initial, 0.0);
+        double initialDistance = goal.heuristic(start.x(), start.y(), start.z());
+        open.add(new Open(initial, 0.0, initialDistance));
+        int expanded = 0;
+        State bestPartial = null;
+        double bestPartialDistance = initialDistance;
+        double bestPartialCost = Double.MAX_VALUE;
+        Map<Cell, Target> noTerminals = Map.of();
+        Set<Cell> noTargetCells = Set.of();
+
+        while (!open.isEmpty() && expanded < nodeCap) {
+            Open current = open.poll();
+            Double known = best.get(current.state());
+            if (known == null || current.g() > known + 1.0e-9) {
+                continue;
+            }
+            Cell cell = current.state().cell();
+            if (goal.isSatisfied(world, cell.x(), cell.y(), cell.z())) {
+                return new RouteResult(
+                    new RoutePlan(
+                        reconstruct(current.state(), parents),
+                        current.state().breaks(),
+                        expanded,
+                        true
+                    ),
+                    "planned",
+                    expanded
+                );
+            }
+            double currentDistance = goal.heuristic(cell.x(), cell.y(), cell.z());
+            if (current.state().steps() > 0
+                && current.state().breaks() > 0
+                && goal.acceptsPartialEndpoint(world, cell.x(), cell.y(), cell.z())
+                && currentDistance + 1.0e-9 < initialDistance
+                && (currentDistance + 1.0e-9 < bestPartialDistance
+                    || (Math.abs(currentDistance - bestPartialDistance) <= 1.0e-9
+                        && current.g() < bestPartialCost))) {
+                bestPartial = current.state();
+                bestPartialDistance = currentDistance;
+                bestPartialCost = current.g();
+            }
+            if (current.state().steps() >= stepCap) {
+                continue;
+            }
+            expanded++;
+
+            for (Transition transition : transitions(
+                world,
+                current.state().cell(),
+                noTerminals,
+                noTargetCells,
+                deniedBlocks,
+                true,
+                movementPolicy
+            )) {
+                int nextBreaks = current.state().breaks() + transition.breaks();
+                if (nextBreaks > maxBreaks) {
+                    continue;
+                }
+                State next = new State(
+                    transition.step().stand(),
+                    nextBreaks,
+                    current.state().steps() + 1
+                );
+                double nextG = current.g()
+                    + transition.movementCost()
+                    + transition.breaks() * BREAK_COST;
+                Double prior = best.get(next);
+                if (prior != null && prior <= nextG) {
+                    continue;
+                }
+                best.put(next, nextG);
+                parents.put(next, new Parent(current.state(), transition.step()));
+                open.add(new Open(
+                    next,
+                    nextG,
+                    nextG + goal.heuristic(next.cell().x(), next.cell().y(), next.cell().z())
+                ));
+            }
+        }
+        if (bestPartial != null) {
+            return new RouteResult(
+                new RoutePlan(
+                    reconstruct(bestPartial, parents),
+                    bestPartial.breaks(),
+                    expanded,
+                    false
+                ),
+                "partial_corridor",
+                expanded
+            );
+        }
+        return new RouteResult(
+            null,
+            expanded >= nodeCap ? "node_budget_exhausted" : "no_excavation_route",
+            expanded
         );
     }
 
@@ -216,8 +360,7 @@ public final class ExcavationPlanner {
                     current.state().steps() + 1
                 );
                 double nextG = current.g()
-                    + MOVE_COST
-                    + Math.abs(next.cell().y() - current.state().cell().y()) * VERTICAL_COST
+                    + transition.movementCost()
                     + transition.breaks() * BREAK_COST;
                 Double prior = best.get(next);
                 if (prior != null && prior <= nextG) {
@@ -333,25 +476,68 @@ public final class ExcavationPlanner {
         Set<Cell> deniedBlocks,
         boolean returnPathRequired
     ) {
+        return transitions(
+            world,
+            current,
+            terminals,
+            targetCells,
+            deniedBlocks,
+            returnPathRequired,
+            MoveGenerator.Policy.defaults()
+        );
+    }
+
+    private static List<Transition> transitions(
+        WorldView world,
+        Cell current,
+        Map<Cell, Target> terminals,
+        Set<Cell> targetCells,
+        Set<Cell> deniedBlocks,
+        boolean returnPathRequired,
+        MoveGenerator.Policy movementPolicy
+    ) {
         List<Transition> transitions = new ArrayList<>();
 
         // A straight, supported shaft down costs one governed floor break.
         Cell below = new Cell(current.x(), current.y() - 1, current.z());
         Cell belowSupport = new Cell(current.x(), current.y() - 2, current.z());
         if (!returnPathRequired
+            && movementPolicy.allowDescend()
             && world.kindAt(belowSupport.x(), belowSupport.y(), belowSupport.z()) == WorldView.NodeKind.SOLID
             && world.kindAt(below.x(), below.y(), below.z()) == WorldView.NodeKind.SOLID
             && !targetCells.contains(below)
             && !deniedBlocks.contains(below)
+            && !world.isBlockClearanceHazardous(below.x(), below.y(), below.z())
             && !world.isBodyPositionHazardous(below.x(), below.y(), below.z())) {
             transitions.add(new Transition(
                 new Step(below, StepMode.DESCEND, List.of(below)),
-                1
+                1,
+                MOVE_COST + VERTICAL_COST
+            ));
+        }
+
+        MoveGenerator movement = new MoveGenerator(world, movementPolicy);
+        for (MoveGenerator.Move move : movement.movesFrom(
+            current.x(), current.y(), current.z()
+        ).moves()) {
+            if (returnPathRequired && !movement.hasDirectReturnMove(
+                current.x(), current.y(), current.z(), move
+            )) {
+                continue;
+            }
+            transitions.add(new Transition(
+                new Step(new Cell(move.x(), move.y(), move.z()), StepMode.WALK, List.of()),
+                0,
+                move.cost()
             ));
         }
 
         for (int[] direction : CARDINALS) {
             for (int dy = -1; dy <= 1; dy++) {
+                if ((dy > 0 && !movementPolicy.allowAscend())
+                    || (dy < 0 && !movementPolicy.allowDescend())) {
+                    continue;
+                }
                 Cell destination = new Cell(
                     current.x() + direction[0],
                     current.y() + dy,
@@ -363,7 +549,8 @@ public final class ExcavationPlanner {
                     destination,
                     terminals,
                     targetCells,
-                    deniedBlocks
+                    deniedBlocks,
+                    true
                 );
                 if (transition != null && (!returnPathRequired || hasWalkReturn(
                     world,
@@ -394,7 +581,8 @@ public final class ExcavationPlanner {
             source,
             terminals,
             targetCells,
-            deniedBlocks
+            deniedBlocks,
+            false
         );
         if (reverse == null) {
             return false;
@@ -413,9 +601,18 @@ public final class ExcavationPlanner {
         Cell destination,
         Map<Cell, Target> terminals,
         Set<Cell> targetCells,
-        Set<Cell> deniedBlocks
+        Set<Cell> deniedBlocks,
+        boolean requireMutation
     ) {
         if (world.isBodyPositionHazardous(destination.x(), destination.y(), destination.z())) {
+            return null;
+        }
+        boolean currentSupportedByLiquid = world.kindAt(
+            current.x(), current.y(), current.z()
+        ) == WorldView.NodeKind.LIQUID || world.kindAt(
+            current.x(), current.y() - 1, current.z()
+        ) == WorldView.NodeKind.LIQUID;
+        if (currentSupportedByLiquid && destination.y() > current.y()) {
             return null;
         }
         Cell support = new Cell(destination.x(), destination.y() - 1, destination.z());
@@ -442,7 +639,16 @@ public final class ExcavationPlanner {
             || !addBodyCell(world, feet, blockers, targetCells, deniedBlocks)) {
             return null;
         }
-        return new Transition(new Step(destination, StepMode.WALK, blockers), blockers.size());
+        // Zero-mutation movement comes exclusively from MoveGenerator so its
+        // water, fall, climb, diagonal and return-safety rules stay canonical.
+        if (requireMutation && blockers.isEmpty()) {
+            return null;
+        }
+        return new Transition(
+            new Step(destination, StepMode.WALK, blockers),
+            blockers.size(),
+            MOVE_COST + Math.abs(destination.y() - current.y()) * VERTICAL_COST
+        );
     }
 
     private static boolean addBodyCell(
@@ -458,7 +664,8 @@ public final class ExcavationPlanner {
         }
         if (kind != WorldView.NodeKind.SOLID
             || targetCells.contains(cell)
-            || deniedBlocks.contains(cell)) {
+            || deniedBlocks.contains(cell)
+            || world.isBlockClearanceHazardous(cell.x(), cell.y(), cell.z())) {
             return false;
         }
         if (!blockers.contains(cell)) {

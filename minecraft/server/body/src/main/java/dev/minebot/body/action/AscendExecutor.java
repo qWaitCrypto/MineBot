@@ -186,6 +186,12 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
     private int recoveryStagingReplans;
     private String recoveryStagingFailure;
     private String recoveryStagingSourceFailure;
+    private String recoveryStagingFailurePhase;
+    private String governanceReason;
+    private String breakFailureReason;
+    private String preconditionFailureReason;
+    private String terminalHazardBlock;
+    private String terminalHazardContext;
     private List<Goal.Stand> activeRecoveryStagingGoals = List.of();
     private final Set<String> visitedRecoveryStagingGoals = new HashSet<>();
     private final Set<BlockPosition> deniedBreakPositions = new HashSet<>();
@@ -224,6 +230,44 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
             proposals,
             positions,
             events,
+            runtime,
+            timeoutTicks,
+            Integer.MAX_VALUE
+        );
+    }
+
+    public AscendExecutor(
+        String bot,
+        String actionId,
+        ExactBlockBreaker blockBreaker,
+        MovementControls movement,
+        BotControls hygiene,
+        PillarAccess pillar,
+        BlockReader blocks,
+        SurfaceAccess surface,
+        HazardPolicy hazards,
+        MutationGate gate,
+        CollectExecutor.ProposalSink proposals,
+        NavigateExecutor.PositionSource positions,
+        NavigateExecutor.EventSink events,
+        ActionRuntime runtime,
+        int timeoutTicks,
+        int maxMutations
+    ) {
+        this(
+            bot,
+            actionId,
+            blockBreaker,
+            movement,
+            hygiene,
+            pillar,
+            blocks,
+            surface,
+            hazards,
+            gate,
+            proposals,
+            positions,
+            events,
             new Lifecycle() {
                 @Override
                 public boolean cancelRequested(String nestedActionId) {
@@ -242,7 +286,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                 }
             },
             timeoutTicks,
-            Integer.MAX_VALUE
+            maxMutations
         );
     }
 
@@ -455,7 +499,9 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                 return;
             }
             if (hazards.isHazard(breakBlock)) {
-                finish(serverTick, ActionRuntime.CLASS_UNSAFE, "hazard_in_stair_route:" + breakBlock);
+                terminalHazardBlock = breakBlock;
+                terminalHazardContext = "stair_route";
+                finish(serverTick, ActionRuntime.CLASS_UNSAFE, "hazard_in_route");
                 return;
             }
             if (isPassable(breakBlock)) {
@@ -513,7 +559,8 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                 if (pendingMutation == PendingMutation.PILLAR_PLACE) {
                     String invalid = pillarPrecondition();
                     if (invalid != null) {
-                        finish(serverTick, ActionRuntime.CLASS_FAILED, invalid + "_after_allow");
+                        preconditionFailureReason = invalid;
+                        finish(serverTick, ActionRuntime.CLASS_FAILED, "pillar_precondition_failed_after_allow");
                         return;
                     }
                     startPillarJump(serverTick);
@@ -529,16 +576,21 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                     bot, breakX, breakY, breakZ, breakBlock, serverTick
                 );
                 if (outcome.state() == ExactBlockBreaker.State.FAILED) {
-                    breakFailed(serverTick, "exact_break_failed:" + outcome.reason());
+                    breakFailureReason = outcome.reason();
+                    breakFailed(serverTick, "exact_break_failed");
                     return;
                 }
                 phaseStartedTick = serverTick;
                 phase = Phase.BREAKING;
             }
             case DENIED, TIMED_OUT -> {
-                String reason = state == MutationGate.State.DENIED
-                    ? "governance_denied:" + gate.reason(proposalId)
-                    : "governance_verdict_timeout";
+                String reason;
+                if (state == MutationGate.State.DENIED) {
+                    governanceReason = gate.reason(proposalId);
+                    reason = "governance_denied";
+                } else {
+                    reason = "governance_verdict_timeout";
+                }
                 gate.discard(proposalId);
                 proposalId = null;
                 if (state == MutationGate.State.DENIED) {
@@ -616,7 +668,8 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         }
         ExactBlockBreaker.Outcome outcome = blockBreaker.tick(bot, serverTick);
         if (outcome.state() == ExactBlockBreaker.State.FAILED) {
-            breakFailed(serverTick, "exact_break_failed:" + outcome.reason());
+            breakFailureReason = outcome.reason();
+            breakFailed(serverTick, "exact_break_failed");
             return;
         }
         if (serverTick - phaseStartedTick > BREAK_TIMEOUT_TICKS) {
@@ -715,9 +768,11 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
             finish(serverTick, ActionRuntime.CLASS_FAILED, "body_missing");
             return;
         }
-        String reason = lastDeniedBreakReason == null
-            ? "governance_denied:pillar_clearance"
-            : lastDeniedBreakReason;
+        String reason = lastDeniedBreakReason;
+        if (reason == null) {
+            governanceReason = "pillar_clearance";
+            reason = "governance_denied";
+        }
         if (canRetryRecoveryStaging()) {
             beginRecoveryStaging(serverTick, position, reason);
         } else {
@@ -1003,7 +1058,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                     finish(
                         serverTick,
                         ActionRuntime.CLASS_FAILED,
-                        "recovery_staging_failed:" + recoveryStagingFailure
+                        "recovery_staging_failed"
                     );
                     return;
                 }
@@ -1030,7 +1085,8 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                 );
                 return;
             }
-            recoveryStagingFailure = "postcondition:" + columnFailure;
+            recoveryStagingFailurePhase = "postcondition";
+            recoveryStagingFailure = columnFailure;
         } else {
             recoveryStagingFailure = outcome.reason();
         }
@@ -1053,7 +1109,7 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
                 && recoveryStagingSourceFailure.startsWith("hazard_")
                 ? ActionRuntime.CLASS_UNSAFE
                 : ActionRuntime.CLASS_FAILED,
-            "recovery_staging_failed:" + recoveryStagingFailure
+            "recovery_staging_failed"
         );
     }
 
@@ -1364,6 +1420,24 @@ public final class AscendExecutor implements ActionRuntime.TickExecutor {
         facts.addProperty("recovery_staging_replans", recoveryStagingReplans);
         if (recoveryStagingFailure != null) {
             facts.addProperty("recovery_staging_failure", recoveryStagingFailure);
+        }
+        if (recoveryStagingFailurePhase != null) {
+            facts.addProperty("recovery_staging_failure_phase", recoveryStagingFailurePhase);
+        }
+        if (governanceReason != null) {
+            facts.addProperty("governance_reason", governanceReason);
+        }
+        if (breakFailureReason != null) {
+            facts.addProperty("break_failure_reason", breakFailureReason);
+        }
+        if (preconditionFailureReason != null) {
+            facts.addProperty("precondition_failure_reason", preconditionFailureReason);
+        }
+        if (terminalHazardBlock != null) {
+            facts.addProperty("hazard_block", terminalHazardBlock);
+        }
+        if (terminalHazardContext != null) {
+            facts.addProperty("hazard_context", terminalHazardContext);
         }
         if (recoveryStagingSourceFailure != null) {
             facts.addProperty("recovery_staging_source_failure", recoveryStagingSourceFailure);

@@ -262,6 +262,99 @@ def test_survival_owner_and_recovery_navigation_are_explicit_protocol_facts() ->
     assert navigation["survival_recovery"] is True
 
 
+def test_navigation_carries_finite_body_profile_without_strategy_fields() -> None:
+    protocol = JavaBodyProtocol()
+    hello = protocol.hello()
+    protocol.feed({
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": hello["request_id"],
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["HELLO", "NAVIGATE"],
+    })
+
+    navigation = protocol.navigate(
+        "MineBot_1",
+        "nav-profile-1",
+        {"kind": "xz", "x": 8, "z": 0},
+        grid_radius=48,
+        max_expand=1200,
+        allow_diagonal=False,
+        allow_ascend=True,
+        allow_descend=False,
+        allow_swim=False,
+        max_fall_depth=2,
+        max_water_drop_depth=8,
+    )
+
+    assert navigation["grid_radius"] == 48
+    assert navigation["max_expand"] == 1200
+    assert navigation["allow_diagonal"] is False
+    assert navigation["allow_swim"] is False
+    assert navigation["max_water_drop_depth"] == 8
+    assert "blocks" not in navigation
+    assert "target_count" not in navigation
+
+
+def test_navigation_governed_break_contract_is_explicit_and_bounded() -> None:
+    protocol = JavaBodyProtocol()
+    hello = protocol.hello()
+    protocol.feed({
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": hello["request_id"],
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["HELLO", "NAVIGATE"],
+    })
+
+    navigation = protocol.navigate(
+        "MineBot_1",
+        "nav-governed-1",
+        {"kind": "xz", "x": 8, "z": 0},
+        allow_break=True,
+        break_budget=3,
+        break_context="travel",
+        denied_mutations=[[1, 64, 0]],
+    )
+
+    assert navigation["allow_break"] is True
+    assert navigation["break_budget"] == 3
+    assert navigation["break_context"] == "travel"
+    assert navigation["denied_mutations"] == [[1, 64, 0]]
+    assert "blocks" not in navigation
+    assert "radius" not in navigation
+
+
+def test_navigation_rejects_implicit_or_unbounded_break_authority() -> None:
+    protocol = JavaBodyProtocol()
+    hello = protocol.hello()
+    protocol.feed({
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": hello["request_id"],
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["HELLO", "NAVIGATE"],
+    })
+
+    with pytest.raises(ValueError, match="positive break_budget"):
+        protocol.navigate(
+            "MineBot_1",
+            "nav-governed-2",
+            {"kind": "xz", "x": 8, "z": 0},
+            allow_break=True,
+            break_context="travel",
+        )
+
+
 def test_protocol_version_mismatch_fails_closed() -> None:
     protocol = JavaBodyProtocol()
     hello = protocol.hello()
@@ -372,3 +465,33 @@ def test_furnace_transfer_params_cannot_override_caller_identity() -> None:
 
     assert request["bot_name"] == "MineBot_1"
     assert request["action_id"] == "furnace-1"
+
+
+@pytest.mark.parametrize("builder_name", ["engage_entity", "follow_entity"])
+def test_entity_actions_require_agent_resolved_canonical_uuid(builder_name: str) -> None:
+    protocol = JavaBodyProtocol()
+    hello = protocol.hello()
+    request_type = "ENGAGE_ENTITY" if builder_name == "engage_entity" else "FOLLOW_ENTITY"
+    protocol.feed({
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": hello["request_id"],
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["HELLO", request_type],
+    })
+    builder = getattr(protocol, builder_name)
+
+    with pytest.raises(ValueError, match="target_spec"):
+        builder("MineBot_1", "action-1", {"target_spec": "nearest_hostile"})
+    with pytest.raises(ValueError, match="canonical"):
+        builder("MineBot_1", "action-2", {"target_uuid": "not-a-uuid"})
+
+    request = builder(
+        "MineBot_1",
+        "action-3",
+        {"target_uuid": "11111111-1111-4111-8111-111111111111"},
+    )
+    assert request["target_uuid"] == "11111111-1111-4111-8111-111111111111"

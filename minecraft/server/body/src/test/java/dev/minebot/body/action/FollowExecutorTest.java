@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class FollowExecutorTest {
+    private static final String TARGET_UUID = "22222222-2222-4222-8222-222222222222";
     private static final class Harness implements
         MovementControls,
         EngageExecutor.TargetSource,
@@ -60,7 +61,7 @@ final class FollowExecutorTest {
         ActionRegistry registry = new ActionRegistry();
         BotEventStream events = new BotEventStream();
         ActionRuntime runtime = runtime(harness, registry, events);
-        submit(runtime, harness, events, "follow-1", "Target", 2.0, 3);
+        submit(runtime, harness, events, "follow-1", TARGET_UUID, 2.0, 3);
 
         for (int tick = 1; tick <= 4; tick++) {
             runtime.tick(tick);
@@ -79,7 +80,7 @@ final class FollowExecutorTest {
         ActionRegistry registry = new ActionRegistry();
         BotEventStream events = new BotEventStream();
         ActionRuntime runtime = runtime(harness, registry, events);
-        submit(runtime, harness, events, "follow-2", "Target", 1.5, 16);
+        submit(runtime, harness, events, "follow-2", TARGET_UUID, 1.5, 16);
 
         runtime.tick(1);
         harness.target = targetAt(9.5);
@@ -89,7 +90,8 @@ final class FollowExecutorTest {
 
         JsonObject terminal = registry.status("follow-2").terminal();
         assertEquals("completed", terminal.get("classification").getAsString());
-        assertEquals("target-1", terminal.get("target_id").getAsString());
+        assertEquals(TARGET_UUID, terminal.get("target_id").getAsString());
+        assertEquals(TARGET_UUID, terminal.get("target_uuid").getAsString());
         assertTrue(terminal.get("target_replans").getAsInt() >= 1);
         assertTrue(terminal.get("final_distance").getAsDouble() <= 1.5);
     }
@@ -131,7 +133,7 @@ final class FollowExecutorTest {
 
     private static EngageExecutor.Target targetAt(double x) {
         return new EngageExecutor.Target(
-            "target-1", "minecraft:player", "Target", x, 64.0, 0.5, 20.0, true
+            TARGET_UUID, "minecraft:player", "Target", x, 64.0, 0.5, 20.0, true
         );
     }
 }

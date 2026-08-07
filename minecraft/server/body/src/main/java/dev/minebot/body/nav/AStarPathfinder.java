@@ -164,8 +164,39 @@ public final class AStarPathfinder {
         boolean directReturnRequired,
         boolean allowGoalStaging
     ) {
-        this.world = world;
-        this.moves = new MoveGenerator(world);
+        this(
+            world,
+            goal,
+            startX,
+            startY,
+            startZ,
+            totalNodeCap,
+            unloadedTouchCap,
+            directReturnRequired,
+            allowGoalStaging,
+            0,
+            MoveGenerator.Policy.defaults()
+        );
+    }
+
+    /** Construct a search with the finite profile supplied by the Body seam. */
+    public AStarPathfinder(
+        WorldView world,
+        Goal goal,
+        int startX,
+        int startY,
+        int startZ,
+        int totalNodeCap,
+        int unloadedTouchCap,
+        boolean directReturnRequired,
+        boolean allowGoalStaging,
+        int gridRadius,
+        MoveGenerator.Policy movePolicy
+    ) {
+        this.world = gridRadius > 0
+            ? new RadiusLimitedWorldView(world, startX, startZ, gridRadius)
+            : world;
+        this.moves = new MoveGenerator(this.world, movePolicy);
         this.goal = goal;
         this.startX = startX;
         this.startY = startY;
@@ -179,6 +210,33 @@ public final class AStarPathfinder {
         open.add(new Open(startKey, goal.heuristic(startX, startY, startZ), 0.0));
         bestSoFarKey = startKey;
         trackBestSoFar(startKey, startX, startY, startZ);
+    }
+
+    private static final class RadiusLimitedWorldView implements WorldView {
+        private final WorldView delegate;
+        private final int originX;
+        private final int originZ;
+        private final int radius;
+
+        private RadiusLimitedWorldView(WorldView delegate, int originX, int originZ, int radius) {
+            this.delegate = delegate;
+            this.originX = originX;
+            this.originZ = originZ;
+            this.radius = radius;
+        }
+
+        @Override
+        public NodeKind kindAt(int x, int y, int z) {
+            if (Math.abs(x - originX) > radius || Math.abs(z - originZ) > radius) {
+                return NodeKind.UNLOADED;
+            }
+            return delegate.kindAt(x, y, z);
+        }
+
+        @Override
+        public boolean isBodyPositionHazardous(int x, int y, int z) {
+            return delegate.isBodyPositionHazardous(x, y, z);
+        }
     }
 
     /** Expands up to {@code nodeBudget} nodes; call again while IN_PROGRESS. */

@@ -14,7 +14,14 @@ from typing import Any, Callable
 from minebot.brain.acquisition import AcquisitionError, AcquisitionStep, RecipeLookup, RecipeVariant, resolve_acquisition
 from minebot.brain.modes import RuntimeProfile
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
-from minebot.contract import Body, InventorySlot, JsonObject, ToolResult, perception_next_cursor
+from minebot.contract import (
+    Body,
+    InventorySlot,
+    JsonObject,
+    ToolResult,
+    governance_confirmation_from,
+    perception_next_cursor,
+)
 from minebot.contract.harvest import PICKAXE_BY_TIER, best_owned_pickaxe, required_pickaxe_tier, tier_satisfies
 from minebot.contract.tool_trace import canonical_args_hash, tool_tactic_signature
 
@@ -91,15 +98,138 @@ def register_collect_resource_tool(registry: ToolRegistry, context: CompositionC
     registry.register(collect_resource_tool(context))
 
 
+def collect_resource_observation_projector(_reason: str, metrics: dict[str, object]) -> JsonObject:
+    """Decision-grade, bounded summary for the model-visible collect-N tool."""
+    summary: JsonObject = {
+        key: metrics[key]
+        for key in (
+            "item",
+            "requested_item",
+            "target_count",
+            "before_count",
+            "after_count",
+            "collected_delta",
+            "remaining_count",
+            "candidates_tried",
+            "resume_hint",
+        )
+        if key in metrics
+    }
+    budget = metrics.get("budget")
+    if isinstance(budget, dict):
+        summary["budget"] = {
+            key: budget[key]
+            for key in ("max_candidates", "max_mutating_calls", "max_wall_s")
+            if key in budget
+        }
+
+    body_process = metrics.get("body_process")
+    body_metrics = body_process.get("metrics") if isinstance(body_process, dict) else None
+    if isinstance(body_metrics, dict):
+        for key in (
+            "collected_total",
+            "remaining_delta",
+            "candidate_attempts_consumed",
+            "candidate_budget_remaining",
+            "navigation_fallback_attempts",
+            "elapsed_ms",
+        ):
+            if key in body_metrics:
+                summary[key] = body_metrics[key]
+        resource_budget = body_metrics.get("budget")
+        if isinstance(resource_budget, dict):
+            summary["resource_budget"] = {
+                key: resource_budget[key]
+                for key in (
+                    "candidate_budget",
+                    "mutation_budget",
+                    "max_wall_s",
+                    "find_limit",
+                    "max_pages",
+                    "max_goals",
+                )
+                if key in resource_budget
+            }
+        navigation_failures = body_metrics.get("navigation_failure_reasons")
+        if isinstance(navigation_failures, list):
+            summary["navigation_failure_reasons"] = [
+                str(value)[:160] for value in navigation_failures[:8]
+            ]
+            summary["navigation_failure_count"] = len(navigation_failures)
+        searches = body_metrics.get("searches")
+        if isinstance(searches, list):
+            summary["search_count"] = len(searches)
+
+    last_failure = metrics.get("last_failure")
+    if last_failure is None and isinstance(body_metrics, dict):
+        last_failure = body_metrics.get("last_failure")
+    failure_summary = _collect_failure_summary(last_failure)
+    if failure_summary:
+        summary["last_failure"] = failure_summary
+    return summary
+
+
+def _collect_failure_summary(value: object) -> JsonObject:
+    if not isinstance(value, dict):
+        return {}
+    summary: JsonObject = {
+        key: value[key]
+        for key in ("phase", "reason", "success", "canRetry", "nextSuggestion")
+        if key in value and not isinstance(value[key], (dict, list, tuple))
+    }
+    reason_chain: list[str] = []
+
+    def visit(node: object, depth: int) -> None:
+        if depth > 5 or len(reason_chain) >= 8 or not isinstance(node, dict):
+            return
+        reason = node.get("reason")
+        if isinstance(reason, str) and reason and reason not in reason_chain:
+            reason_chain.append(reason[:160])
+        for key in ("result", "last_failure", "metrics"):
+            visit(node.get(key), depth + 1)
+
+    visit(value, 0)
+    if reason_chain:
+        summary["reason_chain"] = reason_chain
+    return summary
+
+
+def ensure_tool_observation_projector(_reason: str, metrics: dict[str, object]) -> JsonObject:
+    """Bounded acquisition-plan state for the next strategy decision."""
+    summary: JsonObject = {
+        key: metrics[key]
+        for key in (
+            "item",
+            "target_count",
+            "current_count",
+            "remaining_count",
+            "resume_hint",
+            "governance_confirmation",
+        )
+        if key in metrics
+    }
+    plan = metrics.get("plan")
+    if isinstance(plan, list):
+        summary["plan_step_count"] = len(plan)
+    completed = metrics.get("completed_steps")
+    if isinstance(completed, list):
+        summary["completed_step_count"] = len(completed)
+    failed_step = _collect_failure_summary(metrics.get("failed_step"))
+    if failed_step:
+        summary["failed_step"] = failed_step
+    return summary
+
+
 def collect_resource_tool(context: CompositionContext) -> RegisteredTool:
     return RegisteredTool(
         name="collect_resource",
         description=(
-            "Collect a requested resource count through one bounded high-level transaction. "
-            "For collect-N goals, prefer this over manually chaining search_for_block, move_to, "
-            "get_to_block, or mine_block_collect: the Body owns candidate discovery and blacklisting, "
-            "stand-point selection, navigation, governed mining, pickup, and authoritative inventory "
-            "completion truth. When a recipe or goal accepts any equivalent material family, request "
+            "Collect a requested resource count through bounded Python orchestration over authoritative "
+            "Body reads and caller-designated physical objectives. Call this once for collect-N goals: "
+            "the orchestration layer owns discovery, candidate ordering, blacklists, count and retry "
+            "budgets; each Body action owns only navigation and governed excavation/break/pickup mechanics for its "
+            "designated target and returns a typed terminal with authoritative truth. When a recipe or goal accepts any "
+            "equivalent material family, request "
             "the family name, e.g. item='logs' for any log/stem; use an exact species such as "
             "item='oak_log' only when that exact species is part of the goal or known recipe output."
         ),
@@ -114,18 +244,6 @@ def collect_resource_tool(context: CompositionContext) -> RegisteredTool:
                     ),
                 },
                 "count": {"type": "integer", "minimum": 1},
-                "constraints": {
-                    "type": "object",
-                    "properties": {
-                        "radius": {"type": "integer", "minimum": 1},
-                        "max_candidates": {"type": "integer", "minimum": 1},
-                        "max_mutating_calls": {"type": "integer", "minimum": 1},
-                        "max_wall_s": {"type": "number", "exclusiveMinimum": 0},
-                        "allow_dry": {"type": "boolean"},
-                        "auto_prerequisites": {"type": "boolean"},
-                    },
-                    "additionalProperties": True,
-                },
             },
             "required": ["item", "count"],
             "additionalProperties": False,
@@ -142,6 +260,7 @@ def collect_resource_tool(context: CompositionContext) -> RegisteredTool:
             timeout_s=context.budget.max_wall_s,
             body_mutating=True,
         ),
+        projector=collect_resource_observation_projector,
     )
 
 
@@ -185,6 +304,7 @@ def ensure_tool_for_tool(
             timeout_s=900.0,
             body_mutating=True,
         ),
+        projector=ensure_tool_observation_projector,
     )
 
 
@@ -260,7 +380,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                     "ensure_result": ensured.to_payload(),
                     "resume_hint": (ensured.metrics or {}).get("resume_hint", "reinvoke_ensure"),
                 }
-                confirmation = _governance_confirmation_from(ensured.to_payload())
+                confirmation = governance_confirmation_from(ensured.to_payload())
                 if confirmation is not None:
                     ensure_metrics["governance_confirmation"] = confirmation
                 return ToolResult(
@@ -357,7 +477,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         # as a completed capability and move on to dependent steps.
         result_success = False
         can_retry = bool(body_process.get("canRetry", True))
-        resume_hint = "reselect_candidates" if can_retry else "body_terminal"
+        resume_hint = _resource_resume_hint(body_reason)
         next_suggestion = _tool_result_next_suggestion(body_process)
         last_failure = {
             "phase": "collect_domain",
@@ -396,7 +516,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     )
     metrics = dict(result.metrics or {})
     metrics["body_process"] = body_process
-    confirmation = _governance_confirmation_from(body_process)
+    confirmation = governance_confirmation_from(body_process)
     if confirmation is not None:
         metrics["governance_confirmation"] = confirmation
     return ToolResult(
@@ -537,8 +657,8 @@ def ensure_item(
                 context,
                 step,
                 before_count=before_step_count,
-                keep_workstation=_should_keep_workstation(step, index, last_table_craft_index),
-                cleanup_workstation=_should_cleanup_workstation(step, index, last_table_craft_index),
+                keep_workstation=_should_keep_workstation(plan, index, last_table_craft_index),
+                cleanup_workstation=_should_cleanup_workstation(plan, index, last_table_craft_index),
             )
             step_record = {"index": evidence_index, "step": _acquisition_step_payload(step), "result": result}
             if not result.get("success"):
@@ -1183,33 +1303,6 @@ def _tool_result_next_suggestion(result: dict[str, object], *, _depth: int = 0) 
     return None
 
 
-def _governance_confirmation_from(value: object, *, _depth: int = 0) -> dict[str, object] | None:
-    if _depth > 8:
-        return None
-    if isinstance(value, dict):
-        direct = value.get("governance_confirmation")
-        if isinstance(direct, dict) and isinstance(direct.get("challenge_id"), str):
-            return dict(direct)
-        for key in (
-            "metrics",
-            "body_process",
-            "ensure_result",
-            "last_failure",
-            "failed_step",
-            "result",
-        ):
-            nested = value.get(key)
-            confirmation = _governance_confirmation_from(nested, _depth=_depth + 1)
-            if confirmation is not None:
-                return confirmation
-    if isinstance(value, list):
-        for item in value:
-            confirmation = _governance_confirmation_from(item, _depth=_depth + 1)
-            if confirmation is not None:
-                return confirmation
-    return None
-
-
 def _segment_diagnostics(segment: dict[str, Any]) -> dict[str, object]:
     out: dict[str, object] = {}
     for key in ("index", "status", "terminal_reason", "success", "target"):
@@ -1263,6 +1356,20 @@ def _resource_process_reason(reason: str, *, before_count: int, current_count: i
     if reason == "resource_domain_collected":
         return "collect_inventory_target_not_met"
     return reason
+
+
+def _resource_resume_hint(reason: str) -> str:
+    if reason in {
+        "resource_candidates_not_found",
+        "resource_candidate_domain_exhausted",
+        "resource_domain_partial_exhausted",
+    }:
+        return "reselect_candidates"
+    if "budget" in reason:
+        return "budget_exhausted"
+    if "timeout" in reason:
+        return "timeout"
+    return "body_terminal"
 
 
 def _resource_process_skips(metrics: dict[str, object]) -> list[dict[str, object]]:
@@ -1414,12 +1521,37 @@ def _execute_acquisition_step(
             craft_input,
         )
     if step.kind == "smelt":
-        return _execute_composition_phase(
+        smelt_input: JsonObject = {
+            "input_item": step.detail.get("input_item") or step.item,
+            "count": int(step.detail.get("input_count") or step.count),
+        }
+        result = _execute_composition_phase(
             context,
             "ensure_smelt",
             context.registry.get("smelt_item"),
-            {"input_item": step.detail.get("input_item") or step.item, "count": int(step.detail.get("input_count") or step.count)},
+            smelt_input,
         )
+        if result.get("success") or result.get("reason") != "temporary_furnace_no_supported_site":
+            return result
+        try:
+            surface_tool = context.registry.get("go_to_surface")
+        except KeyError:
+            return result
+        recovery = _execute_composition_phase(
+            context,
+            "ensure_smelt_workspace_recovery",
+            surface_tool,
+            {"timeout_s": min(120.0, max(1.0, context.budget.max_wall_s))},
+        )
+        if not recovery.get("success"):
+            return _with_workspace_recovery(result, recovery)
+        retry = _execute_composition_phase(
+            context,
+            "ensure_smelt_after_workspace_recovery",
+            context.registry.get("smelt_item"),
+            smelt_input,
+        )
+        return _with_workspace_recovery(retry, recovery)
     if step.kind == "equip":
         return _execute_composition_phase(
             context,
@@ -1428,6 +1560,14 @@ def _execute_acquisition_step(
             {"item": step.item, "target": "mainhand"},
         )
     return ToolResult(False, "unknown_acquisition_step", False, metrics={"step": _acquisition_step_payload(step)}).to_payload()
+
+
+def _with_workspace_recovery(result: JsonObject, recovery: JsonObject) -> JsonObject:
+    enriched = dict(result)
+    metrics = dict(enriched.get("metrics") or {})
+    metrics["workspace_recovery"] = recovery
+    enriched["metrics"] = metrics
+    return enriched
 
 
 def _acquisition_step_inventory_count(context: CompositionContext, step: AcquisitionStep) -> int | None:
@@ -1454,21 +1594,41 @@ def _last_table_craft_index(plan: list[AcquisitionStep]) -> int | None:
     return last
 
 
-def _should_keep_workstation(step: AcquisitionStep, index: int, last_table_craft_index: int | None) -> bool:
-    return (
-        step.kind == "craft"
-        and bool(step.detail.get("requires_table"))
-        and last_table_craft_index is not None
-        and index < last_table_craft_index
+def _should_keep_workstation(
+    plan: list[AcquisitionStep],
+    index: int,
+    last_table_craft_index: int | None,
+) -> bool:
+    step = plan[index]
+    if (
+        step.kind != "craft"
+        or not bool(step.detail.get("requires_table"))
+        or last_table_craft_index is None
+        or index >= last_table_craft_index
+    ):
+        return False
+    next_table_craft_index = next(
+        candidate_index
+        for candidate_index in range(index + 1, len(plan))
+        if plan[candidate_index].kind == "craft"
+        and bool(plan[candidate_index].detail.get("requires_table"))
+    )
+    return all(
+        intervening.kind in {"craft", "equip"}
+        for intervening in plan[index + 1:next_table_craft_index]
     )
 
 
-def _should_cleanup_workstation(step: AcquisitionStep, index: int, last_table_craft_index: int | None) -> bool:
+def _should_cleanup_workstation(
+    plan: list[AcquisitionStep],
+    index: int,
+    last_table_craft_index: int | None,
+) -> bool:
+    step = plan[index]
     return (
         step.kind == "craft"
         and bool(step.detail.get("requires_table"))
-        and last_table_craft_index is not None
-        and index == last_table_craft_index
+        and not _should_keep_workstation(plan, index, last_table_craft_index)
     )
 
 
@@ -1511,7 +1671,7 @@ def _ensure_result(
     }
     if failed_step is not None:
         metrics["failed_step"] = failed_step
-        confirmation = _governance_confirmation_from(failed_step)
+        confirmation = governance_confirmation_from(failed_step)
         if confirmation is not None:
             metrics["governance_confirmation"] = confirmation
     if current_count is not None:

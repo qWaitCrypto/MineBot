@@ -342,7 +342,6 @@ def body_capability_tools(
     pickup: PickupTransactions,
     resource_collection: ResourceCollectionTransactions,
     use: UseTransactions,
-    java_objective_body: Body | None = None,
     dig_down_objective_body: Body | None = None,
 ) -> tuple[RegisteredTool, ...]:
     tools = (
@@ -371,7 +370,7 @@ def body_capability_tools(
         _dig_down_tool(work, dig_down_objective_body),
         _dig_up_tool(work),
         _pickup_items_tool(pickup),
-        _collect_block_domain_tool(resource_collection, java_objective_body),
+        _collect_block_domain_tool(resource_collection),
         _read_block_tool(body),
         _read_nearby_blocks_tool(body),
         _read_nearby_entities_tool(body),
@@ -394,6 +393,7 @@ def _tool(
     terminal_truth: tuple[str, ...],
     timeout_s: float,
     projector: ObservationProjector | None = None,
+    model_visible: bool = True,
 ) -> RegisteredTool:
     return RegisteredTool(
         name,
@@ -409,6 +409,7 @@ def _tool(
             body_scope=body_scope,
             terminal_truth=terminal_truth,
             timeout_s=timeout_s,
+            model_visible=model_visible,
         ),
         projector=projector,
     )
@@ -1249,6 +1250,7 @@ def _java_dig_down(body: Body, params: JsonObject) -> ToolResult:
     target_y = int(params["target_y"])
     max_steps = int(params["max_steps"]) if params.get("max_steps") is not None else None
     max_clear_fall = int(_param(params, "max_clear_fall", 2))
+    timeout_s = float(_param(params, "timeout_s", 240.0))
     try:
         result = body.execute(
             Action.create(
@@ -1257,7 +1259,7 @@ def _java_dig_down(body: Body, params: JsonObject) -> ToolResult:
                     "target_y": target_y,
                     "max_steps": max_steps,
                     "max_clear_fall": max_clear_fall,
-                    "timeout_ticks": 4_800,
+                    "timeout_ticks": max(20, min(4_800, int(timeout_s * 20.0 + 0.999))),
                 },
             )
         )
@@ -1314,7 +1316,7 @@ def _dig_up_tool(work: BlockWork) -> RegisteredTool:
 
 
 def resource_domain_observation_projector(reason: str, metrics: dict[str, object]) -> JsonObject:
-    """Model-visible projection for collect_block_domain."""
+    """Bounded projection used when the resource leaf is wrapped by composition."""
     attempts = metrics.get("attempts")
     searches = metrics.get("searches")
     blocker_counts: dict[str, int] = {}
@@ -1381,6 +1383,52 @@ def resource_domain_observation_projector(reason: str, metrics: dict[str, object
                     count_reason(governance_counts, data.get("decision_reason") or data.get("reason"))
 
     summary: JsonObject = {}
+    for key in (
+        "collected_total",
+        "remaining_delta",
+        "candidate_attempts_consumed",
+        "candidate_budget_remaining",
+        "navigation_fallback_attempts",
+        "elapsed_ms",
+    ):
+        if key in metrics:
+            summary[key] = bounded_summary_value(metrics[key])
+    budget = metrics.get("budget")
+    if isinstance(budget, dict):
+        summary["budget"] = {
+            key: bounded_summary_value(budget[key])
+            for key in (
+                "candidate_budget",
+                "mutation_budget",
+                "max_wall_s",
+                "find_limit",
+                "max_pages",
+                "max_goals",
+            )
+            if key in budget
+        }
+    last_failure = metrics.get("last_failure")
+    if isinstance(last_failure, dict):
+        summary["last_failure"] = {
+            key: bounded_summary_value(last_failure[key])
+            for key in ("success", "reason", "canRetry", "nextSuggestion")
+            if key in last_failure
+        }
+        failure_metrics = last_failure.get("metrics")
+        if isinstance(failure_metrics, dict):
+            summary["last_failure"]["evidence"] = {
+                key: bounded_summary_value(failure_metrics[key])
+                for key in (
+                    "target",
+                    "goal",
+                    "attempts_consumed",
+                    "budget_remaining",
+                    "closest_approach_distance",
+                    "unloaded_chunk_count",
+                    "governance_reason",
+                )
+                if key in failure_metrics
+            }
     if blocker_counts:
         summary["process_blockers"] = _bounded_reason_counts(blocker_counts)
     if governance_counts:
@@ -1444,11 +1492,8 @@ def _bounded_reason_counts(counts: dict[str, int]) -> list[str]:
 
 def _collect_block_domain_tool(
     resource: ResourceCollectionTransactions,
-    java_objective_body: Body | None = None,
 ) -> RegisteredTool:
     def run(params: JsonObject) -> ToolResult:
-        if java_objective_body is not None:
-            return _java_collect_block_domain(java_objective_body, params)
         return resource.collect_block_domain(
             block_types=_strings(params["block_types"]),
             expected_drops=_strings(params["expected_drops"]),
@@ -1467,7 +1512,7 @@ def _collect_block_domain_tool(
 
     return _tool(
         "collect_block_domain",
-        "Collect a bounded physical domain of explicit block types. The Body discovers candidates, submits their stand points as one planner goal set, blacklists failed candidates, replans, mines, and verifies pickup inventory truth.",
+        "Run one bounded deterministic resource process over explicit block types. Python owns candidate ordering, blacklists, count and retry budgets; each selected coordinate is executed by one Body-designated break-collect objective.",
         _object_schema(
             {
                 "block_types": STRING_LIST_SCHEMA,
@@ -1486,99 +1531,15 @@ def _collect_block_domain_tool(
         ),
         run,
         mutating=True,
-        source=("java_body" if java_objective_body is not None else "body.resource_collection"),
+        source="body.resource_collection",
         tool_type="resource",
         permission="collect_natural_resource",
         body_scope=("search", "navigation", "mine", "pickup", "inventory"),
         terminal_truth=("findBlocks", "navigateDone", "mineDone", "blockAt", "inventory"),
         timeout_s=960.0,
         projector=resource_domain_observation_projector,
+        model_visible=False,
     )
-
-
-def _java_collect_block_domain(body: Body, params: JsonObject) -> ToolResult:
-    block_types = tuple(_minecraft_id(item) for item in _strings(params["block_types"]))
-    if not block_types:
-        return ToolResult(False, "no_block_types", False)
-    expected_item_ids = tuple(
-        _minecraft_id(item) for item in _strings(params["expected_drops"])
-    )
-    if not expected_item_ids:
-        return ToolResult(False, "resource_expected_drops_missing", False)
-    remaining = int(params["remaining_count"])
-    max_wall_s = float(params.get("max_wall_s") or 60.0)
-    timeout_ticks = max(20, min(12_000, round(max_wall_s * 20)))
-    try:
-        result = body.execute(
-            Action.create(
-                "collectBlock",
-                {
-                    "block_types": list(block_types),
-                    "expected_item_ids": list(expected_item_ids),
-                    "radius": int(params.get("search_radius") or 16),
-                    "vertical_radius": min(64, int(params.get("search_radius") or 16)),
-                    "target_count": remaining,
-                    "candidate_budget": int(params.get("candidate_budget") or 8),
-                    "mutation_budget": int(params.get("mutation_budget") or 8),
-                    "timeout_ticks": timeout_ticks,
-                },
-            )
-        )
-    except Exception as error:  # transport/provider availability
-        return ToolResult(
-            False,
-            "java_body_unavailable",
-            True,
-            metrics={"error": type(error).__name__, "attempts": []},
-        )
-    success = bool(result.ok and result.accepted and result.complete)
-    reason = result.error or ("collected" if success else "body_rejected")
-    body_metrics = dict(result.data)
-    delta = body_metrics.get("inventory_delta")
-    gained = 0
-    if isinstance(delta, dict):
-        try:
-            gained = max(0, int(delta.get("total") or 0))
-            if gained == 0:
-                gained = max(0, int(delta.get("after") or 0) - int(delta.get("before") or 0))
-        except (TypeError, ValueError):
-            gained = 0
-    attempt = {
-        "success": success,
-        "reason": reason,
-        "metrics": body_metrics,
-    }
-    metrics = {
-        **body_metrics,
-        "attempts": [attempt],
-        "collected_delta": gained,
-        "remaining_count": max(0, remaining - gained),
-        "candidates_tried": int(body_metrics.get("candidates_tried") or 0),
-    }
-    if success and gained >= remaining:
-        return ToolResult(True, "collected", False, metrics=metrics)
-    if gained > 0:
-        return ToolResult(
-            False,
-            "partial",
-            True,
-            next_suggestion="continue the same resource objective from current world and inventory truth",
-            metrics=metrics,
-        )
-    return ToolResult(
-        False,
-        str(reason),
-        _java_failure_retryable(str(reason)),
-        metrics=metrics,
-    )
-
-
-def _minecraft_id(value: str) -> str:
-    return value if ":" in value else f"minecraft:{value}"
-
-
-def _java_failure_retryable(reason: str) -> bool:
-    return not reason.startswith(("governance_denied", "target_not_found", "invalid_"))
 
 
 def _pickup_items_tool(pickup: PickupTransactions) -> RegisteredTool:

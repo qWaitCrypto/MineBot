@@ -66,9 +66,16 @@ public final class PathFollower {
             return new Directive(State.STUCK, path.get(index), false, false, index);
         }
         Waypoint target = path.get(index);
-        boolean jump = target.y() > NavigateExecutor.PositionSource.Position.feetBlockY(py) + 0.1
+        int feetY = NavigateExecutor.PositionSource.Position.feetBlockY(py);
+        boolean fallingInTargetColumn = target.y() < feetY
+            && horizontalDistance(px, pz, target) <= reachDistance(index);
+        boolean jump = target.y() > feetY + 0.1
             && horizontalDistance(px, pz, target) < 1.1;
-        return new Directive(State.CONTINUE, target, true, jump, index);
+        // A descending graph edge is one mechanical movement primitive. Once
+        // the body enters its landing column, horizontal input must stop while
+        // gravity completes the edge; continuing to hold forward overshoots
+        // the proven landing and can carry the player into an unplanned cell.
+        return new Directive(State.CONTINUE, target, !fallingInTargetColumn, jump, index);
     }
 
     private void advanceThroughReachedWaypoints(double px, double py, double pz) {
@@ -78,7 +85,8 @@ public final class PathFollower {
             pz,
             path.get(index),
             reachDistance(index),
-            false
+            false,
+            isDownwardWaypoint(index)
         )) {
             index++;
             bestProgress = -Double.MAX_VALUE;
@@ -93,36 +101,42 @@ public final class PathFollower {
             pz,
             path.get(index),
             finalWaypointReachDistance,
-            true
+            true,
+            false
         );
     }
 
-    /** After lag or drift, snap to the nearest of the next few waypoints. */
+    /** After lag, snap forward only when the body actually reached a future waypoint. */
     private boolean resync(double px, double py, double pz) {
         int bestIndex = -1;
-        double bestDistance = DEVIATION_DISTANCE;
-        for (int i = index; i < Math.min(index + RESYNC_LOOKAHEAD + 1, path.size()); i++) {
-            double distance = waypointDistance(px, py, pz, path.get(i));
-            if (distance < bestDistance) {
-                bestDistance = distance;
+        for (int i = index + 1; i < Math.min(index + RESYNC_LOOKAHEAD + 1, path.size()); i++) {
+            if (reached(
+                px,
+                py,
+                pz,
+                path.get(i),
+                reachDistance(i),
+                i == path.size() - 1,
+                isDownwardWaypoint(i)
+            )) {
                 bestIndex = i;
             }
-        }
-        if (bestIndex < 0) {
-            // A graph edge can represent a compound physical move, such as
-            // walking off a ledge and falling several blocks into water. The
-            // player is still on that edge even when neither endpoint is
-            // within the ordinary point-deviation radius.
-            return index > 0
-                && segmentDistance(px, py, pz, path.get(index - 1), path.get(index))
-                    < DEVIATION_DISTANCE;
         }
         if (bestIndex > index) {
             index = bestIndex;
             bestProgress = -Double.MAX_VALUE;
             ticksWithoutProgress = 0;
         }
-        return true;
+        if (waypointDistance(px, py, pz, path.get(index)) < DEVIATION_DISTANCE) {
+            return true;
+        }
+        // A graph edge can represent a compound physical move, such as
+        // walking off a ledge and falling several blocks into water. The
+        // player is still on that edge even when neither endpoint is within
+        // the ordinary point-deviation radius.
+        return index > 0
+            && segmentDistance(px, py, pz, path.get(index - 1), path.get(index))
+                < DEVIATION_DISTANCE;
     }
 
     private boolean trackStuck(double px, double py, double pz) {
@@ -148,17 +162,24 @@ public final class PathFollower {
         double pz,
         Waypoint waypoint,
         double reachDistance,
-        boolean finalWaypoint
+        boolean finalWaypoint,
+        boolean downwardWaypoint
     ) {
         // Upward waypoints must actually be climbed; downward ones tolerate
-        // the airborne tail of a fall. The final waypoint is stricter: handing
-        // off one block early releases movement and can carry the player past
-        // the intended stand before the goal gets to verify it.
-        boolean verticalReached = finalWaypoint
+        // the airborne tail only after the feet enter their target voxel. A
+        // height-only tolerance can consume a descending waypoint one block
+        // early and re-enable forward motion before gravity reaches the proven
+        // landing column. The final waypoint remains equally strict.
+        boolean verticalReached = finalWaypoint || downwardWaypoint
             ? NavigateExecutor.PositionSource.Position.feetBlockY(py) == waypoint.y()
             : py >= waypoint.y() - 0.05 && py - waypoint.y() <= 1.5;
         return horizontalDistance(px, pz, waypoint) <= reachDistance
             && verticalReached;
+    }
+
+    private boolean isDownwardWaypoint(int waypointIndex) {
+        return waypointIndex > 0
+            && path.get(waypointIndex).y() < path.get(waypointIndex - 1).y();
     }
 
     private static double horizontalDistance(double px, double pz, Waypoint waypoint) {

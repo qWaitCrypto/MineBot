@@ -26,6 +26,7 @@ from minebot.contract import (
     PerceptionResult,
     Position,
     ToolResult,
+    governance_confirmation_from,
     perception_next_cursor,
     perception_resume_params,
 )
@@ -273,6 +274,7 @@ class _ScanResult:
     entities: tuple[JsonObject, ...]
     uncertainty: tuple[JsonObject, ...]
     terminal_reason: str | None = None
+    coverage_status: CoverageStatus | None = None
 
     @property
     def found(self) -> bool:
@@ -567,6 +569,11 @@ class ExplorationTransactions:
                     "success": nav.success,
                     "can_retry": nav.can_retry,
                     "mutation_blacklist_size": len(mutation_blacklist),
+                    # Keep the bounded provider terminal intact.  The compact
+                    # summary is useful for scanning, but dropping the
+                    # terminal metrics made a natural recovery failure
+                    # impossible to diagnose from the exploration artifact.
+                    "navigation": nav.to_payload(),
                 }
             )
             lifecycle = _body_lifecycle_terminal(after)
@@ -606,7 +613,12 @@ class ExplorationTransactions:
                     success=True,
                     can_retry=True,
             )
-            reached = nav.success and _region_key(_block_pos(after.pos)) == region
+            # Exploration owns the region-level terminal predicate. A Body
+            # route may truthfully end no_path for every exact stand while its
+            # authoritative final position is already inside the requested
+            # region; that is sufficient to scan, and must not trigger a
+            # retreat to the previous anchor.
+            reached = _region_key(_block_pos(after.pos)) == region
             dry_after = after.pos
             trigger_zero_progress = navigation_zero_progress(nav, before.pos, dry_after)
             if (
@@ -665,6 +677,7 @@ class ExplorationTransactions:
                         "success": aquatic.success,
                         "can_retry": aquatic.can_retry,
                         "trigger": navigation_reason,
+                        "navigation": aquatic.to_payload(),
                         "trigger_zero_progress": trigger_zero_progress,
                         "trigger_partial_progress": not trigger_zero_progress,
                         "fallback_budget": {
@@ -717,7 +730,7 @@ class ExplorationTransactions:
                 nav = aquatic
                 after = aquatic_after
                 navigation_reason = str(aquatic.reason or "mobility_blocked")
-                reached = aquatic.success and _region_key(_block_pos(after.pos)) == region
+                reached = _region_key(_block_pos(after.pos)) == region
                 if reached and fallback_attempted:
                     navigation_uncertainty = tuple(navigation_failures)
                     failures.append(
@@ -728,6 +741,38 @@ class ExplorationTransactions:
                         }
                     )
                     fallback_failure_recorded = True
+            confirmation = governance_confirmation_from(nav.to_payload())
+            if confirmation is not None:
+                # A governance challenge is transient control evidence, not a
+                # terrain observation. Yield it immediately so it cannot age
+                # inside this loop or be persisted in coverage uncertainty.
+                found = bool(all_blocks or all_entities)
+                return self._result(
+                    "found" if found else "mobility_blocked",
+                    targets=targets,
+                    dimension=dimension,
+                    origin=origin,
+                    regions_consumed=regions_consumed,
+                    max_regions=max_regions,
+                    max_distance=max_distance,
+                    distance_consumed=distance_consumed,
+                    covered_this_call=covered_this_call,
+                    blocks=all_blocks,
+                    entities=all_entities,
+                    failures=[
+                        *failures,
+                        {
+                            "region": [region[0], region[1]],
+                            "reason": navigation_reason,
+                            "navigation_attempts": navigation_failures,
+                        },
+                    ],
+                    evidence_keys=evidence_keys,
+                    coverage=prior,
+                    success=found,
+                    can_retry=True,
+                    governance_confirmation=confirmation,
+                )
             if navigation_reason == "survival_reflex_recovered":
                 record = self.coverage.record_region(
                     dimension=dimension,
@@ -1023,6 +1068,7 @@ class ExplorationTransactions:
         entities: list[JsonObject] = []
         uncertainty: list[JsonObject] = []
         block_page_limited = False
+        coverage_status: CoverageStatus | None = None
         if targets.blocks:
             cursor: object = 0
             seen_cursors: set[str] = set()
@@ -1063,6 +1109,13 @@ class ExplorationTransactions:
                     break
                 next_cursor = perception_next_cursor(perception, "nextStart", "next")
                 if next_cursor is None:
+                    if _perception_has_unloaded_boundary(perception):
+                        # A server may have exhausted the loaded snapshot while
+                        # reporting no continuation cursor.  That is a valid
+                        # partial read, not a broken pagination contract. Keep
+                        # the region unsettled so the frontier can continue.
+                        coverage_status = CoverageStatus.UNLOADED_BOUNDARY
+                        break
                     return _ScanResult(
                         tuple(blocks),
                         (),
@@ -1117,7 +1170,13 @@ class ExplorationTransactions:
         terminal_reason = None
         if block_page_limited and (not targets.entities or not (blocks or entities)):
             terminal_reason = "scan_page_limit"
-        return _ScanResult(tuple(blocks), tuple(entities), tuple(uncertainty), terminal_reason)
+        return _ScanResult(
+            tuple(blocks),
+            tuple(entities),
+            tuple(uncertainty),
+            terminal_reason,
+            coverage_status,
+        )
 
     def _scan_terminal(
         self,
@@ -1172,7 +1231,11 @@ class ExplorationTransactions:
             negative.append("no_matching_blocks")
         if targets.entities and not scan.entities:
             negative.append("no_matching_entities")
-        status = CoverageStatus.FOUND if scan.found else CoverageStatus.COVERED
+        status = (
+            CoverageStatus.FOUND
+            if scan.found
+            else scan.coverage_status or CoverageStatus.COVERED
+        )
         record = self.coverage.record_region(
             dimension=dimension,
             query_signature=targets.query_signature,
@@ -1251,6 +1314,7 @@ class ExplorationTransactions:
         coverage: dict[tuple[int, int], CoverageRegion],
         success: bool,
         can_retry: bool,
+        governance_confirmation: JsonObject | None = None,
     ) -> ToolResult:
         final_state = self.body.get_state()
         latest_revision = max((item.revision for item in coverage.values()), default=0)
@@ -1276,33 +1340,41 @@ class ExplorationTransactions:
             else None
         )
         continuation = _exploration_continuation(targets, resume_cursor)
-        return ToolResult(
-            success,
-            reason,
-            can_retry,
-            metrics={
-                "targets": targets.payload(),
-                "dimension": dimension,
-                "origin": list(origin),
-                "final_pos": list(final_state.pos),
-                "budget": {
-                    "max_distance": max_distance,
-                    "max_regions": max_regions,
-                    "regions_consumed": regions_consumed,
-                    "distance_consumed": round(distance_consumed, 3),
-                },
-                "covered_regions": covered_this_call,
-                "coverage_revision": latest_revision,
-                "blocks": blocks,
-                "entities": entities,
-                "candidate_failures": failures,
-                "evidence_keys": list(dict.fromkeys(evidence_keys)),
-                "uncertainty": uncertainty,
-                "resume_cursor": resume_cursor,
-                "continuation": continuation,
-                "complete": reason in {"found", "frontier_exhausted"},
+        metrics: JsonObject = {
+            "targets": targets.payload(),
+            "dimension": dimension,
+            "origin": list(origin),
+            "final_pos": list(final_state.pos),
+            "budget": {
+                "max_distance": max_distance,
+                "max_regions": max_regions,
+                "regions_consumed": regions_consumed,
+                "distance_consumed": round(distance_consumed, 3),
             },
-        )
+            "covered_regions": covered_this_call,
+            "coverage_revision": latest_revision,
+            "blocks": blocks,
+            "entities": entities,
+            "candidate_failures": failures,
+            "evidence_keys": list(dict.fromkeys(evidence_keys)),
+            "uncertainty": uncertainty,
+            "resume_cursor": resume_cursor,
+            "continuation": continuation,
+            "complete": reason in {"found", "frontier_exhausted"},
+        }
+        # Coverage uncertainty is durable world evidence. Never resurrect a
+        # consumed/expired control token from it; only this call's failures or
+        # an explicitly current navigation terminal may open the epoch.
+        confirmation = governance_confirmation or governance_confirmation_from(failures)
+        if (
+            not blocks
+            and not entities
+            and reason in {"mobility_blocked", "frontier_exhausted", "budget_exhausted"}
+            and confirmation is not None
+        ):
+            metrics["governance_confirmation"] = confirmation
+            return ToolResult(False, "governance_confirmation_required", True, metrics=metrics)
+        return ToolResult(success, reason, can_retry, metrics=metrics)
 
 
 def fold_coverage_events(events: list[dict[str, object]]) -> tuple[CoverageRegion, ...]:
@@ -1454,6 +1526,20 @@ def _perception_terminal(perception: PerceptionResult, *, allow_partial: bool = 
 
 def _uncertainty(perception: PerceptionResult) -> list[JsonObject]:
     return [dict(item) for item in (perception.uncertainty or ()) if isinstance(item, dict)]
+
+
+def _perception_has_unloaded_boundary(perception: PerceptionResult) -> bool:
+    """Return whether a partial read stopped at an unloaded-world boundary."""
+
+    try:
+        if int(perception.data.get("unloaded_chunk_count") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return any(
+        _is_unloaded_reason(str(item.get("reason") or ""))
+        for item in _uncertainty(perception)
+    )
 
 
 def _normalized_block_match(item: dict[str, object]) -> JsonObject:

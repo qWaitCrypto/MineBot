@@ -57,6 +57,68 @@ final class ExcavationPlannerTest {
     }
 
     @Test
+    void refusesToClearAHeadCellThatWouldExposeAHazard() {
+        FakeWorld world = sealedHorizontalTunnelWorld();
+        world.hazardBlockClearance(1, STAND + 1, 0);
+
+        ExcavationPlanner.Result result = ExcavationPlanner.plan(
+            world,
+            new ExcavationPlanner.Cell(0, STAND, 0),
+            List.of(new ExcavationPlanner.Target(4, STAND, 0)),
+            Set.of(),
+            6
+        );
+
+        assertFalse(result.success());
+        assertEquals("no_excavation_route", result.reason());
+    }
+
+    @Test
+    void combinesExistingWaterMovementWithGovernedExcavation() {
+        FakeWorld world = new FakeWorld(FLOOR);
+        for (int x = 1; x <= 3; x++) {
+            world.set(x, FLOOR, 0, WorldView.NodeKind.LIQUID);
+        }
+        for (int x = 4; x <= 5; x++) {
+            world.set(x, STAND, 0, WorldView.NodeKind.SOLID);
+            world.set(x, STAND + 1, 0, WorldView.NodeKind.SOLID);
+        }
+        world.set(6, STAND, 0, WorldView.NodeKind.SOLID);
+        for (int x = -8; x <= 8; x++) {
+            for (int y = STAND - 2; y <= STAND + 3; y++) {
+                for (int z = -8; z <= 8; z++) {
+                    if (z != 0) {
+                        world.hazardBodyPosition(x, y, z);
+                    }
+                }
+            }
+        }
+
+        ExcavationPlanner.Result result = ExcavationPlanner.plan(
+            world,
+            new ExcavationPlanner.Cell(0, STAND, 0),
+            List.of(new ExcavationPlanner.Target(6, STAND, 0)),
+            Set.of(),
+            6
+        );
+
+        assertTrue(result.success(), result.reason());
+        assertTrue(result.plan().breakCount() > 0);
+        assertTrue(result.plan().breakCount() <= 4);
+        assertEquals(
+            List.of(1, 2, 3),
+            result.plan().steps().stream()
+                .filter(step -> step.blockers().isEmpty())
+                .map(step -> step.stand().x())
+                .filter(x -> x >= 1 && x <= 3)
+                .toList()
+        );
+        assertTrue(result.plan().steps().stream().anyMatch(
+            step -> step.stand().x() >= 4 && !step.blockers().isEmpty()
+        ));
+    }
+
+    @Test
     void returnsADistanceReducingReturnSafeCorridorWhenTheTargetExceedsOneSegment() {
         int targetX = 7;
         ExcavationPlanner.Cell start = new ExcavationPlanner.Cell(0, STAND, 0);
@@ -76,6 +138,29 @@ final class ExcavationPlannerTest {
         assertTrue(result.plan().steps().stream().allMatch(
             step -> step.mode() == ExcavationPlanner.StepMode.WALK
         ));
+    }
+
+    @Test
+    void plansGovernedBreaksForOneDesignatedNavigationPredicate() {
+        FakeWorld world = sealedHorizontalTunnelWorld();
+        Goal goal = new Goal.Near(3, STAND, 0, 0.5);
+
+        ExcavationPlanner.RouteResult result = ExcavationPlanner.planToGoal(
+            world,
+            new ExcavationPlanner.Cell(0, STAND, 0),
+            goal,
+            Set.of(),
+            6,
+            ExcavationPlanner.DEFAULT_NODE_CAP,
+            ExcavationPlanner.DEFAULT_STEP_CAP,
+            MoveGenerator.Policy.defaults()
+        );
+
+        assertTrue(result.success(), result.reason());
+        assertTrue(result.plan().reachesGoal());
+        assertTrue(result.plan().breakCount() > 0);
+        ExcavationPlanner.Cell terminal = result.plan().steps().getLast().stand();
+        assertTrue(goal.isSatisfied(world, terminal.x(), terminal.y(), terminal.z()));
     }
 
     @Test

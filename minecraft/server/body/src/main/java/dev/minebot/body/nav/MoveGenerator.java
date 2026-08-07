@@ -32,6 +32,33 @@ public final class MoveGenerator {
     /** Falling into water is safe, so a water landing tolerates a deep drop. */
     public static final int MAX_WATER_FALL_BLOCKS = 20;
 
+    /** Finite movement facts supplied by the Body navigation contract. */
+    public record Policy(
+        boolean allowDiagonal,
+        boolean allowAscend,
+        boolean allowDescend,
+        boolean allowSwim,
+        int maxFallBlocks,
+        int maxWaterFallBlocks
+    ) {
+        public Policy {
+            if (maxFallBlocks < 0 || maxWaterFallBlocks < 0) {
+                throw new IllegalArgumentException("fall limits must be non-negative");
+            }
+        }
+
+        public static Policy defaults() {
+            return new Policy(
+                true,
+                true,
+                true,
+                true,
+                MAX_FALL_BLOCKS,
+                MAX_WATER_FALL_BLOCKS
+            );
+        }
+    }
+
     public record Move(int x, int y, int z, double cost) {
     }
 
@@ -43,9 +70,15 @@ public final class MoveGenerator {
     private static final int[][] DIAGONALS = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
 
     private final WorldView world;
+    private final Policy policy;
 
     public MoveGenerator(WorldView world) {
+        this(world, Policy.defaults());
+    }
+
+    public MoveGenerator(WorldView world, Policy policy) {
         this.world = world;
+        this.policy = policy;
     }
 
     /** Legal moves from a standing or floating cell (feet at y, head at y+1). */
@@ -55,13 +88,15 @@ public final class MoveGenerator {
         for (int[] step : CARDINALS) {
             probeColumn(x, y, z, x + step[0], z + step[1], WALK_COST, SWIM_COST, false, moves, unloaded);
         }
-        for (int[] step : DIAGONALS) {
+        for (int[] step : policy.allowDiagonal() ? DIAGONALS : new int[0][0]) {
             // No corner cutting: both adjacent cardinal bodies must be clear.
             if (bodyClear(x + step[0], y, z) && bodyClear(x, y, z + step[1])) {
                 probeColumn(x, y, z, x + step[0], z + step[1], DIAGONAL_COST, SWIM_DIAGONAL_COST, true, moves, unloaded);
             }
         }
-        addVerticalSwim(x, y, z, moves);
+        if (policy.allowSwim()) {
+            addVerticalSwim(x, y, z, moves);
+        }
         addVerticalClimb(x, y, z, moves);
         return new Moves(List.copyOf(moves), unloaded[0]);
     }
@@ -99,7 +134,8 @@ public final class MoveGenerator {
             // route to a shore whose top is level with the water surface.
             boolean supportedByLiquid = world.kindAt(startX, y, startZ) == WorldView.NodeKind.LIQUID
                 || world.kindAt(startX, y - 1, startZ) == WorldView.NodeKind.LIQUID;
-            if (!supportedByLiquid
+            if (policy.allowAscend()
+                && !supportedByLiquid
                 && !diagonal
                 && occupiable(bodyHigh)
                 && occupiable(world.kindAt(nx, y + 2, nz))
@@ -117,6 +153,9 @@ public final class MoveGenerator {
             return;
         }
         if (bodyLow == WorldView.NodeKind.LIQUID) {
+            if (!policy.allowSwim()) {
+                return;
+            }
             // Swim into water at the same height.
             moves.add(new Move(nx, y, nz, swimCost));
             return;
@@ -138,6 +177,9 @@ public final class MoveGenerator {
             return;
         }
         if (floor == WorldView.NodeKind.LIQUID) {
+            if (!policy.allowSwim()) {
+                return;
+            }
             // Keep the player's feet in the air cell above the water surface.
             // Lowering this node by one turns an ordinary crossing into an
             // unintended dive and makes the physical follower fight the path.
@@ -150,7 +192,10 @@ public final class MoveGenerator {
         }
         // Bounded fall: solid ground within MAX_FALL_BLOCKS, or water (a safe
         // landing) within the deeper MAX_WATER_FALL_BLOCKS.
-        for (int drop = 2; drop <= MAX_WATER_FALL_BLOCKS + 1; drop++) {
+        if (!policy.allowDescend()) {
+            return;
+        }
+        for (int drop = 2; drop <= policy.maxWaterFallBlocks() + 1; drop++) {
             if (world.isBodyPositionHazardous(nx, y - drop + 1, nz)) {
                 return;
             }
@@ -169,7 +214,7 @@ public final class MoveGenerator {
                 return;
             }
             if (below == WorldView.NodeKind.SOLID) {
-                if (drop <= MAX_FALL_BLOCKS + 1) {
+                if (drop <= policy.maxFallBlocks() + 1) {
                     moves.add(new Move(nx, y - drop + 1, nz, baseCost + (drop - 1) * FALL_PER_BLOCK_COST));
                 }
                 return;
@@ -217,13 +262,15 @@ public final class MoveGenerator {
         }
         // Climb up: rise to occupy (y+1, y+2); the head cell must be clear so
         // the body can exit at the top onto air or continue up the ladder.
-        if (occupiable(world.kindAt(x, y + 1, z))
+        if (policy.allowAscend()
+            && occupiable(world.kindAt(x, y + 1, z))
             && occupiable(world.kindAt(x, y + 2, z))
             && !world.isBodyPositionHazardous(x, y + 1, z)) {
             moves.add(new Move(x, y + 1, z, CLIMB_UP_COST));
         }
         // Climb down one cell while the column below is still climbable.
-        if (world.kindAt(x, y - 1, z) == WorldView.NodeKind.CLIMBABLE
+        if (policy.allowDescend()
+            && world.kindAt(x, y - 1, z) == WorldView.NodeKind.CLIMBABLE
             && !world.isBodyPositionHazardous(x, y - 1, z)) {
             moves.add(new Move(x, y - 1, z, CLIMB_DOWN_COST));
         }

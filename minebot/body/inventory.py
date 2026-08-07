@@ -694,15 +694,19 @@ class InventoryTransactions:
             if keep_temporary_table:
                 workspace["retained"] = True
             else:
-                reclaim = self.work.mine_block(
+                reclaim = self.work.mine_block_collect(
                     tuple(workspace["table_pos"]),
                     context=BreakContext.BOT_CLEANUP,
+                    expected_drops=(crafting_table_item,),
+                    target_block_types=(crafting_table_item,),
                     timeout_s=reclaim_timeout_s,
                 )
         elif isinstance(workspace, dict) and workspace.get("mode") == "existing_table" and cleanup_existing_bot_table:
-            reclaim = self.work.mine_block(
+            reclaim = self.work.mine_block_collect(
                 tuple(workspace["table_pos"]),
                 context=BreakContext.BOT_CLEANUP,
+                expected_drops=(crafting_table_item,),
+                target_block_types=(crafting_table_item,),
                 timeout_s=reclaim_timeout_s,
             )
 
@@ -745,6 +749,14 @@ class InventoryTransactions:
                 reason=f"craft_residue_post_failed:{cleanup_after.reason}",
                 can_retry=cleanup_after.can_retry,
                 next_suggestion=cleanup_after.next_suggestion,
+                metrics=metrics,
+            )
+        if reclaim is not None and not reclaim.success:
+            return ToolResult(
+                success=False,
+                reason="craft_workstation_reclaim_failed",
+                can_retry=reclaim.can_retry,
+                next_suggestion=reclaim.next_suggestion,
                 metrics=metrics,
             )
         if equip is not None and not equip.success:

@@ -188,6 +188,11 @@ public final class SurvivalReflexController {
         return reflex == null ? null : reflex.kind().ownerName();
     }
 
+    /** Provider-owned world semantics for an explicit hazard reconciliation. */
+    public WorldView recoveryWorld(String botName) {
+        return environment.world(botName);
+    }
+
     public JsonObject hazardUnresolved(String botName) {
         FailureLatch latch = failures.get(botName);
         Position position = environment.position(botName);
@@ -296,10 +301,37 @@ public final class SurvivalReflexController {
         int elapsedTicks,
         int serverTick
     ) {
+        complete(
+            bot,
+            reflex,
+            completedTarget,
+            classification,
+            reason,
+            escaped,
+            elapsedTicks,
+            serverTick,
+            null
+        );
+    }
+
+    private void complete(
+        String bot,
+        Active reflex,
+        Target completedTarget,
+        String classification,
+        String reason,
+        boolean escaped,
+        int elapsedTicks,
+        int serverTick,
+        String failureDetail
+    ) {
         Position finalPosition = environment.position(bot);
         boolean finalDry = finalPosition != null && environment.isDryStand(bot, finalPosition);
         JsonObject terminal = new JsonObject();
         terminal.addProperty("reason", reason);
+        if (failureDetail != null && !failureDetail.isBlank()) {
+            terminal.addProperty("failure_detail", failureDetail);
+        }
         terminal.addProperty("success", escaped);
         terminal.addProperty("kind", reflex.kind().wireName());
         terminal.addProperty("escaped_hazard", escaped);
@@ -406,6 +438,13 @@ public final class SurvivalReflexController {
                 finish(serverTick, ActionRuntime.CLASS_COMPLETED, "escaped", true);
                 return;
             }
+            if (reflex.kind() == Kind.LAVA) {
+                // Carpet's held jump does not reliably produce a fresh lava
+                // ascent impulse. Match a real client's per-tick jump input
+                // (and the proven Scarpet controller) while the same bounded
+                // escape objective remains active.
+                controls.jumpOnce(bot);
+            }
 
             ApproachController.Outcome outcome = approach.tick(
                 serverTick, position.x(), position.y(), position.z()
@@ -422,8 +461,9 @@ public final class SurvivalReflexController {
                 finish(
                     serverTick,
                     ActionRuntime.CLASS_FAILED,
-                    "escape_navigation_failed:" + outcome.reason(),
-                    false
+                    "escape_navigation_failed",
+                    false,
+                    outcome.reason()
                 );
                 return;
             }
@@ -459,12 +499,15 @@ public final class SurvivalReflexController {
 
         private ApproachController approachFor(Target next) {
             Position position = next.position();
+            Goal goal = next.dryStand()
+                ? new Goal.Stand(position.blockX(), position.blockY(), position.blockZ())
+                : new Goal.Near(
+                    position.blockX(), position.blockY(), position.blockZ(), 0.5
+                );
             return new ApproachController(
                 bot,
                 reflex.actionId(),
-                new Goal.Near(
-                    position.blockX(), position.blockY(), position.blockZ(), 0.5
-                ),
+                goal,
                 world,
                 controls,
                 events::emit,
@@ -534,6 +577,16 @@ public final class SurvivalReflexController {
             String reason,
             boolean escaped
         ) {
+            finish(serverTick, classification, reason, escaped, null);
+        }
+
+        private void finish(
+            int serverTick,
+            String classification,
+            String reason,
+            boolean escaped,
+            String failureDetail
+        ) {
             if (approach != null) {
                 approach.halt();
             }
@@ -551,7 +604,8 @@ public final class SurvivalReflexController {
                 reason,
                 escaped,
                 elapsedTicks,
-                serverTick
+                serverTick,
+                failureDetail
             );
         }
     }

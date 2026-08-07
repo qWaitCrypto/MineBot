@@ -35,8 +35,23 @@ from minebot.body.navigation import (
 )
 from minebot.body.reach import ReachIntent, block_reach_domains, round_robin_reach_goals
 from minebot.body.world_read import read_block_facts
-from minebot.contract import Body, BreakContext, Position, ToolResult, is_candidate_skip
+from minebot.contract import (
+    Body,
+    BreakContext,
+    Position,
+    ToolResult,
+    governance_confirmation_from,
+    is_candidate_skip,
+)
 from minebot.game.navigation import GoalComposite, GoalNear
+
+
+DesignatedCollector = Callable[
+    [Position, str, tuple[str, ...], int, float],
+    ToolResult,
+]
+BoundedMobilityEgress = Callable[[float, int], ToolResult]
+BoundedVerticalDescent = Callable[[int, float, int], ToolResult]
 
 
 @dataclass(frozen=True)
@@ -72,11 +87,17 @@ class ResourceCollectionTransactions:
         work: BlockWork,
         *,
         mobility_egress: Callable[[float], ToolResult] | None = None,
+        bounded_mobility_egress: BoundedMobilityEgress | None = None,
+        bounded_vertical_descent: BoundedVerticalDescent | None = None,
+        designated_collector: DesignatedCollector | None = None,
     ) -> None:
         self.body = body
         self.navigator = navigator
         self.work = work
         self.mobility_egress = mobility_egress
+        self.bounded_mobility_egress = bounded_mobility_egress
+        self.bounded_vertical_descent = bounded_vertical_descent
+        self.designated_collector = designated_collector
 
     def collect_block_domain(
         self,
@@ -96,7 +117,12 @@ class ResourceCollectionTransactions:
         normalized_drops = tuple(dict.fromkeys(_normalize_item(item) for item in expected_drops))
         started = time.monotonic()
         collected = 0
+        initial_inventory_total = _expected_inventory_total(
+            self.body.get_state().inventory_counts,
+            normalized_drops,
+        )
         candidate_attempts = 0
+        planning_admitted: set[Position] = set()
         mutation_attempts = 0
         candidate_blacklist: set[Position] = set()
         navigation_mutation_blacklist: set[Position] = set()
@@ -111,20 +137,68 @@ class ResourceCollectionTransactions:
         navigation_failures: list[str] = []
         inspection_candidates: list[dict[str, object]] = []
         mobility_egress_attempted = False
+        vertical_descent_attempted = False
         pending_targets: tuple[NearbyBlockTarget, ...] = ()
         tree_pending_targets: tuple[NearbyBlockTarget, ...] = ()
         tree_retargets_discovered = 0
         initial_egress: dict[str, object] | None = None
+        search_resume_cursors: dict[str, object | None] | None = None
+
+        def reconcile_collected(reported_delta: int = 0) -> int:
+            nonlocal collected
+            before = collected
+            collected += max(0, reported_delta)
+            if initial_inventory_total is not None:
+                observed_total = _expected_inventory_total(
+                    self.body.get_state().inventory_counts,
+                    normalized_drops,
+                )
+                if observed_total is not None:
+                    collected = max(collected, observed_total - initial_inventory_total)
+            return max(0, collected - before)
 
         def terminal(**kwargs: object) -> ToolResult:
-            return self._terminal(initial_egress=initial_egress, **kwargs)
+            return self._terminal(
+                initial_egress=initial_egress,
+                planning_admitted=planning_admitted,
+                **kwargs,
+            )
 
         dry_egress = self.work.egress_to_dry(timeout_s=cfg.segment_timeout_s)
         if not dry_egress.success:
             initial_egress = {"dry": dry_egress.to_payload()}
-            if self.mobility_egress is not None and navigation_surface_egress_fallback_allowed(
-                dry_egress.reason
-            ):
+            surface_recovery_allowed = (
+                dry_egress.reason == "dry_egress_not_liquid"
+                or navigation_surface_egress_fallback_allowed(dry_egress.reason)
+            )
+            if self.bounded_mobility_egress is not None and surface_recovery_allowed:
+                mobility_egress = self.bounded_mobility_egress(
+                    cfg.segment_timeout_s,
+                    cfg.mutation_budget - mutation_attempts,
+                )
+                mutation_attempts += _reported_mutations(mobility_egress)
+                mobility_egress_attempted = True
+                initial_egress["mobility"] = mobility_egress.to_payload()
+                if mobility_egress.success:
+                    initial_egress["selected_profile"] = "bounded_vertical_egress"
+                else:
+                    return terminal(
+                        success=False,
+                        reason=f"resource_{dry_egress.reason}",
+                        can_retry=dry_egress.can_retry,
+                        block_types=normalized_blocks,
+                        expected_drops=normalized_drops,
+                        remaining_count=remaining_count,
+                        collected=collected,
+                        candidate_blacklist=candidate_blacklist,
+                        patch_blacklist=patch_blacklist,
+                        attempts=attempts,
+                        searches=searches,
+                        config=cfg,
+                        started=started,
+                        last_failure=initial_egress,
+                    )
+            elif self.mobility_egress is not None and surface_recovery_allowed:
                 mobility_egress = self.mobility_egress(cfg.segment_timeout_s)
                 mobility_egress_attempted = True
                 initial_egress["mobility"] = mobility_egress.to_payload()
@@ -187,7 +261,6 @@ class ResourceCollectionTransactions:
                     navigation_failures=navigation_failures,
                 )
 
-            candidate_budget_hit = candidate_attempts >= cfg.candidate_budget
             search = find_nearby_block_search(
                 self.body,
                 normalized_blocks,
@@ -195,6 +268,7 @@ class ResourceCollectionTransactions:
                 not_found_reason="resource_candidates_not_found",
                 limit=cfg.find_limit,
                 max_pages=cfg.max_pages,
+                resume_cursors=search_resume_cursors,
             )
             if isinstance(search, ToolResult):
                 if (
@@ -234,52 +308,65 @@ class ResourceCollectionTransactions:
                     total_matches=0,
                 )
 
-            active = _active_targets(
+            search_resume_cursors = (
+                dict(search.next_cursors)
+                if any(cursor is not None for cursor in search.next_cursors.values())
+                else None
+            )
+
+            discovered_active = _active_targets(
                 search,
                 candidate_blacklist=candidate_blacklist,
                 exact_candidate_blacklist=exact_candidate_blacklist,
                 patch_blacklist=patch_blacklist,
-                limit=cfg.find_limit if candidate_budget_hit else max(1, cfg.candidate_budget - candidate_attempts),
+                limit=cfg.find_limit,
                 pending_targets=pending_targets,
                 priority_targets=tree_pending_targets,
             )
-            searches.append(_search_metrics(search, active))
-            if candidate_budget_hit and not tree_pending_targets:
-                exhausted = not active
-                if exhausted:
-                    terminal_reason = (
-                        "resource_domain_partial_exhausted"
-                        if collected > 0
-                        else "resource_candidate_domain_exhausted"
-                    )
-                else:
-                    terminal_reason = "resource_domain_budget_exhausted"
-                terminal_reason = _candidate_exhaustion_terminal_reason(
-                    terminal_reason,
-                    navigation_failures=navigation_failures,
-                    mutation_attempts=mutation_attempts,
-                    inspection_pending=bool(inspection_candidates),
-                )
-                return terminal(
-                    success=False,
-                    reason=terminal_reason,
-                    can_retry=True,
-                    block_types=normalized_blocks,
-                    expected_drops=normalized_drops,
-                    remaining_count=remaining_count,
-                    collected=collected,
-                    candidate_blacklist=candidate_blacklist,
-                    patch_blacklist=patch_blacklist,
-                    attempts=attempts,
-                    searches=searches,
-                    config=cfg,
-                    started=started,
-                    navigation_failures=navigation_failures,
-                    inspection_candidates=inspection_candidates,
-                )
+            remaining_candidate_budget = max(0, cfg.candidate_budget - candidate_attempts)
+            admitted_active = tuple(
+                target
+                for target in discovered_active
+                if target.pos in planning_admitted
+            )
+            newly_admitted = _active_targets(
+                search,
+                candidate_blacklist=candidate_blacklist,
+                exact_candidate_blacklist=(
+                    set(exact_candidate_blacklist) | planning_admitted
+                ),
+                patch_blacklist=patch_blacklist,
+                limit=remaining_candidate_budget,
+                pending_targets=pending_targets,
+                priority_targets=tree_pending_targets,
+            ) if remaining_candidate_budget > 0 else ()
+            if newly_admitted:
+                planning_admitted.update(target.pos for target in newly_admitted)
+                candidate_attempts += len(newly_admitted)
+            active = tuple(dict.fromkeys((*admitted_active, *newly_admitted)))
+            search_metrics = _search_metrics(search, active)
+            search_metrics["unadmitted_candidates"] = [
+                list(target.pos)
+                for target in discovered_active
+                if target.pos not in planning_admitted
+            ]
+            searches.append(search_metrics)
             if not active:
+                if search_resume_cursors is not None:
+                    continue
+                candidate_budget_hit = (
+                    candidate_attempts >= cfg.candidate_budget
+                    and any(
+                        target.pos not in planning_admitted
+                        for target in discovered_active
+                    )
+                )
                 terminal_reason = _candidate_exhaustion_terminal_reason(
-                    "resource_domain_partial_exhausted" if collected > 0 else "resource_candidate_domain_exhausted",
+                    "resource_domain_budget_exhausted"
+                    if candidate_budget_hit
+                    else "resource_domain_partial_exhausted"
+                    if collected > 0
+                    else "resource_candidate_domain_exhausted",
                     navigation_failures=navigation_failures,
                     mutation_attempts=mutation_attempts,
                     inspection_pending=bool(inspection_candidates),
@@ -320,6 +407,11 @@ class ResourceCollectionTransactions:
                     started=started,
                     last_failure=domain.to_payload(),
                 )
+
+            # Preserve every candidate admitted into this planning domain. The
+            # next iteration consumes this finite pool before a later search
+            # page can replace it.
+            pending_targets = tuple(active)
 
             goal = GoalComposite(tuple(GoalNear(pos, radius=0) for pos in domain.goals))
             nav_base_config = load_limited_navigation_config(
@@ -469,39 +561,259 @@ class ResourceCollectionTransactions:
                 candidate_blacklist_before_route_progress = set(candidate_blacklist)
                 patch_blacklist_before_route_progress = list(patch_blacklist)
                 pending_targets = tuple(active)
-                egress_succeeded = False
+                component_recovery_succeeded = False
                 selected_positions = {target.pos for target in selected_targets}
+                recovery_pool = selected_targets or domain.targets
+                recovery_target = (
+                    min(
+                        recovery_pool,
+                        key=lambda target: (
+                            _distance_between(self.body.get_state().pos, target.pos),
+                            target.pos,
+                        ),
+                    )
+                    if recovery_pool
+                    else None
+                )
                 tree_pending_targets = tuple(
                     target for target in tree_pending_targets if target.pos not in selected_positions
                 )
+                designated_recovery_reason: str | None = None
                 if (
                     navigation.reason == "no_path"
+                    and recovery_target is not None
+                    and self.designated_collector is not None
+                    and mutation_attempts < cfg.mutation_budget
+                ):
+                    remaining_mutations = cfg.mutation_budget - mutation_attempts
+                    (
+                        designated_recovery,
+                        recovery_mutations,
+                        recovery_actions,
+                        recovery_exhaustion,
+                    ) = self._run_designated_target(
+                        recovery_target,
+                        normalized_drops,
+                        mutation_budget=remaining_mutations,
+                        segment_timeout_s=cfg.segment_timeout_s,
+                        started=started,
+                        max_wall_s=cfg.max_wall_s,
+                    )
+                    mutation_attempts += recovery_mutations
+                    attempt["designated_recovery"] = recovery_actions[0]["result"]
+                    if len(recovery_actions) > 1:
+                        attempt["designated_recovery_continuations"] = recovery_actions[1:]
+                    attempt["designated_recovery_continuation_count"] = max(
+                        0,
+                        len(recovery_actions) - 1,
+                    )
+                    attempt["designated_recovery_continuation_evidence"] = (
+                        _continuation_evidence(recovery_actions)
+                    )
+                    if recovery_exhaustion is not None:
+                        attempts.append(attempt)
+                        return terminal(
+                            success=False,
+                            reason="resource_domain_budget_exhausted",
+                            can_retry=True,
+                            block_types=normalized_blocks,
+                            expected_drops=normalized_drops,
+                            remaining_count=remaining_count,
+                            collected=collected,
+                            candidate_blacklist=candidate_blacklist,
+                            patch_blacklist=patch_blacklist,
+                            attempts=attempts,
+                            searches=searches,
+                            config=cfg,
+                            started=started,
+                            last_failure={
+                                "reason": recovery_exhaustion,
+                                "target": list(recovery_target.pos),
+                                "result": designated_recovery.to_payload(),
+                            },
+                        )
+                    designated_recovery_reason = designated_recovery.reason
+                    if designated_recovery.success:
+                        delta = reconcile_collected(_collected_total(designated_recovery))
+                        if not _target_still_matches(self.body, recovery_target):
+                            exact_candidate_blacklist.add(recovery_target.pos)
+                        if delta <= 0:
+                            blacklist_candidate_clusters(
+                                candidate_blacklist,
+                                (recovery_target.pos,),
+                            )
+                        continue
+                    if designated_recovery.reason == "missing_required_tool":
+                        return terminal(
+                            success=False,
+                            reason=designated_recovery.reason,
+                            can_retry=False,
+                            block_types=normalized_blocks,
+                            expected_drops=normalized_drops,
+                            remaining_count=remaining_count,
+                            collected=collected,
+                            candidate_blacklist=candidate_blacklist,
+                            patch_blacklist=patch_blacklist,
+                            attempts=attempts,
+                            searches=searches,
+                            config=cfg,
+                            started=started,
+                            last_failure=designated_recovery.to_payload(),
+                        )
+                if (
+                    navigation.reason == "no_path"
+                    and designated_recovery_reason in {None, "no_path"}
                     and not mobility_egress_attempted
-                    and self.mobility_egress is not None
+                    and self.bounded_mobility_egress is not None
+                    and recovery_target is not None
+                    and mutation_attempts < cfg.mutation_budget
                 ):
                     before_egress = self.body.get_state()
-                    mobility_egress_attempted = True
-                    egress = self.mobility_egress(30.0)
-                    after_egress = self.body.get_state()
-                    egress_payload = {
-                        "success": egress.success,
-                        "reason": egress.reason,
-                        "can_retry": egress.can_retry,
-                        "final_pos": list(after_egress.pos),
-                        "distance": _distance_between(before_egress.pos, after_egress.pos),
-                        "result": egress.to_payload(),
-                    }
-                    attempt["mobility_egress"] = egress_payload
-                    egress_succeeded = egress.success
-                    if egress_succeeded:
-                        untried_targets = tuple(
-                            target for target in active if target.pos not in selected_positions
+                    rank_before = _ascend_recovery_rank(
+                        before_egress.pos,
+                        recovery_target.pos,
+                    )
+                    if rank_before is not None:
+                        mobility_egress_attempted = True
+                        remaining_mutations = cfg.mutation_budget - mutation_attempts
+                        egress = self.bounded_mobility_egress(30.0, remaining_mutations)
+                        mutation_attempts += _reported_mutations(egress)
+                        after_egress = self.body.get_state()
+                        rank_after = _ascend_recovery_rank(
+                            after_egress.pos,
+                            recovery_target.pos,
+                            require_target_above=False,
                         )
-                        pending_targets = untried_targets or tuple(selected_targets)
+                        target_preserved = _target_still_matches(
+                            self.body,
+                            recovery_target,
+                        )
+                        rank_reduced = (
+                            rank_after is not None and rank_after < rank_before
+                        )
+                        # Surface egress proves a bounded component transition,
+                        # not monotone Euclidean progress. A valid detour may
+                        # temporarily move away from the exact resource target;
+                        # preserve that target and grant one fresh replan.
+                        component_recovery_succeeded = bool(egress.success and target_preserved)
+                        attempt["mobility_egress"] = {
+                            "success": egress.success,
+                            "reason": egress.reason,
+                            "can_retry": egress.can_retry,
+                            "target": list(recovery_target.pos),
+                            "rank_before": list(rank_before),
+                            "rank_after": list(rank_after) if rank_after is not None else None,
+                            "rank_reduced": rank_reduced,
+                            "target_preserved": target_preserved,
+                            "mutation_budget": remaining_mutations,
+                            "mutations_completed": _reported_mutations(egress),
+                            "final_pos": list(after_egress.pos),
+                            "distance": _distance_between(before_egress.pos, after_egress.pos),
+                            "result": egress.to_payload(),
+                        }
+                        if egress.success and not component_recovery_succeeded:
+                            return terminal(
+                                success=False,
+                                reason="resource_vertical_recovery_unproven",
+                                can_retry=True,
+                                block_types=normalized_blocks,
+                                expected_drops=normalized_drops,
+                                remaining_count=remaining_count,
+                                collected=collected,
+                                candidate_blacklist=candidate_blacklist,
+                                patch_blacklist=patch_blacklist,
+                                attempts=attempts,
+                                searches=searches,
+                                config=cfg,
+                                started=started,
+                                last_failure=attempt["mobility_egress"],
+                            )
+                        if component_recovery_succeeded:
+                            pending_targets = (recovery_target,)
+                if (
+                    navigation.reason == "no_path"
+                    and designated_recovery_reason in {None, "no_path"}
+                    and not component_recovery_succeeded
+                    and not vertical_descent_attempted
+                    and self.bounded_vertical_descent is not None
+                    and recovery_target is not None
+                    and mutation_attempts < cfg.mutation_budget
+                ):
+                    before_descent = self.body.get_state()
+                    rank_before = _descent_recovery_rank(
+                        before_descent.pos,
+                        recovery_target.pos,
+                    )
+                    if rank_before is not None:
+                        vertical_descent_attempted = True
+                        remaining_mutations = cfg.mutation_budget - mutation_attempts
+                        target_y = recovery_target.pos[1] + 1
+                        max_steps = min(
+                            remaining_mutations,
+                            max(1, int(before_descent.pos[1]) - target_y),
+                        )
+                        descent = self.bounded_vertical_descent(
+                            target_y,
+                            30.0,
+                            max_steps,
+                        )
+                        mutation_attempts += _reported_mutations(descent)
+                        after_descent = self.body.get_state()
+                        rank_after = _descent_recovery_rank(
+                            after_descent.pos,
+                            recovery_target.pos,
+                            require_target_below=False,
+                        )
+                        target_preserved = _target_still_matches(
+                            self.body,
+                            recovery_target,
+                        )
+                        rank_reduced = rank_after is not None and rank_after < rank_before
+                        component_recovery_succeeded = bool(
+                            descent.success and target_preserved and rank_reduced
+                        )
+                        attempt["vertical_descent"] = {
+                            "success": descent.success,
+                            "reason": descent.reason,
+                            "can_retry": descent.can_retry,
+                            "target": list(recovery_target.pos),
+                            "target_y": target_y,
+                            "rank_before": list(rank_before),
+                            "rank_after": list(rank_after) if rank_after is not None else None,
+                            "rank_reduced": rank_reduced,
+                            "target_preserved": target_preserved,
+                            "mutation_budget": remaining_mutations,
+                            "max_steps": max_steps,
+                            "mutations_completed": _reported_mutations(descent),
+                            "final_pos": list(after_descent.pos),
+                            "result": descent.to_payload(),
+                        }
+                        if descent.success and not component_recovery_succeeded:
+                            return terminal(
+                                success=False,
+                                reason="resource_vertical_recovery_unproven",
+                                can_retry=True,
+                                block_types=normalized_blocks,
+                                expected_drops=normalized_drops,
+                                remaining_count=remaining_count,
+                                collected=collected,
+                                candidate_blacklist=candidate_blacklist,
+                                patch_blacklist=patch_blacklist,
+                                attempts=attempts,
+                                searches=searches,
+                                config=cfg,
+                                started=started,
+                                last_failure=attempt["vertical_descent"],
+                            )
+                        if component_recovery_succeeded:
+                            pending_targets = (recovery_target,)
                 rejected_targets = selected_targets or domain.targets
-                if egress_succeeded and pending_targets == tuple(selected_targets):
-                    rejected_targets = ()
-                blacklist_size = len(candidate_blacklist)
+                if component_recovery_succeeded and recovery_target is not None:
+                    rejected_targets = tuple(
+                        target
+                        for target in rejected_targets
+                        if target.pos != recovery_target.pos
+                    )
                 blacklist_candidate_clusters(
                     candidate_blacklist,
                     (target.pos for target in rejected_targets),
@@ -509,7 +821,6 @@ class ResourceCollectionTransactions:
                 for target in rejected_targets:
                     if _is_patch_resource(target.block_type) and _is_patch_blocker(navigation.reason):
                         _add_patch_blacklist(patch_blacklist, target.pos)
-                candidate_attempts += len(candidate_blacklist) - blacklist_size
                 rejected_positions = {target.pos for target in rejected_targets}
                 tree_pending_targets = tuple(
                     target
@@ -609,30 +920,83 @@ class ResourceCollectionTransactions:
                     last_failure=navigation.to_payload(),
                 )
 
-            candidate_attempts += 1
-            mutation_attempts += 1
             tree_pending_targets = tuple(candidate for candidate in tree_pending_targets if candidate.pos != target.pos)
             pending_targets = tuple(candidate for candidate in pending_targets if candidate.pos != target.pos)
-            mined = self.work.mine_block_collect(
-                target.pos,
-                context=BreakContext.COLLECT,
-                dry=dry,
-                expected_drops=normalized_drops,
-                target_block_types=normalized_blocks,
-                timeout_s=cfg.segment_timeout_s,
-                prepositioned=True,
-                navigation_config=nav_base_config,
-            )
+            if self.designated_collector is None:
+                mutation_attempts += 1
+                mined = self.work.mine_block_collect(
+                    target.pos,
+                    context=BreakContext.COLLECT,
+                    dry=dry,
+                    expected_drops=normalized_drops,
+                    target_block_types=normalized_blocks,
+                    timeout_s=cfg.segment_timeout_s,
+                    prepositioned=True,
+                    navigation_config=nav_base_config,
+                )
+            else:
+                remaining_mutations = cfg.mutation_budget - mutation_attempts
+                (
+                    mined,
+                    collected_mutations,
+                    collection_actions,
+                    collection_exhaustion,
+                ) = self._run_designated_target(
+                    target,
+                    normalized_drops,
+                    mutation_budget=remaining_mutations,
+                    segment_timeout_s=cfg.segment_timeout_s,
+                    started=started,
+                    max_wall_s=cfg.max_wall_s,
+                )
+                mutation_attempts += collected_mutations
             attempt["target"] = list(target.pos)
             attempt["block_type"] = target.block_type
-            attempt["mine"] = mined.to_payload()
+            if self.designated_collector is None:
+                attempt["mine"] = mined.to_payload()
+                collection_exhaustion = None
+            else:
+                attempt["mine"] = collection_actions[0]["result"]
+                if len(collection_actions) > 1:
+                    attempt["mine_continuations"] = collection_actions[1:]
+                attempt["same_target_continuation_count"] = max(
+                    0,
+                    len(collection_actions) - 1,
+                )
+                attempt["same_target_continuation_evidence"] = (
+                    _continuation_evidence(collection_actions)
+                )
             attempts.append(attempt)
 
+            if collection_exhaustion is not None:
+                return terminal(
+                    success=False,
+                    reason="resource_domain_budget_exhausted",
+                    can_retry=True,
+                    block_types=normalized_blocks,
+                    expected_drops=normalized_drops,
+                    remaining_count=remaining_count,
+                    collected=collected,
+                    candidate_blacklist=candidate_blacklist,
+                    patch_blacklist=patch_blacklist,
+                    attempts=attempts,
+                    searches=searches,
+                    config=cfg,
+                    started=started,
+                    last_failure={
+                        "reason": collection_exhaustion,
+                        "target": list(target.pos),
+                        "result": mined.to_payload(),
+                    },
+                )
+
             if mined.success:
-                delta = max(0, int((mined.metrics or {}).get("collected_total") or 0))
-                collected += delta
+                delta = reconcile_collected(_collected_total(mined))
                 candidate_blacklist.discard(target.pos)
-                exact_candidate_blacklist.discard(target.pos)
+                if _target_still_matches(self.body, target):
+                    exact_candidate_blacklist.discard(target.pos)
+                else:
+                    exact_candidate_blacklist.add(target.pos)
                 _remove_patch_blacklist(patch_blacklist, target.pos)
                 if delta <= 0:
                     blacklist_candidate_clusters(candidate_blacklist, (target.pos,))
@@ -656,7 +1020,23 @@ class ResourceCollectionTransactions:
                     last_failure=mined.to_payload(),
                 )
 
-            if is_candidate_skip(mined.reason) or mined.reason == "collect_no_inventory_delta":
+            reconciled_delta = reconcile_collected()
+            if reconciled_delta > 0 and not _target_still_matches(self.body, target):
+                exact_candidate_blacklist.add(target.pos)
+                continue
+
+            if (
+                is_candidate_skip(mined.reason)
+                or mined.reason == "collect_no_inventory_delta"
+                or mined.reason in {
+                    "target_gone",
+                    "target_block_mismatch",
+                    "no_path",
+                    "excavation_budget_exhausted",
+                    "pickup_not_observed",
+                    "governance_denied",
+                }
+            ):
                 if _governance_needs_inspection(mined.reason):
                     inspection_candidates.append(
                         {
@@ -666,7 +1046,10 @@ class ResourceCollectionTransactions:
                             "metrics": dict(mined.metrics or {}),
                         }
                     )
-                if mined.reason == "target_occluded":
+                if mined.reason in {
+                    "target_occluded",
+                    "pickup_not_observed",
+                }:
                     exact_candidate_blacklist.add(target.pos)
                 else:
                     blacklist_candidate_clusters(candidate_blacklist, (target.pos,))
@@ -677,7 +1060,7 @@ class ResourceCollectionTransactions:
 
             return terminal(
                 success=False,
-                reason=f"resource_collect_failed:{mined.reason}",
+                reason="resource_collect_failed",
                 can_retry=mined.can_retry,
                 block_types=normalized_blocks,
                 expected_drops=normalized_drops,
@@ -709,6 +1092,87 @@ class ResourceCollectionTransactions:
             navigation_failures=navigation_failures,
         )
 
+    def _run_designated_target(
+        self,
+        target: NearbyBlockTarget,
+        expected_drops: tuple[str, ...],
+        *,
+        mutation_budget: int,
+        segment_timeout_s: float,
+        started: float,
+        max_wall_s: float,
+    ) -> tuple[ToolResult, int, list[dict[str, object]], str | None]:
+        """Continue one exact target only while authoritative progress lowers its rank."""
+
+        if self.designated_collector is None:
+            raise RuntimeError("designated collector is unavailable")
+
+        consumed = 0
+        actions: list[dict[str, object]] = []
+        result = ToolResult(
+            False,
+            "timeout",
+            True,
+            metrics={"phase_reason": "wall_budget_exhausted_before_dispatch"},
+        )
+        while consumed < mutation_budget:
+            wall_remaining = max_wall_s - (time.monotonic() - started)
+            if wall_remaining < 1.0:
+                if not actions:
+                    actions.append(
+                        {
+                            "result": result.to_payload(),
+                            "reported_mutations": 0,
+                            "budget_consumed": 0,
+                            "cumulative_budget_consumed": consumed,
+                            "mutation_budget_remaining": mutation_budget,
+                            "target_preserved": None,
+                            "evidence_revision": None,
+                        }
+                    )
+                return result, consumed, actions, "wall_budget_exhausted"
+
+            remaining_mutations = mutation_budget - consumed
+            result = self.designated_collector(
+                target.pos,
+                target.block_type,
+                expected_drops,
+                max(0, remaining_mutations - 1),
+                min(segment_timeout_s, wall_remaining),
+            )
+            reported_mutations = _reported_mutations(result)
+            charged = max(1, reported_mutations)
+            consumed += charged
+            target_preserved: bool | None = None
+            progress_bearing_timeout = result.reason == "timeout" and reported_mutations > 0
+            if progress_bearing_timeout:
+                target_preserved = _target_still_matches(self.body, target)
+            record: dict[str, object] = {
+                "result": result.to_payload(),
+                "reported_mutations": reported_mutations,
+                "budget_consumed": charged,
+                "cumulative_budget_consumed": consumed,
+                "mutation_budget_remaining": max(0, mutation_budget - consumed),
+                "target_preserved": target_preserved,
+                "evidence_revision": (
+                    f"authoritative_mutation:{consumed}"
+                    if progress_bearing_timeout and target_preserved
+                    else None
+                ),
+            }
+            actions.append(record)
+
+            if result.success:
+                break
+            if consumed >= mutation_budget:
+                return result, consumed, actions, "mutation_budget_exhausted"
+            if max_wall_s - (time.monotonic() - started) < 1.0:
+                return result, consumed, actions, "wall_budget_exhausted"
+            if not progress_bearing_timeout or target_preserved is not True:
+                break
+
+        return result, consumed, actions, None
+
     def _terminal(
         self,
         *,
@@ -729,7 +1193,9 @@ class ResourceCollectionTransactions:
         navigation_failures: list[str] | None = None,
         inspection_candidates: list[dict[str, object]] | None = None,
         initial_egress: dict[str, object] | None = None,
+        planning_admitted: set[Position] | None = None,
     ) -> ToolResult:
+        admitted = planning_admitted or set()
         metrics: dict[str, object] = {
             "block_types": list(block_types),
             "expected_drops": list(expected_drops),
@@ -739,6 +1205,12 @@ class ResourceCollectionTransactions:
             "complete": collected >= remaining_count,
             "candidate_blacklist": [list(pos) for pos in sorted(candidate_blacklist)],
             "patch_blacklist": [list(pos) for pos in patch_blacklist],
+            "candidate_attempts_consumed": len(admitted),
+            "candidate_budget_remaining": max(
+                0,
+                config.candidate_budget - len(admitted),
+            ),
+            "planning_admitted": [list(pos) for pos in sorted(admitted)],
             "attempts": attempts,
             "searches": searches,
             "navigation_fallback_attempts": sum(
@@ -770,6 +1242,10 @@ class ResourceCollectionTransactions:
                 "candidates": inspection_candidates,
                 "next": "supply sparse structural/Vision evidence, then recheck exact target coordinates",
             }
+        confirmation = governance_confirmation_from(metrics)
+        if not success and can_retry and confirmation is not None:
+            metrics["governance_confirmation"] = confirmation
+            reason = "governance_confirmation_required"
         return ToolResult(success, reason, can_retry, metrics=metrics)
 
 
@@ -1265,6 +1741,137 @@ def _add_patch_blacklist(blocked: list[Position], target: Position) -> None:
 
 def _remove_patch_blacklist(blocked: list[Position], target: Position) -> None:
     blocked[:] = [center for center in blocked if not _same_patch(target, center)]
+
+
+def _collected_total(result: ToolResult) -> int:
+    metrics = result.metrics or {}
+    try:
+        explicit = int(metrics.get("collected_total") or 0)
+    except (TypeError, ValueError):
+        explicit = 0
+    if explicit > 0:
+        return explicit
+    delta = metrics.get("inventory_delta")
+    if not isinstance(delta, dict):
+        return 0
+    try:
+        return max(
+            0,
+            int(delta.get("total") or 0),
+            int(delta.get("after") or 0) - int(delta.get("before") or 0),
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _expected_inventory_total(
+    counts: dict[str, int] | None,
+    expected_drops: tuple[str, ...],
+) -> int | None:
+    """Return authoritative inventory truth for this collection transaction."""
+
+    if counts is None:
+        return None
+    normalized_counts = {
+        _normalize_item(item): int(count)
+        for item, count in counts.items()
+    }
+    return sum(normalized_counts.get(item, 0) for item in set(expected_drops))
+
+
+def _ascend_recovery_rank(
+    current: tuple[float, float, float],
+    target: Position,
+    *,
+    require_target_above: bool = True,
+) -> tuple[float, float] | None:
+    vertical_delta = float(target[1]) - float(current[1])
+    if require_target_above and vertical_delta <= 1.5:
+        return None
+    return (
+        round(abs(vertical_delta), 6),
+        round(_distance_between(current, target), 6),
+    )
+
+
+def _descent_recovery_rank(
+    current: tuple[float, float, float],
+    target: Position,
+    *,
+    require_target_below: bool = True,
+) -> tuple[float, float] | None:
+    vertical_delta = float(current[1]) - float(target[1])
+    if require_target_below and vertical_delta <= 1.5:
+        return None
+    return (
+        round(abs(vertical_delta), 6),
+        round(_distance_between(current, target), 6),
+    )
+
+
+def _target_still_matches(body: Body, target: NearbyBlockTarget) -> bool:
+    observed = body.perceive(
+        "blockAt",
+        {"x": target.pos[0], "y": target.pos[1], "z": target.pos[2]},
+    )
+    if not observed.ok:
+        return False
+    block_type = observed.data.get("type")
+    return isinstance(block_type, str) and _normalize_item(block_type) == _normalize_item(
+        target.block_type
+    )
+
+
+def _reported_mutations(result: ToolResult) -> int:
+    metrics = result.metrics or {}
+    try:
+        explicit = int(metrics.get("mutations_completed") or 0)
+    except (TypeError, ValueError):
+        explicit = 0
+    if explicit > 0:
+        return explicit
+
+    navigation = metrics.get("navigation")
+    if not isinstance(navigation, dict):
+        return 0
+    nav_metrics = navigation.get("metrics")
+    if not isinstance(nav_metrics, dict):
+        return 0
+    total = 0
+    for segment in nav_metrics.get("segments") or ():
+        if not isinstance(segment, dict):
+            continue
+        diagnostics = segment.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            continue
+        movement_counts = diagnostics.get("movement_counts")
+        if not isinstance(movement_counts, dict):
+            continue
+        for kind in ("break", "place", "pillar", "downward"):
+            try:
+                total += max(0, int(movement_counts.get(kind) or 0))
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
+def _continuation_evidence(
+    actions: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    return [
+        {
+            key: action[key]
+            for key in (
+                "evidence_revision",
+                "reported_mutations",
+                "cumulative_budget_consumed",
+                "mutation_budget_remaining",
+                "target_preserved",
+            )
+        }
+        for action in actions
+        if action.get("evidence_revision") is not None
+    ]
 
 
 def _normalize_item(item: str) -> str:

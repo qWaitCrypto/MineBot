@@ -120,6 +120,28 @@ final class PathFollowerTest {
     }
 
     @Test
+    void resyncDoesNotAcceptAParallelOffsetAsProgressAlongTheFuturePath() {
+        PathFollower follower = new PathFollower(List.of(
+            new Waypoint(-68, 63, 14),
+            new Waypoint(-68, 63, 13),
+            new Waypoint(-67, 63, 13),
+            new Waypoint(-66, 63, 13),
+            new Waypoint(-65, 63, 13)
+        ));
+
+        follower.tick(-67.5, 63.0, 14.5);
+        PathFollower.Directive directive = follower.tick(-66.0, 63.0, 14.84);
+
+        assertEquals(State.CONTINUE, directive.state());
+        assertEquals(new Waypoint(-68, 63, 13), directive.lookTarget());
+        assertEquals(
+            1,
+            follower.waypointIndex(),
+            "being merely near future waypoints must not skip the uncompleted lateral edge"
+        );
+    }
+
+    @Test
     void compoundFallRemainsOnItsCurrentMovementSegment() {
         PathFollower follower = new PathFollower(List.of(
             new Waypoint(61, 70, -40),
@@ -129,11 +151,20 @@ final class PathFollowerTest {
 
         PathFollower.Directive ledge = follower.tick(61.33, 70.0, -39.35);
         PathFollower.Directive falling = follower.tick(61.5, 66.0, -40.4);
+        PathFollower.Directive oneBlockAbove = follower.tick(61.5, 64.4, -40.5);
 
         assertEquals(State.CONTINUE, ledge.state());
         assertEquals(new Waypoint(61, 63, -41), ledge.lookTarget());
+        assertTrue(ledge.forward(), "forward input carries the body into the landing column");
         assertEquals(State.CONTINUE, falling.state());
         assertEquals(new Waypoint(61, 63, -41), falling.lookTarget());
+        assertFalse(
+            falling.forward(),
+            "horizontal input releases inside the landing column so the body cannot overshoot"
+        );
+        assertEquals(State.CONTINUE, oneBlockAbove.state());
+        assertEquals(new Waypoint(61, 63, -41), oneBlockAbove.lookTarget());
+        assertFalse(oneBlockAbove.forward());
         assertEquals(1, follower.waypointIndex());
     }
 

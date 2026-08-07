@@ -156,7 +156,6 @@ _NAVIGATE_TERMINALS: dict[str, tuple[bool, str, bool]] = {
 }
 _COLLECT_TERMINALS: dict[str, tuple[bool, str, bool]] = {
     "completed": (True, "collected", False),
-    "partial": (False, "partial", True),
     "canceled": (False, "canceled", False),
     "timeout": (False, "collect_timeout", True),
 }
@@ -416,6 +415,18 @@ class JavaBodyClient:
         timeout_ticks: int | None = None,
         final_reach_distance: float | None = None,
         survival_recovery: bool = False,
+        grid_radius: int | None = None,
+        max_expand: int | None = None,
+        allow_diagonal: bool | None = None,
+        allow_ascend: bool | None = None,
+        allow_descend: bool | None = None,
+        allow_swim: bool | None = None,
+        max_fall_depth: int | None = None,
+        max_water_drop_depth: int | None = None,
+        allow_break: bool = False,
+        break_budget: int | None = None,
+        break_context: str | None = None,
+        denied_mutations: list[list[int]] | None = None,
     ) -> ToolResult:
         with self._exchange_lock:
             self._ensure_connected()
@@ -427,19 +438,28 @@ class JavaBodyClient:
                 timeout_ticks=timeout_ticks,
                 final_reach_distance=final_reach_distance,
                 survival_recovery=survival_recovery,
+                grid_radius=grid_radius,
+                max_expand=max_expand,
+                allow_diagonal=allow_diagonal,
+                allow_ascend=allow_ascend,
+                allow_descend=allow_descend,
+                allow_swim=allow_swim,
+                max_fall_depth=max_fall_depth,
+                max_water_drop_depth=max_water_drop_depth,
+                allow_break=allow_break,
+                break_budget=break_budget,
+                break_context=break_context,
+                denied_mutations=denied_mutations,
             )
             return self._run_action(request, action_id, "navigate", _NAVIGATE_TERMINALS)
 
     def collect_block(
         self,
-        block_ids: list[str],
+        target: tuple[int, int, int],
         *,
-        expected_item_ids: list[str] | None = None,
-        radius: int | None = None,
-        vertical_radius: int | None = None,
-        target_count: int | None = None,
-        candidate_budget: int | None = None,
-        mutation_budget: int | None = None,
+        expected_block_id: str,
+        expected_item_ids: list[str],
+        excavation_budget: int = 0,
         timeout_ticks: int | None = None,
     ) -> ToolResult:
         with self._exchange_lock:
@@ -448,13 +468,10 @@ class JavaBodyClient:
             request = self._protocol.collect_block(
                 self._bot,
                 action_id,
-                block_ids,
+                target,
+                expected_block_id=expected_block_id,
                 expected_item_ids=expected_item_ids,
-                radius=radius,
-                vertical_radius=vertical_radius,
-                target_count=target_count,
-                candidate_budget=candidate_budget,
-                mutation_budget=mutation_budget,
+                excavation_budget=excavation_budget,
                 timeout_ticks=timeout_ticks,
             )
             return self._run_action(request, action_id, "collect", _COLLECT_TERMINALS)
@@ -483,6 +500,7 @@ class JavaBodyClient:
     def ascend(
         self,
         *,
+        max_mutations: int | None = None,
         timeout_ticks: int | None = None,
     ) -> ToolResult:
         with self._exchange_lock:
@@ -491,6 +509,7 @@ class JavaBodyClient:
             request = self._protocol.ascend(
                 self._bot,
                 action_id,
+                max_mutations=max_mutations,
                 timeout_ticks=timeout_ticks,
             )
             return self._run_action(request, action_id, "ascend", _ASCEND_TERMINALS)
@@ -818,6 +837,7 @@ class JavaBodyClient:
                 "unloaded_chunk_count",
                 "evidence_truncated",
                 "evidence_omitted_fields",
+                "phase_reason",
                 "replans",
                 "expanded_nodes",
                 "unloaded_touches",
@@ -865,7 +885,6 @@ class JavaBodyClient:
                 "approach_excavation_used",
                 "approach_excavation_breaks",
                 "approach_excavation_replans",
-                "approach_excavation_segments",
                 "approach_excavation_failure",
                 "approach_broken",
                 "mined",
@@ -883,8 +902,6 @@ class JavaBodyClient:
         }
         if "inventory_delta" in terminal:
             metrics["inventory_delta"] = terminal["inventory_delta"]
-        if "attempt_failures" in terminal:
-            metrics["attempt_failures"] = terminal["attempt_failures"]
         return metrics
 
     def _reconcile_after_drop(
@@ -1096,7 +1113,11 @@ class JavaBodyClient:
 def _failed_is_retriable(reason: str) -> bool:
     # Terrain/coverage failures may improve with a different target or state;
     # governance denials and exhaustions are terminal for this attempt.
-    non_retriable = ("governance_denied", "target_not_found")
+    non_retriable = (
+        "governance_denied",
+        "governance_blocked",
+        "unreachable_in_current_capabilities",
+    )
     return not any(reason.startswith(tag) for tag in non_retriable)
 
 

@@ -10,6 +10,9 @@ record progress.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from uuid import UUID
+
 from minebot.contract import (
     Action,
     Body,
@@ -31,6 +34,159 @@ def _result(success: bool, reason: str, can_retry: bool, pos, extra: dict[str, o
     if extra:
         metrics.update(extra)
     return ToolResult(success=success, reason=reason, can_retry=can_retry, metrics=metrics)
+
+
+@dataclass(frozen=True)
+class ResolvedEntityTarget:
+    """One Agent-selected physical entity target for a Body objective."""
+
+    requested_target: str
+    target_uuid: str
+    entity_type: str | None
+    name: str | None
+    pos: tuple[float, float, float] | None
+
+    def evidence(self) -> dict[str, object]:
+        return {
+            "requested_target": self.requested_target,
+            "target_uuid": self.target_uuid,
+            "target_type": self.entity_type,
+            "target_name": self.name,
+            "target_pos": None if self.pos is None else list(self.pos),
+        }
+
+
+def resolve_entity_target(
+    body: Body,
+    target_spec: str,
+    *,
+    radius: int = 32,
+    limit: int = 64,
+) -> ResolvedEntityTarget | ToolResult:
+    """Resolve a model-facing entity selector to one UUID in Python.
+
+    Java receives only the selected UUID and may refresh that entity's live
+    position.  It never receives a selector that could authorize substitution.
+    """
+    requested = str(target_spec).strip()
+    if not requested:
+        raise ValueError("target_spec must be a non-empty name/uuid/spec")
+
+    if requested == "nearest_hostile":
+        perceived = find_hostiles(body, radius=radius, limit=limit)
+        if not perceived.success:
+            return perceived
+        raw_entities = list((perceived.metrics or {}).get("hostiles") or ())
+        scope = "nearbyHostiles"
+    else:
+        perception = body.perceive(
+            "nearbyEntities",
+            {"radius": int(radius), "limit": int(limit)},
+        )
+        if not perception.ok:
+            return ToolResult(
+                success=False,
+                reason="entity_target_perception_failed",
+                can_retry=True,
+                metrics={
+                    "requested_target": requested,
+                    "scope": "nearbyEntities",
+                    "error": perception.error,
+                    "uncertainty": list(perception.uncertainty or ()),
+                },
+            )
+        raw_entities = list(perception.data.get("entities") or ())
+        scope = "nearbyEntities"
+
+    matches: list[dict[str, object]] = []
+    normalized_requested_type = requested.removeprefix("minecraft:").casefold()
+    for raw in raw_entities:
+        if not isinstance(raw, dict):
+            continue
+        target_uuid = str(raw.get("id") or "").strip()
+        if not target_uuid:
+            continue
+        if requested != "nearest_hostile":
+            entity_type = str(raw.get("type") or "")
+            normalized_type = entity_type.removeprefix("minecraft:").casefold()
+            name = str(raw.get("name") or "")
+            if not (
+                target_uuid == requested
+                or name == requested
+                or normalized_type == normalized_requested_type
+            ):
+                continue
+        matches.append(raw)
+
+    if not matches:
+        return ToolResult(
+            success=False,
+            reason="target_not_found",
+            can_retry=True,
+            metrics={
+                "requested_target": requested,
+                "scope": scope,
+                "search_radius": int(radius),
+                "entities_observed": len(raw_entities),
+            },
+        )
+
+    selected = min(
+        matches,
+        key=lambda item: (
+            (
+                float(item["dist2"])
+                if item.get("dist2") is not None
+                else float("inf")
+            ),
+            str(item.get("id") or ""),
+        ),
+    )
+    raw_pos = selected.get("pos")
+    pos = None
+    if isinstance(raw_pos, (list, tuple)) and len(raw_pos) == 3:
+        try:
+            pos = (float(raw_pos[0]), float(raw_pos[1]), float(raw_pos[2]))
+        except (TypeError, ValueError):
+            pos = None
+    try:
+        target_uuid = str(UUID(str(selected["id"])))
+    except (TypeError, ValueError, AttributeError):
+        return ToolResult(
+            success=False,
+            reason="target_identity_invalid",
+            can_retry=False,
+            metrics={
+                "requested_target": requested,
+                "scope": scope,
+                "observed_target_id": selected.get("id"),
+            },
+        )
+    return ResolvedEntityTarget(
+        requested_target=requested,
+        target_uuid=target_uuid,
+        entity_type=(str(selected["type"]) if selected.get("type") is not None else None),
+        name=(str(selected["name"]) if selected.get("name") is not None else None),
+        pos=pos,
+    )
+
+
+def entity_target_terminal_mismatch(
+    resolved: ResolvedEntityTarget,
+    terminal_data: dict[str, object],
+) -> ToolResult | None:
+    observed = terminal_data.get("target_id")
+    if observed is None or str(observed) == resolved.target_uuid:
+        return None
+    return ToolResult(
+        success=False,
+        reason="target_identity_mismatch",
+        can_retry=False,
+        metrics={
+            **resolved.evidence(),
+            "observed_target_uuid": str(observed),
+        },
+    )
 
 
 class CombatTransactions:
@@ -73,10 +229,15 @@ class CombatTransactions:
         except ProgressAbort as exc:
             return _result(False, "progress_yielded", True, _pos(self.body.get_state()), {"error": str(exc), "target_spec": target_spec})
 
+        resolved = resolve_entity_target(self.body, target_spec, radius=32)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        target_uuid = resolved.target_uuid
+
         action = Action.create(
             "engageEntity",
             {
-                "target_spec": target_spec,
+                "target_uuid": target_uuid,
                 "attack_range": attack_range,
                 "cooldown_ticks": cooldown_ticks,
                 "acquire_radius": 32,
@@ -91,7 +252,7 @@ class CombatTransactions:
         if not (result.ok and result.accepted):
             rejected = body_rejection_to_tool_result(
                 result,
-                {"error": result.error, "target_spec": target_spec},
+                {"error": result.error, **resolved.evidence()},
             )
             if rejected is not None:
                 return ToolResult(
@@ -101,6 +262,13 @@ class CombatTransactions:
                     next_suggestion=rejected.next_suggestion,
                     metrics={"pos": list(start), **dict(rejected.metrics or {})},
                 )
+            return _result(
+                False,
+                "body_rejected",
+                True,
+                start,
+                {"error": result.error, **resolved.evidence()},
+            )
 
         terminal = self.body.await_action_terminal(
             action.id,
@@ -108,13 +276,16 @@ class CombatTransactions:
             terminal_events={"engageDone", "death", "respawned"},
         )
         if not self.progress.generation_current(generation):
-            return _result(False, "preempted", True, start, {"generation_current": False, "target_spec": target_spec})
+            return _result(False, "preempted", True, start, {"generation_current": False, **resolved.evidence()})
 
         td = terminal.data
+        mismatch = entity_target_terminal_mismatch(resolved, td)
+        if mismatch is not None:
+            return mismatch
         success = bool(td.get("success", False))
         reason = str(td.get("reason") or "unknown")
         self.progress.note_step(
-            ("engage.tick", start, target_spec, reason),
+            ("engage.tick", start, target_uuid, reason),
             success=success,
             fingerprint=self.progress.fingerprint(self.body.get_state()),
             neutral=reason in ("timeout", "target_lost", "disengaged_low_health"),
@@ -125,7 +296,7 @@ class CombatTransactions:
             reason in ("timeout", "target_lost", "disengaged_low_health"),
             start,
             {
-                "target_spec": target_spec,
+                **resolved.evidence(),
                 "attack_range": attack_range,
                 "event": terminal.name,
                 "attacks": td.get("attacks"),
@@ -159,4 +330,10 @@ def find_hostiles(body: Body, *, radius: int = 16, limit: int = 16) -> ToolResul
     )
 
 
-__all__ = ["CombatTransactions", "find_hostiles"]
+__all__ = [
+    "CombatTransactions",
+    "ResolvedEntityTarget",
+    "entity_target_terminal_mismatch",
+    "find_hostiles",
+    "resolve_entity_target",
+]

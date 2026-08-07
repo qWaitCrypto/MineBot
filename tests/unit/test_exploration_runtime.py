@@ -253,7 +253,7 @@ class CornerOnlyFrontierBody(ExplorationBody):
         )
 
 
-def _find_blocks_page(*, blocks=(), complete, next_start=None):
+def _find_blocks_page(*, blocks=(), complete, next_start=None, unloaded_chunk_count=0):
     return PerceptionResult(
         bot="Bot1",
         scope="findBlocks",
@@ -263,8 +263,15 @@ def _find_blocks_page(*, blocks=(), complete, next_start=None):
         data={
             "blocks": list(blocks),
             "nextStart": next_start,
+            "unloaded_chunk_count": unloaded_chunk_count,
         },
-        uncertainty=[] if complete else [{"reason": "page_limit"}],
+        uncertainty=(
+            []
+            if complete
+            else ([{"reason": "unloaded_boundary", "unloaded_chunk_count": unloaded_chunk_count}]
+                  if unloaded_chunk_count
+                  else [{"reason": "page_limit"}])
+        ),
         next=None if next_start is None else str(next_start),
     )
 
@@ -380,6 +387,36 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertTrue(fallback_config.allow_place)
         self.assertTrue(fallback_config.allow_pillar)
 
+    def test_governance_challenge_is_promoted_from_frontier_navigation(self):
+        challenge = {"challenge_id": "gc-explore-1", "context": "travel"}
+        coverage = MemoryExplorationCoverageStore()
+        runtime, _, navigator = _runtime(
+            coverage=coverage,
+            outcomes=[
+                ToolResult(False, "no_path", True, metrics=ZERO_PROGRESS_NAVIGATION_METRICS),
+                ToolResult(
+                    False,
+                    "governance_confirmation_required",
+                    True,
+                    metrics={"governance_confirmation": challenge},
+                ),
+            ]
+        )
+
+        result = runtime.explore_for(block_targets=("dandelion",), max_regions=2)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "governance_confirmation_required")
+        self.assertEqual(result.metrics["governance_confirmation"], challenge)
+        self.assertEqual(len(navigator.calls), 2)
+        persisted = coverage.list_regions(
+            "minecraft:overworld",
+            result.metrics["targets"]["query_signature"],
+        )
+        self.assertFalse(
+            any("governance_confirmation" in repr(region.uncertainty) for region in persisted)
+        )
+
     def test_recovery_exhausted_no_path_uses_governed_mobility_fallback(self):
         runtime, _, navigator = _runtime(
             outcomes=[
@@ -446,6 +483,43 @@ class ExplorationTransactionsTests(unittest.TestCase):
         attempts = result.metrics["candidate_failures"][0]["navigation_attempts"]
         self.assertFalse(attempts[0].get("trigger_zero_progress", False))
         self.assertTrue(attempts[1]["trigger_partial_progress"])
+
+    def test_no_path_inside_frontier_scans_authoritative_region_without_retreat(self):
+        class RegionReachedNavigator(ExplorationNavigator):
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                self.body.state = _state((-7.0, 64.0, -7.0))
+                return ToolResult(
+                    False,
+                    "no_path",
+                    True,
+                    metrics=POSITIVE_PATH_NAVIGATION_METRICS,
+                )
+
+        body = ExplorationBody(
+            blocks={
+                (-1, -1): [
+                    {
+                        "x": -8,
+                        "y": 64,
+                        "z": -8,
+                        "type": "oak_log",
+                        "state": "SOLID",
+                        "dist2": 1.0,
+                    }
+                ]
+            }
+        )
+        navigator = RegionReachedNavigator(body)
+        runtime = ExplorationTransactions(body, navigator, MemoryExplorationCoverageStore())
+
+        result = runtime.explore_for(block_targets=("#logs",), max_regions=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "found")
+        self.assertEqual(result.metrics["blocks"][0]["pos"], [-8, 64, -8])
+        self.assertEqual(result.metrics["budget"]["regions_consumed"], 2)
+        self.assertEqual(len(navigator.calls), 1)
 
     def test_governed_fallback_is_local_to_frontiers_and_has_a_call_cap(self):
         class CappedFallbackNavigator(ExplorationNavigator):
@@ -728,6 +802,38 @@ class ExplorationTransactionsTests(unittest.TestCase):
         find_calls = [params for scope, params in body.perceptions if scope == "findBlocks"]
         self.assertEqual([params["start"] for params in find_calls], [0, 1, 2, 3])
 
+    def test_unloaded_partial_scan_without_cursor_continues_as_frontier_uncertainty(self):
+        class UnloadedBoundaryBody(ExplorationBody):
+            def perceive(self, scope, params):
+                if scope == "findBlocks":
+                    self.perceptions.append((scope, dict(params)))
+                    return _find_blocks_page(
+                        complete=False,
+                        next_start=None,
+                        unloaded_chunk_count=6,
+                    )
+                return super().perceive(scope, params)
+
+        coverage = MemoryExplorationCoverageStore()
+        body = UnloadedBoundaryBody()
+        runtime, _, navigator = _runtime(body=body, coverage=coverage)
+
+        result = runtime.explore_for(
+            block_targets=("dandelion",),
+            max_regions=1,
+            return_policy="region_budget",
+        )
+
+        self.assertEqual(result.reason, "budget_exhausted")
+        self.assertNotEqual(result.reason, "scan_cursor_missing")
+        self.assertFalse(navigator.calls)
+        regions = coverage.list_regions(
+            "minecraft:overworld", result.metrics["targets"]["query_signature"]
+        )
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0].status, CoverageStatus.UNLOADED_BOUNDARY)
+        self.assertFalse(regions[0].settled)
+
     def test_find_blocks_page_budget_exhaustion_preserves_positive_facts(self):
         coverage = MemoryExplorationCoverageStore()
         pages = {
@@ -970,7 +1076,7 @@ class ExplorationTransactionsTests(unittest.TestCase):
                 call_index = len(self.calls)
                 if call_index == 0:
                     self.calls.append((goal, kwargs))
-                    self.body.state = _state((-8.0, 58.0, -8.0))
+                    self.body.state = _state((8.0, 58.0, 8.0))
                     return ToolResult(False, "timeout", True)
                 return super().navigate_to(goal, **kwargs)
 
@@ -1007,7 +1113,7 @@ class ExplorationTransactionsTests(unittest.TestCase):
                         metrics=ZERO_PROGRESS_NAVIGATION_METRICS,
                     )
                 if config.aquatic_traversal:
-                    self.body.state = _state((-4.0, 59.0, -4.0))
+                    self.body.state = _state((4.0, 59.0, 4.0))
                     return ToolResult(False, "break_timeout", False)
                 target = goal.representative(
                     (int(self.body.state.pos[0]), int(self.body.state.pos[1]), int(self.body.state.pos[2]))
@@ -1069,7 +1175,7 @@ class ExplorationTransactionsTests(unittest.TestCase):
                 call_index = len(self.calls)
                 self.calls.append((goal, kwargs))
                 if call_index == 0:
-                    self.body.state = _state((-8.0, 58.0, -8.0))
+                    self.body.state = _state((8.0, 58.0, 8.0))
                     return ToolResult(False, "timeout", True)
                 return ToolResult(False, "no_path", True)
 
@@ -1124,7 +1230,7 @@ class ExplorationTransactionsTests(unittest.TestCase):
                 call_index = len(self.calls)
                 if call_index == 0:
                     self.calls.append((goal, kwargs))
-                    self.body.state = _state((-8.0, 58.0, -8.0))
+                    self.body.state = _state((8.0, 58.0, 8.0))
                     return ToolResult(False, "timeout", True)
                 return super().navigate_to(goal, **kwargs)
 

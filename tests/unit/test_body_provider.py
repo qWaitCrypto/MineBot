@@ -34,6 +34,129 @@ from tests.unit.test_java_body_adapter import FakeBodyServer
 REGION = Region("test", (-64, -64, -64), (64, 320, 64))
 
 
+class ResourceOrchestrationServer(FakeBodyServer):
+    """Small world fixture for Python-owned resource orchestration."""
+
+    def __init__(self, resources: dict[tuple[int, int, int], str]) -> None:
+        super().__init__()
+        self.resources = {
+            pos: block if block.startswith("minecraft:") else f"minecraft:{block}"
+            for pos, block in resources.items()
+        }
+
+    def _handle_find_blocks(self, message: dict, rid: str) -> None:
+        wanted = set(message.get("block_ids") or ())
+        matches = [
+            {
+                "x": pos[0],
+                "y": pos[1],
+                "z": pos[2],
+                "block_id": block,
+                "state": "SOLID",
+                "distance_squared": float(
+                    (pos[0] - 10) ** 2 + (pos[1] - 64) ** 2 + (pos[2] + 4) ** 2
+                ),
+            }
+            for pos, block in self.resources.items()
+            if block in wanted
+        ]
+        matches.sort(key=lambda item: (item["distance_squared"], item["x"], item["y"], item["z"]))
+        self._emit_response(rid, "FIND_BLOCKS_RESULT", {
+            "server_cost_micros": 50,
+            "start": 0,
+            "total_matches": len(matches),
+            "index_generation": 1,
+            "coverage_complete": True,
+            "unloaded_chunk_count": 0,
+            "result_capped": False,
+            "next_cursor": None,
+            "matches": matches,
+        })
+
+    def _handle_navigate(self, message: dict, rid: str) -> None:
+        goal = dict(message["goal"])
+        while goal.get("kind") == "composite":
+            goal = dict((goal.get("goals") or [])[0])
+        if goal.get("kind") == "xz":
+            x, y, z = int(goal["x"]), int(self.position[1]), int(goal["z"])
+        else:
+            x, y, z = int(goal["x"]), int(goal["y"]), int(goal["z"])
+        self.position = [x + 0.5, float(y), z + 0.5]
+        action = message["action_id"]
+        self._emit_response(rid, "NAVIGATE_ACK", {
+            "action_id": action,
+            "state": "accepted",
+        })
+        self._emit_event("owner_acquired", action, {
+            "type": "NAVIGATE",
+            "priority": "ACTION",
+        })
+        self._emit_terminal(action, {
+            "classification": "completed",
+            "reason": "goal_satisfied",
+            "elapsed_ticks": 8,
+            "replans": 0,
+            "final_x": self.position[0],
+            "final_y": self.position[1],
+            "final_z": self.position[2],
+        })
+
+    def _handle_world_read(self, message: dict, rid: str) -> None:
+        scope = message["scope"]
+        params = message.get("params") or {}
+        if scope not in {"blockAt", "blockCells"}:
+            super()._handle_world_read(message, rid)
+            return
+
+        def block_fact(pos: tuple[int, int, int]) -> dict:
+            resource = self.resources.get(pos)
+            if resource is not None:
+                return {
+                    "x": pos[0], "y": pos[1], "z": pos[2],
+                    "type": resource, "state": "SOLID", "properties": {},
+                }
+            if pos in {(10, 64, -4), (10, 65, -4)}:
+                return {
+                    "x": pos[0], "y": pos[1], "z": pos[2],
+                    "type": "minecraft:air", "state": "CLEAR", "properties": {},
+                }
+            return {
+                "x": pos[0], "y": pos[1], "z": pos[2],
+                "type": "minecraft:stone", "state": "SOLID", "properties": {},
+            }
+
+        if scope == "blockAt":
+            pos = (int(params["x"]), int(params["y"]), int(params["z"]))
+            data: dict = block_fact(pos)
+        else:
+            requested = [tuple(int(value) for value in pos) for pos in params.get("cells") or ()]
+            data = {
+                "start": 0,
+                "limit": len(requested),
+                "nextStart": None,
+                "total": len(requested),
+                "count": len(requested),
+                "cells": [block_fact(pos) for pos in requested],
+            }
+        self._emit_response(rid, "WORLD_READ_RESULT", {
+            "bot": message.get("bot_name"),
+            "scope": scope,
+            "missing": False,
+            "ok": True,
+            "complete": True,
+            "server_cost_micros": 25,
+            "data": data,
+            "uncertainty": [],
+            "next": None,
+        })
+
+    def _handle_verdict(self, message: dict) -> None:
+        target = tuple((getattr(self, "_collect_request", {}) or {}).get("target") or ())
+        super()._handle_verdict(message)
+        if bool(message.get("allow")) and len(target) == 3:
+            self.resources.pop(target, None)
+
+
 def _scarpet() -> Mock:
     body = Mock()
     body.bot_name = "Bot"
@@ -164,7 +287,7 @@ def test_composite_routes_migrated_player_action_and_its_terminal_to_java(
     body = CompositeBody(scarpet, java)
     params = {
         "engageEntity": {
-            "target_spec": "nearest_hostile",
+            "target_uuid": "11111111-1111-4111-8111-111111111111",
             "attack_range": 2.0,
             "cooldown_ticks": 10,
             "acquire_radius": 32,
@@ -172,7 +295,7 @@ def test_composite_routes_migrated_player_action_and_its_terminal_to_java(
             "disengage_health": 6.0,
         },
         "followEntity": {
-            "target_spec": "Guide",
+            "target_uuid": "22222222-2222-4222-8222-222222222222",
             "keep_radius": 3.0,
             "replan_distance": 2.0,
             "acquire_radius": 32,
@@ -469,7 +592,7 @@ def test_java_provider_wires_known_target_movement_to_the_objective_navigator() 
 
 def test_java_provider_uses_canonical_collect_domain_tool() -> None:
     policy = GovernancePolicy(natural_regions=[REGION])
-    server = FakeBodyServer()
+    server = ResourceOrchestrationServer({(1, 64, 0): "oak_log"})
     body = JavaBody(
         JavaBodyClient(
             "Bot",
@@ -497,20 +620,29 @@ def test_java_provider_uses_canonical_collect_domain_tool() -> None:
     )
 
     assert result.success is True
-    assert result.reason == "collected"
-    assert result.metrics["collected_delta"] == 1
+    assert result.reason == "resource_domain_collected"
+    assert result.metrics["collected_total"] == 1
+    assert result.metrics["remaining_delta"] == 0
     request = next(item for item in server.requests if item["type"] == "COLLECT_BLOCK")
-    assert request["timeout_ticks"] == 1_200
+    assert request["timeout_ticks"] == 300
+    assert request["contract_version"] == 2
+    assert request["target"] == [1, 64, 0]
+    assert request["expected_block_id"] == "minecraft:oak_log"
     assert request["expected_item_ids"] == ["minecraft:oak_log"]
-    assert request["target_count"] == 1
-    assert request["candidate_budget"] == 8
-    assert request["mutation_budget"] == 8
+    assert all(
+        field not in request
+        for field in ("block_ids", "radius", "target_count", "candidate_budget")
+    )
     assert "collect_block" not in registry.names()
 
 
-def test_java_collect_quantity_is_one_continuous_body_action() -> None:
+def test_java_collect_quantity_is_python_loop_over_designated_actions() -> None:
     policy = GovernancePolicy(natural_regions=[REGION])
-    server = FakeBodyServer()
+    server = ResourceOrchestrationServer({
+        (1, 64, 0): "iron_ore",
+        (4, 64, 0): "iron_ore",
+        (7, 64, 0): "deepslate_iron_ore",
+    })
     body = JavaBody(
         JavaBodyClient("Bot", lambda: server, GovernanceAnswerer(policy)),
         "Bot",
@@ -537,20 +669,26 @@ def test_java_collect_quantity_is_one_continuous_body_action() -> None:
     )
 
     requests = [item for item in server.requests if item["type"] == "COLLECT_BLOCK"]
-    assert len(requests) == 1
-    assert requests[0]["target_count"] == 3
-    assert requests[0]["candidate_budget"] == 7
-    assert requests[0]["mutation_budget"] == 6
-    assert requests[0]["timeout_ticks"] == 1_800
-    assert result.success is False
-    assert result.reason == "partial"
-    assert result.metrics["collected_delta"] == 1
-    assert result.metrics["remaining_count"] == 2
+    assert len(requests) == 3
+    assert {tuple(request["target"]) for request in requests} == {
+        (1, 64, 0), (4, 64, 0), (7, 64, 0),
+    }
+    assert all(20 <= request["timeout_ticks"] <= 1_200 for request in requests)
+    assert all(
+        field not in request
+        for request in requests
+        for field in ("block_ids", "radius", "target_count", "candidate_budget")
+    )
+    assert result.success is True
+    assert result.reason == "resource_domain_collected"
+    assert result.metrics["collected_total"] == 3
+    assert result.metrics["remaining_delta"] == 0
+    assert result.metrics["candidate_attempts_consumed"] == 3
 
 
 def test_java_provider_keeps_block_targets_separate_from_expected_drops() -> None:
     policy = GovernancePolicy(natural_regions=[REGION])
-    server = FakeBodyServer()
+    server = ResourceOrchestrationServer({(1, 64, 0): "iron_ore"})
     body = JavaBody(
         JavaBodyClient(
             "Bot",
@@ -579,10 +717,8 @@ def test_java_provider_keeps_block_targets_separate_from_expected_drops() -> Non
 
     assert result.success is True
     request = next(item for item in server.requests if item["type"] == "COLLECT_BLOCK")
-    assert request["block_ids"] == [
-        "minecraft:iron_ore",
-        "minecraft:deepslate_iron_ore",
-    ]
+    assert request["target"] == [1, 64, 0]
+    assert request["expected_block_id"] == "minecraft:iron_ore"
     assert request["expected_item_ids"] == ["minecraft:raw_iron"]
 
 
@@ -598,7 +734,8 @@ def test_java_body_does_not_replace_explicit_empty_expected_items() -> None:
         Action.create(
             "collectBlock",
             {
-                "block_types": ["minecraft:iron_ore"],
+                "target": [1, 64, 0],
+                "expected_block_id": "minecraft:iron_ore",
                 "expected_item_ids": [],
             },
         )
@@ -674,12 +811,13 @@ def test_java_provider_uses_one_dig_down_objective_without_legacy_move_to() -> N
     )
 
 
-def test_java_only_provider_denies_collection_without_structure_read_coverage() -> None:
+def test_java_only_provider_uses_indexed_world_truth_without_legacy_structure_reader() -> None:
+    server = ResourceOrchestrationServer({(1, 64, 0): "oak_log"})
     runtime = build_body_provider(
         "java",
         bot_name="Bot",
         natural_region=REGION,
-        java_connect=lambda: FakeBodyServer(),
+        java_connect=lambda: server,
     )
     registry = build_phase1_registry(
         runtime.body,
@@ -698,5 +836,6 @@ def test_java_only_provider_denies_collection_without_structure_read_coverage() 
         }
     )
 
-    assert result.success is False
-    assert result.reason == "candidate_targets_exhausted"
+    assert result.success is True
+    assert result.reason == "resource_domain_collected"
+    assert server.verdict_seen == [("mp-1", True)]

@@ -6,6 +6,7 @@ from dataclasses import replace
 from math import floor
 from time import monotonic, sleep
 
+from minebot.body.combat import entity_target_terminal_mismatch, resolve_entity_target
 from minebot.body.navigation import (
     NavigationRunConfig,
     NavigationTransactions,
@@ -39,7 +40,6 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
         arrival_radius: float | None = None,
         mutation_blacklist: set[Position] | None = None,
     ) -> ToolResult:
-        del break_context, mutation_blacklist
         normalized = normalize_goal(goal)
         try:
             payload = _objective_goal_payload(normalized, arrival_radius=arrival_radius)
@@ -73,7 +73,38 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
             "goal": payload,
             "timeout_ticks": max(20, min(12_000, int(effective_timeout_s * 20))),
             "survival_recovery": bool(cfg.survival_recovery),
+            # Keep the provider-owned objective, but do not discard the
+            # caller's finite navigation profile at the Python/Java seam.
+            # Java otherwise falls back to its defaults (including swimming
+            # and the full search cap), making dry-first and load-limited
+            # callers only nominally different.
+            "grid_radius": max(0, min(256, int(cfg.server_grid_radius))),
+            "max_expand": max(1, min(50_000, int(cfg.server_max_expand))),
+            "allow_diagonal": bool(cfg.allow_diagonal),
+            "allow_ascend": bool(cfg.allow_ascend),
+            "allow_descend": bool(cfg.allow_descend),
+            "allow_swim": bool(cfg.allow_swim),
+            "max_fall_depth": max(0, min(32, int(cfg.max_safe_fall_depth))),
+            "max_water_drop_depth": max(0, min(64, int(cfg.max_water_drop_depth))),
         }
+        # The Java provider keeps ordinary NAVIGATE pure movement.  Terrain
+        # mutation is available only on the explicit governed-mobility
+        # escalation profile: pure aquatic traversal also sets
+        # ``aquatic_traversal`` but clears ``allow_break``.
+        governed_break = bool(
+            cfg.aquatic_traversal
+            and cfg.allow_break
+            and cfg.max_break_steps > 0
+        )
+        if governed_break:
+            action_params.update({
+                "allow_break": True,
+                "break_budget": int(cfg.max_break_steps),
+                "break_context": BreakContext(break_context).value,
+                "denied_mutations": [
+                    list(pos) for pos in sorted(mutation_blacklist or set())
+                ],
+            })
         if final_reach_distance is not None:
             action_params["final_reach_distance"] = final_reach_distance
         action = Action.create("navigate", dict(action_params))
@@ -165,10 +196,14 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
         survival = self._prepare_survival(cfg)
         if survival is not None:
             return survival
+        resolved = resolve_entity_target(self.body, target_spec, radius=32)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        target_uuid = resolved.target_uuid
         action = Action.create(
             "followEntity",
             {
-                "target_spec": target_spec,
+                "target_uuid": target_uuid,
                 "keep_radius": keep_distance,
                 "replan_distance": 2.0,
                 "acquire_radius": 32,
@@ -182,23 +217,26 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
                 False,
                 "body_unavailable",
                 True,
-                metrics={"error": type(error).__name__, "target_spec": target_spec},
+                metrics={"error": type(error).__name__, **resolved.evidence()},
             )
         if not (accepted.ok and accepted.accepted):
             return ToolResult(
                 False,
                 str(accepted.error or "body_rejected"),
                 True,
-                metrics={"target_spec": target_spec},
+                metrics=resolved.evidence(),
             )
         terminal = self.body.await_action_terminal(
             action.id,
             timeout_s=timeout_s + 5.0,
             terminal_events={"followDone", "death", "respawned"},
         )
+        mismatch = entity_target_terminal_mismatch(resolved, terminal.data)
+        if mismatch is not None:
+            return mismatch
         metrics = {
             **dict(terminal.data),
-            "target_spec": target_spec,
+            **resolved.evidence(),
             "keep_distance": keep_distance,
             "event": terminal.name,
             "provider_action": "followEntity",

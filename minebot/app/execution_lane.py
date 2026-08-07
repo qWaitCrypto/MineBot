@@ -34,6 +34,10 @@ class SerialExecutionLane:
 
     def __init__(self, *, thread_name: str = "minebot-body") -> None:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=thread_name)
+        self._control_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"{thread_name}-control",
+        )
         self._futures: dict[Future[Any], ExecutionCancellation] = {}
         self._lock = threading.Lock()
         self._closed = False
@@ -100,6 +104,16 @@ class SerialExecutionLane:
             future.cancel()
         return cancellation_scope_count
 
+    async def run_control(self, callback: Callable[..., Any], *args: object) -> Any:
+        """Run an out-of-band Body control call that may preempt the writer."""
+
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("execution lane is closed")
+            executor = self._control_executor
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(executor, callback, *args)
+
     async def wait_idle(self, *, timeout_s: float = EXECUTION_LANE_CANCEL_TIMEOUT_S) -> bool:
         deadline = time.monotonic() + max(0.0, timeout_s)
         while self.active_count:
@@ -120,6 +134,7 @@ class SerialExecutionLane:
             self._closed = True
         self.request_cancel("execution_lane_closed")
         self._executor.shutdown(wait=True, cancel_futures=True)
+        self._control_executor.shutdown(wait=True, cancel_futures=True)
 
     def _discard(self, future: Future[Any]) -> None:
         with self._lock:

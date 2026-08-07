@@ -69,7 +69,7 @@ public final class EngageExecutor implements ActionRuntime.TickExecutor {
 
     /** Server-authoritative target and body facts. */
     public interface TargetSource {
-        Lookup acquire(String botName, String targetSpec, double radius);
+        Lookup acquire(String botName, String targetUuid, double radius);
 
         Lookup refresh(String botName, String targetId, double radius);
 
@@ -87,7 +87,7 @@ public final class EngageExecutor implements ActionRuntime.TickExecutor {
 
     private final String bot;
     private final String actionId;
-    private final String targetSpec;
+    private final String targetUuid;
     private final double attackRange;
     private final int cooldownTicks;
     private final int acquireRadius;
@@ -117,7 +117,7 @@ public final class EngageExecutor implements ActionRuntime.TickExecutor {
     public EngageExecutor(
         String bot,
         String actionId,
-        String targetSpec,
+        String targetUuid,
         double attackRange,
         int cooldownTicks,
         int acquireRadius,
@@ -131,8 +131,8 @@ public final class EngageExecutor implements ActionRuntime.TickExecutor {
         ActionRuntime runtime,
         int timeoutTicks
     ) {
-        if (targetSpec == null || targetSpec.isBlank()) {
-            throw new IllegalArgumentException("target_spec must not be blank");
+        if (targetUuid == null || targetUuid.isBlank()) {
+            throw new IllegalArgumentException("target_uuid must not be blank");
         }
         if (attackRange < 1.2 || attackRange > 3.0) {
             throw new IllegalArgumentException("attack_range is out of bounds");
@@ -148,7 +148,7 @@ public final class EngageExecutor implements ActionRuntime.TickExecutor {
         }
         this.bot = bot;
         this.actionId = actionId;
-        this.targetSpec = targetSpec;
+        this.targetUuid = targetUuid;
         this.attackRange = attackRange;
         this.cooldownTicks = cooldownTicks;
         this.acquireRadius = acquireRadius;
@@ -182,7 +182,7 @@ public final class EngageExecutor implements ActionRuntime.TickExecutor {
         }
 
         if (lockedTarget == null) {
-            Lookup lookup = targets.acquire(bot, targetSpec, acquireRadius);
+            Lookup lookup = targets.acquire(bot, targetUuid, acquireRadius);
             if (lookup.target() == null) {
                 finish(serverTick, ActionRuntime.CLASS_FAILED, lookup.reasonOr("target_not_found"));
                 return;
@@ -336,7 +336,7 @@ public final class EngageExecutor implements ActionRuntime.TickExecutor {
         }
         JsonObject facts = new JsonObject();
         facts.addProperty("success", ActionRuntime.CLASS_COMPLETED.equals(classification));
-        facts.addProperty("target_spec", targetSpec);
+        facts.addProperty("target_uuid", targetUuid);
         if (lockedTarget == null) {
             facts.add("target_id", JsonNull.INSTANCE);
             facts.add("target_type", JsonNull.INSTANCE);

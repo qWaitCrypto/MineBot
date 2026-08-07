@@ -33,6 +33,7 @@ from minebot.app.conversation_tools import (
 from minebot.app.phase1_runtime import exploration_observation_projector
 from minebot.app.tasks import task_artifact_projector
 from minebot.app.wiring import build_agent_runtime
+from minebot.brain.composition import collect_resource_observation_projector
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleState
 from minebot.brain.modes import AgentSignal, ModeRuntime
@@ -758,7 +759,19 @@ class AgentRunnerSpineTests(unittest.TestCase):
             task = asyncio.create_task(lane.run(callback))
             while not started.is_set():
                 await asyncio.sleep(0.002)
-            await asyncio.to_thread(lane.close)
+            closed = threading.Event()
+
+            def close_lane():
+                try:
+                    lane.close()
+                finally:
+                    closed.set()
+
+            closer = threading.Thread(target=close_lane, name="lane-close-test")
+            closer.start()
+            while not closed.is_set():
+                await asyncio.sleep(0.002)
+            closer.join()
             with self.assertRaises(asyncio.CancelledError):
                 await task
 
@@ -1086,6 +1099,23 @@ class AgentRunnerSpineTests(unittest.TestCase):
                         "uncertainty": [{"reason": "page_limit"}],
                     }
                 ],
+                "candidate_attempts_consumed": 5,
+                "candidate_budget_remaining": 7,
+                "budget": {
+                    "candidate_budget": 12,
+                    "mutation_budget": 8,
+                    "max_wall_s": 60.0,
+                },
+                "last_failure": {
+                    "success": False,
+                    "reason": "no_path",
+                    "canRetry": False,
+                    "metrics": {
+                        "target": [-81, 73, 16],
+                        "closest_approach_distance": 9.25,
+                        "unloaded_chunk_count": 2,
+                    },
+                },
             },
         ).to_payload()
 
@@ -1106,6 +1136,13 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(summary["capability_snapshot"]["scaffold_count"], 0)
         self.assertTrue(summary["search_truncated"])
         self.assertEqual(summary["search_uncertainty"], ["page_limit:1"])
+        self.assertEqual(summary["collected_total"], 0)
+        self.assertEqual(summary["remaining_delta"], 3)
+        self.assertEqual(summary["candidate_attempts_consumed"], 5)
+        self.assertEqual(summary["candidate_budget_remaining"], 7)
+        self.assertEqual(summary["budget"]["mutation_budget"], 8)
+        self.assertEqual(summary["last_failure"]["reason"], "no_path")
+        self.assertEqual(summary["last_failure"]["evidence"]["unloaded_chunk_count"], 2)
         self.assertIn("retry the same Body domain", summary["resume_hint"])
         self.assertFalse(payload["projection"]["complete"])
         self.assertIn("metrics.attempts", payload["projection"]["omittedFields"])
@@ -1235,6 +1272,10 @@ class AgentRunnerSpineTests(unittest.TestCase):
 
         self.assertEqual(payload["summary"]["targets"], {"blocks": ["#logs"], "entities": []})
         self.assertEqual(payload["summary"]["block_count"], 10)
+        self.assertEqual(payload["summary"]["entity_count"], 0)
+        self.assertEqual(payload["summary"]["candidate_count"], 10)
+        self.assertEqual(payload["summary"]["budget"]["regions_consumed"], 2)
+        self.assertFalse(payload["summary"]["unloaded_boundary"])
         self.assertEqual(len(payload["summary"]["blocks"]), 8)
         self.assertFalse(payload["summary"]["blocks_complete"])
         self.assertEqual(payload["summary"]["candidate_failure_count"], 2)
@@ -1284,7 +1325,76 @@ class AgentRunnerSpineTests(unittest.TestCase):
 
         self.assertEqual(payload["summary"]["continuation"], continuation)
         self.assertEqual(payload["summary"]["resume_cursor"], cursor)
+        self.assertFalse(payload["summary"]["unloaded_boundary"])
         self.assertNotIn("metrics.continuation", payload["projection"]["omittedFields"])
+
+    def test_collect_resource_projection_keeps_epoch_decision_core_without_nested_ledgers(self):
+        result = ToolResult(
+            False,
+            "unclassified_body_terminal",
+            False,
+            metrics={
+                "item": "raw_iron",
+                "target_count": 3,
+                "before_count": 0,
+                "after_count": 1,
+                "collected_delta": 1,
+                "remaining_count": 2,
+                "candidates_tried": 4,
+                "resume_hint": "body_terminal",
+                "budget": {
+                    "max_candidates": 12,
+                    "max_mutating_calls": 8,
+                    "max_wall_s": 60.0,
+                },
+                "last_failure": {
+                    "phase": "collect_domain",
+                    "reason": "unclassified_body_terminal",
+                    "result": {
+                        "success": False,
+                        "reason": "unclassified_body_terminal",
+                        "canRetry": False,
+                        "metrics": {
+                            "last_failure": {"reason": "new_physics_failure"},
+                            "attempts": [{"target": [index, 12, 0]} for index in range(100)],
+                        },
+                    },
+                },
+                "body_process": {
+                    "success": False,
+                    "reason": "unclassified_body_terminal",
+                    "metrics": {
+                        "collected_total": 1,
+                        "remaining_delta": 2,
+                        "candidate_attempts_consumed": 4,
+                        "candidate_budget_remaining": 8,
+                        "navigation_failure_reasons": ["no_path", "no_path"],
+                        "searches": [{} for _ in range(3)],
+                        "attempts": [{"target": [index, 12, 0]} for index in range(100)],
+                    },
+                },
+            },
+        ).to_payload()
+
+        payload = _model_tool_payload(
+            "collect_resource",
+            result,
+            trace_ref="collect-trace",
+            projector=collect_resource_observation_projector,
+        )
+
+        summary = payload["summary"]
+        self.assertEqual(summary["candidate_attempts_consumed"], 4)
+        self.assertEqual(summary["candidate_budget_remaining"], 8)
+        self.assertEqual(summary["remaining_delta"], 2)
+        self.assertEqual(summary["navigation_failure_count"], 2)
+        self.assertEqual(summary["search_count"], 3)
+        self.assertEqual(
+            summary["last_failure"]["reason_chain"],
+            ["unclassified_body_terminal", "new_physics_failure"],
+        )
+        self.assertNotIn("attempts", summary)
+        self.assertIn("metrics.body_process", payload["projection"]["omittedFields"])
 
     def test_model_tool_payload_preserves_unknown_small_terminal_facts_generically(self):
         result = ToolResult(

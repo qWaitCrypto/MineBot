@@ -253,7 +253,9 @@ def make_runtime(body: ScarpetBody) -> tuple[AgentRuntime, ToolRegistry, Composi
         mode_runtime=mode_runtime,
     )
     runtime.registry = registry
-    runtime.agent = runtime.agent.clone(tools=[sdk_tool_for(registry.get(name)) for name in registry.names()])
+    runtime.agent = runtime.agent.clone(
+        tools=[sdk_tool_for(registry.get(name)) for name in registry.model_names()]
+    )
     return runtime, registry, ctx
 
 

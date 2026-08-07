@@ -618,12 +618,32 @@ def _trace_summary(
         yardstick=AG_FP30_YARDSTICK,
         active_window_s=active_elapsed_s,
     )
+    model_requests = sum(
+        count for name, count in counts.items() if name in {"llm_start", "model_request"}
+    )
+    strategy_epochs = counts["strategy_epoch"]
+    effective_output = (
+        quality.get("signals", {}).get("effective_output", {})
+        if isinstance(quality, dict)
+        else {}
+    )
+    output_points = int(effective_output.get("points") or 0)
     return {
         "trace_records": len(events),
         "production_trace_records": len(production_events),
         "fixture_trace_records": len(fixture_events),
         "event_counts": dict(sorted(counts.items())),
-        "model_requests": sum(count for name, count in counts.items() if name in {"llm_start", "model_request"}),
+        "model_requests": model_requests,
+        "strategy_epoch_metrics": {
+            "strategy_epochs": strategy_epochs,
+            "output_points": output_points,
+            "model_turns_per_output_point": (
+                round(model_requests / output_points, 3) if output_points > 0 else None
+            ),
+            "strategy_epochs_per_model_turn": (
+                round(strategy_epochs / model_requests, 3) if model_requests > 0 else None
+            ),
+        },
         "transport_errors": counts["body_transport_error"],
         "action_timeouts": counts["body_action_timeout"],
         "progress_yields": counts["progress_yielded"],

@@ -1,12 +1,14 @@
 package dev.minebot.body.action;
 
 import dev.minebot.body.nav.Goal;
+import dev.minebot.body.nav.AStarPathfinder;
 import dev.minebot.body.nav.MinecraftWorldView;
 import dev.minebot.body.nav.WorldView;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.material.Fluids;
@@ -19,6 +21,10 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
     public static final int WATER_AIR_THRESHOLD = 80;
     public static final int ESCAPE_RADIUS = 8;
     public static final int WATER_SHORE_RADIUS = 96;
+    private static final int MAX_DRY_CANDIDATES = Goal.MAX_COMPOSITE_MEMBERS;
+    private static final int ESCAPE_PATH_NODE_CAP = 8_000;
+    private static final int ESCAPE_PATH_UNLOADED_CAP = 16;
+    private static final int ESCAPE_PATH_STEP_BUDGET = 2_000;
     private static final int[] Y_OFFSETS = {0, 1, -1, 2, -2, 3, -3};
 
     private final MinecraftServer server;
@@ -47,12 +53,13 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         if (player == null || !(player.level() instanceof ServerLevel level)) {
             return null;
         }
-        if (MinecraftWorldView.isLavaNearBody(
-            level, position.blockX(), position.blockY(), position.blockZ()
-        )) {
+        // Reflex ownership is for an active bodily hazard. Route planning uses
+        // a wider lava clearance envelope, but nearby lava alone must not
+        // preempt a player whose server-authoritative fluid state is safe.
+        if (player.isInLava()) {
             return SurvivalReflexController.Kind.LAVA;
         }
-        if (player.isOnFire()) {
+        if (touchesActiveFire(player, level)) {
             return SurvivalReflexController.Kind.FIRE;
         }
         if (waterRisk(player, level, position)) {
@@ -72,10 +79,8 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
             return false;
         }
         return switch (kind) {
-            case LAVA -> MinecraftWorldView.isLavaNearBody(
-                level, position.blockX(), position.blockY(), position.blockZ()
-            );
-            case FIRE -> player.isOnFire();
+            case LAVA -> player.isInLava();
+            case FIRE -> touchesActiveFire(player, level);
             case WATER -> waterRisk(player, level, position);
         };
     }
@@ -91,12 +96,17 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         if (player == null || !(player.level() instanceof ServerLevel level)) {
             return null;
         }
-        WorldView world = new MinecraftWorldView(level);
+        WorldView safeWorld = new MinecraftWorldView(level);
         if (kind == SurvivalReflexController.Kind.WATER && !dryOnly) {
-            return findBreathableSurface(world, level, position);
+            return findBreathableSurface(safeWorld, level, position);
         }
-        SurvivalReflexController.Target dry = findDryStand(world, level, kind, position);
-        return dry;
+        return findDryStand(
+            safeWorld,
+            reflexPathWorld(level, needsLavaEgress(level, kind, position)),
+            level,
+            kind,
+            position
+        );
     }
 
     @Override
@@ -141,9 +151,7 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         if (candidates.isEmpty()) {
             return null;
         }
-        return candidates.size() == 1
-            ? candidates.getFirst()
-            : new Goal.Composite(candidates);
+        return findReachableDryGoal(world, position, candidates);
     }
 
     @Override
@@ -152,11 +160,18 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         if (player == null || !(player.level() instanceof ServerLevel level)) {
             return null;
         }
-        return new MinecraftWorldView(level);
+        return reflexPathWorld(
+            level,
+            player.isInLava()
+                || (player.isOnFire() && MinecraftWorldView.isLavaNearBody(
+                    level, player.getBlockX(), player.getBlockY(), player.getBlockZ()
+                ))
+        );
     }
 
     private SurvivalReflexController.Target findDryStand(
-        WorldView world,
+        WorldView safeWorld,
+        WorldView pathWorld,
         ServerLevel level,
         SurvivalReflexController.Kind kind,
         SurvivalReflexController.Position origin
@@ -164,40 +179,173 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         int baseX = origin.blockX();
         int baseY = origin.blockY();
         int baseZ = origin.blockZ();
-        for (int radius = 1; radius <= ESCAPE_RADIUS; radius++) {
+        List<SurvivalReflexController.Target> candidates = new ArrayList<>();
+        for (int radius = 1; radius <= ESCAPE_RADIUS
+            && candidates.size() < MAX_DRY_CANDIDATES; radius++) {
             for (int yOffset : Y_OFFSETS) {
                 int y = baseY + yOffset;
                 for (int delta = -radius; delta <= radius; delta++) {
                     SurvivalReflexController.Target target = dryCandidate(
-                        world, level, kind, baseX + radius, y, baseZ + delta
+                        safeWorld, level, kind, baseX + radius, y, baseZ + delta
                     );
                     if (target != null) {
-                        return target;
+                        candidates.add(target);
+                        if (candidates.size() >= MAX_DRY_CANDIDATES) {
+                            break;
+                        }
                     }
                     target = dryCandidate(
-                        world, level, kind, baseX - radius, y, baseZ + delta
+                        safeWorld, level, kind, baseX - radius, y, baseZ + delta
                     );
                     if (target != null) {
-                        return target;
+                        candidates.add(target);
+                        if (candidates.size() >= MAX_DRY_CANDIDATES) {
+                            break;
+                        }
                     }
+                }
+                if (candidates.size() >= MAX_DRY_CANDIDATES) {
+                    break;
                 }
                 for (int delta = -radius + 1; delta < radius; delta++) {
                     SurvivalReflexController.Target target = dryCandidate(
-                        world, level, kind, baseX + delta, y, baseZ + radius
+                        safeWorld, level, kind, baseX + delta, y, baseZ + radius
                     );
                     if (target != null) {
-                        return target;
+                        candidates.add(target);
+                        if (candidates.size() >= MAX_DRY_CANDIDATES) {
+                            break;
+                        }
                     }
                     target = dryCandidate(
-                        world, level, kind, baseX + delta, y, baseZ - radius
+                        safeWorld, level, kind, baseX + delta, y, baseZ - radius
                     );
                     if (target != null) {
-                        return target;
+                        candidates.add(target);
+                        if (candidates.size() >= MAX_DRY_CANDIDATES) {
+                            break;
+                        }
                     }
+                }
+                if (candidates.size() >= MAX_DRY_CANDIDATES) {
+                    break;
                 }
             }
         }
-        return null;
+        return reachableDryCandidate(pathWorld, origin, candidates);
+    }
+
+    /**
+     * A player already in lava must be able to traverse the hazardous source
+     * component to leave it. Safe endpoint selection still uses the ordinary
+     * conservative world; this view is only the bounded reflex path substrate.
+     */
+    private static WorldView reflexPathWorld(
+        ServerLevel level,
+        boolean lavaEgress
+    ) {
+        WorldView conservative = new MinecraftWorldView(level);
+        if (!lavaEgress) {
+            return conservative;
+        }
+        return new WorldView() {
+            @Override
+            public NodeKind kindAt(int x, int y, int z) {
+                return isLava(level, x, y, z)
+                    ? NodeKind.LIQUID
+                    : conservative.kindAt(x, y, z);
+            }
+
+            @Override
+            public boolean isBodyPositionHazardous(int x, int y, int z) {
+                return false;
+            }
+        };
+    }
+
+    private static boolean needsLavaEgress(
+        ServerLevel level,
+        SurvivalReflexController.Kind kind,
+        SurvivalReflexController.Position position
+    ) {
+        return kind == SurvivalReflexController.Kind.LAVA
+            || (kind == SurvivalReflexController.Kind.FIRE
+                && MinecraftWorldView.isLavaNearBody(
+                    level, position.blockX(), position.blockY(), position.blockZ()
+                ));
+    }
+
+    /**
+     * Geometry alone is not an escape target.  Validate the finite candidate
+     * set through the same loaded-world A* used by the reflex executor, then
+     * return the candidate at the actual path endpoint.
+     */
+    private static SurvivalReflexController.Target reachableDryCandidate(
+        WorldView world,
+        SurvivalReflexController.Position origin,
+        List<SurvivalReflexController.Target> candidates
+    ) {
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        List<Goal> goals = candidates.stream()
+            .map(target -> (Goal) new Goal.Stand(
+                target.position().blockX(),
+                target.position().blockY(),
+                target.position().blockZ()
+            ))
+            .toList();
+        Goal goal = goals.size() == 1 ? goals.getFirst() : new Goal.Composite(goals);
+        AStarPathfinder.Result result = new AStarPathfinder(
+            world,
+            goal,
+            origin.blockX(),
+            origin.blockY(),
+            origin.blockZ(),
+            ESCAPE_PATH_NODE_CAP,
+            ESCAPE_PATH_UNLOADED_CAP
+        ).step(ESCAPE_PATH_STEP_BUDGET);
+        if (result.outcome() != AStarPathfinder.Outcome.COMPLETE || result.path().isEmpty()) {
+            return null;
+        }
+        AStarPathfinder.Waypoint endpoint = result.path().getLast();
+        return candidates.stream()
+            .filter(target -> target.position().blockX() == endpoint.x()
+                && target.position().blockY() == endpoint.y()
+                && target.position().blockZ() == endpoint.z())
+            .findFirst()
+            .orElse(null);
+    }
+
+    private static Goal findReachableDryGoal(
+        WorldView world,
+        SurvivalReflexController.Position origin,
+        List<Goal> candidates
+    ) {
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        List<SurvivalReflexController.Target> targets = candidates.stream()
+            .map(goal -> {
+                if (goal instanceof Goal.Stand stand) {
+                    return new SurvivalReflexController.Target(
+                        new SurvivalReflexController.Position(stand.x() + 0.5, stand.y(), stand.z() + 0.5),
+                        true
+                    );
+                }
+                return null;
+            })
+            .filter(target -> target != null)
+            .toList();
+        SurvivalReflexController.Target selected = reachableDryCandidate(world, origin, targets);
+        if (selected == null) {
+            return null;
+        }
+        return new Goal.Stand(
+            selected.position().blockX(),
+            selected.position().blockY(),
+            selected.position().blockZ()
+        );
     }
 
     private static SurvivalReflexController.Target dryCandidate(
@@ -253,6 +401,12 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
             && world.kindAt(x, y - 1, z) == WorldView.NodeKind.SOLID;
     }
 
+    private static boolean touchesActiveFire(ServerPlayer player, ServerLevel level) {
+        return level.getBlockStates(player.getBoundingBox().deflate(1.0e-7)).anyMatch(
+            state -> state.is(Blocks.FIRE) || state.is(Blocks.SOUL_FIRE)
+        );
+    }
+
     private static void addShoreCandidate(
         List<Goal> candidates,
         WorldView world,
@@ -268,7 +422,7 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         if (!isDryStand(world, x, y, z) || !waterBesideShore(world, x, y, z)) {
             return;
         }
-        candidates.add(new Goal.Near(x, y, z, 0.5));
+        candidates.add(new Goal.Stand(x, y, z));
     }
 
     private static boolean waterBesideShore(WorldView world, int x, int y, int z) {
@@ -300,6 +454,15 @@ public final class MinecraftSurvivalEnvironment implements SurvivalReflexControl
         }
         var fluid = chunk.getBlockState(new BlockPos(x, y, z)).getFluidState();
         return fluid.is(Fluids.WATER) || fluid.is(Fluids.FLOWING_WATER);
+    }
+
+    private static boolean isLava(ServerLevel level, int x, int y, int z) {
+        LevelChunk chunk = level.getChunkSource().getChunkNow(x >> 4, z >> 4);
+        if (chunk == null) {
+            return false;
+        }
+        var fluid = chunk.getBlockState(new BlockPos(x, y, z)).getFluidState();
+        return fluid.is(Fluids.LAVA) || fluid.is(Fluids.FLOWING_LAVA);
     }
 
     private ServerPlayer player(String botName) {

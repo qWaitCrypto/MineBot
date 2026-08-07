@@ -56,15 +56,12 @@
         "args": {
           "bot_name": "MineBot_1",
           "action_id": "collect-0001",
-          "block_ids": [
-            "minecraft:oak_log",
-            "minecraft:spruce_log"
-          ],
+          "target": [61, 69, -50],
+          "expected_block_id": "minecraft:oak_log",
           "expected_item_ids": [
-            "minecraft:oak_log",
-            "minecraft:spruce_log"
+            "minecraft:oak_log"
           ],
-          "radius": 48,
+          "excavation_budget": 4,
           "timeout_ticks": 2400
         }
       },
@@ -75,15 +72,13 @@
         "request_id": "r-2",
         "bot_name": "MineBot_1",
         "action_id": "collect-0001",
-        "block_ids": [
-          "minecraft:oak_log",
-          "minecraft:spruce_log"
-        ],
+        "contract_version": 2,
+        "target": [61, 69, -50],
+        "expected_block_id": "minecraft:oak_log",
         "expected_item_ids": [
-          "minecraft:oak_log",
-          "minecraft:spruce_log"
+          "minecraft:oak_log"
         ],
-        "radius": 48,
+        "excavation_budget": 4,
         "timeout_ticks": 2400
       }
     },
@@ -94,7 +89,9 @@
         "request_id": "r-2",
         "action_id": "collect-0001",
         "state": "accepted",
-        "candidates": 5,
+        "contract_version": 2,
+        "target": [61, 69, -50],
+        "excavation_budget": 4,
         "seq": 2,
         "server_tick": 601,
         "sent_at_ms": 1785000006100
@@ -106,7 +103,9 @@
           "request_type": "COLLECT_BLOCK",
           "payload_contains": {
             "state": "accepted",
-            "candidates": 5
+            "contract_version": 2,
+            "target": [61, 69, -50],
+            "excavation_budget": 4
           }
         }
       ]
@@ -250,7 +249,9 @@
             "block_id": "minecraft:oak_log"
           },
           "elapsed_ticks": 144,
-          "candidates_tried": 1,
+          "attempts_consumed": 1,
+          "budget_remaining": 4,
+          "mutations_completed": 1,
           "replans": 0
         }
       },

@@ -7,6 +7,7 @@ from math import dist, floor
 from time import monotonic, sleep
 from typing import Callable
 
+from minebot.body.combat import entity_target_terminal_mismatch, resolve_entity_target
 from minebot.contract import (
     Action,
     Body,
@@ -310,7 +311,15 @@ def navigation_surface_egress_fallback_allowed(reason: object) -> bool:
     if value in {"dry_egress_unavailable", "dry_egress_not_liquid"}:
         return True
     if value.startswith("dry_egress_failed:"):
-        return navigation_governed_mobility_upgrade_reason(value.split(":", 1)[1])
+        inner = value.split(":", 1)[1]
+        if inner in {"stuck", "replan_budget_exhausted"}:
+            # Surface recovery is a bounded provider handoff.  A follower
+            # that gets stuck while leaving a damaged/floating column may
+            # retry the already-governed surface domain with swim/mutation
+            # operators; resource candidate navigation must still blacklist
+            # a failed target rather than silently retry it under a new mode.
+            return True
+        return navigation_governed_mobility_upgrade_reason(inner)
     return False
 
 
@@ -356,19 +365,42 @@ def _navigation_progress_evidence(
                 observed = True
                 if any(_positive_number(count) for count in movement_counts.values()):
                     positive = True
-            final_pos = value.get("final_pos")
-            if isinstance(final_pos, (list, tuple)) and len(final_pos) >= 3:
+            # Java Body's compact NAVIGATE terminal contract carries the same
+            # authoritative position as precise scalar final_x/final_y/final_z
+            # fields and may also include a block-quantized final_pos summary.
+            # Prefer the scalar triplet when both are present: comparing a
+            # player's fractional start to the quantized summary can invent
+            # displacement on a terminal where the player never moved.
+            scalar_position = all(
+                key in value and value[key] is not None
+                for key in ("final_x", "final_y", "final_z")
+            )
+            if scalar_position:
                 try:
                     final_xyz = (
-                        float(final_pos[0]),
-                        float(final_pos[1]),
-                        float(final_pos[2]),
+                        float(value["final_x"]),
+                        float(value["final_y"]),
+                        float(value["final_z"]),
                     )
                     observed = True
                     if _position_distance(before, final_xyz) > 0.25:
                         positive = True
                 except (TypeError, ValueError):
                     pass
+            else:
+                final_pos = value.get("final_pos")
+                if isinstance(final_pos, (list, tuple)) and len(final_pos) >= 3:
+                    try:
+                        final_xyz = (
+                            float(final_pos[0]),
+                            float(final_pos[1]),
+                            float(final_pos[2]),
+                        )
+                        observed = True
+                        if _position_distance(before, final_xyz) > 0.25:
+                            positive = True
+                    except (TypeError, ValueError):
+                        pass
             for key in ("path_length", "waypoints", "move_ticks", "partial_distance"):
                 if key in value and value[key] is not None:
                     observed = True
@@ -1251,10 +1283,15 @@ class NavigationTransactions:
                 },
             )
 
+        resolved = resolve_entity_target(self.body, target_spec, radius=32)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        target_uuid = resolved.target_uuid
+
         action = Action.create(
             "followEntity",
             {
-                "target_spec": target_spec,
+                "target_uuid": target_uuid,
                 "keep_radius": keep_distance,
                 "replan_distance": 2.0,
                 "acquire_radius": 32,
@@ -1275,17 +1312,17 @@ class NavigationTransactions:
         if not (result.ok and result.accepted):
             rejected = body_rejection_to_tool_result(
                 result,
-                {"error": result.error, "target_spec": target_spec},
+                {"error": result.error, **resolved.evidence()},
             )
             if rejected is None:
-                return _result(False, "body_rejected", True, start, [], {"error": result.error, "target_spec": target_spec})
+                return _result(False, "body_rejected", True, start, [], {"error": result.error, **resolved.evidence()})
             return _result(
                 False,
                 rejected.reason,
                 rejected.can_retry,
                 start,
                 [],
-                {**dict(rejected.metrics or {}), "target_spec": target_spec},
+                {**dict(rejected.metrics or {}), **resolved.evidence()},
             )
 
         terminal = self.body.await_action_terminal(
@@ -1294,13 +1331,16 @@ class NavigationTransactions:
             terminal_events={"followDone", "death", "respawned"},
         )
         if not self.progress.generation_current(generation):
-            return _result(False, "preempted", True, start, [], {"generation_current": False, "target_spec": target_spec})
+            return _result(False, "preempted", True, start, [], {"generation_current": False, **resolved.evidence()})
 
         td = terminal.data
+        mismatch = entity_target_terminal_mismatch(resolved, td)
+        if mismatch is not None:
+            return mismatch
         arrived = bool(td.get("arrived", False))
         reason = str(td.get("reason") or "unknown")
         self.progress.note_step(
-            ("follow.tick", start, target_spec, reason),
+            ("follow.tick", start, target_uuid, reason),
             success=arrived,
             fingerprint=self.progress.fingerprint(self.body.get_state()),
             neutral=reason in ("timeout", "target_lost"),
@@ -1311,7 +1351,7 @@ class NavigationTransactions:
             reason in ("timeout", "target_lost", "stuck"),
             start,
             [],
-            {"target_spec": target_spec, "keep_distance": keep_distance, "event": terminal.name},
+            {**resolved.evidence(), "keep_distance": keep_distance, "event": terminal.name},
         )
 
     def move_away(

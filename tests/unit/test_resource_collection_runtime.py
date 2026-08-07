@@ -1,4 +1,6 @@
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 from minebot.body.interaction_support import NearbyBlockSearch, NearbyBlockTarget
 from minebot.body.resource_collection import (
@@ -38,6 +40,20 @@ class ResourceBody:
 
     def perceive(self, scope, params):
         self.perceptions.append((scope, dict(params)))
+        if scope == "blockAt":
+            pos = (int(params["x"]), int(params["y"]), int(params["z"]))
+            block_type = next(
+                (block for target, block in self.targets if target == pos),
+                "air",
+            )
+            return PerceptionResult(
+                bot=self.bot_name,
+                scope=scope,
+                type="perception",
+                ok=True,
+                complete=True,
+                data={"type": block_type},
+            )
         if scope == "findBlocks":
             wanted = str(params["type"]).removeprefix("minecraft:")
             blocks = [
@@ -110,6 +126,66 @@ class EgressRepositioningResourceBody(ResourceBody):
             finally:
                 self.targets = original
         return super().perceive(scope, params)
+
+
+class VerticalRadiusResourceBody(ResourceBody):
+    """Mirror the server's vertical bound so search-contract drift is visible."""
+
+    def perceive(self, scope, params):
+        if scope == "findBlocks":
+            center_y = int(self.state_pos[1])
+            y_radius = int(params["y_radius"])
+            original = self.targets
+            self.targets = [
+                entry
+                for entry in original
+                if abs(entry[0][1] - center_y) <= y_radius
+            ]
+            try:
+                return super().perceive(scope, params)
+            finally:
+                self.targets = original
+        return super().perceive(scope, params)
+
+
+class CursorPagedResourceBody(ResourceBody):
+    """Expose a stable large-domain snapshot through opaque continuation cursors."""
+
+    def __init__(self, pages):
+        super().__init__([entry for page in pages for entry in page])
+        self.pages = list(pages)
+
+    def perceive(self, scope, params):
+        if scope != "findBlocks":
+            return super().perceive(scope, params)
+        self.perceptions.append((scope, dict(params)))
+        cursor = params.get("cursor")
+        index = 0 if cursor is None else int(str(cursor).split("-")[-1])
+        page = self.pages[index]
+        next_cursor = f"page-{index + 1}" if index + 1 < len(self.pages) else None
+        blocks = [
+            {"x": pos[0], "y": pos[1], "z": pos[2], "type": block_type}
+            for pos, block_type in page
+        ]
+        return PerceptionResult(
+            bot=self.bot_name,
+            scope=scope,
+            type="perception",
+            ok=True,
+            complete=next_cursor is None,
+            data={"blocks": blocks, "totalMatches": 4096, "nextStart": next_cursor},
+            next=next_cursor,
+            uncertainty=[{"reason": "result_capped"}],
+        )
+
+
+class InventoryTruthResourceBody(ResourceBody):
+    def __init__(self, targets):
+        super().__init__(targets)
+        self.counts = {"cobblestone": 0}
+
+    def get_state(self):
+        return replace(super().get_state(), inventory_counts=dict(self.counts))
 
 
 class ScopedTreeResourceBody(ResourceBody):
@@ -226,6 +302,222 @@ class RecordingWork:
 
 
 class ResourceCollectionRuntimeTests(unittest.TestCase):
+    def test_search_radius_preserves_targets_within_shared_vertical_cap(self):
+        target = (5, 56, 0)
+        body = VerticalRadiusResourceBody([(target, "iron_ore")])
+        navigator = RecordingNavigator(body, [(5, 57, -1)])
+        calls = []
+
+        def collect_target(pos, block_id, expected_items, excavation_budget, timeout_s):
+            calls.append(pos)
+            body.targets = []
+            return ToolResult(
+                True,
+                "collected",
+                False,
+                metrics={"inventory_delta": {"total": 1}, "mutations_completed": 1},
+            )
+
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            RecordingWork(),
+            designated_collector=collect_target,
+        )
+
+        result = runtime.collect_block_domain(
+            block_types=("iron_ore",),
+            expected_drops=("raw_iron",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(
+                search_radius=16,
+                candidate_budget=1,
+                mutation_budget=1,
+            ),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(calls, [target])
+        find_call = next(params for scope, params in body.perceptions if scope == "findBlocks")
+        self.assertEqual(find_call["radius"], 16)
+        self.assertEqual(find_call["y_radius"], 16)
+
+    def test_designated_collector_runs_once_per_python_selected_target(self):
+        first = (5, 64, 0)
+        second = (24, 64, 0)
+        body = ResourceBody([(first, "dirt"), (second, "dirt")])
+        navigator = RecordingNavigator(body, [(5, 65, -1), (24, 65, -1)])
+        work = RecordingWork()
+        calls = []
+
+        def collect_target(pos, block_id, expected_items, excavation_budget, timeout_s):
+            calls.append((pos, block_id, expected_items, excavation_budget, timeout_s))
+            body.targets = [entry for entry in body.targets if entry[0] != pos]
+            return ToolResult(
+                True,
+                "collected",
+                False,
+                metrics={
+                    "inventory_delta": {
+                        "item_id": "minecraft:dirt",
+                        "before": len(calls) - 1,
+                        "after": len(calls),
+                    },
+                    "mutations_completed": 1,
+                },
+            )
+
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            work,
+            designated_collector=collect_target,
+        )
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=2,
+            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=2),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual([call[0] for call in calls], [first, second])
+        self.assertEqual([call[1] for call in calls], ["dirt", "dirt"])
+        self.assertEqual(work.calls, [])
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertEqual(result.metrics["collected_total"], 2)
+
+    def test_progress_bearing_timeout_continues_the_same_designated_target(self):
+        target = (5, 64, 0)
+        body = ResourceBody([(target, "iron_ore")])
+        navigator = RecordingNavigator(body, [(5, 65, -1)])
+        calls = []
+
+        def collect_target(pos, block_id, expected_items, excavation_budget, timeout_s):
+            calls.append((pos, block_id, expected_items, excavation_budget, timeout_s))
+            if len(calls) == 1:
+                return ToolResult(
+                    False,
+                    "timeout",
+                    True,
+                    metrics={
+                        "phase_reason": "timeout_ticks_exhausted",
+                        "mutations_completed": 14,
+                        "approach_broken": [[index, 64, 0] for index in range(14)],
+                    },
+                )
+            body.targets = []
+            return ToolResult(
+                True,
+                "collected",
+                False,
+                metrics={
+                    "mutations_completed": 1,
+                    "inventory_delta": {"total": 1},
+                },
+            )
+
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            RecordingWork(),
+            designated_collector=collect_target,
+        )
+        result = runtime.collect_block_domain(
+            block_types=("iron_ore",),
+            expected_drops=("raw_iron",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=16),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual([call[0] for call in calls], [target, target])
+        self.assertEqual([call[3] for call in calls], [15, 1])
+        attempt = result.metrics["attempts"][0]
+        self.assertEqual(attempt["same_target_continuation_count"], 1)
+        self.assertEqual(
+            attempt["same_target_continuation_evidence"][0]["evidence_revision"],
+            "authoritative_mutation:14",
+        )
+        self.assertEqual(attempt["mine_continuations"][0]["result"]["reason"], "collected")
+        self.assertEqual(result.metrics["candidate_attempts_consumed"], 1)
+
+    def test_zero_progress_timeout_does_not_continue_or_switch_candidates(self):
+        target = (5, 64, 0)
+        body = ResourceBody([(target, "iron_ore")])
+        navigator = RecordingNavigator(body, [(5, 65, -1)])
+        calls = []
+
+        def collect_target(pos, block_id, expected_items, excavation_budget, timeout_s):
+            calls.append(pos)
+            return ToolResult(
+                False,
+                "timeout",
+                True,
+                metrics={"phase_reason": "timeout_ticks_exhausted", "mutations_completed": 0},
+            )
+
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            RecordingWork(),
+            designated_collector=collect_target,
+        )
+        result = runtime.collect_block_domain(
+            block_types=("iron_ore",),
+            expected_drops=("raw_iron",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=16),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "resource_collect_failed")
+        self.assertEqual(calls, [target])
+        self.assertEqual(result.metrics["candidate_blacklist"], [])
+        self.assertEqual(result.metrics["attempts"][0]["same_target_continuation_count"], 0)
+
+    def test_progress_continuation_stops_at_the_shared_wall_budget(self):
+        target = (5, 64, 0)
+        body = ResourceBody([(target, "iron_ore")])
+        navigator = RecordingNavigator(body, [(5, 65, -1)])
+        calls = []
+        clock = [0.0]
+
+        def collect_target(pos, block_id, expected_items, excavation_budget, timeout_s):
+            calls.append(pos)
+            clock[0] = 2.0
+            return ToolResult(
+                False,
+                "timeout",
+                True,
+                metrics={"phase_reason": "timeout_ticks_exhausted", "mutations_completed": 1},
+            )
+
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            RecordingWork(),
+            designated_collector=collect_target,
+        )
+        with patch("minebot.body.resource_collection.time.monotonic", side_effect=lambda: clock[0]):
+            result = runtime.collect_block_domain(
+                block_types=("iron_ore",),
+                expected_drops=("raw_iron",),
+                remaining_count=1,
+                config=ResourceCollectionConfig(
+                    candidate_budget=1,
+                    mutation_budget=16,
+                    max_wall_s=1.0,
+                ),
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "resource_domain_budget_exhausted")
+        self.assertEqual(calls, [target])
+        self.assertEqual(result.metrics["candidate_blacklist"], [])
+        self.assertEqual(result.metrics["last_failure"]["reason"], "wall_budget_exhausted")
+
     def test_exact_blacklist_filters_priority_targets_without_erasing_neighboring_cluster(self):
         occluded = NearbyBlockTarget((5, 64, 0), "iron_ore", 5.0)
         neighbor = NearbyBlockTarget((6, 64, 0), "iron_ore", 6.0)
@@ -664,6 +956,33 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual(result.metrics["attempts"][0]["navigation_profile"], "governed_mobility")
         self.assertFalse(result.metrics["attempts"][0]["navigation_fallback"]["result"]["success"])
 
+    def test_governance_challenge_is_promoted_after_candidate_alternatives_exhaust(self):
+        target = (5, 64, 0)
+        selected = (5, 65, -1)
+        challenge = {"challenge_id": "gc-resource-1", "context": "collect_approach"}
+        body = ResourceBody([(target, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [selected, selected],
+            outcomes=[(False, "no_path"), (False, "governance_confirmation_required")],
+            metrics=[
+                ZERO_PROGRESS_NAVIGATION_METRICS,
+                {"governance_confirmation": challenge},
+            ],
+        )
+        runtime = ResourceCollectionTransactions(body, navigator, RecordingWork())
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "governance_confirmation_required")
+        self.assertEqual(result.metrics["governance_confirmation"], challenge)
+
     def test_ambiguous_governance_replans_to_an_alternative_candidate(self):
         first = (5, 64, 0)
         second = (12, 64, 0)
@@ -790,31 +1109,101 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
             egress_outcomes=[ToolResult(False, "dry_egress_not_liquid", True)]
         )
         egress_calls = []
+        vertical_egress_calls = []
 
         def egress(timeout_s):
             egress_calls.append(timeout_s)
+            return ToolResult(False, "unexpected_aquatic_egress", False)
+
+        def vertical_egress(timeout_s, mutation_budget):
+            vertical_egress_calls.append((timeout_s, mutation_budget))
             body.state_pos = (2.5, 65.0, 0.5)
             return ToolResult(
                 True,
                 "surface_reached",
                 False,
-                metrics={"final_pos": [2, 65, 0], "terminal_surface_verified": True},
+                metrics={
+                    "final_pos": [2, 65, 0],
+                    "terminal_surface_verified": True,
+                    "mutations_completed": 1,
+                },
             )
 
-        runtime = ResourceCollectionTransactions(body, navigator, work, mobility_egress=egress)
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            work,
+            mobility_egress=egress,
+            bounded_mobility_egress=vertical_egress,
+        )
 
         result = runtime.collect_block_domain(
             block_types=("dirt",),
             expected_drops=("dirt",),
             remaining_count=1,
-            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1, segment_timeout_s=7.0),
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=2, segment_timeout_s=7.0),
         )
 
         self.assertTrue(result.success, result.to_payload())
-        self.assertEqual(egress_calls, [7.0])
-        self.assertEqual(result.metrics["initial_egress"]["selected_profile"], "governed_mobility")
+        self.assertEqual(egress_calls, [])
+        self.assertEqual(vertical_egress_calls, [(7.0, 2)])
+        self.assertEqual(
+            result.metrics["initial_egress"]["selected_profile"],
+            "bounded_vertical_egress",
+        )
         self.assertEqual(result.metrics["initial_egress"]["dry"]["reason"], "dry_egress_not_liquid")
         self.assertEqual(work.calls[0][0], target)
+
+    def test_initial_liquid_without_local_shore_prefers_bounded_ascend(self):
+        target = (5, 64, 0)
+        body = ResourceBody([(target, "dirt")])
+        navigator = RecordingNavigator(body, [(5, 65, -1)])
+        work = RecordingWork(
+            egress_outcomes=[ToolResult(False, "dry_egress_unavailable", True)]
+        )
+        aquatic_egress_calls = []
+        bounded_egress_calls = []
+
+        def aquatic_egress(timeout_s):
+            aquatic_egress_calls.append(timeout_s)
+            return ToolResult(False, "unexpected_aquatic_egress", False)
+
+        def bounded_egress(timeout_s, mutation_budget):
+            bounded_egress_calls.append((timeout_s, mutation_budget))
+            body.state_pos = (2.5, 65.0, 0.5)
+            return ToolResult(
+                True,
+                "surface_reached",
+                False,
+                metrics={"mutations_completed": 1},
+            )
+
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            work,
+            mobility_egress=aquatic_egress,
+            bounded_mobility_egress=bounded_egress,
+        )
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(
+                candidate_budget=1,
+                mutation_budget=2,
+                segment_timeout_s=7.0,
+            ),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(aquatic_egress_calls, [])
+        self.assertEqual(bounded_egress_calls, [(7.0, 2)])
+        self.assertEqual(
+            result.metrics["initial_egress"]["selected_profile"],
+            "bounded_vertical_egress",
+        )
 
     def test_candidate_failure_is_blacklisted_and_remaining_domain_replanned(self):
         first = (5, 64, 0)
@@ -870,6 +1259,70 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual([call[0] for call in work.calls], [second])
         self.assertIn(list(first), result.metrics["candidate_blacklist"])
 
+    def test_position_change_and_rescan_do_not_reactivate_a_failed_target(self):
+        first = (5, 64, 0)
+        second = (24, 64, 0)
+        body = ResourceBody([(first, "dirt"), (second, "dirt")])
+
+        class MovingFailureNavigator(RecordingNavigator):
+            def navigate_to(self, goal, **kwargs):
+                self.calls.append((goal, kwargs))
+                selected = self.selected_goals.pop(0)
+                success, reason = self.outcomes.pop(0)
+                if success:
+                    self.body.state_pos = (
+                        selected[0] + 0.5,
+                        float(selected[1]),
+                        selected[2] + 0.5,
+                    )
+                else:
+                    # Run 17/19 changed position while making no progress on
+                    # the committed target. That is not new target evidence.
+                    self.body.state_pos = (
+                        self.body.state_pos[0] + 2.0,
+                        self.body.state_pos[1],
+                        self.body.state_pos[2],
+                    )
+                return ToolResult(
+                    success,
+                    reason,
+                    not success,
+                    metrics={
+                        "selected_goal": list(selected),
+                        "goal_set_preserved": True,
+                        **(POSITIVE_PATH_NAVIGATION_METRICS if not success else {}),
+                    },
+                )
+
+        navigator = MovingFailureNavigator(
+            body,
+            [(5, 65, -1), (24, 65, -1)],
+            outcomes=[(False, "stuck"), (True, "arrived")],
+        )
+        work = RecordingWork()
+        runtime = ResourceCollectionTransactions(body, navigator, work)
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual([call[0] for call in work.calls], [second])
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertEqual(result.metrics["candidate_blacklist"], [list(first)])
+        self.assertEqual(result.metrics["candidate_attempts_consumed"], 2)
+        self.assertEqual(
+            result.metrics["planning_admitted"],
+            [list(first), list(second)],
+        )
+        self.assertGreaterEqual(
+            [scope for scope, _params in body.perceptions].count("findBlocks"),
+            2,
+        )
+
     def test_failed_tree_does_not_hide_lower_trunk_in_other_tree(self):
         first = (5, 64, 0)
         second_high = (20, 68, 0)
@@ -921,7 +1374,7 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
             block_types=("oak_log",),
             expected_drops=("oak_log",),
             remaining_count=1,
-            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=1),
         )
 
         self.assertTrue(result.success, result.to_payload())
@@ -951,7 +1404,7 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
             block_types=("oak_log",),
             expected_drops=("oak_log",),
             remaining_count=1,
-            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
+            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=1),
         )
 
         self.assertTrue(result.success, result.to_payload())
@@ -990,7 +1443,7 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertEqual(tree["candidates"], [])
         self.assertEqual(tree["search_result"]["reason"], "tree_domain_log_not_found")
 
-    def test_no_path_uses_one_body_mobility_egress_before_replanning(self):
+    def test_no_path_does_not_use_unbounded_or_non_targeted_mobility_egress(self):
         target = (5, 64, 0)
         body = ResourceBody([(target, "dirt")])
         navigator = RecordingNavigator(
@@ -1020,11 +1473,179 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
             config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=1),
         )
 
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "resource_navigation_no_path")
+        self.assertEqual(egress_calls, [])
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertEqual(work.calls, [])
+
+    def test_no_path_uses_one_rank_reducing_bounded_vertical_egress(self):
+        target = (5, 70, 0)
+        body = ResourceBody([(target, "oak_log")])
+        navigator = RecordingNavigator(
+            body,
+            [(5, 69, -1), (5, 69, -1)],
+            outcomes=[(False, "no_path"), (True, "arrived")],
+        )
+        egress_calls = []
+
+        def bounded_egress(timeout_s, mutation_budget):
+            egress_calls.append((timeout_s, mutation_budget))
+            body.state_pos = (4.5, 68.0, 0.5)
+            return ToolResult(
+                True,
+                "surface_reached",
+                False,
+                metrics={"mutations_completed": 0},
+            )
+
+        work = RecordingWork()
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            work,
+            bounded_mobility_egress=bounded_egress,
+        )
+
+        result = runtime.collect_block_domain(
+            block_types=("oak_log",),
+            expected_drops=("oak_log",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=2),
+        )
+
         self.assertTrue(result.success, result.to_payload())
-        self.assertEqual(egress_calls, [30.0])
+        self.assertEqual(egress_calls, [(30.0, 2)])
         self.assertEqual(len(navigator.calls), 2)
         self.assertEqual([call[0] for call in work.calls], [target])
-        self.assertTrue(result.metrics["attempts"][0]["mobility_egress"]["success"])
+        certificate = result.metrics["attempts"][0]["mobility_egress"]
+        self.assertTrue(certificate["rank_reduced"])
+        self.assertTrue(certificate["target_preserved"])
+
+    def test_surface_egress_replans_same_target_when_detour_increases_rank(self):
+        target = (5, 70, 0)
+        body = ResourceBody([(target, "oak_log")])
+        navigator = RecordingNavigator(
+            body,
+            [(5, 69, -1), (5, 69, -1)],
+            outcomes=[(False, "no_path"), (True, "arrived")],
+        )
+        egress_calls = []
+
+        def bounded_egress(timeout_s, mutation_budget):
+            egress_calls.append((timeout_s, mutation_budget))
+            body.state_pos = (20.5, 63.0, 0.5)
+            return ToolResult(
+                True,
+                "surface_reached",
+                False,
+                metrics={"mutations_completed": 0},
+            )
+
+        work = RecordingWork()
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            work,
+            bounded_mobility_egress=bounded_egress,
+        )
+
+        result = runtime.collect_block_domain(
+            block_types=("oak_log",),
+            expected_drops=("oak_log",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=2),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(egress_calls, [(30.0, 2)])
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertEqual([call[0] for call in work.calls], [target])
+        certificate = result.metrics["attempts"][0]["mobility_egress"]
+        self.assertFalse(certificate["rank_reduced"])
+        self.assertTrue(certificate["target_preserved"])
+
+    def test_no_path_uses_one_target_derived_bounded_vertical_descent(self):
+        target = (5, 58, 0)
+        body = ResourceBody([(target, "iron_ore")])
+        navigator = RecordingNavigator(
+            body,
+            [(5, 59, -1), (5, 59, -1)],
+            outcomes=[(False, "no_path"), (True, "arrived")],
+        )
+        descent_calls = []
+
+        def bounded_descent(target_y, timeout_s, mutation_budget):
+            descent_calls.append((target_y, timeout_s, mutation_budget))
+            body.state_pos = (0.5, 59.0, 0.5)
+            return ToolResult(
+                True,
+                "dig_down_target_reached",
+                False,
+                metrics={"mutations_completed": 2},
+            )
+
+        work = RecordingWork()
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            work,
+            bounded_vertical_descent=bounded_descent,
+        )
+
+        result = runtime.collect_block_domain(
+            block_types=("iron_ore",),
+            expected_drops=("raw_iron",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=4),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(descent_calls, [(59, 30.0, 4)])
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertEqual([call[0] for call in work.calls], [target])
+        certificate = result.metrics["attempts"][0]["vertical_descent"]
+        self.assertTrue(certificate["rank_reduced"])
+        self.assertTrue(certificate["target_preserved"])
+
+    def test_surface_egress_cannot_repeat_when_same_target_remains_blocked(self):
+        target = (5, 70, 0)
+        body = ResourceBody([(target, "dirt")])
+        navigator = RecordingNavigator(
+            body,
+            [(5, 69, -1), (5, 69, -1)],
+            outcomes=[(False, "no_path"), (False, "no_path")],
+        )
+        egress_calls = []
+
+        def bounded_egress(timeout_s, mutation_budget):
+            egress_calls.append((timeout_s, mutation_budget))
+            body.state_pos = (20.5, 63.0, 0.5)
+            return ToolResult(
+                True,
+                "surface_reached",
+                False,
+                metrics={"mutations_completed": 0},
+            )
+
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            RecordingWork(),
+            bounded_mobility_egress=bounded_egress,
+        )
+
+        result = runtime.collect_block_domain(
+            block_types=("dirt",),
+            expected_drops=("dirt",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=1, mutation_budget=2),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(egress_calls, [(30.0, 2)])
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertEqual(runtime.work.calls, [])
 
     def test_successful_egress_preserves_untried_candidate_domain(self):
         first = (5, 64, 0)
@@ -1080,7 +1701,7 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
             block_types=("oak_log",),
             expected_drops=("oak_log",),
             remaining_count=1,
-            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=1),
+            config=ResourceCollectionConfig(candidate_budget=3, mutation_budget=1),
         )
 
         self.assertTrue(result.success, result.to_payload())
@@ -1581,7 +2202,7 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         second = (8, 64, 0)
         third = (11, 64, 0)
         body = ResourceBody([(first, "dirt"), (second, "dirt"), (third, "dirt")])
-        navigator = RecordingNavigator(body, [(5, 65, -1), (8, 65, -1)])
+        navigator = RecordingNavigator(body, [(5, 65, -1), (11, 65, -1)])
         work = RecordingWork(
             [
                 ToolResult(False, "collect_no_inventory_delta", True),
@@ -1600,9 +2221,82 @@ class ResourceCollectionRuntimeTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "resource_domain_budget_exhausted")
         self.assertEqual(len(navigator.calls), 2)
-        self.assertEqual([call[0] for call in work.calls], [first, second])
-        self.assertIn(list(third), result.metrics["searches"][-1]["active_candidates"])
+        self.assertEqual([call[0] for call in work.calls], [first, third])
+        self.assertIn(list(second), result.metrics["searches"][-1]["unadmitted_candidates"])
+        self.assertEqual(result.metrics["candidate_attempts_consumed"], 2)
+        self.assertEqual(result.metrics["candidate_budget_remaining"], 0)
         self.assertEqual([scope for scope, _params in body.perceptions].count("findBlocks"), 3)
+
+    def test_large_paged_domain_advances_past_blacklisted_near_cluster(self):
+        first = (5, 64, 0)
+        same_cluster = (6, 64, 1)
+        fresh = (12, 64, 0)
+        body = CursorPagedResourceBody(
+            [
+                [(first, "stone")],
+                [(same_cluster, "stone")],
+                [(fresh, "stone")],
+            ]
+        )
+        navigator = RecordingNavigator(
+            body,
+            [(5, 65, -1), (12, 65, -1)],
+            outcomes=[(False, "no_path"), (True, "arrived")],
+        )
+        work = RecordingWork()
+        runtime = ResourceCollectionTransactions(body, navigator, work)
+
+        result = runtime.collect_block_domain(
+            block_types=("stone",),
+            expected_drops=("cobblestone",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(
+                candidate_budget=2,
+                mutation_budget=1,
+                find_limit=1,
+                max_pages=1,
+            ),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual([call[0] for call in work.calls], [fresh])
+        find_calls = [params for scope, params in body.perceptions if scope == "findBlocks"]
+        self.assertEqual(find_calls[0].get("start"), 0)
+        self.assertEqual([call.get("cursor") for call in find_calls[1:]], ["page-1", "page-2"])
+        self.assertEqual(result.metrics["candidate_attempts_consumed"], 2)
+
+    def test_pickup_timeout_uses_inventory_truth_without_blacklisting_neighbor_cluster(self):
+        first = (5, 64, 0)
+        neighbor = (6, 64, 0)
+        body = InventoryTruthResourceBody([(first, "stone"), (neighbor, "stone")])
+        navigator = RecordingNavigator(body, [(5, 65, -1)])
+
+        def collect_target(pos, _block_id, _expected_items, _excavation_budget, _timeout_s):
+            body.targets = [entry for entry in body.targets if entry[0] != pos]
+            body.counts["cobblestone"] += 1
+            return ToolResult(
+                False,
+                "pickup_not_observed",
+                True,
+                metrics={"mutations_completed": 1, "phase_reason": "pickup_timeout"},
+            )
+
+        runtime = ResourceCollectionTransactions(
+            body,
+            navigator,
+            RecordingWork(),
+            designated_collector=collect_target,
+        )
+        result = runtime.collect_block_domain(
+            block_types=("stone",),
+            expected_drops=("cobblestone",),
+            remaining_count=1,
+            config=ResourceCollectionConfig(candidate_budget=2, mutation_budget=2),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["collected_total"], 1)
+        self.assertEqual(result.metrics["candidate_blacklist"], [])
 
 
 if __name__ == "__main__":

@@ -146,10 +146,12 @@ public final class BlockPrimitiveActions {
             gate.discard(proposalId);
             proposalId = null;
             if (state != MutationGate.State.ALLOWED) {
-                String reason = state == MutationGate.State.TIMED_OUT
-                    ? "governance_verdict_timeout"
-                    : "governance_denied:" + verdictReason;
-                finish(false, reason, ActionRuntime.CLASS_UNSAFE, serverTick);
+                if (state == MutationGate.State.TIMED_OUT) {
+                    finish(false, "governance_verdict_timeout", ActionRuntime.CLASS_UNSAFE, serverTick);
+                } else {
+                    finish(false, "governance_denied", ActionRuntime.CLASS_UNSAFE, serverTick,
+                        "governance_reason", verdictReason);
+                }
                 return;
             }
             String observed = world.blockIdAt(x, y, z);
@@ -160,7 +162,8 @@ public final class BlockPrimitiveActions {
             controls.lookAt(bot, x + 0.5, y + 0.5, z + 0.5);
             ExactBlockBreaker.Outcome outcome = breaker.begin(bot, x, y, z, expectedBlockId, serverTick);
             if (outcome.state() == ExactBlockBreaker.State.FAILED) {
-                finish(false, "exact_break_failed:" + outcome.reason(), ActionRuntime.CLASS_FAILED, serverTick);
+                finish(false, "exact_break_failed", ActionRuntime.CLASS_FAILED, serverTick,
+                    "break_failure_reason", outcome.reason());
                 return;
             }
             phase = MutationPhase.EXECUTING;
@@ -182,7 +185,8 @@ public final class BlockPrimitiveActions {
 
         private void verifyOrContinue(ExactBlockBreaker.Outcome outcome, int serverTick) {
             if (outcome.state() == ExactBlockBreaker.State.FAILED) {
-                finish(false, "exact_break_failed:" + outcome.reason(), ActionRuntime.CLASS_FAILED, serverTick);
+                finish(false, "exact_break_failed", ActionRuntime.CLASS_FAILED, serverTick,
+                    "break_failure_reason", outcome.reason());
                 return;
             }
             if (outcome.state() == ExactBlockBreaker.State.COMPLETE) {
@@ -196,12 +200,26 @@ public final class BlockPrimitiveActions {
         }
 
         private void finish(boolean success, String reason, String classification, int serverTick) {
+            finish(success, reason, classification, serverTick, null, null);
+        }
+
+        private void finish(
+            boolean success,
+            String reason,
+            String classification,
+            int serverTick,
+            String detailKey,
+            String detailValue
+        ) {
             breaker.abort(bot);
             if (proposalId != null) {
                 gate.discard(proposalId);
                 proposalId = null;
             }
             JsonObject facts = mutationFacts(success, reason, x, y, z, expectedBlockId, world.position());
+            if (detailKey != null && detailValue != null) {
+                facts.addProperty(detailKey, detailValue);
+            }
             facts.addProperty("block_after", world.blockIdAt(x, y, z));
             facts.addProperty("elapsed_ticks", Math.max(0, serverTick - startedTick));
             runtime.finish(bot, actionId, classification, facts, serverTick);
@@ -314,15 +332,18 @@ public final class BlockPrimitiveActions {
             gate.discard(proposalId);
             proposalId = null;
             if (state != MutationGate.State.ALLOWED) {
-                String reason = state == MutationGate.State.TIMED_OUT
-                    ? "governance_verdict_timeout"
-                    : "governance_denied:" + verdictReason;
-                finish(false, reason, ActionRuntime.CLASS_UNSAFE, serverTick);
+                if (state == MutationGate.State.TIMED_OUT) {
+                    finish(false, "governance_verdict_timeout", ActionRuntime.CLASS_UNSAFE, serverTick);
+                } else {
+                    finish(false, "governance_denied", ActionRuntime.CLASS_UNSAFE, serverTick,
+                        "governance_reason", verdictReason);
+                }
                 return;
             }
             String invalid = placementPrecondition();
             if (invalid != null) {
-                finish(false, invalid + "_after_allow", ActionRuntime.CLASS_FAILED, serverTick);
+                finish(false, "placement_precondition_failed_after_allow", ActionRuntime.CLASS_FAILED,
+                    serverTick, "precondition_reason", invalid);
                 return;
             }
             itemCountBefore = world.selectedItemCount();
@@ -376,11 +397,25 @@ public final class BlockPrimitiveActions {
         }
 
         private void finish(boolean success, String reason, String classification, int serverTick) {
+            finish(success, reason, classification, serverTick, null, null);
+        }
+
+        private void finish(
+            boolean success,
+            String reason,
+            String classification,
+            int serverTick,
+            String detailKey,
+            String detailValue
+        ) {
             if (proposalId != null) {
                 gate.discard(proposalId);
                 proposalId = null;
             }
             JsonObject facts = mutationFacts(success, reason, x, y, z, blockId, world.position());
+            if (detailKey != null && detailValue != null) {
+                facts.addProperty(detailKey, detailValue);
+            }
             facts.addProperty("requested_face", requestedFace);
             if (resolvedFace != null) {
                 facts.addProperty("face", resolvedFace);

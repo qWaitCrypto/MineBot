@@ -111,6 +111,7 @@ public sealed interface Goal {
         public static final double HORIZONTAL_REACH = 1.3;
         public static final double BELOW_FEET_REACH = 0.5;
         public static final double ABOVE_FEET_REACH = 2.3;
+        public static final double MAX_UNREPLANNED_DRIFT = 0.5;
         private static final double FINAL_POSITION_MARGIN = 0.15;
         private static final double PLANNED_HORIZONTAL_REACH =
             HORIZONTAL_REACH - FINAL_POSITION_MARGIN;
@@ -131,10 +132,7 @@ public sealed interface Goal {
 
         @Override
         public boolean isSatisfied(WorldView world, int nx, int ny, int nz) {
-            return isSatisfied(nx, ny, nz)
-                && isOccupiable(world.kindAt(nx, ny, nz))
-                && isOccupiable(world.kindAt(nx, ny + 1, nz))
-                && !world.isBodyPositionHazardous(nx, ny, nz);
+            return isSatisfied(nx, ny, nz) && isSafeTerminal(world, nx, ny, nz);
         }
 
         @Override
@@ -168,6 +166,19 @@ public sealed interface Goal {
                 dy = 0.0;
             }
             return Math.sqrt(dx * dx + dy * dy + dz * dz) * HEURISTIC_TICKS_PER_BLOCK;
+        }
+
+        public boolean isWithinPhysicalReach(double playerX, double playerY, double playerZ) {
+            return Math.abs(playerX - targetX) <= HORIZONTAL_REACH
+                && Math.abs(playerZ - targetZ) <= HORIZONTAL_REACH
+                && targetY >= playerY - BELOW_FEET_REACH
+                && targetY <= playerY + ABOVE_FEET_REACH;
+        }
+
+        private static boolean isSafeTerminal(WorldView world, int x, int y, int z) {
+            return isOccupiable(world.kindAt(x, y, z))
+                && isOccupiable(world.kindAt(x, y + 1, z))
+                && !world.isBodyPositionHazardous(x, y, z);
         }
 
         private static boolean isOccupiable(WorldView.NodeKind kind) {

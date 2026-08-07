@@ -24,6 +24,27 @@ public final class ApproachController {
         static final Outcome WORKING_OUTCOME = new Outcome(Status.WORKING, "working");
     }
 
+    /** Finite search/movement facts owned by one navigation objective. */
+    public record Profile(
+        int maxExpand,
+        int gridRadius,
+        MoveGenerator.Policy movement
+    ) {
+        public Profile {
+            if (maxExpand < 1 || gridRadius < 0 || movement == null) {
+                throw new IllegalArgumentException("invalid navigation profile");
+            }
+        }
+
+        public static Profile defaults() {
+            return new Profile(
+                AStarPathfinder.DEFAULT_TOTAL_NODE_CAP,
+                0,
+                MoveGenerator.Policy.defaults()
+            );
+        }
+    }
+
     private enum Phase {
         PLANNING,
         FOLLOWING
@@ -43,6 +64,7 @@ public final class ApproachController {
     private final double finalWaypointReachDistance;
     private final boolean directReturnRequired;
     private final boolean allowGoalStaging;
+    private final Profile profile;
 
     private Phase phase = Phase.PLANNING;
     private AStarPathfinder pathfinder;
@@ -56,6 +78,7 @@ public final class ApproachController {
     private int unloadedTotal;
     private int stableArrivalTicks;
     private long lastStuckCell = Long.MIN_VALUE;
+    private String terminalDetail;
 
     public ApproachController(
         String bot,
@@ -190,6 +213,34 @@ public final class ApproachController {
         boolean directReturnRequired,
         boolean allowGoalStaging
     ) {
+        this(
+            bot,
+            actionId,
+            goal,
+            world,
+            controls,
+            events,
+            replanLimit,
+            finalWaypointReachDistance,
+            directReturnRequired,
+            allowGoalStaging,
+            Profile.defaults()
+        );
+    }
+
+    public ApproachController(
+        String bot,
+        String actionId,
+        Goal goal,
+        WorldView world,
+        MovementControls controls,
+        NavigateExecutor.EventSink events,
+        int replanLimit,
+        double finalWaypointReachDistance,
+        boolean directReturnRequired,
+        boolean allowGoalStaging,
+        Profile profile
+    ) {
         this.bot = bot;
         this.actionId = actionId;
         this.goal = goal;
@@ -203,6 +254,7 @@ public final class ApproachController {
         );
         this.directReturnRequired = directReturnRequired;
         this.allowGoalStaging = allowGoalStaging;
+        this.profile = profile;
     }
 
     public int replans() {
@@ -246,8 +298,12 @@ public final class ApproachController {
                 (int) Math.floor(px),
                 NavigateExecutor.PositionSource.Position.feetBlockY(py),
                 (int) Math.floor(pz),
+                profile.maxExpand(),
+                AStarPathfinder.DEFAULT_UNLOADED_TOUCH_CAP,
                 directReturnRequired,
-                allowGoalStaging
+                allowGoalStaging,
+                profile.gridRadius(),
+                profile.movement()
             );
         }
         AStarPathfinder.Result result = pathfinder.step(NavigateExecutor.NODES_PER_TICK);
@@ -306,20 +362,24 @@ public final class ApproachController {
                 Waypoint target = directive.lookTarget();
                 boolean swimming = swimmingAt(px, py, pz);
                 double lookY = swimming ? py + PLAYER_EYE_HEIGHT : target.y() + 0.5;
-                boolean shouldHoldJump = swimming || directive.jump();
-                if (shouldHoldJump && !continuousJumping) {
-                    controls.jumpContinuous(bot);
-                    continuousJumping = true;
-                } else if (!shouldHoldJump && continuousJumping) {
-                    // Carpet's public stop command releases continuous jump as
-                    // well as forward movement. Re-engage the route controls
-                    // below once the upward movement is complete.
+                int feetY = NavigateExecutor.PositionSource.Position.feetBlockY(py);
+                boolean shouldHoldJump = directive.jump()
+                    || (swimming && target.y() >= feetY);
+                boolean shouldMoveForward = directive.forward();
+                if ((!shouldHoldJump && continuousJumping)
+                    || (!shouldMoveForward && moving)) {
+                    // Carpet's public stop command releases jump and forward
+                    // together. Clear both local flags, then re-engage only the
+                    // controls this movement directive still requests.
                     controls.stopMovement(bot);
-                    controls.sprint(bot);
                     moving = false;
                     continuousJumping = false;
                 }
-                if (!moving) {
+                if (shouldHoldJump && !continuousJumping) {
+                    controls.jumpContinuous(bot);
+                    continuousJumping = true;
+                }
+                if (shouldMoveForward && !moving) {
                     JsonObject data = new JsonObject();
                     JsonArray from = new JsonArray();
                     from.add(px);
@@ -336,7 +396,8 @@ public final class ApproachController {
                     events.emit(bot, serverTick, "path_follow_started", actionId, data);
                 }
                 controls.lookAt(bot, target.x() + 0.5, lookY, target.z() + 0.5);
-                if (!moving) {
+                if (shouldMoveForward && !moving) {
+                    controls.sprint(bot);
                     controls.moveForward(bot);
                     moving = true;
                 }
@@ -412,7 +473,8 @@ public final class ApproachController {
 
     private Outcome replanOrFail(int serverTick, String reason) {
         if (replans >= replanLimit) {
-            return new Outcome(Status.FAILED, "replan_budget_exhausted:" + reason);
+            terminalDetail = reason;
+            return new Outcome(Status.FAILED, "replan_budget_exhausted");
         }
         replans++;
         stableArrivalTicks = 0;
@@ -424,6 +486,10 @@ public final class ApproachController {
         data.addProperty("replans", replans);
         events.emit(bot, serverTick, "replan_started", actionId, data);
         return Outcome.WORKING_OUTCOME;
+    }
+
+    public String terminalDetail() {
+        return terminalDetail;
     }
 
     private static long cellOf(double px, double py, double pz) {

@@ -266,6 +266,11 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
         arguments_summary = _tool_arguments_summary_from_json(input_json)
         args_hash = _canonical_args_hash_from_json(input_json)
         tactic_signature = _tool_tactic_signature_from_json(tool.name, input_json)
+        strategy_epoch_condition = (
+            epoch_member.strategy_epoch_condition
+            if epoch_member is not None and tool.sidecar.can_mutate_body
+            else None
+        )
 
         def finalize(
             result: JsonObject,
@@ -327,7 +332,15 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                 args_hash=args_hash,
                 tactic_signature=tactic_signature,
                 arguments_summary=arguments_summary,
+                strategy_epoch_condition=strategy_epoch_condition,
             )
+            if strategy_epoch_condition is not None:
+                trace.emit(
+                    "strategy_epoch",
+                    tool_call_id=tool_call_id,
+                    tool=tool.name,
+                    condition=strategy_epoch_condition,
+                )
         if epoch_member is not None and epoch_member.conflict:
             result = epoch_adapter.conflict_result(epoch_member)
             if trace is not None:
@@ -1486,7 +1499,7 @@ class AgentRuntime:
         interrupt_complete: bool | None = None
         interrupt_error: JsonObject | None = None
         try:
-            interrupt = await asyncio.to_thread(self.body.interrupt, reason)
+            interrupt = await self.execution_lane.run_control(self.body.interrupt, reason)
             interrupt_ok = _optional_bool_attr(interrupt, "ok")
             interrupt_accepted = _optional_bool_attr(interrupt, "accepted")
             interrupt_complete = _optional_bool_attr(interrupt, "complete")
@@ -1555,7 +1568,11 @@ class AgentRuntime:
         while True:
             checks += 1
             try:
-                head = await asyncio.to_thread(read_head, proposed_epoch)
+                # The interrupt must run out-of-band so it can preempt a stuck
+                # writer. Once that writer is idle, owner reconciliation goes
+                # back through the one serialized Body lane like every other
+                # read; a second executor would violate Body call ordering.
+                head = await self.run_sync(read_head, proposed_epoch)
             except Exception as exc:
                 return {
                     "owner_observed": False,
@@ -1593,7 +1610,7 @@ class AgentRuntime:
                 reason, facts = body_task.result()
                 self.authority.invalidate_generation(f"body_critical:{reason}")
                 try:
-                    await asyncio.to_thread(self.body.interrupt, reason)
+                    await self.execution_lane.run_control(self.body.interrupt, reason)
                 except Exception as exc:
                     self.trace.emit("body_interrupt_failed", reason=reason, error_type=type(exc).__name__)
                 streamed.cancel(mode="immediate")
@@ -1637,7 +1654,7 @@ class AgentRuntime:
         while True:
             await asyncio.sleep(BODY_WATCH_POLL_S)
             try:
-                state = await asyncio.to_thread(self.body.get_state)
+                state = await self.run_sync(self.body.get_state)
             except Exception as exc:
                 failures += 1
                 self.trace.emit(

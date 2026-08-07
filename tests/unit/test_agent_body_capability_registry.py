@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from minebot.app.body_capability_tools import (
@@ -13,6 +14,7 @@ from minebot.app.body_tool_catalog import (
 )
 from minebot.app.phase1_runtime import (
     Phase1RuntimeConfig,
+    _java_break_collect,
     build_phase1_agent_runtime,
     build_phase1_registry,
     tool_manifest,
@@ -80,6 +82,77 @@ def _registry():
 
 
 class BodyCapabilityRegistryClosureTests(unittest.TestCase):
+    def test_java_resource_scanner_is_read_only_and_never_referenced_by_action_executors(self):
+        java_root = Path("minecraft/server/body/src/main/java/dev/minebot/body")
+        action_sources = list((java_root / "action").glob("*.java"))
+        scanner_tokens = ("dev.minebot.body.search", "LoadedBlockScanner", "scanner.scan(")
+        offenders = [
+            source.as_posix()
+            for source in action_sources
+            if any(token in source.read_text(encoding="utf-8") for token in scanner_tokens)
+        ]
+        self.assertEqual(offenders, [])
+
+        channel = (java_root / "protocol" / "FakePlayerBodyChannel.java").read_text(
+            encoding="utf-8"
+        )
+        find_start = channel.index("private void handleFindBlocks(")
+        find_end = channel.index("\n    private ", find_start + 1)
+        self.assertEqual(channel.count("scanner.scan("), 1)
+        self.assertIn("scanner.scan(", channel[find_start:find_end])
+
+    def test_java_entity_actions_accept_only_agent_resolved_uuid(self):
+        java_root = Path("minecraft/server/body/src/main/java/dev/minebot/body")
+        channel = (java_root / "protocol" / "FakePlayerBodyChannel.java").read_text(
+            encoding="utf-8"
+        )
+        target_source_start = channel.index("private EngageExecutor.TargetSource entityTargetSource(")
+        target_source_end = channel.index("\n    private ", target_source_start + 1)
+        target_source = channel[target_source_start:target_source_end]
+        self.assertNotIn("nearest_hostile", target_source)
+        self.assertNotIn("closestLookup", target_source)
+        self.assertIn("targetUuid.equals(entity.getUUID().toString())", target_source)
+
+        for handler_name in ("handleFollowEntity", "handleEngageEntity"):
+            start = channel.index(f"private void {handler_name}(")
+            end = channel.index("\n    private ", start + 1)
+            handler = channel[start:end]
+            self.assertIn('requiredUuidString(request, "target_uuid")', handler)
+            self.assertIn("rejectLegacyEntitySelector(request)", handler)
+
+        for executor_name in ("EngageExecutor.java", "FollowExecutor.java"):
+            executor = (java_root / "action" / executor_name).read_text(encoding="utf-8")
+            self.assertNotIn("targetSpec", executor)
+            self.assertIn("targetUuid", executor)
+
+    def test_java_designated_collect_projects_missing_tool_as_strategy_terminal(self):
+        body = Mock()
+        body.execute.return_value = Mock(
+            ok=False,
+            accepted=True,
+            complete=True,
+            error="no_path",
+            data={
+                "phase_reason": "missing_required_tool",
+                "attempts_consumed": 1,
+                "budget_remaining": 0,
+            },
+        )
+
+        result = _java_break_collect(
+            body,
+            (5, 63, 5),
+            expected_block_id="deepslate_diamond_ore",
+            expected_item_ids=("diamond",),
+            excavation_budget=0,
+            timeout_s=10.0,
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "missing_required_tool")
+        self.assertFalse(result.can_retry)
+        self.assertEqual(result.metrics["phase_reason"], "missing_required_tool")
+
     def test_every_base_player_intent_is_registered_through_the_canonical_catalog(self):
         registry = _registry()
 
@@ -437,6 +510,42 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
             set(),
         )
 
+    def test_body_epoch_tools_project_decision_grade_evidence(self):
+        registry = _registry()
+        resource = registry.get("collect_block_domain")
+        explore = registry.get("explore_for")
+
+        self.assertIsNotNone(resource.projector)
+        resource_summary = resource.projector(
+            "new_physics_failure",
+            {
+                "candidate_attempts_consumed": 4,
+                "candidate_budget_remaining": 8,
+                "remaining_delta": 2,
+                "last_failure": {"reason": "new_physics_failure"},
+            },
+        )
+        self.assertEqual(resource_summary["candidate_attempts_consumed"], 4)
+        self.assertEqual(resource_summary["candidate_budget_remaining"], 8)
+        self.assertEqual(resource_summary["remaining_delta"], 2)
+        self.assertEqual(resource_summary["last_failure"]["reason"], "new_physics_failure")
+
+        self.assertIsNotNone(explore.projector)
+        explore_summary = explore.projector(
+            "unloaded_boundary",
+            {
+                "budget": {"max_regions": 4, "regions_consumed": 2},
+                "blocks": [{"pos": [1, 64, 1]}],
+                "entities": [],
+                "candidate_failures": [{"reason": "unloaded_boundary"}],
+                "continuation": {"tool": "explore_for"},
+            },
+        )
+        self.assertEqual(explore_summary["budget"]["regions_consumed"], 2)
+        self.assertEqual(explore_summary["candidate_count"], 1)
+        self.assertTrue(explore_summary["unloaded_boundary"])
+        self.assertEqual(explore_summary["continuation"]["tool"], "explore_for")
+
     def test_all_modes_receive_the_same_shared_tool_pool(self):
         registry = _registry()
         expected = set(registry.names())
@@ -554,7 +663,10 @@ class JavaBodyProviderRegistryTests(unittest.TestCase):
         self.assertNotIn("navigate_to", names)
         self.assertNotIn("collect_block", names)
         self.assertEqual(registry.sidecar("move_to").source, "java_body")
-        self.assertEqual(registry.sidecar("collect_block_domain").source, "java_body")
+        self.assertEqual(
+            registry.sidecar("collect_block_domain").source,
+            "body.resource_collection",
+        )
 
     def test_default_registry_uses_java_after_production_retirement(self):
         registry = _registry()
@@ -564,5 +676,34 @@ class JavaBodyProviderRegistryTests(unittest.TestCase):
         self.assertEqual(registry.sidecar("move_to").source, "java_body")
         self.assertEqual(
             registry.sidecar("collect_block_domain").source,
-            "java_body",
+            "body.resource_collection",
         )
+
+    def test_resource_process_leaf_is_internal_but_remains_composition_callable(self):
+        parts = build_phase1_agent_runtime(
+            body=_body(),
+            goal_text="collect 3 raw iron",
+            model_provider=None,
+            config=Phase1RuntimeConfig(
+                natural_region=Region("test", (-64, -64, -64), (64, 320, 64))
+            ),
+        )
+        try:
+            registered = set(parts.registry.names())
+            model_visible = set(parts.registry.model_names())
+            sdk_tools = {tool.name for tool in parts.runtime.agent.tools}
+
+            self.assertIn("collect_block_domain", registered)
+            self.assertNotIn("collect_block_domain", model_visible)
+            self.assertNotIn("collect_block_domain", sdk_tools)
+            self.assertIn("collect_resource", model_visible)
+            self.assertIn("collect_resource", sdk_tools)
+            self.assertEqual(
+                set(parts.registry.get("collect_resource").input_schema["properties"]),
+                {"item", "count"},
+            )
+            manifest = {row["name"]: row for row in tool_manifest(parts.registry)}
+            self.assertFalse(manifest["collect_block_domain"]["model_visible"])
+            self.assertTrue(manifest["collect_resource"]["model_visible"])
+        finally:
+            parts.runtime.close()

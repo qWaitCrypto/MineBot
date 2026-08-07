@@ -43,6 +43,7 @@ class _ProgressEpochMember:
     order: int
     body_mutating: bool
     arguments: str = ""
+    strategy_epoch_condition: str = "strategy-objective-start"
     claimed: bool = False
     conflict: bool = False
     status: str = "pending"
@@ -143,6 +144,7 @@ class ProgressEpochAdapter:
             self.finalize_unsettled("next_model_response")
         self._model_turn += 1
         pre_fingerprint = await self.runtime.read_progress_fingerprint()
+        strategy_epoch_condition = _strategy_epoch_condition(self.runtime)
         body_calls = [
             call
             for call in calls
@@ -160,6 +162,7 @@ class ProgressEpochAdapter:
                 order=index,
                 body_mutating=self.runtime.registry.get(call.tool_name).sidecar.can_mutate_body,
                 arguments=call.arguments,
+                strategy_epoch_condition=strategy_epoch_condition,
                 conflict=call.tool_call_id in conflicting_ids,
             )
             for index, call in enumerate(calls)
@@ -182,6 +185,7 @@ class ProgressEpochAdapter:
             member_tools=[member.tool_name for member in members],
             body_mutating_count=len(body_calls),
             body_batch_conflict=bool(conflicting_ids),
+            strategy_epoch_condition=strategy_epoch_condition,
             pre_body_fingerprint=pre_fingerprint,
         )
 
@@ -400,6 +404,7 @@ class ProgressEpochAdapter:
                     "success": member.success,
                     "reason": member.reason,
                     "body_mutating": member.body_mutating,
+                    "strategy_epoch_condition": member.strategy_epoch_condition,
                     "progress_step_count": len(member.progress_steps),
                     "observation_handle": member.observation_handle,
                 }
@@ -477,6 +482,35 @@ class ProgressEpochAdapter:
         self._members = {}
         self._active = None
         return progress_abort
+
+
+def _strategy_epoch_condition(runtime: "AgentRuntime") -> str:
+    decision_context = getattr(runtime, "_current_decision_context", None)
+    if getattr(decision_context, "value", decision_context) == "social":
+        return "human"
+
+    recent = runtime.last_tool_results[-1] if runtime.last_tool_results else None
+    if not isinstance(recent, dict):
+        return "strategy-objective-start"
+    reason = str(recent.get("reason") or "").strip().lower()
+    summary = recent.get("summary") if isinstance(recent.get("summary"), dict) else {}
+    resume_hint = str(summary.get("resume_hint") or "").strip().lower()
+    if (
+        resume_hint == "reselect_candidates"
+        or reason in {"target_not_found", "frontier_exhausted"}
+        or "candidate_domain_exhausted" in reason
+        or "domain_partial_exhausted" in reason
+    ):
+        return "domain-exhausted"
+    if (
+        "budget" in reason
+        or "timeout" in reason
+        or resume_hint in {"budget_exhausted", "timeout"}
+    ):
+        return "budget"
+    if recent.get("success") is False:
+        return "novel-failure"
+    return "strategy-objective-start"
 
 
 def _model_function_calls(response: Any) -> list[_ModelFunctionCall]:

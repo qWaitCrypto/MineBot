@@ -22,6 +22,7 @@ from minebot.app.runner import (
     sdk_tool_for,
 )
 from minebot.brain.context import AgentContext
+from minebot.brain.deliberation import DecisionContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleState
 from minebot.brain.modes import ModeRuntime
 from minebot.brain.progress import ProgressAuthority
@@ -164,6 +165,106 @@ def runtime_with(
 def invoke(tool: RegisteredTool, context: RuntimeRunContext, call_id: str):
     wrapper = SimpleNamespace(context=context, tool_call_id=call_id)
     return sdk_tool_for(tool).on_invoke_tool(wrapper, "{}")
+
+
+@pytest.mark.parametrize(
+    ("recent", "decision_context", "expected"),
+    [
+        (None, None, "strategy-objective-start"),
+        (
+            {
+                "tool": "collect_resource",
+                "success": False,
+                "reason": "resource_candidate_domain_exhausted",
+                "summary": {"resume_hint": "reselect_candidates"},
+            },
+            None,
+            "domain-exhausted",
+        ),
+        (
+            {
+                "tool": "collect_resource",
+                "success": False,
+                "reason": "resource_domain_budget_exhausted",
+                "summary": {},
+            },
+            None,
+            "budget",
+        ),
+        (
+            {
+                "tool": "collect_resource",
+                "success": False,
+                "reason": "unclassified_body_terminal",
+                "summary": {},
+            },
+            None,
+            "novel-failure",
+        ),
+        (None, DecisionContext.SOCIAL, "human"),
+    ],
+)
+def test_mutating_invocation_persists_and_traces_closed_strategy_epoch_condition(
+    recent,
+    decision_context,
+    expected,
+):
+    body = EpochBody()
+    tool = make_tool(
+        "collect_resource",
+        lambda _params: ToolResult(True, "resource_domain_collected", False),
+        mutating=True,
+    )
+    archive = RecordingEpochArchive()
+    runtime, adapter, context = runtime_with(body, [tool], epoch_archive=archive)
+    runtime.last_tool_results = [] if recent is None else [recent]
+    runtime._current_decision_context = decision_context
+
+    async def scenario():
+        await adapter.open(response(("call-collect", "collect_resource")))
+        return await invoke(tool, context, "call-collect")
+
+    asyncio.run(scenario())
+    trace = runtime.trace.snapshot()
+    runtime.close()
+
+    assert archive.records[0]["members"][0]["strategy_epoch_condition"] == expected
+    event = next(item for item in trace if item["event"] == "strategy_epoch")
+    assert event["condition"] == expected
+
+
+def test_body_mutating_composite_records_novel_failure_strategy_epoch():
+    body = EpochBody()
+    tool = make_tool(
+        "collect_resource",
+        lambda _params: ToolResult(False, "new_physics_failure", False),
+        mutating=False,
+        body_mutating=True,
+        source="agent.composition",
+    )
+    archive = RecordingEpochArchive()
+    runtime, adapter, context = runtime_with(body, [tool], epoch_archive=archive)
+    runtime.last_tool_results = [
+        {
+            "tool": "collect_resource",
+            "success": False,
+            "reason": "new_physics_failure",
+            "summary": {},
+        }
+    ]
+
+    async def scenario():
+        await adapter.open(response(("call-collect", "collect_resource")))
+        return await invoke(tool, context, "call-collect")
+
+    asyncio.run(scenario())
+    trace = runtime.trace.snapshot()
+    runtime.close()
+
+    assert archive.records[0]["members"][0]["strategy_epoch_condition"] == "novel-failure"
+    event = next(item for item in trace if item["event"] == "strategy_epoch")
+    assert event["tool"] == "collect_resource"
+    assert event["condition"] == "novel-failure"
 
 
 def test_epoch_preflight_rejects_every_conflicting_body_call_without_execution():
