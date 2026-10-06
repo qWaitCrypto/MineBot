@@ -46,11 +46,14 @@ import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.AbstractFurnaceMenu;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.inventory.InventoryMenu;
+import net.minecraft.world.inventory.AbstractCraftingMenu;
+import net.minecraft.world.inventory.CraftingMenu;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.crafting.display.RecipeDisplay;
 import net.minecraft.world.item.crafting.display.RecipeDisplayEntry;
 import net.minecraft.world.item.crafting.display.ShapedCraftingRecipeDisplay;
 import net.minecraft.world.item.crafting.display.ShapelessCraftingRecipeDisplay;
+import net.minecraft.world.item.crafting.display.FurnaceRecipeDisplay;
 import net.minecraft.world.item.crafting.display.SlotDisplay;
 import net.minecraft.world.item.crafting.display.SlotDisplayContext;
 import org.slf4j.Logger;
@@ -82,6 +85,11 @@ public final class MineBotClientBody implements ClientModInitializer {
     private final Set<String> usedIds = new HashSet<>();
     private IBaritone baritone;
     private Run run;
+    private MenuRead menuRead;
+    private long menuContentRevision;
+    private int contentMenuId = -1;
+    private final Map<Integer, ItemStack> confirmedResults = new LinkedHashMap<>();
+    private long resultRevision;
     private volatile Peer peer;
     private int joinedTicks;
     private volatile boolean ready;
@@ -129,6 +137,8 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
             ready = false;
             joinedTicks = 0;
+            if (menuRead != null) finishMenuRead(client, "server_disconnected");
+            confirmedResults.clear();
         });
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
         Thread.ofPlatform().daemon().name("minebot-spike-ipc").start(this::serve);
@@ -219,6 +229,17 @@ public final class MineBotClientBody implements ClientModInitializer {
             } else if (type.equals("world_read")) {
                 if (!ready) throw new IllegalArgumentException("client_not_ready");
                 worldRead(client, request, connection);
+            } else if (type.equals("container_read")) {
+                if (!ready) throw new IllegalArgumentException("client_not_ready");
+                if (run != null || menuRead != null) throw new IllegalArgumentException("body_busy");
+                JsonObject params = request.getAsJsonObject("params");
+                BlockPos pos = positionParam(params, "pos");
+                menuRead = new MenuRead(string(request, "request_id", ""), connection, pos, menuContentRevision);
+                try {
+                    openMenu(client, pos);
+                } catch (RuntimeException error) {
+                    finishMenuRead(client, error.getMessage());
+                }
             } else if (type.equals("settings")) {
                 if (run != null) {
                     throw new IllegalArgumentException("body_busy");
@@ -370,7 +391,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         if (id.isBlank()) {
             throw new IllegalArgumentException("missing_action_id");
         }
-        if (run != null) {
+        if (run != null || menuRead != null) {
             throw new IllegalArgumentException("body_busy");
         }
         if (usedIds.contains(id)) {
@@ -592,7 +613,9 @@ public final class MineBotClientBody implements ClientModInitializer {
         JsonObject response = envelope("world_read", string(request, "request_id", ""));
         response.addProperty("request_id", string(request, "request_id", ""));
         JsonObject data = new JsonObject();
-        if (scope.equals("blockAt")) {
+        if (scope.equals("recipeData")) {
+            data = recipeData(client, params);
+        } else if (scope.equals("blockAt")) {
             BlockPos pos = new BlockPos(params.get("x").getAsInt(), params.get("y").getAsInt(), params.get("z").getAsInt());
             JsonObject fact = blockFact(client.level.getBlockState(pos), pos);
             for (var entry : fact.entrySet()) data.add(entry.getKey(), entry.getValue());
@@ -720,12 +743,32 @@ public final class MineBotClientBody implements ClientModInitializer {
     private static void moveItem(Minecraft client, JsonObject params) {
         int from = params.get("from_slot").getAsInt();
         int to = params.get("to_slot").getAsInt();
-        if (from < 0 || to < 0 || from >= client.player.containerMenu.slots.size() || to >= client.player.containerMenu.slots.size()) {
+        if (from < 0 || from > 44 || to < 0 || to > 40 || from == to) {
             throw new IllegalArgumentException("invalid_inventory_slot");
         }
-        int menu = client.player.containerMenu.containerId;
-        client.gameMode.handleContainerInput(menu, from, 0, net.minecraft.world.inventory.ContainerInput.PICKUP, client.player);
-        client.gameMode.handleContainerInput(menu, to, 0, net.minecraft.world.inventory.ContainerInput.PICKUP, client.player);
+        if (!(client.player.containerMenu instanceof InventoryMenu menu)) {
+            throw new IllegalArgumentException("inventory_menu_unavailable");
+        }
+        if (!menu.getCarried().isEmpty()) throw new IllegalArgumentException("inventory_cursor_occupied");
+        // Protocol 41–44 are personal crafting inputs, not player inventory indices.
+        int source = from < 41 ? menuSlotForPlayer(menu, from) : from - 40;
+        int destination = menuSlotForPlayer(menu, to);
+        if (source < 0 || destination < 0) throw new IllegalArgumentException("invalid_inventory_slot");
+        Slot sourceSlot = menu.getSlot(source);
+        Slot destinationSlot = menu.getSlot(destination);
+        ItemStack stack = sourceSlot.getItem();
+        ItemStack target = destinationSlot.getItem();
+        if (stack.isEmpty()) throw new IllegalArgumentException("source_empty");
+        if (!target.isEmpty() && !ItemStack.isSameItemSameComponents(stack, target)) {
+            throw new IllegalArgumentException("destination_occupied");
+        }
+        int amount = integer(params, "count", stack.getCount());
+        int capacity = Math.min(integer(params, "max_stack", 64), destinationSlot.getMaxStackSize(stack));
+        if (amount <= 0 || amount > stack.getCount() || target.getCount() + amount > capacity
+            || !sourceSlot.mayPickup(client.player) || !destinationSlot.mayPlace(stack)) {
+            throw new IllegalArgumentException("move_count_or_capacity_mismatch");
+        }
+        moveCount(client, menu, source, destination, amount);
     }
 
     private static void mineBlock(Minecraft client, JsonObject params) {
@@ -773,8 +816,8 @@ public final class MineBotClientBody implements ClientModInitializer {
                 if (run.kind.equals("rangedAttack")) {
                     client.options.keyUse.setDown(false);
                 }
-                if (run.kind.equals("containerTransfer") || run.kind.equals("furnaceTransfer")) {
-                    if (client.player.containerMenu.containerId != 0) client.player.closeContainer();
+                if (run.kind.equals("containerTransfer") || run.kind.equals("furnaceTransfer") || run.kind.equals("craftItem")) {
+                    if (client.player.containerMenu.containerId == run.openMenuId) client.player.closeContainer();
                 }
             }
         }
@@ -785,6 +828,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         joinedTicks++;
+        if (menuRead != null) tickMenuRead(client);
         if (!ready && joinedTicks >= 20 && client.level.hasChunkAt(client.player.blockPosition()) && client.player.onGround()) {
             ready = true;
             readyAtMs = (System.nanoTime() - loadedAt) / 1_000_000;
@@ -1065,47 +1109,260 @@ public final class MineBotClientBody implements ClientModInitializer {
             .updateTarget(new Rotation(yaw, pitch), true);
     }
 
-    private void tickCraft(Minecraft client, Run current) {
-        if (!(client.player.containerMenu instanceof InventoryMenu menu)) {
-            requestStop("failed", "inventory_menu_unavailable");
-            return;
+    private static void openMenu(Minecraft client, BlockPos pos) {
+        if (pos == null || !client.level.hasChunkAt(pos) || !client.player.isWithinBlockInteractionRange(pos, 0.0)) {
+            throw new IllegalArgumentException("container_out_of_range");
         }
+        if (client.player.containerMenu.containerId != 0 || !client.player.containerMenu.getCarried().isEmpty()) {
+            throw new IllegalArgumentException("menu_busy");
+        }
+        BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
+        if (!client.gameMode.useItemOn(client.player, InteractionHand.MAIN_HAND, hit).consumesAction()) {
+            throw new IllegalArgumentException("container_open_rejected");
+        }
+    }
+
+    public static void observeMenuContent(int menuId, List<ItemStack> items) {
+        if (instance == null) return;
+        instance.menuContentRevision++;
+        instance.contentMenuId = menuId;
+        if (!items.isEmpty()) instance.confirmedResults.put(menuId, items.getFirst().copy());
+        instance.resultRevision++;
+    }
+
+    public static void observeMenuSlot(int menuId, int slot, ItemStack stack) {
+        if (instance != null && slot == 0) {
+            instance.confirmedResults.put(menuId, stack.copy());
+            instance.resultRevision++;
+        }
+    }
+
+    private boolean freshMenu(Minecraft client, long revision) {
+        return client.player.containerMenu.containerId != 0
+            && contentMenuId == client.player.containerMenu.containerId && menuContentRevision > revision;
+    }
+
+    private void tickMenuRead(Minecraft client) {
+        if (freshMenu(client, menuRead.revision)) finishMenuRead(client, null);
+        else if (System.nanoTime() - menuRead.started > 5_000_000_000L) finishMenuRead(client, "container_open_timeout");
+    }
+
+    private void finishMenuRead(Minecraft client, String error) {
+        MenuRead current = menuRead;
+        if (current == null) return;
+        menuRead = null;
+        JsonObject response = envelope("container_read", current.id);
+        response.addProperty("request_id", current.id);
+        response.addProperty("ok", error == null);
+        if (error != null) response.addProperty("error", error);
+        if (error == null) {
+            AbstractContainerMenu menu = client.player.containerMenu;
+            JsonObject data = new JsonObject();
+            JsonArray pos = new JsonArray();
+            pos.add(current.pos.getX()); pos.add(current.pos.getY()); pos.add(current.pos.getZ());
+            data.add("pos", pos);
+            data.addProperty("menu", menu.getClass().getSimpleName());
+            data.addProperty("menu_id", menu.containerId);
+            data.addProperty("state_id", menu.getStateId());
+            JsonArray slots = new JsonArray();
+            for (Slot slot : menu.slots) {
+                if (!(slot.container instanceof net.minecraft.world.entity.player.Inventory)) {
+                    slots.add(stackFact(slot.getItem(), slots.size(), "container", "container." + slots.size()));
+                }
+            }
+            data.add("slots", slots);
+            if (menu instanceof AbstractFurnaceMenu furnace) {
+                data.addProperty("lit", furnace.isLit());
+                data.addProperty("burn_progress", furnace.getBurnProgress());
+            }
+            response.add("data", data);
+            client.player.closeContainer();
+        }
+        current.peer.send(response);
+    }
+
+    private static JsonObject stackFact(ItemStack stack, int slot, String type, String label) {
+        JsonObject fact = new JsonObject();
+        fact.addProperty("slot", slot);
+        fact.addProperty("slotType", type);
+        fact.addProperty("slotLabel", label);
+        fact.addProperty("empty", stack.isEmpty());
+        fact.addProperty("count", stack.getCount());
+        if (!stack.isEmpty()) {
+            fact.addProperty("item", BuiltInRegistries.ITEM.getKey(stack.getItem()).toString());
+            fact.addProperty("stackRaw", stack.getComponentsPatch().toString());
+            fact.addProperty("maxStack", stack.getMaxStackSize());
+        }
+        return fact;
+    }
+
+    private static JsonArray inventorySlots(Minecraft client) {
+        JsonArray slots = new JsonArray();
+        InventoryMenu menu = client.player.inventoryMenu;
+        for (int slot = 0; slot < 46; slot++) {
+            int mapped = slot < 41 ? menuSlotForPlayer(menu, slot) : slot == 45 ? 0 : slot - 40;
+            ItemStack stack = mapped < 0 ? ItemStack.EMPTY : menu.getSlot(mapped).getItem();
+            String type = slot < 9 ? "hotbar" : slot < 36 ? "inventory" : slot < 40 ? "armor" : slot == 40 ? "offhand" : "aux";
+            slots.add(stackFact(stack, slot, type, type + "." + slot));
+        }
+        return slots;
+    }
+
+    private static JsonObject recipeData(Minecraft client, JsonObject params) {
+        String wanted = string(params, "item", "").replace("minecraft:", "");
+        JsonArray variants = new JsonArray();
+        var context = SlotDisplayContext.fromLevel(client.level);
+        for (var collection : client.player.getRecipeBook().getCollections()) {
+            for (RecipeDisplayEntry entry : collection.getRecipes()) {
+                RecipeDisplay display = entry.display();
+                ItemStack output = display.result().resolveForFirstStack(context);
+                if (output.isEmpty() || !itemPath(output).equals(wanted)) continue;
+                JsonObject variant = new JsonObject();
+                List<SlotDisplay> ingredients;
+                if (display instanceof ShapedCraftingRecipeDisplay shaped) {
+                    variant.addProperty("recipe_kind", "shaped");
+                    variant.addProperty("width", shaped.width());
+                    variant.addProperty("height", shaped.height());
+                    ingredients = shaped.ingredients();
+                } else if (display instanceof ShapelessCraftingRecipeDisplay shapeless) {
+                    variant.addProperty("recipe_kind", "shapeless");
+                    ingredients = shapeless.ingredients();
+                } else if (display instanceof FurnaceRecipeDisplay furnace) {
+                    variant.addProperty("recipe_kind", "smelting");
+                    variant.addProperty("duration_ticks", furnace.duration());
+                    ingredients = List.of(furnace.ingredient());
+                } else continue;
+                String requestedType = string(params, "type", "crafting").replace("minecraft:", "");
+                if (requestedType.equals("crafting") && display instanceof FurnaceRecipeDisplay) continue;
+                if (!requestedType.equals("crafting") && !(display instanceof FurnaceRecipeDisplay)) continue;
+                variant.addProperty("output_item", BuiltInRegistries.ITEM.getKey(output.getItem()).toString());
+                variant.addProperty("output_count", output.getCount());
+                JsonArray groups = new JsonArray();
+                for (SlotDisplay ingredient : ingredients) {
+                    JsonArray alternatives = new JsonArray();
+                    ingredient.resolveForStacks(context).stream().map(stack -> BuiltInRegistries.ITEM.getKey(stack.getItem()).toString())
+                        .distinct().forEach(alternatives::add);
+                    groups.add(alternatives);
+                }
+                variant.add("ingredient_groups", groups);
+                variants.add(variant);
+            }
+        }
+        JsonObject data = new JsonObject();
+        data.add("variants", variants);
+        data.addProperty("recipe_source", "server_synced_unlocked_recipe_book");
+        return data;
+    }
+
+    private void tickCraft(Minecraft client, Run current) {
         JsonObject output = current.params.has("output") && current.params.get("output").isJsonObject()
             ? current.params.getAsJsonObject("output") : new JsonObject();
         String outputItem = string(output, "item", "").replace("minecraft:", "");
-        int outputCount = Math.max(1, integer(output, "count", 1));
+        int outputCount = integer(output, "count", 0);
         int outputInventorySlot = integer(output, "slot", -1);
-        if (outputItem.isBlank() || outputInventorySlot < 0 || outputInventorySlot >= client.player.getInventory().getContainerSize()) {
+        if (outputItem.isBlank() || outputCount <= 0 || outputInventorySlot < 0 || outputInventorySlot >= 36) {
             requestStop("failed", "invalid_recipe_output");
             return;
         }
         if (current.phase == 0) {
+            if (!current.params.has("inputs") || !current.params.get("inputs").isJsonArray()
+                || current.params.getAsJsonArray("inputs").isEmpty() || !validCraftEntries(current.params.getAsJsonArray("inputs"))) {
+                requestStop("failed", "invalid_recipe_inputs");
+                return;
+            }
+            if (current.params.has("remainders") && (!current.params.get("remainders").isJsonArray()
+                || !validCraftEntries(current.params.getAsJsonArray("remainders")))) {
+                requestStop("failed", "invalid_remainder_slot");
+                return;
+            }
+            BlockPos table = positionParam(current.params, "crafting_table");
+            if (table != null) {
+                current.menuRevision = menuContentRevision;
+                openMenu(client, table);
+                current.phase = 10;
+                return;
+            }
+            current.phase = 11;
+        }
+        if (current.phase == 10) {
+            if (!freshMenu(client, current.menuRevision)) return;
+            if (!(client.player.containerMenu instanceof CraftingMenu)) {
+                requestStop("failed", "crafting_table_menu_missing");
+                return;
+            }
+            current.phase = 11;
+        }
+        if (!(client.player.containerMenu instanceof AbstractCraftingMenu menu)) {
+            requestStop("failed", "crafting_menu_unavailable");
+            return;
+        }
+        if (current.phase == 11) {
+            current.openMenuId = menu.containerId;
+            current.outputMenuSlot = menuSlotForPlayer(menu, outputInventorySlot);
+            if (!menu.getCarried().isEmpty() || menu.getInputGridSlots().stream().anyMatch(slot -> slot.hasItem())) {
+                requestStop("failed", "crafting_grid_not_empty");
+                return;
+            }
+            ItemStack destination = menu.getSlot(current.outputMenuSlot).getItem();
+            if ((!destination.isEmpty() && !itemPath(destination).equals(outputItem))
+                || destination.getCount() + outputCount > (destination.isEmpty() ? integer(current.params, "max_stack", 64) : destination.getMaxStackSize())) {
+                requestStop("failed", "craft_output_no_space");
+                return;
+            }
+            current.craftBefore = inventorySlots(client);
+            current.resultRevision = resultRevision;
             if (!craftInputs(client, menu, current)) return;
-            current.outputMenuSlot = playerMenuSlot(outputInventorySlot);
             current.outputExpected = outputItem;
             current.outputRequested = outputCount;
             current.phase = 1;
             current.phaseTick = current.ticks;
             return;
         }
-        if (current.phase == 1 && current.ticks - current.phaseTick < 2) return;
-        ItemStack result = menu.getSlot(InventoryMenu.RESULT_SLOT).getItem();
-        if (result.isEmpty() || !itemPath(result).equals(outputItem) || result.getCount() < outputCount) {
-            requestStop("failed", "recipe_output_missing");
+        if (menu.containerId != current.openMenuId) {
+            requestStop("failed", "crafting_menu_changed");
             return;
         }
-        int before = count(client, outputItem);
-        click(menu, InventoryMenu.RESULT_SLOT, 0, ContainerInput.PICKUP, client);
-        click(menu, current.outputMenuSlot, 0, ContainerInput.PICKUP, client);
-        current.phase = 2;
-        current.phaseTick = current.ticks;
-        current.before = before;
-        if (count(client, outputItem) >= before + outputCount) {
+        if (current.phase == 1) {
+            ItemStack result = confirmedResults.getOrDefault(menu.containerId, ItemStack.EMPTY);
+            if (resultRevision <= current.resultRevision || result.isEmpty()) return;
+            if (!itemPath(result).equals(outputItem) || result.getCount() != current.craftUnitCount) {
+                requestStop("failed", "recipe_output_mismatch");
+                return;
+            }
+            current.resultRevision = resultRevision;
+            click(menu, menu.getResultSlot().index, 0, ContainerInput.PICKUP, client);
+            click(menu, current.outputMenuSlot, 0, ContainerInput.PICKUP, client);
+            current.craftTaken += result.getCount();
+            current.phase = 2;
+            current.phaseTick = current.ticks;
+        } else if (current.phase == 2 && resultRevision > current.resultRevision && current.ticks - current.phaseTick >= 3) {
+            if (current.craftTaken < current.outputRequested) {
+                current.phase = 1;
+            } else {
+                if (!collectCraftRemainders(client, menu, current)) return;
+                current.phase = 3;
+                current.phaseTick = current.ticks;
+            }
+        } else if (current.phase == 3 && current.ticks - current.phaseTick >= 6) {
+            if (!craftInventoryMatches(client, current)) {
+                requestStop("failed", "craft_inventory_mismatch");
+                return;
+            }
             requestStop("completed", "crafted_verified");
         }
     }
 
-    private boolean craftInputs(Minecraft client, InventoryMenu menu, Run current) {
+    private static boolean validCraftEntries(JsonArray entries) {
+        for (var raw : entries) {
+            if (!raw.isJsonObject()) return false;
+            JsonObject entry = raw.getAsJsonObject();
+            int slot = integer(entry, "slot", -1);
+            if (slot < 0 || slot >= 36 || integer(entry, "count", 0) <= 0 || string(entry, "item", "").isBlank()) return false;
+        }
+        return true;
+    }
+
+    private boolean craftInputs(Minecraft client, AbstractCraftingMenu menu, Run current) {
         if (!current.params.has("inputs") || !current.params.get("inputs").isJsonArray()) {
             requestStop("failed", "invalid_recipe_inputs");
             return false;
@@ -1119,10 +1376,10 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
             JsonObject input = raw.getAsJsonObject();
             int inventorySlot = integer(input, "slot", -1);
-            int amount = Math.max(1, integer(input, "count", 1));
+            int amount = integer(input, "count", 0);
             String wanted = string(input, "item", "").replace("minecraft:", "");
-            int source = playerMenuSlot(inventorySlot);
-            if (inventorySlot < 0 || inventorySlot >= client.player.getInventory().getContainerSize()
+            int source = menuSlotForPlayer(menu, inventorySlot);
+            if (inventorySlot < 0 || inventorySlot >= 36 || source < 0
                 || source >= menu.slots.size() || menu.getSlot(source).getItem().isEmpty()
                 || !itemPath(menu.getSlot(source).getItem()).equals(wanted)
                 || menu.getSlot(source).getItem().getCount() < amount) {
@@ -1131,17 +1388,17 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
             for (int unit = 0; unit < amount; unit++) {
                 sourceSlots.add(source);
-                sourceItems.add(menu.getSlot(source).getItem());
+                sourceItems.add(menu.getSlot(source).getItem().copy());
             }
         }
-        RecipePlacement placement = findRecipePlacement(client, current, sourceItems);
+        RecipePlacement placement = findRecipePlacement(client, menu, current, sourceItems);
         if (placement == null) {
             requestStop("failed", "recipe_not_found_or_inputs_do_not_match");
             return false;
         }
+        current.craftUnitCount = placement.outputCount;
         for (int index = 0; index < placement.gridSlots.size(); index++) {
             int gridSlot = placement.gridSlots.get(index);
-            if (gridSlot < InventoryMenu.CRAFT_SLOT_START || gridSlot > InventoryMenu.CRAFT_SLOT_END) continue;
             int source = sourceSlots.get(placement.sourceUnits.get(index));
             click(menu, source, 0, ContainerInput.PICKUP, client);
             click(menu, gridSlot, 1, ContainerInput.PICKUP, client);
@@ -1150,7 +1407,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         return true;
     }
 
-    private RecipePlacement findRecipePlacement(Minecraft client, Run current, List<ItemStack> sourceItems) {
+    private RecipePlacement findRecipePlacement(Minecraft client, AbstractCraftingMenu menu, Run current, List<ItemStack> sourceItems) {
         String wantedOutput = string(current.params.getAsJsonObject("output"), "item", "").replace("minecraft:", "");
         var context = SlotDisplayContext.fromLevel(client.level);
         for (var collection : client.player.getRecipeBook().getCollections()) {
@@ -1158,6 +1415,9 @@ public final class MineBotClientBody implements ClientModInitializer {
                 RecipeDisplay display = entry.display();
                 ItemStack output = display.result().resolveForFirstStack(context);
                 if (output.isEmpty() || !itemPath(output).equals(wantedOutput)) continue;
+                int requested = integer(current.params.getAsJsonObject("output"), "count", 1);
+                if (requested % output.getCount() != 0) continue;
+                int crafts = requested / output.getCount();
                 List<SlotDisplay> ingredients;
                 int width;
                 int height;
@@ -1166,16 +1426,18 @@ public final class MineBotClientBody implements ClientModInitializer {
                     height = shaped.height();
                     ingredients = shaped.ingredients();
                 } else if (display instanceof ShapelessCraftingRecipeDisplay shapeless) {
-                    width = Math.min(2, shapeless.ingredients().size());
-                    height = (shapeless.ingredients().size() + 1) / 2;
+                    width = Math.min(menu.getGridWidth(), shapeless.ingredients().size());
+                    height = (shapeless.ingredients().size() + menu.getGridWidth() - 1) / menu.getGridWidth();
                     ingredients = shapeless.ingredients();
                 } else {
                     continue;
                 }
-                if (width < 1 || height < 1 || width > 2 || height > 2 || ingredients.size() > 4) continue;
+                if (width < 1 || height < 1 || width > menu.getGridWidth() || height > menu.getGridHeight()) continue;
                 List<Integer> nonEmpty = new ArrayList<>();
-                for (int index = 0; index < ingredients.size(); index++) {
-                    if (!ingredients.get(index).resolveForStacks(context).isEmpty()) nonEmpty.add(index);
+                for (int craft = 0; craft < crafts; craft++) {
+                    for (int index = 0; index < ingredients.size(); index++) {
+                        if (!ingredients.get(index).resolveForStacks(context).isEmpty()) nonEmpty.add(index);
+                    }
                 }
                 if (nonEmpty.size() != sourceItems.size()) continue;
                 int[] assigned = new int[sourceItems.size()];
@@ -1187,10 +1449,10 @@ public final class MineBotClientBody implements ClientModInitializer {
                     int displayIndex = nonEmpty.get(requirement);
                     int row = displayIndex / width;
                     int column = displayIndex % width;
-                    gridSlots.add(InventoryMenu.CRAFT_SLOT_START + row * 2 + column);
+                    gridSlots.add(menu.getInputGridSlots().get(row * menu.getGridWidth() + column).index);
                     units.add(assigned[requirement]);
                 }
-                return new RecipePlacement(gridSlots, units);
+                return new RecipePlacement(gridSlots, units, output.getCount());
             }
         }
         return null;
@@ -1211,7 +1473,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         for (int unit = 0; unit < sourceItems.size(); unit++) {
             if (used[unit]) continue;
             ItemStack source = sourceItems.get(unit);
-            boolean match = accepted.stream().anyMatch(candidate -> ItemStack.isSameItemSameComponents(candidate, source));
+            boolean match = accepted.stream().anyMatch(candidate -> ItemStack.isSameItem(candidate, source));
             if (!match) continue;
             used[unit] = true;
             assigned[requirement] = unit;
@@ -1221,28 +1483,81 @@ public final class MineBotClientBody implements ClientModInitializer {
         return false;
     }
 
-    private record RecipePlacement(List<Integer> gridSlots, List<Integer> sourceUnits) {}
+    private record RecipePlacement(List<Integer> gridSlots, List<Integer> sourceUnits, int outputCount) {}
+
+    private boolean collectCraftRemainders(Minecraft client, AbstractCraftingMenu menu, Run current) {
+        JsonArray remainders = current.params.has("remainders") ? current.params.getAsJsonArray("remainders") : new JsonArray();
+        for (var raw : remainders) {
+            JsonObject remainder = raw.getAsJsonObject();
+            String item = string(remainder, "item", "").replace("minecraft:", "");
+            int remaining = integer(remainder, "count", 1);
+            int destination = menuSlotForPlayer(menu, integer(remainder, "slot", -1));
+            if (destination < 0) { requestStop("failed", "invalid_remainder_slot"); return false; }
+            for (Slot slot : menu.getInputGridSlots()) {
+                if (!itemPath(slot.getItem()).equals(item)) continue;
+                int amount = Math.min(remaining, slot.getItem().getCount());
+                moveCount(client, menu, slot.index, destination, amount);
+                remaining -= amount;
+                if (remaining == 0) break;
+            }
+            if (remaining != 0) { requestStop("failed", "craft_remainder_missing"); return false; }
+        }
+        if (menu.getInputGridSlots().stream().anyMatch(Slot::hasItem)) {
+            requestStop("failed", "craft_residue_remaining");
+            return false;
+        }
+        return true;
+    }
+
+    private boolean craftInventoryMatches(Minecraft client, Run current) {
+        JsonArray expected = current.craftBefore.deepCopy();
+        for (var raw : current.params.getAsJsonArray("inputs")) {
+            JsonObject input = raw.getAsJsonObject();
+            JsonObject slot = expected.get(integer(input, "slot", -1)).getAsJsonObject();
+            int left = integer(slot, "count", 0) - integer(input, "count", 0);
+            slot.addProperty("count", left);
+            slot.addProperty("empty", left == 0);
+        }
+        List<JsonObject> gains = new ArrayList<>();
+        gains.add(current.params.getAsJsonObject("output"));
+        if (current.params.has("remainders")) current.params.getAsJsonArray("remainders").forEach(raw -> gains.add(raw.getAsJsonObject()));
+        for (JsonObject gain : gains) {
+            JsonObject slot = expected.get(integer(gain, "slot", -1)).getAsJsonObject();
+            slot.addProperty("item", string(gain, "item", ""));
+            slot.addProperty("count", integer(slot, "count", 0) + integer(gain, "count", 0));
+            slot.addProperty("empty", false);
+        }
+        JsonArray actual = inventorySlots(client);
+        for (int index = 0; index < expected.size(); index++) {
+            JsonObject want = expected.get(index).getAsJsonObject();
+            JsonObject have = actual.get(index).getAsJsonObject();
+            if (integer(want, "count", 0) != integer(have, "count", 0)) return false;
+            if (integer(want, "count", 0) > 0 && !string(want, "item", "").equals(string(have, "item", ""))) return false;
+        }
+        return menuEmpty(client);
+    }
+
+    private static boolean menuEmpty(Minecraft client) {
+        return client.player.containerMenu.getCarried().isEmpty();
+    }
 
     private void tickMenuTransfer(Minecraft client, Run current) {
         if (current.phase == 0) {
+            int botSlot = integer(current.params, "bot_slot", 0);
+            if (botSlot < 0 || botSlot >= 36) {
+                requestStop("failed", "invalid_transfer_slot");
+                return;
+            }
             BlockPos pos = positionParam(current.params, "pos", "target");
-            if (pos == null || !client.player.isWithinBlockInteractionRange(pos, 5.0)) {
-                requestStop("failed", "container_out_of_range");
-                return;
-            }
-            BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
-            InteractionResult opened = client.gameMode.useItemOn(client.player, InteractionHand.MAIN_HAND, hit);
-            if (!opened.consumesAction() && client.player.containerMenu instanceof InventoryMenu) {
-                requestStop("failed", "container_open_rejected");
-                return;
-            }
+            current.menuRevision = menuContentRevision;
+            openMenu(client, pos);
             current.phase = 1;
             current.phaseTick = current.ticks;
             return;
         }
         if (current.phase == 1) {
-            if (current.ticks - current.phaseTick < 2 || client.player.containerMenu.containerId == 0
-                || client.player.containerMenu.slots.size() <= 36) return;
+            if (!freshMenu(client, current.menuRevision)) return;
+            current.openMenuId = client.player.containerMenu.containerId;
             if (current.kind.equals("furnaceTransfer") && !(client.player.containerMenu instanceof AbstractFurnaceMenu)) {
                 requestStop("failed", "furnace_menu_missing");
                 return;
@@ -1253,6 +1568,18 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         if (current.phase == 2 && current.ticks - current.phaseTick >= 3) {
+            if (client.player.containerMenu.containerId != current.openMenuId || !menuEmpty(client)) {
+                requestStop("failed", "transfer_menu_changed_or_cursor_occupied");
+                return;
+            }
+            // A new native open sends complete server contents, independently
+            // of the click prediction and its optimized acknowledgement.
+            client.player.closeContainer();
+            current.menuRevision = menuContentRevision;
+            openMenu(client, positionParam(current.params, "pos", "target"));
+            current.phase = 3;
+        } else if (current.phase == 3 && freshMenu(client, current.menuRevision)) {
+            current.openMenuId = client.player.containerMenu.containerId;
             if (verifyMenuTransfer(client, current)) requestStop("completed", "transfer_verified");
             else requestStop("failed", "transfer_verification_failed");
         }
@@ -1265,6 +1592,8 @@ public final class MineBotClientBody implements ClientModInitializer {
         if (current.kind.equals("furnaceTransfer")) {
             String furnaceSlot = string(current.params, "furnace_slot", "output");
             containerSlot = furnaceSlot.equals("input") ? 0 : furnaceSlot.equals("fuel") ? 1 : 2;
+            direction = direction.equals("bot_to_furnace") ? "bot_to_container"
+                : direction.equals("furnace_to_bot") ? "container_to_bot" : direction;
         }
         int botSlot = integer(current.params, "bot_slot", 0);
         int source = menuSlotForContainer(menu, containerSlot);
@@ -1286,26 +1615,34 @@ public final class MineBotClientBody implements ClientModInitializer {
             requestStop("failed", "source_empty");
             return false;
         }
+        String expectedItem = string(current.params, "item", "").replace("minecraft:", "");
+        if (!expectedItem.isBlank() && !itemPath(sourceStack).equals(expectedItem)) {
+            requestStop("failed", "transfer_source_changed");
+            return false;
+        }
         ItemStack destinationStack = menu.getSlot(destination).getItem();
         if (!destinationStack.isEmpty() && !ItemStack.isSameItemSameComponents(sourceStack, destinationStack)) {
             requestStop("failed", "destination_occupied");
             return false;
         }
         int requested = integer(current.params, "count", 0);
-        int amount = requested <= 0 ? sourceStack.getCount() : Math.min(requested, sourceStack.getCount());
+        int amount = requested <= 0 ? sourceStack.getCount() : requested;
+        Slot destinationSlot = menu.getSlot(destination);
+        if (amount > sourceStack.getCount() || !destinationSlot.mayPlace(sourceStack)
+            || amount + destinationStack.getCount() > Math.min(integer(current.params, "max_stack", 64), destinationSlot.getMaxStackSize(sourceStack))) {
+            requestStop("failed", "transfer_count_or_capacity_mismatch");
+            return false;
+        }
         current.transferSource = source;
         current.transferDestination = destination;
         current.transferItem = itemPath(sourceStack);
         current.transferBeforeSource = sourceStack.getCount();
         current.transferBeforeDestination = destinationStack.getCount();
         current.transferRequested = amount;
-        click(menu, source, 0, ContainerInput.PICKUP, client);
-        if (amount < sourceStack.getCount()) {
-            for (int index = 0; index < amount; index++) click(menu, destination, 1, ContainerInput.PICKUP, client);
-            click(menu, source, 0, ContainerInput.PICKUP, client);
-        } else {
-            click(menu, destination, 0, ContainerInput.PICKUP, client);
-        }
+        current.transferToContainer = direction.equals("bot_to_container");
+        current.transferContainerSlot = containerSlot;
+        current.transferBotSlot = botSlot;
+        moveCount(client, menu, source, destination, amount);
         return true;
     }
 
@@ -1318,8 +1655,22 @@ public final class MineBotClientBody implements ClientModInitializer {
         boolean ok = source.getCount() == current.transferBeforeSource - current.transferRequested
             && destination.getCount() == current.transferBeforeDestination + current.transferRequested
             && itemPath(destination).equals(current.transferItem);
-        if (client.player.containerMenu.containerId != 0) client.player.closeContainer();
+        if (!ok && current.kind.equals("furnaceTransfer") && current.transferToContainer
+            && current.transferContainerSlot == 1 && menu instanceof AbstractFurnaceMenu furnace && furnace.isLit()) {
+            ok = source.getCount() == current.transferBeforeSource - current.transferRequested
+                && destination.getCount() <= current.transferBeforeDestination + current.transferRequested
+                && (destination.isEmpty() || itemPath(destination).equals(current.transferItem));
+        }
         return ok;
+    }
+
+    private static void moveCount(Minecraft client, AbstractContainerMenu menu, int source, int destination, int amount) {
+        int sourceCount = menu.getSlot(source).getItem().getCount();
+        click(menu, source, 0, ContainerInput.PICKUP, client);
+        if (amount < sourceCount) {
+            for (int index = 0; index < amount; index++) click(menu, destination, 1, ContainerInput.PICKUP, client);
+            click(menu, source, 0, ContainerInput.PICKUP, client);
+        } else click(menu, destination, 0, ContainerInput.PICKUP, client);
     }
 
     private void tickHandoff(Minecraft client, Run current) {
@@ -1528,10 +1879,6 @@ public final class MineBotClientBody implements ClientModInitializer {
         return true;
     }
 
-    private static int playerMenuSlot(int inventorySlot) {
-        return inventorySlot < 9 ? 36 + inventorySlot : 9 + inventorySlot;
-    }
-
     private static int menuSlotForContainer(AbstractContainerMenu menu, int containerSlot) {
         int index = 0;
         for (int slot = 0; slot < menu.slots.size(); slot++) {
@@ -1632,6 +1979,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             if (!current.transferItem.isBlank()) {
                 response.addProperty("transfer_item", current.transferItem);
                 response.addProperty("transfer_count", current.transferRequested);
+                response.addProperty("count", status.equals("completed") ? current.transferRequested : 0);
             }
         }
         run = null;
@@ -1678,6 +2026,7 @@ public final class MineBotClientBody implements ClientModInitializer {
                 }
             }
             state.add("inventory", inventory);
+            state.add("inventory_slots", inventorySlots(client));
             JsonArray entities = new JsonArray();
             var nearby = client.level.getEntities(
                 client.player,
@@ -1885,6 +2234,11 @@ public final class MineBotClientBody implements ClientModInitializer {
         int outputMenuSlot = -1;
         String outputExpected = "";
         int outputRequested;
+        int craftUnitCount;
+        int craftTaken;
+        JsonArray craftBefore;
+        long resultRevision;
+        long menuRevision;
         Entity targetEntity;
         double initialHealth = -1.0;
         int attacks;
@@ -1901,6 +2255,9 @@ public final class MineBotClientBody implements ClientModInitializer {
         int transferBeforeSource;
         int transferBeforeDestination;
         int transferRequested;
+        boolean transferToContainer;
+        int transferContainerSlot;
+        int transferBotSlot;
         int mutations;
         String handoffReceiverId = "";
         int handoffExpected;
@@ -1931,6 +2288,12 @@ public final class MineBotClientBody implements ClientModInitializer {
 
         long elapsed() {
             return (System.nanoTime() - started) / 1_000_000;
+        }
+    }
+
+    private record MenuRead(String id, Peer peer, BlockPos pos, long revision, long started) {
+        MenuRead(String id, Peer peer, BlockPos pos, long revision) {
+            this(id, peer, pos, revision, System.nanoTime());
         }
     }
 

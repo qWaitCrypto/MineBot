@@ -131,6 +131,7 @@ class ContainerTransactions:
                     "container_slot": source_slot if direction == "container_to_bot" else dest_slot,
                     "bot_slot": dest_slot if direction == "container_to_bot" else source_slot,
                     "count": move_count,
+                    "item": item,
                 },
             )
             accepted = self.body.execute(action)

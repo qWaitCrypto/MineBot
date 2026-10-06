@@ -16,7 +16,7 @@ from minebot.body.interaction_support import (
 
 from minebot.contract import Body
 from minebot.contract import body_rejection_to_tool_result, terminal_event_to_tool_result
-from minebot.contract import Action, BreakContext, InteractionContext, InventorySlot, PerceptionResult, PlaceContext, Result, ToolResult, perception_next_cursor
+from minebot.contract import Action, BreakContext, InteractionContext, InventorySlot, PerceptionResult, PlaceContext, Position, Result, ToolResult, perception_next_cursor
 from minebot.game.governance import GovernancePolicy
 
 
@@ -363,6 +363,7 @@ class InventoryTransactions:
         inputs: list[dict[str, object]],
         output: dict[str, object],
         remainders: list[dict[str, object]] | None = None,
+        crafting_table: Position | None = None,
         max_stack: int = 64,
         timeout_s: float = 2.0,
     ) -> ToolResult:
@@ -392,6 +393,7 @@ class InventoryTransactions:
                 "output": dict(normalized_output),
                 "remainders": [dict(entry) for entry in normalized_remainders],
                 "max_stack": max_stack,
+                **({"crafting_table": list(crafting_table)} if crafting_table is not None else {}),
             },
             timeout_s=timeout_s,
         )
@@ -649,6 +651,7 @@ class InventoryTransactions:
             inputs=[dict(entry) for entry in plan.inputs],
             output={"slot": plan.output_slot, "item": plan.item, "count": plan.crafted_count},
             remainders=[dict(entry) for entry in plan.remainders],
+            crafting_table=tuple(workspace["table_pos"]) if isinstance(workspace, dict) else None,
             timeout_s=craft_timeout_s,
         )
         craft_attempts = [craft.to_payload()]
@@ -685,6 +688,7 @@ class InventoryTransactions:
                         inputs=[dict(entry) for entry in plan.inputs],
                         output={"slot": plan.output_slot, "item": plan.item, "count": plan.crafted_count},
                         remainders=[dict(entry) for entry in plan.remainders],
+                        crafting_table=tuple(workspace["table_pos"]) if isinstance(workspace, dict) else None,
                         timeout_s=craft_timeout_s,
                     )
                     craft_attempts.append(craft.to_payload())

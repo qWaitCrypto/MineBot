@@ -365,6 +365,8 @@ class FurnaceTransactions:
             "furnace_slot": furnace_slot,
             "bot_slot": bot_slot,
             "max_stack": max_stack,
+            "item": (before_bot_slot.item if direction == "bot_to_furnace" and before_bot_slot is not None
+                     else before_furnace_slot.item if before_furnace_slot is not None else ""),
         }
         if count is not None:
             params["count"] = count

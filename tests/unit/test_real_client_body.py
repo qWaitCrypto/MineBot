@@ -11,7 +11,7 @@ from minebot.body.objective_navigation import ObjectiveNavigationTransactions
 from minebot.contract import Action
 from minebot.contract import Region
 from minebot.game.real_client_body import RealClientBody
-from minebot.game.real_client_ipc import RealClientTerminal
+from minebot.game.real_client_ipc import RealClientRejected, RealClientTerminal
 
 
 class FakeClientIpc:
@@ -42,6 +42,12 @@ class FakeClientIpc:
             "offhand_item": "minecraft:torch",
             "dimension": "minecraft:overworld",
             "inventory": {"oak_log": 2, "wheat_seeds": 3},
+            "inventory_slots": [
+                {"slot": slot, "item": "minecraft:oak_log" if slot in {2, 27} else "minecraft:wheat_seeds" if slot == 9 else None,
+                 "count": 1 if slot in {2, 27} else 3 if slot == 9 else 0,
+                 "empty": slot not in {2, 9, 27}}
+                for slot in range(46)
+            ],
             "entities": [
                 {
                     "id": "11111111-1111-4111-8111-111111111111",
@@ -134,7 +140,61 @@ def test_real_client_body_maps_state_inventory_and_find_blocks() -> None:
 
     inventory = body.perceive("inventory", {"limit": 46})
     assert inventory.ok
-    assert {slot["item"] for slot in inventory.data["slots"]} == {"oak_log", "wheat_seeds"}
+    assert len(inventory.data["slots"]) == 46
+    assert inventory.data["slots"][2]["item"] == "minecraft:oak_log"
+    assert inventory.data["slots"][27]["item"] == "minecraft:oak_log"
+    assert inventory.data["slots"][0]["empty"]
+
+
+def test_real_client_inventory_pages_preserve_sparse_slot_ids() -> None:
+    body = RealClientBody("CapProbe2", FakeClientIpc())  # type: ignore[arg-type]
+    page = body.perceive("inventory", {"start": 24, "limit": 12})
+    assert not page.complete and page.next == "36"
+    assert page.data["totalSlots"] == 46
+    assert [slot["slot"] for slot in page.data["slots"]] == list(range(24, 36))
+    assert page.data["slots"][3]["count"] == 1
+
+
+def test_real_client_does_not_invent_slots_from_aggregate_counts() -> None:
+    class OldIpc(FakeClientIpc):
+        def state(self):
+            state = super().state()
+            state.pop("inventory_slots")
+            return state
+    body = RealClientBody("CapProbe2", OldIpc())  # type: ignore[arg-type]
+    assert body.perceive("inventory", {}).error == "capability_unavailable:client_inventory_slots_missing"
+
+
+def test_real_client_container_pages_share_one_native_menu_snapshot() -> None:
+    class MenuIpc(FakeClientIpc):
+        def control(self, request_type, **fields):
+            self.controls.append((request_type, fields))
+            return {"ok": True, "data": {"menu_id": 7, "slots": [{"slot": i, "empty": True, "count": 0} for i in range(27)]}}
+    ipc = MenuIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
+    for start in (0, 12, 24):
+        page = body.perceive("container", {"pos": [1, 70, 2], "start": start, "limit": 12})
+        assert page.ok and page.data["menu_id"] == 7
+    assert len(ipc.controls) == 1
+    assert [slot["slot"] for slot in page.data["slots"]] == [24, 25, 26]
+    assert page.complete
+    body.perceive("container", {"pos": [1, 70, 2], "start": 0})
+    assert len(ipc.controls) == 2
+
+
+def test_real_client_recipe_read_preserves_ingredient_alternatives() -> None:
+    class RecipeIpc(FakeClientIpc):
+        def world_read(self, scope, params):
+            assert scope == "recipeData" and params == {"item": "stick"}
+            return {"ok": True, "data": {"variants": [{"output_item": "minecraft:stick", "output_count": 4,
+                    "ingredient_groups": [["minecraft:oak_planks", "minecraft:birch_planks"]] * 2}]}}
+    body = RealClientBody("CapProbe2", RecipeIpc())  # type: ignore[arg-type]
+    page = body.perceive("recipeData", {"item": "stick"})
+    assert page.ok and page.data["variants"][0]["ingredient_groups"][0] == ["minecraft:oak_planks", "minecraft:birch_planks"]
+
+
+def test_real_client_world_reads_keep_existing_shapes() -> None:
+    body = RealClientBody("CapProbe2", FakeClientIpc())  # type: ignore[arg-type]
 
     blocks = body.perceive("findBlocks", {"block_types": ["minecraft:oak_log"]})
     assert blocks.ok
@@ -307,6 +367,23 @@ def test_real_client_body_routes_native_body_actions_to_client_primitive(
     assert accepted.ok and accepted.accepted
     assert terminal.data["success"] is True
     assert ipc.controls[0][0] == "primitive"
+
+
+@pytest.mark.parametrize("error, reason", [
+    (RealClientRejected("destination_occupied"), "destination_occupied"),
+    (ConnectionError("closed"), "transport:ConnectionError"),
+])
+def test_real_client_primitive_refusal_is_distinct_from_transport_failure(error, reason) -> None:
+    class RefusingIpc(FakeClientIpc):
+        def control(self, request_type, **fields):
+            raise error
+    body = RealClientBody("CapProbe2", RefusingIpc())  # type: ignore[arg-type]
+    action = Action.create("moveItem", {"from_slot": 9, "to_slot": 0, "count": 1})
+    assert body.execute(action).accepted
+    terminal = body.await_action_terminal(action.id, timeout_s=1.0)
+    assert not terminal.data["success"]
+    assert terminal.data["status"] == "failed"
+    assert terminal.data["reason"] == reason
 
 
 @pytest.mark.parametrize(

@@ -5,7 +5,8 @@
   "client": [
     "ServerNameResolverMixin",
     "ItemPickupMixin",
-    "VerticalInteractionMixin"
+    "VerticalInteractionMixin",
+    "MenuSyncMixin"
   ],
   "injectors": {
     "defaultRequire": 1

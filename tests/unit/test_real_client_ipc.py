@@ -5,7 +5,9 @@ import socket
 import struct
 import threading
 
-from minebot.game.real_client_ipc import RealClientIpc, RealClientTerminal
+import pytest
+
+from minebot.game.real_client_ipc import RealClientIpc, RealClientRejected, RealClientTerminal
 
 
 def _send(connection: socket.socket, payload: dict[str, object]) -> None:
@@ -84,3 +86,25 @@ def test_ipc_control_is_correlated_and_returns_client_state() -> None:
 
     assert result["type"] == "settings"
     assert result["allow_break"] is False
+
+
+def test_ipc_control_preserves_a_correlated_client_refusal() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def server() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            request = _recv(connection)
+            _send(connection, {"type": "rejected", "request_id": request["request_id"],
+                               "reason": "destination_occupied"})
+        listener.close()
+
+    thread = threading.Thread(target=server)
+    port = listener.getsockname()[1]
+    thread.start()
+    with RealClientIpc(port=port) as client:
+        with pytest.raises(RealClientRejected, match="destination_occupied"):
+            client.control("primitive", action_name="moveItem", params={"from_slot": 9, "to_slot": 27})
+    thread.join()

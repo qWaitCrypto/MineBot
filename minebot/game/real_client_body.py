@@ -19,7 +19,7 @@ from typing import Any, Mapping
 from minebot.contract import BodyState, Event, PerceptionResult, Result
 from minebot.contract import Action
 from minebot.game.errors import BodyActionTimeoutError
-from minebot.game.real_client_ipc import RealClientIpc, RealClientIpcError, RealClientTerminal
+from minebot.game.real_client_ipc import RealClientIpc, RealClientIpcError, RealClientRejected, RealClientTerminal
 
 
 _CAPABILITY_GAP = "capability_unavailable"
@@ -58,9 +58,9 @@ _CAPABILITIES: tuple[RealClientCapability, ...] = (
     RealClientCapability("world_reads", "minecraft_client", "adapter", "Authoritative client-world block and entity snapshots"),
     RealClientCapability("engage_entity", "client_combat", "verified", "Iron-sword kill in the stationary zombie fixture"),
     RealClientCapability("ranged_attack", "client_combat", "verified", "Single bow/crossbow hit, missing ammunition and cancellation fixtures"),
-    RealClientCapability("craft_item", "client_inventory_menu", "verified", "2x2 sticks recipe; other recipes and workstations need fixtures"),
-    RealClientCapability("container_transfer", "client_menu", "verified", "Chest-to-player transfer; other containers need fixtures"),
-    RealClientCapability("furnace_transfer", "client_furnace_menu", "verified", "Furnace output-to-player transfer; other directions need fixtures"),
+    RealClientCapability("craft_item", "client_inventory_menu", "verified", "Sticks, table stone pickaxe and cake/bucket remainder fixtures; other recipes need fixtures"),
+    RealClientCapability("container_transfer", "client_menu", "verified", "Chest transfers in both directions and capacity refusal; other containers need fixtures"),
+    RealClientCapability("furnace_transfer", "client_furnace_menu", "verified", "Raw iron input/fuel/cooking/output/reclaim lifecycle and idle fuel clear fixtures"),
     RealClientCapability("handoff_item", "client_inventory", "verified", "Server recipient/count pickup receipt and full-inventory failure fixtures"),
     RealClientCapability("vertical_recovery", "custom_goal", "verified", "Baritone shaft descent/ascent, surface return and cancel; mutations require disposable-world opt-in"),
 )
@@ -102,6 +102,7 @@ class RealClientBody:
         self._last_state_payload: dict[str, Any] | None = None
         self._ready_lock = threading.Lock()
         self._ready = False
+        self._container_pages: dict[tuple[int, int, int], dict[str, Any]] = {}
 
     @property
     def capabilities(self) -> Mapping[str, RealClientCapability]:
@@ -158,6 +159,10 @@ class RealClientBody:
     def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
         if scope == "inventory":
             return self._inventory_perception(params)
+        if scope == "container":
+            return self._container_perception(params)
+        if scope == "recipeData":
+            return self._world_read_perception(scope, params)
         if scope == "findBlocks":
             return self._find_blocks_perception(params)
         if scope in {"blockAt", "blockCells", "nearbyBlocks"}:
@@ -325,7 +330,7 @@ class RealClientBody:
                     "action_id": pending.action.id,
                     "success": False,
                     "status": "failed",
-                    "reason": f"transport:{type(error).__name__}",
+                    "reason": str(error) if isinstance(error, RealClientRejected) else f"transport:{type(error).__name__}",
                     "message": str(error),
                 },
             )
@@ -456,37 +461,53 @@ class RealClientBody:
 
     def _inventory_perception(self, params: dict[str, object]) -> PerceptionResult:
         try:
-            state = self.get_state()
+            state = self._state_payload()
         except Exception as error:
             return _gap_perception(self.bot_name, "inventory", f"state_read:{type(error).__name__}")
-        items = sorted((state.inventory_counts or {}).items())
+        slots = state.get("inventory_slots")
+        if not isinstance(slots, list):
+            return _gap_perception(self.bot_name, "inventory", "client_inventory_slots_missing")
+        return self._slot_page("inventory", slots, params)
+
+    def _container_perception(self, params: dict[str, object]) -> PerceptionResult:
+        pos = _position(params.get("pos"))
+        if pos is None:
+            return _gap_perception(self.bot_name, "container", "invalid_request:pos")
+        try:
+            if int(params.get("start") or 0) == 0 or pos not in self._container_pages:
+                self._ensure_connected()
+                response = self.ipc.control("container_read", params={"pos": list(pos)})
+                if not response.get("ok", False):
+                    return _gap_perception(self.bot_name, "container", str(response.get("error") or "container_read_failed"))
+                self._container_pages[pos] = dict(response.get("data") or {})
+            data = self._container_pages[pos]
+            slots = data.get("slots")
+            if not isinstance(slots, list):
+                return _gap_perception(self.bot_name, "container", "client_container_slots_missing")
+            return self._slot_page("container", slots, params, metadata=data)
+        except Exception as error:
+            return _gap_perception(self.bot_name, "container", f"container_read:{type(error).__name__}")
+
+    def _slot_page(
+        self, scope: str, slots: list[object], params: dict[str, object],
+        *, metadata: Mapping[str, object] | None = None,
+    ) -> PerceptionResult:
         start = max(0, int(params.get("start") or 0))
-        limit = max(1, min(46, int(params.get("limit") or 46)))
-        page = items[start : start + limit]
-        slots = [
-            {
-                "slot": start + index,
-                "item": item,
-                "count": int(count),
-                "empty": False,
-                "slotType": "player",
-                "slotLabel": item,
-            }
-            for index, (item, count) in enumerate(page)
-        ]
-        next_start = start + limit if start + limit < len(items) else None
+        limit = max(1, min(128, int(params.get("limit") or 46)))
+        next_start = start + limit if start + limit < len(slots) else None
         return PerceptionResult(
             bot=self.bot_name,
-            scope="inventory",
+            scope=scope,
             type="perception",
             ok=True,
             complete=next_start is None,
             data={
+                **dict(metadata or {}),
                 "start": start,
                 "limit": limit,
                 "nextStart": next_start,
-                "totalSlots": len(items),
-                "slots": slots,
+                "totalSlots": len(slots),
+                "slots": slots[start : start + limit],
             },
             uncertainty=[] if next_start is None else [{"reason": "page_limit"}],
             next=None if next_start is None else str(next_start),
@@ -499,7 +520,7 @@ class RealClientBody:
         elif isinstance(raw_types, (list, tuple)):
             targets = [str(value) for value in raw_types]
         else:
-            target = params.get("block")
+            target = params.get("block") or params.get("type")
             targets = [str(target)] if target else []
         if not targets:
             return _gap_perception(self.bot_name, "findBlocks", "invalid_request:no_block_types")
@@ -516,24 +537,34 @@ class RealClientBody:
                         locations.append({"x": int(raw[0]), "y": int(raw[1]), "z": int(raw[2]), "type": _unnamespace(target)})
         except Exception as error:
             return _gap_perception(self.bot_name, "findBlocks", f"scan:{type(error).__name__}")
+        position = response.get("position") if targets else None
+        if isinstance(position, (list, tuple)) and len(position) == 3 and params.get("radius") is not None:
+            radius = max(1, min(64, int(params["radius"])))
+            y_radius = max(1, min(64, int(params.get("y_radius") or radius)))
+            locations = [pos for pos in locations if abs(pos["x"] - position[0]) <= radius
+                         and abs(pos["z"] - position[2]) <= radius and abs(pos["y"] - position[1]) <= y_radius]
         limit = max(1, min(256, int(params.get("limit") or 32)))
-        matches = locations[:limit]
+        start = max(0, int(params.get("start") or 0))
+        matches = locations[start : start + limit]
+        next_start = start + limit if start + limit < len(locations) else None
         return PerceptionResult(
             bot=self.bot_name,
             scope="findBlocks",
             type="perception",
             ok=True,
-            complete=True,
+            complete=next_start is None,
             data={
-                "start": 0,
+                "start": start,
                 "limit": limit,
                 "count": len(matches),
                 "totalMatches": len(locations),
-                "nextStart": None,
+                "nextStart": next_start,
                 "matches": matches,
-                "coverage_complete": True,
+                "blocks": matches,
+                "coverage_complete": False,
             },
-            uncertainty=[],
+            uncertainty=[{"reason": "client_loaded_chunks_only"}],
+            next=None if next_start is None else str(next_start),
         )
 
     def _next_seq(self) -> int:

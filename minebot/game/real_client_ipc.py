@@ -23,6 +23,10 @@ class RealClientIpcError(RuntimeError):
     """The disposable client process did not complete the IPC exchange."""
 
 
+class RealClientRejected(RealClientIpcError):
+    """The client received the request and refused it with a concrete reason."""
+
+
 @dataclass(frozen=True)
 class RealClientTerminal:
     action_id: str
@@ -137,7 +141,7 @@ class RealClientIpc:
         while True:
             message = self._take(lambda value: value.get("request_id") == request_id, deadline)
             if message.get("type") == "rejected" and message.get("request_id") == request_id:
-                raise RealClientIpcError(str(message.get("reason", "control rejected")))
+                raise RealClientRejected(str(message.get("reason", "control rejected")))
             if message.get("type") == request_type and message.get("request_id") == request_id:
                 return message
             if time.monotonic() >= deadline:
