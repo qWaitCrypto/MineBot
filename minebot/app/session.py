@@ -204,14 +204,8 @@ class AgentSession:
             if existing is not None:
                 return existing
         intent_kind = WorkIntentKind(command.kind.value)
-        recovery_is_active = (
-            self.parts is not None
-            and self.parts.lifecycle.state is LifecycleState.RECOVERING
-        )
         cancellation_reason: str | None = None
-        if self.parts is not None and (
-            always_interrupt or (self._work_in_flight and not recovery_is_active)
-        ):
+        if self.parts is not None and always_interrupt:
             cancellation_reason = f"session_command:{command.kind.value}"
             self.parts.authority.invalidate_generation(cancellation_reason)
         superseded = superseded_kinds_for(intent_kind)
