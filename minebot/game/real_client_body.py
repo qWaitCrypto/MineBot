@@ -127,6 +127,16 @@ class RealClientBody:
     def _ensure_connected(self) -> None:
         self.ipc.connect()
 
+    def world_identity(self) -> str:
+        """Return the client dimension as the session's stable world scope.
+
+        A launcher may provide a stronger world id through the session config;
+        the dimension fallback keeps the shared runtime namespace deterministic
+        without inventing a server-side seed or pretending the client owns it.
+        """
+        state = self._state_payload()
+        return f"real-client:{state.get('dimension') or 'unknown'}"
+
     def get_state(self) -> BodyState:
         cached = self._state_payload()
         with self._lock:

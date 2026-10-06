@@ -206,7 +206,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(cfg.world_id_override, "world-fixture")
         self.assertEqual(cfg.state_db_path, Path("var/test-state.sqlite3"))
         self.assertFalse(hasattr(cfg, "rcon"))
-        self.assertFalse(hasattr(cfg, "body_provider"))
+        self.assertEqual(cfg.body_provider, "java")
 
     def test_config_rejects_legacy_production_body_provider(self):
         for provider in ("scarpet", "composite"):
@@ -232,6 +232,34 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         self.assertEqual(cfg.server_id, "ws://127.0.0.1:8767")
         self.assertFalse(hasattr(cfg, "rcon"))
+
+    def test_real_client_config_selects_ipc_endpoint_without_java_url(self):
+        cfg = real_server_config_from_env(
+            {
+                "MINEBOT_REAL_BOT": "MineBot",
+                "MINEBOT_BODY_PROVIDER": "real_client",
+                "MINEBOT_REAL_CLIENT_HOST": "127.0.0.1",
+                "MINEBOT_REAL_CLIENT_PORT": "8876",
+                "MINEBOT_REAL_SERVER_ID": "disposable-client-world",
+            }
+        )
+
+        self.assertEqual(cfg.body_provider, "real_client")
+        self.assertEqual(cfg.java_body_url, "")
+        self.assertEqual(cfg.real_client_host, "127.0.0.1")
+        self.assertEqual(cfg.real_client_port, 8876)
+        self.assertEqual(cfg.server_id, "disposable-client-world")
+
+    def test_real_client_config_rejects_invalid_ipc_port(self):
+        with self.assertRaises(RealServerConfigError) as ctx:
+            real_server_config_from_env(
+                {
+                    "MINEBOT_REAL_BOT": "MineBot",
+                    "MINEBOT_BODY_PROVIDER": "real_client",
+                    "MINEBOT_REAL_CLIENT_PORT": "not-a-port",
+                }
+            )
+        self.assertIn("MINEBOT_REAL_CLIENT_PORT", str(ctx.exception))
 
     def test_config_rejects_java_provider_without_java_url(self):
         with self.assertRaises(RealServerConfigError) as ctx:

@@ -57,6 +57,7 @@ from minebot.brain.lifecycle import LifecycleState
 from minebot.brain.composition import resource_plan_for
 from minebot.contract import Body, InventorySlot, Region
 from minebot.game.errors import BodyProtocolError
+from minebot.game.real_client_ipc import RealClientIpc
 
 IDLE_BODY_STATE_SAMPLE_INTERVAL_S = 120.0
 IDLE_BODY_EVENT_POLL_BASE_DELAY_S = 0.25
@@ -74,6 +75,9 @@ class RealServerConfig:
     server_id: str
     world_id_override: str | None
     state_db_path: Path
+    body_provider: str = "java"
+    real_client_host: str = "127.0.0.1"
+    real_client_port: int = 8768
 
 
 class RealServerConfigError(RuntimeError):
@@ -492,12 +496,30 @@ def env_required(env: Mapping[str, str], name: str) -> str:
 def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealServerConfig:
     env = os.environ if env is None else env
     requested_provider = (env.get("MINEBOT_BODY_PROVIDER") or "java").strip().lower()
-    if requested_provider != "java":
+    if requested_provider not in {"java", "real_client"}:
         raise RealServerConfigError(
-            "production Body provider is Java-only; "
+            "production Body provider must be java or real_client; "
             f"MINEBOT_BODY_PROVIDER={requested_provider or '<empty>'} is legacy/debug-only"
         )
-    java_body_url = env_required(env, "MINEBOT_JAVA_BODY_URL").strip()
+    java_body_url = (env.get("MINEBOT_JAVA_BODY_URL") or "").strip()
+    if requested_provider == "java" and not java_body_url:
+        raise RealServerConfigError("missing required env var MINEBOT_JAVA_BODY_URL")
+    real_client_host = (
+        env.get("MINEBOT_REAL_CLIENT_HOST")
+        or env.get("MINEBOT_CLIENT_IPC_HOST")
+        or "127.0.0.1"
+    ).strip()
+    raw_client_port = (
+        env.get("MINEBOT_REAL_CLIENT_PORT")
+        or env.get("MINEBOT_CLIENT_IPC_PORT")
+        or "8768"
+    ).strip()
+    try:
+        real_client_port = int(raw_client_port)
+    except ValueError as exc:
+        raise RealServerConfigError("MINEBOT_REAL_CLIENT_PORT must be an integer") from exc
+    if not 1 <= real_client_port <= 65535:
+        raise RealServerConfigError("MINEBOT_REAL_CLIENT_PORT must be between 1 and 65535")
     bot_name = env_required(env, "MINEBOT_REAL_BOT")
     natural_region = _region_from_env(env)
     recovery_respawn_pos = _position_from_env(env, "MINEBOT_REAL_RECOVERY_RESPAWN_POS")
@@ -505,7 +527,11 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
     language = agent_language_from_env(env)
     world_id_override = (env.get("MINEBOT_REAL_WORLD_ID") or "").strip() or None
     state_db_path = Path(env.get("MINEBOT_AGENT_STATE_DB") or DEFAULT_RUNTIME_STATE_DB)
-    server_id = (env.get("MINEBOT_REAL_SERVER_ID") or java_body_url).strip()
+    server_id = (
+        env.get("MINEBOT_REAL_SERVER_ID")
+        or java_body_url
+        or f"real-client://{real_client_host}:{real_client_port}"
+    ).strip()
     return RealServerConfig(
         java_body_url=java_body_url,
         bot_name=bot_name,
@@ -516,11 +542,35 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
         server_id=server_id,
         world_id_override=world_id_override,
         state_db_path=state_db_path,
+        body_provider=requested_provider,
+        real_client_host=real_client_host,
+        real_client_port=real_client_port,
     )
 
 
 def _body_endpoint(config: RealServerConfig) -> str:
+    if config.body_provider == "real_client":
+        return f"{config.real_client_host}:{config.real_client_port}"
     return config.java_body_url
+
+
+def _build_real_server_body_provider(config: RealServerConfig):
+    if config.body_provider == "real_client":
+        return build_body_provider(
+            "real_client",
+            bot_name=config.bot_name,
+            natural_region=config.natural_region,
+            real_client_connect=lambda: RealClientIpc(
+                config.real_client_host,
+                config.real_client_port,
+            ),
+        )
+    return build_body_provider(
+        "java",
+        bot_name=config.bot_name,
+        natural_region=config.natural_region,
+        java_body_url=config.java_body_url,
+    )
 
 
 def _region_from_env(env: Mapping[str, str]) -> Region:
@@ -554,12 +604,7 @@ async def run_real_server_goal(
     with contextlib.nullcontext():
         camera = _CameraSession(camera_config)
         try:
-            body_runtime = build_body_provider(
-                "java",
-                bot_name=config.bot_name,
-                natural_region=config.natural_region,
-                java_body_url=config.java_body_url,
-            )
+            body_runtime = _build_real_server_body_provider(config)
         except BodyProviderConfigError as exc:
             print(f"Real-server Body provider unavailable: {exc}", file=sys.stderr)
             await provider.aclose()
@@ -670,12 +715,7 @@ async def run_real_server_interactive(
         work_queue: PersistentWorkIntentQueue | None = None
         try:
             app_reloaded = False
-            body_runtime = build_body_provider(
-                "java",
-                bot_name=config.bot_name,
-                natural_region=config.natural_region,
-                java_body_url=config.java_body_url,
-            )
+            body_runtime = _build_real_server_body_provider(config)
             body = body_runtime.body
             world_id = config.world_id_override
             if world_id is None:

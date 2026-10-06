@@ -25,6 +25,12 @@ mine, get-to-block, explore, follow/pickup, farm, Builder/Clear and Elytra
 objectives, plus typed client controls and world reads. Every objective has a
 correlated action id, progress/terminal result, and cancellation path.
 
+The Agent session keeps Java as its default. To select this backend explicitly,
+set `MINEBOT_BODY_PROVIDER=real_client`, `MINEBOT_REAL_CLIENT_HOST` (default
+`127.0.0.1`), and `MINEBOT_REAL_CLIENT_PORT` (default `8768`) before starting
+the Python session; the client must already be running and ready. There is no
+automatic fallback to the Java backend.
+
 The first local run may require setting `onboardAccessibility:false` in the
 ignored `client/body/run/options.txt`; this is test-client state and is not a
 repository setting. The server-name resolver mixin only bypasses Mojang's
