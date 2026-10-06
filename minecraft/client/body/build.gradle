@@ -1,0 +1,95 @@
+plugins {
+    id "net.fabricmc.fabric-loom"
+    id "maven-publish"
+}
+
+version = "0.1.0"
+group = "dev.minebot"
+
+base {
+    archivesName = "minebot-client-body"
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+    withSourcesJar()
+}
+
+def baritoneVersion = "1.18.0"
+def baritoneJar = file("${buildDir}/baritone/baritone-api-fabric-${baritoneVersion}.jar")
+def baritoneUrl = "https://github.com/cabaletta/baritone/releases/download/v${baritoneVersion}/baritone-api-fabric-${baritoneVersion}.jar"
+def baritoneSha1 = "3220ff86a50254488bfd86529ba7e4ac8048a36f"
+
+dependencies {
+    minecraft "com.mojang:minecraft:26.1.2"
+    implementation "net.fabricmc:fabric-loader:0.19.3"
+    implementation "net.fabricmc.fabric-api:fabric-api:0.152.1+26.1.2"
+    implementation files(baritoneJar)
+}
+
+tasks.register("downloadBaritone") {
+    outputs.file(baritoneJar)
+    doLast {
+        if (!baritoneJar.exists() || sha1(baritoneJar) != baritoneSha1) {
+            baritoneJar.parentFile.mkdirs()
+            new URL(baritoneUrl).withInputStream { input ->
+                baritoneJar.withOutputStream { output -> output << input }
+            }
+        }
+        def actualSha1 = sha1(baritoneJar)
+        if (actualSha1 != baritoneSha1) {
+            throw new GradleException("Baritone ${baritoneVersion} SHA-1 mismatch: ${actualSha1}")
+        }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    dependsOn(tasks.named("downloadBaritone"))
+    options.encoding = "UTF-8"
+    options.release = 25
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+}
+
+tasks.named("runClient").configure {
+    dependsOn(tasks.named("downloadBaritone"))
+    def address = System.getenv().getOrDefault("MINEBOT_CLIENT_SERVER", "127.0.0.1:25566")
+    def addressParts = address.split(":", 2)
+    if (addressParts.size() != 2 || addressParts[0].isBlank() || addressParts[1].isBlank()) {
+        throw new GradleException("MINEBOT_CLIENT_SERVER must be HOST:PORT, got '${address}'")
+    }
+    def username = System.getenv().getOrDefault("MINEBOT_CLIENT_USERNAME", "MineBotPhaseA")
+    // Minecraft 26.1 uses quickPlayMultiplayer for a direct server launch.
+    args("--username", username, "--quickPlayMultiplayer", address)
+    def goal = System.getenv().get("MINEBOT_CLIENT_OBJECTIVE")
+    if (goal != null && !goal.isBlank()) {
+        systemProperty("minebot.client.objective", goal)
+    }
+    def cancelAfterTicks = System.getenv().get("MINEBOT_CLIENT_CANCEL_AFTER_TICKS")
+    if (cancelAfterTicks != null && !cancelAfterTicks.isBlank()) {
+        systemProperty("minebot.client.cancel_after_ticks", cancelAfterTicks)
+    }
+}
+
+processResources {
+    inputs.property "version", project.version
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+static String sha1(File file) {
+    def digest = java.security.MessageDigest.getInstance("SHA-1")
+    file.withInputStream { input ->
+        byte[] buffer = new byte[8192]
+        int read
+        while ((read = input.read(buffer)) != -1) {
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().collect { String.format("%02x", it) }.join()
+}

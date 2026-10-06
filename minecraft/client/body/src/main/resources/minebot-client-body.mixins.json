@@ -1,0 +1,11 @@
+{
+  "required": true,
+  "package": "dev.minebot.client.body.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+    "ServerNameResolverMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

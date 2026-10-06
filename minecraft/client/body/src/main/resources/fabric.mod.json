@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "minebot-client-body",
+  "version": "${version}",
+  "name": "MineBot Client Body Spike",
+  "description": "Narrow real-client Body substrate probe for MineBot.",
+  "authors": ["MineBot"],
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "dev.minebot.client.body.MineBotClientBody"
+    ]
+  },
+  "mixins": [
+    "minebot-client-body.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "26.1.2",
+    "fabric-api": "*",
+    "baritone": "=1.18.0"
+  }
+}
