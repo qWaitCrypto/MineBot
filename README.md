@@ -16,8 +16,9 @@
 </div>
 
 Tell MineBot what you want in ordinary language. The model chooses a strategy,
-the harness keeps the thread, and a server-authoritative body does the physical
-work.
+the harness keeps the thread, and the configured execution backend does the
+physical work. The goal includes playing, helping, building, and accompanying
+players; the Ender Dragon is one milestone in that product.
 
 > **You:** Collect 64 logs.<br>
 > **MineBot:** reasons, acts, observes, recovers, and keeps going.
@@ -32,12 +33,16 @@ The model chooses from one shared capability pool. The harness preserves task
 continuity. The Body handles the grind inside one physical objective. Every
 result comes back as structured world truth.
 
-MineBot's production Body runs inside the Fabric server. Java owns indexed
+MineBot's current usable Body runs inside the Fabric server. Java owns indexed
 perception, navigation, continuous controls, survival reactions, and structured
 WebSocket transport; Carpet supplies the real FakePlayer. Scarpet/RCON remains
-only as legacy regression and debug material. A real-client/Baritone path is
-deferred, not part of the current production architecture. Success is accepted
-only when observed server state confirms it.
+only as legacy regression and debug material. The next experiment is a narrow
+real-client + upstream Baritone sample to measure startup, real terrain
+movement, collection, effective cancellation, concrete failures, and cost. It
+is not yet supported. Non-essential self-built navigation expansion is paused.
+See [Issue #1](https://github.com/qWaitCrypto/MineBot/issues/1) for the product
+principles and phased route. Success requires observed world state, not command
+acceptance.
 
 ## Built To Finish
 
@@ -45,9 +50,11 @@ only when observed server state confirms it.
 
 The current Java-only baseline has live evidence for natural-terrain collection,
 crafting and smelting, navigation, following, combat, vertical escape, survival
-preemption, death recovery, restart reconciliation, and idle wake-up. The latest
-30-minute quality gate produced logs and a wooden tool chain but still failed its
-long no-output and recovery criteria. This is a developer preview, not a claim
+preemption, death recovery, restart reconciliation, and idle wake-up. The
+recorded Gate 10 passed its specific autonomy-quality evaluator but did not
+complete the full AG-FP30 goal. That test is evidence for one scenario; it does
+not define acceptance for cooperation, building, or adventure. This is a
+developer preview, not a claim
 of finished open-world autonomy. Success is measured by authoritative world and
 inventory changes, not by a tool claiming it succeeded.
 
@@ -84,13 +91,12 @@ tests/        unit, live Body, and real-agent gates
 
 <img src="assets/readme/roadmap.webp" alt="MineBot long-range roadmap toward deeper world understanding, the Ender Dragon, and autonomous building" width="100%">
 
-The reliable Body and persistent agent are the foundation, not the finish line.
-The observer, scoped Memory, Minecraft Wiki access, and loadable Skills are now
-part of that foundation. The immediate challenge is purposeful action in
-natural terrain and one honest 30-minute integrated run. Farther out are Vision,
-richer providers and transport, and many-bot worlds. The two north stars remain
-deliberately unreasonable: beat the Ender Dragon from nothing, then learn to
-design and build in an open world.
+The immediate step is a reproducible real-client + Baritone experiment, followed
+by a thin runtime that completes one honest end-to-end task. The project will
+then widen the tested conditions. Chat, cooperation, adventure, and building
+remain part of the route alongside the Ender Dragon milestone. Engineering is
+judged by playable results and measured limits; existing layers are useful
+assets, rather than permanent prerequisites for delivery.
 
 ## Wake It Up
 

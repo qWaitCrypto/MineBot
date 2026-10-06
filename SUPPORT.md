@@ -14,7 +14,8 @@ the project's long-term architecture.
 | Full unit suite | Development signal | Broader than the newcomer gate and may expose active implementation work |
 | Local Minecraft Body | Advanced/manual | Requires a disposable 26.1.2 Fabric + Carpet server with the MineBot Java Body mod |
 | Newcomer Body lab | Not ready | No distributable server bootstrap or clean-world fixture contract yet |
-| Fabric Java Body | Production architecture, developer preview | Java-only live gates run without production Scarpet/RCON; the 30-minute autonomy-quality gate has not passed yet |
+| Fabric Java Body | Current usable backend, developer preview | Gate 10 passed its specific quality evaluator but did not complete AG-FP30; non-essential navigation expansion is paused |
+| Real client + Baritone | Planned narrow experiment; unsupported | Startup, movement, collection, cancellation, concrete failures, and resource cost still need live evidence |
 
 The supported contributor command is documented in
 [CONTRIBUTING.md](CONTRIBUTING.md). Passing it proves only the shared terminal
