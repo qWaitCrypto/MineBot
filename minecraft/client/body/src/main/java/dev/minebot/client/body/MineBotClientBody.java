@@ -46,6 +46,12 @@ import net.minecraft.world.inventory.AbstractFurnaceMenu;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.inventory.InventoryMenu;
 import net.minecraft.world.inventory.Slot;
+import net.minecraft.world.item.crafting.display.RecipeDisplay;
+import net.minecraft.world.item.crafting.display.RecipeDisplayEntry;
+import net.minecraft.world.item.crafting.display.ShapedCraftingRecipeDisplay;
+import net.minecraft.world.item.crafting.display.ShapelessCraftingRecipeDisplay;
+import net.minecraft.world.item.crafting.display.SlotDisplay;
+import net.minecraft.world.item.crafting.display.SlotDisplayContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,7 +65,9 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -867,6 +875,11 @@ public final class MineBotClientBody implements ClientModInitializer {
     }
 
     private void tickEngage(Minecraft client, Run current) {
+        if (current.targetEntity instanceof LivingEntity previous
+            && (!previous.isAlive() || previous.getHealth() <= 0.0f)) {
+            requestStop("completed", "killed");
+            return;
+        }
         LivingEntity target = combatTarget(client, current);
         if (target == null) {
             requestStop("failed", current.targetEntity == null ? "target_not_found" : "target_lost");
@@ -903,6 +916,11 @@ public final class MineBotClientBody implements ClientModInitializer {
     }
 
     private void tickRanged(Minecraft client, Run current) {
+        if (current.targetEntity instanceof LivingEntity previous
+            && (!previous.isAlive() || previous.getHealth() <= 0.0f)) {
+            requestStop("completed", "killed");
+            return;
+        }
         LivingEntity target = combatTarget(client, current);
         if (target == null) {
             requestStop("failed", current.targetEntity == null ? "target_not_found" : "target_lost");
@@ -918,8 +936,15 @@ public final class MineBotClientBody implements ClientModInitializer {
         if (!itemPath(client.player.getMainHandItem()).equals(weapon)) {
             selectItem(client, weapon);
         }
-        if (!hasLineOfSight(client, target)) {
-            approachCombatTarget(client, target, number(current.params, "radius", 24.0));
+        double maxRange = Math.max(2.0, Math.min(32.0, number(current.params, "max_range", 24.0)));
+        boolean requireLineOfSight = booleanValue(current.params, "require_line_of_sight", false);
+        if (client.player.distanceTo(target) > maxRange
+            || (requireLineOfSight && !hasLineOfSight(client, target))) {
+            // The search radius is not a navigation goal.  Close to a bounded
+            // combat distance until the shot is in range; callers that need
+            // strict visibility can opt in without making ordinary ranged
+            // actions spin forever on a stale client-side ray trace.
+            approachCombatTarget(client, target, number(current.params, "approach_range", 3.0));
             return;
         }
         lookAtEntity(client, target);
@@ -952,6 +977,14 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
         }
         if (target.getHealth() < current.initialHealth - 0.01f) current.damageObserved = true;
+        // A bow release is acknowledged by the world through the target's
+        // health delta.  Some client versions clear isUsingItem before the
+        // local tick can observe the release, so waiting for the local shot
+        // counter would leave a successful hit running until its deadline.
+        if (current.damageObserved && !client.player.isUsingItem()) {
+            current.shots = Math.max(current.shots, expected);
+            requestStop("completed", "damage_observed");
+        }
     }
 
     private LivingEntity combatTarget(Minecraft client, Run current) {
@@ -1046,10 +1079,11 @@ public final class MineBotClientBody implements ClientModInitializer {
             requestStop("failed", "invalid_recipe_inputs");
             return false;
         }
-        int grid = InventoryMenu.CRAFT_SLOT_START;
+        List<Integer> sourceSlots = new ArrayList<>();
+        List<ItemStack> sourceItems = new ArrayList<>();
         for (var raw : current.params.getAsJsonArray("inputs")) {
-            if (!raw.isJsonObject() || grid > InventoryMenu.CRAFT_SLOT_END) {
-                requestStop("failed", "recipe_grid_overflow");
+            if (!raw.isJsonObject()) {
+                requestStop("failed", "invalid_recipe_inputs");
                 return false;
             }
             JsonObject input = raw.getAsJsonObject();
@@ -1064,18 +1098,99 @@ public final class MineBotClientBody implements ClientModInitializer {
                 requestStop("failed", "craft_input_mismatch");
                 return false;
             }
-            if (grid + amount - 1 > InventoryMenu.CRAFT_SLOT_END) {
-                requestStop("failed", "recipe_grid_overflow");
-                return false;
-            }
             for (int unit = 0; unit < amount; unit++) {
-                click(menu, source, 0, ContainerInput.PICKUP, client);
-                click(menu, grid++, 1, ContainerInput.PICKUP, client);
-                click(menu, source, 0, ContainerInput.PICKUP, client);
+                sourceSlots.add(source);
+                sourceItems.add(menu.getSlot(source).getItem());
             }
+        }
+        RecipePlacement placement = findRecipePlacement(client, current, sourceItems);
+        if (placement == null) {
+            requestStop("failed", "recipe_not_found_or_inputs_do_not_match");
+            return false;
+        }
+        for (int index = 0; index < placement.gridSlots.size(); index++) {
+            int gridSlot = placement.gridSlots.get(index);
+            if (gridSlot < InventoryMenu.CRAFT_SLOT_START || gridSlot > InventoryMenu.CRAFT_SLOT_END) continue;
+            int source = sourceSlots.get(placement.sourceUnits.get(index));
+            click(menu, source, 0, ContainerInput.PICKUP, client);
+            click(menu, gridSlot, 1, ContainerInput.PICKUP, client);
+            click(menu, source, 0, ContainerInput.PICKUP, client);
         }
         return true;
     }
+
+    private RecipePlacement findRecipePlacement(Minecraft client, Run current, List<ItemStack> sourceItems) {
+        String wantedOutput = string(current.params.getAsJsonObject("output"), "item", "").replace("minecraft:", "");
+        var context = SlotDisplayContext.fromLevel(client.level);
+        for (var collection : client.player.getRecipeBook().getCollections()) {
+            for (RecipeDisplayEntry entry : collection.getRecipes()) {
+                RecipeDisplay display = entry.display();
+                ItemStack output = display.result().resolveForFirstStack(context);
+                if (output.isEmpty() || !itemPath(output).equals(wantedOutput)) continue;
+                List<SlotDisplay> ingredients;
+                int width;
+                int height;
+                if (display instanceof ShapedCraftingRecipeDisplay shaped) {
+                    width = shaped.width();
+                    height = shaped.height();
+                    ingredients = shaped.ingredients();
+                } else if (display instanceof ShapelessCraftingRecipeDisplay shapeless) {
+                    width = Math.min(2, shapeless.ingredients().size());
+                    height = (shapeless.ingredients().size() + 1) / 2;
+                    ingredients = shapeless.ingredients();
+                } else {
+                    continue;
+                }
+                if (width < 1 || height < 1 || width > 2 || height > 2 || ingredients.size() > 4) continue;
+                List<Integer> nonEmpty = new ArrayList<>();
+                for (int index = 0; index < ingredients.size(); index++) {
+                    if (!ingredients.get(index).resolveForStacks(context).isEmpty()) nonEmpty.add(index);
+                }
+                if (nonEmpty.size() != sourceItems.size()) continue;
+                int[] assigned = new int[sourceItems.size()];
+                java.util.Arrays.fill(assigned, -1);
+                if (!assignRecipeUnits(ingredients, nonEmpty, context, sourceItems, 0, assigned, new boolean[sourceItems.size()])) continue;
+                List<Integer> gridSlots = new ArrayList<>();
+                List<Integer> units = new ArrayList<>();
+                for (int requirement = 0; requirement < nonEmpty.size(); requirement++) {
+                    int displayIndex = nonEmpty.get(requirement);
+                    int row = displayIndex / width;
+                    int column = displayIndex % width;
+                    gridSlots.add(InventoryMenu.CRAFT_SLOT_START + row * 2 + column);
+                    units.add(assigned[requirement]);
+                }
+                return new RecipePlacement(gridSlots, units);
+            }
+        }
+        return null;
+    }
+
+    private static boolean assignRecipeUnits(
+        List<SlotDisplay> ingredients,
+        List<Integer> nonEmpty,
+        net.minecraft.util.context.ContextMap context,
+        List<ItemStack> sourceItems,
+        int requirement,
+        int[] assigned,
+        boolean[] used
+    ) {
+        if (requirement >= nonEmpty.size()) return true;
+        SlotDisplay display = ingredients.get(nonEmpty.get(requirement));
+        List<ItemStack> accepted = display.resolveForStacks(context);
+        for (int unit = 0; unit < sourceItems.size(); unit++) {
+            if (used[unit]) continue;
+            ItemStack source = sourceItems.get(unit);
+            boolean match = accepted.stream().anyMatch(candidate -> ItemStack.isSameItemSameComponents(candidate, source));
+            if (!match) continue;
+            used[unit] = true;
+            assigned[requirement] = unit;
+            if (assignRecipeUnits(ingredients, nonEmpty, context, sourceItems, requirement + 1, assigned, used)) return true;
+            used[unit] = false;
+        }
+        return false;
+    }
+
+    private record RecipePlacement(List<Integer> gridSlots, List<Integer> sourceUnits) {}
 
     private void tickMenuTransfer(Minecraft client, Run current) {
         if (current.phase == 0) {
@@ -1298,6 +1413,10 @@ public final class MineBotClientBody implements ClientModInitializer {
 
     private static int integer(JsonObject object, String key, int fallback) {
         return object.has(key) && object.get(key).isJsonPrimitive() ? object.get(key).getAsInt() : fallback;
+    }
+
+    private static boolean booleanValue(JsonObject object, String key, boolean fallback) {
+        return object.has(key) && object.get(key).isJsonPrimitive() ? object.get(key).getAsBoolean() : fallback;
     }
 
     private static double clamp(double value, double min, double max) {
