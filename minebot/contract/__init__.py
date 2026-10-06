@@ -52,9 +52,12 @@ from .execution import (
 from .progress import (
     FAILURE_STORM_LIMIT,
     LocalProgressController,
+    REVIEWABLE_STOP_REASONS,
     ProgressAbort,
     ProgressController,
     ProgressFacts,
+    ProgressStopReason,
+    dominant_progress_abort,
     STAGNATION_LIMIT,
     STALL_LIMIT,
 )
@@ -85,6 +88,9 @@ __all__ = [
     "ProgressAbort",
     "ProgressController",
     "ProgressFacts",
+    "ProgressStopReason",
+    "REVIEWABLE_STOP_REASONS",
+    "dominant_progress_abort",
     "LocalProgressController",
     "FAILURE_STORM_LIMIT",
     "Region",

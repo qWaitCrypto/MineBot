@@ -107,7 +107,7 @@ public final class EngageExecutor implements ActionRuntime.TickExecutor {
     private int elapsedTicks;
     private int attacks;
     private boolean damageObserved;
-    private boolean targetGoneAfterAttack;
+    private boolean targetLost;
     private Double initialHealth;
     private Double lastHealth;
     private int lastAttackTick = Integer.MIN_VALUE;
@@ -198,13 +198,8 @@ public final class EngageExecutor implements ActionRuntime.TickExecutor {
         } else {
             Lookup lookup = targets.refresh(bot, lockedTarget.id(), acquireRadius);
             if (lookup.target() == null) {
-                String reason = missingTargetReason();
-                if ("killed".equals(reason)) {
-                    targetGoneAfterAttack = true;
-                    damageObserved = true;
-                }
-                finish(serverTick, "killed".equals(reason)
-                    ? ActionRuntime.CLASS_COMPLETED : ActionRuntime.CLASS_FAILED, reason);
+                targetLost = true;
+                finish(serverTick, ActionRuntime.CLASS_FAILED, "target_lost");
                 return;
             }
             lockedTarget = lookup.target();
@@ -298,13 +293,6 @@ public final class EngageExecutor implements ActionRuntime.TickExecutor {
         }
     }
 
-    private String missingTargetReason() {
-        if (attacks == 0) {
-            return "target_lost";
-        }
-        return lockedTarget != null && lockedTarget.isPlayer() ? "target_gone" : "killed";
-    }
-
     private static boolean movedEnough(Target first, Target second) {
         double dx = first.x() - second.x();
         double dy = first.y() - second.y();
@@ -352,9 +340,7 @@ public final class EngageExecutor implements ActionRuntime.TickExecutor {
             targetPos.add(lockedTarget.y());
             targetPos.add(lockedTarget.z());
             facts.add("target_pos", targetPos);
-            if (targetGoneAfterAttack) {
-                facts.addProperty("target_health", 0.0);
-            } else if (lockedTarget.health() == null) {
+            if (targetLost || lockedTarget.health() == null) {
                 facts.add("target_health", JsonNull.INSTANCE);
             } else {
                 facts.addProperty("target_health", lockedTarget.health());

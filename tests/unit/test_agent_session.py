@@ -4,6 +4,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 from agents.exceptions import MaxTurnsExceeded
@@ -11,7 +12,7 @@ from openai import APIError, RateLimitError
 
 from minebot.app.autonomy import AutonomyCoordinator
 from minebot.app.progress_epochs import PersistentProgressEpochArchive
-from minebot.app.runner import AgentRuntime, RecoveryOutcome
+from minebot.app.runner import AgentRuntime, RecoveryOutcome, sdk_tool_for
 from minebot.app.memory import MemoryWorkspace, register_memory_tools
 from minebot.app.runtime_state import (
     CheckpointDisposition,
@@ -279,6 +280,144 @@ class AgentSessionTests(unittest.TestCase):
         session.close()
         store.close()
 
+    def test_pending_process_exit_does_not_replace_committed_continuation(self):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        workspace = TaskWorkspace(store, scope)
+        archive = PersistentProgressEpochArchive(store, scope)
+        session = AgentSession(lambda goal: build_parts(goal, [], []), task_workspace=workspace)
+        session.parts = build_parts("collect logs", [], [])
+        session.autonomy_coordinator = AutonomyCoordinator(
+            workspace,
+            session.work_queue,
+            archive,
+        )
+        task = workspace.start("collect logs", source="user")
+        archive.store(
+            {
+                "epoch_id": "epoch-handoff-material",
+                "run_id": "run-handoff-material",
+                "model_turn": 1,
+                "members": [],
+                "pre_body_fingerprint": "before",
+                "post_body_fingerprint": "after",
+                "evidence_refs": [],
+                "epistemic_keys": [],
+                "material_changed": True,
+                "progress_aborted": False,
+            }
+        )
+        _, checkpoint = workspace.checkpoint(
+            expected_task_revision=task.revision,
+            disposition=CheckpointDisposition.CONTINUE,
+            summary="collect another log",
+            body_fingerprint={"dimension": "overworld"},
+            continuation=ContinuationContract(
+                objective="collect another log",
+                operation_class=ContinuationOperationClass.MATERIAL,
+                target_descriptor={"kind": "resource", "identifier": "oak_log"},
+                expected_evidence=("inventory delta",),
+                bounded_epoch_budget=2,
+                approach_key="approach:oak-log",
+                evidence_cursor=0,
+                generation=4,
+            ),
+        )
+        session.parts.lifecycle.ready()
+        session.parts.lifecycle.start()
+        session.parts.authority.invalidate_generation("process_exit")
+        intent = session.work_queue.enqueue(
+            WorkIntentKind.START,
+            source="test",
+            payload={},
+            task_id=task.task_id,
+        )
+        session.work_queue.enqueue(WorkIntentKind.QUIT, source="test", payload={})
+
+        session._apply_task_checkpoint_lifecycle(
+            intent=intent,
+            checkpoint_before=None,
+        )
+
+        latest = store.get_latest_checkpoint(task.task_id)
+        self.assertEqual(latest.checkpoint_id, checkpoint.checkpoint_id)
+        self.assertEqual(latest.disposition, CheckpointDisposition.CONTINUE)
+        self.assertEqual(store.get_task(task.task_id).status, TaskStatus.RUNNING)
+        self.assertTrue(
+            store.reserve_continuation_epoch(
+                scope,
+                checkpoint_id=checkpoint.checkpoint_id,
+                epoch_id="handoff-successor-work",
+            )
+        )
+        self.assertTrue(
+            any(
+                event["event"] == "autonomy_continuation_deferred"
+                and event["reason"] == "continuation_handoff_settled"
+                for event in session.parts.runtime.trace.snapshot()
+            )
+        )
+        session.close()
+        store.close()
+
+    def test_rejected_completion_keeps_only_the_immediate_continuation_budget(self):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        workspace = TaskWorkspace(store, scope)
+        task = workspace.start("collect 2 logs", source="user")
+        _, owner = workspace.checkpoint(
+            expected_task_revision=task.revision,
+            disposition=CheckpointDisposition.CONTINUE,
+            summary="collect another log",
+            body_fingerprint={"dimension": "overworld"},
+            continuation=ContinuationContract(
+                objective="collect another log",
+                operation_class=ContinuationOperationClass.MATERIAL,
+                target_descriptor={"kind": "resource", "identifier": "logs"},
+                expected_evidence=("inventory delta",),
+                bounded_epoch_budget=2,
+                approach_key="approach:logs",
+                evidence_cursor=0,
+                generation=1,
+            ),
+        )
+        store.settle_continuation_approach(
+            scope,
+            checkpoint_id=owner.checkpoint_id,
+            task_id=task.task_id,
+            approach_key=owner.continuation.approach_key,
+            budget_limit=owner.continuation.bounded_epoch_budget,
+            consumed_epochs=0,
+        )
+        task = store.get_task(task.task_id)
+        _, completion = workspace.checkpoint(
+            expected_task_revision=task.revision,
+            disposition=CheckpointDisposition.COMPLETE,
+            summary="the logs are collected",
+            evidence=["inventory was checked"],
+        )
+        session = AgentSession(lambda goal: build_parts(goal, [], []), task_workspace=workspace)
+
+        review = session.reject_completion_request(
+            {"satisfied": False, "inventory_count": 1, "target": {"count": 2}}
+        )
+
+        self.assertIsNotNone(review)
+        self.assertEqual(review.kind, WorkIntentKind.COMPLETION_REVIEW)
+        self.assertEqual(review.payload["checkpoint_id"], completion.checkpoint_id)
+        self.assertEqual(review.payload["budget_checkpoint_id"], owner.checkpoint_id)
+        self.assertEqual(store.get_task(task.task_id).status, TaskStatus.RUNNING)
+        self.assertFalse(workspace.completion_requested)
+        self.assertTrue(
+            store.reserve_continuation_epoch(
+                scope,
+                checkpoint_id=owner.checkpoint_id,
+                epoch_id="completion-review-work",
+            )
+        )
+        session.close()
+        store.close()
+
     def test_checkpoint_continue_without_world_progress_yields_instead_of_looping(self):
         store = RuntimeStateStore(":memory:")
         scope = RuntimeScope("server", "world", "Bot1")
@@ -345,6 +484,98 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(latest.summary, "continuation_without_qualifying_evidence")
         session.close()
         store.close()
+
+    def test_new_body_failure_reaches_next_model_run_for_a_different_action(self):
+        self._exercise_failure_reconsideration(repeat_failure=False)
+
+    def test_repeating_the_same_body_failure_does_not_queue_another_reconsideration(self):
+        self._exercise_failure_reconsideration(repeat_failure=True)
+
+    def test_target_loss_reaches_model_but_repeated_loss_stops(self):
+        for repeat in (False, True):
+            with self.subTest(repeat=repeat):
+                self._exercise_failure_reconsideration(repeat_failure=repeat, failure_reason="target_lost")
+
+    def _exercise_failure_reconsideration(self, *, repeat_failure, failure_reason="no_path"):
+        store = RuntimeStateStore(":memory:")
+        scope = RuntimeScope("server", "world", "Bot1")
+        workspace = TaskWorkspace(store, scope)
+        archive = PersistentProgressEpochArchive(store, scope)
+        actions = []
+        calls = []
+
+        def parts_factory(goal):
+            parts = build_parts(goal, [], [])
+            parts.runtime.progress_epoch_archive = archive
+
+            def blocked(_params):
+                actions.append("blocked_route")
+                return ToolResult(False, failure_reason, False)
+
+            def alternative(_params):
+                actions.append("alternative_route")
+                parts.runtime.body.x += 1
+                return ToolResult(True, "arrived", False)
+
+            for name, callback in (("blocked_route", blocked), ("alternative_route", alternative)):
+                parts.registry.register(RegisteredTool(
+                    name, name, {"type": "object", "properties": {}}, callback,
+                    ToolSidecar(name, True, "body.navigation", "navigation", name, (), ("position",)),
+                ))
+
+            async def runner(_agent, _input_text, *, context, **_kwargs):
+                model_input = context.instruction_preamble + "\n" + _input_text
+                calls.append(model_input)
+                reconsidering = "TASK_RECONSIDER" in model_input
+                name = "alternative_route" if reconsidering and not repeat_failure else "blocked_route"
+                call_id = f"call-{len(calls)}"
+                await context.progress_epochs.open(SimpleNamespace(output=[SimpleNamespace(
+                    type="function_call", call_id=call_id, name=name, arguments="{}",
+                )]))
+                result = await sdk_tool_for(parts.registry.get(name)).on_invoke_tool(
+                    SimpleNamespace(context=context, tool_call_id=call_id), "{}",
+                )
+                task = workspace.current_task
+                if reconsidering and not repeat_failure:
+                    self.assertTrue(result["success"])
+                    workspace.checkpoint(expected_task_revision=task.revision,
+                        disposition=CheckpointDisposition.WAIT_EVENT, summary="arrived; wait for the next event")
+                else:
+                    self.assertFalse(result["success"])
+                    workspace.checkpoint(expected_task_revision=task.revision,
+                        disposition=CheckpointDisposition.CONTINUE, summary="route blocked; reconsider",
+                        body_fingerprint={"dimension": "overworld"},
+                        continuation=ContinuationContract(
+                            objective="reach destination", operation_class=ContinuationOperationClass.MATERIAL,
+                            target_descriptor={"kind": "state", "identifier": "arrived"},
+                            expected_evidence=("arrival",), bounded_epoch_budget=4,
+                            approach_key="approach:travel",
+                            evidence_cursor=parts.runtime.current_run_evidence_cursor(),
+                            generation=parts.authority.current_generation(),
+                        ))
+                return {"ok": True}
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory, task_workspace=workspace)
+        session.autonomy_coordinator = AutonomyCoordinator(workspace, session.work_queue, archive)
+        try:
+            session.submit(SessionCommand.start("reach destination"))
+            first = asyncio.run(session.step())
+            self.assertEqual(first.status, "completed_turn", first)
+            self.assertEqual(session.work_queue.pending_count(), 1)
+            self.assertFalse(archive.list_after(0)[0]["material_changed"])
+            second = asyncio.run(session.step())
+            self.assertEqual(second.status, "completed_turn", second)
+            self.assertEqual(actions, ["blocked_route", "blocked_route" if repeat_failure else "alternative_route"])
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(workspace.current_task.status,
+                             TaskStatus.YIELDED if repeat_failure else TaskStatus.WAITING_EVENT)
+            self.assertEqual(session.work_queue.pending_count(), 0)
+        finally:
+            session.close()
+            store.close()
 
     def test_missing_checkpoint_gets_one_bounded_task_boundary_retry_then_yields(self):
         store = RuntimeStateStore(":memory:")
@@ -973,6 +1204,63 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(preempted.status, "preempted")
         self.assertEqual(quit_step.status, "quit")
         self.assertEqual(bodies[0].interrupt_reasons, ["chat_quit"])
+
+    def test_quit_after_turn_cancellation_still_releases_body_owner(self):
+        bodies: list[FakeBody] = []
+        runner_started = asyncio.Event()
+        release_runner = asyncio.Event()
+
+        class OwnerBody(FakeBody):
+            def __init__(self):
+                super().__init__()
+                self.owner = "navigation-owner"
+
+            def event_head(self, _proposed_epoch):
+                return {"owner": self.owner}
+
+            def interrupt(self, reason=None):
+                self.owner = None
+                return super().interrupt(reason)
+
+        def parts_factory(goal: str) -> AgentRuntimeParts:
+            body = OwnerBody()
+            bodies.append(body)
+            parts = build_parts(goal, [], [])
+            parts.runtime.body = body
+
+            async def runner(_agent, _input_text, **_kwargs):
+                runner_started.set()
+                await release_runner.wait()
+                raise asyncio.CancelledError
+
+            parts.runtime.runner_run = runner
+            return parts
+
+        session = AgentSession(parts_factory)
+        session.submit(SessionCommand.start("collect 64 logs"))
+
+        async def scenario():
+            active = asyncio.create_task(session.step())
+            await runner_started.wait()
+            session.submit(SessionCommand.quit("gate_deadline"))
+            # Let the turn surface cancellation before the supervisor's next
+            # queue-notification poll, reproducing the live teardown race.
+            release_runner.set()
+            preempted = await active
+            quit_step = await session.step()
+            return preempted, quit_step
+
+        preempted, quit_step = asyncio.run(scenario())
+        trace = session.parts.runtime.trace.snapshot()
+        session.close()
+
+        self.assertEqual(preempted.status, "preempted")
+        self.assertEqual(quit_step.status, "quit")
+        self.assertEqual(bodies[0].interrupt_reasons, ["gate_deadline"])
+        self.assertIsNone(bodies[0].owner)
+        cancelled = [event for event in trace if event["event"] == "execution_cancelled"]
+        self.assertEqual(len(cancelled), 1)
+        self.assertTrue(cancelled[0]["settled"])
 
     def test_preempt_timeout_quarantines_lane_instead_of_starting_new_work(self):
         bodies: list[FakeBody] = []

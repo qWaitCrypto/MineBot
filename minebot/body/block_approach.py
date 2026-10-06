@@ -284,7 +284,10 @@ class BlockApproachTransactions:
             target_distance = _distance_to_target(current, target.pos)
             if target_distance > interaction_radius:
                 continue
-            return self._verify_target(target, wanted, interaction_radius, already_in_range=True)
+            result = self._verify_target(target, wanted, interaction_radius, already_in_range=True)
+            if result.reason == "get_to_block_not_interactable":
+                continue
+            return result
         return None
 
     def _verify_selected_targets(
@@ -318,7 +321,8 @@ class BlockApproachTransactions:
     ) -> ToolResult:
         block = self.body.perceive(
             "blockAt",
-            {"x": target.pos[0], "y": target.pos[1], "z": target.pos[2]},
+            {"x": target.pos[0], "y": target.pos[1], "z": target.pos[2],
+             "interaction_radius": min(interaction_radius, 4.5)},
         )
         failed = perception_failure(block)
         if failed is not None:
@@ -341,6 +345,14 @@ class BlockApproachTransactions:
             return ToolResult(False, "get_to_block_target_changed", True, metrics=metrics)
         if not metrics["range_verified"]:
             return ToolResult(False, "get_to_block_target_out_of_range", True, metrics=metrics)
+        ready = block.data.get("interaction_ready")
+        if type(ready) is not bool:
+            return ToolResult(False, "perception_failed", True, metrics={
+                **metrics, "error": "interaction_readiness_missing", "scope": "blockAt",
+            })
+        metrics["interaction_verified"] = ready
+        if not ready:
+            return ToolResult(False, "get_to_block_not_interactable", True, metrics=metrics)
         return ToolResult(True, "block_reached", False, metrics=metrics)
 
 

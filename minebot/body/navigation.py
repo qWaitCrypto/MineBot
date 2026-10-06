@@ -290,6 +290,10 @@ def navigation_governed_mobility_upgrade_reason(reason: object) -> bool:
         "node_budget_without_progress",
         "unloaded_boundary_without_progress",
         "no_path_incomplete_coverage_without_progress",
+        # Java objective slices carry their own bounded timeout. A caller may
+        # widen once only after ``navigation_zero_progress`` has independently
+        # proved this terminal made no physical/path progress.
+        "timeout_ticks_exhausted",
     }:
         return True
     if value.startswith(("recovery_exhausted:", "replan_budget_exhausted:")):
@@ -338,7 +342,14 @@ def navigation_governed_mobility_upgrade_allowed(
     hypothetical partial path from widening every ordinary failed route.
     """
 
-    if result.success or not navigation_governed_mobility_upgrade_reason(result.reason):
+    if result.success:
+        return False
+    # An objective time slice can expire after some useful movement. That is
+    # not evidence that wider mutation operators are required. Only the
+    # independently proven zero-progress timeout may hand off once.
+    if str(result.reason or "") == "timeout_ticks_exhausted":
+        return navigation_zero_progress(result, before, after)
+    if not navigation_governed_mobility_upgrade_reason(result.reason):
         return False
     if navigation_zero_progress(result, before, after):
         return True
@@ -617,6 +628,7 @@ class NavigationTransactions:
         timeout_s: float | None = None,
         arrival_radius: float | None = None,
         mutation_blacklist: set[Position] | None = None,
+        continuation_check: Callable[[], str | None] | None = None,
     ) -> ToolResult:
         cfg = config or NavigationRunConfig()
         if cfg.load_limited:
@@ -736,10 +748,31 @@ class NavigationTransactions:
             if not self.progress.generation_current(generation):
                 return _result(False, "preempted", True, goal_anchor, executed, {"generation_current": False})
 
+            continuation_reason = (
+                continuation_check() if continuation_check is not None else None
+            )
+            if continuation_reason is not None:
+                return _result(
+                    False,
+                    continuation_reason,
+                    True,
+                    goal_anchor,
+                    executed,
+                    {
+                        "navigation_goal": nav_goal.payload(),
+                        "continuation_yield": {
+                            "reason": continuation_reason,
+                            "completed_segments": len(executed),
+                        },
+                    },
+                )
+
             try:
                 self.progress.require_can_continue(f"navigate_to:{nav_goal.payload()}")
             except ProgressAbort as exc:
-                return _result(False, "progress_yielded", True, goal_anchor, executed, {"error": str(exc)})
+                return _result(False, "progress_yielded", True, goal_anchor, executed, {
+                    "error": str(exc), "progress_stop_reason": exc.stop_reason.value,
+                })
 
             action_params = _compact_navigate_action_params(
                 {
@@ -1263,7 +1296,10 @@ class NavigationTransactions:
         try:
             self.progress.require_can_continue(f"follow_entity:{target_spec}")
         except ProgressAbort as exc:
-            return _result(False, "progress_yielded", True, _block_pos(self.body.get_state()), [], {"error": str(exc), "target_spec": target_spec})
+            return _result(False, "progress_yielded", True, _block_pos(self.body.get_state()), [], {
+                "error": str(exc), "target_spec": target_spec,
+                "progress_stop_reason": exc.stop_reason.value,
+            })
 
         settle = _wait_for_survival_reflex_idle(
             self.body,

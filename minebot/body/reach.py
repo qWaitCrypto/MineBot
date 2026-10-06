@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from math import ceil, dist, floor
 from typing import TypeVar
 
-from minebot.body.world_read import read_block_facts
+from minebot.body.world_read import read_block_facts, standing_height
 from minebot.contract import Body, PerceptionResult, Position, ToolResult
 
 
@@ -114,6 +114,7 @@ def block_reach_domains(
             body,
             tuple(dict.fromkeys(wanted)),
             failure_label="reach:domain_batch",
+            include_standing=True,
         )
     except ValueError as exc:
         return ToolResult(
@@ -222,6 +223,13 @@ def _resolve_domain(
             else:
                 rejected.append(rejection)
                 continue
+        height = standing_height(feet)
+        physical_y = candidate[1] if height is None else height
+        center = (candidate[0] + 0.5, physical_y, candidate[2] + 0.5)
+        target_center = tuple(value + 0.5 for value in intent.target)
+        if dist(center, target_center) > intent.interaction_radius + 1e-6:
+            rejected.append({"candidate": list(candidate), "reason": "outside_interaction_range"})
+            continue
         rejection = _line_of_sight_rejection(intent, candidate, facts)
         if rejection is not None:
             if _can_defer_clearance(intent, rejection):
@@ -231,8 +239,8 @@ def _resolve_domain(
                 continue
         candidates.append(
             (
-                dist(state_pos, (candidate[0] + 0.5, candidate[1], candidate[2] + 0.5)),
-                abs(float(candidate[1]) - state_pos[1]),
+                dist(state_pos, center),
+                abs(physical_y - state_pos[1]),
                 candidate,
             )
         )
@@ -307,7 +315,8 @@ def _geometric_candidates(intent: ReachIntent) -> tuple[Position, ...]:
             candidate = (tx + dx, ty + vertical, tz + dz)
             if candidate in candidates:
                 continue
-            candidate_center = (candidate[0] + 0.5, candidate[1], candidate[2] + 0.5)
+            closest_y = min(max(target_center[1], candidate[1]), candidate[1] + 1)
+            candidate_center = (candidate[0] + 0.5, closest_y, candidate[2] + 0.5)
             if dist(candidate_center, target_center) > intent.interaction_radius + 1e-6:
                 continue
             candidates.append(candidate)
@@ -398,6 +407,8 @@ def _candidate_rejection(
 ) -> dict[str, object] | None:
     if feet is None or head is None or support is None:
         return {"candidate": list(candidate), "reason": "missing_fact"}
+    if standing_height(feet) is not None:
+        return None
     if not intent.allow_liquid and (cell_is_liquid(feet) or cell_is_liquid(head) or cell_is_liquid(support)):
         return {"candidate": list(candidate), "reason": "liquid_contact"}
     if not (cell_is_clear(feet) or (intent.allow_liquid and cell_is_liquid(feet))):
@@ -421,6 +432,8 @@ def _candidate_rejection(
         }
     if intent.require_support and not cell_is_solid_support(support):
         return {"candidate": list(candidate), "reason": "support_unstable"}
+    if intent.require_support and not intent.allow_liquid and "standing_y" in feet.data:
+        return {"candidate": list(candidate), "reason": "support_unverified"}
     return None
 
 

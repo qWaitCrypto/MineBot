@@ -39,6 +39,7 @@ from minebot.contract import (
     BodyState,
     JsonObject,
     ProgressAbort,
+    ProgressStopReason,
     ToolResult,
     is_candidate_skip,
     is_governance_decision_required,
@@ -309,11 +310,18 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
         # call as another failed tool result.
         if result.reason == PROGRESS_YIELDED_REASON:
             facts = ctx.authority.facts(ctx.goal_text)
+            try:
+                stop_reason = ProgressStopReason(
+                    (result.metrics or {}).get("progress_stop_reason", "unknown")
+                )
+            except (TypeError, ValueError):
+                stop_reason = ProgressStopReason.UNKNOWN
             raise ProgressAbort(
                 "progress authority yielded: "
                 f"goal={facts.goal!r} stagnant={facts.stagnant_steps} "
                 f"stalled={facts.stalled_steps} failures={facts.failure_steps}",
                 facts=facts,
+                stop_reason=stop_reason,
             )
 
         post_fingerprint = ctx.authority.fingerprint(post_state)  # step 5: post fp

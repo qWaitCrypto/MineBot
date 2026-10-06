@@ -978,7 +978,15 @@ def _is_natural_obstacle(reason: object, *, tool: object = None) -> bool:
     # These are agent/runtime contract failures, not world episodes.  Counting
     # them would let a failed skill lookup or local planning call manufacture
     # recovery evidence without the Body ever encountering an obstacle.
-    if tool_name in {"load_skill", "update_plan", "read_state", "read_inventory", "read_block", "read_recipe"}:
+    if tool_name in {
+        "load_skill",
+        "update_plan",
+        "read_state",
+        "read_inventory",
+        "read_block",
+        "read_recipe",
+        "read_tool_observation",
+    }:
         return False
     if any(
         text == marker or text.startswith(f"{marker}:")

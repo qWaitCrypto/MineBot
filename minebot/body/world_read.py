@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from time import monotonic
 
 from minebot.contract import Body, PerceptionResult, Position, perception_next_cursor
 from minebot.game.navigation import GridCell, GridWorld
+
+
+def standing_height(perception: PerceptionResult | None) -> float | None:
+    """Read an optional native standing proof without inventing a fallback pose."""
+    if perception is None or not perception.ok or not perception.complete:
+        return None
+    height = perception.data.get("standing_y")
+    voxel_y = perception.data.get("y")
+    if (isinstance(height, bool) or not isinstance(height, (int, float))
+        or not isfinite(height) or not isinstance(voxel_y, (int, float))
+        or not voxel_y <= height < voxel_y + 1):
+        return None
+    return float(height)
 
 
 @dataclass(frozen=True)
@@ -128,6 +142,7 @@ def read_block_facts(
     *,
     page_size: int = 64,
     failure_label: str = "read",
+    include_standing: bool = False,
 ) -> dict[Position, PerceptionResult]:
     """Read authoritative ``blockAt`` facts for many positions in one pass.
 
@@ -155,9 +170,12 @@ def read_block_facts(
         request_cells = cells[offset : offset + page_size]
         start = 0
         while start is not None:
+            params = {"cells": request_cells, "start": start, "limit": page_size}
+            if include_standing:
+                params["include_standing"] = True
             perception = body.perceive(
                 "blockCells",
-                {"cells": request_cells, "start": start, "limit": page_size},
+                params,
             )
             absolute_start = offset + start
             if not perception.ok:

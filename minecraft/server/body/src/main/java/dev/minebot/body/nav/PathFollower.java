@@ -12,6 +12,9 @@ import java.util.List;
  */
 public final class PathFollower {
     public static final double WAYPOINT_REACH_DISTANCE = 0.7;
+    // A 0.6-wide standing body must clear the previous support, not merely
+    // put its center inside the ordinary waypoint reach radius.
+    private static final double LANDING_ALIGNMENT_DISTANCE = 0.5 - 0.3;
     public static final double DEVIATION_DISTANCE = 4.0;
     public static final int RESYNC_LOOKAHEAD = 3;
     public static final int STUCK_TICKS = 60;
@@ -66,10 +69,10 @@ public final class PathFollower {
             return new Directive(State.STUCK, path.get(index), false, false, index);
         }
         Waypoint target = path.get(index);
-        int feetY = NavigateExecutor.PositionSource.Position.feetBlockY(py);
-        boolean fallingInTargetColumn = target.y() < feetY
-            && horizontalDistance(px, pz, target) <= reachDistance(index);
-        boolean jump = target.y() > feetY + 0.1
+        boolean fallingInTargetColumn = target.feetY() < py - 0.05
+            && horizontalDistance(px, pz, target)
+                <= Math.min(reachDistance(index), LANDING_ALIGNMENT_DISTANCE);
+        boolean jump = target.feetY() > py + 0.1
             && horizontalDistance(px, pz, target) < 1.1;
         // A descending graph edge is one mechanical movement primitive. Once
         // the body enters its landing column, horizontal input must stop while
@@ -150,6 +153,11 @@ public final class PathFollower {
         return ticksWithoutProgress >= STUCK_TICKS;
     }
 
+    /** Arrival still needs physical support; keep using the same progress sensor. */
+    boolean stuckWhileSettling(double px, double py, double pz) {
+        return trackStuck(px, py, pz);
+    }
+
     private double reachDistance(int waypointIndex) {
         return waypointIndex == path.size() - 1
             ? finalWaypointReachDistance
@@ -172,14 +180,18 @@ public final class PathFollower {
         // landing column. The final waypoint remains equally strict.
         boolean verticalReached = finalWaypoint || downwardWaypoint
             ? NavigateExecutor.PositionSource.Position.feetBlockY(py) == waypoint.y()
-            : py >= waypoint.y() - 0.05 && py - waypoint.y() <= 1.5;
+                && py >= waypoint.feetY() - 0.05
+            : py >= waypoint.feetY() - 0.05 && py - waypoint.feetY() <= 1.5;
+        if (waypoint.dry() && (finalWaypoint || downwardWaypoint)) {
+            verticalReached = Math.abs(py - waypoint.feetY()) <= WorldView.STABLE_SUPPORT_DISTANCE;
+        }
         return horizontalDistance(px, pz, waypoint) <= reachDistance
             && verticalReached;
     }
 
     private boolean isDownwardWaypoint(int waypointIndex) {
         return waypointIndex > 0
-            && path.get(waypointIndex).y() < path.get(waypointIndex - 1).y();
+            && path.get(waypointIndex).feetY() < path.get(waypointIndex - 1).feetY();
     }
 
     private static double horizontalDistance(double px, double pz, Waypoint waypoint) {
@@ -195,7 +207,7 @@ public final class PathFollower {
         Waypoint waypoint
     ) {
         double dx = px - (waypoint.x() + 0.5);
-        double dy = py - waypoint.y();
+        double dy = py - waypoint.feetY();
         double dz = pz - (waypoint.z() + 0.5);
         return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
@@ -208,10 +220,10 @@ public final class PathFollower {
         Waypoint end
     ) {
         double sx = start.x() + 0.5;
-        double sy = start.y();
+        double sy = start.feetY();
         double sz = start.z() + 0.5;
         double vx = end.x() - start.x();
-        double vy = end.y() - start.y();
+        double vy = end.feetY() - start.feetY();
         double vz = end.z() - start.z();
         double lengthSquared = vx * vx + vy * vy + vz * vz;
         if (lengthSquared == 0.0) {

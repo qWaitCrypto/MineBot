@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Protocol
 
 from .messages import BodyState
@@ -10,6 +11,23 @@ from .messages import BodyState
 STAGNATION_LIMIT = 3
 STALL_LIMIT = 8
 FAILURE_STORM_LIMIT = 5
+
+
+class ProgressStopReason(str, Enum):
+    UNKNOWN = "unknown"
+    NO_PROGRESS = "no_progress"
+    EPISTEMIC_BUDGET = "epistemic_budget"
+    BODY_TRANSPORT = "body_transport"
+
+
+# A stop cause is reviewable only when it means "this approach is not working",
+# so a model may deliberate over it and, at a separate boundary, buy one
+# execution admission for a different approach. Transport instability and
+# unclassified aborts are not strategy exhaustion: they stay terminal for
+# execution. One definition, because every gate must agree on it.
+REVIEWABLE_STOP_REASONS = frozenset(
+    {ProgressStopReason.NO_PROGRESS, ProgressStopReason.EPISTEMIC_BUDGET}
+)
 
 
 @dataclass(frozen=True)
@@ -25,13 +43,44 @@ class ProgressFacts:
     epistemic_steps: int = 0
     last_epistemic_keys: tuple[str, ...] = ()
 
+    def stop_reason(self) -> ProgressStopReason:
+        if self.epistemic_steps >= STALL_LIMIT:
+            return ProgressStopReason.EPISTEMIC_BUDGET
+        if (
+            self.stagnant_steps >= STAGNATION_LIMIT
+            or self.stalled_steps >= STALL_LIMIT
+            or self.failure_steps >= FAILURE_STORM_LIMIT
+        ):
+            return ProgressStopReason.NO_PROGRESS
+        return ProgressStopReason.UNKNOWN
+
 
 class ProgressAbort(Exception):
     """Raised when a progress authority decides a loop must yield."""
 
-    def __init__(self, message: str = "", *, facts: ProgressFacts | None = None) -> None:
+    def __init__(
+        self, message: str = "", *, facts: ProgressFacts | None = None,
+        stop_reason: ProgressStopReason = ProgressStopReason.UNKNOWN,
+        stop_epoch_id: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.facts = facts
+        self.stop_reason = ProgressStopReason(stop_reason)
+        # The durable epoch that recorded this stop. A reconsideration grant is
+        # stamped with it, so one stop can never buy two admissions.
+        self.stop_epoch_id = stop_epoch_id
+
+
+def dominant_progress_abort(*aborts: ProgressAbort | None) -> ProgressAbort | None:
+    """Do not let incidental stagnation hide an infrastructure or unknown stop."""
+    priority = {
+        ProgressStopReason.NO_PROGRESS: 0,
+        ProgressStopReason.EPISTEMIC_BUDGET: 1,
+        ProgressStopReason.UNKNOWN: 2,
+        ProgressStopReason.BODY_TRANSPORT: 3,
+    }
+    return max((abort for abort in aborts if abort is not None),
+               key=lambda abort: priority[abort.stop_reason], default=None)
 
 
 class ProgressController(Protocol):
@@ -78,7 +127,7 @@ class LocalProgressController:
 
     def fingerprint(self, state: BodyState) -> str:
         pos = ",".join(f"{value:.1f}" for value in state.pos)
-        return "|".join([pos, f"{state.health:.1f}", str(int(state.food)), str(state.time // 1000), state.inventory_hash])
+        return "|".join([pos, f"{state.health:.1f}", str(int(state.food)), state.inventory_hash])
 
     def observe_step(self, action_key: tuple[Any, ...], fingerprint: str) -> None:
         self.current_fingerprint = fingerprint
@@ -144,4 +193,5 @@ class LocalProgressController:
                 f"goal={facts.goal!r} stagnant={facts.stagnant_steps} "
                 f"stalled={facts.stalled_steps} failures={facts.failure_steps}",
                 facts=facts,
+                stop_reason=facts.stop_reason(),
             )

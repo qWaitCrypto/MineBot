@@ -25,10 +25,11 @@ from minebot.contract import (
     perception_resume_params,
 )
 from minebot.contract import terminal_event_to_tool_result
-from minebot.body.world_read import read_block_facts
+from minebot.body.world_read import read_block_facts, standing_height
 from minebot.body.reach import (
     ReachIntent,
     block_reach_domain,
+    block_reach_geometry,
     cell_is_clear,
     cell_is_solid_support,
 )
@@ -828,6 +829,7 @@ def interaction_stand_points(
         target,
         interaction_radius=interaction_radius,
         current_y=current_y,
+        include_target=include_target,
     )
     for stand_y in extra_levels:
         stands = _interaction_reach_band(
@@ -872,19 +874,16 @@ def _interaction_vertical_reach_levels(
     *,
     interaction_radius: float,
     current_y: float,
+    include_target: bool = False,
 ) -> tuple[int, ...]:
     if interaction_radius <= 0:
         return ()
-    vertical_limit = int(interaction_radius)
-    levels = []
-    for offset in range(-vertical_limit, vertical_limit + 2):
-        stand_y = target[1] + offset
-        if stand_y in {target[1], target[1] - 1}:
-            continue
-        stand_center = (target[0] + 1.5, float(stand_y), target[2] + 0.5)
-        target_center = (target[0] + 0.5, target[1] + 0.5, target[2] + 0.5)
-        if dist(stand_center, target_center) <= interaction_radius:
-            levels.append(stand_y)
+    geometry = block_reach_geometry(ReachIntent(
+        target=target, interaction_radius=interaction_radius,
+        vertical_offsets=None, include_target=include_target,
+    ))
+    levels = list({candidate[1] for candidate in geometry
+        if candidate[1] not in {target[1], target[1] - 1}})
     levels.sort(key=lambda stand_y: (abs(float(stand_y) - current_y), abs(stand_y - target[1]), stand_y))
     return tuple(levels)
 
@@ -978,10 +977,13 @@ def _entity_distance_band_stand_points(
             if pos in seen:
                 continue
             seen.add(pos)
-            stand_distance = dist((pos[0] + 0.5, pos[1], pos[2] + 0.5), target)
-            if stand_distance < min_distance:
+            closest_y = min(max(target[1], pos[1]), pos[1] + 1)
+            nearest_distance = dist((pos[0] + 0.5, closest_y, pos[2] + 0.5), target)
+            farthest_distance = max(dist((pos[0] + 0.5, y, pos[2] + 0.5), target)
+                for y in (pos[1], pos[1] + 1))
+            if farthest_distance < min_distance:
                 continue
-            if max_distance is not None and stand_distance > max_distance:
+            if max_distance is not None and nearest_distance > max_distance:
                 continue
             candidates_to_read.append(pos)
             add_read_position(pos)
@@ -999,6 +1001,7 @@ def _entity_distance_band_stand_points(
             body,
             tuple(positions_to_read),
             failure_label="entity_stand_domain",
+            include_standing=True,
         )
     except ValueError as exc:
         return ToolResult(
@@ -1018,13 +1021,22 @@ def _entity_distance_band_stand_points(
         stand = facts[pos]
         head = facts[(pos[0], pos[1] + 1, pos[2])]
         below = facts[(pos[0], pos[1] - 1, pos[2])]
-        if not _interaction_feet_clear(stand):
+        height = standing_height(stand)
+        if "standing_y" in stand.data:
+            if height is None:
+                continue
+        else:
+            if not _interaction_feet_clear(stand):
+                continue
+            if not _interaction_head_clear(head, head_pos=(pos[0], pos[1] + 1, pos[2]), target=block_pos):
+                continue
+            if not _interaction_support_standable(below):
+                continue
+        center = (pos[0] + 0.5, pos[1] if height is None else height, pos[2] + 0.5)
+        distance = dist(center, target)
+        if distance < min_distance or (max_distance is not None and distance > max_distance):
             continue
-        if not _interaction_head_clear(head, head_pos=(pos[0], pos[1] + 1, pos[2]), target=block_pos):
-            continue
-        if not _interaction_support_standable(below):
-            continue
-        candidates.append((dist(state.pos, (pos[0] + 0.5, pos[1], pos[2] + 0.5)), pos))
+        candidates.append((dist(state.pos, center), pos))
 
     candidates.sort(key=lambda item: (item[0], item[1]))
     return [pos for _distance, pos in candidates[:max_points]]

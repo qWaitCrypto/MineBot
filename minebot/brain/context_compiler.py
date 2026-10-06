@@ -55,6 +55,7 @@ class ContextFacts:
     goal_text: str
     turn: int
     language: str
+    goal_facts: Mapping[str, object] | None = None
     include_goal: bool = True
     include_session_messages: bool = True
     session_messages: tuple[tuple[str, str], ...] = ()
@@ -97,6 +98,16 @@ def _render_goal(facts: ContextFacts) -> str | None:
     if facts.include_goal and facts.goal_text.strip():
         return f"GOAL: {facts.goal_text}"
     return None
+
+
+def _render_goal_facts(facts: ContextFacts) -> str | None:
+    """Render server-observed completion facts without prescribing an action."""
+
+    if facts.goal_facts is None:
+        return None
+    return "GOAL_FACTS: " + json.dumps(
+        facts.goal_facts, ensure_ascii=False, sort_keys=True
+    )
 
 
 def _render_session_header(facts: ContextFacts) -> str | None:
@@ -176,6 +187,7 @@ def _render_resume(facts: ContextFacts) -> str | None:
 # budget squeeze past the P1 band — may remove it.
 SECTION_REGISTRY: tuple[SectionSpec, ...] = (
     SectionSpec("goal", 0, _render_goal),
+    SectionSpec("goal_facts", 0, _render_goal_facts, provenance_required=True),
     SectionSpec("session_header", 0, _render_session_header),
     SectionSpec("session_messages", 3, _render_session_messages),
     SectionSpec("task_facts", 1, _render_task_artifact, provenance_required=True),

@@ -709,6 +709,9 @@ def _work_intent_from_row(row: sqlite3.Row) -> dict[str, object]:
 
 
 def _progress_epoch_from_row(row: sqlite3.Row) -> dict[str, object]:
+    commit_input = _json_load(row["commit_input_json"], default=None)
+    if row["commit_input_json"] is not None and not isinstance(commit_input, dict):
+        raise RuntimeStateError("stored progress epoch commit input is corrupt")
     members = _json_load(row["members_json"], default=[])
     evidence_refs = _json_load(row["evidence_refs_json"], default=[])
     epistemic_keys = _json_load(row["epistemic_keys_json"], default=[])
@@ -749,6 +752,9 @@ def _progress_epoch_from_row(row: sqlite3.Row) -> dict[str, object]:
         "novel_epistemic_keys": novel_epistemic_keys,
         "material_changed": bool(row["material_changed"]),
         "progress_aborted": bool(row["progress_aborted"]),
+        "progress_stop_reason": row["progress_stop_reason"],
+        "budget_checkpoint_id": row["budget_checkpoint_id"],
+        "commit_input": commit_input,
         "settled_at": str(row["settled_at"]),
     }
 

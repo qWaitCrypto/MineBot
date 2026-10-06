@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from math import floor
+from math import ceil, floor
 from time import monotonic, sleep
+from typing import Callable
 
 from minebot.body.combat import entity_target_terminal_mismatch, resolve_entity_target
 from minebot.body.navigation import (
@@ -39,6 +40,7 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
         timeout_s: float | None = None,
         arrival_radius: float | None = None,
         mutation_blacklist: set[Position] | None = None,
+        continuation_check: Callable[[], str | None] | None = None,
     ) -> ToolResult:
         normalized = normalize_goal(goal)
         try:
@@ -64,6 +66,115 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
         if survival is not None:
             return survival
 
+        def continuation_yield(
+            reason: str,
+            *,
+            completed_segments: int,
+            previous: ToolResult | None = None,
+        ) -> ToolResult:
+            prior_metrics = dict(previous.metrics or {}) if previous is not None else {}
+            metrics = {
+                **prior_metrics,
+                "navigation_goal": normalized.payload(),
+                "provider_action": "navigate",
+                "continuation_yield": {
+                    "reason": reason,
+                    "completed_segments": completed_segments,
+                },
+            }
+            return ToolResult(False, reason, True, metrics=metrics)
+
+        if continuation_check is None:
+            return self._execute_objective(
+                normalized,
+                payload,
+                cfg=cfg,
+                break_context=break_context,
+                timeout_s=effective_timeout_s,
+                arrival_radius=arrival_radius,
+                mutation_blacklist=mutation_blacklist,
+            )
+
+        # A Java objective owns the fine-grained path.  For callers that must
+        # regain the decision lane, issue the same objective in finite time
+        # slices and inspect only after each completed provider action. Governed
+        # slices share one authority: only a consistent server mutation receipt
+        # permits continuation, with the remaining allowance (never a refill).
+        remaining_timeout_s = effective_timeout_s
+        deadline = monotonic() + effective_timeout_s
+        completed_segments = 0
+        governed_break = bool(
+            cfg.aquatic_traversal and cfg.allow_break and cfg.max_break_steps > 0
+        )
+        max_segments = max(1, ceil(effective_timeout_s / max(0.05, cfg.segment_timeout_s)))
+        previous: ToolResult | None = None
+        remaining_breaks = cfg.max_break_steps
+        mutations_completed = 0
+        slice_results: list[dict[str, object]] = []
+        while remaining_timeout_s > 0:
+            continuation_reason = continuation_check()
+            if continuation_reason is not None:
+                return continuation_yield(
+                    continuation_reason,
+                    completed_segments=completed_segments,
+                    previous=previous,
+                )
+            segment_timeout_s = min(remaining_timeout_s, cfg.segment_timeout_s, deadline - monotonic())
+            if segment_timeout_s <= 0 and previous is not None:
+                return previous
+            previous = self._execute_objective(
+                normalized,
+                payload,
+                cfg=replace(cfg, max_break_steps=remaining_breaks) if governed_break else cfg,
+                break_context=break_context,
+                timeout_s=segment_timeout_s,
+                arrival_radius=arrival_radius,
+                mutation_blacklist=mutation_blacklist,
+            )
+            completed_segments += 1
+            remaining_timeout_s -= segment_timeout_s
+            progress_receipt = False
+            if governed_break:
+                metrics = dict(previous.metrics or {})
+                used = metrics.get("mutations_completed")
+                left = metrics.get("budget_remaining")
+                valid_receipt = (
+                    type(used) is int and type(left) is int
+                    and 0 <= used <= remaining_breaks
+                    and left == remaining_breaks - used
+                )
+                slice_results.append(previous.to_payload())
+                if valid_receipt:
+                    mutations_completed += used
+                    remaining_breaks = left
+                    progress_receipt = used > 0 and left > 0
+                metrics.update(
+                    mutations_completed=mutations_completed,
+                    budget_remaining=remaining_breaks,
+                    navigation_slices=list(slice_results),
+                    mutation_receipt_valid=valid_receipt,
+                )
+                previous = replace(previous, metrics=metrics)
+            if previous.success or previous.reason != "timeout_ticks_exhausted":
+                return previous
+            if (governed_break and not progress_receipt) or completed_segments >= max_segments:
+                return previous
+
+        assert previous is not None
+        return previous
+
+    def _execute_objective(
+        self,
+        normalized: NavigationGoal,
+        payload: dict[str, object],
+        *,
+        cfg: NavigationRunConfig,
+        break_context: BreakContext | str,
+        timeout_s: float,
+        arrival_radius: float | None,
+        mutation_blacklist: set[Position] | None,
+    ) -> ToolResult:
+
         final_reach_distance = (
             min(0.1, max(0.05, float(arrival_radius)))
             if arrival_radius is not None
@@ -71,7 +182,7 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
         )
         action_params: dict[str, object] = {
             "goal": payload,
-            "timeout_ticks": max(20, min(12_000, int(effective_timeout_s * 20))),
+            "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
             "survival_recovery": bool(cfg.survival_recovery),
             # Keep the provider-owned objective, but do not discard the
             # caller's finite navigation profile at the Python/Java seam.
@@ -123,7 +234,7 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
             reflex = _wait_for_reflex_completion(
                 self.body,
                 after_seq=after_seq,
-                timeout_s=min(6.0, max(1.0, effective_timeout_s)),
+                timeout_s=min(6.0, max(1.0, timeout_s)),
             )
             if reflex is not None:
                 handoff = {"event": reflex.name, "seq": reflex.seq, "data": dict(reflex.data)}

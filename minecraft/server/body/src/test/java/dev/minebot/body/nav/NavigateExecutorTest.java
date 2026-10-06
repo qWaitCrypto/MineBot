@@ -236,6 +236,22 @@ final class NavigateExecutorTest {
     }
 
     @Test
+    void unsupportedArrivalReturnsTheCauseAndCleansUpBeforeTheOuterTimeout() {
+        Harness harness = Harness.create(new FakeWorld(FLOOR), new Goal.Stand(0, STAND, 0), 2_400);
+        harness.body().y = STAND + 0.2;
+        harness.body().frozen = true;
+        JsonObject terminal = harness.runUntilTerminal(
+            (NavigateExecutor.REPLAN_LIMIT + 1) * (PathFollower.STUCK_TICKS + 4)
+        );
+        assertEquals("failed", terminal.get("classification").getAsString());
+        assertEquals("no_path", terminal.get("reason").getAsString());
+        assertEquals("replan_budget_exhausted:arrival_unstable",
+            terminal.get("failure_detail").getAsString());
+        assertEquals(NavigateExecutor.REPLAN_LIMIT, terminal.get("replans").getAsInt());
+        assertTrue(harness.body().log.contains("clearAll"));
+    }
+
+    @Test
     void completesASimpleWalkWithGoalVerification() {
         Harness harness = Harness.create(new FakeWorld(FLOOR), new Goal.Near(10, STAND, 0, 1.5), 2_400);
 

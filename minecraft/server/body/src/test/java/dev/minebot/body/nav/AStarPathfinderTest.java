@@ -15,6 +15,40 @@ final class AStarPathfinderTest {
     private static final int FLOOR = 63;
     private static final int STAND = FLOOR + 1;
 
+    @Test
+    void timeSlicesResumeTheSameSearchWithoutRenewingItsTotalNodeAllowance() {
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        var search = new AStarPathfinder(new FakeWorld(FLOOR), new Goal.XZ(100, 100),
+            0, STAND, 0, 3, 50);
+        for (int expected = 1; expected <= 3; expected++) {
+            var result = search.step(2_000, 5, () -> clock.getAndAdd(10));
+            assertEquals(expected, result.expandedNodes());
+            if (expected < 3) {
+                assertEquals(Outcome.IN_PROGRESS, result.outcome());
+            } else {
+                assertTrue(result.reason().startsWith("node_budget"));
+                assertTrue(result.outcome() != Outcome.IN_PROGRESS);
+            }
+        }
+    }
+
+    @Test
+    void timeSlicingPreservesTheRouteAndCompletesWithoutRestartingAStar() {
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        var world = new FakeWorld(FLOOR);
+        var goal = new Goal.XZ(6, 0);
+        var search = new AStarPathfinder(world, goal, 0, STAND, 0);
+        Result result = null;
+        for (int slice = 0; slice < 100; slice++) {
+            result = search.step(2_000, 5, () -> clock.getAndAdd(10));
+            if (result.outcome() != Outcome.IN_PROGRESS) {
+                break;
+            }
+        }
+        assertEquals(Outcome.COMPLETE, result.outcome());
+        assertEquals(solve(world, goal, 0, 0).path(), result.path());
+    }
+
     private static Result solve(WorldView world, Goal goal, int sx, int sz) {
         return solveAt(world, goal, sx, STAND, sz);
     }

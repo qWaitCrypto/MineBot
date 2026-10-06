@@ -10,7 +10,7 @@ import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 from uuid import uuid4
@@ -48,7 +48,7 @@ from minebot.app.progress_epoch_adapter import (
 from minebot.app.runtime_trace import RuntimeTrace
 from minebot.app.model_provider import ModelProviderRegistry, is_retryable_model_error
 from minebot.app.observation_artifacts import ToolObservationArchive
-from minebot.app.progress_epochs import ProgressEpochArchive
+from minebot.app.progress_epochs import ContinuationEpochBudget, ProgressEpochArchive
 from minebot.app.skills import SkillOperationError
 from minebot.app.observability import ObservationSink, sanitize_observation
 from minebot.app.projection import (
@@ -76,7 +76,7 @@ from minebot.brain.modes import (
     signalize_events,
     survival_reason_from_tool_results,
 )
-from minebot.brain.progress import ProgressAuthority, ProgressStep
+from minebot.brain.progress import ProgressAuthority, ProgressStep, progress_snapshot
 from minebot.brain.registry import (
     ObservationProjector,
     RegisteredTool,
@@ -86,11 +86,15 @@ from minebot.brain.registry import (
 )
 from minebot.contract import (
     Body,
+    BodyState,
     ExecutionCancellation,
     ExecutionCancelled,
     JsonObject,
     ProgressAbort,
     ProgressFacts,
+    ProgressStopReason,
+    REVIEWABLE_STOP_REASONS,
+    dominant_progress_abort,
     execution_cancellation_scope,
     is_governance_decision_required,
     is_partial_progress,
@@ -142,6 +146,7 @@ class AgentTurnOutcome:
     result: Any | None = None
     yielded_facts: ProgressFacts | None = None
     message: str | None = None
+    progress_stop_reason: ProgressStopReason | None = None
 
 
 @dataclass(frozen=True)
@@ -272,6 +277,8 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             else None
         )
 
+        post_state: BodyState | None = None
+
         def finalize(
             result: JsonObject,
             *,
@@ -297,9 +304,20 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                     progress_steps=progress_steps,
                     status=status,
                     pending_abort=pending_abort,
+                    post_state=post_state,
                 )
                 if abort is not None and raise_progress_abort:
-                    raise abort
+                    if abort is not epoch_adapter.reviewable_abort:
+                        raise abort
+                    model_result["executionStop"] = {
+                        "reason": abort.stop_reason.value,
+                        "scope": "work_closed_task_tools_only",
+                        "nextSuggestion": (
+                            "Work is stopped. Use the existing evidence to update the task plan "
+                            "and checkpoint wait_event or yield. No work tool can execute, "
+                            "and a continue checkpoint does not renew execution permission."
+                        ),
+                    }
             return model_result
 
         if trace is not None:
@@ -341,6 +359,39 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                     tool=tool.name,
                     condition=strategy_epoch_condition,
                 )
+        if (
+            epoch_adapter is not None and epoch_adapter.work_stop is not None
+            and not (tool.sidecar.source == "agent.task" and not tool.sidecar.can_mutate_body)
+        ):
+            if epoch_member is None:
+                raise ProgressAbort("stopped work has no declared epoch", stop_reason=ProgressStopReason.UNKNOWN)
+            return finalize({
+                "success": False, "reason": "progress_work_closed", "canRetry": False,
+                "nextSuggestion": "Use task tools to record a plan and wait or yield; work remains stopped.",
+                "metrics": {"progress_stop_reason": epoch_adapter.work_stop.stop_reason.value},
+            }, status="progress_denied")
+        if (
+            epoch_adapter is not None and epoch_adapter.budget is not None
+            and not (tool.sidecar.source == "agent.task" and not tool.sidecar.can_mutate_body)
+            and (epoch_member is None or epoch_member.budget_denied)
+        ):
+            if epoch_member is None:
+                raise ProgressAbort(
+                    "continuation work has no declared progress epoch",
+                    facts=ctx.context.weld_context.authority.facts(ctx.context.agent_context.goal_text),
+                    stop_reason=ProgressStopReason.UNKNOWN,
+                )
+            return finalize({
+                "success": False,
+                "reason": "continuation_work_budget_closed",
+                "canRetry": False,
+                "nextSuggestion": (
+                    "The incoming continuation is exhausted or no longer current. "
+                    "Use task tools to inspect the task, revise the plan, and close a checkpoint. "
+                    "This run cannot execute more work under that continuation."
+                ),
+                "metrics": {"budget_checkpoint_id": epoch_adapter.budget.checkpoint_id},
+            }, status="budget_denied")
         if epoch_member is not None and epoch_member.conflict:
             result = epoch_adapter.conflict_result(epoch_member)
             if trace is not None:
@@ -443,6 +494,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
                     timeout_s=tool.sidecar.timeout_s,
                 )
                 progress_steps = captured.progress_steps
+                post_state = captured.post_state
                 if captured.error is not None:
                     raise captured.error
                 assert captured.result is not None
@@ -629,6 +681,7 @@ class _CapturedToolExecution:
     result: JsonObject | None
     progress_steps: tuple[ProgressStep, ...]
     error: Exception | None = None
+    post_state: BodyState | None = None
 
 
 def _capture_tool_execution(
@@ -641,7 +694,13 @@ def _capture_tool_execution(
             result = execute_tool(tool, params, context.weld_context)
         except Exception as exc:
             return _CapturedToolExecution(None, tuple(captured), exc)
-    return _CapturedToolExecution(result, tuple(captured))
+    try:
+        post_state = progress_snapshot(context.weld_context.body.get_state())
+    except Exception as exc:
+        post_state = None
+        if context.trace is not None:
+            context.trace.emit("progress_post_state_unavailable", tool=tool.name, error_type=type(exc).__name__)
+    return _CapturedToolExecution(result, tuple(captured), post_state=post_state)
 
 
 def _finalize_tool_payload(
@@ -790,8 +849,9 @@ def _tool_exception_next_suggestion(reason: str) -> str:
 def _progress_abort_metrics(exc: ProgressAbort) -> JsonObject:
     facts = exc.facts
     if facts is None:
-        return {}
+        return {"progress_stop_reason": exc.stop_reason.value}
     return {
+        "progress_stop_reason": exc.stop_reason.value,
         "stagnant_steps": facts.stagnant_steps,
         "stalled_steps": facts.stalled_steps,
         "failure_steps": facts.failure_steps,
@@ -1205,6 +1265,7 @@ class AgentRuntime:
         conversation_session: Session | None = None,
         observation_archive: ToolObservationArchive | None = None,
         progress_epoch_archive: ProgressEpochArchive | None = None,
+        progress_task_id: Callable[[], str | None] | None = None,
         routing_policy: RoutingPolicy | None = None,
     ) -> None:
         self.body = body
@@ -1228,6 +1289,14 @@ class AgentRuntime:
         )
         self.observation_archive = observation_archive
         self.progress_epoch_archive = progress_epoch_archive
+        self.progress_task_id = progress_task_id
+        self._progress_task_initialized = False
+        self._progress_task_owner: str | None = None
+        self._progress_restore_abort: ProgressAbort | None = None
+        self._progress_work_stop: ProgressAbort | None = None
+        # Set per turn from the admitted continuation: the stop epoch whose
+        # review was bought with one non-renewable task allowance.
+        self._turn_review_grant: str | None = None
         self._run_evidence_cursor = 0
         self.hooks = RuntimeHooks()
         self.weld_context = WeldContext(
@@ -1279,13 +1348,19 @@ class AgentRuntime:
         continuation_evidence_cursor: int | None = None,
         intent_kind: str | None = None,
         has_durable_goal: bool | None = None,
+        continuation_budget: ContinuationEpochBudget | None = None,
+        review_grant_stop_epoch_id: str | None = None,
     ) -> AgentTurnOutcome:
         self._turn_intent_kind = intent_kind
         self._turn_has_durable_goal = has_durable_goal
+        self._turn_review_grant = review_grant_stop_epoch_id
         prepared = await self.run_sync(self._prepare_turn, extra_signals)
         if isinstance(prepared, AgentTurnOutcome):
             return prepared
         profile = prepared
+        restore_abort = await self.run_sync(self.restore_task_progress)
+        if restore_abort is not None:
+            return self._yield_from_progress_abort(restore_abort)
         try:
             self._refresh_dynamic_context()
         except SkillOperationError as exc:
@@ -1341,6 +1416,7 @@ class AgentRuntime:
             runtime=self,
             run_id=run_id,
             archive=self.progress_epoch_archive,
+            budget=continuation_budget,
         )
         run_context = RuntimeRunContext(
             agent_context=self.agent_context,
@@ -1381,18 +1457,19 @@ class AgentRuntime:
             raise
         except ProgressAbort as exc:
             deferred = progress_epochs.finalize_unsettled("progress_abort")
-            return self._yield_from_progress_abort(deferred or exc)
+            return self._yield_from_progress_abort(dominant_progress_abort(deferred, exc) or exc)
         except BodyRecoveryRequired as exc:
             progress_epochs.finalize_unsettled("body_recovery")
             return self._enter_recovery_from_body_fact(exc.reason, exc.facts)
         except MaxTurnsExceeded as exc:
-            progress_epochs.finalize_unsettled("max_turns_exceeded")
+            deferred = progress_epochs.finalize_unsettled("max_turns_exceeded")
+            if progress_epochs.work_stop is not None:
+                return self._yield_from_progress_abort(
+                    dominant_progress_abort(deferred, progress_epochs.work_stop) or progress_epochs.work_stop)
             return self._yield_from_runaway_ceiling(exc)
         except UserError as exc:
             deferred = progress_epochs.finalize_unsettled("sdk_user_error")
-            progress_abort = _find_progress_abort(exc)
-            if progress_abort is None:
-                progress_abort = deferred
+            progress_abort = dominant_progress_abort(_find_progress_abort(exc), deferred)
             if progress_abort is None:
                 recovery_required = _find_body_recovery_required(exc)
                 if recovery_required is not None:
@@ -1419,6 +1496,7 @@ class AgentRuntime:
             lifecycle=self.lifecycle.state,
             profile=profile,
             result=result,
+            progress_stop_reason=None if progress_epochs.work_stop is None else progress_epochs.work_stop.stop_reason,
         )
 
     def _raise_model_transport_error_if_retryable(self, exc: BaseException) -> None:
@@ -1431,6 +1509,68 @@ class AgentRuntime:
             retryable=True,
         )
         raise ModelTurnTransportError(error_type) from exc
+
+    def restore_task_progress(self) -> ProgressAbort | None:
+        """Prepare task progress before model or lifecycle-recovery execution."""
+        if self.progress_task_id is None:
+            return None
+        try:
+            task_id = self.progress_task_id()
+            if task_id is None:
+                return self._progress_restore_abort
+            if self._progress_task_initialized and task_id == self._progress_task_owner:
+                self._reopen_reviewed_work_lane()
+                return self._progress_restore_abort
+            if self.progress_epoch_archive is not None:
+                abort = self.progress_epoch_archive.restore_authority(self.authority, task_id=task_id)
+            else:
+                if self._progress_task_initialized:
+                    self.authority.restore_facts(ProgressAuthority().facts(self.agent_context.goal_text))
+                abort = None
+        except Exception as exc:
+            self.trace.emit("progress_restore_failed", error_type=type(exc).__name__)
+            return ProgressAbort("progress state could not be restored")
+        self._progress_task_owner = task_id
+        self._progress_task_initialized = True
+        self._progress_work_stop = (
+            abort if abort is not None and abort.stop_reason in REVIEWABLE_STOP_REASONS
+            else None
+        )
+        self._progress_restore_abort = (
+            abort if abort is not None and abort.stop_reason in {
+                ProgressStopReason.UNKNOWN, ProgressStopReason.BODY_TRANSPORT,
+            } else None
+        )
+        self.trace.emit("progress_restored", task_id=task_id,
+            progress_stop_reason=None if abort is None else abort.stop_reason.value,
+            **asdict(self.authority.facts(self.agent_context.goal_text)))
+        self._reopen_reviewed_work_lane()
+        return self._progress_restore_abort
+
+    def _reopen_reviewed_work_lane(self) -> None:
+        """Open a closed work lane whose stop was reviewed with an allowance.
+
+        The continuation gate already established that this exact approach
+        debited one non-renewable task allowance to review that stop, that the
+        approach is a different one, and that every stop in the window was
+        reviewable. The exhausted approach's progress evidence cannot judge a
+        different approach, so the successor run starts a fresh window.
+
+        Nothing here refills an allowance, and a transport or unclassified stop
+        never qualifies: those stay terminal in ``_progress_restore_abort``.
+        """
+        stop = self._progress_work_stop
+        if self._turn_review_grant is None or stop is None:
+            return
+        if stop.stop_reason not in REVIEWABLE_STOP_REASONS:
+            return
+        self._progress_work_stop = None
+        self.authority.restore_facts(ProgressAuthority().facts(self.agent_context.goal_text))
+        self.trace.emit(
+            "progress_work_lane_reopened",
+            review_grant_stop_epoch_id=self._turn_review_grant,
+            progress_stop_reason=stop.stop_reason.value,
+        )
 
     async def run_sync(
         self,
@@ -1458,21 +1598,22 @@ class AgentRuntime:
     def current_run_evidence_cursor(self) -> int:
         return self._run_evidence_cursor
 
-    async def read_progress_fingerprint(self) -> str | None:
+    def current_progress_work_stop(self) -> ProgressAbort | None:
+        """The reviewable stop that closed this run's work lane, if any."""
+        return self._progress_work_stop
+
+    async def read_progress_state(self) -> BodyState | None:
         try:
-            return await self.run_sync(self._read_progress_fingerprint)
+            return await self.run_sync(self._read_progress_state)
         except Exception as exc:
             self.trace.emit(
                 "progress_epoch_fingerprint_failed",
                 error_type=type(exc).__name__,
             )
-            return self.authority.current_fingerprint or self.authority.last_fingerprint or None
+            return None
 
-    def _read_progress_fingerprint(self) -> str | None:
-        state = self.body.get_state()
-        if state.missing:
-            return self.authority.current_fingerprint or self.authority.last_fingerprint or None
-        return self.authority.fingerprint(state)
+    def _read_progress_state(self) -> BodyState | None:
+        return progress_snapshot(self.body.get_state())
 
     async def wait_for_execution_idle(self, *, timeout_s: float = EXECUTION_LANE_CANCEL_TIMEOUT_S) -> bool:
         return await self.execution_lane.wait_idle(timeout_s=timeout_s)
@@ -2143,6 +2284,7 @@ class AgentRuntime:
             facts,
             trace_event="progress_yielded",
             message=_yield_message(facts, self.agent_context.goal_text),
+            progress_stop_reason=exc.stop_reason,
         )
 
     def _yield_from_runaway_ceiling(self, exc: MaxTurnsExceeded) -> AgentTurnOutcome:
@@ -2222,6 +2364,7 @@ class AgentRuntime:
             abort = ProgressAbort(
                 "body transport unstable: yielding for supervisor review",
                 facts=facts,
+                stop_reason=ProgressStopReason.BODY_TRANSPORT,
             )
             if raise_on_limit:
                 raise abort
@@ -2245,6 +2388,7 @@ class AgentRuntime:
         *,
         trace_event: str,
         message: str,
+        progress_stop_reason: ProgressStopReason | None = None,
     ) -> AgentTurnOutcome:
         yielded = self.mode_runtime.reduce(
             [AgentSignal.progress_abort(facts)],
@@ -2256,6 +2400,7 @@ class AgentRuntime:
         self.agent_context.observe_profile(yielded_profile)
         self.trace.emit(
             trace_event,
+            progress_stop_reason=None if progress_stop_reason is None else progress_stop_reason.value,
             stagnant_steps=facts.stagnant_steps,
             stalled_steps=facts.stalled_steps,
             failure_steps=facts.failure_steps,
@@ -2269,6 +2414,7 @@ class AgentRuntime:
             profile=yielded_profile,
             yielded_facts=facts,
             message=message,
+            progress_stop_reason=progress_stop_reason,
         )
 
     def _prepare_turn(self, extra_signals: list[AgentSignal] | None = None) -> RuntimeProfile | AgentTurnOutcome:

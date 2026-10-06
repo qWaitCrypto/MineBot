@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import math
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from minebot.contract import (
@@ -25,6 +26,78 @@ class ProgressStep:
     fingerprint: str
     success: bool | None = None
     neutral: bool = False
+
+
+def progress_snapshot(state: BodyState) -> BodyState | None:
+    if state.missing or not state.complete:
+        return None
+    return replace(state, inventory_counts=(
+        None if state.inventory_counts is None else dict(state.inventory_counts)
+    ))
+
+
+def material_progress_evidence(
+    before: BodyState | None,
+    after: BodyState | None,
+    *,
+    successful_body_action: bool,
+) -> tuple[str, ...]:
+    """Credit observed effects, never clock ticks, damage, or failed movement."""
+    if (
+        before is None or after is None
+        or before.missing or after.missing
+        or not before.complete or not after.complete
+        or before.bot != after.bot or before.dimension != after.dimension
+    ):
+        return ()
+    evidence: list[str] = []
+    if before.inventory_counts is not None and after.inventory_counts is not None:
+        if any(count > before.inventory_counts.get(item, 0) for item, count in after.inventory_counts.items()):
+            evidence.append("inventory_gain")
+        elif successful_body_action and before.inventory_counts != after.inventory_counts:
+            evidence.append("completed_inventory_change")
+    elif successful_body_action and before.inventory_hash != after.inventory_hash:
+        evidence.append("inventory_change")
+    if successful_body_action:
+        if tuple(round(value, 1) for value in before.pos) != tuple(round(value, 1) for value in after.pos):
+            evidence.append("completed_movement")
+        if after.health > before.health or after.food > before.food:
+            evidence.append("survival_improvement")
+        if before.oxygen is not None and after.oxygen is not None and after.oxygen > before.oxygen:
+            evidence.append("oxygen_recovered")
+        if (before.selected_item, before.offhand_item) != (after.selected_item, after.offhand_item):
+            evidence.append("equipment_changed")
+    return tuple(evidence)
+
+
+def combat_progress_evidence(result: dict[str, object]) -> tuple[str, ...]:
+    """Use target-locked terminal observations, not swings or a success label."""
+    metrics = result.get("metrics")
+    if not isinstance(metrics, dict):
+        return ()
+    if (
+        metrics.get("event") != "engageDone"
+        or not isinstance(metrics.get("action_id"), str)
+        or not metrics["action_id"]
+        or not isinstance(metrics.get("target_uuid"), str)
+        or not metrics["target_uuid"]
+        or metrics.get("target_id") != metrics["target_uuid"]
+        or metrics.get("persistent_target") is not True
+        or metrics.get("damage_observed") is not True
+    ):
+        return ()
+    initial, final = metrics.get("target_initial_health"), metrics.get("target_health")
+    if any(type(value) not in (int, float) or not math.isfinite(value) for value in (initial, final)):
+        return ()
+    if not initial > final >= 0:
+        return ()
+    if result.get("success") is True and result.get("reason") == "killed" and final == 0:
+        return ("observed_target_defeat",)
+    if result.get("success") is False and result.get("reason") in {
+        "timeout", "disengaged_low_health", "no_path",
+    }:
+        return ("observed_target_damage",)
+    return ()
 
 
 @dataclass
@@ -49,6 +122,20 @@ class ProgressAuthority:
     def current_generation(self) -> int:
         return self._generation
 
+    def restore_facts(self, facts: ProgressFacts) -> None:
+        """Restore task progress without reviving process-local execution tokens."""
+        if self._active_capture() is not None:
+            raise RuntimeError("cannot restore progress during tool execution")
+        self.stagnant_steps = facts.stagnant_steps
+        self.stalled_steps = facts.stalled_steps
+        self.failure_steps = facts.failure_steps
+        self.epistemic_steps = facts.epistemic_steps
+        self.last_action = facts.last_action
+        self.last_fingerprint = facts.last_fingerprint
+        self.current_fingerprint = facts.current_fingerprint
+        self.last_epistemic_keys = facts.last_epistemic_keys
+        self.recent_events = list(facts.recent_events)
+
     def next_generation(self) -> int:
         self._generation += 1
         return self._generation
@@ -65,8 +152,7 @@ class ProgressAuthority:
             raise ValueError("BodyState.food is required for progress fingerprint")
         pos = ",".join(f"{value:.1f}" for value in state.pos)
         health = f"{state.health:.1f}"
-        time_bucket = state.time // 1000
-        return "|".join([pos, health, str(int(state.food)), str(time_bucket), state.inventory_hash])
+        return "|".join([pos, health, str(int(state.food)), state.inventory_hash])
 
     def observe_step(self, action_key: tuple[Any, ...], fingerprint: str) -> None:
         capture = self._active_capture()
@@ -156,6 +242,7 @@ class ProgressAuthority:
                 f"stalled={facts.stalled_steps} failures={facts.failure_steps} "
                 f"epistemic={facts.epistemic_steps}",
                 facts=facts,
+                stop_reason=facts.stop_reason(),
             )
 
     @contextmanager

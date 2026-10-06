@@ -39,7 +39,32 @@ public sealed interface Goal {
     /** Optimistic remaining cost in ticks from a standing cell. */
     double heuristic(int x, int y, int z);
 
+    default double heuristic(WorldView world, int x, int y, int z) {
+        double height = world.standingHeight(x, y, z);
+        double correction = Double.isFinite(height) ? Math.abs(height - y) * HEURISTIC_TICKS_PER_BLOCK : 0;
+        return Math.max(0, heuristic(x, y, z) - correction);
+    }
+
     record Near(int x, int y, int z, double range) implements Goal {
+        @Override
+        public double finalReachDistanceLimit() {
+            // Sub-cell goals require entering the cell, not stopping in an adjacent one.
+            return range < 1 ? 0.15 : PathFollower.WAYPOINT_REACH_DISTANCE;
+        }
+
+        @Override
+        public boolean isSatisfied(WorldView world, int nx, int ny, int nz) {
+            double dx = nx - x;
+            double dz = nz - z;
+            // Most search nodes cannot reach this goal horizontally; avoid collision work there.
+            if (dx * dx + dz * dz > range * range) {
+                return false;
+            }
+            double height = world.standingHeight(nx, ny, nz);
+            double dy = (Double.isFinite(height) ? height : ny) - y;
+            return dx * dx + dy * dy + dz * dz <= range * range;
+        }
+
         @Override
         public boolean isSatisfied(int nx, int ny, int nz) {
             double dx = nx - x;
@@ -94,10 +119,7 @@ public sealed interface Goal {
         }
 
         private static boolean isDryStand(WorldView world, int x, int y, int z) {
-            return world.kindAt(x, y, z) == WorldView.NodeKind.PASSABLE
-                && world.kindAt(x, y + 1, z) == WorldView.NodeKind.PASSABLE
-                && world.kindAt(x, y - 1, z) == WorldView.NodeKind.SOLID
-                && !world.isBodyPositionHazardous(x, y, z);
+            return Double.isFinite(world.standingHeight(x, y, z));
         }
     }
 
@@ -122,6 +144,10 @@ public sealed interface Goal {
 
         @Override
         public boolean isSatisfied(int nx, int ny, int nz) {
+            return withinPlannedReach(nx, ny, nz);
+        }
+
+        private boolean withinPlannedReach(int nx, double ny, int nz) {
             double centerX = nx + 0.5;
             double centerZ = nz + 0.5;
             return Math.abs(centerX - targetX) <= PLANNED_HORIZONTAL_REACH
@@ -132,12 +158,15 @@ public sealed interface Goal {
 
         @Override
         public boolean isSatisfied(WorldView world, int nx, int ny, int nz) {
-            return isSatisfied(nx, ny, nz) && isSafeTerminal(world, nx, ny, nz);
+            double height = world.standingHeight(nx, ny, nz);
+            return withinPlannedReach(nx, Double.isFinite(height) ? height : ny, nz)
+                && (Double.isFinite(height) || isSafeTerminal(world, nx, ny, nz));
         }
 
         @Override
         public boolean acceptsPartialEndpoint(WorldView world, int nx, int ny, int nz) {
-            return isOccupiable(world.kindAt(nx, ny, nz))
+            return Double.isFinite(world.standingHeight(nx, ny, nz))
+                || isOccupiable(world.kindAt(nx, ny, nz))
                 && isOccupiable(world.kindAt(nx, ny + 1, nz))
                 && !world.isBodyPositionHazardous(nx, ny, nz);
         }
@@ -219,9 +248,17 @@ public sealed interface Goal {
 
         @Override
         public boolean isSatisfied(WorldView world, int nx, int ny, int nz) {
-            return isSatisfied(nx, ny, nz)
-                && isDryStand(world, nx, ny, nz)
-                && hasInteractionLine(world, nx, ny, nz);
+            double height = world.standingHeight(nx, ny, nz);
+            return Double.isFinite(height)
+                && isWithinPhysicalReach(world, nx + 0.5, height, nz + 0.5);
+        }
+
+        public boolean isWithinPhysicalReach(WorldView world, double x, double y, double z) {
+            double dx = x - (targetX + 0.5);
+            double dy = y + EYE_HEIGHT - (targetY + 0.5);
+            double dz = z - (targetZ + 0.5);
+            return dx * dx + dy * dy + dz * dz <= range * range
+                && hasInteractionLine(world, x, y, z);
         }
 
         @Override
@@ -247,7 +284,7 @@ public sealed interface Goal {
             return Math.max(0, distance) * HEURISTIC_TICKS_PER_BLOCK;
         }
 
-        private double eyeDistanceSquared(int nx, int ny, int nz) {
+        private double eyeDistanceSquared(int nx, double ny, int nz) {
             double dx = nx + 0.5 - (targetX + 0.5);
             double dy = ny + EYE_HEIGHT - (targetY + 0.5);
             double dz = nz + 0.5 - (targetZ + 0.5);
@@ -255,15 +292,13 @@ public sealed interface Goal {
         }
 
         private static boolean isDryStand(WorldView world, int x, int y, int z) {
-            return world.kindAt(x, y, z) == WorldView.NodeKind.PASSABLE
-                && world.kindAt(x, y + 1, z) == WorldView.NodeKind.PASSABLE
-                && world.kindAt(x, y - 1, z) == WorldView.NodeKind.SOLID;
+            return Double.isFinite(world.standingHeight(x, y, z));
         }
 
-        private boolean hasInteractionLine(WorldView world, int x, int y, int z) {
-            double eyeX = x + 0.5;
+        private boolean hasInteractionLine(WorldView world, double x, double y, double z) {
+            double eyeX = x;
             double eyeY = y + EYE_HEIGHT;
-            double eyeZ = z + 0.5;
+            double eyeZ = z;
             double[][] targetPoints = {
                 {targetX + 0.01, targetY + 0.5, targetZ + 0.5},
                 {targetX + 0.99, targetY + 0.5, targetZ + 0.5},

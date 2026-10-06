@@ -18,6 +18,7 @@ import java.util.Set;
 public final class NavigateExecutor implements ActionRuntime.TickExecutor {
     /** Frozen in tests/fixtures/java_body_budgets.json. */
     public static final int NODES_PER_TICK = 2_000;
+    public static final long PLANNING_NANOS_PER_TICK = 5_000_000L;
     public static final int REPLAN_LIMIT = 5;
     /** Frozen in tests/fixtures/java_body_budgets.json. */
     public static final int DEFAULT_TIMEOUT_TICKS = 2_400;
@@ -254,6 +255,7 @@ public final class NavigateExecutor implements ActionRuntime.TickExecutor {
         if (outcome.status() == ApproachController.Status.WORKING) {
             return;
         }
+        String approachDetail = approach.terminalDetail();
         recordAndHaltApproach();
         if (outcome.status() == ApproachController.Status.COMPLETED) {
             finish(
@@ -273,7 +275,7 @@ public final class NavigateExecutor implements ActionRuntime.TickExecutor {
             : "no_path";
         String detail = governedBreakFailure != null
             ? governedBreakFailure
-            : outcome.reason();
+            : approachDetail == null ? outcome.reason() : outcome.reason() + ":" + approachDetail;
         finish(serverTick, ActionRuntime.CLASS_FAILED, reason, detail, positionFacts(position));
     }
 
@@ -630,13 +632,14 @@ public final class NavigateExecutor implements ActionRuntime.TickExecutor {
         return facts;
     }
 
-    private static boolean atCell(
+    private boolean atCell(
         PositionSource.Position position,
         ExcavationPlanner.Cell cell
     ) {
         return position.blockX() == cell.x()
             && position.feetBlockY() == cell.y()
-            && position.blockZ() == cell.z();
+            && position.blockZ() == cell.z()
+            && world.isStableDryPosition(position.x(), position.y(), position.z());
     }
 
     private static JsonObject positionFacts(PositionSource.Position position) {

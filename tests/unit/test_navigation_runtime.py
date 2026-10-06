@@ -955,6 +955,27 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(result.reason, "arrived")
         self.assertEqual(len(body.actions), 2)
 
+    def test_navigate_to_yields_at_segment_boundary_for_caller_decision(self):
+        nav = FakeNavigator([_segment("arrived", (10, 64, 0), success=True, reason="arrived")])
+        body = FakeBody(
+            [state_at((0, 64, 0)), state_at((5, 64, 0)), state_at((5, 64, 0))],
+            terminal_reasons=["partial", "arrived"],
+        )
+        runtime = NavigationTransactions(body, nav)
+        checks = iter((None, "resource_output_window_exhausted"))
+
+        result = runtime.navigate_to(
+            (10, 64, 0),
+            config=NavigationRunConfig(max_segments=4),
+            continuation_check=lambda: next(checks),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "resource_output_window_exhausted")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(len(body.actions), 1)
+        self.assertEqual(len(result.metrics["segments"]), 1)
+
     def test_navigate_to_replans_after_live_world_change(self):
         body = FakeBody(
             [state_at((0, 64, 0)), state_at((1, 64, 0)), state_at((1, 64, 0))],

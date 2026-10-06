@@ -108,6 +108,47 @@ class GovernanceTests(unittest.TestCase):
                 self.assertTrue(decision.allowed)
                 self.assertEqual(decision.reason, "allowed_natural")
 
+    def test_explicit_natural_leaf_egress_remains_subject_to_structure_and_region_protection(self):
+        low_risk = GovernancePolicy(
+            structure_risk_assessor=StaticRiskAssessor(StructureRiskLevel.LOW),
+            require_structure_assessment=True,
+        )
+        high_risk = GovernancePolicy(
+            structure_risk_assessor=StaticRiskAssessor(StructureRiskLevel.HIGH),
+            require_structure_assessment=True,
+        )
+        protected = GovernancePolicy(
+            protected_regions=[Region("leaf_build", (99, 60, 99), (101, 70, 101))],
+            structure_risk_assessor=StaticRiskAssessor(StructureRiskLevel.LOW),
+            require_structure_assessment=True,
+        )
+
+        allowed = low_risk.can_break(
+            (100, 64, 100),
+            "minecraft:spruce_leaves",
+            BreakContext.DIRECT,
+            explicit_target=True,
+        )
+        denied_high = high_risk.can_break(
+            (100, 64, 100),
+            "spruce_leaves",
+            BreakContext.DIRECT,
+            explicit_target=True,
+        )
+        denied_protected = protected.can_break(
+            (100, 64, 100),
+            "spruce_leaves",
+            BreakContext.DIRECT,
+            explicit_target=True,
+        )
+
+        self.assertTrue(allowed.allowed)
+        self.assertEqual(allowed.reason, "allowed_natural")
+        self.assertFalse(denied_high.allowed)
+        self.assertEqual(denied_high.reason, "player_structure_risk")
+        self.assertFalse(denied_protected.allowed)
+        self.assertEqual(denied_protected.reason, "protected_region")
+
     def test_collect_context_rejects_non_target_trash(self):
         decision = self.policy.can_break((0, 64, 0), "stone", BreakContext.COLLECT)
 

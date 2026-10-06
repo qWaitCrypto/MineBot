@@ -89,6 +89,7 @@ class FakeBody:
                 "attacks": attacks,
                 "target_id": TARGET_UUID,
                 "target_health": 0.0 if success else None,
+                "target_initial_health": 20.0,
                 "damage_observed": success,
                 "persistent_target": True,
                 "cooldown_ticks": 10,
@@ -159,6 +160,8 @@ class EngageRuntimeTests(unittest.TestCase):
         self.assertEqual(result.metrics["attacks"], 7)
         self.assertEqual(result.metrics["target_id"], TARGET_UUID)
         self.assertTrue(result.metrics["damage_observed"])
+        self.assertEqual(result.metrics["target_initial_health"], 20.0)
+        self.assertEqual(result.metrics["action_id"], body.actions[0].id)
         self.assertEqual(result.metrics["min_attack_interval_ticks"], 10)
 
     def test_engage_entity_awaits_engage_done_terminal(self):

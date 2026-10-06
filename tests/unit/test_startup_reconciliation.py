@@ -124,6 +124,30 @@ class StartupReconciliationTests(unittest.TestCase):
             **kwargs,
         )
 
+    def test_bound_admission_from_a_replaced_task_is_not_inherited(self):
+        old = self.workspace.start("old goal", source="user")
+        self.queue.enqueue(WorkIntentKind.RECOVERY_RECONCILE, source="test", payload={})
+        leased = self.queue.lease_next()
+        orphan = self.queue.bind_admission(leased, "old-checkpoint", 7, old.task_id)
+        self.workspace.replace("new goal", source="user")
+        result = self.reconcile(ReconcileBody(), orphaned_intents=(orphan,))
+        self.assertNotIn("budget_checkpoint_id", result.intent.payload)
+        self.assertNotIn("evidence_cursor", result.intent.payload)
+
+    def test_conflicting_admissions_do_not_discard_pending_recovery_evidence(self):
+        from minebot.app.reconciliation import StartupReconciliationError
+        task = self.workspace.start("resume goal", source="user")
+        for owner in ("first", "second"):
+            self.queue.enqueue(WorkIntentKind.RECOVERY_RECONCILE, source="test", payload={
+                "budget_checkpoint_id": owner, "evidence_cursor": 0,
+                "admission_task_id": task.task_id,
+            })
+        body = ReconcileBody()
+        with self.assertRaises(StartupReconciliationError):
+            self.reconcile(body)
+        self.assertEqual(body.calls, [("interrupt", "startup_reconcile")])
+        self.assertEqual(len(self.queue.queued_intents(WorkIntentKind.RECOVERY_RECONCILE)), 2)
+
     def test_running_task_refreshes_truth_and_enqueues_exactly_one_resume(self):
         task = self.workspace.start("prepare for the End", source="user")
         body = ReconcileBody(

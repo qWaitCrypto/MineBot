@@ -19,6 +19,7 @@ evidence only; production constructs this provider directly.
 from __future__ import annotations
 
 import time
+from math import isfinite
 
 from minebot.contract import (
     Action,
@@ -499,6 +500,26 @@ class JavaBody:
                 error="missing_body",
             )
         data = dict(payload.get("data") or {})
+        if params.get("include_standing") is True and scope in {"blockAt", "blockCells"}:
+            facts = [data] if scope == "blockAt" else data.get("cells")
+            invalid = not isinstance(facts, list)
+            for fact in facts if isinstance(facts, list) else []:
+                if not isinstance(fact, dict) or "standing_y" not in fact:
+                    invalid = True
+                    break
+                height = fact["standing_y"]
+                if height is not None and (
+                    isinstance(height, bool) or not isinstance(height, (int, float))
+                    or not isfinite(height) or not isinstance(fact.get("y"), (int, float))
+                    or not fact["y"] <= height < fact["y"] + 1
+                ):
+                    invalid = True
+                    break
+            if invalid:
+                return PerceptionResult(
+                    bot=self.bot_name, scope=scope, type="perception", ok=False, complete=False,
+                    error="invalid_standing_geometry", uncertainty=[{"reason": "invalid_standing_geometry"}],
+                )
         if payload.get("server_cost_micros") is not None:
             data["serverCostMicros"] = int(payload["server_cost_micros"])
         return PerceptionResult(

@@ -589,6 +589,9 @@ async def run_real_server_goal(
                     governance_policy=body_runtime.governance,
                     recovery_respawn_pos=config.recovery_respawn_pos,
                     recovery_gamemode="survival",
+                    goal_facts_refresher=lambda context: context.observe_goal_facts(
+                        ag_fp30_goal_facts(body, goal_text)
+                    ),
                 ),
                 agent_name="MineBotRealServer",
                 language=config.language,
@@ -774,6 +777,9 @@ async def run_real_server_interactive(
                     governance_policy=body_runtime.governance,
                     recovery_respawn_pos=config.recovery_respawn_pos,
                     recovery_gamemode="survival",
+                    goal_facts_refresher=lambda context: context.observe_goal_facts(
+                        ag_fp30_goal_facts(body, goal_text)
+                    ),
                     speech_sink=speech_sink,
                     conversation_session=conversation_session,
                     task_workspace=task_workspace,
@@ -1043,8 +1049,7 @@ async def _run_interactive_loop(
                 _announce_interactive_terminal(body, completed_truth)
                 last = completed
             elif (
-                truth.target is None
-                and getattr(session, "task_workspace", None) is not None
+                getattr(session, "task_workspace", None) is not None
                 and session.task_workspace.completion_requested
             ):
                 parts = getattr(session, "parts", None)
@@ -1059,8 +1064,9 @@ async def _run_interactive_loop(
                             None if checkpoint is None else checkpoint.checkpoint_id
                         ),
                         evidence=[] if checkpoint is None else list(checkpoint.evidence),
-                        required_authority="human_or_typed_verifier",
+                        required_authority="terminal_truth",
                     )
+                session.reject_completion_request(truth.to_trace())
             if remaining is not None:
                 remaining -= 1
             await asyncio.sleep(0)
@@ -1650,6 +1656,83 @@ def evaluate_ag_fp30_terminal_truth(
         exit_code=exit_code,
         facts=facts,
     )
+
+
+def ag_fp30_goal_facts(body: Body, goal: str) -> dict[str, object] | None:
+    """Return compact, server-authoritative AG-FP30 completion facts for a turn.
+
+    This is a model observation, not an action planner.  It reuses the exact
+    terminal predicate so the model cannot be shown a looser version of the
+    goal than the session will enforce at shutdown.
+    """
+
+    if not is_ag_fp30_goal(goal):
+        return None
+    try:
+        truth = evaluate_ag_fp30_terminal_truth(
+            body,
+            goal,
+            SessionStep("goal_facts", LifecycleState.ACTIVE),
+        )
+    except Exception as exc:
+        return {
+            "evaluator": AG_FP30_GOAL_ID,
+            "complete": False,
+            "unmet": ["authoritative_goal_read_failed"],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    facts = truth.facts
+    flowers = facts.get("flowers") if isinstance(facts.get("flowers"), dict) else {}
+    drops = facts.get("drops") if isinstance(facts.get("drops"), dict) else {}
+    equipment = facts.get("equipment") if isinstance(facts.get("equipment"), dict) else {}
+    inventory = facts.get("inventory") if isinstance(facts.get("inventory"), dict) else {}
+    unmet: list[str] = []
+    if not flowers.get("satisfied"):
+        unmet.append(
+            f"flowers:{len(flowers.get('distinct_items') or [])}/{int(flowers.get('minimum') or 3)}"
+        )
+    for animal in sorted(AG_FP30_DROP_FAMILIES):
+        detail = drops.get(animal)
+        if not isinstance(detail, dict) or not detail.get("satisfied"):
+            unmet.append(f"{animal}_drop")
+    for slot in ("offhand", "mainhand"):
+        detail = equipment.get(slot)
+        if not isinstance(detail, dict) or not detail.get("satisfied"):
+            required = "shield" if slot == "offhand" else "iron_pickaxe"
+            observed = None if not isinstance(detail, dict) else detail.get("item")
+            unmet.append(f"{slot}:{observed or 'empty'}!={required}")
+    if int(inventory.get("torch_count") or 0) < 16:
+        unmet.append(f"torches:{int(inventory.get('torch_count') or 0)}/16")
+    if int(inventory.get("iron_ingot_count") or 0) < 3:
+        unmet.append(f"iron_ingots:{int(inventory.get('iron_ingot_count') or 0)}/3")
+    if facts.get("error") or facts.get("owner_error"):
+        unmet.append("authoritative_goal_read_failed")
+    return {
+        "evaluator": AG_FP30_GOAL_ID,
+        "complete": truth.satisfied,
+        "unmet": unmet,
+        "flowers": {
+            "distinct_items": list(flowers.get("distinct_items") or []),
+            "minimum": int(flowers.get("minimum") or 3),
+        },
+        "drops": {
+            animal: bool(detail.get("satisfied"))
+            for animal, detail in sorted(drops.items())
+            if isinstance(detail, dict)
+        },
+        "equipment": {
+            slot: {
+                "required": detail.get("required"),
+                "observed": detail.get("item"),
+            }
+            for slot, detail in sorted(equipment.items())
+            if isinstance(detail, dict)
+        },
+        "inventory": {
+            "iron_ingot_count": int(inventory.get("iron_ingot_count") or 0),
+            "torch_count": int(inventory.get("torch_count") or 0),
+        },
+    }
 
 
 def evaluate_terminal_truth(body: Body, goal: str, final: SessionStep) -> TerminalTruth:

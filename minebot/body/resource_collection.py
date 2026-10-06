@@ -60,6 +60,7 @@ class ResourceCollectionConfig:
     candidate_budget: int = 8
     mutation_budget: int = 8
     max_wall_s: float = 60.0
+    max_no_output_s: float = 300.0
     find_limit: int = 12
     max_pages: int = 1
     max_goals: int = SERVER_GOAL_SET_LIMIT
@@ -121,6 +122,32 @@ class ResourceCollectionTransactions:
             self.body.get_state().inventory_counts,
             normalized_drops,
         )
+        last_output_total = initial_inventory_total
+        last_output_at = started
+
+        def output_window_exhausted() -> bool:
+            nonlocal last_output_at, last_output_total
+            now = time.monotonic()
+            observed_total = _expected_inventory_total(
+                self.body.get_state().inventory_counts,
+                normalized_drops,
+            )
+            if (
+                observed_total is not None
+                and last_output_total is not None
+                and observed_total > last_output_total
+            ):
+                last_output_total = observed_total
+                last_output_at = now
+            return now - last_output_at >= cfg.max_no_output_s
+
+        def navigation_continuation_check() -> str | None:
+            if output_window_exhausted():
+                return "resource_output_window_exhausted"
+            if time.monotonic() - started >= cfg.max_wall_s:
+                return "resource_domain_budget_exhausted"
+            return None
+
         candidate_attempts = 0
         planning_admitted: set[Position] = set()
         mutation_attempts = 0
@@ -240,6 +267,22 @@ class ResourceCollectionTransactions:
                 )
 
         while collected < remaining_count:
+            if output_window_exhausted():
+                return terminal(
+                    success=False,
+                    reason="resource_output_window_exhausted",
+                    can_retry=True,
+                    block_types=normalized_blocks,
+                    expected_drops=normalized_drops,
+                    remaining_count=remaining_count,
+                    collected=reconcile_collected(),
+                    candidate_blacklist=candidate_blacklist,
+                    patch_blacklist=patch_blacklist,
+                    attempts=attempts,
+                    searches=searches,
+                    config=cfg,
+                    started=started,
+                )
             if (
                 mutation_attempts >= cfg.mutation_budget
                 or time.monotonic() - started >= cfg.max_wall_s
@@ -418,7 +461,10 @@ class ResourceCollectionTransactions:
                 replace(
                     NavigationRunConfig(),
                     segment_timeout_s=cfg.segment_timeout_s,
-                    max_break_steps=self.work.MINE_APPROACH_MAX_BREAK_STEPS,
+                    max_break_steps=min(
+                        self.work.MINE_APPROACH_MAX_BREAK_STEPS,
+                        cfg.mutation_budget - mutation_attempts,
+                    ),
                 )
             )
             navigation_budget = _candidate_navigation_budget(
@@ -444,6 +490,7 @@ class ResourceCollectionTransactions:
                 break_context=BreakContext.COLLECT_APPROACH,
                 config=nav_config,
                 mutation_blacklist=navigation_mutation_blacklist,
+                continuation_check=navigation_continuation_check,
             )
             after_navigation = self.body.get_state().pos
             selected_goal = _selected_goal(navigation, domain.goals)
@@ -489,6 +536,7 @@ class ResourceCollectionTransactions:
                     break_context=BreakContext.COLLECT_APPROACH,
                     config=fallback_config,
                     mutation_blacklist=navigation_mutation_blacklist,
+                    continuation_check=navigation_continuation_check,
                 )
                 fallback_after = self.body.get_state().pos
                 attempt["navigation_fallback"] = {
@@ -513,6 +561,7 @@ class ResourceCollectionTransactions:
                     ],
                 }
                 navigation = fallback
+                mutation_attempts += _reported_mutations(fallback)
                 selected_goal = _selected_goal(navigation, domain.goals)
                 selected_targets = domain.targets_by_goal.get(selected_goal, ())
                 attempt["selected_goal"] = list(selected_goal)
@@ -522,6 +571,65 @@ class ResourceCollectionTransactions:
                 attempt["navigation_mutation_blacklist_after"] = [
                     list(pos) for pos in sorted(navigation_mutation_blacklist)
                 ]
+
+            if navigation.success and navigation.reason == "arrived" and selected_targets:
+                readiness = _verify_interaction_ready(self.body, selected_targets)
+                attempt["interaction_readiness"] = readiness.to_payload()
+                if readiness.reason == "perception_failed":
+                    attempts.append(attempt)
+                    return terminal(
+                        success=False,
+                        reason=readiness.reason,
+                        can_retry=True,
+                        block_types=normalized_blocks,
+                        expected_drops=normalized_drops,
+                        remaining_count=remaining_count,
+                        collected=collected,
+                        candidate_blacklist=candidate_blacklist,
+                        patch_blacklist=patch_blacklist,
+                        attempts=attempts,
+                        searches=searches,
+                        config=cfg,
+                        started=started,
+                        last_failure=readiness.to_payload(),
+                    )
+                if not readiness.success:
+                    # A Python-computed stand is only a candidate. The Java Body
+                    # owns the exact eye/ray predicate, so do not spend a
+                    # COLLECT_BLOCK deadline on a stand it has already rejected.
+                    attempts.append(attempt)
+                    exact_candidate_blacklist.update(target.pos for target in selected_targets)
+                    continue
+                ready_positions = {
+                    tuple(position)
+                    for position in (readiness.metrics or {}).get("ready_targets", ())
+                    if isinstance(position, list) and len(position) == 3
+                }
+                selected_targets = tuple(
+                    target for target in selected_targets if target.pos in ready_positions
+                )
+                attempt["selected_targets"] = [list(target.pos) for target in selected_targets]
+
+            if navigation.reason in {
+                "resource_output_window_exhausted", "resource_domain_budget_exhausted",
+            }:
+                attempts.append(attempt)
+                return terminal(
+                    success=False,
+                    reason=navigation.reason,
+                    can_retry=True,
+                    block_types=normalized_blocks,
+                    expected_drops=normalized_drops,
+                    remaining_count=remaining_count,
+                    collected=reconcile_collected(),
+                    candidate_blacklist=candidate_blacklist,
+                    patch_blacklist=patch_blacklist,
+                    attempts=attempts,
+                    searches=searches,
+                    config=cfg,
+                    started=started,
+                    last_failure=navigation.to_payload(),
+                )
 
             if navigation.reason in {
                 "preempted",
@@ -900,6 +1008,10 @@ class ResourceCollectionTransactions:
                     )
                 continue
 
+            if mutation_attempts >= cfg.mutation_budget:
+                attempts.append(attempt)
+                continue
+
             target = _selected_target(self.body, selected_targets)
             if target is None:
                 attempts.append(attempt)
@@ -1221,6 +1333,7 @@ class ResourceCollectionTransactions:
                 "candidate_budget": config.candidate_budget,
                 "mutation_budget": config.mutation_budget,
                 "max_wall_s": config.max_wall_s,
+                "max_no_output_s": config.max_no_output_s,
                 "find_limit": config.find_limit,
                 "max_pages": config.max_pages,
                 "max_goals": config.max_goals,
@@ -1265,7 +1378,11 @@ def _validate_request(
         return ToolResult(False, "resource_search_radius_invalid", False)
     if config.candidate_budget <= 0 or config.mutation_budget <= 0:
         return ToolResult(False, "resource_budget_invalid", False)
-    if config.max_wall_s <= 0 or config.segment_timeout_s <= 0:
+    if (
+        config.max_wall_s <= 0
+        or config.max_no_output_s <= 0
+        or config.segment_timeout_s <= 0
+    ):
         return ToolResult(False, "resource_timeout_invalid", False)
     if config.find_limit <= 0 or config.max_pages <= 0:
         return ToolResult(False, "resource_search_budget_invalid", False)
@@ -1819,6 +1936,67 @@ def _target_still_matches(body: Body, target: NearbyBlockTarget) -> bool:
     block_type = observed.data.get("type")
     return isinstance(block_type, str) and _normalize_item(block_type) == _normalize_item(
         target.block_type
+    )
+
+
+def _verify_interaction_ready(
+    body: Body,
+    targets: tuple[NearbyBlockTarget, ...],
+) -> ToolResult:
+    """Verify Java's live interaction predicate after a candidate stand arrives."""
+
+    failures: list[dict[str, object]] = []
+    ready_targets: list[list[int]] = []
+    for target in targets:
+        observed = body.perceive(
+            "blockAt",
+            {
+                "x": target.pos[0],
+                "y": target.pos[1],
+                "z": target.pos[2],
+                "interaction_radius": BlockWork.MINE_INTERACTION_RANGE,
+            },
+        )
+        if not observed.ok:
+            return ToolResult(
+                False,
+                "perception_failed",
+                True,
+                metrics={"target": list(target.pos), "scope": "blockAt", "error": observed.error},
+            )
+        actual = _normalize_item(str(observed.data.get("type") or "unknown"))
+        metrics = {
+            "target": list(target.pos),
+            "expected_type": _normalize_item(target.block_type),
+            "actual_type": actual,
+        }
+        if actual != _normalize_item(target.block_type):
+            failures.append({**metrics, "reason": "target_changed"})
+            continue
+        ready = observed.data.get("interaction_ready")
+        if type(ready) is not bool:
+            return ToolResult(
+                False,
+                "perception_failed",
+                True,
+                metrics={**metrics, "scope": "blockAt", "error": "interaction_readiness_missing"},
+            )
+        if ready:
+            ready_targets.append(list(target.pos))
+        else:
+            failures.append({**metrics, "reason": "not_interactable"})
+    if ready_targets:
+        return ToolResult(
+            True,
+            "interaction_ready",
+            False,
+            metrics={"ready_targets": ready_targets, "failures": failures},
+        )
+    return ToolResult(
+        False,
+        "resource_target_not_interactable",
+        True,
+        metrics={"targets": [list(target.pos) for target in targets], "failures": failures},
     )
 
 

@@ -454,7 +454,8 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
         if (position.blockX() == stand.x()
             && position.feetBlockY() == stand.y()
-            && position.blockZ() == stand.z()) {
+            && position.blockZ() == stand.z()
+            && world.isStableDryPosition(position.x(), position.y(), position.z())) {
             excavationStepIndex++;
             advanceExcavation(serverTick, position);
             return;
@@ -1095,6 +1096,11 @@ public final class CollectExecutor implements ActionRuntime.TickExecutor {
         }
         facts.addProperty("reason", reason);
         facts.addProperty("elapsed_ticks", elapsedTicks);
+        facts.addProperty("terminal_phase", phase.name().toLowerCase(java.util.Locale.ROOT));
+        if (approach != null) {
+            facts.addProperty("active_approach_expanded_nodes", approach.expandedNodes());
+            facts.addProperty("active_approach_unloaded_touches", approach.unloadedTouches());
+        }
         facts.addProperty("attempts_consumed", 1 + excavationReplans);
         facts.addProperty("budget_remaining", Math.max(0, maxExcavationMutations - excavationBreaks));
         facts.addProperty("mutations_completed", excavationBreaks + (targetBroken ? 1 : 0));

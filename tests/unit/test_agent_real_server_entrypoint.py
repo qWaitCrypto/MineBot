@@ -1305,6 +1305,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
             def __init__(self):
                 self.steps = 0
+                self.rejections = []
 
             async def step(self):
                 self.steps += 1
@@ -1315,6 +1316,10 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             def complete_current_goal(self, reason, *, authority):
                 self.task_workspace.complete(authority=authority)
                 return SessionStep("completed", LifecycleState.IDLE, reason)
+
+            def reject_completion_request(self, facts):
+                self.rejections.append(facts)
+                self.task_workspace.resume()
 
         session = ModelCompleteSession()
 
@@ -1329,8 +1334,9 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         pending = store.get_task(task.task_id)
         self.assertEqual(final.status, "quit")
-        self.assertEqual(pending.status, TaskStatus.WAITING_EVENT)
+        self.assertEqual(pending.status, TaskStatus.RUNNING)
         self.assertEqual(pending.completion_authority, CompletionAuthority.NONE)
+        self.assertEqual(len(session.rejections), 1)
         store.close()
 
     def test_complete_checkpoint_requires_evidence(self):
@@ -1368,6 +1374,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             def __init__(self):
                 self.steps = 0
                 self.completions = 0
+                self.rejections = []
 
             async def step(self):
                 self.steps += 1
@@ -1378,6 +1385,10 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             def complete_current_goal(self, *_args, **_kwargs):
                 self.completions += 1
                 raise AssertionError("canonical completion must require inventory truth")
+
+            def reject_completion_request(self, facts):
+                self.rejections.append(facts)
+                self.task_workspace.resume()
 
         session = CanonicalSession()
 
@@ -1392,7 +1403,8 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         self.assertEqual(final.status, "quit")
         self.assertEqual(session.completions, 0)
-        self.assertEqual(store.get_task(task.task_id).status, TaskStatus.WAITING_EVENT)
+        self.assertEqual(store.get_task(task.task_id).status, TaskStatus.RUNNING)
+        self.assertEqual(len(session.rejections), 1)
         store.close()
 
     def test_interactive_loop_completes_goal_and_returns_to_idle_without_exiting(self):

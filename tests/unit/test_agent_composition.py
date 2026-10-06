@@ -4,6 +4,7 @@ from minebot.brain.composition import (
     CompositionBudget,
     CompositionContext,
     collect_resource,
+    collect_resource_observation_projector,
     ensure_item,
     ensure_tool_for,
     register_collect_resource_tool,
@@ -1471,6 +1472,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertIn("item='logs'", tool.description)
         self.assertIn("exact species", tool.description)
         self.assertIn("logs", tool.input_schema["properties"]["item"]["description"])
+        self.assertIn("inventory total", tool.input_schema["properties"]["count"]["description"])
         self.assertEqual(set(tool.input_schema["properties"]), {"item", "count"})
         self.assertNotIn("constraints", tool.input_schema["properties"])
         self.assertEqual(tool.framework_view()["description"], tool.description)
@@ -1520,6 +1522,38 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.can_retry)
         self.assertEqual(result.metrics["after_count"], 0)
         self.assertEqual(result.metrics["resume_hint"], "reselect_candidates")
+
+    def test_collect_resource_returns_output_window_with_partial_inventory_evidence(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "resource_output_window_exhausted",
+                "can_retry": True,
+                "delta": 1,
+                "metrics": {
+                    "remaining_delta": 1,
+                    "budget": {"max_no_output_s": 300.0},
+                },
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource({"item": "dirt", "count": 2}, ctx)
+        summary = collect_resource_observation_projector(result.reason, result.metrics or {})
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "resource_output_window_exhausted")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.metrics["after_count"], 1)
+        self.assertEqual(result.metrics["remaining_count"], 1)
+        self.assertEqual(result.metrics["resume_hint"], "reconsider_or_resume_collect")
+        self.assertEqual(summary["remaining_count"], 1)
+        self.assertEqual(summary["resource_budget"]["max_no_output_s"], 300.0)
 
     def test_collect_resource_surfaces_unknown_terminal_once_without_deterministic_retry(self):
         body = FakeBody()
@@ -1868,7 +1902,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertTrue(result.can_retry)
         self.assertEqual(result.metrics["last_failure"]["reason"], "resource_navigation_segment_budget_exhausted")
 
-    def test_collect_resource_preserves_goal_total_and_log_family(self):
+    def test_collect_resource_preserves_explicit_staged_total_and_species(self):
         body = FakeBody()
         body.inventory_counts = {"oak_log": 18}
         registry = ToolRegistry()
@@ -1884,14 +1918,14 @@ class AgentCompositionTests(unittest.TestCase):
         result = collect_resource({"item": "oak_log", "count": 46}, ctx)
 
         self.assertFalse(result.success, result)
-        self.assertEqual(result.metrics["requested_count"], 46)
-        self.assertEqual(result.metrics["goal_target_count"], 64)
-        self.assertEqual(result.metrics["target_count"], 64)
-        self.assertEqual(result.metrics["remaining_count"], 46)
-        self.assertEqual(result.metrics["requested_item"], "logs")
-        self.assertEqual(calls[0]["block_types"], list(resource_plan_for("logs").block_types))
+        self.assertEqual(result.metrics["target_count"], 46)
+        self.assertEqual(result.metrics["remaining_count"], 28)
+        self.assertEqual(calls[0]["remaining_count"], 28)
+        self.assertEqual(result.metrics["requested_item"], "oak_log")
+        self.assertEqual(calls[0]["block_types"], ["oak_log"])
+        self.assertNotIn("goal_target_count", result.metrics)
 
-    def test_collect_resource_does_not_widen_specific_log_goal(self):
+    def test_collect_resource_does_not_narrow_explicit_family_from_goal(self):
         body = FakeBody()
         registry = ToolRegistry()
         register_inventory_tools(registry, body)
@@ -1906,8 +1940,32 @@ class AgentCompositionTests(unittest.TestCase):
         result = collect_resource({"item": "logs", "count": 64}, ctx)
 
         self.assertFalse(result.success, result)
-        self.assertEqual(result.metrics["requested_item"], "oak_log")
-        self.assertEqual(calls[0]["block_types"], ["oak_log"])
+        self.assertEqual(result.metrics["requested_item"], "logs")
+        self.assertEqual(calls[0]["block_types"], list(resource_plan_for("logs").block_types))
+
+    def test_collect_resource_satisfied_stage_is_independent_of_goal_wording(self):
+        for goal in ("collect 64 logs", "gather oak_log 64", "collect 64 unknown_resource",
+                     "\u6536\u96c6 64 \u4e2a\u539f\u6728", "prepare for the End", ""):
+            with self.subTest(goal=goal):
+                body = FakeBody()
+                body.inventory_counts = {"oak_log": 4}
+                registry = ToolRegistry()
+                register_inventory_tools(registry, body)
+                domain, calls = resource_domain_tool(body, {
+                    "success": False, "reason": "resource_candidate_domain_exhausted",
+                    "can_retry": False,
+                })
+                registry.register(domain)
+                ctx, _trace_events = composition_context(body, registry, max_candidates=1)
+                ctx.weld_context.goal_text = goal
+
+                result = collect_resource({"item": "oak_log", "count": 4}, ctx)
+
+                self.assertTrue(result.success, result)
+                self.assertEqual(result.metrics["target_count"], 4)
+                self.assertEqual(result.metrics["remaining_count"], 0)
+                self.assertEqual(result.metrics["collected_delta"], 0)
+                self.assertEqual(calls, [])
 
 if __name__ == "__main__":
     unittest.main()

@@ -98,7 +98,48 @@ public final class MoveGenerator {
             addVerticalSwim(x, y, z, moves);
         }
         addVerticalClimb(x, y, z, moves);
+        double standingY = world.standingHeight(x, y, z);
+        if (Double.isFinite(standingY)) {
+            // Replace voxel-derived dry endpoints, not swimming/climbing edges.
+            moves.removeIf(move -> {
+                var feet = world.kindAt(move.x(), move.y(), move.z());
+                var floor = world.kindAt(move.x(), move.y() - 1, move.z());
+                return feet != WorldView.NodeKind.LIQUID && feet != WorldView.NodeKind.CLIMBABLE
+                    && floor != WorldView.NodeKind.LIQUID && floor != WorldView.NodeKind.CLIMBABLE;
+            });
+            for (int[] step : CARDINALS) {
+                addDryMoves(x, y, z, standingY, step, false, moves);
+            }
+            if (policy.allowDiagonal()) {
+                for (int[] step : DIAGONALS) {
+                    addDryMoves(x, y, z, standingY, step, true, moves);
+                }
+            }
+        }
         return new Moves(List.copyOf(moves), unloaded[0]);
+    }
+
+    private void addDryMoves(int x, int y, int z, double standingY, int[] step,
+                             boolean diagonal, List<Move> moves) {
+        int nx = x + step[0];
+        int nz = z + step[1];
+        for (int ny = y + 1; ny >= y - policy.maxFallBlocks(); ny--) {
+            double targetY = world.standingHeight(nx, ny, nz);
+            if (!Double.isFinite(targetY)) {
+                continue;
+            }
+            double rise = targetY - standingY;
+            if (rise > 1.0 + 1.0e-7 || rise < -policy.maxFallBlocks() - 1.0e-7
+                || (rise > 1.0e-7 && !policy.allowAscend())
+                || (rise < -1.0e-7 && !policy.allowDescend())
+                || (diagonal && Math.abs(rise) > 1.0e-7)
+                || !world.isDryTransitionClear(x, standingY, z, nx, targetY, nz)) {
+                continue;
+            }
+            double cost = rise > 1.0e-7 ? STEP_UP_COST
+                : (diagonal ? DIAGONAL_COST : WALK_COST) - rise * FALL_PER_BLOCK_COST;
+            moves.add(new Move(nx, ny, nz, cost));
+        }
     }
 
     /** True when the destination has a legal direct edge back to the source. */
@@ -195,7 +236,10 @@ public final class MoveGenerator {
         if (!policy.allowDescend()) {
             return;
         }
-        for (int drop = 2; drop <= policy.maxWaterFallBlocks() + 1; drop++) {
+        int maxDrop = Math.max(
+            policy.maxFallBlocks(), policy.allowSwim() ? policy.maxWaterFallBlocks() : 0
+        );
+        for (int drop = 2; drop <= maxDrop + 1; drop++) {
             if (world.isBodyPositionHazardous(nx, y - drop + 1, nz)) {
                 return;
             }
@@ -205,12 +249,14 @@ public final class MoveGenerator {
                 return;
             }
             if (below == WorldView.NodeKind.LIQUID) {
-                moves.add(new Move(
-                    nx,
-                    y - drop + 1,
-                    nz,
-                    baseCost + SWIM_COST + (drop - 1) * FALL_PER_BLOCK_COST
-                ));
+                if (policy.allowSwim() && drop <= policy.maxWaterFallBlocks() + 1) {
+                    moves.add(new Move(
+                        nx,
+                        y - drop + 1,
+                        nz,
+                        baseCost + SWIM_COST + (drop - 1) * FALL_PER_BLOCK_COST
+                    ));
+                }
                 return;
             }
             if (below == WorldView.NodeKind.SOLID) {

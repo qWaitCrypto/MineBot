@@ -1752,12 +1752,14 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                 if (actor.getUUID().toString().equals(targetUuid)) {
                     return EngageExecutor.Lookup.missing("self_target_disallowed");
                 }
-                return uuidLookup(targetUuid, radius);
+                return uuidLookup(targetUuid, radius, true);
             }
 
             @Override
             public EngageExecutor.Lookup refresh(String botName, String targetId, double radius) {
-                return uuidLookup(targetId, radius);
+                // A locked target's death is a terminal fact, not an acquisition
+                // candidate. Filtering it out here would erase kill evidence.
+                return uuidLookup(targetId, radius, false);
             }
 
             @Override
@@ -1768,13 +1770,14 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
             @Override
             public boolean hasLineOfSight(String botName, EngageExecutor.Target target) {
                 List<net.minecraft.world.entity.Entity> matches = nearbyEntities(
-                    64.0, entity -> target.id().equals(entity.getUUID().toString())
+                    64.0, true, entity -> target.id().equals(entity.getUUID().toString())
                 );
                 return !matches.isEmpty() && actor.hasLineOfSight(matches.get(0));
             }
 
             private List<net.minecraft.world.entity.Entity> nearbyEntities(
                 double radius,
+                boolean requireAlive,
                 java.util.function.Predicate<net.minecraft.world.entity.Entity> predicate
             ) {
                 double boundedRadius = Math.max(1.0, Math.min(64.0, radius));
@@ -1785,14 +1788,14 @@ public final class FakePlayerBodyChannel implements MineBotChannel {
                         && !entity.getUUID().equals(actor.getUUID())
                         && !entity.entityTags().contains("minebot.camera.observer")
                         && (!livingOnly
-                            || (entity instanceof LivingEntity living && living.isAlive()))
+                            || (entity instanceof LivingEntity living && (!requireAlive || living.isAlive())))
                         && predicate.test(entity)
                 );
             }
 
-            private EngageExecutor.Lookup uuidLookup(String targetUuid, double radius) {
+            private EngageExecutor.Lookup uuidLookup(String targetUuid, double radius, boolean requireAlive) {
                 net.minecraft.world.entity.Entity target = nearbyEntities(
-                    radius, entity -> targetUuid.equals(entity.getUUID().toString())
+                    radius, requireAlive, entity -> targetUuid.equals(entity.getUUID().toString())
                 ).stream().findFirst().orElse(null);
                 if (target == null) {
                     return EngageExecutor.Lookup.missing("target_not_found");

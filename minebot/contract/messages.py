@@ -331,29 +331,31 @@ def is_partial_progress(
     if not reason or _depth > 5:
         return False
     normalized = str(reason)
-    partial_reason = (
+    partial_terminal = (
         normalized == "partial"
         or normalized.startswith("partial_")
         or ":partial" in normalized
         or "_partial" in normalized
+        or "resource_output_window_exhausted" in normalized
     )
-    if not partial_reason or metrics is None:
+    if metrics is None:
         return False
-    for key in ("collected_delta", "collected_count", "blocks_descended"):
-        value = metrics.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+    if partial_terminal:
+        for key in ("collected_delta", "collected_count", "blocks_descended"):
+            value = metrics.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                return True
+        before = metrics.get("before_count")
+        after = metrics.get("after_count")
+        if (
+            isinstance(before, (int, float))
+            and not isinstance(before, bool)
+            and isinstance(after, (int, float))
+            and not isinstance(after, bool)
+            and after > before
+        ):
             return True
-    before = metrics.get("before_count")
-    after = metrics.get("after_count")
-    if (
-        isinstance(before, (int, float))
-        and not isinstance(before, bool)
-        and isinstance(after, (int, float))
-        and not isinstance(after, bool)
-        and after > before
-    ):
-        return True
-    for key in ("body_process", "last_failure", "result"):
+    for key in ("body_process", "last_failure", "result", "failed_step"):
         nested = metrics.get(key)
         if isinstance(nested, Mapping) and is_partial_progress(
             str(nested.get("reason") or normalized),

@@ -33,7 +33,10 @@ from minebot.app.conversation_tools import (
 from minebot.app.phase1_runtime import exploration_observation_projector
 from minebot.app.tasks import task_artifact_projector
 from minebot.app.wiring import build_agent_runtime
-from minebot.brain.composition import collect_resource_observation_projector
+from minebot.brain.composition import (
+    collect_resource_observation_projector,
+    ensure_tool_observation_projector,
+)
 from minebot.brain.context import AgentContext
 from minebot.brain.lifecycle import LifecycleController, LifecycleState
 from minebot.brain.modes import AgentSignal, ModeRuntime
@@ -1395,6 +1398,67 @@ class AgentRunnerSpineTests(unittest.TestCase):
         )
         self.assertNotIn("attempts", summary)
         self.assertIn("metrics.body_process", payload["projection"]["omittedFields"])
+
+    def test_ensure_projection_exposes_interrupted_resource_substep_as_partial(self):
+        result = ToolResult(
+            False,
+            "ensure_step_failed:resource_output_window_exhausted",
+            True,
+            metrics={
+                "item": "iron_pickaxe",
+                "target_count": 1,
+                "resume_hint": "reinvoke_ensure",
+                "plan": [{} for _ in range(18)],
+                "completed_steps": [{} for _ in range(7)],
+                "failed_step": {
+                    "index": 7,
+                    "step": {"kind": "collect", "item": "cobblestone", "count": 3},
+                    "result": {
+                        "success": False,
+                        "reason": "resource_output_window_exhausted",
+                        "canRetry": True,
+                        "nextSuggestion": None,
+                        "metrics": {
+                            "item": "cobblestone",
+                            "requested_item": "cobblestone",
+                            "target_count": 3,
+                            "before_count": 0,
+                            "after_count": 2,
+                            "collected_delta": 2,
+                            "remaining_count": 1,
+                            "candidates_tried": 6,
+                            "resume_hint": "reconsider_or_resume_collect",
+                            "body_process": {
+                                "metrics": {
+                                    "candidate_attempts_consumed": 32,
+                                    "candidate_budget_remaining": 64,
+                                    "collected_total": 0,
+                                    "remaining_delta": 3,
+                                    "elapsed_ms": 308426.908,
+                                }
+                            },
+                        },
+                    },
+                },
+            },
+        ).to_payload()
+
+        payload = _model_tool_payload(
+            "ensure_tool_for",
+            result,
+            trace_ref="ensure-trace",
+            projector=ensure_tool_observation_projector,
+        )
+
+        failed_step = payload["summary"]["failed_step"]
+        self.assertEqual(payload["outcome"], "partial")
+        self.assertEqual(payload["summary"]["resume_hint"], "reinvoke_ensure")
+        self.assertEqual(failed_step["step"], {"kind": "collect", "item": "cobblestone", "count": 3})
+        self.assertEqual(failed_step["resource"]["after_count"], 2)
+        self.assertEqual(failed_step["resource"]["remaining_count"], 1)
+        self.assertEqual(failed_step["resource"]["candidate_attempts_consumed"], 32)
+        self.assertEqual(failed_step["resource"]["resume_hint"], "reconsider_or_resume_collect")
+        self.assertIn("resource_output_window_exhausted", failed_step["reason_chain"])
 
     def test_model_tool_payload_preserves_unknown_small_terminal_facts_generically(self):
         result = ToolResult(
@@ -3033,6 +3097,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(outcome.lifecycle, LifecycleState.YIELDED)
         self.assertIn("body_transport_unstable", outcome.message)
         self.assertIn("body_transport_unstable", outcome.yielded_facts.recent_events[-1])
+        self.assertEqual(outcome.progress_stop_reason.value, "body_transport")
         trace = runtime.trace.snapshot()
         self.assertEqual(len([event for event in trace if event["event"] == "body_transport_error"]), 3)
         self.assertFalse(any(event["event"] == "body_recovery_required" for event in trace))

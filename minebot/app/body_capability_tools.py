@@ -1426,6 +1426,7 @@ def resource_domain_observation_projector(reason: str, metrics: dict[str, object
                     "closest_approach_distance",
                     "unloaded_chunk_count",
                     "governance_reason",
+                    "failure_detail",
                 )
                 if key in failure_metrics
             }
@@ -1597,6 +1598,22 @@ def _read_block_tool(body: Body) -> RegisteredTool:
     )
 
 
+def nearby_blocks_observation_projector(reason: str, metrics: dict[str, object]) -> JsonObject:
+    data = metrics.get("data")
+    if not isinstance(data, dict):
+        return {}
+    summary: JsonObject = {"detail_path": ["metrics", "data", "blocks"]}
+    for key in ("center", "radius", "start", "limit", "total", "nextStart"):
+        if key in data:
+            summary[key] = bounded_summary_value(data[key])
+    blocks = data.get("blocks")
+    if isinstance(blocks, list):
+        summary["block_count"] = len(blocks)
+        summary["blocks"] = [bounded_summary_value(block) for block in blocks[:8]]
+        summary["blocks_complete"] = len(blocks) <= 8 and metrics.get("complete") is True
+    return summary
+
+
 def _read_nearby_blocks_tool(body: Body) -> RegisteredTool:
     return _tool(
         "read_nearby_blocks",
@@ -1621,6 +1638,7 @@ def _read_nearby_blocks_tool(body: Body) -> RegisteredTool:
         body_scope=("blocks",),
         terminal_truth=("nearbyBlocks",),
         timeout_s=20.0,
+        projector=nearby_blocks_observation_projector,
     )
 
 

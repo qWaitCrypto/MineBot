@@ -5,6 +5,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.function.LongSupplier;
 
 /**
  * Resumable anytime A* over a {@link WorldView}. One search may span several
@@ -17,7 +18,14 @@ public final class AStarPathfinder {
     public static final int DEFAULT_UNLOADED_TOUCH_CAP = 50;
     public static final double MIN_PARTIAL_PROGRESS_BLOCKS = 5.0;
 
-    public record Waypoint(int x, int y, int z) {
+    public record Waypoint(int x, int y, int z, double feetY, boolean dry) {
+        public Waypoint(int x, int y, int z) {
+            this(x, y, z, y, false);
+        }
+
+        public Waypoint(int x, int y, int z, double feetY) {
+            this(x, y, z, feetY, true);
+        }
     }
 
     public enum Outcome {
@@ -207,7 +215,7 @@ public final class AStarPathfinder {
         this.allowGoalStaging = allowGoalStaging;
         long startKey = pack(startX, startY, startZ);
         gScore.put(startKey, 0.0);
-        open.add(new Open(startKey, goal.heuristic(startX, startY, startZ), 0.0));
+        open.add(new Open(startKey, goal.heuristic(this.world, startX, startY, startZ), 0.0));
         bestSoFarKey = startKey;
         trackBestSoFar(startKey, startX, startY, startZ);
     }
@@ -234,6 +242,20 @@ public final class AStarPathfinder {
         }
 
         @Override
+        public double standingHeight(int x, int y, int z) {
+            return Math.abs(x - originX) > radius || Math.abs(z - originZ) > radius
+                ? Double.NaN : delegate.standingHeight(x, y, z);
+        }
+
+        @Override
+        public boolean isDryVolumeClear(double minX, double minY, double minZ,
+                                        double maxX, double maxY, double maxZ) {
+            return minX >= originX - radius && maxX <= originX + radius + 1
+                && minZ >= originZ - radius && maxZ <= originZ + radius + 1
+                && delegate.isDryVolumeClear(minX, minY, minZ, maxX, maxY, maxZ);
+        }
+
+        @Override
         public boolean isBodyPositionHazardous(int x, int y, int z) {
             return delegate.isBodyPositionHazardous(x, y, z);
         }
@@ -241,11 +263,27 @@ public final class AStarPathfinder {
 
     /** Expands up to {@code nodeBudget} nodes; call again while IN_PROGRESS. */
     public Result step(int nodeBudget) {
+        return step(nodeBudget, Long.MAX_VALUE);
+    }
+
+    /** Cooperative wall-time slice: one expansion is indivisible. */
+    public Result step(int nodeBudget, long timeBudgetNanos) {
+        return step(nodeBudget, timeBudgetNanos, System::nanoTime);
+    }
+
+    Result step(int nodeBudget, long timeBudgetNanos, LongSupplier clock) {
+        if (timeBudgetNanos <= 0) {
+            throw new IllegalArgumentException("planning time slice must be positive");
+        }
         if (finished != null) {
             return finished;
         }
+        long started = clock.getAsLong();
         int stepExpanded = 0;
         while (stepExpanded < nodeBudget) {
+            if (stepExpanded > 0 && clock.getAsLong() - started >= timeBudgetNanos) {
+                break;
+            }
             Open current = open.poll();
             if (current == null) {
                 return finish(exhaustedOutcome());
@@ -277,7 +315,7 @@ public final class AStarPathfinder {
                 }
                 gScore.put(key, tentative);
                 cameFrom.put(key, current.key());
-                open.add(new Open(key, tentative + goal.heuristic(move.x(), move.y(), move.z()), tentative));
+                open.add(new Open(key, tentative + goal.heuristic(world, move.x(), move.y(), move.z()), tentative));
             }
             if (expanded >= totalNodeCap) {
                 return finish(boundedOutcome("node_budget"));
@@ -293,7 +331,7 @@ public final class AStarPathfinder {
         if (!goal.acceptsPartialEndpoint(world, x, y, z)) {
             return;
         }
-        double h = goal.heuristic(x, y, z);
+        double h = goal.heuristic(world, x, y, z);
         if (h < bestSoFarH) {
             bestSoFarH = h;
             bestSoFarKey = key;
@@ -353,7 +391,11 @@ public final class AStarPathfinder {
         List<Waypoint> path = new ArrayList<>();
         Long cursor = key;
         while (cursor != null) {
-            path.add(new Waypoint(unpackX(cursor), unpackY(cursor), unpackZ(cursor)));
+            int x = unpackX(cursor);
+            int y = unpackY(cursor);
+            int z = unpackZ(cursor);
+            double height = world.standingHeight(x, y, z);
+            path.add(Double.isFinite(height) ? new Waypoint(x, y, z, height) : new Waypoint(x, y, z));
             cursor = cameFrom.get(cursor);
         }
         List<Waypoint> forward = new ArrayList<>(path.size());

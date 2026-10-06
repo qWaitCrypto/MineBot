@@ -8,6 +8,9 @@ dependencies = [
     # Pinned: the SDK adds surfaces fast and LitellmModel is beta
     # (agent-layer-architecture.md §6, §12 watch-item).
     "openai-agents==0.17.6",
+    # Verified with the pinned Runner; 2.53.0 requires cache_write_tokens
+    # that agents 0.17.6 does not supply when constructing Usage.
+    "openai==2.36.0",
     "filelock>=3.16,<4",
     "PyYAML>=6.0.2,<7",
 ]
@@ -23,6 +26,7 @@ minebot-local = "minebot.app.local_launcher:main"
 include = ["minebot*"]
 
 [project.optional-dependencies]
+test = ["pytest>=8,<10"]
 # kind="litellm" providers (Anthropic, Gemini, …) need this beta extra.
 litellm = ["openai-agents[litellm]==0.17.6"]
 camera = ["websockets==16.0"]

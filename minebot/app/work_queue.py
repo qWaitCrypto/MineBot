@@ -12,6 +12,8 @@ from uuid import uuid4
 from filelock import FileLock, Timeout
 
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateConflict, RuntimeStateStore
+from minebot.app.recovery_admission import confirmed_recovery_payload, next_recovery_admission, reconciled_recovery_payload
+from minebot.contract import BodyState
 
 
 class WorkIntentKind(str, Enum):
@@ -24,6 +26,7 @@ class WorkIntentKind(str, Enum):
     QUIT = "quit"
     BODY_EVENT = "body_event"
     RECOVERY_RECONCILE = "recovery_reconcile"
+    COMPLETION_REVIEW = "completion_review"
     TASK_BOUNDARY = "task_boundary"
     TASK_CONTINUE = "task_continue"
     MAINTENANCE = "maintenance"
@@ -43,6 +46,7 @@ WORK_INTENT_PRIORITY: dict[WorkIntentKind, int] = {
     WorkIntentKind.REPLACE_GOAL: 90,
     WorkIntentKind.PAUSE: 85,
     WorkIntentKind.RECOVERY_RECONCILE: 80,
+    WorkIntentKind.COMPLETION_REVIEW: 80,
     WorkIntentKind.BODY_EVENT: 75,
     WorkIntentKind.CONTINUE: 70,
     WorkIntentKind.START: 65,
@@ -106,6 +110,14 @@ class WorkIntentQueue(Protocol):
     ) -> WorkIntent: ...
 
     def lease_next(self) -> WorkIntent | None: ...
+
+    def bind_admission(self, intent: WorkIntent, checkpoint_id: str | None, evidence_cursor: int, task_id: str | None = None) -> WorkIntent: ...
+
+    def reserve_recovery_attempt(self, intent: WorkIntent, *, max_attempts: int) -> WorkIntent | None: ...
+
+    def confirm_recovery(self, intent: WorkIntent) -> WorkIntent: ...
+
+    def reconcile_recovery(self, intent: WorkIntent, *, state: BodyState) -> None: ...
 
     def complete(self, intent: WorkIntent) -> WorkIntent: ...
 
@@ -298,6 +310,68 @@ class MemoryWorkIntentQueue:
     def close(self) -> None:
         return None
 
+    def bind_admission(self, intent: WorkIntent, checkpoint_id: str | None, evidence_cursor: int, task_id: str | None = None) -> WorkIntent:
+        with self._lock:
+            current = self._records[intent.intent_id]
+            if current.revision != intent.revision or current.state is not WorkIntentState.LEASED:
+                raise RuntimeError("budget owner binding requires the current lease")
+            admission = {"budget_checkpoint_id": checkpoint_id, "admission_evidence_cursor": int(evidence_cursor),
+                         "admission_task_id": task_id}
+            if evidence_cursor < 0:
+                raise ValueError("admission evidence cursor must be non-negative")
+            for key, value in admission.items():
+                if key in current.payload and current.payload[key] != value:
+                    raise RuntimeError("work intent admission is already bound")
+            bound = WorkIntent(**{**current.__dict__, "payload": {
+                **current.payload, **admission,
+            }})
+            self._records[intent.intent_id] = bound
+            return bound
+
+    def reserve_recovery_attempt(self, intent: WorkIntent, *, max_attempts: int) -> WorkIntent | None:
+        with self._lock:
+            current = self._live_recovery_intent(intent)
+            admission = next_recovery_admission(current.payload,
+                (record.__dict__ for record in self._records.values()),
+                intent_id=intent.intent_id, max_attempts=max_attempts)
+            if admission is None:
+                self._records[intent.intent_id] = WorkIntent(**{**current.__dict__, "payload": {
+                    **current.payload, "recovery_admission_denied": True,
+                }})
+                return None
+            reserved = WorkIntent(**{**current.__dict__, "payload": {
+                **current.payload, "recovery_admission": admission,
+            }})
+            self._records[intent.intent_id] = reserved
+            return reserved
+
+    def confirm_recovery(self, intent: WorkIntent) -> WorkIntent:
+        with self._lock:
+            current = self._live_recovery_intent(intent)
+            confirmed = WorkIntent(**{**current.__dict__,
+                "payload": confirmed_recovery_payload(current.payload)})
+            self._records[intent.intent_id] = confirmed
+            return confirmed
+
+    def _live_recovery_intent(self, intent: WorkIntent) -> WorkIntent:
+        current = self._records[intent.intent_id]
+        if current.revision != intent.revision or current.state is not WorkIntentState.LEASED:
+            raise RuntimeStateConflict("recovery accounting requires the current lease")
+        return current
+
+    def reconcile_recovery(self, intent: WorkIntent, *, state: BodyState) -> None:
+        with self._lock:
+            current = self._live_recovery_intent(intent)
+            settlement = reconciled_recovery_payload(current.__dict__,
+                (record.__dict__ for record in self._records.values()), state=state)
+            if settlement is not None:
+                target, payload = settlement
+                self._records[target] = WorkIntent(**{**self._records[target].__dict__, "payload": payload})
+            if "recovery_reconciled_intent_id" not in current.payload:
+                self._records[current.intent_id] = WorkIntent(**{**current.__dict__, "payload": {
+                    **current.payload, "recovery_reconciled_intent_id": None if settlement is None else settlement[0],
+                }})
+
     def _finish(
         self,
         intent: WorkIntent,
@@ -398,6 +472,25 @@ class PersistentWorkIntentQueue:
         )
         self._refresh_available()
         return None if row is None else _intent_from_row(row)
+
+    def bind_admission(self, intent: WorkIntent, checkpoint_id: str | None, evidence_cursor: int, task_id: str | None = None) -> WorkIntent:
+        return _intent_from_row(self.store.bind_work_intent_admission(
+            self.scope, intent_id=intent.intent_id, expected_revision=intent.revision,
+            lease_owner=self.lease_owner, checkpoint_id=checkpoint_id, evidence_cursor=evidence_cursor, task_id=task_id,
+        ))
+
+    def reserve_recovery_attempt(self, intent: WorkIntent, *, max_attempts: int) -> WorkIntent | None:
+        row = self.store.reserve_recovery_attempt(self.scope, intent_id=intent.intent_id,
+            expected_revision=intent.revision, lease_owner=self.lease_owner, max_attempts=max_attempts)
+        return None if row is None else _intent_from_row(row)
+
+    def confirm_recovery(self, intent: WorkIntent) -> WorkIntent:
+        return _intent_from_row(self.store.confirm_recovery(self.scope, intent_id=intent.intent_id,
+            expected_revision=intent.revision, lease_owner=self.lease_owner))
+
+    def reconcile_recovery(self, intent: WorkIntent, *, state: BodyState) -> None:
+        self.store.reconcile_recovery(self.scope, intent_id=intent.intent_id,
+            expected_revision=intent.revision, lease_owner=self.lease_owner, state=state)
 
     def complete(self, intent: WorkIntent) -> WorkIntent:
         row = self.store.finish_work_intent(

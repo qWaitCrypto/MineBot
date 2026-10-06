@@ -6,6 +6,7 @@ from minebot.app.body_capability_tools import (
     BODY_CAPABILITY_DEBT,
     BODY_PRIMITIVE_CLOSURE,
     BODY_TRANSACTION_CLOSURE,
+    _read_nearby_blocks_tool,
 )
 from minebot.app.body_tool_catalog import (
     BODY_OBJECTIVE_PROVIDER_TABLE,
@@ -19,7 +20,7 @@ from minebot.app.phase1_runtime import (
     build_phase1_registry,
     tool_manifest,
 )
-from minebot.app.runner import tool_is_enabled
+from minebot.app.runner import tool_is_enabled, _model_tool_payload
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
 from minebot.app.tasks import TaskWorkspace
 from minebot.body import (
@@ -40,7 +41,7 @@ from minebot.body import (
 from minebot.brain.lifecycle import LifecycleState
 from minebot.brain.modes import ModeRuntime
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import Region, StructureRiskAssessment, StructureRiskLevel, ToolResult
+from minebot.contract import Region, StructureRiskAssessment, StructureRiskLevel, ToolResult, PerceptionResult
 from minebot.game import ScarpetBody
 from minebot.game.governance import GovernancePolicy
 from minebot.game.composite_body import CompositeBody
@@ -82,6 +83,23 @@ def _registry():
 
 
 class BodyCapabilityRegistryClosureTests(unittest.TestCase):
+    def test_nearby_blocks_exposes_decision_sample_and_exact_detail_path(self):
+        body = _body()
+        blocks = [{"x": i, "y": 64, "z": 0, "type": "minecraft:stone"} for i in range(12)]
+        body.perceive.return_value = PerceptionResult(
+            bot="Bot1", scope="nearbyBlocks", type="perception", ok=True, complete=False,
+            data={"blocks": blocks, "center": [0, 64, 0], "nextStart": 12},
+        )
+        tool = _read_nearby_blocks_tool(body)
+        result = tool.callable({})
+        payload = _model_tool_payload(tool.name, result.to_payload(), trace_ref="nearby", projector=tool.projector)
+        summary = payload["summary"]
+        self.assertEqual(summary["blocks"], blocks[:8])
+        self.assertEqual(summary["block_count"], 12)
+        self.assertFalse(summary["blocks_complete"])
+        self.assertEqual(summary["detail_path"], ["metrics", "data", "blocks"])
+        self.assertEqual(result.metrics["data"]["blocks"], blocks)
+
     def test_java_resource_scanner_is_read_only_and_never_referenced_by_action_executors(self):
         java_root = Path("minecraft/server/body/src/main/java/dev/minebot/body")
         action_sources = list((java_root / "action").glob("*.java"))
@@ -522,13 +540,18 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
                 "candidate_attempts_consumed": 4,
                 "candidate_budget_remaining": 8,
                 "remaining_delta": 2,
-                "last_failure": {"reason": "new_physics_failure"},
+                "last_failure": {
+                    "reason": "new_physics_failure",
+                    "metrics": {"failure_detail": "replan_budget_exhausted:arrival_unstable"},
+                },
             },
         )
         self.assertEqual(resource_summary["candidate_attempts_consumed"], 4)
         self.assertEqual(resource_summary["candidate_budget_remaining"], 8)
         self.assertEqual(resource_summary["remaining_delta"], 2)
         self.assertEqual(resource_summary["last_failure"]["reason"], "new_physics_failure")
+        self.assertEqual(resource_summary["last_failure"]["evidence"]["failure_detail"],
+                         "replan_budget_exhausted:arrival_unstable")
 
         self.assertIsNotNone(explore.projector)
         explore_summary = explore.projector(

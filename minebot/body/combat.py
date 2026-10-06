@@ -227,7 +227,10 @@ class CombatTransactions:
         try:
             self.progress.require_can_continue(f"engage_entity:{target_spec}")
         except ProgressAbort as exc:
-            return _result(False, "progress_yielded", True, _pos(self.body.get_state()), {"error": str(exc), "target_spec": target_spec})
+            return _result(False, "progress_yielded", True, _pos(self.body.get_state()), {
+                "error": str(exc), "target_spec": target_spec,
+                "progress_stop_reason": exc.stop_reason.value,
+            })
 
         resolved = resolve_entity_target(self.body, target_spec, radius=32)
         if isinstance(resolved, ToolResult):
@@ -298,10 +301,12 @@ class CombatTransactions:
             {
                 **resolved.evidence(),
                 "attack_range": attack_range,
+                "action_id": action.id,
                 "event": terminal.name,
                 "attacks": td.get("attacks"),
                 "target_id": td.get("target_id"),
                 "target_health": td.get("target_health"),
+                "target_initial_health": td.get("target_initial_health"),
                 "damage_observed": td.get("damage_observed"),
                 "persistent_target": td.get("persistent_target"),
                 "cooldown_ticks": td.get("cooldown_ticks"),

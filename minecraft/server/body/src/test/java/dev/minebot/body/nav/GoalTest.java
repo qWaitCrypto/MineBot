@@ -12,6 +12,42 @@ import org.junit.jupiter.api.Test;
 
 final class GoalTest {
     @Test
+    void distantCompositeStandsDoNotReadCollisionGeometry() {
+        int[] reads = {0};
+        WorldView world = new WorldView() {
+            public NodeKind kindAt(int x, int y, int z) { return NodeKind.PASSABLE; }
+            public double standingHeight(int x, int y, int z) { reads[0]++; return y + 0.5; }
+        };
+        List<Goal> targets = new ArrayList<>();
+        for (int i = 0; i < 32; i++) {
+            targets.add(new Goal.Near(100 + i, 64, 100, 0.5));
+        }
+        assertFalse(new Goal.Composite(targets).isSatisfied(world, 0, 64, 0));
+        assertEquals(0, reads[0], "horizontal exclusion needs no standing/collision read");
+        assertTrue(new Goal.Near(0, 64, 0, 0.5).isSatisfied(world, 0, 64, 0));
+        assertEquals(1, reads[0], "nearby sub-voxel geometry still requires authoritative height");
+        assertFalse(new Goal.Near(0, 64, 0, 0).isSatisfied(world, 0, 64, 0));
+    }
+
+    @Test
+    void interactionReadinessRejectsNearbyOccludedBlocks() {
+        FakeWorld world = new FakeWorld(63);
+        Goal.Interact goal = new Goal.Interact(2, 64, 0, 4.5);
+        assertTrue(goal.isWithinPhysicalReach(world, 0.5, 64, 0.5));
+        world.wall(1, 0, 67);
+        assertFalse(goal.isWithinPhysicalReach(world, 0.5, 64, 0.5));
+        assertTrue(goal.isWithinPhysicalReach(world, 2.5, 64, 1.5));
+    }
+
+    @Test
+    void interactionReadinessUsesActualPositionAtRangeBoundary() {
+        FakeWorld world = new FakeWorld(63);
+        Goal.Interact goal = new Goal.Interact(4, 64, 0, 4.5);
+        assertTrue(goal.isWithinPhysicalReach(world, 0.5, 64, 0.5));
+        assertFalse(goal.isWithinPhysicalReach(world, 0.0, 64, 0.5));
+    }
+
+    @Test
     void compositeLimitMatchesTheCompletePythonStandDomain() {
         assertEquals(32, Goal.MAX_COMPOSITE_MEMBERS);
         assertDoesNotThrow(() -> new Goal.Composite(goals(32)));

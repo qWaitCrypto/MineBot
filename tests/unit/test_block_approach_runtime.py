@@ -2,7 +2,17 @@ import unittest
 
 from minebot.body import BlockApproachTransactions, GetToBlockConfig
 from minebot.contract import ToolResult
-from tests.unit.test_work_runtime import FakeBody, FakeNavigator
+from tests.unit.test_work_runtime import FakeBody as WorkFakeBody, FakeNavigator
+
+
+class FakeBody(WorkFakeBody):
+    interaction_ready = True
+
+    def perceive(self, scope, params):
+        result = super().perceive(scope, params)
+        if scope == "blockAt" and "interaction_radius" in params:
+            result.data["interaction_ready"] = self.interaction_ready
+        return result
 
 
 def target_blocks(*targets: tuple[int, int, int]) -> dict[tuple[int, int, int], tuple[str, str]]:
@@ -49,6 +59,35 @@ class ChangingTargetNavigator(SequencedNavigator):
 
 
 class BlockApproachTransactionsTests(unittest.TestCase):
+    def test_occluded_near_target_requires_navigation_and_fresh_readiness(self):
+        target = (2, 64, 0)
+        body = FakeBody(blocks=target_blocks(target), find_blocks=[
+            {"x": 2, "y": 64, "z": 0, "type": "minecraft:oak_log"},
+        ])
+        body.interaction_ready = False
+
+        class RevealingNavigator(SequencedNavigator):
+            def navigate_to(self, goal, **kwargs):
+                result = super().navigate_to(goal, **kwargs)
+                self.body.interaction_ready = True
+                return result
+
+        navigator = RevealingNavigator(body, [(True, "arrived")])
+        result = BlockApproachTransactions(body, navigator).get_to_block(block_types=("oak_log",))
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertTrue(result.metrics["interaction_verified"])
+        self.assertFalse(result.metrics["already_in_range"])
+
+    def test_missing_readiness_never_claims_approach_success(self):
+        body = FakeBody(blocks=target_blocks((2, 64, 0)), find_blocks=[
+            {"x": 2, "y": 64, "z": 0, "type": "minecraft:oak_log"},
+        ])
+        body.interaction_ready = None
+        result = BlockApproachTransactions(body, FakeNavigator()).get_to_block(block_types=("oak_log",))
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "perception_failed")
+
     def test_requires_block_filter(self):
         body = FakeBody()
         navigator = FakeNavigator()

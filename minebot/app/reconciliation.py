@@ -59,6 +59,24 @@ def enqueue_startup_reconciliation(
     stale = queue.queued_intents(WorkIntentKind.RECOVERY_RECONCILE)
     stale_body_events = queue.queued_intents(WorkIntentKind.BODY_EVENT)
     stale_continuations = queue.queued_intents(WorkIntentKind.TASK_CONTINUE)
+    task = workspace.current_task
+    admissions = []
+    for prior in (*orphaned_intents, *stale):
+        if task is None:
+            continue
+        if "admission_task_id" in prior.payload and task is not None and prior.payload["admission_task_id"] != task.task_id:
+            continue
+        if task is not None and prior.task_id not in {None, task.task_id}:
+            continue
+        cursor = prior.payload.get("admission_evidence_cursor", prior.payload.get("evidence_cursor"))
+        if "budget_checkpoint_id" in prior.payload and cursor is not None:
+            admissions.append((prior.payload["budget_checkpoint_id"], int(cursor)))
+    if len({owner for owner, _ in admissions}) > 1:
+        # Ambiguous admission must not leave an old physical action running.
+        interrupt = body.interrupt("startup_reconcile")
+        if not (interrupt.ok and interrupt.accepted):
+            raise StartupReconciliationError("could not interrupt body with conflicting admissions")
+        raise StartupReconciliationError("conflicting interrupted budget owners")
     carried_events = _events_from_reconcile_intents(stale)
     carried_events.extend(_events_from_body_intents(stale_body_events))
     if stale or stale_body_events or stale_continuations:
@@ -149,6 +167,10 @@ def enqueue_startup_reconciliation(
         },
         "terminal": terminal,
     }
+    if admissions:
+        payload["budget_checkpoint_id"] = admissions[0][0]
+        payload["evidence_cursor"] = min(cursor for _, cursor in admissions)
+        payload["admission_task_id"] = None if task is None else task.task_id
     intent = queue.enqueue(
         WorkIntentKind.RECOVERY_RECONCILE,
         source="startup_reconcile",

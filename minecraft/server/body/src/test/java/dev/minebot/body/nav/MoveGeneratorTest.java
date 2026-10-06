@@ -158,6 +158,37 @@ final class MoveGeneratorTest {
     }
 
     @Test
+    void landingMediumUsesItsOwnFallLimitAndSwimPermission() {
+        for (boolean swim : new boolean[] {false, true}) {
+            for (int solidLimit : new int[] {0, 1, 3, 5}) {
+                for (int waterLimit : new int[] {0, 1, 3, 5}) {
+                    for (int drop = 1; drop <= 6; drop++) {
+                        for (WorldView.NodeKind landing : new WorldView.NodeKind[] {
+                            WorldView.NodeKind.SOLID, WorldView.NodeKind.LIQUID
+                        }) {
+                            FakeWorld world = new FakeWorld(FLOOR);
+                            int landingY = STAND - drop - 1;
+                            for (int y = FLOOR; y > landingY; y--) {
+                                world.set(1, y, 0, WorldView.NodeKind.PASSABLE);
+                            }
+                            world.set(1, landingY, 0, landing);
+                            MoveGenerator.Policy policy = new MoveGenerator.Policy(
+                                false, true, true, swim, solidLimit, waterLimit
+                            );
+                            boolean expected = landing == WorldView.NodeKind.SOLID
+                                ? drop <= solidLimit : swim && drop <= waterLimit;
+                            assertEquals(expected, hasMoveTo(
+                                new MoveGenerator(world, policy).movesFrom(0, STAND, 0).moves(),
+                                1, landingY + 1, 0
+                            ), "landing=" + landing + " drop=" + drop + " policy=" + policy);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     void landOnlyWorldIsUnchangedByLiquidLogic() {
         // Regression: with no liquid anywhere, the move set is exactly walking.
         MoveGenerator gen = new MoveGenerator(new FakeWorld(FLOOR));

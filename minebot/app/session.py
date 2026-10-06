@@ -18,11 +18,17 @@ from enum import Enum
 from uuid import uuid4
 
 from minebot.app.autonomy import AutonomyAction, AutonomyCoordinator
+from minebot.app.progress_epochs import ContinuationEpochBudget
 from minebot.app.body_events import event_matches_wait_conditions
 from minebot.app.principals import AdmissionCapability, PrincipalRegistry
 from minebot.app.wiring import AgentRuntimeParts
 from minebot.app.runner import ModelTurnTransportError, RecoveryOutcome
-from minebot.app.runtime_state import CheckpointDisposition, CompletionAuthority, TaskStatus
+from minebot.app.runtime_state import (
+    CheckpointDisposition,
+    CompletionAuthority,
+    TaskRecord,
+    TaskStatus,
+)
 from minebot.app.skills import SkillWorkspace
 from minebot.app.tasks import TaskWorkspace
 from minebot.app.work_queue import (
@@ -36,7 +42,7 @@ from minebot.app.work_queue import (
 )
 from minebot.brain.lifecycle import LifecycleError, LifecycleState
 from minebot.brain.modes import AgentSignal, signalize_events
-from minebot.contract import Event
+from minebot.contract import REVIEWABLE_STOP_REASONS, Event, ProgressStopReason
 
 DEFAULT_RUNAWAY_STEP_LIMIT = 100_000
 EXECUTION_QUARANTINE_POLL_S = 0.25
@@ -100,6 +106,7 @@ class SessionStep:
     status: str
     lifecycle: LifecycleState
     message: str | None = None
+    progress_stop_reason: ProgressStopReason | None = None
 
 
 # Command spelling -> what the principal is actually trying to do (F5 §8.2).
@@ -377,6 +384,16 @@ class AgentSession:
             else await self._apply_runtime_intent(intent)
         )
         self._begin_skill_owner(intent)
+        if intent.kind is WorkIntentKind.RECOVERY_RECONCILE and intent.source == "startup_reconcile":
+            reconciled = await self._run_supervised(
+                self._reconcile_startup_recovery(intent),
+                work_kind="startup_recovery_confirmation",
+                admission_version=admission_version,
+            )
+            if reconciled is _WORK_PREEMPTED:
+                return SessionStep("preempted", self.parts.lifecycle.state, "superseded_during_reconciliation")
+            if reconciled is not None:
+                return reconciled
         runtime_terminal = self._runtime_intent_terminal_step(intent)
         if runtime_terminal is not None:
             return runtime_terminal
@@ -393,9 +410,36 @@ class AgentSession:
             status = "waiting" if self.has_active_goal else "idle"
             return SessionStep(status, self.parts.lifecycle.state, "intent handled without model turn")
 
+        runnable_states = {
+            LifecycleState.INIT,
+            LifecycleState.IDLE,
+            LifecycleState.ACTIVE,
+            LifecycleState.RESUMING,
+            LifecycleState.RECOVERING,
+        }
+        if self.parts.lifecycle.state not in runnable_states:
+            return SessionStep("waiting", self.parts.lifecycle.state)
+
+        # Both lifecycle recovery and the model inherit this frozen owner.
+        continuation_budget = self._continuation_budget(intent)
+        if "admission_evidence_cursor" in intent.payload:
+            evidence_cursor = int(intent.payload["admission_evidence_cursor"])
+        elif intent.kind in {WorkIntentKind.TASK_BOUNDARY, WorkIntentKind.RECOVERY_RECONCILE} and "evidence_cursor" in intent.payload:
+            evidence_cursor = int(intent.payload["evidence_cursor"] or 0)
+        else:
+            evidence_cursor = self.parts.runtime.latest_progress_evidence_cursor()
+        intent = self.work_queue.bind_admission(
+            intent, None if continuation_budget is None else continuation_budget.checkpoint_id, evidence_cursor,
+            None if self.task_workspace is None or self.task_workspace.current_task is None
+            else self.task_workspace.current_task.task_id,
+        )
         if self.parts.lifecycle.state is LifecycleState.RECOVERING:
             recovered = await self._run_supervised(
-                self._drive_recovery(),
+                self._drive_recovery(
+                    intent=intent,
+                    continuation_budget=continuation_budget,
+                    evidence_cursor=evidence_cursor,
+                ),
                 work_kind="recovery",
                 admission_version=admission_version,
             )
@@ -406,28 +450,16 @@ class AgentSession:
                 intent=intent,
                 checkpoint_before=checkpoint_before,
             )
-
-        runnable_states = {
-            LifecycleState.INIT,
-            LifecycleState.IDLE,
-            LifecycleState.ACTIVE,
-            LifecycleState.RESUMING,
-        }
-        if self.parts.lifecycle.state not in runnable_states:
-            return SessionStep("waiting", self.parts.lifecycle.state)
-
         try:
             outcome = await self._run_supervised(
                 self.parts.runtime.run_turn(
                     extra_signals=signals,
                     body_actions_allowed=intent.kind is not WorkIntentKind.MAINTENANCE,
-                    continuation_evidence_cursor=(
-                        int(intent.payload.get("evidence_cursor") or 0)
-                        if intent.kind is WorkIntentKind.TASK_BOUNDARY
-                        else None
-                    ),
+                    continuation_evidence_cursor=evidence_cursor,
                     intent_kind=intent.kind.value,
                     has_durable_goal=self.has_active_goal,
+                    continuation_budget=continuation_budget,
+                    review_grant_stop_epoch_id=self._continuation_review_grant(intent),
                 ),
                 work_kind="agent_turn",
                 admission_version=admission_version,
@@ -435,7 +467,7 @@ class AgentSession:
             if outcome is _WORK_PREEMPTED:
                 return SessionStep("preempted", self.parts.lifecycle.state, "superseded_during_agent_turn")
         except ModelTurnTransportError as exc:
-            return self._schedule_model_recovery(exc)
+            return self._schedule_model_recovery(exc, intent=intent)
         except Exception as exc:
             self._trace(
                 "session_step_failed",
@@ -455,14 +487,50 @@ class AgentSession:
             )
             self._model_recovery_attempts = 0
         return self._finish_step(
-            SessionStep(outcome.status, outcome.lifecycle, outcome.message),
+            SessionStep(outcome.status, outcome.lifecycle, outcome.message,
+                        progress_stop_reason=outcome.progress_stop_reason),
             intent=intent,
             checkpoint_before=checkpoint_before,
         )
 
-    def _schedule_model_recovery(self, exc: ModelTurnTransportError) -> SessionStep:
+    def _continuation_budget(self, intent: WorkIntent) -> ContinuationEpochBudget | None:
+        if self.task_workspace is None:
+            return None
+        checkpoint_id = intent.payload.get("budget_checkpoint_id")
+        if intent.kind is WorkIntentKind.TASK_CONTINUE:
+            checkpoint_id = intent.payload.get("checkpoint_id")
+        if "budget_checkpoint_id" not in intent.payload and intent.kind in {
+            WorkIntentKind.BODY_EVENT, WorkIntentKind.RECOVERY_RECONCILE,
+        }:
+            task = self.task_workspace.current_task
+            checkpoint = None if task is None else self.task_workspace.store.get_latest_checkpoint(task.task_id)
+            if checkpoint is not None and checkpoint.continuation is not None:
+                checkpoint_id = checkpoint.checkpoint_id
+        if not checkpoint_id:
+            return None
+        return ContinuationEpochBudget(self.task_workspace.store, self.task_workspace.scope, str(checkpoint_id))
+
+    def _continuation_review_grant(self, intent: WorkIntent) -> str | None:
+        """The stop epoch this admitted continuation paid an allowance to review.
+
+        Only a task continuation can carry one: the continuation gate already
+        checked that this exact approach debited one non-renewable task
+        allowance for that stop and that every stop in the window was
+        reviewable. The successor run uses it to open the work lane it closed.
+        """
+        if self.task_workspace is None or intent.kind is not WorkIntentKind.TASK_CONTINUE:
+            return None
+        budget = self._continuation_budget(intent)
+        if budget is None:
+            return None
+        return self.task_workspace.store.checkpoint_review_grant(
+            self.task_workspace.scope, checkpoint_id=budget.checkpoint_id,
+        )
+
+    def _schedule_model_recovery(self, exc: ModelTurnTransportError, *, intent: WorkIntent) -> SessionStep:
         assert self.parts is not None
         assert self.work_queue is not None
+        budget = self._continuation_budget(intent)
         attempt = self._model_recovery_attempts + 1
         self._turn_pending = False
         if attempt > self.max_model_recovery_attempts:
@@ -489,6 +557,8 @@ class AgentSession:
                 "reason": "transient_model_error",
                 "attempt": attempt,
                 "error_type": exc.error_type,
+                "budget_checkpoint_id": None if budget is None else budget.checkpoint_id,
+                "evidence_cursor": self.parts.runtime.current_run_evidence_cursor(),
                 "instruction": (
                     "The previous model turn ended before completion. Body and tool effects "
                     "already committed remain authoritative. Read current state, inventory, "
@@ -538,14 +608,57 @@ class AgentSession:
             execution_idle=bool(facts.get("execution_idle")),
         )
 
-    async def _drive_recovery(self) -> SessionStep:
+    async def _reconcile_startup_recovery(self, intent: WorkIntent) -> SessionStep | None:
+        assert self.parts is not None
+        if intent.task_id is None:
+            return None
+        try:
+            task = None if self.task_workspace is None else self.task_workspace.current_task
+            if task is None or task.task_id != intent.task_id:
+                raise ValueError("startup recovery task changed")
+            abort = await self.parts.runtime.run_sync(self.parts.runtime.restore_task_progress)
+            if abort is not None:
+                self._turn_pending = False
+                self._stand_down()
+                return self._yield_recovery_failure("progress_restore_stopped", {},
+                    progress_stop_reason=abort.stop_reason)
+            state = await self.parts.runtime.run_sync(self.parts.runtime.body.get_state)
+            self.work_queue.reconcile_recovery(intent, state=state)
+        except Exception as exc:
+            self._turn_pending = False
+            self._stand_down()
+            return self._yield_recovery_failure("startup_recovery_confirmation_failed",
+                {"error_type": type(exc).__name__}, progress_stop_reason=ProgressStopReason.UNKNOWN)
+        return None
+
+    async def _drive_recovery(
+        self, *, intent: WorkIntent, continuation_budget: ContinuationEpochBudget | None = None,
+        evidence_cursor: int | None = None,
+    ) -> SessionStep:
         assert self.parts is not None
         handler = self.parts.runtime.recovery_handler
         if handler is None:
             self._trace("session_recovery_missing_driver", lifecycle=self.parts.lifecycle.state.value)
             return self._yield_recovery_failure("recovery_driver_missing", {})
-        self._recovery_attempts += 1
+        phase = "admission"
         try:
+            restore_abort = await self.parts.runtime.run_sync(self.parts.runtime.restore_task_progress)
+            if restore_abort is not None:
+                return self._yield_recovery_failure(
+                    "progress_restore_stopped",
+                    {"stop_reason": restore_abort.stop_reason.value},
+                    progress_stop_reason=restore_abort.stop_reason,
+                )
+            assert self.work_queue is not None
+            reserved = self.work_queue.reserve_recovery_attempt(intent, max_attempts=self.max_recovery_attempts)
+            if reserved is None:
+                return self._yield_recovery_failure("recovery_attempt_budget_exhausted", {},
+                    progress_stop_reason=ProgressStopReason.UNKNOWN)
+            admission = reserved.payload["recovery_admission"]
+            self._recovery_attempts = int(admission["attempt"])
+            recovery_limit = int(admission["limit"])
+            self._trace("recovery_attempt_reserved", intent_id=intent.intent_id, **admission)
+            phase = "driver"
             if inspect.iscoroutinefunction(handler):
                 outcome = await handler(self.parts.runtime)
             else:
@@ -560,7 +673,11 @@ class AgentSession:
                 lifecycle=self.parts.lifecycle.state.value,
                 attempt=self._recovery_attempts,
             )
-            return self._yield_recovery_failure("recovery_driver_error", {"error_type": type(exc).__name__, "message": str(exc)})
+            return self._yield_recovery_failure(
+                "recovery_admission_failed" if phase == "admission" else "recovery_driver_error",
+                {"error_type": type(exc).__name__, "message": str(exc)},
+                progress_stop_reason=ProgressStopReason.UNKNOWN if phase == "admission" else None,
+            )
         if not isinstance(outcome, RecoveryOutcome):
             self._trace(
                 "session_recovery_invalid_result",
@@ -576,11 +693,11 @@ class AgentSession:
             reason=outcome.reason,
             can_retry=outcome.can_retry,
             attempt=self._recovery_attempts,
-            max_attempts=self.max_recovery_attempts,
+            max_attempts=recovery_limit,
             facts=outcome.facts,
         )
         if not outcome.success:
-            if outcome.can_retry and self._recovery_attempts < self.max_recovery_attempts:
+            if outcome.can_retry and self._recovery_attempts < recovery_limit:
                 return SessionStep("recovery_retry", self.parts.lifecycle.state, f"recovery_retry:{outcome.reason}")
             return self._yield_recovery_failure(outcome.reason, outcome.facts)
 
@@ -589,6 +706,8 @@ class AgentSession:
             extra_signals=signals,
             intent_kind=WorkIntentKind.RECOVERY_RECONCILE.value,
             has_durable_goal=self.has_active_goal,
+            continuation_budget=continuation_budget,
+            continuation_evidence_cursor=evidence_cursor,
         )
         if recovered.lifecycle is LifecycleState.RECOVERING:
             reason = recovered.message or "recovery_confirmation_failed"
@@ -596,9 +715,9 @@ class AgentSession:
                 "session_recovery_confirmation_failed",
                 reason=reason,
                 attempt=self._recovery_attempts,
-                max_attempts=self.max_recovery_attempts,
+                max_attempts=recovery_limit,
             )
-            if self._recovery_attempts < self.max_recovery_attempts:
+            if self._recovery_attempts < recovery_limit:
                 return SessionStep(
                     "recovery_retry",
                     recovered.lifecycle,
@@ -608,10 +727,20 @@ class AgentSession:
                 "recovery_confirmation_failed",
                 {"reason": reason},
             )
-        self._recovery_attempts = 0
-        return SessionStep(recovered.status, recovered.lifecycle, recovered.message)
+        if recovered.lifecycle in {LifecycleState.RESUMING, LifecycleState.ACTIVE} and recovered.progress_stop_reason is None:
+            try:
+                self.work_queue.confirm_recovery(reserved)
+            except Exception as exc:
+                return self._yield_recovery_failure("recovery_confirmation_persistence_failed",
+                    {"error_type": type(exc).__name__}, progress_stop_reason=ProgressStopReason.UNKNOWN)
+            self._recovery_attempts = 0
+        return SessionStep(recovered.status, recovered.lifecycle, recovered.message,
+            progress_stop_reason=recovered.progress_stop_reason)
 
-    def _yield_recovery_failure(self, reason: str, facts: dict[str, object]) -> SessionStep:
+    def _yield_recovery_failure(
+        self, reason: str, facts: dict[str, object], *,
+        progress_stop_reason: ProgressStopReason | None = None,
+    ) -> SessionStep:
         assert self.parts is not None
         self._trace(
             "session_recovery_gave_up",
@@ -619,14 +748,20 @@ class AgentSession:
             attempts=self._recovery_attempts,
             max_attempts=self.max_recovery_attempts,
             facts=facts,
+            progress_stop_reason=None if progress_stop_reason is None else progress_stop_reason.value,
         )
         self._recovery_attempts = 0
         try:
-            if self.parts.lifecycle.state is LifecycleState.RECOVERING:
+            if self.parts.lifecycle.state is LifecycleState.RECOVERING or (
+                progress_stop_reason is not None and self.parts.lifecycle.state in {
+                    LifecycleState.ACTIVE, LifecycleState.RESUMING,
+                }
+            ):
                 self.parts.lifecycle.stand_down()
         except LifecycleError:
             self._trace("session_lifecycle_error", action="recovery_stand_down", state=self.parts.lifecycle.state.value)
-        return SessionStep("yielded", self.parts.lifecycle.state, f"recovery_failed:{reason}")
+        return SessionStep("yielded", self.parts.lifecycle.state, f"recovery_failed:{reason}",
+            progress_stop_reason=progress_stop_reason)
 
     async def run_until_waiting(
         self,
@@ -709,6 +844,49 @@ class AgentSession:
                 },
             )
         return SessionStep("completed", self.parts.lifecycle.state, reason)
+
+    def reject_completion_request(self, facts: dict[str, object]) -> WorkIntent | None:
+        """Reopen an unconfirmed completion request for one factual review turn.
+
+        The model may request completion, but only an external terminal verifier
+        may grant it.  A false verifier result restores the task to RUNNING and
+        carries the immediately preceding continuation owner forward.  It does
+        not mint a new approach or refund any reservation.
+        """
+        if self.task_workspace is None or self.work_queue is None:
+            return None
+        task = self.task_workspace.current_task
+        if task is None or not self.task_workspace.completion_requested:
+            return None
+        checkpoint = self.task_workspace.store.get_latest_checkpoint(task.task_id)
+        if checkpoint is None:
+            return None
+        budget_checkpoint_id = self.task_workspace.completion_review_budget_owner()
+        resumed = self.task_workspace.resume()
+        if resumed is None:
+            return None
+        payload = {
+            "checkpoint_id": checkpoint.checkpoint_id,
+            "task_revision": resumed.revision,
+            "facts": dict(facts),
+        }
+        if budget_checkpoint_id is not None:
+            payload["budget_checkpoint_id"] = budget_checkpoint_id
+        intent = self.work_queue.enqueue(
+            WorkIntentKind.COMPLETION_REVIEW,
+            source="authoritative_completion_rejected",
+            payload=payload,
+            dedupe_key=f"completion_review:{task.task_id}:{checkpoint.checkpoint_id}",
+            task_id=task.task_id,
+        )
+        self._trace(
+            "task_completion_rejected",
+            task_id=task.task_id,
+            checkpoint_id=checkpoint.checkpoint_id,
+            budget_checkpoint_id=budget_checkpoint_id,
+            facts=dict(facts),
+        )
+        return intent
 
     async def _apply_command(self, command: SessionCommand) -> list[AgentSignal]:
         if command.kind in {
@@ -1044,6 +1222,7 @@ class AgentSession:
             WorkIntentKind.TASK_BOUNDARY,
             WorkIntentKind.TASK_CONTINUE,
             WorkIntentKind.RECOVERY_RECONCILE,
+            WorkIntentKind.COMPLETION_REVIEW,
         }:
             self._ensure_parts_for_runtime_intent()
             assert self.parts is not None
@@ -1051,6 +1230,7 @@ class AgentSession:
             if intent.kind in {
                 WorkIntentKind.TASK_BOUNDARY,
                 WorkIntentKind.TASK_CONTINUE,
+                WorkIntentKind.COMPLETION_REVIEW,
             } and task is None:
                 self._turn_pending = False
                 self._trace(
@@ -1109,6 +1289,23 @@ class AgentSession:
                         current_checkpoint=None if checkpoint is None else checkpoint.checkpoint_id,
                     )
                     return []
+            if intent.kind is WorkIntentKind.COMPLETION_REVIEW:
+                expected_checkpoint = str(intent.payload.get("checkpoint_id") or "")
+                checkpoint = self.task_workspace.store.get_latest_checkpoint(task.task_id)
+                if (
+                    checkpoint is None
+                    or checkpoint.checkpoint_id != expected_checkpoint
+                    or checkpoint.disposition is not CheckpointDisposition.COMPLETE
+                    or task.status is not TaskStatus.RUNNING
+                ):
+                    self._turn_pending = False
+                    self._trace(
+                        "completion_review_dropped",
+                        reason="checkpoint_changed",
+                        expected_checkpoint=expected_checkpoint,
+                        current_checkpoint=None if checkpoint is None else checkpoint.checkpoint_id,
+                    )
+                    return []
             if task is not None:
                 self._goal_active = True
                 self.parts.context.set_goal(task.goal_text)
@@ -1123,6 +1320,26 @@ class AgentSession:
                     "one explicit disposition. This bounded boundary-closure run does not "
                     "choose your strategy. FACTS: "
                     + frame
+                )
+            elif intent.kind is WorkIntentKind.COMPLETION_REVIEW:
+                self.parts.context.observe_system_message(
+                    "COMPLETION_NOT_CONFIRMED: An authoritative terminal verifier "
+                    "did not confirm your completion request. The user goal remains "
+                    "active. Treat these facts as ground truth, reassess the task, and "
+                    "either take a justified next action or checkpoint wait/yield. FACTS: "
+                    + frame
+                )
+            elif (
+                intent.kind is WorkIntentKind.TASK_CONTINUE
+                and intent.payload.get("continuation_mode") == "reconsider"
+            ):
+                self.parts.context.observe_system_message(
+                    "TASK_RECONSIDER: A newly observed gameplay failure invalidates an approach, "
+                    "not the user goal. Review the failure and prior plan, choose a different "
+                    "approach or explicitly yield/wait if none is justified. Repeating the "
+                    "same failure with different coordinates, counts, or wording is not new "
+                    "evidence. This run uses the existing remaining continuation budget; "
+                    "it does not reset safety, progress, or execution limits. FACTS: " + frame
                 )
             else:
                 self.parts.context.observe_system_message(
@@ -1360,6 +1577,17 @@ class AgentSession:
             return None
         return self.parts.skill_workspace
 
+    def _reconsideration_granted(self, task: TaskRecord) -> bool:
+        """Did the closing checkpoint buy execution with a task allowance?"""
+        assert self.task_workspace is not None
+        checkpoint = self.task_workspace.store.get_latest_checkpoint(task.task_id)
+        if checkpoint is None or checkpoint.disposition is not CheckpointDisposition.CONTINUE:
+            return False
+        return self.task_workspace.store.checkpoint_review_grant(
+            self.task_workspace.scope,
+            checkpoint_id=checkpoint.checkpoint_id,
+        ) is not None
+
     def _finish_step(
         self,
         step: SessionStep,
@@ -1369,6 +1597,35 @@ class AgentSession:
     ) -> SessionStep:
         if self.parts is None:
             return step
+        if step.progress_stop_reason in REVIEWABLE_STOP_REASONS:
+            self._turn_pending = False
+            self._active_turn_request = None
+            self._suspended_turn_request = None
+            task = None if self.task_workspace is None else self.task_workspace.current_task
+            if task is not None and task.status is TaskStatus.RUNNING:
+                if self._reconsideration_granted(task):
+                    # The model reviewed this stop and bought a different
+                    # approach with one non-renewable task allowance. Let the
+                    # normal continuation gates judge it instead of discarding
+                    # the decision; if they admit it, the successor run opens a
+                    # fresh window for that approach alone. The allowance stays
+                    # spent and this stop can never be bought again.
+                    self._apply_task_checkpoint_lifecycle(
+                        intent=intent,
+                        checkpoint_before=checkpoint_before,
+                    )
+                    self._sync_task_context()
+                    return SessionStep(step.status, self.parts.lifecycle.state, step.message,
+                        progress_stop_reason=step.progress_stop_reason)
+                self.task_workspace.reject_continuation(
+                    reason="progress_work_stopped",
+                    evidence=(f"progress_stop_reason={step.progress_stop_reason.value}",),
+                    body_fingerprint=self._current_body_fingerprint(),
+                )
+            self._stand_down()
+            self._sync_task_context()
+            return SessionStep(step.status, self.parts.lifecycle.state, step.message,
+                progress_stop_reason=step.progress_stop_reason)
         if step.status == "completed_turn":
             self._turn_pending = False
             self._active_turn_request = None
@@ -1445,6 +1702,7 @@ class AgentSession:
         task = self.task_workspace.current_task
         if task is None:
             return
+        budget = self._continuation_budget(intent)
         checkpoint = self.task_workspace.store.get_latest_checkpoint(task.task_id)
         if checkpoint is None or checkpoint.checkpoint_id == checkpoint_before:
             if intent.kind in {
@@ -1454,6 +1712,7 @@ class AgentSession:
                 WorkIntentKind.BODY_EVENT,
                 WorkIntentKind.RECOVERY_RECONCILE,
                 WorkIntentKind.TASK_CONTINUE,
+                WorkIntentKind.COMPLETION_REVIEW,
             }:
                 boundary = self.work_queue.enqueue(
                     WorkIntentKind.TASK_BOUNDARY,
@@ -1462,6 +1721,7 @@ class AgentSession:
                         "origin_intent_id": intent.intent_id,
                         "task_revision": task.revision,
                         "evidence_cursor": self.parts.runtime.current_run_evidence_cursor(),
+                        "budget_checkpoint_id": None if budget is None else budget.checkpoint_id,
                     },
                     dedupe_key=(
                         f"task_boundary:{task.task_id}:r{task.revision}:"
@@ -1493,6 +1753,52 @@ class AgentSession:
                         self.parts.lifecycle.yield_()
                     else:
                         self._stand_down()
+            return
+        if (
+            checkpoint.disposition is CheckpointDisposition.CONTINUE
+            and self.work_queue.queued_intents(WorkIntentKind.QUIT)
+        ):
+            # Process shutdown invalidates the current lease, not a checkpoint
+            # already committed by that lease. Settle the outgoing continuation
+            # against its real evidence without queuing old-process work, so
+            # startup receives a usable durable budget owner.
+            if self.autonomy_coordinator is None:
+                self._reject_autonomy_continuation(
+                    checkpoint_id=checkpoint.checkpoint_id,
+                    reason="autonomy_coordinator_unavailable",
+                )
+                return
+            decision = self.autonomy_coordinator.decide(
+                current_generation=self.parts.authority.current_generation(),
+                body_fingerprint=self._current_body_fingerprint(),
+                lifecycle=self.parts.lifecycle.state,
+                handoff_only=True,
+            )
+            self._trace(
+                "autonomy_decision",
+                action=decision.action.value,
+                reason=decision.reason,
+                task_id=task.task_id,
+                checkpoint_id=checkpoint.checkpoint_id,
+                intent_id=None,
+                consumed_epochs=decision.consumed_epochs,
+                remaining_epochs=decision.remaining_epochs,
+                material_changed=decision.material_changed,
+                novel_epistemic_keys=list(decision.novel_epistemic_keys),
+            )
+            if decision.action is not AutonomyAction.CONTINUE:
+                self._reject_autonomy_continuation(
+                    checkpoint_id=checkpoint.checkpoint_id,
+                    reason=decision.reason,
+                )
+                return
+            self._trace(
+                "autonomy_continuation_deferred",
+                reason=decision.reason,
+                checkpoint_id=checkpoint.checkpoint_id,
+                consumed_epochs=decision.consumed_epochs,
+                remaining_epochs=decision.remaining_epochs,
+            )
             return
         if self.autonomy_coordinator is None:
             if checkpoint.disposition is CheckpointDisposition.CONTINUE:

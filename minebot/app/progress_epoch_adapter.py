@@ -13,16 +13,25 @@ would cancel evidence the authority has not seen yet.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from minebot.app.progress_epochs import ProgressEpochArchive
-from minebot.brain.progress import ProgressStep
-from minebot.contract import JsonObject, ProgressAbort
+from minebot.app.progress_epochs import ContinuationEpochBudget, ProgressEpochArchive
+from minebot.brain.feedback import failure_evidence_key
+from minebot.brain.progress import ProgressStep, combat_progress_evidence, material_progress_evidence
+from minebot.contract import (
+    REVIEWABLE_STOP_REASONS,
+    BodyState,
+    JsonObject,
+    ProgressAbort,
+    ProgressStopReason,
+    dominant_progress_abort,
+)
 from minebot.contract.tool_trace import (
     canonical_args_hash_from_json as _canonical_args_hash_from_json,
     canonical_tool_arguments_from_json as _canonical_tool_arguments,
+    tool_tactic_signature_from_json,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
@@ -53,6 +62,10 @@ class _ProgressEpochMember:
     observation_handle: str | None = None
     epistemic_keys: tuple[str, ...] = ()
     pending_abort: ProgressAbort | None = None
+    failure_evidence_key: str | None = None
+    material_evidence: tuple[str, ...] = ()
+    budget_denied: bool = False
+    progress_denied: bool = False
 
 
 @dataclass
@@ -62,6 +75,10 @@ class _ProgressEpoch:
     model_turn: int
     pre_body_fingerprint: str | None
     members: list[_ProgressEpochMember]
+    pre_body_state: BodyState | None = None
+    budget_checkpoint_id: str | None = None
+    task_identity_bound: bool = False
+    task_id: str | None = None
     finalized: bool = False
 
 
@@ -123,14 +140,24 @@ class ProgressEpochAdapter:
         runtime: "AgentRuntime",
         run_id: str,
         archive: ProgressEpochArchive | None = None,
+        budget: ContinuationEpochBudget | None = None,
     ) -> None:
         self.runtime = runtime
         self.run_id = run_id
         self.archive = archive
+        self.budget = budget
         self._model_turn = 0
         self._active: _ProgressEpoch | None = None
         self._members: dict[str, _ProgressEpochMember] = {}
         self._seen_epistemic_keys: set[str] = set()
+        # Carry an actual stop, not raw high counters: first-seen evidence can
+        # legitimately admit an alternative before the authority stops work.
+        self.work_stop = (
+            runtime._progress_work_stop
+            if "checkpoint_task" in runtime.registry and _task_closure_tool(runtime, "checkpoint_task")
+            else None
+        )
+        self.reviewable_abort: ProgressAbort | None = None
 
     async def open(self, response: Any) -> None:
         calls = [
@@ -143,7 +170,19 @@ class ProgressEpochAdapter:
         if self._active is not None and not self._active.finalized:
             self.finalize_unsettled("next_model_response")
         self._model_turn += 1
-        pre_fingerprint = await self.runtime.read_progress_fingerprint()
+        epoch_id = f"epoch-{uuid4().hex}"
+        task_identity_bound = self.runtime.progress_task_id is not None
+        task_id = (
+            await self.runtime.run_sync(self.runtime.progress_task_id)
+            if task_identity_bound else None
+        )
+        work_calls = [call for call in calls if not _task_closure_tool(self.runtime, call.tool_name)]
+        budget_denied = (
+            self.work_stop is None and self.budget is not None and bool(work_calls)
+            and not await self.runtime.run_sync(self.budget.reserve, epoch_id)
+        )
+        pre_state = await self.runtime.read_progress_state()
+        pre_fingerprint = None if pre_state is None else self.runtime.authority.fingerprint(pre_state)
         strategy_epoch_condition = _strategy_epoch_condition(self.runtime)
         body_calls = [
             call
@@ -164,15 +203,21 @@ class ProgressEpochAdapter:
                 arguments=call.arguments,
                 strategy_epoch_condition=strategy_epoch_condition,
                 conflict=call.tool_call_id in conflicting_ids,
+                budget_denied=budget_denied and call in work_calls,
+                progress_denied=self.work_stop is not None and call in work_calls,
             )
             for index, call in enumerate(calls)
         ]
         epoch = _ProgressEpoch(
-            epoch_id=f"epoch-{uuid4().hex}",
+            epoch_id=epoch_id,
             run_id=self.run_id,
             model_turn=self._model_turn,
             pre_body_fingerprint=pre_fingerprint,
             members=members,
+            pre_body_state=pre_state,
+            budget_checkpoint_id=None if self.budget is None else self.budget.checkpoint_id,
+            task_identity_bound=task_identity_bound,
+            task_id=task_id,
         )
         self._active = epoch
         self._members = {member.tool_call_id: member for member in members}
@@ -187,6 +232,8 @@ class ProgressEpochAdapter:
             body_batch_conflict=bool(conflicting_ids),
             strategy_epoch_condition=strategy_epoch_condition,
             pre_body_fingerprint=pre_fingerprint,
+            budget_checkpoint_id=epoch.budget_checkpoint_id,
+            budget_denied=budget_denied,
         )
 
     def claim_member(
@@ -283,6 +330,7 @@ class ProgressEpochAdapter:
         progress_steps: tuple[ProgressStep, ...] = (),
         status: str | None = None,
         pending_abort: ProgressAbort | None = None,
+        post_state: BodyState | None = None,
     ) -> ProgressAbort | None:
         epoch = self._active
         if epoch is None or epoch.finalized:
@@ -302,7 +350,28 @@ class ProgressEpochAdapter:
         handle = model_result.get("observationHandle")
         member.observation_handle = str(handle) if isinstance(handle, str) and handle else None
         member.epistemic_keys = _explicit_evidence_keys(result)
+        if member.body_mutating and member.status == "failure" and pending_abort is None:
+            member.failure_evidence_key = failure_evidence_key(
+                tool_tactic_signature_from_json(member.tool_name, member.arguments),
+                member.reason,
+            )
+            if member.failure_evidence_key is not None:
+                member.epistemic_keys = tuple(dict.fromkeys(
+                    (*member.epistemic_keys, member.failure_evidence_key)
+                ))
         member.pending_abort = pending_abort
+        if member.status in {"success", "failure", "partial"} and member.reason != "preempted":
+            member.material_evidence = material_progress_evidence(
+                epoch.pre_body_state, post_state,
+                successful_body_action=member.body_mutating and member.status == "success",
+            )
+            if (
+                member.body_mutating and member.tool_name == "engage_entity" and pending_abort is None
+                and epoch.pre_body_state is not None and post_state is not None
+                and epoch.pre_body_state.bot == post_state.bot
+                and epoch.pre_body_state.dimension == post_state.dimension
+            ):
+                member.material_evidence += combat_progress_evidence(result)
         self.runtime.trace.emit(
             "progress_epoch_member_settled",
             epoch_id=epoch.epoch_id,
@@ -360,6 +429,10 @@ class ProgressEpochAdapter:
         ordered = sorted(epoch.members, key=lambda member: member.order)
         steps = [step for member in ordered for step in member.progress_steps]
         committed_steps = _collapsed_epoch_progress_steps(ordered)
+        closure_only = not committed_steps and all(
+            member.budget_denied or member.progress_denied or _task_closure_tool(self.runtime, member.tool_name)
+            for member in ordered
+        )
         post_fingerprint = next(
             (
                 step.fingerprint
@@ -381,11 +454,7 @@ class ProgressEpochAdapter:
                 for key in member.epistemic_keys
             )
         )
-        material_changed = bool(
-            epoch.pre_body_fingerprint
-            and post_fingerprint
-            and epoch.pre_body_fingerprint != post_fingerprint
-        )
+        material_changed = any(member.material_evidence for member in ordered)
         local_novel_epistemic_keys = [
             key for key in epistemic_keys if key not in self._seen_epistemic_keys
         ]
@@ -404,9 +473,13 @@ class ProgressEpochAdapter:
                     "success": member.success,
                     "reason": member.reason,
                     "body_mutating": member.body_mutating,
+                    "task_closure": _task_closure_tool(self.runtime, member.tool_name),
                     "strategy_epoch_condition": member.strategy_epoch_condition,
                     "progress_step_count": len(member.progress_steps),
                     "observation_handle": member.observation_handle,
+                    "tactic_signature": tool_tactic_signature_from_json(member.tool_name, member.arguments),
+                    "failure_evidence_key": member.failure_evidence_key,
+                    "material_evidence": list(member.material_evidence),
                 }
                 for member in ordered
             ],
@@ -417,10 +490,26 @@ class ProgressEpochAdapter:
             "novel_epistemic_keys": local_novel_epistemic_keys,
             "material_changed": material_changed,
             "progress_aborted": False,
+            "budget_checkpoint_id": epoch.budget_checkpoint_id,
             "captured_progress_step_count": len(steps),
             "committed_progress_step_count": len(committed_steps),
+            "commit_input": {
+                "version": 1,
+                "task_identity_bound": epoch.task_identity_bound,
+                "task_id": epoch.task_id,
+                "apply": not closure_only,
+                "authority_before": asdict(
+                    self.runtime.authority.facts(self.runtime.agent_context.goal_text)
+                ),
+                "steps": [asdict(step) for step in committed_steps],
+                "pending_stop_reasons": [
+                    member.pending_abort.stop_reason.value
+                    for member in ordered if member.pending_abort is not None
+                ] + ([] if self.work_stop is None else [self.work_stop.stop_reason.value]),
+            },
         }
         cursor: int | None = None
+        archive_abort: ProgressAbort | None = None
         if self.archive is not None:
             try:
                 stored = self.archive.store(record)
@@ -433,6 +522,7 @@ class ProgressEpochAdapter:
                     record["novel_epistemic_keys"] = novel_epistemic_keys
             except Exception as exc:
                 record["novel_epistemic_keys"] = []
+                archive_abort = ProgressAbort("progress epoch persistence failed")
                 self.runtime.trace.emit(
                     "progress_epoch_archive_failed",
                     epoch_id=epoch.epoch_id,
@@ -442,37 +532,41 @@ class ProgressEpochAdapter:
 
         progress_abort: ProgressAbort | None = None
         try:
-            self.runtime.authority.commit_steps(
-                committed_steps,
-                self.runtime.agent_context.goal_text,
-                novel_epistemic_keys=novel_epistemic_keys,
-                material_changed=material_changed,
-            )
+            # Bookkeeping and rejected work do not consume an admitted review.
+            # Pending hard stops still participate in arbitration below.
+            if not closure_only:
+                self.runtime.authority.commit_steps(
+                    committed_steps,
+                    self.runtime.agent_context.goal_text,
+                    novel_epistemic_keys=novel_epistemic_keys,
+                    material_changed=material_changed,
+                )
         except ProgressAbort as exc:
             progress_abort = exc
-        if progress_abort is None:
-            progress_abort = next(
-                (
-                    member.pending_abort
-                    for member in ordered
-                    if member.pending_abort is not None
-                ),
-                None,
-            )
-        record["progress_aborted"] = progress_abort is not None
+        progress_abort = dominant_progress_abort(
+            progress_abort, archive_abort, self.work_stop, *(member.pending_abort for member in ordered),
+        )
         record["epistemic_steps"] = self.runtime.authority.epistemic_steps
         if progress_abort is not None and self.archive is not None:
             mark_aborted = getattr(self.archive, "mark_progress_aborted", None)
             if callable(mark_aborted):
                 try:
-                    mark_aborted(epoch.epoch_id)
+                    mark_aborted(epoch.epoch_id, stop_reason=progress_abort.stop_reason)
                 except Exception as exc:
+                    progress_abort = dominant_progress_abort(
+                        progress_abort, ProgressAbort("progress stop persistence failed"),
+                    )
                     self.runtime.trace.emit(
                         "progress_epoch_archive_failed",
                         epoch_id=epoch.epoch_id,
                         operation="mark_progress_aborted",
                         error_type=type(exc).__name__,
                     )
+        record["progress_aborted"] = progress_abort is not None
+        record["progress_stop_reason"] = None if progress_abort is None else progress_abort.stop_reason.value
+        if progress_abort is not None:
+            # Bind the stop to the epoch that durably recorded it.
+            progress_abort.stop_epoch_id = epoch.epoch_id
         epoch.finalized = True
         self.runtime.trace.emit(
             "progress_epoch_settled",
@@ -481,7 +575,34 @@ class ProgressEpochAdapter:
         )
         self._members = {}
         self._active = None
+        self.reviewable_abort = None
+        if (
+            progress_abort is not None
+            and progress_abort.stop_reason in REVIEWABLE_STOP_REASONS
+            and "checkpoint_task" in self.runtime.registry
+            and _task_closure_tool(self.runtime, "checkpoint_task")
+            and all(
+                member.status in {"success", "progress_denied", "budget_denied"}
+                or (_task_closure_tool(self.runtime, member.tool_name) and member.reason in {
+                    "task_checkpoint_rejected", "task_plan_rejected", "invalid_tool_json", "invalid_tool_input",
+                })
+                or (member.status == "failure" and (
+                    member.failure_evidence_key is not None
+                    or (member.pending_abort is not None
+                        and member.pending_abort.stop_reason in REVIEWABLE_STOP_REASONS)
+                ))
+                for member in ordered
+            )
+        ):
+            self.work_stop = progress_abort
+            self.runtime._progress_work_stop = progress_abort
+            self.reviewable_abort = progress_abort
         return progress_abort
+
+
+def _task_closure_tool(runtime: "AgentRuntime", tool_name: str) -> bool:
+    sidecar = runtime.registry.get(tool_name).sidecar
+    return sidecar.source == "agent.task" and not sidecar.can_mutate_body
 
 
 def _strategy_epoch_condition(runtime: "AgentRuntime") -> str:

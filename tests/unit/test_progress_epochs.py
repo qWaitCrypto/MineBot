@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +28,7 @@ from minebot.brain.lifecycle import LifecycleController, LifecycleState
 from minebot.brain.modes import ModeRuntime
 from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import BodyState, ProgressAbort, ToolResult
+from minebot.contract import BodyState, ProgressAbort, ProgressStopReason, ToolResult
 from minebot.game.errors import BodyActionTimeoutError
 
 
@@ -90,9 +91,10 @@ class RecordingEpochArchive:
     def list_after(self, cursor, *, limit=100):
         return self.records[cursor : cursor + limit]
 
-    def mark_progress_aborted(self, epoch_id):
+    def mark_progress_aborted(self, epoch_id, *, stop_reason="unknown"):
         record = next(record for record in self.records if record["epoch_id"] == epoch_id)
         record["progress_aborted"] = True
+        record["progress_stop_reason"] = str(getattr(stop_reason, "value", stop_reason))
 
 
 def make_tool(
@@ -165,6 +167,108 @@ def runtime_with(
 def invoke(tool: RegisteredTool, context: RuntimeRunContext, call_id: str):
     wrapper = SimpleNamespace(context=context, tool_call_id=call_id)
     return sdk_tool_for(tool).on_invoke_tool(wrapper, "{}")
+
+
+@pytest.mark.parametrize("change,success,expected", [
+    ("time", False, False),
+    ("time", True, False),
+    ("movement", False, False),
+    ("movement", True, True),
+    ("damage", False, False),
+    ("inventory_loss", False, False),
+    ("inventory_loss", True, True),
+    ("inventory_gain", False, True),
+    ("inventory_gain", True, True),
+    ("incomplete", True, False),
+    ("preempted", True, False),
+])
+def test_epoch_material_evidence_distinguishes_effect_from_incidental_change(change, success, expected):
+    class ChangingBody(EpochBody):
+        changed = False
+
+        def get_state(self):
+            current = replace(super().get_state(), inventory_hash="unchanged", inventory_counts={"oak_log": 2})
+            if not self.changed:
+                return current
+            changes = {
+                "time": {"time": 5000},
+                "movement": {"pos": (3.0, 64.0, 0.0)},
+                "damage": {"health": 18.0, "food": 18},
+                "inventory_loss": {"inventory_hash": "loss", "inventory_counts": {"oak_log": 1}},
+                "inventory_gain": {"inventory_hash": "gain", "inventory_counts": {"oak_log": 3}},
+                "incomplete": {"pos": (3.0, 64.0, 0.0), "complete": False},
+                "preempted": {"pos": (3.0, 64.0, 0.0), "inventory_counts": {"oak_log": 3}},
+            }
+            return replace(current, **changes[change])
+
+    body = ChangingBody()
+
+    def action(_params):
+        body.changed = True
+        reason = "preempted" if change == "preempted" else "arrived" if success else "no_path"
+        return ToolResult(success, reason, False)
+
+    tool = make_tool("work", action, mutating=True)
+    archive = RecordingEpochArchive()
+    runtime, adapter, context = runtime_with(body, [tool], epoch_archive=archive)
+
+    async def scenario():
+        await adapter.open(response(("call-work", "work")))
+        return await invoke(tool, context, "call-work")
+
+    try:
+        result = asyncio.run(scenario())
+        assert result["success"] is success
+        assert archive.records[0]["material_changed"] is expected
+        assert bool(archive.records[0]["members"][0]["material_evidence"]) is expected
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("killed", True), ("target_lost", False), ("preempted", False),
+    ("incomplete", False), ("dimension_changed", False), ("wrong_tool", False),
+])
+def test_stationary_combat_credits_observed_target_effect_through_transaction(mode, expected):
+    from minebot.body.combat import CombatTransactions
+    from tests.unit.test_engage_runtime import FakeBody
+
+    class CombatBody(FakeBody):
+        finished = False
+
+        def await_action_terminal(self, *args, **kwargs):
+            terminal = super().await_action_terminal(*args, **kwargs)
+            self.finished = True
+            return terminal
+
+        def get_state(self):
+            state = super().get_state()
+            if self.finished and mode == "incomplete":
+                return replace(state, complete=False)
+            if self.finished and mode == "dimension_changed":
+                return replace(state, dimension="nether")
+            return state
+
+    body = CombatBody(terminal_reason=mode if mode in {"target_lost", "preempted"} else "killed")
+    combat = CombatTransactions(body)
+    tool_name = "unrelated_tool" if mode == "wrong_tool" else "engage_entity"
+    tool = make_tool(tool_name, lambda _params: combat.engage_entity("nearest_hostile"), mutating=True)
+    archive = RecordingEpochArchive()
+    runtime, adapter, context = runtime_with(body, [tool], epoch_archive=archive)
+
+    async def scenario():
+        await adapter.open(response(("call-combat", tool_name)))
+        return await invoke(tool, context, "call-combat")
+
+    try:
+        result = asyncio.run(scenario())
+        assert result["success"] is (mode not in {"target_lost", "preempted"})
+        record = archive.records[0]
+        assert record["pre_body_fingerprint"] == record["post_body_fingerprint"]
+        assert record["material_changed"] is expected
+        assert ("observed_target_defeat" in record["members"][0]["material_evidence"]) is expected
+    finally:
+        runtime.close()
 
 
 @pytest.mark.parametrize(
@@ -488,6 +592,57 @@ def test_archive_failure_does_not_grant_unverified_epistemic_progress():
 
     assert authority.epistemic_steps == 0
     assert any(event["event"] == "progress_epoch_archive_failed" for event in events)
+
+
+def test_epoch_archive_failure_stops_even_a_materially_successful_batch():
+    class FailingArchive(RecordingEpochArchive):
+        def store(self, record):
+            raise OSError("unavailable")
+
+    body = EpochBody()
+    def move(_params):
+        body.x += 1
+        return ToolResult(True, "moved", False)
+
+    tool = make_tool("move_to", move, mutating=True)
+    runtime, adapter, context = runtime_with(body, [tool], epoch_archive=FailingArchive())
+    async def scenario():
+        await adapter.open(response(("move", "move_to")))
+        with pytest.raises(ProgressAbort) as caught:
+            await invoke(tool, context, "move")
+        assert caught.value.stop_reason is ProgressStopReason.UNKNOWN
+    try:
+        asyncio.run(scenario())
+        settled = [event for event in runtime.trace.snapshot() if event["event"] == "progress_epoch_settled"]
+        assert settled[-1]["material_changed"] is True
+        assert settled[-1]["progress_stop_reason"] == "unknown"
+        assert body.x == 1
+    finally:
+        runtime.close()
+
+
+def test_failure_to_persist_a_strategy_stop_does_not_allow_reconsideration():
+    class FailingStopArchive(RecordingEpochArchive):
+        def mark_progress_aborted(self, epoch_id, *, stop_reason):
+            raise OSError("unavailable")
+
+    body = EpochBody()
+    authority = ProgressAuthority(failure_steps=4)
+    tool = make_tool("move_to", lambda _: ToolResult(False, "blocked", True), mutating=True)
+    runtime, adapter, context = runtime_with(body, [tool], authority=authority,
+        epoch_archive=FailingStopArchive())
+    async def scenario():
+        await adapter.open(response(("move", "move_to")))
+        with pytest.raises(ProgressAbort) as caught:
+            await invoke(tool, context, "move")
+        assert caught.value.stop_reason is ProgressStopReason.UNKNOWN
+    try:
+        asyncio.run(scenario())
+        settled = [event for event in runtime.trace.snapshot() if event["event"] == "progress_epoch_settled"]
+        assert settled[-1]["progress_stop_reason"] == "unknown"
+        assert settled[-1]["progress_aborted"] is True
+    finally:
+        runtime.close()
 
 
 def test_native_sdk_call_id_reaches_observation_and_epoch_archives():

@@ -2,6 +2,48 @@ import unittest
 
 from minebot.brain.progress import FAILURE_STORM_LIMIT, STAGNATION_LIMIT, STALL_LIMIT, ProgressAbort, ProgressAuthority
 from minebot.contract import BodyState
+from minebot.contract.progress import LocalProgressController
+from minebot.brain.progress import combat_progress_evidence
+
+
+class CombatProgressEvidenceTests(unittest.TestCase):
+    def receipt(self, *, success=True, reason="killed", **metrics):
+        return {"success": success, "reason": reason, "metrics": {
+            "event": "engageDone", "action_id": "action-1",
+            "target_uuid": "target-1", "target_id": "target-1",
+            "persistent_target": True, "damage_observed": True,
+            "target_initial_health": 20.0, "target_health": 0.0,
+            **metrics,
+        }}
+
+    def test_observed_damage_can_be_partial_output_without_a_kill(self):
+        for reason in ("timeout", "disengaged_low_health", "no_path"):
+            with self.subTest(reason=reason):
+                self.assertEqual(combat_progress_evidence(self.receipt(
+                    success=False, reason=reason, target_health=5.0,
+                )), ("observed_target_damage",))
+
+    def test_kill_label_and_swing_count_alone_are_not_effects(self):
+        invalid = [
+            {"target_initial_health": None}, {"target_health": None},
+            {"target_health": 10.0}, {"target_health": -1.0},
+            {"target_health": float("nan")}, {"target_initial_health": float("inf")},
+            {"target_initial_health": True}, {"target_health": "0"},
+            {"target_initial_health": 0.0}, {"damage_observed": False, "attacks": 20},
+            {"target_id": "other-target"}, {"persistent_target": False},
+            {"action_id": ""}, {"event": "death"},
+        ]
+        for metrics in invalid:
+            with self.subTest(metrics=metrics):
+                self.assertEqual(combat_progress_evidence(self.receipt(**metrics)), ())
+
+    def test_hard_stops_and_missing_targets_cannot_borrow_old_health(self):
+        for reason in ("preempted", "target_lost", "target_gone", "body_transport_error",
+                       "governance_denied", "unknown"):
+            with self.subTest(reason=reason):
+                self.assertEqual(combat_progress_evidence(self.receipt(
+                    success=False, reason=reason,
+                )), ())
 
 
 def state(pos=(0.04, 60, 0.04), health=20.04, food=20, inventory_hash="abc", time=999):
@@ -24,7 +66,7 @@ def state(pos=(0.04, 60, 0.04), health=20.04, food=20, inventory_hash="abc", tim
 
 
 class ProgressTests(unittest.TestCase):
-    def test_fingerprint_canonicalizes_position_health_and_time_bucket(self):
+    def test_fingerprint_canonicalizes_physical_state_but_ignores_time(self):
         progress = ProgressAuthority()
 
         a = progress.fingerprint(state())
@@ -34,7 +76,18 @@ class ProgressTests(unittest.TestCase):
 
         self.assertEqual(a, b)
         self.assertNotEqual(c, a)
-        self.assertNotEqual(d, a)
+        self.assertEqual(d, a)
+
+    def test_time_passing_does_not_reset_observation_stagnation(self):
+        progress = ProgressAuthority()
+        for index in range(STAGNATION_LIMIT + 1):
+            progress.observe_step(("read_state",), progress.fingerprint(state(time=index * 1000)))
+        self.assertTrue(progress.should_yield())
+
+    def test_body_local_guard_uses_the_same_clock_independent_fingerprint(self):
+        local = LocalProgressController()
+        brain = ProgressAuthority()
+        self.assertEqual(local.fingerprint(state(time=5000)), brain.fingerprint(state(time=1000)))
 
 
     def test_successful_tool_result_resets_stagnation_even_with_same_fingerprint(self):

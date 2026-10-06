@@ -574,6 +574,7 @@ class FakeBodyServer:
         self._emit_event("owner_acquired", action, {"type": "NAVIGATE", "priority": "ACTION"})
         if self.scenario == "navigate_no_path":
             self._emit_terminal(action, {"classification": "failed", "reason": "no_path",
+                                        "failure_detail": "replan_budget_exhausted:arrival_unstable",
                                          "elapsed_ticks": 12, "replans": 0})
         elif self.scenario == "navigate_preempted":
             self._emit_terminal(action, {
@@ -1328,6 +1329,7 @@ def test_navigate_no_path_keeps_typed_failure() -> None:
     assert result.success is False
     assert result.reason == "no_path"
     assert result.can_retry is True
+    assert result.metrics["failure_detail"] == "replan_budget_exhausted:arrival_unstable"
 
 
 def test_execution_lane_cancellation_interrupts_java_terminal_wait() -> None:
@@ -1437,6 +1439,9 @@ def test_terminal_metrics_preserve_the_bounded_decision_grade_core() -> None:
         "closest_approach_distance": 11.5,
         "unloaded_chunk_count": 0,
         "elapsed_ticks": 400,
+        "terminal_phase": "approaching",
+        "active_approach_expanded_nodes": 1_200,
+        "active_approach_unloaded_touches": 3,
         "evidence_truncated": True,
         "evidence_omitted_fields": ["planning_attempts"],
     }
@@ -1702,6 +1707,49 @@ def test_engage_entity_preserves_server_kill_facts_and_action_identity() -> None
     assert result.metrics["target_health"] == 0.0
     assert result.metrics["damage_observed"] is True
     assert result.metrics["min_attack_interval_ticks"] == 10
+
+
+def test_combat_terminal_evidence_survives_java_body_and_python_transaction() -> None:
+    from minebot.body.combat import CombatTransactions
+    from minebot.brain.progress import combat_progress_evidence
+    from minebot.game.java_body import JavaBody
+
+    class CombatServer(FakeBodyServer):
+        def _emit_response(self, rid, kind, payload):
+            if kind == "ENTITY_READ_RESULT" and payload.get("data"):
+                payload = {**payload, "data": {**payload["data"], "entities": [
+                    {**entity, "id": HOSTILE_UUID}
+                    if entity["type"] == "minecraft:zombie" else entity
+                    for entity in payload["data"]["entities"]
+                ]}}
+            super()._emit_response(rid, kind, payload)
+
+    class LostTargetServer(CombatServer):
+        def _handle_engage(self, message, rid):
+            action = message["action_id"]
+            self._emit_response(rid, "ENGAGE_ENTITY_ACK", {"action_id": action, "state": "accepted"})
+            self._emit_terminal(action, {
+                "classification": "failed", "reason": "target_lost", "success": False,
+                "target_uuid": message["target_uuid"], "target_id": message["target_uuid"],
+                "target_health": None, "target_initial_health": 20.0,
+                "damage_observed": False, "persistent_target": True, "attacks": 1,
+            })
+
+    for server, expected in ((CombatServer(), ("observed_target_defeat",)), (LostTargetServer(), ())):
+        client = _client(server)
+        try:
+            body = JavaBody(client, "Bot")
+            result = CombatTransactions(body).engage_entity("nearest_hostile")
+            request = next(request for request in server.requests if request.get("type") == "ENGAGE_ENTITY")
+            assert result.metrics["action_id"] == request["action_id"]
+            assert result.metrics["target_initial_health"] == 20.0
+            assert combat_progress_evidence(result.to_payload()) == expected
+            assert result.success is bool(expected)
+            assert result.reason == ("killed" if expected else "target_lost")
+            if not expected:
+                assert result.metrics["target_health"] is None
+        finally:
+            client.close()
 
 
 def test_follow_entity_preserves_target_lock_and_final_distance() -> None:
@@ -2266,6 +2314,42 @@ def test_java_body_world_read_family_preserves_existing_perception_shapes() -> N
     assert nearby.data["blocks"][0]["type"] == "minecraft:oak_log"
     assert debug.data["cursor"]["state"] == "CLEAR"
     assert debug.data["feet"]["state"] == "SOLID"
+
+
+@pytest.mark.parametrize("scope", ["blockAt", "blockCells"])
+def test_java_body_requires_requested_standing_facts_without_legacy_fallback(scope) -> None:
+    client = _client(FakeBodyServer())
+    body = JavaBody(client, "Bot")
+    try:
+        result = body.perceive(scope, {"x": 0, "y": 63, "z": 0,
+            "cells": [[0, 63, 0]], "include_standing": True})
+        assert not result.ok
+        assert result.error == "invalid_standing_geometry"
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("height,valid", [(63.5, True), (None, True), (64.0, False),
+    (True, False), ("63.5", False), (float("nan"), False)])
+def test_java_body_preserves_or_rejects_native_standing_height(height, valid) -> None:
+    class StandingServer(FakeBodyServer):
+        def _emit_response(self, rid, kind, payload):
+            if kind == "WORLD_READ_RESULT":
+                for fact in payload.get("data", {}).get("cells", []):
+                    fact["standing_y"] = height
+            super()._emit_response(rid, kind, payload)
+
+    client = _client(StandingServer())
+    try:
+        result = JavaBody(client, "Bot").perceive("blockCells",
+            {"cells": [[0, 63, 0]], "include_standing": True})
+        assert result.ok is valid
+        if valid:
+            assert result.data["cells"][0]["standing_y"] == height
+        else:
+            assert result.error == "invalid_standing_geometry"
+    finally:
+        client.close()
 
 
 def test_java_body_world_read_missing_body_is_explicit() -> None:

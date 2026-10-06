@@ -51,7 +51,6 @@ public final class ApproachController {
     }
 
     private static final double PLAYER_EYE_HEIGHT = 1.62;
-    private static final double STABLE_STAND_Y_TOLERANCE = 0.08;
     private static final int STABLE_STAND_TICKS = 2;
 
     private final String bot;
@@ -76,6 +75,8 @@ public final class ApproachController {
     private int replans;
     private int expandedTotal;
     private int unloadedTotal;
+    private int planningExpanded;
+    private int planningUnloaded;
     private int stableArrivalTicks;
     private long lastStuckCell = Long.MIN_VALUE;
     private String terminalDetail;
@@ -262,11 +263,11 @@ public final class ApproachController {
     }
 
     public int expandedNodes() {
-        return expandedTotal;
+        return expandedTotal + planningExpanded;
     }
 
     public int unloadedTouches() {
-        return unloadedTotal;
+        return unloadedTotal + planningUnloaded;
     }
 
     public double finalWaypointReachDistance() {
@@ -306,7 +307,11 @@ public final class ApproachController {
                 profile.movement()
             );
         }
-        AStarPathfinder.Result result = pathfinder.step(NavigateExecutor.NODES_PER_TICK);
+        AStarPathfinder.Result result = pathfinder.step(
+            NavigateExecutor.NODES_PER_TICK, NavigateExecutor.PLANNING_NANOS_PER_TICK
+        );
+        planningExpanded = result.outcome() == AStarPathfinder.Outcome.IN_PROGRESS ? result.expandedNodes() : 0;
+        planningUnloaded = result.outcome() == AStarPathfinder.Outcome.IN_PROGRESS ? result.unloadedTouches() : 0;
         switch (result.outcome()) {
             case IN_PROGRESS -> {
                 return Outcome.WORKING_OUTCOME;
@@ -343,7 +348,7 @@ public final class ApproachController {
             Waypoint waypoint = path.get(index);
             JsonArray point = new JsonArray();
             point.add(waypoint.x());
-            point.add(waypoint.y());
+            point.add(waypoint.feetY());
             point.add(waypoint.z());
             preview.add(point);
         }
@@ -361,7 +366,7 @@ public final class ApproachController {
             case CONTINUE -> {
                 Waypoint target = directive.lookTarget();
                 boolean swimming = swimmingAt(px, py, pz);
-                double lookY = swimming ? py + PLAYER_EYE_HEIGHT : target.y() + 0.5;
+                double lookY = swimming ? py + PLAYER_EYE_HEIGHT : target.feetY() + 0.5;
                 int feetY = NavigateExecutor.PositionSource.Position.feetBlockY(py);
                 boolean shouldHoldJump = directive.jump()
                     || (swimming && target.y() >= feetY);
@@ -387,7 +392,7 @@ public final class ApproachController {
                     from.add(pz);
                     JsonArray waypoint = new JsonArray();
                     waypoint.add(target.x());
-                    waypoint.add(target.y());
+                    waypoint.add(target.feetY());
                     waypoint.add(target.z());
                     data.add("from", from);
                     data.add("waypoint", waypoint);
@@ -410,8 +415,11 @@ public final class ApproachController {
                 int fz = (int) Math.floor(pz);
                 if (goal.isSatisfied(world, fx, fy, fz)) {
                     if (isDrySupportedStand(fx, fy, fz)) {
-                        if (Math.abs(py - fy) > STABLE_STAND_Y_TOLERANCE) {
+                        if (!world.isStableDryPosition(px, py, pz)) {
                             stableArrivalTicks = 0;
+                            if (follower.stuckWhileSettling(px, py, pz)) {
+                                return replanOrFail(serverTick, "arrival_unstable");
+                            }
                             return Outcome.WORKING_OUTCOME;
                         }
                         if (follower.finalHorizontalDistance(px, pz)
@@ -461,6 +469,16 @@ public final class ApproachController {
             }
             default -> {
                 halt();
+                int fx = (int) Math.floor(px);
+                int fy = NavigateExecutor.PositionSource.Position.feetBlockY(py);
+                int fz = (int) Math.floor(pz);
+                if (directive.state() == PathFollower.State.STUCK
+                    && follower.finalHorizontalDistance(px, pz) <= finalWaypointReachDistance
+                    && goal.isSatisfied(world, fx, fy, fz)
+                    && isDrySupportedStand(fx, fy, fz)
+                    && !world.isStableDryPosition(px, py, pz)) {
+                    return replanOrFail(serverTick, "arrival_unstable");
+                }
                 long cell = cellOf(px, py, pz);
                 if (cell == lastStuckCell) {
                     return new Outcome(Status.FAILED, "stuck");
@@ -507,9 +525,7 @@ public final class ApproachController {
     }
 
     private boolean isDrySupportedStand(int x, int y, int z) {
-        return world.kindAt(x, y, z) == WorldView.NodeKind.PASSABLE
-            && world.kindAt(x, y + 1, z) == WorldView.NodeKind.PASSABLE
-            && world.kindAt(x, y - 1, z) == WorldView.NodeKind.SOLID;
+        return Double.isFinite(world.standingHeight(x, y, z));
     }
 
     private void maintainPlanningPosture(double px, double py, double pz) {

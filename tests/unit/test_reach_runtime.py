@@ -1,6 +1,6 @@
 import unittest
 
-from minebot.body.interaction_support import NearbyBlockTarget
+from minebot.body.interaction_support import NearbyBlockTarget, entity_stand_points, interaction_stand_points
 from minebot.body.reach import (
     ReachIntent,
     block_reach_domain,
@@ -11,7 +11,78 @@ from minebot.contract import ToolResult
 from tests.unit.test_work_runtime import FakeBody
 
 
+class NativeStandingBody(FakeBody):
+    def __init__(self, blocks, heights):
+        super().__init__(blocks=blocks)
+        self.heights = heights
+
+    def perceive(self, scope, params=None):
+        result = super().perceive(scope, params)
+        if scope == "blockCells" and params.get("include_standing") is True:
+            for fact in result.data.get("cells", []):
+                fact["standing_y"] = self.heights.get((fact["x"], fact["y"], fact["z"]))
+        return result
+
+
 class ReachRuntimeTests(unittest.TestCase):
+    def test_expanded_vertical_band_does_not_discard_a_reachable_fractional_pose(self):
+        stand = (0, 62, 0)
+        body = NativeStandingBody({stand: ("minecraft:snow", "SOLID")}, {stand: 62.875})
+        stands = interaction_stand_points(body, (1, 64, 0),
+            expand_vertical=True, interaction_radius=1.95)
+        self.assertIn(stand, stands)
+
+    def test_expanded_vertical_band_still_requires_actual_range_truth(self):
+        stand = (0, 62, 0)
+        body = NativeStandingBody({stand: ("minecraft:snow", "SOLID")}, {stand: 62.0})
+        stands = interaction_stand_points(body, (1, 64, 0),
+            expand_vertical=True, interaction_radius=1.95)
+        self.assertNotIn(stand, stands)
+        requested = [tuple(cell) for scope, params in body.perceptions if scope == "blockCells"
+            for cell in params["cells"]]
+        self.assertIn(stand, requested)
+
+    def test_vertical_expansion_preserves_explicit_same_column_candidates(self):
+        stand = (1, 65, 0)
+        body = NativeStandingBody({(1, 64, 0): ("minecraft:stone", "SOLID")}, {stand: 65.0})
+        stands = interaction_stand_points(body, (1, 64, 0), include_target=True,
+            expand_vertical=True, interaction_radius=0.9)
+        self.assertIn(stand, stands)
+
+    def test_entity_band_includes_a_native_low_surface_at_its_actual_distance(self):
+        stand = (0, 63, 0)
+        body = NativeStandingBody({stand: ("minecraft:stone_slab", "SOLID")}, {stand: 63.5})
+        stands = entity_stand_points(body, (1.5, 63.5, 0.5), max_distance=1.05)
+        self.assertIn(stand, stands)
+
+    def test_entity_band_rejects_missing_native_standing_proof(self):
+        body = NativeStandingBody({(0, 63, 0): ("minecraft:stone", "SOLID")}, {})
+        stands = entity_stand_points(body, (1.5, 64, 0.5), max_distance=1.5)
+        self.assertNotIn((0, 64, 0), stands)
+
+    def test_native_low_surface_is_retained_using_its_physical_reach(self):
+        stand = (0, 63, 0)
+        body = NativeStandingBody({stand: ("minecraft:stone_slab", "SOLID")}, {stand: 63.5})
+        domain = block_reach_domain(body, ReachIntent(target=(1, 64, 0),
+            vertical_offsets=(-1,), interaction_radius=1.5))
+        self.assertNotIsInstance(domain, ToolResult)
+        self.assertIn(stand, domain.candidates)
+        self.assertTrue(all(params["include_standing"] for scope, params in body.perceptions
+            if scope == "blockCells"))
+
+    def test_native_absence_of_support_cannot_fall_back_to_coarse_solid_floor(self):
+        stand = (0, 64, 0)
+        body = NativeStandingBody({(0, 63, 0): ("minecraft:stone", "SOLID")}, {})
+        domain = block_reach_domain(body, ReachIntent(target=(1, 64, 0), vertical_offsets=(0,)))
+        self.assertNotIn(stand, domain.candidates)
+
+    def test_native_height_outside_interaction_range_is_not_a_valid_stand(self):
+        stand = (0, 65, 0)
+        body = NativeStandingBody({(0, 64, 0): ("minecraft:oak_fence", "SOLID")}, {stand: 65.5})
+        domain = block_reach_domain(body, ReachIntent(target=(1, 64, 0),
+            vertical_offsets=(1,), interaction_radius=1.3))
+        self.assertNotIn(stand, domain.candidates)
+
     def test_round_robin_goal_domain_preserves_target_links_and_bound(self):
         targets = (
             NearbyBlockTarget((5, 64, 0), "dirt", 5.0),

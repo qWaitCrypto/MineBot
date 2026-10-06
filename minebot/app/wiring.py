@@ -48,6 +48,7 @@ def build_agent_runtime(
     conversation_session: Session | None = None,
     observation_archive: ToolObservationArchive | None = None,
     progress_epoch_archive: ProgressEpochArchive | None = None,
+    progress_task_id: Callable[[], str | None] | None = None,
 ) -> AgentRuntimeParts:
     context = AgentContext(
         system_prompt=prompt_with_language(system_prompt, language=language),
@@ -72,6 +73,7 @@ def build_agent_runtime(
         conversation_session=conversation_session,
         observation_archive=observation_archive,
         progress_epoch_archive=progress_epoch_archive,
+        progress_task_id=progress_task_id,
     )
     return AgentRuntimeParts(
         runtime=runtime,

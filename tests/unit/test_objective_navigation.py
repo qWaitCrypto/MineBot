@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pytest
+
 from minebot.body.navigation import (
     NavigationRunConfig,
     SERVER_GOAL_SET_LIMIT,
@@ -36,6 +38,27 @@ class ObjectiveBody:
                 "final_z": self.final_pos[2],
             },
             error=self.failure,
+        )
+
+
+@dataclass
+class SegmentingObjectiveBody:
+    outcomes: list[str | None]
+    bot_name: str = "Bot"
+    actions: list[Action] = field(default_factory=list)
+
+    def execute(self, action: Action) -> Result:
+        self.actions.append(action)
+        outcome = self.outcomes.pop(0)
+        return Result(
+            id=action.id,
+            bot=self.bot_name,
+            type="result",
+            ok=outcome is None,
+            accepted=True,
+            complete=True,
+            data={"final_x": 4.5, "final_y": 64.0, "final_z": 0.5},
+            error=outcome,
         )
 
 
@@ -313,6 +336,43 @@ def test_configured_segment_envelope_becomes_one_objective_timeout() -> None:
     assert body.actions[0].params["max_water_drop_depth"] == 32
 
 
+def test_continuation_yields_after_one_completed_provider_segment() -> None:
+    body = SegmentingObjectiveBody(["timeout_ticks_exhausted"])
+    checks = iter((None, "resource_output_window_exhausted"))
+
+    result = ObjectiveNavigationTransactions(body).navigate_to(
+        (8, 64, 0),
+        config=NavigationRunConfig(max_segments=4, segment_timeout_s=12.0),
+        continuation_check=lambda: next(checks),
+    )
+
+    assert result.success is False
+    assert result.reason == "resource_output_window_exhausted"
+    assert result.can_retry is True
+    assert len(body.actions) == 1
+    assert body.actions[0].params["timeout_ticks"] == 240
+    assert result.metrics["continuation_yield"] == {
+        "reason": "resource_output_window_exhausted",
+        "completed_segments": 1,
+    }
+
+
+def test_continuation_reissues_a_pure_objective_after_timeout_segment() -> None:
+    body = SegmentingObjectiveBody(["timeout_ticks_exhausted", None])
+    checks = iter((None, None))
+
+    result = ObjectiveNavigationTransactions(body).navigate_to(
+        (8, 64, 0),
+        config=NavigationRunConfig(max_segments=2, segment_timeout_s=12.0),
+        continuation_check=lambda: next(checks),
+    )
+
+    assert result.success is True
+    assert result.reason == "arrived"
+    assert len(body.actions) == 2
+    assert [action.params["timeout_ticks"] for action in body.actions] == [240, 240]
+
+
 def test_dry_first_profile_is_preserved_at_the_java_objective_seam() -> None:
     body = ObjectiveBody()
 
@@ -340,6 +400,77 @@ def test_dry_first_profile_is_preserved_at_the_java_objective_seam() -> None:
     assert params["max_fall_depth"] == 1
     assert params["max_water_drop_depth"] == 4
     assert "allow_break" not in params
+
+
+@pytest.mark.parametrize("stop", [None, "resource_output_window_exhausted"])
+def test_governed_timeout_preserves_authority_across_slices(stop) -> None:
+    class ProgressBody(SegmentingObjectiveBody):
+        def execute(self, action):
+            result = super().execute(action)
+            result.data.update(mutations_completed=1, budget_remaining=action.params["break_budget"] - 1)
+            return result
+
+    body = ProgressBody(["timeout_ticks_exhausted", None])
+    checks = iter((None, stop))
+    result = ObjectiveNavigationTransactions(body).navigate_to(
+        (8, 64, 0),
+        config=governed_mobility_navigation_config(
+            NavigationRunConfig(max_break_steps=3, max_segments=2, segment_timeout_s=12)
+        ),
+        mutation_blacklist={(1, 64, 0)},
+        continuation_check=lambda: next(checks),
+    )
+    assert result.reason == (stop or "arrived")
+    assert [a.params["break_budget"] for a in body.actions] == ([3] if stop else [3, 2])
+    assert result.metrics["mutations_completed"] == (1 if stop else 2)
+    assert result.metrics["budget_remaining"] == (2 if stop else 1)
+    assert all(a.params["denied_mutations"] == [[1, 64, 0]] for a in body.actions)
+    assert all(a.params["goal"] == body.actions[0].params["goal"] for a in body.actions)
+
+
+@pytest.mark.parametrize("facts", [
+    {}, {"mutations_completed": 0, "budget_remaining": 3},
+    {"mutations_completed": 1, "budget_remaining": 3},
+    {"mutations_completed": 3, "budget_remaining": 0},
+])
+def test_governed_timeout_without_remaining_proven_authority_stops(facts) -> None:
+    class ProgressBody(SegmentingObjectiveBody):
+        def execute(self, action):
+            result = super().execute(action)
+            result.data.update(facts)
+            return result
+
+    body = ProgressBody(["timeout_ticks_exhausted"])
+    result = ObjectiveNavigationTransactions(body).navigate_to(
+        (8, 64, 0),
+        config=governed_mobility_navigation_config(NavigationRunConfig(max_break_steps=3)),
+        continuation_check=lambda: None,
+    )
+    assert result.reason == "timeout_ticks_exhausted"
+    assert len(body.actions) == 1
+
+
+@pytest.mark.parametrize("reason", ["timeout_ticks_exhausted", "governance_denied", "body_missing"])
+@pytest.mark.parametrize("max_segments", [2, 4])
+def test_governed_slices_never_refill_or_retry_a_non_timeout(reason, max_segments) -> None:
+    class ProgressBody(SegmentingObjectiveBody):
+        def execute(self, action):
+            result = super().execute(action)
+            result.data.update(mutations_completed=1, budget_remaining=action.params["break_budget"] - 1)
+            return result
+
+    body = ProgressBody([reason] * 3)
+    result = ObjectiveNavigationTransactions(body).navigate_to(
+        (8, 64, 0),
+        config=governed_mobility_navigation_config(NavigationRunConfig(
+            max_break_steps=3, max_segments=max_segments,
+        )),
+        continuation_check=lambda: None,
+    )
+    assert result.reason == reason
+    assert [a.params["break_budget"] for a in body.actions] == (
+        [3, 2, 1][:max_segments] if reason == "timeout_ticks_exhausted" else [3]
+    )
 
 
 def test_governed_mobility_explicitly_carries_bounded_break_authority() -> None:

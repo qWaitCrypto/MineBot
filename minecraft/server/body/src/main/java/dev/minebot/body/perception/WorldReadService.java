@@ -3,6 +3,9 @@ package dev.minebot.body.perception;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import dev.minebot.body.nav.MinecraftWorldView;
+import dev.minebot.body.nav.Goal;
+import dev.minebot.body.nav.WorldView;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 
@@ -16,10 +19,12 @@ public final class WorldReadService {
 
     private final ServerPlayer player;
     private final MinecraftBlockReader reader;
+    private final WorldView geometry;
 
     public WorldReadService(ServerPlayer player, ServerLevel level) {
         this.player = player;
         this.reader = new MinecraftBlockReader(level);
+        this.geometry = new MinecraftWorldView(level);
     }
 
     public Result read(String scope, JsonObject params) {
@@ -39,7 +44,18 @@ public final class WorldReadService {
             floorInt(params, "y"),
             floorInt(params, "z")
         );
-        return Result.complete(factJson(fact));
+        JsonObject data = requestedFactJson(fact, params);
+        if (params.has("interaction_radius")) {
+            double radius = params.get("interaction_radius").getAsDouble();
+            if (!Double.isFinite(radius) || radius <= 0 || radius > Goal.Interact.MINE_RANGE) {
+                throw new IllegalArgumentException("interaction_radius must be in (0,4.5]");
+            }
+            boolean ready = new Goal.Interact(fact.x(), fact.y(), fact.z(), radius).isWithinPhysicalReach(
+                geometry, player.getX(), player.getY(), player.getZ()
+            );
+            data.addProperty("interaction_ready", ready);
+        }
+        return Result.complete(data);
     }
 
     private Result blockCells(JsonObject params) {
@@ -64,7 +80,7 @@ public final class WorldReadService {
         int end = Math.min(cells.size(), start + limit);
         JsonArray facts = new JsonArray();
         for (int index = start; index < end; index++) {
-            facts.add(factJson(reader.read(cells.get(index))));
+            facts.add(requestedFactJson(reader.read(cells.get(index)), params));
         }
         JsonObject data = pageData(start, limit, end >= cells.size() ? null : end, cells.size());
         data.addProperty("count", facts.size());
@@ -172,6 +188,28 @@ public final class WorldReadService {
         JsonObject properties = new JsonObject();
         fact.properties().forEach(properties::addProperty);
         json.add("properties", properties);
+        return json;
+    }
+
+    private JsonObject requestedFactJson(BlockSnapshot.Fact fact, JsonObject params) {
+        if (!params.has("include_standing")) {
+            return factJson(fact);
+        }
+        var flag = params.get("include_standing");
+        if (!flag.isJsonPrimitive() || !flag.getAsJsonPrimitive().isBoolean()) {
+            throw new IllegalArgumentException("include_standing must be boolean");
+        }
+        return flag.getAsBoolean() ? factJson(fact, geometry) : factJson(fact);
+    }
+
+    public static JsonObject factJson(BlockSnapshot.Fact fact, WorldView geometry) {
+        JsonObject json = factJson(fact);
+        double height = geometry.standingHeight(fact.x(), fact.y(), fact.z());
+        if (Double.isFinite(height)) {
+            json.addProperty("standing_y", height);
+        } else {
+            json.add("standing_y", JsonNull.INSTANCE);
+        }
         return json;
     }
 

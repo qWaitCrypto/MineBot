@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class EngageExecutorTest {
@@ -32,6 +33,7 @@ final class EngageExecutorTest {
         double z = 0.5;
         int attacks;
         int clears;
+        boolean targetMissing;
         final List<String> controls = new ArrayList<>();
 
         @Override
@@ -65,7 +67,8 @@ final class EngageExecutorTest {
 
         @Override
         public EngageExecutor.Lookup refresh(String bot, String targetId, double radius) {
-            return EngageExecutor.Lookup.found(target);
+            return targetMissing ? EngageExecutor.Lookup.missing("target_not_found")
+                : EngageExecutor.Lookup.found(target);
         }
 
         @Override public Double bodyHealth(String bot) { return bodyHealth; }
@@ -111,6 +114,34 @@ final class EngageExecutorTest {
         assertEquals(TARGET_UUID, terminal.get("target_uuid").getAsString());
         assertTrue(terminal.get("damage_observed").getAsBoolean());
         assertEquals(2, terminal.get("attacks").getAsInt());
+        assertTrue(harness.clears > 0);
+    }
+
+    @Test
+    void disappearingAfterAnAttackDoesNotProveDamageOrDeath() {
+        Harness harness = new Harness();
+        ActionRegistry registry = new ActionRegistry();
+        BotEventStream events = new BotEventStream();
+        ActionRuntime runtime = new ActionRuntime(
+            new FakePlayerActionOwner(), harness, registry, events
+        );
+        runtime.submit("Bot", "engage-lost", "ENGAGE_ENTITY", OwnerPriority.ACTION, 0);
+        runtime.attachExecutor("engage-lost", new EngageExecutor(
+            "Bot", "engage-lost", TARGET_UUID, 2.0, 2, 16, 6.0,
+            openWorld(), harness, harness, harness, harness, events::emit, runtime, 20
+        ));
+
+        runtime.tick(1);
+        assertEquals(1, harness.attacks);
+        harness.targetMissing = true;
+        runtime.tick(2);
+
+        JsonObject terminal = registry.status("engage-lost").terminal();
+        assertEquals("failed", terminal.get("classification").getAsString());
+        assertEquals("target_lost", terminal.get("reason").getAsString());
+        assertFalse(terminal.get("success").getAsBoolean());
+        assertFalse(terminal.get("damage_observed").getAsBoolean());
+        assertTrue(terminal.get("target_health").isJsonNull());
         assertTrue(harness.clears > 0);
     }
 

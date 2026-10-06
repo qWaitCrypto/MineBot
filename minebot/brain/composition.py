@@ -6,7 +6,6 @@ do not import Body transactions or game transport.
 
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -144,6 +143,7 @@ def collect_resource_observation_projector(_reason: str, metrics: dict[str, obje
                     "candidate_budget",
                     "mutation_budget",
                     "max_wall_s",
+                    "max_no_output_s",
                     "find_limit",
                     "max_pages",
                     "max_goals",
@@ -214,9 +214,43 @@ def ensure_tool_observation_projector(_reason: str, metrics: dict[str, object]) 
     completed = metrics.get("completed_steps")
     if isinstance(completed, list):
         summary["completed_step_count"] = len(completed)
-    failed_step = _collect_failure_summary(metrics.get("failed_step"))
+    failed_step = _ensure_failed_step_summary(metrics.get("failed_step"))
     if failed_step:
         summary["failed_step"] = failed_step
+    return summary
+
+
+def _ensure_failed_step_summary(value: object) -> JsonObject:
+    """Expose the decision-grade part of an interrupted acquisition step."""
+    if not isinstance(value, dict):
+        return {}
+    summary = _collect_failure_summary(value)
+    step = value.get("step")
+    if isinstance(step, dict):
+        step_summary = {
+            key: step[key]
+            for key in ("kind", "item", "count")
+            if key in step
+        }
+        if step_summary:
+            summary["step"] = step_summary
+    result = value.get("result")
+    if not isinstance(result, dict):
+        return summary
+    terminal = {
+        key: result[key]
+        for key in ("success", "reason", "canRetry", "nextSuggestion")
+        if key in result
+    }
+    if terminal:
+        summary["result"] = terminal
+    result_metrics = result.get("metrics")
+    if isinstance(step, dict) and step.get("kind") == "collect" and isinstance(result_metrics, dict):
+        resource = collect_resource_observation_projector(
+            str(result.get("reason") or ""), result_metrics
+        )
+        if resource:
+            summary["resource"] = resource
     return summary
 
 
@@ -224,9 +258,10 @@ def collect_resource_tool(context: CompositionContext) -> RegisteredTool:
     return RegisteredTool(
         name="collect_resource",
         description=(
-            "Collect a requested resource count through bounded Python orchestration over authoritative "
-            "Body reads and caller-designated physical objectives. Call this once for collect-N goals: "
-            "the orchestration layer owns discovery, candidate ordering, blacklists, count and retry "
+            "Reach the caller's requested inventory total through bounded Python orchestration over authoritative "
+            "Body reads and caller-designated physical objectives. Existing inventory counts toward the total; "
+            "item and count describe this stage and are never overridden by global goal wording. "
+            "The orchestration layer owns discovery, candidate ordering, blacklists, count and retry "
             "budgets; each Body action owns only navigation and governed excavation/break/pickup mechanics for its "
             "designated target and returns a typed terminal with authoritative truth. When a recipe or goal accepts any "
             "equivalent material family, request "
@@ -243,7 +278,11 @@ def collect_resource_tool(context: CompositionContext) -> RegisteredTool:
                         "use exact names like 'oak_log' only for exact-species objectives."
                     ),
                 },
-                "count": {"type": "integer", "minimum": 1},
+                "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Desired inventory total for this stage, not the number of additional items to collect.",
+                },
             },
             "required": ["item", "count"],
             "additionalProperties": False,
@@ -320,14 +359,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     constraints = constraints if isinstance(constraints, dict) else {}
     budget = _budget_from_constraints(context.budget, constraints)
     allow_dry = bool(constraints.get("allow_dry", False))
-    requested_count = count
-    requested_plan = _resource_plan(item)
-    goal_target = _goal_collect_target(context.weld_context.goal_text)
-    plan = _resolve_collect_plan(requested_plan, goal_target)
-    goal_target_count: int | None = None
-    if goal_target is not None and _goal_target_matches_plan(goal_target, plan):
-        count = max(count, goal_target[1])
-        goal_target_count = goal_target[1]
+    plan = _resource_plan(item)
     radius = _resolve_search_radius(plan, constraints)
 
     before_result = _read_count(context, plan.inventory_items)
@@ -359,8 +391,6 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             [],
             [],
             "complete",
-            requested_count=requested_count,
-            goal_target_count=goal_target_count,
         )
 
     auto_prerequisites = bool(constraints.get("auto_prerequisites", True))
@@ -407,8 +437,6 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
                     [],
                     [],
                     "complete",
-                    requested_count=requested_count,
-                    goal_target_count=goal_target_count,
                 )
 
     remaining_count = max(1, count - current_count)
@@ -511,8 +539,6 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
         next_suggestion=next_suggestion,
         last_failure=last_failure,
         budget=budget,
-        requested_count=requested_count,
-        goal_target_count=goal_target_count,
     )
     metrics = dict(result.metrics or {})
     metrics["body_process"] = body_process
@@ -735,35 +761,6 @@ def _budget_from_constraints(default: CompositionBudget, constraints: dict[str, 
         max_mutating_calls=int(constraints.get("max_mutating_calls") or default.max_mutating_calls),
         max_wall_s=float(constraints.get("max_wall_s") or default.max_wall_s),
     )
-
-
-def _goal_collect_target(goal_text: str) -> tuple[str, int] | None:
-    text = goal_text.strip().lower().replace("minecraft:", "")
-    match = re.search(r"\b(?:collect|get|gather|mine)\s+(\d+)\s+([a-z_]+)\b", text)
-    if match:
-        return (_normalize_item(match.group(2)), int(match.group(1)))
-    match = re.search(r"\b(?:collect|get|gather|mine)\s+([a-z_]+)\s+(\d+)\b", text)
-    if match:
-        return (_normalize_item(match.group(1)), int(match.group(2)))
-    return None
-
-
-def _goal_target_matches_plan(goal_target: tuple[str, int], plan: ResourcePlan) -> bool:
-    goal_item = _normalize_item(goal_target[0])
-    try:
-        goal_plan = _resource_plan(goal_item)
-    except ValueError:
-        return False
-    return bool(set(goal_plan.inventory_items) & set(plan.inventory_items))
-
-
-def _resolve_collect_plan(requested_plan: ResourcePlan, goal_target: tuple[str, int] | None) -> ResourcePlan:
-    if goal_target is None:
-        return requested_plan
-    goal_plan = _resource_plan(goal_target[0])
-    if _is_log_plan(goal_plan) and _is_log_plan(requested_plan):
-        return goal_plan
-    return requested_plan
 
 
 def _search_max_pages_for_budget(budget: CompositionBudget, find_limit: int) -> int:
@@ -1327,12 +1324,6 @@ def _segment_diagnostics(segment: dict[str, Any]) -> dict[str, object]:
     return out
 
 
-def _is_log_plan(plan: ResourcePlan) -> bool:
-    return plan.requested_item in {"log", "logs"} or any(
-        _is_log_like_item(block_type) for block_type in plan.block_types
-    )
-
-
 def _is_log_like_item(item: str) -> bool:
     normalized = _normalize_item(item)
     return normalized.endswith("_log") or normalized.endswith("_stem")
@@ -1365,6 +1356,8 @@ def _resource_resume_hint(reason: str) -> str:
         "resource_domain_partial_exhausted",
     }:
         return "reselect_candidates"
+    if reason == "resource_output_window_exhausted":
+        return "reconsider_or_resume_collect"
     if "budget" in reason:
         return "budget_exhausted"
     if "timeout" in reason:
@@ -1422,8 +1415,6 @@ def _collect_result(
     next_suggestion: str | None = None,
     last_failure: dict[str, object] | None = None,
     budget: CompositionBudget | None = None,
-    requested_count: int | None = None,
-    goal_target_count: int | None = None,
 ) -> ToolResult:
     metrics: dict[str, object] = {
         "item": plan.inventory_item,
@@ -1441,10 +1432,6 @@ def _collect_result(
         "skipped": skipped,
         "resume_hint": resume_hint,
     }
-    if requested_count is not None and requested_count != target_count:
-        metrics["requested_count"] = requested_count
-    if goal_target_count is not None:
-        metrics["goal_target_count"] = goal_target_count
     if last_failure is not None:
         metrics["last_failure"] = last_failure
     if budget is not None:

@@ -420,16 +420,22 @@ public final class ExcavationPlanner {
         if (world.isBodyPositionHazardous(stand.x(), stand.y(), stand.z())) {
             return;
         }
-        WorldView.NodeKind support = world.kindAt(stand.x(), stand.y() - 1, stand.z());
-        if (support != WorldView.NodeKind.SOLID) {
-            return;
-        }
-        if (!canClearBodyCell(world.kindAt(stand.x(), stand.y(), stand.z()))
-            || !canClearBodyCell(world.kindAt(stand.x(), stand.y() + 1, stand.z()))) {
-            return;
-        }
-        if (!interactionSatisfiedAfterClearingBody(world, stand, target)) {
-            return;
+        // A real interaction pose needs no hypothetical full-cell clearance.
+        boolean alreadyInteractable = new Goal.Interact(
+            target.x(), target.y(), target.z(), Goal.Interact.MINE_RANGE
+        ).isSatisfied(world, stand.x(), stand.y(), stand.z());
+        if (!alreadyInteractable) {
+            WorldView.NodeKind support = world.kindAt(stand.x(), stand.y() - 1, stand.z());
+            if (support != WorldView.NodeKind.SOLID) {
+                return;
+            }
+            if (!canClearBodyCell(world.kindAt(stand.x(), stand.y(), stand.z()))
+                || !canClearBodyCell(world.kindAt(stand.x(), stand.y() + 1, stand.z()))) {
+                return;
+            }
+            if (!interactionSatisfiedAfterClearingBody(world, stand, target)) {
+                return;
+            }
         }
         // Standing on the target is safe only when the post-mine landing is solid.
         if (stand.x() == target.x() && stand.y() == target.y() + 1 && stand.z() == target.z()) {

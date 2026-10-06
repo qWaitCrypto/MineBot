@@ -15,6 +15,10 @@ import threading
 from pathlib import Path
 from uuid import uuid4
 
+from minebot.contract import REVIEWABLE_STOP_REASONS, ProgressStopReason
+from minebot.app.recovery_admission import confirmed_recovery_payload, next_recovery_admission, reconciled_recovery_payload
+from minebot.contract import BodyState
+
 from minebot.app.runtime_records import (
     _MEMORY_SOURCE_RANK,
     CheckpointDisposition,
@@ -82,8 +86,18 @@ from minebot.app.runtime_state_mapping import (
 )
 
 
-RUNTIME_SCHEMA_VERSION = 16
+RUNTIME_SCHEMA_VERSION = 20
 DEFAULT_RUNTIME_STATE_DB = Path("var/minebot/agent-state.sqlite3")
+
+# How many times one task may convert a reviewable progress stop into a
+# genuinely different approach. Owned by the task row, debited once per grant,
+# and never incremented: a restart, a renamed approach, or a fresh in-memory
+# authority cannot restore a spent allowance. Restating the goal creates a new
+# task, which is a user authorization event rather than a refill.
+TASK_RECONSIDERATION_ALLOWANCE = 3
+
+# ``REVIEWABLE_STOP_REASONS`` is owned by the progress contract and imported
+# above; the store and its callers gate on that one definition.
 
 
 
@@ -177,8 +191,9 @@ class RuntimeStateStore:
                     INSERT INTO tasks (
                         task_id, scope_key, revision, goal_text, source,
                         requested_by, status, completion_authority,
-                        active_plan_id, latest_checkpoint_id, created_at, updated_at
-                    ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                        active_plan_id, latest_checkpoint_id,
+                        reconsiderations_remaining, created_at, updated_at
+                    ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -188,6 +203,7 @@ class RuntimeStateStore:
                         _bounded_text(requested_by, max_length=128),
                         status.value,
                         CompletionAuthority.NONE.value,
+                        TASK_RECONSIDERATION_ALLOWANCE,
                         now,
                         now,
                     ),
@@ -233,8 +249,9 @@ class RuntimeStateStore:
                 INSERT INTO tasks (
                     task_id, scope_key, revision, goal_text, source,
                     requested_by, status, completion_authority,
-                    active_plan_id, latest_checkpoint_id, created_at, updated_at
-                ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                    active_plan_id, latest_checkpoint_id,
+                    reconsiderations_remaining, created_at, updated_at
+                ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -244,6 +261,7 @@ class RuntimeStateStore:
                     _bounded_text(requested_by, max_length=128),
                     TaskStatus.RUNNING.value,
                     CompletionAuthority.NONE.value,
+                    TASK_RECONSIDERATION_ALLOWANCE,
                     now,
                     now,
                 ),
@@ -557,6 +575,142 @@ class RuntimeStateStore:
         remaining = max(0, int(row["budget_limit"]) - int(row["consumed_epochs"]))
         return min(max(0, int(requested_budget)), remaining)
 
+    def task_reconsiderations_remaining(self, scope: RuntimeScope, *, task_id: str) -> int:
+        with self._lock:
+            self._require_open()
+            row = self._connection.execute(
+                """
+                SELECT reconsiderations_remaining FROM tasks
+                WHERE task_id = ? AND scope_key = ?
+                """,
+                (task_id, scope.key),
+            ).fetchone()
+        return 0 if row is None else max(0, int(row["reconsiderations_remaining"]))
+
+    def admit_reconsidered_approach(
+        self,
+        scope: RuntimeScope,
+        *,
+        task_id: str,
+        approach_key: str,
+        budget_limit: int,
+        stop_epoch_id: str,
+        stop_reason: ProgressStopReason,
+    ) -> dict[str, int] | None:
+        """Debit one non-renewable allowance so a new approach may execute.
+
+        The grant is stamped with the stop epoch it reviewed, which makes the
+        admission idempotent for that stop and refuses every already-attempted
+        approach: a renamed objective hashes to the same key and finds a row
+        whose grant belongs to a different stop. Nothing here clears a counter,
+        raises an allowance, or admits a non-reviewable stop cause.
+        """
+        if ProgressStopReason(stop_reason) not in REVIEWABLE_STOP_REASONS:
+            return None
+        epoch_id = _required_text("stop_epoch_id", stop_epoch_id, max_length=256)
+        key = _required_text("approach_key", approach_key, max_length=256)
+        now = _utc_now()
+        with self._lock, self._connection:
+            self._require_open()
+            self._connection.execute("BEGIN IMMEDIATE")
+            existing = self._connection.execute(
+                """
+                SELECT budget_limit, consumed_epochs, review_grant_stop_epoch_id
+                FROM continuation_approaches
+                WHERE scope_key = ? AND task_id = ? AND approach_key = ?
+                """,
+                (scope.key, task_id, key),
+            ).fetchone()
+            if existing is not None:
+                # Only re-entry for the very same reviewed stop is idempotent.
+                if existing["review_grant_stop_epoch_id"] != epoch_id:
+                    return None
+                limit = int(existing["budget_limit"])
+                return {
+                    "budget_limit": limit,
+                    "remaining_epochs": max(0, limit - int(existing["consumed_epochs"])),
+                    "reconsiderations_remaining": self._task_allowance(scope, task_id),
+                }
+            debited = self._connection.execute(
+                """
+                UPDATE tasks SET reconsiderations_remaining = reconsiderations_remaining - 1
+                WHERE task_id = ? AND scope_key = ? AND reconsiderations_remaining > 0
+                """,
+                (task_id, scope.key),
+            )
+            if debited.rowcount != 1:
+                return None
+            limit = max(1, int(budget_limit))
+            self._connection.execute(
+                """
+                INSERT INTO continuation_approaches (
+                    scope_key, task_id, approach_key, budget_limit,
+                    consumed_epochs, review_grant_stop_epoch_id, updated_at
+                ) VALUES (?, ?, ?, ?, 0, ?, ?)
+                """,
+                (scope.key, task_id, key, limit, epoch_id, now),
+            )
+            return {
+                "budget_limit": limit,
+                "remaining_epochs": limit,
+                "reconsiderations_remaining": self._task_allowance(scope, task_id),
+            }
+
+    def _task_allowance(self, scope: RuntimeScope, task_id: str) -> int:
+        row = self._connection.execute(
+            "SELECT reconsiderations_remaining FROM tasks WHERE task_id = ? AND scope_key = ?",
+            (task_id, scope.key),
+        ).fetchone()
+        return 0 if row is None else max(0, int(row["reconsiderations_remaining"]))
+
+    def approach_review_grant(
+        self, scope: RuntimeScope, *, task_id: str, approach_key: str,
+    ) -> str | None:
+        """The stop epoch that bought this approach its execution admission."""
+        with self._lock:
+            self._require_open()
+            row = self._connection.execute(
+                """
+                SELECT review_grant_stop_epoch_id FROM continuation_approaches
+                WHERE scope_key = ? AND task_id = ? AND approach_key = ?
+                """,
+                (scope.key, task_id, approach_key),
+            ).fetchone()
+        if row is None or row["review_grant_stop_epoch_id"] is None:
+            return None
+        return str(row["review_grant_stop_epoch_id"])
+
+    def checkpoint_review_grant(
+        self, scope: RuntimeScope, *, checkpoint_id: str,
+    ) -> str | None:
+        """Grant stop epoch for a checkpoint's own continuation approach."""
+        with self._lock:
+            self._require_open()
+            row = self._connection.execute(
+                """
+                SELECT c.continuation_json, c.task_id
+                FROM task_checkpoints c
+                JOIN tasks t ON t.task_id = c.task_id
+                WHERE c.checkpoint_id = ? AND t.scope_key = ?
+                """,
+                (checkpoint_id, scope.key),
+            ).fetchone()
+            if row is None:
+                return None
+            contract = _continuation_from_json(row["continuation_json"])
+            if contract is None:
+                return None
+            grant = self._connection.execute(
+                """
+                SELECT review_grant_stop_epoch_id FROM continuation_approaches
+                WHERE scope_key = ? AND task_id = ? AND approach_key = ?
+                """,
+                (scope.key, row["task_id"], contract.approach_key),
+            ).fetchone()
+        if grant is None or grant["review_grant_stop_epoch_id"] is None:
+            return None
+        return str(grant["review_grant_stop_epoch_id"])
+
     def settle_continuation_approach(
         self,
         scope: RuntimeScope,
@@ -634,6 +788,65 @@ class RuntimeStateStore:
                 "consumed_epochs": total,
                 "remaining_epochs": max(0, limit - total),
             }
+
+    def reserve_continuation_epoch(
+        self, scope: RuntimeScope, *, checkpoint_id: str, epoch_id: str,
+    ) -> bool:
+        """Debit the incoming approach before executing a model's tool batch."""
+        epoch_id = _required_text("epoch_id", epoch_id, max_length=256)
+        with self._lock, self._connection:
+            self._require_open()
+            self._connection.execute("BEGIN IMMEDIATE")
+            existing = self._connection.execute(
+                "SELECT scope_key, checkpoint_id FROM continuation_epoch_reservations WHERE epoch_id = ?",
+                (epoch_id,),
+            ).fetchone()
+            if existing is not None:
+                return existing["scope_key"] == scope.key and existing["checkpoint_id"] == checkpoint_id
+            row = self._connection.execute(
+                """
+                SELECT c.continuation_json, t.task_id, s.consumed_epochs,
+                       a.budget_limit, a.consumed_epochs AS approach_consumed
+                FROM task_checkpoints c
+                JOIN tasks t ON t.task_id = c.task_id
+                JOIN task_checkpoints latest ON latest.checkpoint_id = t.latest_checkpoint_id
+                JOIN continuation_settlements s ON s.checkpoint_id = c.checkpoint_id
+                JOIN continuation_approaches a ON a.scope_key = s.scope_key
+                    AND a.task_id = s.task_id AND a.approach_key = s.approach_key
+                WHERE c.checkpoint_id = ? AND t.scope_key = ?
+                    AND c.disposition = 'continue' AND t.status = 'running'
+                    AND (
+                        t.latest_checkpoint_id = c.checkpoint_id
+                        OR (
+                            latest.disposition = 'complete'
+                            AND latest.revision = c.revision + 1
+                        )
+                    )
+                """, (checkpoint_id, scope.key),
+            ).fetchone()
+            if row is None:
+                return False
+            contract = _continuation_from_json(row["continuation_json"])
+            if (
+                contract is None
+                or int(row["consumed_epochs"]) >= contract.bounded_epoch_budget
+                or int(row["approach_consumed"]) >= int(row["budget_limit"])
+            ):
+                return False
+            self._connection.execute(
+                "INSERT INTO continuation_epoch_reservations(epoch_id, scope_key, checkpoint_id) VALUES (?, ?, ?)",
+                (epoch_id, scope.key, checkpoint_id),
+            )
+            self._connection.execute(
+                "UPDATE continuation_settlements SET consumed_epochs = consumed_epochs + 1 WHERE checkpoint_id = ?",
+                (checkpoint_id,),
+            )
+            self._connection.execute(
+                """UPDATE continuation_approaches SET consumed_epochs = consumed_epochs + 1, updated_at = ?
+                   WHERE scope_key = ? AND task_id = ? AND approach_key = ?""",
+                (_utc_now(), scope.key, row["task_id"], contract.approach_key),
+            )
+            return True
 
     def enqueue_work_intent(
         self,
@@ -946,6 +1159,147 @@ class RuntimeStateStore:
         assert leased is not None
         return _work_intent_from_row(leased)
 
+    def bind_work_intent_admission(
+        self, scope: RuntimeScope, *, intent_id: str, expected_revision: int,
+        lease_owner: str, checkpoint_id: str | None, evidence_cursor: int,
+        task_id: str | None = None,
+    ) -> dict[str, object]:
+        """Write-once admission metadata; the current lease token stays valid."""
+        with self._lock, self._connection:
+            self._require_open()
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                """SELECT * FROM work_intents WHERE intent_id = ? AND scope_key = ?
+                   AND revision = ? AND state = 'leased' AND lease_owner = ?
+                   AND lease_expires_at > ?""",
+                (intent_id, scope.key, int(expected_revision), lease_owner, _utc_now()),
+            ).fetchone()
+            if row is None:
+                raise RuntimeStateConflict("budget owner binding requires the current live lease")
+            payload = _json_load(row["payload_json"], default={})
+            admission = {"budget_checkpoint_id": checkpoint_id, "admission_evidence_cursor": int(evidence_cursor),
+                         "admission_task_id": task_id}
+            if evidence_cursor < 0:
+                raise ValueError("admission evidence cursor must be non-negative")
+            for key, value in admission.items():
+                if key in payload and payload[key] != value:
+                    raise RuntimeStateConflict("work intent admission is already bound")
+            payload.update(admission)
+            self._connection.execute(
+                "UPDATE work_intents SET payload_json = ? WHERE intent_id = ?",
+                (_json_dump(payload), intent_id),
+            )
+            self._retire_reconciled_orphans(row, payload)
+            bound = self._connection.execute(
+                "SELECT * FROM work_intents WHERE intent_id = ?", (intent_id,),
+            ).fetchone()
+        assert bound is not None
+        return _work_intent_from_row(bound)
+
+    def reserve_recovery_attempt(
+        self, scope: RuntimeScope, *, intent_id: str, expected_revision: int,
+        lease_owner: str, max_attempts: int,
+    ) -> dict[str, object] | None:
+        with self._lock, self._connection:
+            self._require_open()
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._recovery_intent(scope, intent_id, expected_revision, lease_owner)
+            payload = _json_load(row["payload_json"], default={})
+            history = self._connection.execute(
+                "SELECT * FROM work_intents WHERE scope_key = ?", (scope.key,),
+            ).fetchall()
+            admission = next_recovery_admission(payload,
+                (_work_intent_from_row(item) for item in history),
+                intent_id=intent_id, max_attempts=max_attempts)
+            if admission is None:
+                self._connection.execute(
+                    "UPDATE work_intents SET payload_json = ? WHERE intent_id = ?",
+                    (_json_dump({**payload, "recovery_admission_denied": True}), intent_id),
+                )
+                return None
+            self._connection.execute(
+                "UPDATE work_intents SET payload_json = ? WHERE intent_id = ?",
+                (_json_dump({**payload, "recovery_admission": admission}), intent_id),
+            )
+            updated = self._connection.execute(
+                "SELECT * FROM work_intents WHERE intent_id = ?", (intent_id,),
+            ).fetchone()
+        return _work_intent_from_row(updated)
+
+    def confirm_recovery(
+        self, scope: RuntimeScope, *, intent_id: str, expected_revision: int, lease_owner: str,
+    ) -> dict[str, object]:
+        with self._lock, self._connection:
+            self._require_open()
+            self._connection.execute("BEGIN IMMEDIATE")
+            # Recording an owned terminal result does not authorize new work.
+            row = self._recovery_intent(scope, intent_id, expected_revision, lease_owner, require_live=False)
+            payload = confirmed_recovery_payload(_json_load(row["payload_json"], default={}))
+            self._connection.execute("UPDATE work_intents SET payload_json = ? WHERE intent_id = ?",
+                (_json_dump(payload), intent_id))
+            updated = self._connection.execute(
+                "SELECT * FROM work_intents WHERE intent_id = ?", (intent_id,),
+            ).fetchone()
+        return _work_intent_from_row(updated)
+
+    def reconcile_recovery(
+        self, scope: RuntimeScope, *, intent_id: str, expected_revision: int,
+        lease_owner: str, state: BodyState,
+    ) -> None:
+        with self._lock, self._connection:
+            self._require_open()
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._recovery_intent(scope, intent_id, expected_revision, lease_owner)
+            task = self.get_foreground_task(scope)
+            if task is None or task.task_id != row["task_id"]:
+                raise RuntimeStateConflict("recovery reconciliation task changed")
+            if state.bot != scope.bot_id:
+                return
+            history = self._connection.execute(
+                "SELECT * FROM work_intents WHERE scope_key = ?", (scope.key,),
+            ).fetchall()
+            settlement = reconciled_recovery_payload(_work_intent_from_row(row),
+                (_work_intent_from_row(item) for item in history), state=state)
+            if settlement is not None:
+                target, payload = settlement
+                self._connection.execute("UPDATE work_intents SET payload_json = ? WHERE intent_id = ?",
+                    (_json_dump(payload), target))
+            current_payload = _json_load(row["payload_json"], default={})
+            if "recovery_reconciled_intent_id" not in current_payload:
+                self._connection.execute("UPDATE work_intents SET payload_json = ? WHERE intent_id = ?",
+                    (_json_dump({**current_payload,
+                        "recovery_reconciled_intent_id": None if settlement is None else settlement[0]}), intent_id))
+
+    def _recovery_intent(
+        self, scope: RuntimeScope, intent_id: str, revision: int, lease_owner: str,
+        *, require_live: bool = True,
+    ) -> sqlite3.Row:
+        row = self._connection.execute(
+            """SELECT * FROM work_intents WHERE intent_id = ? AND scope_key = ?
+               AND revision = ? AND state = 'leased' AND lease_owner = ?
+               AND (? = 0 OR lease_expires_at > ?)""",
+            (intent_id, scope.key, int(revision), lease_owner, int(require_live), _utc_now()),
+        ).fetchone()
+        if row is None:
+            raise RuntimeStateConflict("recovery accounting requires the current lease token")
+        return row
+
+    def _retire_reconciled_orphans(self, row: sqlite3.Row, payload: dict[str, object]) -> None:
+        """Called inside the admission/completion transaction, never before it."""
+        if row["kind"] != "recovery_reconcile" or row["source"] != "startup_reconcile":
+            return
+        for orphan in payload.get("orphaned_intents") or []:
+            if not isinstance(orphan, dict) or not isinstance(orphan.get("intent_id"), str):
+                continue
+            self._connection.execute(
+                """UPDATE work_intents
+                   SET error_json = json_set(error_json, '$.reconciled_by', ?)
+                   WHERE intent_id = ? AND scope_key = ? AND state = 'failed'
+                     AND json_extract(error_json, '$.reason') = 'process_restart_unknown_outcome'
+                     AND json_extract(error_json, '$.reconciled_by') IS NULL""",
+                (row["intent_id"], orphan["intent_id"], row["scope_key"]),
+            )
+
     def finish_work_intent(
         self,
         intent_id: str,
@@ -979,6 +1333,11 @@ class RuntimeStateStore:
                 raise RuntimeStateConflict(
                     f"work intent revision conflict: intent_id={intent_id} expected={expected_revision}"
                 )
+            if state == "completed":
+                row = self._connection.execute(
+                    "SELECT * FROM work_intents WHERE intent_id = ?", (intent_id,),
+                ).fetchone()
+                self._retire_reconciled_orphans(row, _json_load(row["payload_json"], default={}))
         record = self.get_work_intent(intent_id)
         assert record is not None
         return record
@@ -1053,13 +1412,19 @@ class RuntimeStateStore:
         now = _utc_now()
         with self._lock, self._connection:
             self._require_open()
+            self._connection.execute("BEGIN IMMEDIATE")
             rows = self._connection.execute(
                 """
                 SELECT * FROM work_intents
-                WHERE scope_key = ? AND state = 'leased'
+                WHERE scope_key = ? AND (
+                    state = 'leased' OR (
+                        state = 'failed' AND json_extract(error_json, '$.reason') = ?
+                        AND json_extract(error_json, '$.reconciled_by') IS NULL
+                    )
+                )
                 ORDER BY leased_at ASC, created_at ASC
                 """,
-                (scope.key,),
+                (scope.key, reason),
             ).fetchall()
             if not rows:
                 return []
@@ -1077,7 +1442,7 @@ class RuntimeStateStore:
                     scope.key,
                 ),
             )
-            if cursor.rowcount != len(rows):
+            if cursor.rowcount != sum(row["state"] == "leased" for row in rows):
                 raise RuntimeStateConflict("leased work intent abandonment race")
         return [_work_intent_from_row(row) for row in rows]
 
@@ -1256,6 +1621,9 @@ class RuntimeStateStore:
         members = [dict(member) for member in raw_members if isinstance(member, dict)]
         if len(members) != len(raw_members):
             raise ValueError("progress epoch members must contain only objects")
+        commit_input = record.get("commit_input")
+        if commit_input is not None and not isinstance(commit_input, dict):
+            raise ValueError("progress epoch commit input must be an object or null")
         evidence_refs = _bounded_text_list(
             record.get("evidence_refs") or (),
             max_items=128,
@@ -1280,6 +1648,10 @@ class RuntimeStateStore:
             _json_dump([]),
             int(bool(record.get("material_changed"))),
             int(bool(record.get("progress_aborted"))),
+            (ProgressStopReason(record.get("progress_stop_reason") or "unknown").value
+             if record.get("progress_aborted") else None),
+            _bounded_text(record.get("budget_checkpoint_id") or "", max_length=256) or None,
+            None if commit_input is None else _json_dump(commit_input),
             now,
         )
         try:
@@ -1291,8 +1663,9 @@ class RuntimeStateStore:
                         epoch_id, scope_key, run_id, model_turn, members_json,
                         pre_body_fingerprint, post_body_fingerprint,
                         evidence_refs_json, epistemic_keys_json, novel_epistemic_keys_json,
-                        material_changed, progress_aborted, settled_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        material_changed, progress_aborted, progress_stop_reason, budget_checkpoint_id,
+                        commit_input_json, settled_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     values,
                 )
@@ -1394,20 +1767,54 @@ class RuntimeStateStore:
             ).fetchone()
         return 0 if row is None else int(row["cursor"])
 
+    def latest_task_progress_epoch(
+        self, scope: RuntimeScope, *, task_id: str,
+    ) -> dict[str, object] | None:
+        task = self.get_task(task_id)
+        if task is None or task.scope_key != scope.key:
+            raise RuntimeStateConflict("progress recovery requires a task in the current scope")
+        with self._lock:
+            self._require_open()
+            rows = self._connection.execute(
+                """SELECT * FROM progress_epochs
+                   WHERE scope_key = ? AND (settled_at >= ?
+                       OR json_extract(commit_input_json, '$.task_id') = ?)
+                   ORDER BY cursor ASC""",
+                (scope.key, task.created_at, task_id),
+            ).fetchall()
+        latest = None
+        for row in rows:
+            record = _progress_epoch_from_row(row)
+            commit = record["commit_input"]
+            if not isinstance(commit, dict) or commit.get("task_identity_bound") is not True:
+                raise RuntimeStateError("progress history has no proven task ownership")
+            if "task_id" not in commit or (
+                commit["task_id"] is not None
+                and (not isinstance(commit["task_id"], str) or not commit["task_id"])
+            ):
+                raise RuntimeStateError("progress history has invalid task ownership")
+            if commit.get("task_id") == task_id:
+                latest = record
+        return latest
+
     def mark_progress_epoch_aborted(
         self,
         scope: RuntimeScope,
         epoch_id: str,
+        *,
+        stop_reason: ProgressStopReason = ProgressStopReason.UNKNOWN,
     ) -> None:
+        reason = ProgressStopReason(stop_reason).value
         with self._lock, self._connection:
             self._require_open()
             cursor = self._connection.execute(
                 """
                 UPDATE progress_epochs
-                SET progress_aborted = 1
+                SET progress_aborted = 1,
+                    progress_stop_reason = COALESCE(progress_stop_reason, ?)
                 WHERE scope_key = ? AND epoch_id = ?
                 """,
-                (scope.key, str(epoch_id)),
+                (reason, scope.key, str(epoch_id)),
             )
             if cursor.rowcount != 1:
                 raise RuntimeStateConflict(
@@ -2538,6 +2945,7 @@ class RuntimeStateStore:
                     completion_authority TEXT NOT NULL,
                     active_plan_id TEXT,
                     latest_checkpoint_id TEXT,
+                    reconsiderations_remaining INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -2619,6 +3027,7 @@ class RuntimeStateStore:
                     approach_key TEXT NOT NULL,
                     budget_limit INTEGER NOT NULL,
                     consumed_epochs INTEGER NOT NULL,
+                    review_grant_stop_epoch_id TEXT,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(scope_key, task_id, approach_key)
                 );
@@ -2680,12 +3089,21 @@ class RuntimeStateStore:
                     novel_epistemic_keys_json TEXT NOT NULL,
                     material_changed INTEGER NOT NULL,
                     progress_aborted INTEGER NOT NULL,
+                    progress_stop_reason TEXT,
+                    budget_checkpoint_id TEXT,
+                    commit_input_json TEXT,
                     settled_at TEXT NOT NULL,
                     UNIQUE(scope_key, run_id, model_turn)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_progress_epochs_scope_cursor
                 ON progress_epochs(scope_key, cursor);
+
+                CREATE TABLE IF NOT EXISTS continuation_epoch_reservations (
+                    epoch_id TEXT PRIMARY KEY,
+                    scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
+                    checkpoint_id TEXT NOT NULL REFERENCES task_checkpoints(checkpoint_id) ON DELETE CASCADE
+                );
 
                 CREATE TABLE IF NOT EXISTS progress_evidence (
                     scope_key TEXT NOT NULL REFERENCES runtime_scopes(scope_key) ON DELETE CASCADE,
@@ -3098,6 +3516,60 @@ class RuntimeStateStore:
                         "ALTER TABLE memory_entries ADD COLUMN superseded_by TEXT"
                     )
                 current = 16
+            elif current == 16:
+                columns = {str(row["name"]) for row in self._connection.execute(
+                    "PRAGMA table_info(progress_epochs)"
+                ).fetchall()}
+                if "progress_stop_reason" not in columns:
+                    self._connection.execute(
+                        "ALTER TABLE progress_epochs ADD COLUMN progress_stop_reason TEXT"
+                    )
+                self._connection.execute(
+                    "UPDATE progress_epochs SET progress_stop_reason = 'unknown' "
+                    "WHERE progress_aborted = 1 AND progress_stop_reason IS NULL"
+                )
+                current = 17
+            elif current == 17:
+                columns = {str(row["name"]) for row in self._connection.execute(
+                    "PRAGMA table_info(progress_epochs)"
+                ).fetchall()}
+                if "budget_checkpoint_id" not in columns:
+                    self._connection.execute("ALTER TABLE progress_epochs ADD COLUMN budget_checkpoint_id TEXT")
+                current = 18
+            elif current == 18:
+                columns = {str(row["name"]) for row in self._connection.execute(
+                    "PRAGMA table_info(progress_epochs)"
+                ).fetchall()}
+                if "commit_input_json" not in columns:
+                    self._connection.execute(
+                        "ALTER TABLE progress_epochs ADD COLUMN commit_input_json TEXT"
+                    )
+                current = 19
+            elif current == 19:
+                task_columns = {str(row["name"]) for row in self._connection.execute(
+                    "PRAGMA table_info(tasks)"
+                ).fetchall()}
+                if "reconsiderations_remaining" not in task_columns:
+                    self._connection.execute(
+                        "ALTER TABLE tasks "
+                        "ADD COLUMN reconsiderations_remaining INTEGER NOT NULL DEFAULT 0"
+                    )
+                    # Existing tasks predate the grant ledger, so none of their
+                    # allowance was ever spent. Seed the accurate value rather
+                    # than inferring either an exemption or a punishment.
+                    self._connection.execute(
+                        "UPDATE tasks SET reconsiderations_remaining = ?",
+                        (TASK_RECONSIDERATION_ALLOWANCE,),
+                    )
+                approach_columns = {str(row["name"]) for row in self._connection.execute(
+                    "PRAGMA table_info(continuation_approaches)"
+                ).fetchall()}
+                if "review_grant_stop_epoch_id" not in approach_columns:
+                    self._connection.execute(
+                        "ALTER TABLE continuation_approaches "
+                        "ADD COLUMN review_grant_stop_epoch_id TEXT"
+                    )
+                current = 20
             else:
                 raise RuntimeStateError(
                     f"no runtime schema migration from version {current}"

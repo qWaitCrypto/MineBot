@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from minebot.app.runtime_state import (
+    REVIEWABLE_STOP_REASONS,
     CheckpointDisposition,
     CompletionAuthority,
     ContinuationContract,
@@ -24,7 +25,7 @@ from minebot.app.runtime_state import (
 from minebot.app.projection import bounded_summary_value
 from minebot.brain.context import AgentContext
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import JsonObject, ToolResult
+from minebot.contract import JsonObject, ProgressAbort, ToolResult
 
 
 @dataclass
@@ -206,13 +207,36 @@ class TaskWorkspace:
     @property
     def completion_requested(self) -> bool:
         task = self.current_task
-        if task is None:
+        if task is None or task.status is not TaskStatus.WAITING_EVENT:
             return False
         checkpoint = self.store.get_latest_checkpoint(task.task_id)
         return (
             checkpoint is not None
             and checkpoint.disposition is CheckpointDisposition.COMPLETE
         )
+
+    def completion_review_budget_owner(self) -> str | None:
+        """Return the live continuation a pending completion request interrupted.
+
+        A completion request is not terminal authority.  When its independent
+        verifier rejects it, only the immediately preceding continuation may
+        fund the correction turn; looking further back could revive a strategy
+        that a later checkpoint had already closed.
+        """
+        task = self.current_task
+        if task is None or task.status is not TaskStatus.WAITING_EVENT:
+            return None
+        checkpoints = self.store.list_task_checkpoints(task.task_id)
+        if len(checkpoints) < 2:
+            return None
+        pending, owner = checkpoints[-1], checkpoints[-2]
+        if (
+            pending.disposition is not CheckpointDisposition.COMPLETE
+            or owner.disposition is not CheckpointDisposition.CONTINUE
+            or owner.continuation is None
+        ):
+            return None
+        return owner.checkpoint_id
 
     def _require_task(self) -> TaskRecord:
         task = self.current_task
@@ -228,6 +252,7 @@ def register_task_tools(
     body_fingerprint: Callable[[], dict[str, object]] | None = None,
     evidence_cursor: Callable[[], int] | None = None,
     generation: Callable[[], int] | None = None,
+    review_stop: Callable[[], ProgressAbort | None] | None = None,
 ) -> None:
     registry.register(_read_task_tool(workspace))
     registry.register(_update_plan_tool(workspace))
@@ -237,6 +262,7 @@ def register_task_tools(
             body_fingerprint=body_fingerprint,
             evidence_cursor=evidence_cursor,
             generation=generation,
+            review_stop=review_stop,
         )
     )
 
@@ -421,6 +447,7 @@ def _checkpoint_task_tool(
     body_fingerprint: Callable[[], dict[str, object]] | None,
     evidence_cursor: Callable[[], int] | None,
     generation: Callable[[], int] | None,
+    review_stop: Callable[[], ProgressAbort | None] | None = None,
 ) -> RegisteredTool:
     def checkpoint(params: dict[str, object]) -> ToolResult:
         try:
@@ -432,6 +459,7 @@ def _checkpoint_task_tool(
                 raw=params.get("continuation"),
                 evidence_cursor=0 if evidence_cursor is None else evidence_cursor(),
                 generation=0 if generation is None else generation(),
+                review_stop=None if review_stop is None else review_stop(),
             )
             task, record = workspace.checkpoint(
                 expected_task_revision=int(params.get("expected_task_revision") or 0),
@@ -619,6 +647,7 @@ def _continuation_contract(
     raw: object,
     evidence_cursor: int,
     generation: int,
+    review_stop: ProgressAbort | None = None,
 ) -> ContinuationContract | None:
     if disposition is not CheckpointDisposition.CONTINUE:
         if raw is not None:
@@ -661,12 +690,42 @@ def _continuation_contract(
         ).encode("utf-8")
     ).hexdigest()
     task = workspace._require_task()
-    effective_budget = workspace.store.continuation_approach_remaining(
-        workspace.scope,
-        task_id=task.task_id,
-        approach_key=approach_key,
-        requested_budget=requested_budget,
+    reviewable_stop = (
+        review_stop is not None
+        and bool(review_stop.stop_epoch_id)
+        and review_stop.stop_reason in REVIEWABLE_STOP_REASONS
     )
+    if reviewable_stop:
+        # Work stopped because this task's approach was not working. Executing
+        # anything further costs one non-renewable task allowance, and only a
+        # genuinely different approach can buy it: a repeated or renamed
+        # approach hashes to a key that already owns a row, whose grant belongs
+        # to another stop, so it is refused however it is worded.
+        #
+        # A transport or unclassified stop takes the plain path below: writing
+        # the plan down is deliberation, which stays allowed, but no grant is
+        # stamped, so the continuation gates still refuse to execute it.
+        granted = workspace.store.admit_reconsidered_approach(
+            workspace.scope,
+            task_id=task.task_id,
+            approach_key=approach_key,
+            budget_limit=requested_budget,
+            stop_epoch_id=review_stop.stop_epoch_id,
+            stop_reason=review_stop.stop_reason,
+        )
+        if granted is None:
+            raise ValueError(
+                "continuation after a progress stop requires a different approach "
+                f"and a remaining task reconsideration allowance: {approach_key}"
+            )
+        effective_budget = int(granted["remaining_epochs"])
+    else:
+        effective_budget = workspace.store.continuation_approach_remaining(
+            workspace.scope,
+            task_id=task.task_id,
+            approach_key=approach_key,
+            requested_budget=requested_budget,
+        )
     if effective_budget < 1:
         raise ValueError(f"continuation approach budget exhausted: {approach_key}")
     return ContinuationContract(

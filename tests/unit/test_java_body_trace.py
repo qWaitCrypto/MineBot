@@ -37,8 +37,37 @@ def _args_hash(tool: str, args: dict) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
+class TraceBodyServer(FakeBodyServer):
+    """Complete the requested stand goal, not the adapter fixture's fixed endpoint."""
+
+    def _emit_response(self, rid: str, kind: str, payload: dict) -> None:
+        if kind == "WORLD_READ_RESULT":
+            data = payload.get("data") or {}
+            for fact in data.get("cells", []):
+                # This fixture models solid, uncleared cells, not dry stands.
+                fact["standing_y"] = None
+        super()._emit_response(rid, kind, payload)
+
+    def _handle_navigate(self, message: dict, rid: str) -> None:
+        goal = message["goal"]
+        while goal["kind"] == "composite":
+            goal = goal["goals"][0]
+        assert goal["kind"] in {"near", "xz"}
+        self.position = [float(goal["x"]) + 0.5,
+                         float(goal.get("y", self.position[1])),
+                         float(goal["z"]) + 0.5]
+        action = message["action_id"]
+        self._emit_response(rid, "NAVIGATE_ACK", {"action_id": action, "state": "accepted"})
+        self._emit_event("owner_acquired", action, {"type": "NAVIGATE", "priority": "ACTION"})
+        self._emit_terminal(action, {
+            "classification": "completed", "reason": "goal_satisfied",
+            "elapsed_ticks": 1, "replans": 0,
+            "final_x": self.position[0], "final_y": self.position[1], "final_z": self.position[2],
+        })
+
+
 def _run_collect(policy_regions) -> object:
-    server = FakeBodyServer()
+    server = TraceBodyServer()
     policy = GovernancePolicy(**policy_regions)
     client = _client(server, GovernanceAnswerer(policy))
     client.connect()

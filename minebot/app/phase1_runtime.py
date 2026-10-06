@@ -60,6 +60,7 @@ from minebot.brain.composition import (
     ensure_tool_for_tool,
     inventory_tool,
 )
+from minebot.brain.context import AgentContext
 from minebot.app.observability import sanitize_observation
 from minebot.app.projection import bounded_summary_value, top_reasons
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
@@ -87,6 +88,7 @@ class Phase1RuntimeConfig:
     exploration_coverage_store: ExplorationCoverageStore | None = None
     body_provider: str = "java"
     governance_policy: GovernancePolicy | None = None
+    goal_facts_refresher: Callable[[AgentContext], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,13 @@ def build_phase1_agent_runtime(
         conversation_session=config.conversation_session,
         observation_archive=config.observation_archive,
         progress_epoch_archive=config.progress_epoch_archive,
+        progress_task_id=(
+            None if config.task_workspace is None
+            else lambda: (
+                None if (task := config.task_workspace.current_task) is None
+                else task.task_id
+            )
+        ),
     )
     context = CompositionContext(
         registry=registry,
@@ -154,6 +163,7 @@ def build_phase1_agent_runtime(
             body_fingerprint=lambda: _task_body_fingerprint(body, authority),
             evidence_cursor=parts.runtime.current_run_evidence_cursor,
             generation=authority.current_generation,
+            review_stop=parts.runtime.current_progress_work_stop,
         )
     if (
         config.conversation_session is not None
@@ -173,6 +183,11 @@ def build_phase1_agent_runtime(
         config.skill_workspace.bind_registry(registry)
         config.skill_workspace.sync_context(parts.context)
         parts.runtime.add_context_refresher(config.skill_workspace.sync_context)
+    if config.goal_facts_refresher is not None:
+        # This only supplies observed completion facts to the model. The
+        # strategy model still chooses every action through the normal tools.
+        config.goal_facts_refresher(parts.context)
+        parts.runtime.add_context_refresher(config.goal_facts_refresher)
     parts.runtime.registry = registry
     parts.runtime.agent = parts.runtime.agent.clone(
         tools=[sdk_tool_for(registry.get(name)) for name in registry.model_names()]

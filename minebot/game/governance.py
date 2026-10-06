@@ -46,6 +46,21 @@ NATURAL_FLOWER_TYPES = frozenset(
     }
 )
 
+NATURAL_LEAF_TYPES = frozenset(
+    {
+        "oak_leaves",
+        "spruce_leaves",
+        "birch_leaves",
+        "jungle_leaves",
+        "acacia_leaves",
+        "dark_oak_leaves",
+        "mangrove_leaves",
+        "cherry_leaves",
+        "azalea_leaves",
+        "flowering_azalea_leaves",
+    }
+)
+
 
 NATURAL_BREAKABLE = frozenset(
     {
@@ -88,7 +103,7 @@ NATURAL_BREAKABLE = frozenset(
         "deepslate_diamond_ore",
         "deepslate_emerald_ore",
     }
-) | NATURAL_FLOWER_TYPES
+) | NATURAL_FLOWER_TYPES | NATURAL_LEAF_TYPES
 
 COLLECT_TARGETS = frozenset(
     {

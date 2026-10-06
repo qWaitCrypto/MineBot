@@ -49,6 +49,7 @@ class AgentContext:
     max_session_messages: int = 8
     _turn: int = 0
     _last_state: BodyState | None = field(default=None, repr=False)
+    _goal_facts: dict[str, object] | None = field(default=None, repr=False)
     _last_profile: RuntimeProfile | None = field(default=None, repr=False)
     _resume_facts: dict[str, object] | None = field(default=None, repr=False)
     _task_artifact: dict[str, object] | None = field(default=None, repr=False)
@@ -91,6 +92,14 @@ class AgentContext:
     def observe_state(self, state: BodyState) -> None:
         """Record the latest authoritative Body state for per-turn injection."""
         self._last_state = state
+
+    def observe_goal_facts(self, facts: dict[str, object] | None) -> None:
+        """Record a read-only, authoritative projection of goal completion."""
+        self._goal_facts = (
+            None
+            if facts is None
+            else json.loads(json.dumps(facts, ensure_ascii=False, sort_keys=True))
+        )
 
     def observe_profile(self, profile: RuntimeProfile) -> None:
         """Record the current stance profile for per-turn context framing."""
@@ -278,6 +287,7 @@ class AgentContext:
         """Immutable snapshot of everything observed, for the F2 compiler."""
         return ContextFacts(
             goal_text=self.goal_text,
+            goal_facts=self._goal_facts,
             turn=self._turn,
             language=self.language,
             include_goal=include_goal,
