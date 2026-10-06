@@ -56,9 +56,60 @@ tests in `test_body_provider.py`, all failing with
 an unmodified archive of commit `038b987`. They are not fixed by this change.
 
 The earlier sticks, chest, furnace-output and sword fixtures remain separate
-evidence. This change does not prove 3x3 workstation crafting, every transfer
-direction, moving-target combat/handoff, broad natural terrain recovery,
-Elytra flight, shared-world protection, or a complete Agent task. The generic
+evidence. The menu extension below adds workstation and transfer evidence.
+Moving-target combat/handoff, broad natural terrain recovery, Elytra flight,
+shared-world protection, and a complete Agent task remain unproven. The generic
 `baritoneCommand` remains outside the Agent action surface. Mutation limits in
 this experiment bound touched positions; a complete shared-world permission
 implementation remains work for actual deployment.
+
+## Canonical tool menu slice and inventory slots
+
+The same disposable tuple now completes `craft_item`,
+`transfer_container_item`, `smelt_item`, and `clear_furnace` through the
+existing Agent tool registry → Python transactions → RealClientBody → native
+client menus. RCON only supplies resources/workstations and independently
+checks the server result. There is no model planning or autonomous gathering;
+all recipes are unlocked for the fixture.
+
+| Behavior | Server-confirmed result | Tool duration |
+| --- | --- | --- |
+| Craft eight sticks from slot 9 | Eight sticks; four source planks remain; separate slot 27 stack intact | 2.140 s |
+| Craft stone pickaxe at nearby table | One stone pickaxe; three cobblestone and two sticks consumed | 2.030 s |
+| Craft cake at table | One cake and three buckets returned to named inventory slots | 1.908 s |
+| Chest → backpack, then backpack → chest | Three stone withdrawn, two returned; chest seven, backpack one | 0.778 / 0.829 s |
+| Transfer two stone into a stack of 63 | `transfer_count_or_capacity_mismatch`; both inventories intact | 165 ms action |
+| Full raw iron smelt | One iron ingot collected; unused coal reclaimed; furnace empty | 14.374 s |
+| Clear idle furnace fuel | Three coal recovered; furnace empty | 1.361 s |
+
+Native `moveItem` also passes partial moves `9 → 2` (three) and `2 → 9`
+(two), offhand transfers `27 → 40 → 35`, and a helmet round trip
+`12 → 39 → 12`. Independent server reads verify each count; Minecraft 26.1.2
+stores worn equipment in `equipment`, separately from `Inventory`.
+
+Crafting rejects equipment/grid/result slots as ingredient sources, output
+destinations, or remainder destinations. Container/furnace transfers reject
+player slots 36, 40, 41, and 45 before opening a menu. `moveItem` rejects the
+crafting result, crafting-input destinations, zero/excess counts, and
+incompatible stacks without changing inventory or equipment. Its explicit
+personal-grid recovery source remains slots 41–44; the unit suite exercises
+Python residue recovery, but a live pre-filled personal-grid fixture has not
+been run. Client refusals now retain their specific reason through Body;
+transport failures remain distinct.
+
+Raw local reports:
+
+- `logs/real-client-menus-1791322852744099542.json` (30 tool/action records).
+- `logs/real-client-menu-refusals-1791322987539686283.json` (five refusals after preserving their Body reasons).
+
+The first attempt started before client readiness and hit the 30 s IPC wait;
+the client became ready in 36.567 s. A subsequent proof initially queried the
+old offhand NBT location; after correcting the fixture query to `equipment`,
+the full slice passed. These were retained as failed local reports rather
+than counted as successful tests.
+
+Client Java compilation and runtime mixin loading passed. The final targeted
+inventory, container, furnace, client Body and IPC suite passed **163 tests
+and 71 subtests**. This proves the supplied-resource menu slice on one tuple;
+it does not establish every recipe/container, shared-world protection, or
+complete autonomous Agent behavior.

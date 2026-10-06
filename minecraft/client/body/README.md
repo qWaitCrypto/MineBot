@@ -64,6 +64,7 @@ From the repository root, with the disposable server and client running:
 ```bash
 .venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case vertical
 .venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case ranged
+.venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case menus
 ```
 
 For handoff, launch a second client with username `Receiver` and IPC port
@@ -78,6 +79,14 @@ world opt-in; without it, the probe's `--case vertical_denied` verifies the
 floor and position remain intact. The distance, liquid, and mutation-position
 bounds are enforced before a vertical interaction. This narrow guard does not
 provide shared-world protection for the other Baritone processes.
+
+The `menus` fixture supplies resources, unlocks recipes, and exercises the
+canonical Agent tool callables for sticks, workstation pickaxe/cake crafting,
+bucket remainders, chest transfer in both directions, and smelt/fuel reclaim.
+It also checks protocol inventory slots, partial count moves, equipment round
+trips and invalid requests against server inventory/equipment reads. Launch
+the client and wait for readiness before running the fixture; this is a
+directed tool proof, without model planning or autonomous resource gathering.
 
 See [the dated verification record](verification-20261007.md) for actual
 results, reproduced failures, and the remaining coverage limits.
