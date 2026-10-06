@@ -56,13 +56,13 @@ _CAPABILITIES: tuple[RealClientCapability, ...] = (
     RealClientCapability("builder_selections", "selection", "adapter", "Builder selection add, clear, and geometry transforms"),
     RealClientCapability("body_primitives", "minecraft_client", "adapter", "Native jump, look, use, combat attempt, inventory, block and crop actions"),
     RealClientCapability("world_reads", "minecraft_client", "adapter", "Authoritative client-world block and entity snapshots"),
-    RealClientCapability("engage_entity", "client_combat", "verified", "Iron-sword kill in the stationary zombie fixture"),
-    RealClientCapability("ranged_attack", "client_combat", "verified", "Single bow/crossbow hit, missing ammunition and cancellation fixtures"),
+    RealClientCapability("engage_entity", "client_combat", "verified", "Agent engage_entity kills the named stationary zombie; closer decoy untouched"),
+    RealClientCapability("ranged_attack", "client_combat", "verified", "Agent ranged_attack: backpack bow/crossbow hits, closer decoy untouched, concrete missing ammunition; directed cancel proof"),
     RealClientCapability("craft_item", "client_inventory_menu", "verified", "Sticks, table stone pickaxe and cake/bucket remainder fixtures; other recipes need fixtures"),
     RealClientCapability("container_transfer", "client_menu", "verified", "Chest transfers in both directions and capacity refusal; other containers need fixtures"),
     RealClientCapability("furnace_transfer", "client_furnace_menu", "verified", "Raw iron input/fuel/cooking/output/reclaim lifecycle and idle fuel clear fixtures"),
-    RealClientCapability("handoff_item", "client_inventory", "verified", "Server recipient/count pickup receipt and full-inventory failure fixtures"),
-    RealClientCapability("vertical_recovery", "custom_goal", "verified", "Baritone shaft descent/ascent, surface return and cancel; mutations require disposable-world opt-in"),
+    RealClientCapability("handoff_item", "client_inventory", "verified", "Agent give_player: server recipient/count receipt and full-inventory failure with two real clients"),
+    RealClientCapability("vertical_recovery", "custom_goal", "verified", "Agent down/up/surface tools: grounded shaft results and chosen scaffold; directed cancel proof; mutations require disposable-world opt-in"),
 )
 CAPABILITY_REGISTRY: Mapping[str, RealClientCapability] = {item.name: item for item in _CAPABILITIES}
 
@@ -220,7 +220,8 @@ class RealClientBody:
         if not isinstance(raw_entities, list):
             return _gap_perception(self.bot_name, scope, "client_entity_snapshot_missing")
         limit = max(1, min(128, int(params.get("limit") or 64)))
-        entities = [dict(item) for item in raw_entities if isinstance(item, Mapping)]
+        entities = [dict(item) for item in raw_entities if isinstance(item, Mapping)
+                    and (item.get("health") is None or float(item["health"]) > 0)]
         if scope == "nearbyHostiles":
             entities = [item for item in entities if bool(item.get("hostile"))]
         return PerceptionResult(
@@ -321,6 +322,7 @@ class RealClientBody:
                 event = _terminal_event(self.bot_name, pending.action, terminal)
                 self._merge_state_payload(terminal.payload)
         except Exception as error:
+            reason = str(error) if isinstance(error, RealClientRejected) else f"transport:{type(error).__name__}"
             event = Event(
                 seq=self._next_seq(),
                 tick=0,
@@ -330,7 +332,8 @@ class RealClientBody:
                     "action_id": pending.action.id,
                     "success": False,
                     "status": "failed",
-                    "reason": str(error) if isinstance(error, RealClientRejected) else f"transport:{type(error).__name__}",
+                    "reason": reason,
+                    "stopped_reason": reason,
                     "message": str(error),
                 },
             )
@@ -709,7 +712,14 @@ def _wire_action_for(action: Action) -> dict[str, object] | None:
     }
     if action.name not in names:
         return None
-    return {"name": action.name, "params": dict(action.params)}
+    params = dict(action.params)
+    if action.name in {"digDown", "digUp"} and params.get("max_steps") is not None:
+        steps = int(params["max_steps"])
+        params.setdefault("max_distance", steps)
+        params.setdefault("max_mutations", steps * 3)
+    if action.name == "handoffItem" and params.get("timeout_ticks") is not None:
+        params.setdefault("pickup_timeout_ticks", int(params["timeout_ticks"]))
+    return {"name": action.name, "params": params}
 
 
 def _control_for(action: Action) -> tuple[str, dict[str, object]] | None:
@@ -802,7 +812,7 @@ def _goal_objective(raw_goal: object, arrival_radius: object) -> str | None:
             return None
         radius_raw = raw_goal.get("range", raw_goal.get("radius", arrival_radius or 1))
         try:
-            radius = max(1, math.ceil(float(radius_raw)))
+            radius = max(0, math.ceil(float(radius_raw)))
         except (TypeError, ValueError):
             return None
         return f"near:{position[0]}:{position[1]}:{position[2]}:{radius}"
@@ -863,7 +873,7 @@ def _goal_token(raw_goal: object) -> str | None:
         if position is None:
             return None
         try:
-            radius = max(1, math.ceil(float(raw_goal.get("range", raw_goal.get("radius", 1)))))
+            radius = max(0, math.ceil(float(raw_goal.get("range", raw_goal.get("radius", 1)))))
         except (TypeError, ValueError):
             return None
         return f"near:{position[0]}:{position[1]}:{position[2]}:{radius}"
@@ -942,6 +952,10 @@ def _timeout_ms(action: Action) -> int:
             raw = None
     if raw is None and action.params.get("timeout_s") is not None:
         raw = float(action.params["timeout_s"]) * 1000
+    if raw is not None and action.name == "handoffItem":
+        # Pickup timeout starts at the drop; leave time for approach/rotation
+        # and for the stopped terminal to settle before the Python wait ends.
+        raw = int(raw) + 4_000
     try:
         return max(1_000, min(300_000, int(raw or 60_000)))
     except (TypeError, ValueError):
@@ -954,6 +968,7 @@ def _timeout_seconds(action: Action) -> float:
 
 def _terminal_event(bot_name: str, action: Action, terminal: RealClientTerminal) -> Event:
     payload = dict(terminal.payload)
+    payload.setdefault("stopped_reason", terminal.reason)
     position = payload.get("position")
     if isinstance(position, (list, tuple)) and len(position) == 3:
         payload.setdefault("final_x", position[0])
@@ -982,6 +997,7 @@ def _control_event(bot_name: str, action: Action, response: Mapping[str, object]
         "success": True,
         "status": "completed",
         "reason": "control_applied",
+        "stopped_reason": "completed",
     })
     return Event(seq=0, tick=0, bot=bot_name, name=_terminal_name(action.name), data=data)
 

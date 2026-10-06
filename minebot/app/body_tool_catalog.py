@@ -27,6 +27,7 @@ _BASE_TOOL_NAMES = (
     "go_to_surface",
     "follow_entity",
     "engage_entity",
+    "ranged_attack",
     "find_hostiles",
     "search_for_block",
     "mine_block_collect",
@@ -107,6 +108,9 @@ BODY_OBJECTIVE_PROVIDER_TABLE: dict[str, dict[str, str]] = {
     "real_client": {
         "move_to": "real_client",
         "follow_entity": "real_client",
+        "go_to_surface": "real_client",
+        "dig_down": "real_client",
+        "dig_up": "real_client",
     },
 }
 

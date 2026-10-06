@@ -41,7 +41,7 @@ from minebot.contract import (
 from minebot.game.governance import GovernancePolicy
 
 
-HANDOFF_MIN_DISTANCE = 1.25
+HANDOFF_MIN_DISTANCE = 0.0
 HANDOFF_MAX_DISTANCE = 3.0
 
 
@@ -1805,7 +1805,7 @@ class InteractionTransactions:
         rejected = _acceptance_failure(accepted)
         if rejected is not None:
             return rejected
-        terminal = self.body.await_action_terminal(action.id, timeout_s=timeout_s)
+        terminal = self.body.await_action_terminal(action.id, timeout_s=timeout_s + 5.0)
         return terminal_event_to_tool_result(terminal)
 
     def _await_pickup(self, receiver_name: str, item: str, *, timeout_s: float) -> HandoffReceipt | None:

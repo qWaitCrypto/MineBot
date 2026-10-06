@@ -176,7 +176,7 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
 
         self.assertEqual(tuple(registry.names()), canonical_body_tool_names(stage="base"))
         bindings = registry.canonical_bindings()
-        self.assertEqual(len(bindings), 43)
+        self.assertEqual(len(bindings), 44)
         self.assertEqual(
             {binding.intent for binding in bindings},
             {f"body:{name}" for name in canonical_body_tool_names(stage="base")},
@@ -184,7 +184,7 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         self.assertTrue(all(row["intent"] for row in tool_manifest(registry)))
         self.assertTrue(all(row["implementation"] for row in tool_manifest(registry)))
 
-    def test_production_runtime_completes_all_45_player_intents(self):
+    def test_production_runtime_completes_all_player_intents(self):
         parts = build_phase1_agent_runtime(
             body=_body(),
             goal_text="collect wood",
@@ -199,7 +199,7 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
                 for binding in parts.registry.canonical_bindings()
                 if binding.intent.startswith("body:")
             ]
-            self.assertEqual(len(body_bindings), 45)
+            self.assertEqual(len(body_bindings), 46)
             self.assertEqual(
                 {binding.tool_name for binding in body_bindings},
                 set(canonical_body_tool_names()),
@@ -664,7 +664,7 @@ class JavaBodyProviderRegistryTests(unittest.TestCase):
             )
         self.assertEqual(
             set(BODY_OBJECTIVE_PROVIDER_TABLE["real_client"]),
-            {"move_to", "follow_entity"},
+            {"move_to", "follow_entity", "go_to_surface", "dig_down", "dig_up"},
         )
         self.assertEqual(set(BODY_OBJECTIVE_PROVIDER_TABLE["scarpet"].values()), {"scarpet"})
         self.assertEqual(set(BODY_OBJECTIVE_PROVIDER_TABLE["java"].values()), {"java"})

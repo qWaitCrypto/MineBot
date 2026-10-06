@@ -34,6 +34,7 @@ from minebot.contract import (
     Position,
     ToolResult,
     perception_next_cursor,
+    terminal_event_to_tool_result,
 )
 
 
@@ -111,6 +112,9 @@ BODY_TRANSACTION_CLOSURE: dict[str, CapabilityClosure] = {
     ),
     "CombatTransactions.engage_entity": _closure(
         "tool", "engage_entity", note="Bounded target-locked melee engagement."
+    ),
+    "CombatTransactions.ranged_attack": _closure(
+        "tool", "ranged_attack", note="Bounded bow/crossbow action at one resolved target, with damage/kill terminal."
     ),
     "ExplorationTransactions.explore_for": _closure(
         "tool", "explore_for", note="Bounded multi-target frontier exploration with persisted coverage."
@@ -238,7 +242,6 @@ BODY_TRANSACTION_CLOSURE: dict[str, CapabilityClosure] = {
 
 
 BODY_CAPABILITY_DEBT: dict[str, str] = {
-    "ranged_attack": "Scarpet has a live-proven rangedAttack primitive, but no capability-level Python transaction yet owns weapon selection, target acquisition, and terminal verification for the Brain.",
     "villager_trade": "Offer reading exists, but full-fidelity execution requires the explicitly deferred Thin Java Merchant Primitive.",
     "named_places": "Remembered-place storage belongs to deferred A6 memory; navigation itself is already registered.",
 }
@@ -294,7 +297,7 @@ BODY_PRIMITIVE_CLOSURE: dict[str, CapabilityClosure] = {
         "owned", "engage_entity", note="The engagement transaction owns acquisition, pursuit, cooldown, and kill truth."
     ),
     "ScarpetBody.ranged_attack": _closure(
-        "debt", note=BODY_CAPABILITY_DEBT["ranged_attack"]
+        "owned", "ranged_attack", note="The combat transaction owns target acquisition, weapon choice and terminal handling."
     ),
     "ScarpetBody.container_transfer": _closure(
         "owned", "transfer_container_item", note="ContainerTransactions owns slot planning and delta verification."
@@ -343,6 +346,7 @@ def body_capability_tools(
     resource_collection: ResourceCollectionTransactions,
     use: UseTransactions,
     dig_down_objective_body: Body | None = None,
+    dig_up_objective_body: Body | None = None,
 ) -> tuple[RegisteredTool, ...]:
     tools = (
         _move_away_tool(navigator),
@@ -368,7 +372,7 @@ def body_capability_tools(
         _place_block_tool(work),
         _place_here_tool(work),
         _dig_down_tool(work, dig_down_objective_body),
-        _dig_up_tool(work),
+        _dig_up_tool(work, dig_up_objective_body),
         _pickup_items_tool(pickup),
         _collect_block_domain_tool(resource_collection),
         _read_block_tool(body),
@@ -1251,18 +1255,17 @@ def _java_dig_down(body: Body, params: JsonObject) -> ToolResult:
     max_steps = int(params["max_steps"]) if params.get("max_steps") is not None else None
     max_clear_fall = int(_param(params, "max_clear_fall", 2))
     timeout_s = float(_param(params, "timeout_s", 240.0))
+    action = Action.create("digDown", {
+        "target_y": target_y,
+        "max_steps": max_steps,
+        "max_clear_fall": max_clear_fall,
+        "timeout_ticks": max(20, min(4_800, int(timeout_s * 20.0 + 0.999))),
+        **({"max_mutations": int(params["max_mutations"])} if "max_mutations" in params else {}),
+    })
     try:
-        result = body.execute(
-            Action.create(
-                "digDown",
-                {
-                    "target_y": target_y,
-                    "max_steps": max_steps,
-                    "max_clear_fall": max_clear_fall,
-                    "timeout_ticks": max(20, min(4_800, int(timeout_s * 20.0 + 0.999))),
-                },
-            )
-        )
+        result = body.execute(action)
+        if result.ok and result.accepted and not result.complete:
+            return terminal_event_to_tool_result(body.await_action_terminal(action.id, timeout_s=timeout_s + 5.0))
     except Exception as error:
         return ToolResult(
             False,
@@ -1280,7 +1283,26 @@ def _java_dig_down(body: Body, params: JsonObject) -> ToolResult:
     )
 
 
-def _dig_up_tool(work: BlockWork) -> RegisteredTool:
+def _dig_up_tool(work: BlockWork, objective_body: Body | None = None) -> RegisteredTool:
+    def run(params: JsonObject) -> ToolResult:
+        scaffold_blocks = _strings(params.get("scaffold_blocks")) or (
+            "cobblestone", "cobbled_deepslate", "deepslate", "stone", "dirt", "netherrack",
+        )
+        if objective_body is not None:
+            from minebot.body.inventory import _dispatch
+
+            return _dispatch(objective_body, "digUp", {
+                "target_y": int(params["target_y"]),
+                "max_steps": int(params["max_steps"]) if params.get("max_steps") is not None else None,
+                "scaffold_blocks": list(scaffold_blocks),
+                "timeout_ticks": 4_800,
+            }, timeout_s=245.0)
+        return work.dig_up_to_y(
+            int(params["target_y"]), context=BreakContext.DIRECT,
+            scaffold_blocks=scaffold_blocks,
+            max_steps=int(params["max_steps"]) if params.get("max_steps") is not None else None,
+        )
+
     return _tool(
         "dig_up",
         "Clear and pillar through a guarded vertical shaft to target Y using only owned safe scaffold blocks.",
@@ -1292,21 +1314,9 @@ def _dig_up_tool(work: BlockWork) -> RegisteredTool:
             },
             required=("target_y",),
         ),
-        lambda params: work.dig_up_to_y(
-            int(params["target_y"]),
-            context=BreakContext.DIRECT,
-            scaffold_blocks=_strings(params.get("scaffold_blocks")) or (
-                "cobblestone",
-                "cobbled_deepslate",
-                "deepslate",
-                "stone",
-                "dirt",
-                "netherrack",
-            ),
-            max_steps=int(params["max_steps"]) if params.get("max_steps") is not None else None,
-        ),
+        run,
         mutating=True,
-        source="body.block_work",
+        source="body.objective" if objective_body is not None else "body.block_work",
         tool_type="navigation",
         permission="dig_vertical",
         body_scope=("mine", "place", "navigation", "blocks", "inventory"),

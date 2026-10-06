@@ -686,7 +686,25 @@ public final class MineBotClientBody implements ClientModInitializer {
                 return;
             }
         }
-        throw new IllegalArgumentException("item_not_in_hotbar");
+        for (int slot = 9; slot < 36; slot++) {
+            ItemStack stack = client.player.getInventory().getItem(slot);
+            if (stack.isEmpty() || !itemPath(stack).equals(wanted)) continue;
+            if (!(client.player.containerMenu instanceof InventoryMenu menu)) {
+                throw new IllegalArgumentException("inventory_menu_unavailable");
+            }
+            if (!menu.getCarried().isEmpty()) throw new IllegalArgumentException("inventory_cursor_occupied");
+            int hotbar = client.player.getInventory().getSelectedSlot();
+            for (int candidate = 0; candidate < 9; candidate++) {
+                if (client.player.getInventory().getItem(candidate).isEmpty()) {
+                    hotbar = candidate;
+                    break;
+                }
+            }
+            click(menu, menuSlotForPlayer(menu, slot), hotbar, ContainerInput.SWAP, client);
+            client.player.getInventory().setSelectedSlot(hotbar);
+            return;
+        }
+        throw new IllegalArgumentException("not_in_inventory");
     }
 
     private static void selectSlot(Minecraft client, JsonObject params) {
@@ -919,7 +937,8 @@ public final class MineBotClientBody implements ClientModInitializer {
                 default -> requestStop("failed", "unsupported_client_action");
             }
         } catch (RuntimeException error) {
-            requestStop("failed", "client_action_failed:" + error.getClass().getSimpleName());
+            requestStop("failed", error instanceof IllegalArgumentException ? error.getMessage()
+                : "client_action_failed:" + error.getClass().getSimpleName());
             LOG.warn("MINEBOT_BODY action_failed id={} action={} detail={}", current.id, current.kind, error.toString());
         }
     }
@@ -985,6 +1004,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         String weapon = string(current.params, "weapon", "bow").replace("minecraft:", "");
         if (!itemPath(client.player.getMainHandItem()).equals(weapon)) {
             selectItem(client, weapon);
+            return;
         }
         double maxRange = Math.max(2.0, Math.min(32.0, number(current.params, "max_range", 24.0)));
         boolean requireLineOfSight = booleanValue(current.params, "require_line_of_sight", false);
@@ -1031,13 +1051,19 @@ public final class MineBotClientBody implements ClientModInitializer {
             client.options.keyUse.setDown(true);
             client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
             current.useStartedTick = current.ticks;
-        } else if (current.useStartedTick >= 0 && current.ticks - current.useStartedTick >= required) {
+        } else if (current.useStartedTick >= 0 && (
+            held.getItem() instanceof CrossbowItem && CrossbowItem.isCharged(held)
+            || client.player.isUsingItem() && client.player.getTicksUsingItem() >= required + 1)) {
             client.options.keyUse.setDown(false);
             client.gameMode.releaseUsingItem(client.player);
             if (!(held.getItem() instanceof CrossbowItem)) {
                 current.shots++;
                 current.lastShotTick = current.ticks;
             }
+            current.useStartedTick = -1;
+        } else if (current.useStartedTick >= 0 && !client.player.isUsingItem()) {
+            // A server inventory update may interrupt charging after a swap.
+            client.options.keyUse.setDown(false);
             current.useStartedTick = -1;
         }
         if (current.damageObserved && current.shots >= expected && !client.player.isUsingItem()) {
@@ -1046,18 +1072,20 @@ public final class MineBotClientBody implements ClientModInitializer {
     }
 
     private LivingEntity combatTarget(Minecraft client, Run current) {
-        String targetId = string(current.params, "target_id", "");
+        String targetId = string(current.params, "target_uuid", string(current.params, "target_id", ""));
+        if (targetId.isBlank() && current.targetEntity != null) targetId = current.targetEntity.getUUID().toString();
         String targetName = string(current.params, "target_name", "");
         String targetType = string(current.params, "target_type", "").replace("minecraft:", "");
-        double radius = Math.max(1.0, Math.min(64.0, number(current.params, "radius", 32.0)));
+        double radius = Math.max(1.0, Math.min(64.0, number(current.params, "acquire_radius", number(current.params, "radius", 32.0))));
         LivingEntity best = null;
         double bestDistance = Double.MAX_VALUE;
         for (Entity entity : client.level.getEntities(client.player, client.player.getBoundingBox().inflate(radius), value -> value instanceof LivingEntity)) {
             if (!(entity instanceof LivingEntity living) || !living.isAlive()) continue;
-            boolean match = (!targetId.isBlank() && entity.getUUID().toString().equals(targetId))
-                || (!targetName.isBlank() && entity.getName().getString().equals(targetName))
-                || (!targetType.isBlank() && BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath().equals(targetType));
-            if (targetId.isBlank() && targetName.isBlank() && targetType.isBlank()) match = entity instanceof Enemy;
+            boolean match;
+            if (!targetId.isBlank()) match = entity.getUUID().toString().equals(targetId);
+            else if (!targetName.isBlank()) match = entity.getName().getString().equals(targetName);
+            else if (!targetType.isBlank()) match = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath().equals(targetType);
+            else match = entity instanceof Enemy;
             if (match && client.player.distanceToSqr(entity) < bestDistance) {
                 best = living;
                 bestDistance = client.player.distanceToSqr(entity);
@@ -1084,7 +1112,9 @@ public final class MineBotClientBody implements ClientModInitializer {
     }
 
     private void approachCombatTarget(Minecraft client, LivingEntity target, double range) {
-        Goal next = new GoalNear(target.blockPosition(), (int) Math.max(1, Math.ceil(Math.min(8.0, range))));
+        // Baritone tests block coordinates; leave room for the players' actual
+        // sub-block positions so goal completion also puts the target in reach.
+        Goal next = new GoalNear(target.blockPosition(), (int) Math.max(0, Math.floor(Math.min(8.0, range) - 1.0)));
         if (!baritone.getCustomGoalProcess().isActive() || baritone.getPathingBehavior().getGoal() == null
             || !baritone.getPathingBehavior().getGoal().toString().equals(next.toString())) {
             baritone.getCustomGoalProcess().setGoalAndPath(next);
@@ -1694,6 +1724,10 @@ public final class MineBotClientBody implements ClientModInitializer {
                 requestStop("failed", "handoff_to_self");
                 return;
             }
+            if (!current.params.has("slot") && !itemPath(client.player.getMainHandItem()).equals(item)) {
+                selectItem(client, item);
+                return;
+            }
             if (slot < 0 || slot >= 9) {
                 requestStop("failed", "invalid_hotbar_slot");
                 return;
@@ -1714,6 +1748,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             // pass the recipient before vanilla's pickup delay expires.
             lookAtDropPoint(client);
             current.handoffReceiverId = recipient.getUUID().toString();
+            current.handoffReceiverName = recipient.getName().getString();
             current.handoffExpected = wanted;
             for (Entity entity : client.level.entitiesForRendering()) {
                 if (entity instanceof ItemEntity) current.handoffExistingDrops.add(entity.getId());
@@ -1785,6 +1820,14 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
         if (current.phase == 0) {
             current.anchor = client.player.blockPosition();
+            if (current.params.has("scaffold_blocks")) {
+                List<net.minecraft.world.item.Item> allowed = new ArrayList<>();
+                for (var name : current.params.getAsJsonArray("scaffold_blocks")) {
+                    allowed.add(new BlockOptionalMeta(name.getAsString()).getBlock().asItem());
+                }
+                current.previousThrowawayItems = BaritoneAPI.getSettings().acceptableThrowawayItems.value;
+                BaritoneAPI.getSettings().acceptableThrowawayItems.value = allowed;
+            }
             current.verticalDistance = Math.max(1, Math.min(128, integer(current.params, "max_distance", 64)));
             int targetY = integer(current.params, "target_y",
                 current.kind.equals("digUp") ? current.anchor.getY() + 1 : current.anchor.getY());
@@ -1975,12 +2018,25 @@ public final class MineBotClientBody implements ClientModInitializer {
                 response.addProperty("handoff_expected", current.handoffExpected);
                 response.addProperty("handoff_picked_up", current.handoffPickedUp);
                 response.addProperty("handoff_receipt", current.handoffReceipt);
+                response.addProperty("spawned_count", current.phase >= 2 ? current.handoffExpected : 0);
+                if (current.handoffReceipt) {
+                    JsonObject receipt = new JsonObject();
+                    receipt.addProperty("player", current.handoffReceiverName);
+                    receipt.addProperty("item", current.item);
+                    receipt.addProperty("count", current.handoffPickedUp);
+                    receipt.addProperty("seq", 0);
+                    receipt.addProperty("tick", client.level == null ? 0 : client.level.getGameTime());
+                    response.add("pickup_receipt", receipt);
+                }
             }
             if (!current.transferItem.isBlank()) {
                 response.addProperty("transfer_item", current.transferItem);
                 response.addProperty("transfer_count", current.transferRequested);
                 response.addProperty("count", status.equals("completed") ? current.transferRequested : 0);
             }
+        }
+        if (current.previousThrowawayItems != null) {
+            BaritoneAPI.getSettings().acceptableThrowawayItems.value = current.previousThrowawayItems;
         }
         run = null;
         emit(current, response);
@@ -2260,6 +2316,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         int transferBotSlot;
         int mutations;
         String handoffReceiverId = "";
+        String handoffReceiverName = "";
         int handoffExpected;
         final Set<Integer> handoffExistingDrops = new HashSet<>();
         final Map<Integer, Integer> handoffDrops = new LinkedHashMap<>();
@@ -2270,6 +2327,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         int verticalDistance;
         int verticalSettledTicks;
         int verticalIdleTicks;
+        List<net.minecraft.world.item.Item> previousThrowawayItems;
         String stopStatus;
         String stopReason;
         String lastPathEvent = "";

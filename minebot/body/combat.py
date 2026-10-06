@@ -1,12 +1,4 @@
-"""Body transaction combat runtime (engage + find_hostiles).
-
-Mirrors ``NavigationTransactions.follow_entity``: the brain emits one intent
-("engage X" or "engage nearest_hostile") and the Body owns the fight server-side
-(approach via Scarpet navigateTo + run_move_tick, swing on cooldown when in
-range with line-of-sight, disengage on low health, kill-verify). Python is the
-transaction glue: dispatch the action, await ``engageDone`` terminal truth,
-record progress.
-"""
+"""Resolve one combat target and dispatch melee/ranged work through Body."""
 
 from __future__ import annotations
 
@@ -196,6 +188,54 @@ class CombatTransactions:
         self.body = body
         self.progress = progress or LocalProgressController()
 
+    def ranged_attack(
+        self,
+        target_spec: str,
+        *,
+        weapon: str = "bow",
+        shots: int = 1,
+        max_range: float = 24.0,
+        timeout_s: float = 20.0,
+    ) -> ToolResult:
+        """Fire a bounded bow/crossbow action at one resolved entity UUID."""
+        from minebot.body.inventory import _dispatch
+
+        weapon = weapon.removeprefix("minecraft:")
+        if weapon not in {"bow", "crossbow"} or not 1 <= shots <= 64 or not 2 <= max_range <= 32 or not 0 < timeout_s <= 300:
+            raise ValueError("provide a bow/crossbow, 1–64 shots, range 2–32, and timeout 0–300 seconds")
+        generation = self.progress.current_generation()
+        start = _pos(self.body.get_state())
+        if not self.progress.generation_current(generation):
+            return _result(False, "preempted", True, start)
+        try:
+            self.progress.require_can_continue(f"ranged_attack:{target_spec}")
+        except ProgressAbort as exc:
+            return _result(False, "progress_yielded", True, start, {"error": str(exc)})
+        resolved = resolve_entity_target(self.body, target_spec, radius=32)
+        if isinstance(resolved, ToolResult):
+            return resolved
+        result = _dispatch(
+            self.body,
+            "rangedAttack",
+            {"target_uuid": resolved.target_uuid, "weapon": weapon, "expected_shots": shots,
+             "max_range": max_range, "timeout_ticks": max(20, int(timeout_s * 20))},
+            timeout_s=timeout_s + 5.0,
+        )
+        if not self.progress.generation_current(generation):
+            return _result(False, "preempted", True, start, resolved.evidence())
+        metrics = dict(result.metrics or {})
+        mismatch = entity_target_terminal_mismatch(resolved, metrics)
+        if mismatch is not None:
+            return mismatch
+        self.progress.note_step(
+            ("ranged.tick", start, resolved.target_uuid, result.reason),
+            success=result.success,
+            fingerprint=self.progress.fingerprint(self.body.get_state()),
+            neutral=result.reason in {"timeout", "target_lost"},
+        )
+        return _result(result.success, result.reason, result.can_retry, start,
+                       {**resolved.evidence(), **metrics, "weapon": weapon, "requested_shots": shots})
+
     def engage_entity(
         self,
         target_spec: str,
@@ -207,8 +247,8 @@ class CombatTransactions:
     ) -> ToolResult:
         """Engage and fight a target (name/type/uuid or 'nearest_hostile').
 
-        The Body approaches via server-side A* + ``run_move_tick``, swings on
-        cooldown when within ``attack_range`` AND line-of-sight is clear,
+        The Body approaches, swings on cooldown when within ``attack_range``
+        and line-of-sight is clear,
         disengages when bot health drops to ``disengage_health``, and
         kill-verifies via target health <= 0. Returns on ``engageDone``.
         """

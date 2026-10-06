@@ -64,7 +64,7 @@ from minebot.brain.context import AgentContext
 from minebot.app.observability import sanitize_observation
 from minebot.app.projection import bounded_summary_value, top_reasons
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
-from minebot.contract import Action, JsonObject
+from minebot.contract import Action, JsonObject, terminal_event_to_tool_result
 from minebot.brain.progress import ProgressAuthority
 from minebot.contract import Body, BreakContext, InventorySlot, PerceptionResult, Position, Region, ToolResult, perception_next_cursor
 from minebot.game import GovernancePolicy
@@ -604,6 +604,8 @@ def build_phase1_registry(
     pickup = PickupTransactions(body, navigator)
     work = BlockWork(body, policy, navigator=navigator, pickup=pickup)
     def mobility_egress(timeout_s: float) -> ToolResult:
+        if surface_objective_body is not None:
+            return _java_ascend(surface_objective_body, timeout_s=timeout_s)
         return work.go_to_surface(
             context=BreakContext.TRAVEL,
             timeout_s=timeout_s,
@@ -637,6 +639,7 @@ def build_phase1_registry(
     block_approach = BlockApproachTransactions(body, approach_navigator)
     collect_objective_body = catalog.objective_body("collect_block_domain", body)
     dig_down_objective_body = catalog.objective_body("dig_down", body)
+    dig_up_objective_body = catalog.objective_body("dig_up", body)
     designated_collector = (
         lambda pos, expected_block_id, expected_item_ids, excavation_budget, timeout_s:
             _java_break_collect(
@@ -661,6 +664,7 @@ def build_phase1_registry(
                 {
                     "target_y": target_y,
                     "max_steps": max(1, mutation_budget),
+                    "max_mutations": max(0, mutation_budget),
                     "max_clear_fall": 2,
                     "timeout_s": timeout_s,
                 },
@@ -704,6 +708,7 @@ def build_phase1_registry(
             _go_to_surface_tool(work, surface_objective_body),
             _follow_tool(navigator),
             _engage_tool(combat),
+            _ranged_tool(combat),
             _find_hostiles_tool(body),
             _search_tool(work),
             _mine_collect_tool(work, collect_objective_body),
@@ -723,6 +728,7 @@ def build_phase1_registry(
                 resource_collection=resource_collection,
                 use=use_txn,
                 dig_down_objective_body=dig_down_objective_body,
+                dig_up_objective_body=dig_up_objective_body,
             ),
         )
     )
@@ -1208,8 +1214,11 @@ def _java_ascend(
     }
     if max_mutations is not None:
         action_params["max_mutations"] = max(0, int(max_mutations))
+    action = Action.create("ascend", action_params)
     try:
-        result = java_objective_body.execute(Action.create("ascend", action_params))
+        result = java_objective_body.execute(action)
+        if result.ok and result.accepted and not result.complete:
+            return terminal_event_to_tool_result(java_objective_body.await_action_terminal(action.id, timeout_s=timeout_s + 5.0))
     except Exception as error:
         return ToolResult(
             False,
@@ -1257,7 +1266,7 @@ def _follow_tool(navigator: NavigationTransactions) -> RegisteredTool:
 def _engage_tool(combat: CombatTransactions) -> RegisteredTool:
     return RegisteredTool(
         "engage_entity",
-        "Engage and fight a hostile target (by name/type/uuid, or 'nearest_hostile'). The Body approaches via server-side pathfinding, swings on cooldown when in range with line-of-sight, disengages on low health, and kill-verifies. Melee; ranged mobs use cover-aware approach.",
+        "Fight one selected target (name/type/uuid, or 'nearest_hostile') in melee. The Body approaches, swings on cooldown with line-of-sight, disengages on low health, and verifies the kill.",
         {
             "type": "object",
             "properties": {
@@ -1286,6 +1295,35 @@ def _engage_tool(combat: CombatTransactions) -> RegisteredTool:
             body_scope=("combat", "nearby_entities"),
             terminal_truth=("engageDone", "position"),
             timeout_s=120.0,
+        ),
+    )
+
+
+def _ranged_tool(combat: CombatTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "ranged_attack",
+        "Shoot one selected target with a bow or crossbow. The Body selects the weapon, aims, charges, fires a bounded number of shots, and verifies damage or a kill. Requires a weapon and ammunition.",
+        {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "minLength": 1},
+                "weapon": {"type": "string", "enum": ["bow", "crossbow"]},
+                "shots": {"type": "integer", "minimum": 1, "maximum": 64},
+                "max_range": {"type": "number", "minimum": 2, "maximum": 32},
+                "timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+        lambda params: combat.ranged_attack(
+            str(params["target"]), weapon=str(params.get("weapon", "bow")),
+            shots=int(params.get("shots", 1)), max_range=float(params.get("max_range", 24)),
+            timeout_s=float(params.get("timeout_s", 20)),
+        ),
+        ToolSidecar(
+            "ranged_attack", mutating=True, source="body.combat", tool_type="combat",
+            permission="combat", body_scope=("combat", "nearby_entities", "inventory"),
+            terminal_truth=("rangedDone", "target_health"), timeout_s=305.0,
         ),
     )
 

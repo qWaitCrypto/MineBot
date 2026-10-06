@@ -230,7 +230,10 @@ def test_real_client_body_executes_process_and_returns_terminal_event() -> None:
 @pytest.mark.parametrize(
     ("goal", "objective"),
     (
+        ({"kind": "near", "pos": [10, 70, 9], "radius": 0}, "near:10:70:9:0"),
         ({"kind": "block", "x": 10, "y": 70, "z": 9}, "block:10:70:9"),
+        ({"kind": "composite", "mode": "any", "goals": [{"kind": "near", "pos": [10, 70, 9], "radius": 0}]},
+         "any:near:10:70:9:0"),
         (
             {
                 "kind": "composite",
@@ -457,3 +460,122 @@ def test_real_client_follow_uses_baritone_target_resolution() -> None:
 
     assert result.success
     assert result.metrics["requested_target"] == "Sheep"
+
+
+@pytest.mark.parametrize("tool_name, action_name", [("engage_entity", "engageEntity"), ("ranged_attack", "rangedAttack")])
+def test_real_client_combat_tools_send_one_resolved_uuid(tool_name, action_name) -> None:
+    target_uuid = "11111111-1111-4111-8111-111111111111"
+
+    class CombatIpc(FakeClientIpc):
+        def state(self):
+            state = super().state()
+            state["entities"].append({"id": "22222222-2222-4222-8222-222222222222", "name": "Decoy", "type": "zombie",
+                                      "hostile": True, "dist2": 0.01, "pos": [4, 70, 9]})
+            state["entities"].append({"id": "00000000-0000-4000-8000-000000000000", "name": "Sheep", "type": "sheep",
+                                      "health": 0, "dist2": 0.01, "pos": [4, 70, 9]})
+            return state
+
+        def action(self, name, params, *, action_id, timeout_ms, **kwargs):
+            super().action(name, params, action_id=action_id, timeout_ms=timeout_ms, **kwargs)
+            return RealClientTerminal(action_id, "completed", "killed" if name == "engageEntity" else "damage_observed",
+                                      {"target_id": params["target_uuid"], "target_health": 0 if name == "engageEntity" else 15,
+                                       "damage_observed": True, "shots": 1})
+
+    ipc = CombatIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
+    registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=REGION, body_provider="real_client"))
+    result = registry.get(tool_name).callable({"target": "Sheep", "timeout_s": 1})
+    assert result.success
+    assert result.reason == ("killed" if tool_name == "engage_entity" else "damage_observed")
+    assert ipc.actions[0][0] == action_name
+    assert ipc.actions[0][1]["target_uuid"] == target_uuid
+    assert result.metrics["target_id"] == target_uuid
+    assert not ipc.commands
+
+
+def test_real_client_ranged_tool_preserves_no_ammunition_and_target_mismatch() -> None:
+    class FailedShotIpc(FakeClientIpc):
+        failure = True
+
+        def action(self, name, params, *, action_id, timeout_ms, **kwargs):
+            return RealClientTerminal(action_id, "failed" if self.failure else "completed",
+                                      "no_ammunition" if self.failure else "damage_observed",
+                                      {"target_id": params["target_uuid"] if self.failure else "22222222-2222-4222-8222-222222222222"})
+    ipc = FailedShotIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
+    registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=REGION, body_provider="real_client"))
+    result = registry.get("ranged_attack").callable({"target": "Sheep"})
+    assert not result.success and result.reason == "no_ammunition"
+    ipc.failure = False
+    result = registry.get("ranged_attack").callable({"target": "Sheep"})
+    assert not result.success and result.reason == "target_identity_mismatch"
+
+
+def test_real_client_ranged_tool_missing_target_does_not_start_an_action() -> None:
+    ipc = FakeClientIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
+    registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=REGION, body_provider="real_client"))
+    result = registry.get("ranged_attack").callable({"target": "Missing"})
+    assert not result.success and result.reason == "target_not_found"
+    assert not ipc.actions
+
+
+@pytest.mark.parametrize("tool_name, params, action_name", [
+    ("go_to_surface", {"timeout_s": 2}, "ascend"),
+    ("dig_down", {"target_y": 65, "max_steps": 3}, "digDown"),
+    ("dig_up", {"target_y": 75, "max_steps": 3, "scaffold_blocks": ["dirt"]}, "digUp"),
+])
+def test_real_client_vertical_tools_wait_for_one_body_terminal(tool_name, params, action_name) -> None:
+    class VerticalIpc(FakeClientIpc):
+        def action(self, name, params, *, action_id, timeout_ms, **kwargs):
+            super().action(name, params, action_id=action_id, timeout_ms=timeout_ms, **kwargs)
+            time.sleep(0.01)
+            return RealClientTerminal(action_id, "completed", "surface_reached" if name == "ascend" else "target_reached",
+                                      {"position": [4.5, params.get("target_y", 80), 9.5], "on_ground": True})
+
+    ipc = VerticalIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
+    registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=REGION, body_provider="real_client"))
+    result = registry.get(tool_name).callable(params)
+    assert result.success and result.metrics["on_ground"]
+    assert len(ipc.actions) == 1 and ipc.actions[0][0] == action_name
+    if action_name != "ascend":
+        assert ipc.actions[0][1]["max_distance"] == 3
+        assert ipc.actions[0][1]["max_mutations"] == 9
+    if action_name == "digUp":
+        assert ipc.actions[0][1]["scaffold_blocks"] == ["dirt"]
+    assert not ipc.commands
+
+
+def test_real_client_vertical_tool_returns_cancellation_terminal() -> None:
+    started = threading.Event()
+
+    class CancellableVerticalIpc(FakeClientIpc):
+        def action(self, name, params, *, action_id, timeout_ms, **kwargs):
+            started.set()
+            assert self._cancel.wait(2)
+            return RealClientTerminal(action_id, "canceled", "cancel_requested", {"position": [4.5, 70, 9.5]})
+
+    ipc = CancellableVerticalIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
+    registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=REGION, body_provider="real_client"))
+    results = []
+    worker = threading.Thread(target=lambda: results.append(registry.get("dig_up").callable({"target_y": 75})))
+    worker.start()
+    assert started.wait(2)
+    assert body.interrupt("stop vertical work").ok
+    worker.join(2)
+    assert not worker.is_alive()
+    assert len(results) == 1 and not results[0].success and results[0].reason == "cancel_requested"
+    assert len(ipc.canceled) == 1
+
+
+def test_real_client_vertical_tool_retains_liquid_refusal() -> None:
+    class HazardIpc(FakeClientIpc):
+        def action(self, name, params, *, action_id, timeout_ms, **kwargs):
+            return RealClientTerminal(action_id, "failed", "vertical_liquid_hazard", {"mutations": 0})
+
+    body = RealClientBody("CapProbe2", HazardIpc())  # type: ignore[arg-type]
+    registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=REGION, body_provider="real_client"))
+    result = registry.get("dig_down").callable({"target_y": 65})
+    assert not result.success and result.reason == "vertical_liquid_hazard" and result.metrics["mutations"] == 0
