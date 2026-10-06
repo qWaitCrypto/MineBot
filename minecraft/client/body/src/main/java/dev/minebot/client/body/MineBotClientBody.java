@@ -5,6 +5,11 @@ import baritone.api.IBaritone;
 import baritone.api.event.events.PathEvent;
 import baritone.api.event.listener.AbstractGameEventListener;
 import baritone.api.pathing.goals.GoalBlock;
+import baritone.api.pathing.goals.Goal;
+import baritone.api.pathing.goals.GoalXZ;
+import baritone.api.pathing.goals.GoalNear;
+import baritone.api.schematic.FillSchematic;
+import baritone.api.utils.BlockOptionalMeta;
 import baritone.api.utils.BlockOptionalMetaLookup;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -13,8 +18,11 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EquipmentSlot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,7 +49,8 @@ public final class MineBotClientBody implements ClientModInitializer {
     private Run run;
     private volatile Peer peer;
     private int joinedTicks;
-    private boolean ready;
+    private volatile boolean ready;
+    private long readyAtMs;
     private final long loadedAt = System.nanoTime();
 
     @Override
@@ -104,7 +113,7 @@ public final class MineBotClientBody implements ClientModInitializer {
                         Minecraft.getInstance().execute(() -> {
                             JsonObject response = state(Minecraft.getInstance());
                             response.addProperty("type", "ready");
-                            response.addProperty("mod_to_ready_ms", (System.nanoTime() - loadedAt) / 1_000_000);
+                            response.addProperty("mod_to_ready_ms", readyAtMs);
                             connection.send(response);
                         });
                     }
@@ -178,8 +187,34 @@ public final class MineBotClientBody implements ClientModInitializer {
                 if (request.has("explore_for_blocks")) {
                     BaritoneAPI.getSettings().exploreForBlocks.value = request.get("explore_for_blocks").getAsBoolean();
                 }
+                if (request.has("allow_break")) {
+                    BaritoneAPI.getSettings().allowBreak.value = request.get("allow_break").getAsBoolean();
+                }
+                if (request.has("allow_place")) {
+                    BaritoneAPI.getSettings().allowPlace.value = request.get("allow_place").getAsBoolean();
+                }
+                if (request.has("replant_crops")) {
+                    BaritoneAPI.getSettings().replantCrops.value = request.get("replant_crops").getAsBoolean();
+                }
+                if (request.has("farm_max_scan_size")) {
+                    int size = request.get("farm_max_scan_size").getAsInt();
+                    if (size < 1 || size > 256) throw new IllegalArgumentException("invalid_farm_max_scan_size");
+                    BaritoneAPI.getSettings().farmMaxScanSize.value = size;
+                }
                 JsonObject response = state(client);
                 response.addProperty("type", "settings");
+                connection.send(response);
+            } else if (type.equals("builder_pause") || type.equals("builder_resume")) {
+                if (type.equals("builder_pause")) baritone.getBuilderProcess().pause();
+                else baritone.getBuilderProcess().resume();
+                JsonObject response = state(client);
+                response.addProperty("type", type);
+                connection.send(response);
+            } else if (type.equals("close_screen")) {
+                client.player.closeContainer();
+                client.setScreen(null);
+                JsonObject response = state(client);
+                response.addProperty("type", type);
                 connection.send(response);
             } else if (type.equals("cancel")) {
                 if (run == null || !run.id.equals(id)) {
@@ -227,6 +262,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             throw new IllegalArgumentException("invalid_timeout");
         }
         Run candidate = new Run(id, objective, connection, timeout);
+        candidate.kind = parts[0];
         if (parts.length == 4 && (parts[0].equals("goto") || parts[0].equals("navigate"))) {
             try {
                 candidate.goal = new GoalBlock(
@@ -238,16 +274,61 @@ public final class MineBotClientBody implements ClientModInitializer {
         } else if ((parts.length == 2 || parts.length == 3) && parts[0].equals("mine") && !parts[1].isBlank()) {
             candidate.target = parts[1];
             candidate.item = parts.length == 3 ? parts[2] : parts[1];
+        } else if (parts.length == 3 && parts[0].equals("xz")) {
+            candidate.goal = new GoalXZ(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
+        } else if (parts.length == 5 && parts[0].equals("near")) {
+            candidate.goal = new GoalNear(position(parts, 1), Integer.parseInt(parts[4]));
+        } else if (parts.length == 2 && parts[0].equals("get")) {
+            candidate.target = parts[1];
+        } else if (parts.length == 3 && parts[0].equals("explore")) {
+            candidate.anchor = new BlockPos(Integer.parseInt(parts[1]), 0, Integer.parseInt(parts[2]));
+        } else if (parts.length == 2 && (parts[0].equals("follow") || parts[0].equals("pickup"))) {
+            candidate.target = parts[1];
+            if (parts[0].equals("pickup")) candidate.item = parts[1];
+        } else if (parts.length == 5 && parts[0].equals("farm")) {
+            candidate.range = Integer.parseInt(parts[1]);
+            candidate.anchor = position(parts, 2);
+        } else if (parts.length == 8 && parts[0].equals("build")) {
+            candidate.target = parts[1];
+            candidate.anchor = position(parts, 2);
+            candidate.sx = Integer.parseInt(parts[5]);
+            candidate.sy = Integer.parseInt(parts[6]);
+            candidate.sz = Integer.parseInt(parts[7]);
+            if (candidate.sx < 1 || candidate.sy < 1 || candidate.sz < 1 || candidate.sx * candidate.sy * candidate.sz > 256) {
+                throw new IllegalArgumentException("invalid_fixture_size");
+            }
+        } else if (parts.length == 7 && parts[0].equals("clear")) {
+            candidate.anchor = position(parts, 1);
+            candidate.end = position(parts, 4);
+        } else if (parts.length == 4 && parts[0].equals("elytra")) {
+            candidate.anchor = position(parts, 1);
         } else {
             throw new IllegalArgumentException("unsupported_objective");
         }
         candidate.before = count(client, candidate.item);
         usedIds.add(id);
         run = candidate;
-        if (candidate.goal != null) {
-            baritone.getCustomGoalProcess().setGoalAndPath(candidate.goal);
-        } else {
-            baritone.getMineProcess().mineByName(1, candidate.target);
+        try {
+            if (candidate.goal != null) baritone.getCustomGoalProcess().setGoalAndPath(candidate.goal);
+            else switch (candidate.kind) {
+                case "mine" -> baritone.getMineProcess().mineByName(1, candidate.target);
+                case "get" -> baritone.getGetToBlockProcess().getToBlock(new BlockOptionalMeta(candidate.target));
+                case "explore" -> baritone.getExploreProcess().explore(candidate.anchor.getX(), candidate.anchor.getZ());
+                case "follow" -> baritone.getFollowProcess().follow(entity ->
+                    entity.getName().getString().equals(candidate.target)
+                        || BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath().equals(candidate.target));
+                case "pickup" -> baritone.getFollowProcess().pickup(stack -> BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath().equals(candidate.target));
+                case "farm" -> baritone.getFarmProcess().farm(candidate.range, candidate.anchor);
+                case "build" -> baritone.getBuilderProcess().build("minebot-owned-fixture", new FillSchematic(candidate.sx, candidate.sy, candidate.sz, new BlockOptionalMeta(candidate.target)), candidate.anchor);
+                case "clear" -> baritone.getBuilderProcess().clearArea(candidate.anchor, candidate.end);
+                case "elytra" -> {
+                    if (!baritone.getElytraProcess().isLoaded()) throw new IllegalArgumentException("elytra_process_not_loaded");
+                    baritone.getElytraProcess().pathTo(candidate.anchor);
+                }
+                default -> throw new IllegalArgumentException("unsupported_objective");
+            }
+        } catch (RuntimeException error) {
+            requestStop("failed", "process_start_failed:" + error.getMessage());
         }
         emit(candidate, envelope("accepted", id));
         LOG.info("MINEBOT_PHASE_A objective_started id={} objective={}", id, objective);
@@ -270,9 +351,10 @@ public final class MineBotClientBody implements ClientModInitializer {
         joinedTicks++;
         if (!ready && joinedTicks >= 20 && client.level.hasChunkAt(client.player.blockPosition()) && client.player.onGround()) {
             ready = true;
+            readyAtMs = (System.nanoTime() - loadedAt) / 1_000_000;
             JsonObject response = state(client);
             response.addProperty("type", "ready");
-            response.addProperty("mod_to_ready_ms", (System.nanoTime() - loadedAt) / 1_000_000);
+            response.addProperty("mod_to_ready_ms", readyAtMs);
             if (peer != null) {
                 peer.send(response);
             }
@@ -283,6 +365,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         current.ticks++;
+        if (processActive()) current.seenActive = true;
         int cancelTicks = Integer.getInteger("minebot.client.cancel_after_ticks", 0);
         if (cancelTicks > 0 && current.ticks >= cancelTicks) {
             requestStop("canceled", "launch_cancel_requested");
@@ -295,7 +378,9 @@ public final class MineBotClientBody implements ClientModInitializer {
             } else if (current.elapsed() > current.timeout) {
                 requestStop("timeout", "deadline_exceeded");
             } else if (current.ticks > 20 && !processActive() && !baritone.getPathingBehavior().isPathing()) {
-                requestStop("failed", "baritone_stopped_without_result");
+                boolean finite = current.seenActive && (current.kind.equals("build") || current.kind.equals("clear")
+                    || current.kind.equals("get") || current.kind.equals("farm") || current.kind.equals("elytra"));
+                requestStop(finite ? "completed" : "failed", finite ? "process_finished_verify_world" : "baritone_stopped_without_result");
             }
         }
         if (current.ticks % 20 == 0) {
@@ -346,6 +431,8 @@ public final class MineBotClientBody implements ClientModInitializer {
         response.addProperty("inventory_before", current.before);
         response.addProperty("inventory_after", count(client, current.item));
         response.addProperty("inventory_delta", count(client, current.item) - current.before);
+        response.addProperty("process_kind", current.kind);
+        response.addProperty("seen_active", current.seenActive);
         response.addProperty("last_path_event", current.lastPathEvent);
         JsonObject events = new JsonObject();
         current.pathEvents.forEach(events::addProperty);
@@ -371,6 +458,12 @@ public final class MineBotClientBody implements ClientModInitializer {
             state.add("position", pos);
             state.addProperty("on_ground", client.player.onGround());
             state.addProperty("creative", client.player.getAbilities().instabuild);
+            state.addProperty("dimension", client.level.dimension().identifier().toString());
+            state.addProperty("health", client.player.getHealth());
+            state.addProperty("food", client.player.getFoodData().getFoodLevel());
+            state.addProperty("fall_flying", client.player.isFallFlying());
+            state.addProperty("menu", client.player.containerMenu.getClass().getSimpleName());
+            state.addProperty("chest_item", BuiltInRegistries.ITEM.getKey(client.player.getItemBySlot(EquipmentSlot.CHEST).getItem()).getPath());
             state.addProperty("feet_chunk_loaded", client.level.hasChunkAt(client.player.blockPosition()));
             JsonObject inventory = new JsonObject();
             for (int slot = 0; slot < client.player.getInventory().getContainerSize(); slot++) {
@@ -386,6 +479,25 @@ public final class MineBotClientBody implements ClientModInitializer {
             state.addProperty("pathing", baritone.getPathingBehavior().isPathing());
             state.addProperty("mine_active", baritone.getMineProcess().isActive());
             state.addProperty("goal_active", baritone.getCustomGoalProcess().isActive());
+            state.addProperty("get_active", baritone.getGetToBlockProcess().isActive());
+            state.addProperty("explore_active", baritone.getExploreProcess().isActive());
+            state.addProperty("follow_active", baritone.getFollowProcess().isActive());
+            state.addProperty("farm_active", baritone.getFarmProcess().isActive());
+            state.addProperty("builder_active", baritone.getBuilderProcess().isActive());
+            state.addProperty("builder_paused", baritone.getBuilderProcess().isPaused());
+            state.addProperty("elytra_active", baritone.getElytraProcess().isActive());
+            state.addProperty("elytra_loaded", baritone.getElytraProcess().isLoaded());
+            JsonArray following = new JsonArray();
+            var followed = baritone.getFollowProcess().following();
+            if (followed != null) {
+                for (Entity entity : followed) {
+                    JsonObject observed = new JsonObject();
+                    observed.addProperty("name", entity.getName().getString());
+                    observed.addProperty("distance", client.player.distanceTo(entity));
+                    following.add(observed);
+                }
+            }
+            state.add("following", following);
             state.addProperty("any_process_active", processActive());
             var goal = baritone.getPathingBehavior().getGoal();
             state.addProperty("baritone_goal", goal == null ? "" : goal.toString());
@@ -415,6 +527,10 @@ public final class MineBotClientBody implements ClientModInitializer {
         return object.has(key) ? object.get(key).getAsString() : fallback;
     }
 
+    private static BlockPos position(String[] parts, int index) {
+        return new BlockPos(Integer.parseInt(parts[index]), Integer.parseInt(parts[index + 1]), Integer.parseInt(parts[index + 2]));
+    }
+
     private static JsonObject envelope(String type, String id) {
         JsonObject object = new JsonObject();
         object.addProperty("type", type);
@@ -435,7 +551,15 @@ public final class MineBotClientBody implements ClientModInitializer {
         final long started = System.nanoTime();
         final long timeout;
         final Map<String, Integer> pathEvents = new LinkedHashMap<>();
-        GoalBlock goal;
+        Goal goal;
+        String kind;
+        BlockPos anchor;
+        BlockPos end;
+        int range;
+        int sx;
+        int sy;
+        int sz;
+        boolean seenActive;
         String target;
         String item;
         String stopStatus;
