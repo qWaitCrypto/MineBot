@@ -317,7 +317,7 @@ class FurnaceTransactions:
                     "count": count,
                 },
             )
-        if bot_slot < 0 or bot_slot > 45:
+        if bot_slot < 0 or bot_slot >= 36:
             return ToolResult(
                 success=False,
                 reason="invalid_bot_slot",
@@ -1114,6 +1114,13 @@ class FurnaceTransactions:
         output_count: int,
         output_slot: int | None,
     ) -> SmeltPlan | ToolResult:
+        if output_slot is not None and not 0 <= output_slot < 36:
+            return ToolResult(
+                success=False,
+                reason="invalid_bot_slot",
+                can_retry=False,
+                metrics={"furnace_pos": list(pos), "bot_slot": output_slot},
+            )
         target_type = _read_target_type(self.body, pos)
         if isinstance(target_type, ToolResult):
             return target_type
@@ -1430,7 +1437,7 @@ def _read_target_type(body: Body, pos: Position) -> str | ToolResult:
 
 def _plan_clear(pos: Position, furnace_slots: list[InventorySlot], inventory_slots: list[InventorySlot]) -> FurnaceClearPlan:
     by_slot = {slot.slot: slot for slot in furnace_slots}
-    empty_bot_slots = [slot.slot for slot in inventory_slots if slot.empty]
+    empty_bot_slots = [slot.slot for slot in inventory_slots if 0 <= slot.slot < 36 and slot.empty]
     occupied = [
         (name, by_slot.get(index))
         for name, index in ((slot_name, FURNACE_SLOTS[slot_name]) for slot_name in CLEAR_ORDER)
@@ -1515,7 +1522,7 @@ def _same_item(actual: str | None, wanted: str) -> bool:
 def _find_item_slot(slots: list[InventorySlot], item: str, *, min_count: int, exclude: set[int] | None = None) -> int | None:
     excluded = exclude or set()
     for slot in slots:
-        if slot.slot in excluded or slot.empty:
+        if not 0 <= slot.slot < 36 or slot.slot in excluded or slot.empty:
             continue
         if _same_item(slot.item, item) and slot.count >= min_count:
             return slot.slot
@@ -1527,7 +1534,7 @@ def _available_item_count(slots: list[InventorySlot], item: str, *, exclude: set
     return sum(
         slot.count
         for slot in slots
-        if slot.slot not in excluded and not slot.empty and _same_item(slot.item, item)
+        if 0 <= slot.slot < 36 and slot.slot not in excluded and not slot.empty and _same_item(slot.item, item)
     )
 
 

@@ -172,6 +172,45 @@ class FakeNearestContainerBody(FakeContainerBody):
 
 
 class ContainerRuntimeTests(unittest.TestCase):
+    def test_transfer_to_container_ignores_equipment_and_crafting_sources(self):
+        for storage in ([], [slot(35, "minecraft:diamond", 1)]):
+            with self.subTest(storage=storage):
+                body = FakeContainerBody(
+                    container_pages=[perception("container", [slot(0)])],
+                    inventory_pages=[perception("inventory", [slot(index, "minecraft:diamond", 4)
+                                                              for index in (40, 41, 45)] + storage)],
+                )
+                result = ContainerTransactions(body).transfer_item(
+                    (1, 59, 0), item="diamond", count=1, direction="bot_to_container",
+                )
+                if storage:
+                    self.assertTrue(result.success)
+                    self.assertEqual(body.actions[0].params["bot_slot"], 35)
+                else:
+                    self.assertEqual(result.reason, "item_not_available")
+                    self.assertEqual(body.actions, [])
+
+    def test_transfer_from_container_ignores_equipment_and_crafting_destinations(self):
+        for free_storage in (False, True):
+            with self.subTest(free_storage=free_storage):
+                inventory = [slot(index) for index in range(36, 46)] + [
+                    slot(index) if index == 35 and free_storage else slot(index, "minecraft:dirt", 64)
+                    for index in range(36)
+                ]
+                body = FakeContainerBody(
+                    container_pages=[perception("container", [slot(0, "minecraft:diamond", 1)])],
+                    inventory_pages=[perception("inventory", inventory)],
+                )
+                result = ContainerTransactions(body).transfer_item(
+                    (1, 59, 0), item="diamond", count=1, direction="container_to_bot",
+                )
+                if free_storage:
+                    self.assertTrue(result.success)
+                    self.assertEqual(body.actions[0].params["bot_slot"], 35)
+                else:
+                    self.assertEqual(result.reason, "destination_full")
+                    self.assertEqual(body.actions, [])
+
     def test_transfer_item_reads_inventory_in_safe_pages(self):
         body = FakeContainerBody(
             container_pages=[perception("container", [slot(0, "minecraft:diamond", 1)])],

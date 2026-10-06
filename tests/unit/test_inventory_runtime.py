@@ -592,6 +592,46 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertEqual(result.reason, "invalid_craft_request")
         self.assertEqual(body.actions, [])
 
+    def test_craft_exact_rejects_non_storage_input_output_and_remainder_slots(self):
+        for index in (-1, 36, 40, 41, 44, 45, 46):
+            for role in ("inputs", "output", "remainders"):
+                with self.subTest(slot=index, role=role):
+                    body = FakeInventoryBody([])
+                    params = {
+                        "inputs": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+                        "output": {"slot": 1, "item": "minecraft:oak_planks", "count": 4},
+                        "remainders": [],
+                    }
+                    entry = {"slot": index, "item": "minecraft:bucket", "count": 1}
+                    params[role] = entry if role == "output" else [entry]
+                    result = InventoryTransactions(body).craft_exact(**params)
+                    self.assertEqual(result.reason, "invalid_craft_request")
+                    self.assertEqual(body.actions, [])
+                    self.assertEqual(body.perceptions, [])
+
+    def test_craft_recipe_rejects_non_storage_output_before_cleanup(self):
+        for index in (-1, 36, 40, 41, 45):
+            with self.subTest(slot=index):
+                body = FakeInventoryBody([])
+                result = InventoryTransactions(body).craft_recipe(item="stick", output_slot=index)
+                self.assertEqual(result.reason, "invalid_craft_output_slot")
+                self.assertEqual(body.actions, [])
+                self.assertEqual(body.perceptions, [])
+
+    def test_craft_recipe_uses_storage_inputs_and_outputs_only(self):
+        before = [slot(0), slot(35, "minecraft:oak_log", 1),
+                  slot(36, "minecraft:oak_planks", 8), slot(40, "minecraft:oak_log", 64), slot(41)]
+        after = [slot(0, "minecraft:oak_planks", 4), slot(35),
+                 slot(36, "minecraft:oak_planks", 8), slot(40, "minecraft:oak_log", 64), slot(41)]
+        body = FakeInventoryBody(
+            [perception(before), perception(before), perception(before), perception(after), perception(after)],
+            recipe_data={"minecraft:oak_planks": '[[[[oak_planks, 4, {count:4,id:"minecraft:oak_planks"}]], [[oak_log]], [shapeless]]]'},
+        )
+        result = InventoryTransactions(body).craft_recipe(item="minecraft:oak_planks", count=4)
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(body.actions[0].params["inputs"], [{"slot": 35, "item": "minecraft:oak_log", "count": 1}])
+        self.assertEqual(body.actions[0].params["output"]["slot"], 0)
+
     def test_craft_exact_reports_craft_unverified_when_post_slots_do_not_match(self):
         body = FakeInventoryBody(
             [
@@ -943,6 +983,17 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "already_clean")
         self.assertEqual(body.actions, [])
+
+    def test_cleanup_crafting_residue_rejects_invalid_source_or_destination(self):
+        for sources, destinations in (((40,), (0,)), ((45,), (0,)), ((41,), (36,)), ((41,), (0, 45))):
+            with self.subTest(sources=sources, destinations=destinations):
+                body = FakeInventoryBody([])
+                result = InventoryTransactions(body).cleanup_crafting_residue(
+                    residue_slots=sources, destination_slots=destinations,
+                )
+                self.assertEqual(result.reason, "invalid_residue_cleanup_request")
+                self.assertEqual(body.actions, [])
+                self.assertEqual(body.perceptions, [])
 
     def test_cleanup_crafting_residue_refuses_when_no_destination_space(self):
         body = FakeInventoryBody(

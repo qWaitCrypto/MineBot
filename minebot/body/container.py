@@ -344,6 +344,7 @@ def _plan_transfer(
     container_slots: list[InventorySlot],
     inventory_slots: list[InventorySlot],
 ) -> ContainerTransferPlan:
+    inventory_slots = [slot for slot in inventory_slots if 0 <= slot.slot < 36]
     sources = container_slots if direction == "container_to_bot" else inventory_slots
     destinations = inventory_slots if direction == "container_to_bot" else container_slots
     matching_sources = [slot for slot in sources if _same_item(slot.item, item) and not slot.empty]

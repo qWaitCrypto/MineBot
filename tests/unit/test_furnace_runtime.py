@@ -313,6 +313,46 @@ class FakeInteractionNavigator:
 
 
 class FurnaceRuntimeTests(unittest.TestCase):
+    def test_clear_furnace_ignores_equipment_and_crafting_destinations(self):
+        body = FakeFurnaceBody(
+            perception("container", [slot(0), slot(1), slot(2, "minecraft:iron_ingot", 1)]),
+            perception("inventory", [slot(index, "minecraft:dirt", 64) for index in range(36)]
+                       + [slot(index) for index in range(36, 46)]),
+        )
+        result = FurnaceTransactions(body).clear_furnace((1, 59, 0))
+        self.assertEqual(result.reason, "bot_inventory_full")
+        self.assertEqual(body.actions, [])
+
+    def test_smelt_ignores_equipment_and_crafting_inputs_and_fuel(self):
+        for special in (36, 40, 41, 45):
+            for role in ("input", "fuel"):
+                with self.subTest(slot=special, role=role):
+                    inventory = [slot(special if role == "input" else 0, "minecraft:raw_iron", 1),
+                                 slot(special if role == "fuel" else 35, "minecraft:coal", 2), slot(1)]
+                    body = FakeFurnaceBody(
+                        perception("container", [slot(0), slot(1), slot(2)]), perception("inventory", inventory),
+                    )
+                    result = FurnaceTransactions(body).smelt_once(
+                        (1, 59, 0), input_item="raw_iron", input_count=1, fuel_item="coal",
+                        fuel_count=1, output_item="iron_ingot", output_count=1,
+                    )
+                    self.assertEqual(result.reason, "smelt_input_not_available" if role == "input" else "smelt_fuel_not_available")
+                    if role == "fuel":
+                        self.assertEqual(result.metrics["available_count"], 0)
+                    self.assertEqual(body.actions, [])
+
+    def test_smelt_rejects_non_storage_output_before_mutation(self):
+        for index in (-1, 36, 40, 41, 45):
+            with self.subTest(slot=index):
+                body = FakeFurnaceBody(perception("container", []), perception("inventory", []))
+                result = FurnaceTransactions(body).smelt_once(
+                    (1, 59, 0), input_item="raw_iron", input_count=1, fuel_item="coal",
+                    fuel_count=1, output_item="iron_ingot", output_count=1, output_slot=index,
+                )
+                self.assertEqual(result.reason, "invalid_bot_slot")
+                self.assertEqual(body.actions, [])
+                self.assertEqual(body.perceptions, [])
+
     def test_select_fuel_prefers_dedicated_fuels_and_normalizes_counts(self):
         result = select_fuel(
             {
@@ -1705,17 +1745,15 @@ class FurnaceRuntimeTests(unittest.TestCase):
         self.assertEqual(body.actions, [])
 
     def test_transfer_slot_rejects_invalid_bot_slot(self):
-        body = FakeFurnaceBody(
-            perception("container", [slot(0), slot(1), slot(2)]),
-            perception("inventory", [slot(0)]),
-        )
-        runtime = FurnaceTransactions(body)
-
-        result = runtime.transfer_slot((1, 59, 0), direction="furnace_to_bot", bot_slot=99)
-
-        self.assertFalse(result.success)
-        self.assertEqual(result.reason, "invalid_bot_slot")
-        self.assertEqual(body.actions, [])
+        for index in (-1, 36, 40, 41, 45, 99):
+            for direction in ("furnace_to_bot", "bot_to_furnace"):
+                with self.subTest(slot=index, direction=direction):
+                    body = FakeFurnaceBody(perception("container", []), perception("inventory", []))
+                    result = FurnaceTransactions(body).transfer_slot((1, 59, 0), direction=direction, bot_slot=index)
+                    self.assertFalse(result.success)
+                    self.assertEqual(result.reason, "invalid_bot_slot")
+                    self.assertEqual(body.actions, [])
+                    self.assertEqual(body.perceptions, [])
 
     def test_transfer_slot_reports_unverified_when_terminal_count_disagrees_with_truth(self):
         body = FakeFurnaceBody(

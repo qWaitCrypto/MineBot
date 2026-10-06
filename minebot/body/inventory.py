@@ -465,7 +465,9 @@ class InventoryTransactions:
     ) -> ToolResult:
         residue_set = set(residue_slots)
         destination_order = tuple(slot for slot in destination_slots if slot not in residue_set)
-        if not residue_slots or not destination_order:
+        if (not residue_slots or not destination_order
+                or any(slot < 41 or slot > 44 for slot in residue_slots)
+                or any(slot < 0 or slot >= 36 for slot in destination_slots)):
             return ToolResult(
                 success=False,
                 reason="invalid_residue_cleanup_request",
@@ -567,6 +569,14 @@ class InventoryTransactions:
                 reason="invalid_craft_count",
                 can_retry=False,
                 metrics={"item": item, "requested_count": count},
+            )
+
+        if output_slot is not None and not 0 <= output_slot < 36:
+            return ToolResult(
+                success=False,
+                reason="invalid_craft_output_slot",
+                can_retry=False,
+                metrics={"item": item, "requested_count": count, "output_slot": output_slot},
             )
 
         cleanup_before = self.cleanup_crafting_residue(
@@ -1171,7 +1181,7 @@ def _normalize_craft_inputs(inputs: list[dict[str, object]]) -> list[dict[str, o
             count = int(raw["count"])
         except (KeyError, TypeError, ValueError):
             return []
-        if slot < 0 or slot > 45 or count <= 0 or not item:
+        if slot < 0 or slot >= 36 or count <= 0 or not item:
             return []
         normalized.append({"slot": slot, "item": item, "count": count})
     return normalized
@@ -1184,7 +1194,7 @@ def _normalize_craft_output(output: dict[str, object]) -> dict[str, object] | No
         count = int(output["count"])
     except (KeyError, TypeError, ValueError):
         return None
-    if slot < 0 or slot > 45 or count <= 0 or not item:
+    if slot < 0 or slot >= 36 or count <= 0 or not item:
         return None
     return {"slot": slot, "item": item, "count": count}
 
@@ -1199,7 +1209,7 @@ def _normalize_craft_remainders(remainders: list[dict[str, object]]) -> list[dic
             count = int(raw["count"])
         except (KeyError, TypeError, ValueError):
             return None
-        if slot < 0 or slot > 45 or count <= 0 or not item or slot in seen_slots:
+        if slot < 0 or slot >= 36 or count <= 0 or not item or slot in seen_slots:
             return None
         seen_slots.add(slot)
         normalized.append({"slot": slot, "item": item, "count": count})
@@ -1493,6 +1503,7 @@ def _allocate_recipe_inputs(
     variant: CraftRecipeVariant,
     crafts: int,
 ) -> tuple[list[dict[str, object]], dict[int, str]] | tuple[None, None]:
+    slots = [slot for slot in slots if 0 <= slot.slot < 36]
     requirements: list[tuple[str, ...]] = []
     for group in variant.ingredient_groups:
         if not group:
@@ -1570,6 +1581,8 @@ def _find_craft_output_slot(
     max_stack: int = 64,
 ) -> int | None:
     if preferred is not None:
+        if not 0 <= preferred < 36 or preferred in exclude:
+            return None
         slot = _slot_by_index(slots, preferred)
         if slot is None or slot.empty:
             return preferred
@@ -1577,7 +1590,7 @@ def _find_craft_output_slot(
             return preferred
         return None
     for slot in slots:
-        if slot.slot in exclude or slot.empty:
+        if not 0 <= slot.slot < 36 or slot.slot in exclude or slot.empty:
             continue
         if _same_item(slot.item, item) and slot.count + count <= max_stack:
             return slot.slot
