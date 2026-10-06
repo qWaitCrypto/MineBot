@@ -17,6 +17,8 @@ Start MineBot's local test server first, then run from `minecraft/`:
 export MINEBOT_CLIENT_SERVER=127.0.0.1:25566
 export MINEBOT_CLIENT_USERNAME=MineBotPhaseA
 export MINEBOT_CLIENT_IPC_PORT=8768
+# Only for an explicitly disposable loopback world:
+export MINEBOT_CLIENT_DISPOSABLE_WORLD=true
 xvfb-run -a ./gradlew :client:body:runClient --no-daemon --console=plain
 ```
 
@@ -54,3 +56,28 @@ the [Body capability matrix](../../../docs/references/real-client-body-capabilit
 for the action boundary and the
 [conformance record](../../../docs/references/client-body-baritone-capability-evidence-20261006.md)
 for measurements.
+
+## Reproduce the typed transaction proof
+
+From the repository root, with the disposable server and client running:
+
+```bash
+.venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case vertical
+.venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case ranged
+```
+
+For handoff, launch a second client with username `Receiver` and IPC port
+`8769`, then run the same probe with `--case handoff`. The probe checks the
+server inventory of the actual recipient; a full recipient inventory must
+fail without a receipt. Reports are saved as local JSON under `logs/`.
+
+The vertical actions delegate digging, pillar placement, and movement to
+upstream Baritone. They wait for a grounded destination and use server block
+updates as mutation evidence. Their break/place calls require the disposable
+world opt-in; without it, the probe's `--case vertical_denied` verifies the
+floor and position remain intact. The distance, liquid, and mutation-position
+bounds are enforced before a vertical interaction. This narrow guard does not
+provide shared-world protection for the other Baritone processes.
+
+See [the dated verification record](verification-20261007.md) for actual
+results, reproduced failures, and the remaining coverage limits.
