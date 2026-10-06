@@ -20,9 +20,12 @@ export MINEBOT_CLIENT_OBJECTIVE=goto:20:70:0
 xvfb-run -a ./gradlew :client:body:runClient --no-daemon --console=plain
 ```
 
-Supported launch objectives are `goto:x:y:z` (or `navigate:x:y:z`) and
-`mine:block_name`. Set `MINEBOT_CLIENT_CANCEL_AFTER_TICKS` to a positive value
-to cancel the active path after that many client ticks.
+Supported launch objectives are `goto:x:y:z` (or `navigate:x:y:z`),
+`mine:block_name`, and the directed fixture form
+`mineat:block_name:x:y:z`. The latter first navigates below the specified
+block, then invokes the same Baritone mining process; it isolates collection
+from global target search. Set `MINEBOT_CLIENT_CANCEL_AFTER_TICKS` to a
+positive value to cancel the active path after that many client ticks.
 
 The first local run may require setting `onboardAccessibility:false` in the
 ignored `client/body/run/options.txt`; this is test-client state and is not a
@@ -31,8 +34,10 @@ external address blocklist for this local test process.
 
 ## Current evidence
 
-Coordinate navigation and cancellation have been observed against the local
-server. The directed mining probe currently reports Baritone path failures and
-zero inventory change, so collection is an open Phase A blocker. Do not treat
-this module as selected for production until that result and the remaining
-cost measurements have a concrete decision.
+Coordinate navigation, cancellation, and directed collection have been
+observed against the local server. The directed probe reached the target and
+reported `collection_reached` with one `oak_log` in the client inventory.
+Global `mine:block_name` search still reports repeated Baritone path failures,
+so search remains an open Phase A blocker. Do not treat this module as
+selected for production until that result and the remaining cost measurements
+have a concrete decision.

@@ -66,7 +66,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         activeRun = run;
         baritone.getGameEventHandler().registerEventListener(run);
         try {
-            startObjective(baritone, rawObjective);
+            startObjective(run, rawObjective);
             // The join callback can run before the first authoritative player
             // position arrives. Coordinates belong in the periodic state
             // sample below; logging them here would create false evidence.
@@ -80,7 +80,8 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
     }
 
-    private static void startObjective(IBaritone baritone, String rawObjective) {
+    private static void startObjective(ProbeRun run, String rawObjective) {
+        IBaritone baritone = run.baritone();
         String[] parts = rawObjective.split(":", -1);
         if (parts.length == 4 && (parts[0].equals("goto") || parts[0].equals("navigate"))) {
             baritone.getCustomGoalProcess().setGoalAndPath(new GoalBlock(
@@ -91,13 +92,20 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         if (parts.length == 2 && parts[0].equals("mine") && !parts[1].isBlank()) {
-            baritone.getMineProcess().mineByName(1, normalizeBlockName(parts[1]));
+            run.startMine(normalizeBlockName(parts[1]));
+            return;
+        }
+        if (parts.length == 5 && parts[0].equals("mineat") && !parts[1].isBlank()) {
+            int x = parseCoordinate(parts[2], "x");
+            int y = parseCoordinate(parts[3], "y");
+            int z = parseCoordinate(parts[4], "z");
+            run.prepareDirectedMine(normalizeBlockName(parts[1]), x, y, z);
             return;
         }
         if (parts.length == 2 && parts[0].equals("cancel")) {
             throw new IllegalArgumentException("cancel_requires_active_objective");
         }
-        throw new IllegalArgumentException("expected goto:x:y:z or mine:block_name");
+        throw new IllegalArgumentException("expected goto:x:y:z, mine:block_name, or mineat:block_name:x:y:z");
     }
 
     private static String normalizeBlockName(String name) {
@@ -133,6 +141,19 @@ public final class MineBotClientBody implements ClientModInitializer {
             LOGGER.info("MINEBOT_PHASE_A canceled objective={} accepted={} elapsed_ms={}",
                 run.objective(), canceled, run.elapsedMs());
         }
+        if (run.hasDirectedMine() && !run.mineStarted()
+            && !run.baritone().getCustomGoalProcess().isActive()
+            && !run.baritone().getPathingBehavior().isPathing()
+            && client.player.distanceToSqr(run.mineX() + 0.5, run.mineY(), run.mineZ() + 0.5) <= 4.0) {
+            run.startMine(run.mineTarget());
+            LOGGER.info("MINEBOT_PHASE_A directed_mine_started objective={} target={} elapsed_ms={}",
+                run.objective(), run.mineTarget(), run.elapsedMs());
+        }
+        if (run.mineStarted() && run.targetItemCount(client) > 0 && !run.collectionLogged()) {
+            run.markCollectionLogged();
+            LOGGER.info("MINEBOT_PHASE_A collection_reached objective={} target={} count={} elapsed_ms={}",
+                run.objective(), run.mineTarget(), run.targetItemCount(client), run.elapsedMs());
+        }
     }
 
     private static final class ProbeRun implements AbstractGameEventListener {
@@ -140,12 +161,34 @@ public final class MineBotClientBody implements ClientModInitializer {
         private final String objective;
         private final long startedNanos = System.nanoTime();
         private final int cancelAfterTicks = Integer.getInteger("minebot.client.cancel_after_ticks", 0);
+        private String mineTarget;
+        private int mineX;
+        private int mineY;
+        private int mineZ;
+        private boolean directedMine;
+        private boolean mineStarted;
+        private boolean collectionLogged;
         private boolean cancelSent;
         private boolean cancelEventLogged;
 
         private ProbeRun(IBaritone baritone, String objective) {
             this.baritone = baritone;
             this.objective = objective;
+        }
+
+        private void startMine(String target) {
+            mineTarget = target;
+            mineStarted = true;
+            baritone.getMineProcess().mineByName(1, target);
+        }
+
+        private void prepareDirectedMine(String target, int x, int y, int z) {
+            mineTarget = target;
+            mineX = x;
+            mineY = y - 1;
+            mineZ = z;
+            directedMine = true;
+            baritone.getCustomGoalProcess().setGoalAndPath(new GoalBlock(mineX, mineY, mineZ));
         }
 
         @Override
@@ -158,14 +201,13 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
 
         private int targetItemCount(Minecraft client) {
-            if (!objective.startsWith("mine:")) {
+            if (mineTarget == null) {
                 return -1;
             }
-            String target = normalizeBlockName(objective.substring("mine:".length()));
             int count = 0;
             for (int slot = 0; slot < client.player.getInventory().getContainerSize(); slot++) {
                 ItemStack stack = client.player.getInventory().getItem(slot);
-                if (!stack.isEmpty() && BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath().equals(target)) {
+                if (!stack.isEmpty() && BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath().equals(mineTarget)) {
                     count += stack.getCount();
                 }
             }
@@ -178,6 +220,14 @@ public final class MineBotClientBody implements ClientModInitializer {
 
         private IBaritone baritone() { return baritone; }
         private String objective() { return objective; }
+        private String mineTarget() { return mineTarget; }
+        private boolean hasDirectedMine() { return directedMine; }
+        private int mineX() { return mineX; }
+        private int mineY() { return mineY; }
+        private int mineZ() { return mineZ; }
+        private boolean mineStarted() { return mineStarted; }
+        private boolean collectionLogged() { return collectionLogged; }
+        private void markCollectionLogged() { collectionLogged = true; }
         private int cancelAfterTicks() { return cancelAfterTicks; }
         private boolean cancelSent() { return cancelSent; }
         private void markCancelSent() { cancelSent = true; }
