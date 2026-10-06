@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from collections.abc import Mapping
 from math import ceil, floor
 from time import monotonic, sleep
 from typing import Callable
@@ -229,6 +230,41 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
                 True,
                 metrics={"error": type(error).__name__, "goal": normalized.payload()},
             )
+        if result.ok and result.accepted and not result.complete:
+            await_terminal = getattr(self.body, "await_action_terminal", None)
+            if not callable(await_terminal):
+                return ToolResult(
+                    False,
+                    "body_unavailable",
+                    True,
+                    metrics={
+                        "error": "async_body_missing_terminal_wait",
+                        "goal": normalized.payload(),
+                    },
+                )
+            try:
+                terminal = await_terminal(action.id, timeout_s=timeout_s + 5.0)
+            except Exception as error:
+                return ToolResult(
+                    False,
+                    "body_unavailable",
+                    True,
+                    metrics={
+                        "error": type(error).__name__,
+                        "goal": normalized.payload(),
+                    },
+                )
+            terminal_data = dict(terminal.data)
+            terminal_success = bool(terminal_data.get("success"))
+            result = replace(
+                result,
+                ok=terminal_success,
+                complete=True,
+                data=terminal_data,
+                error=None if terminal_success else str(
+                    terminal_data.get("reason") or "body_rejected"
+                ),
+            )
         reflex_handoffs: list[dict[str, object]] = []
         if str(result.error or "") == "preempted":
             reflex = _wait_for_reflex_completion(
@@ -307,20 +343,25 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
         survival = self._prepare_survival(cfg)
         if survival is not None:
             return survival
-        resolved = resolve_entity_target(self.body, target_spec, radius=32)
-        if isinstance(resolved, ToolResult):
-            return resolved
-        target_uuid = resolved.target_uuid
+        capabilities = getattr(self.body, "capabilities", None)
+        direct_follow = isinstance(capabilities, Mapping) and "follow_entity" in capabilities
+        resolved = None
+        if not direct_follow:
+            resolved = resolve_entity_target(self.body, target_spec, radius=32)
+            if isinstance(resolved, ToolResult):
+                return resolved
         action = Action.create(
             "followEntity",
             {
-                "target_uuid": target_uuid,
+                "target": target_spec,
                 "keep_radius": keep_distance,
                 "replan_distance": 2.0,
                 "acquire_radius": 32,
                 "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
             },
         )
+        if resolved is not None:
+            action.params["target_uuid"] = resolved.target_uuid
         try:
             accepted = self.body.execute(action)
         except Exception as error:
@@ -328,26 +369,39 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
                 False,
                 "body_unavailable",
                 True,
-                metrics={"error": type(error).__name__, **resolved.evidence()},
+                metrics={
+                    "error": type(error).__name__,
+                    **({} if resolved is None else resolved.evidence()),
+                    "requested_target": target_spec,
+                },
             )
         if not (accepted.ok and accepted.accepted):
             return ToolResult(
                 False,
                 str(accepted.error or "body_rejected"),
                 True,
-                metrics=resolved.evidence(),
+                metrics=(
+                    {"requested_target": target_spec}
+                    if resolved is None
+                    else resolved.evidence()
+                ),
             )
         terminal = self.body.await_action_terminal(
             action.id,
             timeout_s=timeout_s + 5.0,
             terminal_events={"followDone", "death", "respawned"},
         )
-        mismatch = entity_target_terminal_mismatch(resolved, terminal.data)
-        if mismatch is not None:
-            return mismatch
+        if resolved is not None:
+            mismatch = entity_target_terminal_mismatch(resolved, terminal.data)
+            if mismatch is not None:
+                return mismatch
         metrics = {
             **dict(terminal.data),
-            **resolved.evidence(),
+            **(
+                {"requested_target": target_spec}
+                if resolved is None
+                else resolved.evidence()
+            ),
             "keep_distance": keep_distance,
             "event": terminal.name,
             "provider_action": "followEntity",

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import json
 import socket
 import struct
+import threading
 import time
 from typing import Any, Mapping
 
@@ -42,6 +43,7 @@ class RealClientIpc:
         self.timeout_s = timeout_s
         self._socket: socket.socket | None = None
         self._next_request = 0
+        self._send_lock = threading.Lock()
 
     def __enter__(self) -> "RealClientIpc":
         self.connect()
@@ -142,7 +144,12 @@ class RealClientIpc:
         raw = json.dumps(dict(message), ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
         if not 1 <= len(raw) <= MAX_FRAME_BYTES:
             raise RealClientProtocolError("IPC frame is outside the bounded payload size")
-        self._socket.sendall(struct.pack(">I", len(raw)) + raw)
+        # A command reader may be waiting for a terminal while the Body
+        # interrupt path sends a cancel on the same loopback connection.
+        # Serialize only writes; the single command reader remains the owner
+        # of incoming frames.
+        with self._send_lock:
+            self._socket.sendall(struct.pack(">I", len(raw)) + raw)
 
     def receive(self, *, timeout_s: float | None = None) -> dict[str, Any]:
         if self._socket is None:

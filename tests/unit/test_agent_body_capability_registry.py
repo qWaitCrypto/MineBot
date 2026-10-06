@@ -649,23 +649,27 @@ class JavaBodyProviderRegistryTests(unittest.TestCase):
     def test_provider_table_is_the_only_direct_objective_owner_choice(self):
         self.assertEqual(
             set(BODY_OBJECTIVE_PROVIDER_TABLE),
-            {"scarpet", "java", "composite"},
+            {"scarpet", "java", "composite", "real_client"},
         )
-        self.assertTrue(
-            all(
-                set(bindings) == {
+        for provider in ("scarpet", "java", "composite"):
+            self.assertEqual(
+                set(BODY_OBJECTIVE_PROVIDER_TABLE[provider]),
+                {
                     "move_to",
                     "follow_entity",
                     "go_to_surface",
                     "dig_down",
                     "collect_block_domain",
-                }
-                for bindings in BODY_OBJECTIVE_PROVIDER_TABLE.values()
+                },
             )
+        self.assertEqual(
+            set(BODY_OBJECTIVE_PROVIDER_TABLE["real_client"]),
+            {"move_to", "follow_entity"},
         )
         self.assertEqual(set(BODY_OBJECTIVE_PROVIDER_TABLE["scarpet"].values()), {"scarpet"})
         self.assertEqual(set(BODY_OBJECTIVE_PROVIDER_TABLE["java"].values()), {"java"})
         self.assertEqual(set(BODY_OBJECTIVE_PROVIDER_TABLE["composite"].values()), {"java"})
+        self.assertEqual(set(BODY_OBJECTIVE_PROVIDER_TABLE["real_client"].values()), {"real_client"})
 
     def test_composite_has_one_canonical_navigation_and_collection_surface(self):
         scarpet = _body()

@@ -104,6 +104,10 @@ BODY_OBJECTIVE_PROVIDER_TABLE: dict[str, dict[str, str]] = {
         "dig_down": "java",
         "collect_block_domain": "java",
     },
+    "real_client": {
+        "move_to": "real_client",
+        "follow_entity": "real_client",
+    },
 }
 
 
@@ -118,7 +122,8 @@ class CanonicalBodyToolCatalog:
             raise ValueError(f"unknown Body tool provider {self.provider!r}; expected one of: {choices}")
 
     def objective_body(self, tool_name: str, body: Body) -> Body | None:
-        return body if BODY_OBJECTIVE_PROVIDER_TABLE[self.provider].get(tool_name) == "java" else None
+        implementation = BODY_OBJECTIVE_PROVIDER_TABLE[self.provider].get(tool_name)
+        return body if implementation in {"java", "real_client"} else None
 
     def register(self, tool: RegisteredTool) -> RegisteredTool:
         try:

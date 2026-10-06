@@ -913,28 +913,56 @@ def _move_to_tool(
             return ToolResult(False, "invalid_position", False)
         radius = int(params.get("radius") or 0)
         timeout_s = float(params.get("timeout_s") or 12.0)
+        action = Action.create(
+            "navigate",
+            {
+                "goal": {
+                    "kind": "near",
+                    "x": pos[0],
+                    "y": pos[1],
+                    "z": pos[2],
+                    "range": float(radius) if radius > 0 else 0.75,
+                },
+                "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
+            },
+        )
         try:
-            result = java_objective_body.execute(
-                Action.create(
-                    "navigate",
-                    {
-                        "goal": {
-                            "kind": "near",
-                            "x": pos[0],
-                            "y": pos[1],
-                            "z": pos[2],
-                            "range": float(radius) if radius > 0 else 0.75,
-                        },
-                        "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
-                    },
-                )
-            )
+            result = java_objective_body.execute(action)
         except Exception as error:
             return ToolResult(
                 False,
                 "java_body_unavailable",
                 True,
                 metrics={"error": type(error).__name__},
+            )
+        if result.ok and result.accepted and not result.complete:
+            await_terminal = getattr(java_objective_body, "await_action_terminal", None)
+            if not callable(await_terminal):
+                return ToolResult(
+                    False,
+                    "java_body_unavailable",
+                    True,
+                    metrics={"error": "async_body_missing_terminal_wait"},
+                )
+            try:
+                terminal = await_terminal(action.id, timeout_s=timeout_s + 5.0)
+            except Exception as error:
+                return ToolResult(
+                    False,
+                    "java_body_unavailable",
+                    True,
+                    metrics={"error": type(error).__name__},
+                )
+            terminal_data = dict(terminal.data)
+            terminal_success = bool(terminal_data.get("success"))
+            reason = "arrived" if terminal_success else str(
+                terminal_data.get("reason") or "body_rejected"
+            )
+            return ToolResult(
+                terminal_success,
+                reason,
+                not terminal_success,
+                metrics=terminal_data,
             )
         success = bool(result.ok and result.accepted and result.complete)
         reason = "arrived" if success else str(result.error or "body_rejected")
