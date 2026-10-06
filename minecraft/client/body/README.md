@@ -1,11 +1,11 @@
-# MineBot real-client Phase A probe
+# MineBot real-client Body
 
-This module is a disposable substrate experiment for Issue #1. It starts a
-real Fabric client with upstream Baritone and emits a small log stream marked
-`MINEBOT_PHASE_A`. It is not a production Body adapter, does not implement the
-Python Body contract, and does not replace the current server Body.
+This module starts a real Fabric client with upstream Baritone and serves the
+thin Python `RealClientBody` adapter. It is the client execution backend for
+the abstract Body boundary; it does not replace the current Java FakePlayer
+backend until a caller selects the `real_client` provider.
 
-The pinned candidate is Minecraft `26.1.2`, Fabric Loader `0.19.3`, Fabric API
+The supported tuple is Minecraft `26.1.2`, Fabric Loader `0.19.3`, Fabric API
 `0.152.1+26.1.2`, Java `25`, and Baritone `v1.18.0`. The Baritone jar is fetched
 from its official release and checked by SHA-1 during the Gradle build.
 
@@ -20,12 +20,10 @@ export MINEBOT_CLIENT_IPC_PORT=8768
 xvfb-run -a ./gradlew :client:body:runClient --no-daemon --console=plain
 ```
 
-After the client reports readiness, send a bounded `goto:x:y:z` or
-`mine:block_name` request through `minebot.game.real_client_ipc.RealClientIpc`.
-The adapter returns the accepted/progress/terminal frames and can request a
-cancel. Set `MINEBOT_CLIENT_EARLY_START=true` together with
-`MINEBOT_CLIENT_OBJECTIVE=mine:oak_log` only to reproduce the pre-readiness
-failure; production-facing experiments must submit through IPC after ready.
+After the client reports readiness, `RealClientBody` can submit navigation,
+mine, get-to-block, explore, follow/pickup, farm, Builder/Clear and Elytra
+objectives, plus typed client controls and world reads. Every objective has a
+correlated action id, progress/terminal result, and cancellation path.
 
 The first local run may require setting `onboardAccessibility:false` in the
 ignored `client/body/run/options.txt`; this is test-client state and is not a
@@ -41,8 +39,10 @@ events, and cancellation latency. The controlled fixture proves global
 `mine:oak_log` after readiness; starting the same request from the JOIN callback
 still reproduces the old search failure.
 
-The IPC and Java code remain disposable experiment code. It is not the
-production Body contract, and it does not claim that Builder, Farm, Follow,
-Explore, Elytra, combat, reconnect, or multi-client Baritone behavior is
-integrated. See the [Phase A evidence record](../../../docs/references/client-body-baritone-phase-a-evidence-20261006.md)
-for the exact measurements and promotion limits.
+The evidence record still distinguishes verified process behavior from
+callable controls that need a dedicated fixture. Combat transactions,
+inventory-screen crafting/container/furnace lifecycles, recipient handoff,
+and governed vertical excavation remain explicit capability gaps rather than
+silent fallbacks. See the [Body capability matrix](../../../docs/references/real-client-body-capability-matrix-20261006.md)
+for the exact reasons and the [conformance record](../../../docs/references/client-body-baritone-capability-evidence-20261006.md)
+for measurements.

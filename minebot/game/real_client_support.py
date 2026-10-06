@@ -1,8 +1,8 @@
 """Support-matrix types for the Baritone-backed real-client Body.
 
 The real-client path is deliberately opt-in. A tuple is usable only after
-live conformance has promoted it to ``supported``; a candidate tuple is useful
-for the R0 spike but must never be selected by production composition.
+live conformance has promoted it to ``supported``; unverified candidates must
+never be selected by composition.
 """
 
 from __future__ import annotations
@@ -50,12 +50,11 @@ class SupportMatrixEntry:
         return self.status is SupportStatus.SUPPORTED
 
 
-# R0 uses the exact current MineBot server tuple. The official Baritone 1.18.0
-# release and its 26.1 branch declare Minecraft 26.1.2, Fabric Loader 0.19.3,
-# and Java 25. It remains a candidate until MineBot's live conformance proof
-# passes; selecting a candidate in production is intentionally impossible.
-CANDIDATE_26_1_2 = SupportMatrixEntry(
-    matrix_id="candidate-mc-26.1.2-baritone-v1.18.0-fabric-java25",
+# The exact tuple below has passed the disposable-world conformance record:
+# start/join, real terrain arrival, resource collection, cancellation, every
+# main Baritone process family, and structured Body state/terminal evidence.
+SUPPORTED_26_1_2 = SupportMatrixEntry(
+    matrix_id="supported-mc-26.1.2-baritone-v1.18.0-fabric-java25",
     tuple=RealClientTuple(
         minecraft="26.1.2",
         baritone="v1.18.0",
@@ -63,15 +62,16 @@ CANDIDATE_26_1_2 = SupportMatrixEntry(
         java="25",
         integration="minebot-client-spike",
     ),
-    status=SupportStatus.CANDIDATE,
+    status=SupportStatus.SUPPORTED,
     evidence=(
-        "official Baritone v1.18.0 release plus branch 26.1 gradle.properties "
-        "declare Minecraft 26.1.2, Fabric Loader 0.19.3, and Java 25"
+        "Phase A and Body conformance evidence: the pinned tuple starts, joins, "
+        "reaches terrain, mines with an inventory delta, cancels within a "
+        "measured bound, and exposes all eight main Baritone process families"
     ),
 )
 
 REAL_CLIENT_SUPPORT_MATRIX: tuple[SupportMatrixEntry, ...] = (
-    CANDIDATE_26_1_2,
+    SUPPORTED_26_1_2,
 )
 
 
