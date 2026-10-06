@@ -18,6 +18,7 @@ class FakeClientIpc:
     def __init__(self) -> None:
         self.connected = False
         self.commands: list[tuple[str, str, int]] = []
+        self.controls: list[tuple[str, dict[str, object]]] = []
         self.canceled: list[str] = []
         self._cancel = threading.Event()
 
@@ -32,12 +33,39 @@ class FakeClientIpc:
             "position": [4.5, 70.0, 9.5],
             "health": 20.0,
             "food": 20,
+            "oxygen": 300,
+            "yaw": 90.0,
+            "pitch": -5.0,
+            "selected_slot": 2,
+            "selected_item": "minecraft:oak_log",
+            "offhand_item": "minecraft:torch",
             "dimension": "minecraft:overworld",
             "inventory": {"oak_log": 2, "wheat_seeds": 3},
+            "entities": [
+                {
+                    "id": "11111111-1111-4111-8111-111111111111",
+                    "name": "Sheep",
+                    "type": "sheep",
+                    "pos": [5.0, 70.0, 9.0],
+                    "dist2": 0.25,
+                    "hostile": False,
+                }
+            ],
         }
 
     def scan(self, target: str) -> dict[str, object]:
         return {"locations": [[4, 70, 9]], "target": target}
+
+    def world_read(self, scope: str, params: dict[str, object]) -> dict[str, object]:
+        del params
+        return {
+            "type": "world_read",
+            "request_id": "world-1",
+            "ok": True,
+            "complete": True,
+            "data": {"x": 4, "y": 70, "z": 9, "type": "minecraft:oak_log", "state": "SOLID"}
+            if scope == "blockAt" else {"cells": []},
+        }
 
     def command(self, objective: str, *, action_id: str, timeout_ms: int, cancel_after_s=None) -> RealClientTerminal:
         del cancel_after_s
@@ -60,6 +88,16 @@ class FakeClientIpc:
         self.canceled.append(action_id)
         self._cancel.set()
 
+    def control(self, request_type: str, **fields: object) -> dict[str, object]:
+        self.controls.append((request_type, dict(fields)))
+        return {
+            "type": request_type,
+            "request_id": "control-1",
+            "position": [4.5, 70.0, 9.5],
+            "inventory": {"oak_log": 2, "wheat_seeds": 3},
+            "allow_break": fields.get("allow_break", True),
+        }
+
 
 REGION = Region("test", (-64, -64, -64), (64, 320, 64))
 
@@ -70,6 +108,9 @@ def test_real_client_body_maps_state_inventory_and_find_blocks() -> None:
 
     state = body.get_state()
     assert state.pos == (4.5, 70.0, 9.5)
+    assert state.yaw == 90.0 and state.pitch == -5.0
+    assert state.oxygen == 300 and state.selected_slot == 2
+    assert state.selected_item == "oak_log" and state.offhand_item == "torch"
     assert state.inventory_counts == {"oak_log": 2, "wheat_seeds": 3}
 
     inventory = body.perceive("inventory", {"limit": 46})
@@ -79,6 +120,16 @@ def test_real_client_body_maps_state_inventory_and_find_blocks() -> None:
     blocks = body.perceive("findBlocks", {"block_types": ["minecraft:oak_log"]})
     assert blocks.ok
     assert blocks.data["matches"] == [{"x": 4, "y": 70, "z": 9, "type": "oak_log"}]
+    entities = body.perceive("nearbyEntities", {"limit": 4})
+    assert entities.ok
+    assert entities.data["entities"][0]["name"] == "Sheep"
+    block = body.perceive("blockAt", {"x": 4, "y": 70, "z": 9})
+    assert block.ok
+    assert block.data["type"] == "minecraft:oak_log"
+
+    capabilities = body.perceive("capabilities", {})
+    assert capabilities.ok
+    assert any(item["action"] == "craftItem" for item in capabilities.data["unsupported"])
 
 
 def test_real_client_body_executes_process_and_returns_terminal_event() -> None:
@@ -94,6 +145,33 @@ def test_real_client_body_executes_process_and_returns_terminal_event() -> None:
     assert terminal.name == "navigateDone"
     assert terminal.data["success"] is True
     assert body.poll_events() == [terminal]
+
+
+@pytest.mark.parametrize(
+    ("goal", "objective"),
+    (
+        ({"kind": "block", "x": 10, "y": 70, "z": 9}, "block:10:70:9"),
+        (
+            {
+                "kind": "composite",
+                "mode": "any",
+                "goals": [{"kind": "block", "x": 10, "y": 70, "z": 9}],
+            },
+            "any:block:10:70:9",
+        ),
+    ),
+)
+def test_real_client_body_preserves_block_goal_semantics(
+    goal: dict[str, object], objective: str,
+) -> None:
+    ipc = FakeClientIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
+
+    accepted = body.execute(Action("goal-shape", "navigate", {"goal": goal}))
+    body.await_action_terminal("goal-shape", timeout_s=1.0)
+
+    assert accepted.ok and accepted.accepted
+    assert ipc.commands[0][0] == objective
 
 
 def test_real_client_body_interrupts_active_process() -> None:
@@ -112,14 +190,86 @@ def test_real_client_body_interrupts_active_process() -> None:
     assert terminal.data["status"] == "canceled"
 
 
-def test_real_client_body_rejects_unmapped_action_without_fallback() -> None:
+def test_real_client_body_adapts_exact_collect_block_without_fallback() -> None:
     body = RealClientBody("CapProbe2", FakeClientIpc())  # type: ignore[arg-type]
 
     result = body.execute(Action("a3", "collectBlock", {"target": [1, 2, 3]}))
+    terminal = body.await_action_terminal("a3", timeout_s=1.0)
 
-    assert not result.ok
-    assert not result.accepted
-    assert result.error == "capability_unavailable:unsupported_action"
+    assert result.ok and result.accepted
+    assert terminal.name == "mineDone"
+
+
+def test_real_client_body_maps_baritone_controls_through_the_same_body_boundary() -> None:
+    ipc = FakeClientIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
+
+    action = Action("settings-1", "baritoneSettings", {"settings": {"allow_break": False}})
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id, timeout_s=1.0)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.name == "baritoneSettingsDone"
+    assert terminal.data["success"] is True
+    assert ipc.controls == [("settings", {"allow_break": False})]
+
+
+@pytest.mark.parametrize(
+    ("action_name", "params", "request_type"),
+    (
+        ("getToBlockBlacklistClosest", {}, "get_to_block_blacklist"),
+        ("builderBuildFile", {"path": "fixture.schem", "origin": [1, 70, 2]}, "builder_file"),
+        ("builderSelectionAdd", {"pos1": [1, 70, 2], "pos2": [3, 72, 4]}, "builder_selection"),
+        ("builderSelectionClear", {}, "builder_selection"),
+        (
+            "builderSelectionExpand",
+            {"direction": "up", "amount": 2},
+            "builder_selection",
+        ),
+    ),
+)
+def test_real_client_body_maps_extended_baritone_controls(
+    action_name: str,
+    params: dict[str, object],
+    request_type: str,
+) -> None:
+    ipc = FakeClientIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
+
+    accepted = body.execute(Action(f"control-{action_name}", action_name, params))
+    terminal = body.await_action_terminal(f"control-{action_name}", timeout_s=1.0)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.data["success"] is True
+    assert ipc.controls[0][0] == request_type
+
+
+@pytest.mark.parametrize(
+    "action_name",
+    ("jump", "stop", "selectSlot", "lookAt", "useItem", "attackEntity", "dropItem", "moveItem", "mineBlock", "placeBlock", "igniteBlock", "sowCrop"),
+)
+def test_real_client_body_routes_native_body_actions_to_client_primitive(
+    action_name: str,
+) -> None:
+    ipc = FakeClientIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
+    params: dict[str, object] = {}
+    if action_name == "lookAt":
+        params["target"] = [5.0, 70.0, 9.0]
+    elif action_name == "selectSlot":
+        params["slot"] = 0
+    elif action_name == "mineBlock":
+        params["target"] = [4, 70, 9]
+    elif action_name == "placeBlock":
+        params["target"] = [4, 70, 9]
+    elif action_name in {"igniteBlock", "sowCrop"}:
+        params["target"] = [4, 70, 9]
+    action = Action(f"primitive-{action_name}", action_name, params)
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id, timeout_s=1.0)
+    assert accepted.ok and accepted.accepted
+    assert terminal.data["success"] is True
+    assert ipc.controls[0][0] == "primitive"
 
 
 @pytest.mark.parametrize(

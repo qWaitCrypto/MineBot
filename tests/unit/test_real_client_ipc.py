@@ -54,3 +54,33 @@ def test_ipc_command_returns_structured_terminal() -> None:
     assert result.completed
     assert result.reason == "goal_reached"
     assert result.payload["position"] == [4.5, 70.0, 9.5]
+
+
+def test_ipc_control_is_correlated_and_returns_client_state() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def server() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            request = _recv(connection)
+            assert request["type"] == "settings"
+            assert request["allow_break"] is False
+            _send(connection, {
+                "type": "settings",
+                "request_id": request["request_id"],
+                "allow_break": False,
+                "position": [4.5, 70.0, 9.5],
+            })
+        listener.close()
+
+    thread = threading.Thread(target=server)
+    thread.start()
+    with RealClientIpc(port=port) as client:
+        result = client.settings({"allow_break": False})
+    thread.join()
+
+    assert result["type"] == "settings"
+    assert result["allow_break"] is False

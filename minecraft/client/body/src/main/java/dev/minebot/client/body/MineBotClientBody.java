@@ -6,11 +6,17 @@ import baritone.api.event.events.PathEvent;
 import baritone.api.event.listener.AbstractGameEventListener;
 import baritone.api.pathing.goals.GoalBlock;
 import baritone.api.pathing.goals.Goal;
+import baritone.api.pathing.goals.GoalComposite;
 import baritone.api.pathing.goals.GoalXZ;
 import baritone.api.pathing.goals.GoalNear;
+import baritone.api.pathing.goals.GoalRunAway;
+import baritone.api.pathing.goals.GoalYLevel;
 import baritone.api.schematic.FillSchematic;
+import baritone.api.selection.ISelection;
 import baritone.api.utils.BlockOptionalMeta;
 import baritone.api.utils.BlockOptionalMetaLookup;
+import baritone.api.utils.BetterBlockPos;
+import baritone.api.utils.Rotation;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -21,8 +27,16 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.Property;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.core.Direction;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.monster.Enemy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,8 +49,10 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -180,6 +196,9 @@ public final class MineBotClientBody implements ClientModInitializer {
                 });
                 response.add("locations", positions);
                 connection.send(response);
+            } else if (type.equals("world_read")) {
+                if (!ready) throw new IllegalArgumentException("client_not_ready");
+                worldRead(client, request, connection);
             } else if (type.equals("settings")) {
                 if (run != null) {
                     throw new IllegalArgumentException("body_busy");
@@ -203,19 +222,99 @@ public final class MineBotClientBody implements ClientModInitializer {
                 }
                 JsonObject response = state(client);
                 response.addProperty("type", "settings");
+                response.addProperty("request_id", string(request, "request_id", ""));
                 connection.send(response);
             } else if (type.equals("builder_pause") || type.equals("builder_resume")) {
                 if (type.equals("builder_pause")) baritone.getBuilderProcess().pause();
                 else baritone.getBuilderProcess().resume();
                 JsonObject response = state(client);
                 response.addProperty("type", type);
+                response.addProperty("request_id", string(request, "request_id", ""));
                 connection.send(response);
             } else if (type.equals("close_screen")) {
                 client.player.closeContainer();
                 client.setScreen(null);
                 JsonObject response = state(client);
                 response.addProperty("type", type);
+                response.addProperty("request_id", string(request, "request_id", ""));
                 connection.send(response);
+            } else if (type.equals("explore_filter")) {
+                if (run != null) throw new IllegalArgumentException("body_busy");
+                String filter = string(request, "path", "");
+                if (filter.isBlank()) throw new IllegalArgumentException("missing_filter_path");
+                baritone.getExploreProcess().applyJsonFilter(
+                    Path.of(filter), request.has("invert") && request.get("invert").getAsBoolean()
+                );
+                JsonObject response = state(client);
+                response.addProperty("type", type);
+                response.addProperty("request_id", string(request, "request_id", ""));
+                connection.send(response);
+            } else if (type.equals("builder_open_schematic")) {
+                if (run != null) throw new IllegalArgumentException("body_busy");
+                baritone.getBuilderProcess().buildOpenSchematic();
+                JsonObject response = state(client);
+                response.addProperty("type", type);
+                response.addProperty("request_id", string(request, "request_id", ""));
+                connection.send(response);
+            } else if (type.equals("builder_open_litematic")) {
+                if (run != null) throw new IllegalArgumentException("body_busy");
+                int index = request.has("index") ? request.get("index").getAsInt() : 0;
+                if (index < 0 || index > 1024) throw new IllegalArgumentException("invalid_litematic_index");
+                baritone.getBuilderProcess().buildOpenLitematic(index);
+                JsonObject response = state(client);
+                response.addProperty("type", type);
+                response.addProperty("request_id", string(request, "request_id", ""));
+                connection.send(response);
+            } else if (type.equals("builder_file")) {
+                if (run != null) throw new IllegalArgumentException("body_busy");
+                String path = string(request, "path", "").trim();
+                String name = string(request, "name", "").trim();
+                if (path.isBlank() || name.isBlank()) throw new IllegalArgumentException("missing_builder_file");
+                boolean accepted = baritone.getBuilderProcess().build(
+                    name, Path.of(path).toFile(), blockPosition(request, "origin")
+                );
+                if (!accepted) throw new IllegalArgumentException("builder_file_rejected");
+                JsonObject response = state(client);
+                response.addProperty("type", type);
+                response.addProperty("request_id", string(request, "request_id", ""));
+                connection.send(response);
+            } else if (type.equals("get_to_block_blacklist")) {
+                boolean blacklisted = baritone.getGetToBlockProcess().blacklistClosest();
+                JsonObject response = state(client);
+                response.addProperty("type", type);
+                response.addProperty("request_id", string(request, "request_id", ""));
+                response.addProperty("get_to_block_blacklist", blacklisted);
+                connection.send(response);
+            } else if (type.equals("builder_selection")) {
+                builderSelection(client, request, connection);
+            } else if (type.equals("elytra_repack")) {
+                if (run != null) throw new IllegalArgumentException("body_busy");
+                baritone.getElytraProcess().repackChunks();
+                JsonObject response = state(client);
+                response.addProperty("type", type);
+                response.addProperty("request_id", string(request, "request_id", ""));
+                connection.send(response);
+            } else if (type.equals("elytra_reset")) {
+                if (run != null) throw new IllegalArgumentException("body_busy");
+                baritone.getElytraProcess().resetState();
+                JsonObject response = state(client);
+                response.addProperty("type", type);
+                response.addProperty("request_id", string(request, "request_id", ""));
+                connection.send(response);
+            } else if (type.equals("baritone_command")) {
+                if (run != null) throw new IllegalArgumentException("body_busy");
+                String command = string(request, "command", "").trim();
+                if (command.isBlank()) throw new IllegalArgumentException("missing_baritone_command");
+                if (!baritone.getCommandManager().execute(command)) {
+                    throw new IllegalArgumentException("baritone_command_rejected");
+                }
+                JsonObject response = state(client);
+                response.addProperty("type", type);
+                response.addProperty("request_id", string(request, "request_id", ""));
+                connection.send(response);
+            } else if (type.equals("primitive")) {
+                if (!ready) throw new IllegalArgumentException("client_not_ready");
+                primitive(client, request, connection);
             } else if (type.equals("cancel")) {
                 if (run == null || !run.id.equals(id)) {
                     throw new IllegalArgumentException("action_not_active");
@@ -234,10 +333,12 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
         } catch (IllegalArgumentException error) {
             JsonObject response = envelope("rejected", id);
+            response.addProperty("request_id", string(request, "request_id", ""));
             response.addProperty("reason", error.getMessage());
             connection.send(response);
         } catch (RuntimeException error) {
             JsonObject response = envelope("rejected", id);
+            response.addProperty("request_id", string(request, "request_id", ""));
             response.addProperty("reason", "request_failed");
             response.addProperty("detail", error.toString());
             connection.send(response);
@@ -263,7 +364,9 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
         Run candidate = new Run(id, objective, connection, timeout);
         candidate.kind = parts[0];
-        if (parts.length == 4 && (parts[0].equals("goto") || parts[0].equals("navigate"))) {
+        if (parts[0].equals("any") || parts[0].equals("away") || parts[0].equals("y") || parts[0].equals("block")) {
+            candidate.goal = parseGoalObjective(objective);
+        } else if (parts.length == 4 && (parts[0].equals("goto") || parts[0].equals("navigate"))) {
             try {
                 candidate.goal = new GoalBlock(
                     Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3])
@@ -271,9 +374,21 @@ public final class MineBotClientBody implements ClientModInitializer {
             } catch (NumberFormatException error) {
                 throw new IllegalArgumentException("invalid_coordinates");
             }
-        } else if ((parts.length == 2 || parts.length == 3) && parts[0].equals("mine") && !parts[1].isBlank()) {
-            candidate.target = parts[1];
-            candidate.item = parts.length == 3 ? parts[2] : parts[1];
+        } else if ((parts.length == 2 || parts.length == 3 || parts.length == 4) && parts[0].equals("mine") && !parts[1].isBlank()) {
+            if (parts.length == 4) {
+                candidate.mineQuantity = Integer.parseInt(parts[1]);
+                if (candidate.mineQuantity < 1 || candidate.mineQuantity > 4096) {
+                    throw new IllegalArgumentException("invalid_mine_quantity");
+                }
+                candidate.targets = parts[2].split(",", -1);
+                if (candidate.targets.length == 0) throw new IllegalArgumentException("missing_mine_targets");
+                candidate.target = candidate.targets[0];
+                candidate.item = parts[3];
+            } else {
+                candidate.target = parts[1];
+                candidate.targets = new String[] {parts[1]};
+                candidate.item = parts.length == 3 ? parts[2] : parts[1];
+            }
         } else if (parts.length == 3 && parts[0].equals("xz")) {
             candidate.goal = new GoalXZ(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
         } else if (parts.length == 5 && parts[0].equals("near")) {
@@ -311,7 +426,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         try {
             if (candidate.goal != null) baritone.getCustomGoalProcess().setGoalAndPath(candidate.goal);
             else switch (candidate.kind) {
-                case "mine" -> baritone.getMineProcess().mineByName(1, candidate.target);
+                case "mine" -> baritone.getMineProcess().mineByName(candidate.mineQuantity, candidate.targets);
                 case "get" -> baritone.getGetToBlockProcess().getToBlock(new BlockOptionalMeta(candidate.target));
                 case "explore" -> baritone.getExploreProcess().explore(candidate.anchor.getX(), candidate.anchor.getZ());
                 case "follow" -> baritone.getFollowProcess().follow(entity ->
@@ -332,6 +447,273 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
         emit(candidate, envelope("accepted", id));
         LOG.info("MINEBOT_PHASE_A objective_started id={} objective={}", id, objective);
+    }
+
+    private void primitive(Minecraft client, JsonObject request, Peer connection) {
+        String action = string(request, "action_name", "");
+        JsonObject params = request.has("params") && request.get("params").isJsonObject()
+            ? request.getAsJsonObject("params") : new JsonObject();
+        if (client.player == null || client.gameMode == null) {
+            throw new IllegalArgumentException("player_not_ready");
+        }
+        switch (action) {
+            case "jump" -> client.player.input.makeJump();
+            case "stop" -> {
+                baritone.getPathingBehavior().cancelEverything();
+                baritone.getInputOverrideHandler().clearAllKeys();
+            }
+            case "selectItem" -> selectItem(client, string(params, "item", ""));
+            case "selectSlot" -> selectSlot(client, params);
+            case "lookAt" -> lookAt(client, params);
+            case "useItem" -> useItem(client, params);
+            case "attackEntity" -> attackEntity(client, params);
+            case "dropItem" -> dropItem(client, params);
+            case "moveItem" -> moveItem(client, params);
+            case "mineBlock", "collectBlock" -> mineBlock(client, params);
+            case "placeBlock" -> placeBlock(client, params);
+            case "igniteBlock", "sowCrop" -> useOnBlock(client, action, params);
+            default -> throw new IllegalArgumentException("unsupported_primitive_action");
+        }
+        JsonObject response = state(client);
+        response.addProperty("type", "primitive");
+        response.addProperty("request_id", string(request, "request_id", ""));
+        response.addProperty("success", true);
+        response.addProperty("reason", "action_applied");
+        connection.send(response);
+    }
+
+    private void builderSelection(Minecraft client, JsonObject request, Peer connection) {
+        String operation = string(request, "operation", "");
+        var manager = baritone.getSelectionManager();
+        ISelection result = null;
+        switch (operation) {
+            case "add" -> result = manager.addSelection(
+                new BetterBlockPos(blockPosition(request, "pos1")),
+                new BetterBlockPos(blockPosition(request, "pos2"))
+            );
+            case "clear" -> manager.removeAllSelections();
+            case "expand", "contract", "shift" -> {
+                ISelection selected = manager.getOnlySelection();
+                if (selected == null) throw new IllegalArgumentException("builder_selection_missing");
+                Direction direction = selectionDirection(request);
+                int amount = request.has("amount") ? request.get("amount").getAsInt() : 1;
+                if (amount < 1 || amount > 256) throw new IllegalArgumentException("invalid_selection_amount");
+                result = switch (operation) {
+                    case "expand" -> manager.expand(selected, direction, amount);
+                    case "contract" -> manager.contract(selected, direction, amount);
+                    default -> manager.shift(selected, direction, amount);
+                };
+            }
+            default -> throw new IllegalArgumentException("unsupported_builder_selection_operation");
+        }
+        JsonObject response = state(client);
+        response.addProperty("type", "builder_selection");
+        response.addProperty("request_id", string(request, "request_id", ""));
+        response.add("builder_selections", selectionFacts(manager));
+        if (result != null) response.add("selection", selectionFact(result));
+        connection.send(response);
+    }
+
+    private static Direction selectionDirection(JsonObject request) {
+        String raw = string(request, "direction", "").trim().toUpperCase(Locale.ROOT);
+        try {
+            return Direction.valueOf(raw);
+        } catch (IllegalArgumentException error) {
+            throw new IllegalArgumentException("invalid_selection_direction", error);
+        }
+    }
+
+    private static JsonArray selectionFacts(baritone.api.selection.ISelectionManager manager) {
+        JsonArray selections = new JsonArray();
+        for (ISelection selection : manager.getSelections()) selections.add(selectionFact(selection));
+        return selections;
+    }
+
+    private static JsonObject selectionFact(ISelection selection) {
+        JsonObject fact = new JsonObject();
+        JsonArray pos1 = new JsonArray();
+        pos1.add(selection.pos1().getX());
+        pos1.add(selection.pos1().getY());
+        pos1.add(selection.pos1().getZ());
+        JsonArray pos2 = new JsonArray();
+        pos2.add(selection.pos2().getX());
+        pos2.add(selection.pos2().getY());
+        pos2.add(selection.pos2().getZ());
+        fact.add("pos1", pos1);
+        fact.add("pos2", pos2);
+        return fact;
+    }
+
+    private void worldRead(Minecraft client, JsonObject request, Peer connection) {
+        String scope = string(request, "scope", "");
+        JsonObject params = request.has("params") && request.get("params").isJsonObject()
+            ? request.getAsJsonObject("params") : new JsonObject();
+        JsonObject response = envelope("world_read", string(request, "request_id", ""));
+        response.addProperty("request_id", string(request, "request_id", ""));
+        JsonObject data = new JsonObject();
+        if (scope.equals("blockAt")) {
+            BlockPos pos = new BlockPos(params.get("x").getAsInt(), params.get("y").getAsInt(), params.get("z").getAsInt());
+            JsonObject fact = blockFact(client.level.getBlockState(pos), pos);
+            for (var entry : fact.entrySet()) data.add(entry.getKey(), entry.getValue());
+        } else if (scope.equals("blockCells")) {
+            JsonArray cells = new JsonArray();
+            JsonArray raw = params.has("cells") && params.get("cells").isJsonArray() ? params.getAsJsonArray("cells") : new JsonArray();
+            for (var item : raw) {
+                JsonArray xyz = item.getAsJsonArray();
+                BlockPos pos = new BlockPos(xyz.get(0).getAsInt(), xyz.get(1).getAsInt(), xyz.get(2).getAsInt());
+                cells.add(blockFact(client.level.getBlockState(pos), pos));
+            }
+            data.add("cells", cells);
+            data.addProperty("count", cells.size());
+        } else if (scope.equals("nearbyBlocks")) {
+            JsonArray blocks = new JsonArray();
+            JsonArray targets = params.has("block_types") && params.get("block_types").isJsonArray()
+                ? params.getAsJsonArray("block_types") : new JsonArray();
+            int radius = params.has("radius") ? Math.min(64, Math.max(1, params.get("radius").getAsInt())) : 16;
+            for (var target : targets) {
+                var locations = BaritoneAPI.getProvider().getWorldScanner().scanChunkRadius(
+                    baritone.getPlayerContext(), new BlockOptionalMetaLookup(target.getAsString().replace("minecraft:", "")), radius, 10, 64
+                );
+                locations.forEach(pos -> {
+                    JsonObject fact = new JsonObject();
+                    fact.addProperty("x", pos.getX());
+                    fact.addProperty("y", pos.getY());
+                    fact.addProperty("z", pos.getZ());
+                    fact.addProperty("type", target.getAsString().replace("minecraft:", ""));
+                    blocks.add(fact);
+                });
+            }
+            data.add("blocks", blocks);
+            data.addProperty("count", blocks.size());
+        } else {
+            throw new IllegalArgumentException("unsupported_world_read_scope");
+        }
+        response.addProperty("ok", true);
+        response.addProperty("complete", true);
+        response.add("data", data);
+        response.add("uncertainty", new JsonArray());
+        connection.send(response);
+    }
+
+    private static JsonObject blockFact(BlockState state, BlockPos pos) {
+        JsonObject fact = new JsonObject();
+        fact.addProperty("x", pos.getX());
+        fact.addProperty("y", pos.getY());
+        fact.addProperty("z", pos.getZ());
+        fact.addProperty("type", BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
+        String kind = state.isAir() || state.canBeReplaced() ? "CLEAR"
+            : (!state.getFluidState().isEmpty() ? "FLUID" : "SOLID");
+        fact.addProperty("state", kind);
+        JsonObject properties = new JsonObject();
+        for (Property<?> property : state.getProperties()) {
+            properties.addProperty(property.getName(), property.value(state).toString());
+        }
+        fact.add("properties", properties);
+        return fact;
+    }
+
+    private static void selectItem(Minecraft client, String item) {
+        if (item.isBlank()) throw new IllegalArgumentException("missing_item");
+        String wanted = item.replace("minecraft:", "");
+        for (int slot = 0; slot < 9; slot++) {
+            ItemStack stack = client.player.getInventory().getItem(slot);
+            if (!stack.isEmpty() && BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath().equals(wanted)) {
+                client.player.getInventory().setSelectedSlot(slot);
+                return;
+            }
+        }
+        throw new IllegalArgumentException("item_not_in_hotbar");
+    }
+
+    private static void selectSlot(Minecraft client, JsonObject params) {
+        int slot = params.has("slot") ? params.get("slot").getAsInt() : -1;
+        if (slot < 0 || slot >= 9) throw new IllegalArgumentException("invalid_hotbar_slot");
+        client.player.getInventory().setSelectedSlot(slot);
+    }
+
+    private static void lookAt(Minecraft client, JsonObject params) {
+        JsonArray target = params.has("target") && params.get("target").isJsonArray()
+            ? params.getAsJsonArray("target") : null;
+        if (target == null || target.size() != 3) throw new IllegalArgumentException("invalid_look_target");
+        double dx = target.get(0).getAsDouble() - client.player.getX();
+        double dy = target.get(1).getAsDouble() - (client.player.getY() + client.player.getEyeHeight());
+        double dz = target.get(2).getAsDouble() - client.player.getZ();
+        double horizontal = Math.sqrt(dx * dx + dz * dz);
+        float yaw = (float) (Math.atan2(dz, dx) * 180.0 / Math.PI) - 90.0f;
+        float pitch = (float) -(Math.atan2(dy, horizontal) * 180.0 / Math.PI);
+        BaritoneAPI.getProvider().getBaritoneForMinecraft(client).getLookBehavior()
+            .updateTarget(new Rotation(yaw, pitch), true);
+    }
+
+    private static void useItem(Minecraft client, JsonObject params) {
+        if (params.has("item")) selectItem(client, string(params, "item", ""));
+        client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+    }
+
+    private static void attackEntity(Minecraft client, JsonObject params) {
+        String wantedId = string(params, "target_id", "");
+        String wantedName = string(params, "target_name", "");
+        String wantedType = string(params, "target_type", "").replace("minecraft:", "");
+        Entity selected = null;
+        double best = Double.MAX_VALUE;
+        for (Entity entity : client.level.getEntities(client.player, client.player.getBoundingBox().inflate(32.0), value -> true)) {
+            boolean match = (!wantedId.isBlank() && entity.getUUID().toString().equals(wantedId))
+                || (!wantedName.isBlank() && entity.getName().getString().equals(wantedName))
+                || (!wantedType.isBlank() && BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath().equals(wantedType));
+            if (match && client.player.distanceToSqr(entity) < best) {
+                selected = entity;
+                best = client.player.distanceToSqr(entity);
+            }
+        }
+        if (selected == null) throw new IllegalArgumentException("target_not_found");
+        client.gameMode.attack(client.player, selected);
+    }
+
+    private static void dropItem(Minecraft client, JsonObject params) {
+        int slot = params.has("slot") ? params.get("slot").getAsInt() : client.player.getInventory().getSelectedSlot();
+        if (slot < 0 || slot >= client.player.getInventory().getContainerSize()) throw new IllegalArgumentException("invalid_inventory_slot");
+        client.player.getInventory().setSelectedSlot(Math.max(0, Math.min(8, slot)));
+        client.player.drop("all".equals(string(params, "mode", "one")));
+    }
+
+    private static void moveItem(Minecraft client, JsonObject params) {
+        int from = params.get("from_slot").getAsInt();
+        int to = params.get("to_slot").getAsInt();
+        if (from < 0 || to < 0 || from >= client.player.containerMenu.slots.size() || to >= client.player.containerMenu.slots.size()) {
+            throw new IllegalArgumentException("invalid_inventory_slot");
+        }
+        int menu = client.player.containerMenu.containerId;
+        client.gameMode.handleContainerInput(menu, from, 0, net.minecraft.world.inventory.ContainerInput.PICKUP, client.player);
+        client.gameMode.handleContainerInput(menu, to, 0, net.minecraft.world.inventory.ContainerInput.PICKUP, client.player);
+    }
+
+    private static void mineBlock(Minecraft client, JsonObject params) {
+        BlockPos target = blockPosition(params, "target");
+        if (!client.player.isWithinBlockInteractionRange(target, 5.0)) throw new IllegalArgumentException("target_out_of_range");
+        if (!client.gameMode.destroyBlock(target)) throw new IllegalArgumentException("block_break_rejected");
+    }
+
+    private static void placeBlock(Minecraft client, JsonObject params) {
+        BlockPos target = blockPosition(params, "target");
+        if (params.has("block_type")) selectItem(client, string(params, "block_type", ""));
+        BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(target), Direction.UP, target, false);
+        InteractionResult result = client.gameMode.useItemOn(client.player, InteractionHand.MAIN_HAND, hit);
+        if (!result.consumesAction()) throw new IllegalArgumentException("block_place_rejected");
+    }
+
+    private static void useOnBlock(Minecraft client, String action, JsonObject params) {
+        BlockPos target = blockPosition(params, "target");
+        if (params.has("item")) selectItem(client, string(params, "item", ""));
+        if (params.has("seed_item")) selectItem(client, string(params, "seed_item", ""));
+        BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(target), Direction.UP, target, false);
+        InteractionResult result = client.gameMode.useItemOn(client.player, InteractionHand.MAIN_HAND, hit);
+        if (!result.consumesAction()) throw new IllegalArgumentException(action + "_rejected");
+    }
+
+    private static BlockPos blockPosition(JsonObject params, String key) {
+        JsonArray raw = params.has(key) && params.get(key).isJsonArray() ? params.getAsJsonArray(key) : null;
+        if (raw == null || raw.size() != 3) throw new IllegalArgumentException("invalid_target");
+        return new BlockPos(raw.get(0).getAsInt(), raw.get(1).getAsInt(), raw.get(2).getAsInt());
     }
 
     private void requestStop(String status, String reason) {
@@ -461,6 +843,12 @@ public final class MineBotClientBody implements ClientModInitializer {
             state.addProperty("dimension", client.level.dimension().identifier().toString());
             state.addProperty("health", client.player.getHealth());
             state.addProperty("food", client.player.getFoodData().getFoodLevel());
+            state.addProperty("oxygen", client.player.getAirSupply());
+            state.addProperty("yaw", client.player.getYRot());
+            state.addProperty("pitch", client.player.getXRot());
+            state.addProperty("selected_slot", client.player.getInventory().getSelectedSlot());
+            state.addProperty("selected_item", itemPath(client.player.getMainHandItem()));
+            state.addProperty("offhand_item", itemPath(client.player.getOffhandItem()));
             state.addProperty("fall_flying", client.player.isFallFlying());
             state.addProperty("menu", client.player.containerMenu.getClass().getSimpleName());
             state.addProperty("chest_item", BuiltInRegistries.ITEM.getKey(client.player.getItemBySlot(EquipmentSlot.CHEST).getItem()).getPath());
@@ -474,6 +862,30 @@ public final class MineBotClientBody implements ClientModInitializer {
                 }
             }
             state.add("inventory", inventory);
+            JsonArray entities = new JsonArray();
+            var nearby = client.level.getEntities(
+                client.player,
+                client.player.getBoundingBox().inflate(64.0),
+                entity -> true
+            );
+            for (Entity entity : nearby) {
+                JsonObject observed = new JsonObject();
+                observed.addProperty("id", entity.getUUID().toString());
+                observed.addProperty("name", entity.getName().getString());
+                observed.addProperty("type", BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath());
+                JsonArray entityPos = new JsonArray();
+                entityPos.add(entity.getX());
+                entityPos.add(entity.getY());
+                entityPos.add(entity.getZ());
+                observed.add("pos", entityPos);
+                observed.addProperty("dist2", client.player.distanceToSqr(entity));
+                observed.addProperty("hostile", entity instanceof Enemy);
+                if (entity instanceof net.minecraft.world.entity.LivingEntity living) {
+                    observed.addProperty("health", living.getHealth());
+                }
+                entities.add(observed);
+            }
+            state.add("entities", entities);
         }
         if (baritone != null) {
             state.addProperty("pathing", baritone.getPathingBehavior().isPathing());
@@ -485,8 +897,24 @@ public final class MineBotClientBody implements ClientModInitializer {
             state.addProperty("farm_active", baritone.getFarmProcess().isActive());
             state.addProperty("builder_active", baritone.getBuilderProcess().isActive());
             state.addProperty("builder_paused", baritone.getBuilderProcess().isPaused());
+            JsonArray placeable = new JsonArray();
+            try {
+                for (BlockState block : baritone.getBuilderProcess().getApproxPlaceable()) {
+                    placeable.add(BuiltInRegistries.BLOCK.getKey(block.getBlock()).toString());
+                }
+            } catch (RuntimeException ignored) {
+                // Builder inspection is advisory when no schematic is loaded.
+            }
+            state.add("builder_placeable", placeable);
+            baritone.getBuilderProcess().getMinLayer().ifPresent(value -> state.addProperty("builder_min_layer", value));
+            baritone.getBuilderProcess().getMaxLayer().ifPresent(value -> state.addProperty("builder_max_layer", value));
+            state.add("builder_selections", selectionFacts(baritone.getSelectionManager()));
             state.addProperty("elytra_active", baritone.getElytraProcess().isActive());
             state.addProperty("elytra_loaded", baritone.getElytraProcess().isLoaded());
+            state.addProperty("elytra_safe_to_cancel", baritone.getElytraProcess().isSafeToCancel());
+            state.addProperty("elytra_destination", baritone.getElytraProcess().currentDestination() == null
+                ? "" : baritone.getElytraProcess().currentDestination().toShortString());
+            state.addProperty("elytra_path_size", baritone.getElytraProcess().getPath().size());
             JsonArray following = new JsonArray();
             var followed = baritone.getFollowProcess().following();
             if (followed != null) {
@@ -499,11 +927,15 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
             state.add("following", following);
             state.addProperty("any_process_active", processActive());
+            baritone.getPathingBehavior().estimatedTicksToGoal()
+                .ifPresent(value -> state.addProperty("path_estimated_ticks", value));
             var goal = baritone.getPathingBehavior().getGoal();
             state.addProperty("baritone_goal", goal == null ? "" : goal.toString());
             state.addProperty("allow_break", BaritoneAPI.getSettings().allowBreak.value);
             state.addProperty("allow_place", BaritoneAPI.getSettings().allowPlace.value);
             state.addProperty("explore_for_blocks", BaritoneAPI.getSettings().exploreForBlocks.value);
+            state.addProperty("replant_crops", BaritoneAPI.getSettings().replantCrops.value);
+            state.addProperty("farm_max_scan_size", BaritoneAPI.getSettings().farmMaxScanSize.value);
             state.addProperty("legit_mine_y", BaritoneAPI.getSettings().legitMineYLevel.value);
         }
         return state;
@@ -521,6 +953,72 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
         }
         return count;
+    }
+
+    private static String itemPath(ItemStack stack) {
+        return stack.isEmpty() ? "" : BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath();
+    }
+
+    private static Goal parseGoalObjective(String objective) {
+        String[] parts = objective.split(":", -1);
+        try {
+            if (parts[0].equals("y") && parts.length == 2) {
+                return new GoalYLevel(Integer.parseInt(parts[1]));
+            }
+            if (parts[0].equals("block") && parts.length == 4) {
+                return new GoalBlock(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
+            }
+            if (parts[0].equals("away") && parts.length == 5) {
+                return new GoalRunAway(
+                    Double.parseDouble(parts[4]),
+                    new BlockPos(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]))
+                );
+            }
+            if (parts[0].equals("any") && objective.startsWith("any:")) {
+                String[] alternatives = objective.substring(4).split("\\|", -1);
+                if (alternatives.length < 1 || alternatives.length > 64) {
+                    throw new IllegalArgumentException("invalid_goal_composite_size");
+                }
+                Goal[] goals = new Goal[alternatives.length];
+                for (int index = 0; index < alternatives.length; index++) {
+                    goals[index] = parseGoalToken(alternatives[index]);
+                }
+                return new GoalComposite(goals);
+            }
+        } catch (NumberFormatException error) {
+            throw new IllegalArgumentException("invalid_goal_coordinates", error);
+        }
+        throw new IllegalArgumentException("invalid_goal_objective");
+    }
+
+    private static Goal parseGoalToken(String token) {
+        String[] parts = token.split(":", -1);
+        try {
+            return switch (parts[0]) {
+                case "near" -> {
+                    if (parts.length != 5) throw new IllegalArgumentException("invalid_near_goal");
+                    yield new GoalNear(
+                        new BlockPos(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3])),
+                        Integer.parseInt(parts[4])
+                    );
+                }
+                case "xz" -> {
+                    if (parts.length != 3) throw new IllegalArgumentException("invalid_xz_goal");
+                    yield new GoalXZ(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
+                }
+                case "y" -> {
+                    if (parts.length != 2) throw new IllegalArgumentException("invalid_y_goal");
+                    yield new GoalYLevel(Integer.parseInt(parts[1]));
+                }
+                case "block" -> {
+                    if (parts.length != 4) throw new IllegalArgumentException("invalid_block_goal");
+                    yield new GoalBlock(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
+                }
+                default -> throw new IllegalArgumentException("unsupported_goal_kind");
+            };
+        } catch (NumberFormatException error) {
+            throw new IllegalArgumentException("invalid_goal_coordinates", error);
+        }
     }
 
     private static String string(JsonObject object, String key, String fallback) {
@@ -562,6 +1060,8 @@ public final class MineBotClientBody implements ClientModInitializer {
         boolean seenActive;
         String target;
         String item;
+        String[] targets = new String[0];
+        int mineQuantity = 1;
         String stopStatus;
         String stopReason;
         String lastPathEvent = "";
