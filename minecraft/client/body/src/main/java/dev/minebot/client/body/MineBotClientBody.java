@@ -67,8 +67,10 @@ public final class MineBotClientBody implements ClientModInitializer {
         baritone.getGameEventHandler().registerEventListener(run);
         try {
             startObjective(baritone, rawObjective);
-            LOGGER.info("MINEBOT_PHASE_A objective_started objective={} x={} y={} z={}",
-                rawObjective, client.player.getX(), client.player.getY(), client.player.getZ());
+            // The join callback can run before the first authoritative player
+            // position arrives. Coordinates belong in the periodic state
+            // sample below; logging them here would create false evidence.
+            LOGGER.info("MINEBOT_PHASE_A objective_started objective={}", rawObjective);
         } catch (IllegalArgumentException error) {
             activeRun = null;
             LOGGER.error("MINEBOT_PHASE_A failure=unsupported_objective objective={} reason={}", rawObjective, error.getMessage());
