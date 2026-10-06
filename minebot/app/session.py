@@ -1629,9 +1629,9 @@ class AgentSession:
                 )
             return _WORK_PREEMPTED
 
-        async def preempt_work(reason: str):
+        async def preempt_work(reason: str, *, interrupt_body: bool):
             cancellation_task: asyncio.Task[dict[str, object]] | None = None
-            if self.parts is not None:
+            if interrupt_body and self.parts is not None:
                 cancellation_task = asyncio.create_task(
                     self.parts.runtime.cancel_active_execution_with_facts(
                         reason,
@@ -1646,9 +1646,10 @@ class AgentSession:
         try:
             while not task.done():
                 if self.work_queue.notification_version != admission_version:
-                    reason = _queued_preemption_reason(self.work_queue, work_kind)
-                    if reason is not None:
-                        return await preempt_work(reason)
+                    preemption = _queued_preemption(self.work_queue, work_kind)
+                    if preemption is not None:
+                        reason, interrupt_body = preemption
+                        return await preempt_work(reason, interrupt_body=interrupt_body)
                     admission_version = self.work_queue.notification_version
                 await asyncio.sleep(0.01)
             return task.result()
@@ -1656,11 +1657,15 @@ class AgentSession:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-            if (
-                self.work_queue.notification_version != admission_version
-                and _queued_preemption_reason(self.work_queue, work_kind) is not None
-            ):
-                return await settle_preempted_work(None)
+            if self.work_queue.notification_version != admission_version:
+                preemption = _queued_preemption(self.work_queue, work_kind)
+                if preemption is not None:
+                    reason, interrupt_body = preemption
+                    # A control command can cancel the active turn before this
+                    # supervisor observes its queue notification. Explicit
+                    # controls own Body interruption; ordinary messages only
+                    # cancel the model turn and leave physical work running.
+                    return await preempt_work(reason, interrupt_body=interrupt_body)
             raise
 
     async def _guard_execution_quarantine(self) -> SessionStep | None:
@@ -1714,7 +1719,7 @@ def _queued_quarantine_control(queue: WorkIntentQueue | None) -> WorkIntent | No
     return min(controls, key=lambda intent: (-intent.priority, intent.intent_id))
 
 
-def _queued_preemption_reason(queue: WorkIntentQueue, work_kind: str) -> str | None:
+def _queued_preemption(queue: WorkIntentQueue, work_kind: str) -> tuple[str, bool] | None:
     queued = queue.queued_intents()
     if work_kind == "recovery":
         queued = [intent for intent in queued if intent.kind in CONTROL_INTENT_KINDS]
@@ -1725,9 +1730,10 @@ def _queued_preemption_reason(queue: WorkIntentQueue, work_kind: str) -> str | N
         key=lambda item: (item[1].priority, -item[0]),
     )[1]
     reason = intent.payload.get("reason")
-    if isinstance(reason, str) and reason:
-        return reason
-    return intent.source
+    return (
+        reason if isinstance(reason, str) and reason else intent.source,
+        intent.kind in CONTROL_INTENT_KINDS,
+    )
 
 
 def _command_requires_body_interrupt(command: SessionCommand) -> bool:

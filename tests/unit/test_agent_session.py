@@ -911,8 +911,8 @@ class AgentSessionTests(unittest.TestCase):
         self.assertNotEqual(calls[1], "hello")
         self.assertEqual(calls[1], "actually, who are you?")
         self.assertIn(("user", "hello"), session.parts.context.session_messages())
-        self.assertEqual(bodies[0].interrupt_reasons, ["user_message"])
-        self.assertEqual(queued_at_cancellation, [1, 1])
+        self.assertEqual(bodies[0].interrupt_reasons, [])
+        self.assertEqual(queued_at_cancellation, [])
 
     def test_chat_control_is_queued_before_a_blocking_body_interrupt_settles(self):
         bodies: list[FakeBody] = []
