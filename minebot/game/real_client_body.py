@@ -102,6 +102,8 @@ class RealClientBody:
         self._pending: dict[str, _PendingAction] = {}
         self._event_queue: list[Event] = []
         self._last_state_payload: dict[str, Any] | None = None
+        self._ready_lock = threading.Lock()
+        self._ready = False
 
     @property
     def capabilities(self) -> Mapping[str, RealClientCapability]:
@@ -125,7 +127,12 @@ class RealClientBody:
         ]
 
     def _ensure_connected(self) -> None:
-        self.ipc.connect()
+        with self._ready_lock:
+            self.ipc.connect()
+            wait_ready = getattr(self.ipc, "wait_ready", None)
+            if not self._ready and callable(wait_ready):
+                wait_ready()
+                self._ready = True
 
     def world_identity(self) -> str:
         """Return the client dimension as the session's stable world scope.
@@ -433,6 +440,8 @@ class RealClientBody:
             return _gap_event(self.bot_name, expected_name, f"terminal:{type(error).__name__}")
 
     def close(self) -> None:
+        with self._ready_lock:
+            self._ready = False
         self.ipc.close()
 
     def _inventory_perception(self, params: dict[str, object]) -> PerceptionResult:
