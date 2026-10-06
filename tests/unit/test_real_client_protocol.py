@@ -17,8 +17,7 @@ from minebot.game.real_client_protocol import (
     verify_hello,
 )
 from minebot.game.real_client_support import (
-    CANDIDATE_1_21_8,
-    EXCLUDED_26_1_2,
+    CANDIDATE_26_1_2,
     RealClientTuple,
     UnsupportedRealClientTuple,
     require_supported_real_client_tuple,
@@ -30,12 +29,12 @@ def identity() -> RealClientIdentity:
         player="Bot1",
         session_id="session-1",
         client_epoch="epoch-1",
-        minecraft="1.21.8",
-        baritone="v1.15.0",
-        loader_package="fabric",
-        java="21",
+        minecraft="26.1.2",
+        baritone="v1.18.0",
+        loader_package="fabric-0.19.3",
+        java="25",
         integration="minebot-client-spike",
-        support_matrix_id=CANDIDATE_1_21_8.matrix_id,
+        support_matrix_id=CANDIDATE_26_1_2.matrix_id,
     )
 
 
@@ -116,11 +115,10 @@ def test_event_ledger_records_gap_and_coalesces_old_state() -> None:
         ledger.observe_event({"type": "event", "client_epoch": "epoch-2", "event_seq": 5})
 
 
-def test_support_matrix_does_not_promote_candidate_or_26_1_2() -> None:
+def test_support_matrix_does_not_promote_candidate_before_live_proof() -> None:
     with pytest.raises(UnsupportedRealClientTuple):
-        require_supported_real_client_tuple(CANDIDATE_1_21_8.tuple)
-    assert EXCLUDED_26_1_2.status.value == "excluded"
+        require_supported_real_client_tuple(CANDIDATE_26_1_2.tuple)
     with pytest.raises(UnsupportedRealClientTuple):
         require_supported_real_client_tuple(
-            RealClientTuple("26.1.2", "v1.15.0", "fabric", "25", "minebot-client-spike")
+            RealClientTuple("26.1.2", "v1.18.0", "fabric-0.19.3", "25", "other-integration")
         )

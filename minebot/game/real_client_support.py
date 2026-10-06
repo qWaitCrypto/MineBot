@@ -50,38 +50,28 @@ class SupportMatrixEntry:
         return self.status is SupportStatus.SUPPORTED
 
 
-# R0 starts with the first upstream release that explicitly covers a stable
-# 1.21.x range. It remains a candidate until MineBot's live conformance gate
-# passes. Java 21 is the matching runtime family for this Minecraft release.
-CANDIDATE_1_21_8 = SupportMatrixEntry(
-    matrix_id="candidate-mc-1.21.8-baritone-v1.15.0-fabric-java21",
+# R0 uses the exact current MineBot server tuple. The official Baritone 1.18.0
+# release and its 26.1 branch declare Minecraft 26.1.2, Fabric Loader 0.19.3,
+# and Java 25. It remains a candidate until MineBot's live conformance proof
+# passes; selecting a candidate in production is intentionally impossible.
+CANDIDATE_26_1_2 = SupportMatrixEntry(
+    matrix_id="candidate-mc-26.1.2-baritone-v1.18.0-fabric-java25",
     tuple=RealClientTuple(
-        minecraft="1.21.8",
-        baritone="v1.15.0",
-        loader_package="fabric",
-        java="21",
+        minecraft="26.1.2",
+        baritone="v1.18.0",
+        loader_package="fabric-0.19.3",
+        java="25",
         integration="minebot-client-spike",
     ),
     status=SupportStatus.CANDIDATE,
-    evidence="official Baritone v1.15.0 release declares Minecraft 1.21.6-1.21.8",
-)
-
-EXCLUDED_26_1_2 = SupportMatrixEntry(
-    matrix_id="excluded-mc-26.1.2",
-    tuple=RealClientTuple(
-        minecraft="26.1.2",
-        baritone="unavailable",
-        loader_package="fabric",
-        java="25",
-        integration="none",
+    evidence=(
+        "official Baritone v1.18.0 release plus branch 26.1 gradle.properties "
+        "declare Minecraft 26.1.2, Fabric Loader 0.19.3, and Java 25"
     ),
-    status=SupportStatus.EXCLUDED,
-    evidence="the project route excludes 26.1.2 until an exact MineBot conformance tuple is validated",
 )
 
 REAL_CLIENT_SUPPORT_MATRIX: tuple[SupportMatrixEntry, ...] = (
-    CANDIDATE_1_21_8,
-    EXCLUDED_26_1_2,
+    CANDIDATE_26_1_2,
 )
 
 
