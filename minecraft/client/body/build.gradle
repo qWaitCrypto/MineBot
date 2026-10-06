@@ -73,6 +73,8 @@ tasks.named("runClient").configure {
     if (cancelAfterTicks != null && !cancelAfterTicks.isBlank()) {
         systemProperty("minebot.client.cancel_after_ticks", cancelAfterTicks)
     }
+    systemProperty("minebot.client.ipc_port", System.getenv().getOrDefault("MINEBOT_CLIENT_IPC_PORT", "8768"))
+    systemProperty("minebot.client.early_start", System.getenv().getOrDefault("MINEBOT_CLIENT_EARLY_START", "false"))
 }
 
 processResources {
