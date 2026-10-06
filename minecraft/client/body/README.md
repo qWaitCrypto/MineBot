@@ -65,11 +65,13 @@ From the repository root, with the disposable server and client running:
 .venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case vertical
 .venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case ranged
 .venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case menus
+.venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case combat_tools
+.venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case vertical_tools
 ```
 
 For handoff, launch a second client with username `Receiver` and IPC port
-`8769`, then run the same probe with `--case handoff`. The probe checks the
-server inventory of the actual recipient; a full recipient inventory must
+`8769`, then run the same probe with `--case handoff` or `--case handoff_tools`.
+The probe checks the server inventory of the actual recipient; a full recipient inventory must
 fail without a receipt. Reports are saved as local JSON under `logs/`.
 
 The vertical actions delegate digging, pillar placement, and movement to
@@ -87,6 +89,15 @@ It also checks protocol inventory slots, partial count moves, equipment round
 trips and invalid requests against server inventory/equipment reads. Launch
 the client and wait for readiness before running the fixture; this is a
 directed tool proof, without model planning or autonomous resource gathering.
+
+`combat_tools` calls `equip_item`, `engage_entity`, and `ranged_attack` with
+weapons supplied in the backpack. It checks the named target's death/damage,
+an untouched closer decoy, and the missing-ammunition reason. `vertical_tools`
+calls `dig_down`, `dig_up` with a specified scaffold, and `go_to_surface`, then
+checks grounded server positions, the distance refusal, and tool cancellation.
+`handoff_tools` calls `give_player` and checks its common pickup receipt and
+the full-recipient failure. These use the canonical tool callables without a
+planning model. They do not establish a complete autonomous Agent task.
 
 See [the dated verification record](verification-20261007.md) for actual
 results, reproduced failures, and the remaining coverage limits.

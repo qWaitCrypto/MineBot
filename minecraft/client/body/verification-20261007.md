@@ -113,3 +113,59 @@ inventory, container, furnace, client Body and IPC suite passed **163 tests
 and 71 subtests**. This proves the supplied-resource menu slice on one tuple;
 it does not establish every recipe/container, shared-world protection, or
 complete autonomous Agent behavior.
+
+## Canonical combat, vertical work and handoff tools
+
+The existing Agent registry now calls these client actions through Body, in
+the same disposable tuple. RCON supplies resources/fixtures and independently
+checks the result. There is no model planning in this proof.
+
+| Tool behavior | Server-confirmed result | Duration |
+| --- | --- | --- |
+| `equip_item` then `engage_entity` | Iron sword selected from backpack slot 27; named target killed; closer decoy remains at 20 HP | 3.365 s combat |
+| `ranged_attack`, bow from backpack | One arrow; named target 20 → 12.128 HP; closer decoy remains at 20 HP | 1.454 s |
+| `ranged_attack`, crossbow from backpack | One arrow; named target 20 → 9.176 HP; closer decoy remains at 20 HP | 1.872 s |
+| `ranged_attack`, no arrows | `no_ammunition`; target and decoy remain at 20 HP | 299 ms |
+| `dig_down` | Grounded Y=150 → 149; server shaft floor becomes air | 0.945 s |
+| `dig_up`, dirt scaffold | Grounded Y=150 → 152; specified dirt placed at the shaft base | 2.567 s |
+| `go_to_surface` | Grounded at Y=155; independently checked server position | 2.487 s |
+| `dig_down`, target outside four-step bound | `vertical_target_out_of_bounds`; original stone floor intact | 168 ms |
+| Cancel `dig_up` tool | Canceled terminal; no Baritone process/pathing after a further 0.5 s | 134 ms from stop to tool return |
+| `give_player`, two diamonds | Common `pickup_receipt` identifies Receiver, diamond and count 2; server recipient inventory contains both diamonds; no ground item remains | 2.625 s |
+| `give_player`, full recipient | `receiver_pickup_unconfirmed`; no receipt and no diamonds in receiver inventory | 4.022 s |
+
+The fixes close actual incompatibilities between the earlier typed client
+actions and the existing tools: combat UUID field mismatch, corpse selection,
+missing ranged tool registration, lost terminal reasons, premature synchronous
+vertical completion, and handoff receipt/source-slot mismatch. Native selection
+now swaps a backpack item into an empty or selected hotbar slot. Combat approach
+leaves a block-coordinate margin so actual attack reach is satisfied. Ranged
+charging uses the native use duration, including interruption by an inventory
+update. Vertical tools forward the step bound and use the requested scaffold;
+the previous Baritone throwaway-item setting is restored at the terminal.
+Nearby handoff no longer requires stepping away from a recipient who is already
+within reach. Its pickup wait and terminal wait now allow native approach,
+rotation and stop settling. Zero-radius navigation goals retain radius zero.
+
+The direct ranged regression also passed bow/crossbow hits, no-ammunition and
+charging cancellation (zero shots, 104 ms client stop-to-terminal). Its first
+attempt hit a leftover `ToolTarget` overlapping the intended fixture zombie;
+`no_damage_observed` correctly refused success. The fixture now removes the
+other directed combat targets before starting. Earlier failed reports retain
+the import, hotbar, approach, charging and handoff incompatibilities; they are
+not counted as successful runs.
+
+Raw local reports:
+
+- `logs/real-client-combat_tools-1791324416631010561.json`
+- `logs/real-client-vertical_tools-1791324684727561379.json`
+- `logs/real-client-handoff_tools-1791324642841859822.json`
+- `logs/real-client-ranged-1791324760025175272.json`
+
+The final relevant combat, interaction, inventory, container, furnace, client
+Body/IPC/protocol, registry, and synchronous Java vertical compatibility suite
+passed **311 tests and 187 subtests**. The formal Agent entrypoint regression
+also passed **80 tests and 8 subtests**. Java compilation and actual mixin loading
+passed. The previously recorded Java collection baseline failures remain
+outside this suite. Moving targets, broad natural terrain, shared-world
+protection, Elytra flight and a complete model-driven task remain unverified.

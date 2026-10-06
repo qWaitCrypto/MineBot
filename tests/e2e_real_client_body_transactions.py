@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import time
+import threading
 
 from minebot.contract import Action
 from minebot.contract import Region
@@ -24,7 +25,7 @@ from minebot.game.real_client_ipc import RealClientIpc
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--disposable-local-server", action="store_true", required=True)
-    parser.add_argument("--case", choices=("vertical", "vertical_denied", "handoff", "ranged", "menus"), required=True)
+    parser.add_argument("--case", choices=("vertical", "vertical_denied", "vertical_tools", "handoff", "handoff_tools", "ranged", "menus", "combat_tools"), required=True)
     parser.add_argument("--client-name", default="MineBotCombat")
     parser.add_argument("--receiver-name", default="Receiver")
     args = parser.parse_args()
@@ -124,7 +125,73 @@ def main() -> None:
             assert not body.ipc.state()["any_process_active"]
             records[-1]["settled_position"] = body.get_state().pos
             records[-1]["position_at_cancel"] = before
-        elif args.case == "handoff":
+        elif args.case == "vertical_tools":
+            assert body.ipc.state().get("disposable_world")
+            region = Region("disposable-vertical-tools", (60, 147, -4), (68, 165, 4))
+            registry = build_phase1_registry(body, Phase1RuntimeConfig(
+                region, body_provider="real_client",
+                governance_policy=GovernancePolicy(natural_regions=[region], bot_name=args.client_name),
+            ))
+
+            def vertical_tool(name: str, params: dict[str, object], height: int | None) -> dict[str, object]:
+                started = time.monotonic()
+                result = registry.get(name).callable(params)
+                records.append({"tool": name, "params": params, "result": result.to_payload(),
+                                "elapsed_s": round(time.monotonic() - started, 3)})
+                print(name, result.success, result.reason, records[-1]["elapsed_s"], flush=True)
+                if height is not None:
+                    verify_height(dict(result.metrics or {}), height)
+                return result.to_payload()
+
+            setup_vertical()
+            vertical_tool("dig_down", {"target_y": 149, "max_steps": 8}, 149)
+            assert command("execute if block 64 149 0 minecraft:air") == "Test passed"
+            setup_vertical()
+            command(f"clear {args.client_name} minecraft:cobblestone")
+            command(f"give {args.client_name} minecraft:dirt 32")
+            time.sleep(0.3)
+            vertical_tool("dig_up", {"target_y": 152, "max_steps": 8, "scaffold_blocks": ["dirt"]}, 152)
+            assert command("execute if block 64 150 0 minecraft:dirt") == "Test passed"
+            vertical_tool("go_to_surface", {"timeout_s": 15}, 155)
+            setup_vertical()
+            failed = vertical_tool("dig_down", {"target_y": 140, "max_steps": 4}, None)
+            assert not failed["success"] and failed["reason"] == "vertical_target_out_of_bounds"
+            assert command("execute if block 64 149 0 minecraft:stone") == "Test passed"
+            setup_vertical()
+            canceled = []
+            worker = threading.Thread(target=lambda: canceled.append(
+                registry.get("dig_up").callable({"target_y": 155, "max_steps": 8})))
+            worker.start()
+            time.sleep(0.4)
+            stopped_at = time.monotonic()
+            assert body.interrupt("cancel vertical tool fixture").ok
+            worker.join(5)
+            assert not worker.is_alive() and len(canceled) == 1
+            result = canceled[0]
+            records.append({"tool": "dig_up", "result": result.to_payload(), "cancel": True,
+                            "cancel_latency_ms": round((time.monotonic() - stopped_at) * 1000)})
+            assert not result.success and result.metrics["status"] == "canceled", result.to_payload()
+            time.sleep(0.5)
+            settled = body.ipc.state()
+            assert not settled["any_process_active"] and not settled["pathing"]
+            print("dig_up canceled", records[-1]["cancel_latency_ms"], "ms", flush=True)
+        elif args.case in {"handoff", "handoff_tools"}:
+            registry = build_phase1_registry(body, Phase1RuntimeConfig(
+                Region("disposable-handoff-tools", (-4, 69, -4), (4, 74, 4)), body_provider="real_client",
+            ))
+
+            def handoff(timeout_ticks: int) -> dict[str, object]:
+                if args.case == "handoff":
+                    return action("handoffItem", {"receiver": args.receiver_name, "item": "diamond", "slot": 0,
+                                                  "count": 2, "pickup_timeout_ticks": timeout_ticks})
+                started = time.monotonic()
+                params = {"player_name": args.receiver_name, "item": "diamond", "count": 2}
+                result = registry.get("give_player").callable(params)
+                records.append({"tool": "give_player", "params": params, "result": result.to_payload(),
+                                "elapsed_s": round(time.monotonic() - started, 3)})
+                print("give_player", result.success, result.reason, records[-1]["elapsed_s"], flush=True)
+                return {**dict(result.metrics or {}), "success": result.success, "reason": result.reason}
+
             command(f"gamemode survival {args.receiver_name}")
             command("fill -4 69 -4 4 69 4 minecraft:stone")
             command("fill -4 70 -4 4 73 4 minecraft:air")
@@ -135,12 +202,13 @@ def main() -> None:
             command("kill @e[type=item,x=0,y=70,z=0,distance=..8]")
             command(f"give {args.client_name} minecraft:diamond 2")
             wait_at(0.5, 70, 0.5)
-            data = action("handoffItem", {"receiver": args.receiver_name, "item": "diamond", "slot": 0,
-                                         "count": 2, "pickup_timeout_ticks": 100})
+            data = handoff(100)
             assert data["success"] and data["handoff_receipt"] and data["handoff_picked_up"] == 2, data
             recipient_inventory = command(f"data get entity {args.receiver_name} Inventory")
             records[-1]["server_recipient_inventory"] = recipient_inventory
             assert 'count: 2' in recipient_inventory and 'minecraft:diamond' in recipient_inventory, recipient_inventory
+            if args.case == "handoff_tools":
+                assert data["pickup_receipt"]["player"] == args.receiver_name and data["pickup_receipt"]["count"] == 2
             assert command("execute if entity @e[type=item,x=0,y=70,z=0,distance=..8]") == "Test failed"
 
             # A real player with a full inventory cannot receive the drop.
@@ -148,11 +216,60 @@ def main() -> None:
             command(f"give {args.receiver_name} minecraft:cobblestone 2304")
             command(f"give {args.client_name} minecraft:diamond 2")
             time.sleep(0.3)
-            data = action("handoffItem", {"receiver": args.receiver_name, "item": "diamond", "slot": 0,
-                                         "count": 2, "pickup_timeout_ticks": 20})
+            data = handoff(20)
             assert not data["success"] and not data["handoff_receipt"] and data["handoff_picked_up"] == 0, data
             assert data["reason"] == "receiver_pickup_unconfirmed", data
             assert "minecraft:diamond" not in command(f"data get entity {args.receiver_name} Inventory")
+        elif args.case == "combat_tools":
+            command("fill 78 149 -4 100 149 6 minecraft:stone")
+            command("fill 78 150 -4 100 154 6 minecraft:air")
+            command("time set midnight")
+            region = Region("disposable-combat-tools", (78, 149, -4), (100, 155, 6))
+            registry = build_phase1_registry(body, Phase1RuntimeConfig(
+                region, body_provider="real_client",
+                governance_policy=GovernancePolicy(natural_regions=[region], bot_name=args.client_name),
+            ))
+
+            def combat_fixture(weapon: str, *, ammunition: bool = True) -> None:
+                for name in ("ToolTarget", "ToolDecoy", "RangedFixture"):
+                    command(f"kill @e[type=zombie,name={name}]")
+                command(f"gamemode survival {args.client_name}")
+                command(f"clear {args.client_name}")
+                command(f"item replace entity {args.client_name} inventory.18 with minecraft:{weapon}")
+                if ammunition and weapon in {"bow", "crossbow"}:
+                    command(f"give {args.client_name} minecraft:arrow 16")
+                command(f"tp {args.client_name} 80.5 150 0.5")
+                command('summon zombie 88.5 150 0.5 {NoAI:1b,Silent:1b,CustomName:"ToolTarget",PersistenceRequired:1b}')
+                command('summon zombie 81.5 150 2.5 {NoAI:1b,Silent:1b,CustomName:"ToolDecoy",PersistenceRequired:1b}')
+                wait_at(80.5, 150, 0.5)
+
+            def combat_tool(name: str, params: dict[str, object], *, expected_reason: str) -> None:
+                started = time.monotonic()
+                result = registry.get(name).callable(params)
+                record = {"tool": name, "params": params, "result": result.to_payload(),
+                          "elapsed_s": round(time.monotonic() - started, 3),
+                          "server_target_health": command("data get entity @e[type=zombie,name=ToolTarget,limit=1] Health"),
+                          "server_decoy_health": command("data get entity @e[type=zombie,name=ToolDecoy,limit=1] Health")}
+                records.append(record)
+                print(name, result.success, result.reason, record["elapsed_s"], flush=True)
+                assert result.reason == expected_reason, result.to_payload()
+                assert result.success == (expected_reason in {"killed", "damage_observed"}), result.to_payload()
+                assert record["server_decoy_health"].endswith(": 20.0f"), record
+                if expected_reason == "killed":
+                    assert command("execute unless entity @e[type=zombie,name=ToolTarget]") == "Test passed"
+                elif expected_reason == "damage_observed":
+                    assert not record["server_target_health"].endswith(": 20.0f"), record
+
+            combat_fixture("iron_sword")
+            equipped = registry.get("equip_item").callable({"item": "iron_sword", "target": "mainhand"})
+            assert equipped.success, equipped.to_payload()
+            combat_tool("engage_entity", {"target": "ToolTarget", "timeout_s": 30}, expected_reason="killed")
+            for weapon in ("bow", "crossbow"):
+                combat_fixture(weapon)
+                combat_tool("ranged_attack", {"target": "ToolTarget", "weapon": weapon, "shots": 1, "timeout_s": 15},
+                            expected_reason="damage_observed")
+            combat_fixture("bow", ammunition=False)
+            combat_tool("ranged_attack", {"target": "ToolTarget", "timeout_s": 5}, expected_reason="no_ammunition")
         elif args.case == "menus":
             # Supplied resources and workstations, canonical Agent tool callables;
             # no model planning, gathering or shared-world permission claim.
@@ -311,7 +428,8 @@ def main() -> None:
             command("time set midnight")
             command(f"gamemode survival {args.client_name}")
             for weapon in ("bow", "crossbow"):
-                command("kill @e[type=zombie,name=RangedFixture]")
+                for name in ("RangedFixture", "ToolTarget", "ToolDecoy"):
+                    command(f"kill @e[type=zombie,name={name}]")
                 command("kill @e[type=arrow,x=80,y=150,z=0,distance=..24]")
                 command(f"clear {args.client_name}")
                 command(f"give {args.client_name} minecraft:{weapon}")
