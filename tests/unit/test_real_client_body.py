@@ -18,6 +18,7 @@ class FakeClientIpc:
     def __init__(self) -> None:
         self.connected = False
         self.commands: list[tuple[str, str, int]] = []
+        self.actions: list[tuple[str, dict[str, object], str, int]] = []
         self.controls: list[tuple[str, dict[str, object]]] = []
         self.canceled: list[str] = []
         self._cancel = threading.Event()
@@ -88,6 +89,24 @@ class FakeClientIpc:
         self.canceled.append(action_id)
         self._cancel.set()
 
+    def action(
+        self,
+        name: str,
+        params: dict[str, object],
+        *,
+        action_id: str,
+        timeout_ms: int,
+        on_progress=None,
+    ) -> RealClientTerminal:
+        del on_progress
+        self.actions.append((name, dict(params), action_id, timeout_ms))
+        return RealClientTerminal(
+            action_id=action_id,
+            status="completed",
+            reason="verified",
+            payload={"position": [4.5, 70.0, 9.5], "action_kind": name},
+        )
+
     def control(self, request_type: str, **fields: object) -> dict[str, object]:
         self.controls.append((request_type, dict(fields)))
         return {
@@ -129,7 +148,8 @@ def test_real_client_body_maps_state_inventory_and_find_blocks() -> None:
 
     capabilities = body.perceive("capabilities", {})
     assert capabilities.ok
-    assert any(item["action"] == "craftItem" for item in capabilities.data["unsupported"])
+    assert not any(item["action"] == "craftItem" for item in capabilities.data["unsupported"])
+    assert any(item["action"] == "baritoneCommand" for item in capabilities.data["unsupported"])
 
 
 def test_real_client_body_executes_process_and_returns_terminal_event() -> None:
@@ -188,6 +208,23 @@ def test_real_client_body_interrupts_active_process() -> None:
     assert result.ok and result.accepted
     assert ipc.canceled == ["a2"]
     assert terminal.data["status"] == "canceled"
+
+
+@pytest.mark.parametrize(
+    "action_name",
+    ("engageEntity", "rangedAttack", "craftItem", "containerTransfer", "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp"),
+)
+def test_real_client_body_routes_structured_actions_to_typed_client_wire(
+    action_name: str,
+) -> None:
+    ipc = FakeClientIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
+    accepted = body.execute(Action(f"structured-{action_name}", action_name, {"timeout_ticks": 20}))
+    terminal = body.await_action_terminal(f"structured-{action_name}", timeout_s=1.0)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.data["success"] is True
+    assert ipc.actions[0][0] == action_name
 
 
 def test_real_client_body_adapts_exact_collect_block_without_fallback() -> None:

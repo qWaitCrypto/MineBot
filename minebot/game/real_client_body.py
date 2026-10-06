@@ -56,19 +56,17 @@ _CAPABILITIES: tuple[RealClientCapability, ...] = (
     RealClientCapability("builder_selections", "selection", "adapter", "Builder selection add, clear, and geometry transforms"),
     RealClientCapability("body_primitives", "minecraft_client", "adapter", "Native jump, look, use, combat attempt, inventory, block and crop actions"),
     RealClientCapability("world_reads", "minecraft_client", "adapter", "Authoritative client-world block and entity snapshots"),
+    RealClientCapability("engage_entity", "client_combat", "implemented", "Tick-owned approach, line-of-sight, cooldown, health and kill terminal"),
+    RealClientCapability("ranged_attack", "client_combat", "implemented", "Bow/crossbow charge, release and damage-observed terminal"),
+    RealClientCapability("craft_item", "client_inventory_menu", "implemented", "Recipe-screen slot placement and output verification"),
+    RealClientCapability("container_transfer", "client_menu", "implemented", "Open, slot-map, transfer and post-click verification"),
+    RealClientCapability("furnace_transfer", "client_furnace_menu", "implemented", "Furnace slot lifecycle and transfer verification"),
+    RealClientCapability("handoff_item", "client_inventory", "implemented", "Recipient approach and dropped-item handoff"),
+    RealClientCapability("vertical_recovery", "client_vertical", "implemented", "Bounded liquid-aware dig/ascend tick loop"),
 )
 CAPABILITY_REGISTRY: Mapping[str, RealClientCapability] = {item.name: item for item in _CAPABILITIES}
 
 UNSUPPORTED_CAPABILITIES: Mapping[str, str] = {
-    "engageEntity": "Baritone exposes no combat process; a one-shot client attack cannot satisfy approach, cooldown, safety, and kill verification.",
-    "rangedAttack": "Baritone exposes no ranged-combat process; charge, projectile trajectory, and hit verification need a separate client combat implementation.",
-    "craftItem": "Baritone has no inventory crafting transaction API and the client seam does not own recipe-screen lifecycle or authoritative output verification.",
-    "containerTransfer": "Baritone has no container transaction API; reliable transfer needs server menu lifecycle, slot mapping, and reopen/reconciliation semantics.",
-    "furnaceTransfer": "Baritone has no furnace transaction API; reliable transfer needs server menu lifecycle and slot-state verification.",
-    "handoffItem": "Baritone/client IPC has no recipient identity and delivery receipt protocol for another player.",
-    "ascend": "The Body contract requires verified surface recovery; a Baritone Y goal does not prove a safe surface or governed vertical mutation.",
-    "digDown": "The Body contract requires bounded, governed shaft excavation and fall/liquid checks; a generic Baritone goal cannot provide those guarantees.",
-    "digUp": "The Body contract requires bounded, governed pillar construction and clearance checks; a generic Baritone goal cannot provide those guarantees.",
     "navigationMutationDecision": "This is the frozen server-governance proposal action; the real client route has no equivalent server proposal owner.",
     "baritoneCommand": "The generic Baritone command manager has no typed Body result semantics; expose individual commands only after their result contract is adapted.",
     "spawn": "The real client process is owned by its launcher; Body does not create or destroy a Minecraft client process.",
@@ -252,8 +250,9 @@ class RealClientBody:
 
     def execute(self, action: Action) -> Result:
         objective = _objective_for(action)
+        wire_action = _wire_action_for(action)
         control = None if objective is not None else _control_for(action)
-        if objective is None and control is None:
+        if objective is None and control is None and wire_action is None:
             return _gap_result(action, self.bot_name, "unsupported_action")
         with self._lock:
             if self._active is not None and (
@@ -266,7 +265,7 @@ class RealClientBody:
             self._pending[action.id] = pending
         thread = threading.Thread(
             target=self._run_action,
-            args=(pending, objective, control, _timeout_ms(action)),
+            args=(pending, objective, control, wire_action, _timeout_ms(action)),
             name=f"minebot-real-client-{action.id[:8]}",
             daemon=True,
         )
@@ -281,6 +280,7 @@ class RealClientBody:
             data={
                 "action": action.name,
                 "objective": objective,
+                "wire_action": None if wire_action is None else wire_action["name"],
                 "control": None if control is None else control[0],
                 "provider": "baritone",
             },
@@ -291,6 +291,7 @@ class RealClientBody:
         pending: _PendingAction,
         objective: str | None,
         control: tuple[str, dict[str, object]] | None,
+        wire_action: dict[str, object] | None,
         timeout_ms: int,
     ) -> None:
         try:
@@ -300,6 +301,15 @@ class RealClientBody:
                 response = self.ipc.control(control_type, **fields)
                 event = _control_event(self.bot_name, pending.action, response)
                 self._merge_state_payload(response)
+            elif wire_action is not None:
+                terminal = self.ipc.action(
+                    str(wire_action["name"]),
+                    dict(wire_action.get("params") or {}),
+                    action_id=pending.action.id,
+                    timeout_ms=timeout_ms,
+                )
+                event = _terminal_event(self.bot_name, pending.action, terminal)
+                self._merge_state_payload(terminal.payload)
             else:
                 assert objective is not None
                 terminal = self.ipc.command(objective, action_id=pending.action.id, timeout_ms=timeout_ms)
@@ -655,6 +665,22 @@ def _objective_for(action: Action) -> str | None:
     return None
 
 
+def _wire_action_for(action: Action) -> dict[str, object] | None:
+    """Return a structured client action for semantics Baritone does not own.
+
+    These actions deliberately travel as typed JSON instead of being encoded as
+    an arbitrary Baritone command.  The client owns the tick lifecycle and
+    returns the same terminal event shape as every other Body action.
+    """
+    names = {
+        "engageEntity", "rangedAttack", "craftItem", "containerTransfer",
+        "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp",
+    }
+    if action.name not in names:
+        return None
+    return {"name": action.name, "params": dict(action.params)}
+
+
 def _control_for(action: Action) -> tuple[str, dict[str, object]] | None:
     params = dict(action.params)
     name = action.name
@@ -878,6 +904,11 @@ def _position(value: object) -> tuple[int, int, int] | None:
 
 def _timeout_ms(action: Action) -> int:
     raw = action.params.get("timeout_ms")
+    if raw is None and action.params.get("timeout_ticks") is not None:
+        try:
+            raw = int(action.params["timeout_ticks"]) * 50
+        except (TypeError, ValueError):
+            raw = None
     if raw is None and action.params.get("timeout_s") is not None:
         raw = float(action.params["timeout_s"]) * 1000
     try:
@@ -993,6 +1024,15 @@ def _terminal_name(action_name: str) -> str:
         "placeBlock": "placeDone",
         "igniteBlock": "igniteDone",
         "sowCrop": "sowDone",
+        "engageEntity": "engageDone",
+        "rangedAttack": "rangedDone",
+        "craftItem": "craftDone",
+        "containerTransfer": "containerDone",
+        "furnaceTransfer": "furnaceDone",
+        "handoffItem": "handoffDone",
+        "ascend": "ascendDone",
+        "digDown": "digDownDone",
+        "digUp": "digUpDone",
     }.get(action_name, "actionDone")
 
 

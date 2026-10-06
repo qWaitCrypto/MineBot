@@ -22,7 +22,8 @@ xvfb-run -a ./gradlew :client:body:runClient --no-daemon --console=plain
 
 After the client reports readiness, `RealClientBody` can submit navigation,
 mine, get-to-block, explore, follow/pickup, farm, Builder/Clear and Elytra
-objectives, plus typed client controls and world reads. Every objective has a
+objectives, plus typed combat, crafting, container/furnace, handoff and
+vertical-recovery actions. Typed client controls and world reads use the same
 correlated action id, progress/terminal result, and cancellation path.
 
 The Agent session keeps Java as its default. To select this backend explicitly,
@@ -46,9 +47,10 @@ events, and cancellation latency. The controlled fixture proves global
 still reproduces the old search failure.
 
 The evidence record still distinguishes verified process behavior from
-callable controls that need a dedicated fixture. Combat transactions,
-inventory-screen crafting/container/furnace lifecycles, recipient handoff,
-and governed vertical excavation remain explicit capability gaps rather than
-silent fallbacks. See the [Body capability matrix](../../../docs/references/real-client-body-capability-matrix-20261006.md)
-for the exact reasons and the [conformance record](../../../docs/references/client-body-baritone-capability-evidence-20261006.md)
+client transactions that need dedicated hostile, recipe, menu, multiplayer,
+and terrain fixtures. These actions are typed client transactions with
+explicit terminal verification; they do not silently fall back to Java. See
+the [Body capability matrix](../../../docs/references/real-client-body-capability-matrix-20261006.md)
+for the action boundary and the
+[conformance record](../../../docs/references/client-body-baritone-capability-evidence-20261006.md)
 for measurements.
