@@ -40,6 +40,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.AbstractFurnaceMenu;
@@ -75,6 +76,7 @@ import java.util.Set;
 
 /** Real-client Body adapter: typed actions are executed on the client tick. */
 public final class MineBotClientBody implements ClientModInitializer {
+    private static MineBotClientBody instance;
     private static final Logger LOG = LoggerFactory.getLogger("minebot-client-body");
     private static final int MAX_FRAME = 1024 * 1024;
     private final Set<String> usedIds = new HashSet<>();
@@ -88,6 +90,7 @@ public final class MineBotClientBody implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        instance = this;
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
             joinedTicks = 0;
             ready = false;
@@ -763,8 +766,12 @@ public final class MineBotClientBody implements ClientModInitializer {
             baritone.getInputOverrideHandler().clearAllKeys();
             if (run.structured && Minecraft.getInstance().player != null) {
                 Minecraft client = Minecraft.getInstance();
+                if (isVertical(run) && client.gameMode != null) client.gameMode.stopDestroyBlock();
                 if (client.player.isUsingItem() && client.gameMode != null) {
                     client.gameMode.releaseUsingItem(client.player);
+                }
+                if (run.kind.equals("rangedAttack")) {
+                    client.options.keyUse.setDown(false);
                 }
                 if (run.kind.equals("containerTransfer") || run.kind.equals("furnaceTransfer")) {
                     if (client.player.containerMenu.containerId != 0) client.player.closeContainer();
@@ -829,8 +836,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             // or emits pathing input.  Physical settling (for example, landing
             // after a cancel while falling) is a separate world fact and must
             // not turn a stopped action into a multi-second IPC timeout.
-            boolean stopped = current.structured
-                || (!processActive() && !baritone.getPathingBehavior().isPathing());
+            boolean stopped = !processActive() && !baritone.getPathingBehavior().isPathing();
             if (stopped && current.baritoneStoppedAt == 0) {
                 current.baritoneStoppedAt = System.nanoTime();
             }
@@ -950,39 +956,47 @@ public final class MineBotClientBody implements ClientModInitializer {
         lookAtEntity(client, target);
         int expected = Math.max(1, integer(current.params, "expected_shots", 1));
         int interval = Math.max(1, integer(current.params, "use_interval_ticks", weapon.equals("crossbow") ? 30 : 20));
+        if (current.shots > 0 && (target.getHealth() < current.initialHealth - 0.01f
+            || (current.shotHealthBaseline >= 0.0f && target.getHealth() < current.shotHealthBaseline - 0.01f))) {
+            current.damageObserved = true;
+        }
         if (current.shots >= expected && !client.player.isUsingItem()) {
             if (current.damageObserved) {
                 requestStop("completed", "damage_observed");
-            } else if (current.ticks - current.lastShotTick >= Math.max(10, interval)) {
+            } else if (current.ticks - current.lastShotTick >= Math.max(40, interval * 3)) {
                 requestStop("failed", "no_damage_observed");
             }
             return;
         }
         ItemStack held = client.player.getMainHandItem();
-        if (client.player.isUsingItem()) {
-            int charge = client.player.getTicksUsingItem();
-            int required = held.getItem() instanceof CrossbowItem ? CrossbowItem.getChargeDuration(held, client.player) : 20;
-            if (charge >= required) {
-                client.gameMode.releaseUsingItem(client.player);
-                current.shots++;
-                current.lastShotTick = current.ticks;
-            }
-        } else if (current.lastShotTick < 0 || current.ticks - current.lastShotTick >= interval) {
-            if (held.getItem() instanceof CrossbowItem && CrossbowItem.isCharged(held)) {
-                client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
-                current.shots++;
-                current.lastShotTick = current.ticks;
-            } else {
-                client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
-            }
+        if (!client.player.getAbilities().instabuild && current.useStartedTick < 0
+            && !(held.getItem() instanceof CrossbowItem && CrossbowItem.isCharged(held))
+            && client.player.getProjectile(held).isEmpty()) {
+            requestStop("failed", "no_ammunition");
+            return;
         }
-        if (target.getHealth() < current.initialHealth - 0.01f) current.damageObserved = true;
-        // A bow release is acknowledged by the world through the target's
-        // health delta.  Some client versions clear isUsingItem before the
-        // local tick can observe the release, so waiting for the local shot
-        // counter would leave a successful hit running until its deadline.
-        if (current.damageObserved && !client.player.isUsingItem()) {
-            current.shots = Math.max(current.shots, expected);
+        int required = held.getItem() instanceof CrossbowItem ? CrossbowItem.getChargeDuration(held, client.player) : 20;
+        if (held.getItem() instanceof CrossbowItem && CrossbowItem.isCharged(held)
+            && current.useStartedTick < 0
+            && (current.lastShotTick < 0 || current.ticks - current.lastShotTick >= interval)) {
+            current.shotHealthBaseline = target.getHealth();
+            client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+        } else if (current.useStartedTick < 0
+            && (current.lastShotTick < 0 || current.ticks - current.lastShotTick >= interval)) {
+            current.shotHealthBaseline = target.getHealth();
+            client.options.keyUse.setDown(true);
+            client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+            current.useStartedTick = current.ticks;
+        } else if (current.useStartedTick >= 0 && current.ticks - current.useStartedTick >= required) {
+            client.options.keyUse.setDown(false);
+            client.gameMode.releaseUsingItem(client.player);
+            if (!(held.getItem() instanceof CrossbowItem)) {
+                current.shots++;
+                current.lastShotTick = current.ticks;
+            }
+            current.useStartedTick = -1;
+        }
+        if (current.damageObserved && current.shots >= expected && !client.player.isUsingItem()) {
             requestStop("completed", "damage_observed");
         }
     }
@@ -1006,6 +1020,23 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
         }
         return best;
+    }
+
+    /** Vanilla may fire a charged crossbow between two Body ticks. */
+    public static boolean observeCrossbowUse() {
+        if (instance == null || instance.run == null || !instance.run.kind.equals("rangedAttack")) return true;
+        Run current = instance.run;
+        Minecraft client = Minecraft.getInstance();
+        ItemStack held = client.player.getMainHandItem();
+        if (!(held.getItem() instanceof CrossbowItem) || !CrossbowItem.isCharged(held)) return true;
+        int expected = Math.max(1, integer(current.params, "expected_shots", 1));
+        client.options.keyUse.setDown(false);
+        if (current.stopStatus != null || current.shots >= expected) return false;
+        if (current.targetEntity instanceof LivingEntity target) current.shotHealthBaseline = target.getHealth();
+        current.shots++;
+        current.lastShotTick = current.ticks;
+        current.useStartedTick = -1;
+        return true;
     }
 
     private void approachCombatTarget(Minecraft client, LivingEntity target, double range) {
@@ -1307,68 +1338,194 @@ public final class MineBotClientBody implements ClientModInitializer {
             requestStop("failed", "receiver_not_found");
             return;
         }
-        if (client.player.distanceTo(recipient) > 3.0) {
-            if (recipient instanceof LivingEntity living) approachCombatTarget(client, living, 2.0);
+        if (current.phase == 0) {
+            if (recipient == client.player) {
+                requestStop("failed", "handoff_to_self");
+                return;
+            }
+            if (slot < 0 || slot >= 9) {
+                requestStop("failed", "invalid_hotbar_slot");
+                return;
+            }
+            if (client.player.distanceTo(recipient) > 1.5) {
+                if (recipient instanceof LivingEntity living) approachCombatTarget(client, living, 1.0);
+                return;
+            }
+            ItemStack stack = slot >= 0 && slot < client.player.getInventory().getContainerSize()
+                ? client.player.getInventory().getItem(slot) : ItemStack.EMPTY;
+            if (stack.isEmpty() || !itemPath(stack).equals(item) || stack.getCount() < wanted) {
+                requestStop("failed", "handoff_source_mismatch");
+                return;
+            }
+            client.player.getInventory().setSelectedSlot(Math.max(0, Math.min(8, slot)));
+            baritone.getPathingBehavior().cancelEverything();
+            // Drop downward after rotation is sent; a horizontal throw can
+            // pass the recipient before vanilla's pickup delay expires.
+            lookAtDropPoint(client);
+            current.handoffReceiverId = recipient.getUUID().toString();
+            current.handoffExpected = wanted;
+            for (Entity entity : client.level.entitiesForRendering()) {
+                if (entity instanceof ItemEntity) current.handoffExistingDrops.add(entity.getId());
+            }
+            current.phase = 1;
+            current.phaseTick = current.ticks;
             return;
         }
-        ItemStack stack = slot >= 0 && slot < client.player.getInventory().getContainerSize()
-            ? client.player.getInventory().getItem(slot) : ItemStack.EMPTY;
-        if (stack.isEmpty() || !itemPath(stack).equals(item) || stack.getCount() < wanted) {
-            requestStop("failed", "handoff_source_mismatch");
+        if (current.phase == 1) {
+            // Let the client send the downward rotation before the drop
+            // packet.  A vertical throw keeps the item in the receiver's
+            // pickup radius through vanilla's ten-tick pickup delay.
+            lookAtDropPoint(client);
+            if (current.ticks - current.phaseTick < 2 || client.player.getXRot() < 85.0f) return;
+            for (int index = 0; index < wanted; index++) client.player.drop(false);
+            current.phase = 2;
+            current.phaseTick = current.ticks;
             return;
         }
-        client.player.getInventory().setSelectedSlot(Math.max(0, Math.min(8, slot)));
-        for (int index = 0; index < wanted; index++) client.player.drop(false);
-        current.handoffReceiverId = recipient.getUUID().toString();
-        requestStop("completed", "handoff_dropped_at_receiver");
+        for (Entity entity : client.level.entitiesForRendering()) {
+            if (entity instanceof ItemEntity drop && !current.handoffExistingDrops.contains(drop.getId())
+                && itemPath(drop.getItem()).equals(item) && drop.distanceToSqr(client.player) < 9.0) {
+                current.handoffDrops.merge(drop.getId(), drop.getItem().getCount(), Math::max);
+            }
+        }
+        if (current.handoffPickedUp >= current.handoffExpected
+            && count(client, item) == current.before - current.handoffExpected) {
+            current.handoffReceipt = true;
+            requestStop("completed", "handoff_pickup_observed");
+            return;
+        }
+        int waitTicks = Math.max(20, integer(current.params, "pickup_timeout_ticks", 100));
+        if (current.handoffDrops.isEmpty() && current.ticks - current.phaseTick >= 20) {
+            requestStop("failed", "handoff_drop_not_observed");
+            return;
+        }
+        if (current.ticks - current.phaseTick >= waitTicks) {
+            requestStop("failed", "receiver_pickup_unconfirmed");
+        }
+    }
+
+    /** Called on the client thread before vanilla removes a picked-up item. */
+    public static void observePickup(int itemId, int recipientId, int amount) {
+        if (instance == null || instance.run == null) return;
+        Run current = instance.run;
+        Minecraft client = Minecraft.getInstance();
+        if (!current.kind.equals("handoffItem") || current.phase != 2 || current.stopStatus != null
+            || client.level == null) return;
+        Entity recipient = client.level.getEntity(recipientId);
+        Integer remaining = current.handoffDrops.get(itemId);
+        if (recipient == null || !recipient.getUUID().toString().equals(current.handoffReceiverId)
+            || remaining == null || amount <= 0) return;
+        Entity item = client.level.getEntity(itemId);
+        if (item instanceof ItemEntity drop) remaining = Math.max(remaining, drop.getItem().getCount());
+        int received = Math.min(remaining, amount);
+        current.handoffDrops.put(itemId, remaining - received);
+        current.handoffPickedUp += received;
+    }
+
+    private static void lookAtDropPoint(Minecraft client) {
+        BaritoneAPI.getProvider().getBaritoneForMinecraft(client).getLookBehavior()
+            .updateTarget(new Rotation(client.player.getYRot(), 90.0f), true);
     }
 
     private void tickVertical(Minecraft client, Run current) {
-        int currentY = client.player.blockPosition().getY();
-        int targetY = integer(current.params, "target_y", current.kind.equals("digUp") ? currentY + 1 : currentY);
-        if (current.kind.equals("ascend")) targetY = findSurfaceY(client, current);
-        if (current.kind.equals("digDown") && currentY <= targetY) {
-            requestStop("completed", "target_depth_reached");
-            return;
-        }
-        if ((current.kind.equals("digUp") || current.kind.equals("ascend")) && currentY >= targetY) {
-            requestStop("completed", current.kind.equals("ascend") ? "surface_reached" : "target_height_reached");
-            return;
-        }
-        BlockPos base = client.player.blockPosition();
-        BlockPos target = current.kind.equals("digDown")
-            ? new BlockPos(base.getX(), currentY - 1, base.getZ())
-            : new BlockPos(base.getX(), currentY + 1, base.getZ());
-        BlockState targetState = client.level.getBlockState(target);
-        if (!targetState.getFluidState().isEmpty()) {
+        if (client.player.isInLava() || client.player.isInWater()) {
             requestStop("failed", "vertical_liquid_hazard");
             return;
         }
-        if (!targetState.isAir()) {
-            if (!client.gameMode.destroyBlock(target)) {
-                requestStop("failed", "vertical_break_rejected");
+        if (current.phase == 0) {
+            current.anchor = client.player.blockPosition();
+            current.verticalDistance = Math.max(1, Math.min(128, integer(current.params, "max_distance", 64)));
+            int targetY = integer(current.params, "target_y",
+                current.kind.equals("digUp") ? current.anchor.getY() + 1 : current.anchor.getY());
+            if (current.kind.equals("ascend")) targetY = findSurfaceY(client, current);
+            if (targetY == Integer.MIN_VALUE) {
+                requestStop("failed", "surface_not_found");
                 return;
             }
-            current.mutations++;
-            if (current.mutations > Math.max(1, integer(current.params, "max_mutations", 64))) {
-                requestStop("failed", "vertical_mutation_budget_exceeded");
+            if (Math.abs(targetY - current.anchor.getY()) > current.verticalDistance
+                || targetY < client.level.getMinY() || targetY + 1 >= client.level.getMaxY()) {
+                requestStop("failed", "vertical_target_out_of_bounds");
                 return;
             }
+            if (hasVerticalLiquidHazard(client, new BlockPos(current.anchor.getX(), targetY, current.anchor.getZ()))) {
+                requestStop("failed", "vertical_liquid_hazard");
+                return;
+            }
+            current.goal = new GoalBlock(current.anchor.getX(), targetY, current.anchor.getZ());
+            current.phase = 1;
+            current.phaseTick = current.ticks;
+            baritone.getCustomGoalProcess().setGoalAndPath(current.goal);
         }
-        if (current.kind.equals("digUp") || current.kind.equals("ascend")) {
-            if (client.player.onGround()) client.player.input.makeJump();
+        if (current.goal.isInGoal(client.player.blockPosition()) && client.player.onGround()) {
+            current.verticalSettledTicks++;
+            if (current.verticalSettledTicks >= 5) {
+                requestStop("completed", current.kind.equals("digDown") ? "target_depth_reached"
+                    : current.kind.equals("ascend") ? "surface_reached" : "target_height_reached");
+            }
+        } else {
+            current.verticalSettledTicks = 0;
+            if (client.player.onGround() && !current.goal.isInGoal(client.player.blockPosition())
+                && !processActive() && !baritone.getPathingBehavior().isPathing()) {
+                if (++current.verticalIdleTicks >= 10) requestStop("failed", "vertical_no_path");
+            } else current.verticalIdleTicks = 0;
         }
     }
 
     private int findSurfaceY(Minecraft client, Run current) {
         int y = client.player.blockPosition().getY();
-        int limit = Math.max(1, integer(current.params, "max_mutations", 64));
+        if (client.level.canSeeSky(client.player.blockPosition()) && client.player.onGround()) return y;
+        int limit = current.verticalDistance;
         for (int offset = 1; offset <= limit; offset++) {
             BlockPos feet = new BlockPos(client.player.blockPosition().getX(), y + offset, client.player.blockPosition().getZ());
-            if (client.level.getBlockState(feet).isAir() && client.level.getBlockState(feet.above()).isAir()
-                && !client.level.getBlockState(feet.below()).isAir()) return y + offset;
+            if (client.level.hasChunkAt(feet) && client.level.canSeeSky(feet)
+                && client.level.getBlockState(feet).isAir() && client.level.getBlockState(feet.above()).isAir()
+                && !client.level.getBlockState(feet.below()).getCollisionShape(client.level, feet.below()).isEmpty()) return y + offset;
         }
-        return y + 1;
+        return Integer.MIN_VALUE;
+    }
+
+    private static boolean isVertical(Run current) {
+        return current.kind.equals("ascend") || current.kind.equals("digUp") || current.kind.equals("digDown");
+    }
+
+    public static void observeBlockUpdate(BlockPos pos, BlockState state) {
+        if (instance == null || instance.run == null || !isVertical(instance.run)) return;
+        Run current = instance.run;
+        BlockState before = current.verticalTouched.get(pos);
+        if (before != null && !before.equals(state) && current.verticalConfirmed.add(pos.immutable())) current.mutations++;
+    }
+
+    private static boolean hasVerticalLiquidHazard(Minecraft client, BlockPos pos) {
+        if (!client.level.getBlockState(pos).getFluidState().isEmpty()) return true;
+        for (Direction direction : Direction.values()) {
+            if (!client.level.getBlockState(pos.relative(direction)).getFluidState().isEmpty()) return true;
+        }
+        return false;
+    }
+
+    /** Limits only the vertical transaction; shared-world mutation stays denied. */
+    public static boolean allowVerticalMutation(BlockPos pos) {
+        if (instance == null || instance.run == null || !isVertical(instance.run)) return true;
+        Run current = instance.run;
+        Minecraft client = Minecraft.getInstance();
+        if (current.stopStatus != null) return false;
+        String denial = null;
+        if (!Boolean.getBoolean("minebot.client.disposable_world")) denial = "vertical_mutation_not_authorized";
+        else if (current.anchor == null || Math.abs(pos.getX() - current.anchor.getX()) > current.verticalDistance
+            || Math.abs(pos.getZ() - current.anchor.getZ()) > current.verticalDistance
+            || Math.abs(pos.getY() - current.anchor.getY()) > current.verticalDistance + 2) denial = "vertical_target_out_of_bounds";
+        else if (!client.level.hasChunkAt(pos)) denial = "vertical_chunk_unloaded";
+        else {
+            if (hasVerticalLiquidHazard(client, pos)) denial = "vertical_liquid_hazard";
+            if (!current.verticalTouched.containsKey(pos) && current.verticalTouched.size()
+                >= Math.max(0, integer(current.params, "max_mutations", 64))) denial = "vertical_mutation_budget_exceeded";
+        }
+        if (denial != null) {
+            instance.requestStop("failed", denial);
+            return false;
+        }
+        current.verticalTouched.putIfAbsent(pos.immutable(), client.level.getBlockState(pos));
+        return true;
     }
 
     private static int playerMenuSlot(int inventorySlot) {
@@ -1426,6 +1583,15 @@ public final class MineBotClientBody implements ClientModInitializer {
 
     private void terminal(Minecraft client, String status, String reason) {
         Run current = run;
+        if (current != null && status.equals("failed") && reason.equals("no_damage_observed")
+            && current.kind.equals("rangedAttack") && current.shots > 0
+            && current.targetEntity instanceof LivingEntity target
+            && current.shotHealthBaseline >= 0.0f
+            && target.getHealth() < current.shotHealthBaseline - 0.01f) {
+            current.damageObserved = true;
+            status = "completed";
+            reason = "damage_observed";
+        }
         JsonObject response = state(client);
         response.addProperty("type", "terminal");
         response.addProperty("action_id", current.id);
@@ -1450,8 +1616,19 @@ public final class MineBotClientBody implements ClientModInitializer {
             response.addProperty("attacks", current.attacks);
             response.addProperty("shots", current.shots);
             response.addProperty("damage_observed", current.damageObserved);
+            response.addProperty("initial_health", current.initialHealth);
+            response.addProperty("shot_health_baseline", current.shotHealthBaseline);
+            if (current.targetEntity != null) {
+                response.addProperty("target_id", current.targetEntity.getUUID().toString());
+                if (current.targetEntity instanceof LivingEntity target) response.addProperty("target_health", target.getHealth());
+            }
             response.addProperty("mutations", current.mutations);
-            if (!current.handoffReceiverId.isBlank()) response.addProperty("receiver_id", current.handoffReceiverId);
+            if (!current.handoffReceiverId.isBlank()) {
+                response.addProperty("receiver_id", current.handoffReceiverId);
+                response.addProperty("handoff_expected", current.handoffExpected);
+                response.addProperty("handoff_picked_up", current.handoffPickedUp);
+                response.addProperty("handoff_receipt", current.handoffReceipt);
+            }
             if (!current.transferItem.isBlank()) {
                 response.addProperty("transfer_item", current.transferItem);
                 response.addProperty("transfer_count", current.transferRequested);
@@ -1466,6 +1643,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         JsonObject state = new JsonObject();
         state.addProperty("protocol", "minebot-client-spike/1");
         state.addProperty("ready", ready);
+        state.addProperty("disposable_world", Boolean.getBoolean("minebot.client.disposable_world"));
         state.addProperty("pid", ProcessHandle.current().pid());
         state.addProperty("heap_used_bytes", Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory());
         state.addProperty("heap_committed_bytes", Runtime.getRuntime().totalMemory());
@@ -1713,6 +1891,8 @@ public final class MineBotClientBody implements ClientModInitializer {
         int shots;
         int lastAttackTick = -1;
         int lastShotTick = -1;
+        int useStartedTick = -1;
+        double shotHealthBaseline = -1.0;
         boolean damageObserved;
         int openMenuId = -1;
         int transferSource = -1;
@@ -1723,6 +1903,16 @@ public final class MineBotClientBody implements ClientModInitializer {
         int transferRequested;
         int mutations;
         String handoffReceiverId = "";
+        int handoffExpected;
+        final Set<Integer> handoffExistingDrops = new HashSet<>();
+        final Map<Integer, Integer> handoffDrops = new LinkedHashMap<>();
+        int handoffPickedUp;
+        boolean handoffReceipt;
+        final Map<BlockPos, BlockState> verticalTouched = new LinkedHashMap<>();
+        final Set<BlockPos> verticalConfirmed = new HashSet<>();
+        int verticalDistance;
+        int verticalSettledTicks;
+        int verticalIdleTicks;
         String stopStatus;
         String stopReason;
         String lastPathEvent = "";

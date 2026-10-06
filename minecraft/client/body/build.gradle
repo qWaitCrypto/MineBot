@@ -75,6 +75,11 @@ tasks.named("runClient").configure {
     }
     systemProperty("minebot.client.ipc_port", System.getenv().getOrDefault("MINEBOT_CLIENT_IPC_PORT", "8768"))
     systemProperty("minebot.client.early_start", System.getenv().getOrDefault("MINEBOT_CLIENT_EARLY_START", "false"))
+    def disposableWorld = System.getenv().getOrDefault("MINEBOT_CLIENT_DISPOSABLE_WORLD", "false") == "true"
+    if (disposableWorld && !(addressParts[0] in ["127.0.0.1", "localhost", "[::1]"])) {
+        throw new GradleException("Disposable-world mutation is limited to a local test server")
+    }
+    systemProperty("minebot.client.disposable_world", disposableWorld)
 }
 
 processResources {

@@ -56,13 +56,13 @@ _CAPABILITIES: tuple[RealClientCapability, ...] = (
     RealClientCapability("builder_selections", "selection", "adapter", "Builder selection add, clear, and geometry transforms"),
     RealClientCapability("body_primitives", "minecraft_client", "adapter", "Native jump, look, use, combat attempt, inventory, block and crop actions"),
     RealClientCapability("world_reads", "minecraft_client", "adapter", "Authoritative client-world block and entity snapshots"),
-    RealClientCapability("engage_entity", "client_combat", "implemented", "Tick-owned approach, line-of-sight, cooldown, health and kill terminal"),
-    RealClientCapability("ranged_attack", "client_combat", "implemented", "Bow/crossbow charge, release and damage-observed terminal"),
-    RealClientCapability("craft_item", "client_inventory_menu", "implemented", "Recipe-screen slot placement and output verification"),
-    RealClientCapability("container_transfer", "client_menu", "implemented", "Open, slot-map, transfer and post-click verification"),
-    RealClientCapability("furnace_transfer", "client_furnace_menu", "implemented", "Furnace slot lifecycle and transfer verification"),
-    RealClientCapability("handoff_item", "client_inventory", "implemented", "Recipient approach and dropped-item handoff"),
-    RealClientCapability("vertical_recovery", "client_vertical", "implemented", "Bounded liquid-aware dig/ascend tick loop"),
+    RealClientCapability("engage_entity", "client_combat", "verified", "Iron-sword kill in the stationary zombie fixture"),
+    RealClientCapability("ranged_attack", "client_combat", "verified", "Single bow/crossbow hit, missing ammunition and cancellation fixtures"),
+    RealClientCapability("craft_item", "client_inventory_menu", "verified", "2x2 sticks recipe; other recipes and workstations need fixtures"),
+    RealClientCapability("container_transfer", "client_menu", "verified", "Chest-to-player transfer; other containers need fixtures"),
+    RealClientCapability("furnace_transfer", "client_furnace_menu", "verified", "Furnace output-to-player transfer; other directions need fixtures"),
+    RealClientCapability("handoff_item", "client_inventory", "verified", "Server recipient/count pickup receipt and full-inventory failure fixtures"),
+    RealClientCapability("vertical_recovery", "custom_goal", "verified", "Baritone shaft descent/ascent, surface return and cancel; mutations require disposable-world opt-in"),
 )
 CAPABILITY_REGISTRY: Mapping[str, RealClientCapability] = {item.name: item for item in _CAPABILITIES}
 

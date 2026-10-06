@@ -3,7 +3,9 @@
   "package": "dev.minebot.client.body.mixin",
   "compatibilityLevel": "JAVA_25",
   "client": [
-    "ServerNameResolverMixin"
+    "ServerNameResolverMixin",
+    "ItemPickupMixin",
+    "VerticalInteractionMixin"
   ],
   "injectors": {
     "defaultRequire": 1
