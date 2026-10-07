@@ -6,7 +6,7 @@
 
 理念来自 [Issue #1](https://github.com/qWaitCrypto/MineBot/issues/1) 的完整 P01–P40。本计划不把已有契约、治理或进度机制当作必须保留的产品理念。
 
-2026-10-07 用户进一步明确：原生异步工具是主线，原生 response.steer 是次要能力。当前优先使用已实测的 HTTP Responses 完成连续任务；WebSocket 路径保留，实际 steering 验证单独记录。
+2026-10-07 用户进一步明确：原生异步工具是主线，原生 response.steer 是次要能力。随后用户明确不继续 WebSocket 工作：当前目标只要求已实测的 HTTP 原生异步路径，WebSocket 代码保留，未经真实验证，不再作为当前待办。
 
 ## 范围与接口
 
@@ -35,11 +35,11 @@
 
 达到这些行为后停止扩张。若模型端点不支持原生协议，保留已实现的切片并明确缺少的配置，不将兼容模拟包装成原生支持。
 
-## 当前进度
+## 当前进度（用户移除 WebSocket 后，本次目标已完成）
 
 - [x] 目标已创建，当前执行计划已切换。
 - [x] 固定 gpt-6.1-sol / OpenAI SDK 2.36.0 / 现有端点的 HTTP 原生异步组合，普通请求和原生 SSE 均已实测。
-- [ ] WebSocket steering 真实验证：现有 provider 仍未提供可用账户，按用户优先级放在异步工具主线之后。
+- WebSocket steering：用户已明确移出当前工作范围；保留已有代码，不继续端点验证。
 - [x] Responses 内核与定向接口验证。
 - [x] 生产入口、消息 steering、明确取消、短计划和最新上下文接通；会话回归覆盖 SQLite 消息队列与同步执行线程。
 - [x] 真实模型 + Minecraft 连续任务和物理取消验收，83.779 秒通过。
@@ -86,10 +86,10 @@ python -m tests.e2e_real_client_agent_collect --disposable-local-server --contin
 
 失败实验保留在 logs/：交互入口误依赖 Java event_head；blockAt 缺少 interaction_ready；没有专用采集后端时 lambda 返回 None；即时挖掘只有客户端预测；拾取没有匹配 UUID 和距离。这些实际阻断已分别修正，挖掘复用上游 Baritone 的单方块 clear 过程，未扩建自研导航。一次客户端启动 SIGSEGV 和一次 HTTP 连接失败也记录为失败；最终实验通过并不覆盖或删除它们。
 
-## WebSocket steering：待验证的次要能力
+## WebSocket steering：已移出当前工作范围
 
 代码保留原生 response.steer 路径及定向协议回归，尚未通过当前 provider 的真实 steering 验收。此前同一模型握手可达，但首次 response.create 在任何响应事件前被关闭：1013 / no available account。HTTP previous_response_id 也被该端点拒绝，当前 HTTP 路径因此使用完整历史、store=false 与 reasoning.encrypted_content。
 
 Sub2API 源码核对固定为 0.2.14 / 3f1a2ea0a760730e3bc528105c00b4ee4f23e469，未确认 provider 部署版本。ctx_pool 与 http_bridge 只接受 response.create；passthrough 能透传其他事件，但本端点尚未实测。需要 provider 的可用 WebSocket 账户与相应配置才能继续这一项。[入口](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_forwarder_ingress.go#L131-L264)、[透传](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_v2_passthrough_adapter.go#L1150-L1162)、[账户选择](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/handler/openai_gateway_handler.go#L2700-L2729)。
 
-HTTP 在当前模型响应结束后处理排队消息；WebSocket 原生 steering 可以在模型响应进行中注入要求，两者不混称。[官方 steering 文档](https://developers.openai.com/api/docs/guides/steering)。按用户最新优先级，这项不阻断已经完成的原生异步主线，不为它扩建 provider 平台。
+HTTP 在当前模型响应结束后处理排队消息；WebSocket 原生 steering 可以在模型响应进行中注入要求，两者不混称。[官方 steering 文档](https://developers.openai.com/api/docs/guides/steering)。用户已明确不继续这项工作。以下源码与失败记录保留为历史证据，不触发后续开发或验证。
