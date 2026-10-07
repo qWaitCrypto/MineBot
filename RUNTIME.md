@@ -36,7 +36,7 @@
 ## 当前进度
 
 - [x] 目标已创建，当前执行计划已切换。
-- [ ] 固定一个原生协议可用的端点组合：当前 gpt-6.1-sol / OpenAI SDK 2.36.0 / websockets 16.0 已完成请求尝试，WebSocket 上游账户不可用。
+- [ ] 固定一个完整协议可用的端点组合：gpt-6.1-sol / OpenAI SDK 2.36.0 的 HTTP 原生异步工具已实测通过；WebSocket steering 仍因账户筛选失败而未验证。
 - [x] Responses 内核与定向接口验证。
 - [x] 生产入口、消息 steering、明确取消、短计划和最新上下文接通；会话回归覆盖 SQLite 消息队列与同步执行线程。
 - [ ] 真实模型 + Minecraft 连续任务和物理取消验收。
@@ -71,4 +71,10 @@ python -m tests.e2e_real_client_agent_collect --disposable-local-server --contin
 
 现有真实采集脚本已增加 `--continuity` 模式，复用生产交互入口验证采集交接、途中聊天、追加返回和独立取消。模式先执行真实原生协议请求；本机 WSL 尝试在 WebSocket 连接阶段失败（ConnectionResetError），报告明确记录 Minecraft 任务未启动。Windows 的同模型协议复核仍为上游 `1013: no available account`。这些是失败记录，后续世界行为尚未执行。
 
-因此原生异步/steering 的真实 API 验证未通过，Minecraft 连续任务尚未启动，goal 未完成。下一步需要该端点提供可用的 WebSocket 上游账户，或换一个支持这条协议的私有配置，再运行同一协议实验和真实任务；不重复扩大接口测试。
+补充实测：同一端点的 gpt-6.1-sol 使用 HTTP Responses、完整 input 历史、store=false 和 reasoning.encrypted_content，避开 previous_response_id，三次请求均返回 200。首轮调用实际带 async=true；暂不提交工具结果，发送普通聊天后收到 ACK；随后用原始 call_id 提交 count=3，收到 COUNT=3。报告：logs/responses-http-async-20261007.json。工具结果为实验数据，尚未接入 Minecraft。
+
+原生异步工具本身不要求 WebSocket；HTTP 可以在工具仍运行时发起下一轮模型请求。原生 response.steer 用于模型响应进行中注入要求，当前官方协议要求 WebSocket。HTTP 下等待当前模型响应结束再消费新消息，与原生 mid-turn steering 是不同的行为，不能混称。此前将整条原生异步路径判为不可用的结论已被以上实测修正。
+
+Sub2API 源码核对固定为 0.2.14 / 3f1a2ea0a760730e3bc528105c00b4ee4f23e469（未确认现有 provider 部署版本）：默认 ctx_pool 与 http_bridge 入口只接受 response.create，会拒绝 response.steer；passthrough 会透传其他事件，具备尝试原生 steering 的通路，但尚无本端点的完整实测。1013/no available account 在网关账户选择失败时生成，需要管理员检查全局 WebSocket 配置、账户模式、分组/模型资格及账户可用性，不能仅凭该报错认定模型不支持。源码见 [入口](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_forwarder_ingress.go#L131-L264)、[透传](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_v2_passthrough_adapter.go#L1150-L1162)、[账户选择](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/handler/openai_gateway_handler.go#L2700-L2729)。
+
+HTTP 原生异步的真实 API 验证已通过；原生 WebSocket steering 和 Minecraft 连续任务仍未完成，goal 保持未完成。后续可以明确采用 HTTP 原生异步推进身体/聊天的连续运行验收，同时继续核实 provider 的 passthrough 配置；若保持原生 mid-turn steering 为验收项，仍需该 WebSocket 通路实际成功。当前生产 Responses 内核仍使用 WebSocket，没有在接口失败后自动改成 HTTP。
