@@ -33,58 +33,58 @@ The model chooses from one shared capability pool. The harness preserves task
 continuity. The Body handles the grind inside one physical objective. Every
 result comes back as structured world truth.
 
-MineBot's current usable Body runs inside the Fabric server. Java owns indexed
-perception, navigation, continuous controls, survival reactions, and structured
-WebSocket transport; Carpet supplies the real FakePlayer. Scarpet/RCON remains
-only as legacy regression and debug material. The next experiment is a narrow
-real-client + upstream Baritone sample to measure startup, real terrain
-movement, collection, effective cancellation, concrete failures, and cost. It
-is not yet supported. Non-essential self-built navigation expansion is paused.
-See [Issue #1](https://github.com/qWaitCrypto/MineBot/issues/1) for the product
-principles and phased route. Success requires observed world state, not command
-acceptance.
+The current Body uses a real Fabric client, upstream Baritone, and native client
+actions. Directed disposable-world experiments cover navigation, collection,
+crafting, containers, furnaces, melee/ranged combat, vertical work, item handoff,
+and Elytra arrival. Java/Carpet FakePlayer remains an available backend;
+non-essential self-built navigation expansion is frozen. Product principles
+come from [Issue #1](https://github.com/qWaitCrypto/MineBot/issues/1).
+
+The current runtime change adds a base-SDK Responses kernel for asynchronous
+physical work, user steering, and fresh task context. It is selected explicitly
+with `MINEBOT_AGENT_KERNEL=responses`; the existing SDK path remains the default
+while native API and continuous-task acceptance are pending. See
+[RUNTIME.md](RUNTIME.md) for the implementation, setup, and actual experiment
+result. Success requires observed world state, not command acceptance.
 
 ## Built To Finish
 
 **Navigate. Gather. Craft. Smelt. Equip. Fight. Recover. Continue.**
 
-The current Java-only baseline has live evidence for natural-terrain collection,
-crafting and smelting, navigation, following, combat, vertical escape, survival
-preemption, death recovery, restart reconciliation, and idle wake-up. The
-recorded Gate 10 passed its specific autonomy-quality evaluator but did not
-complete the full AG-FP30 goal. That test is evidence for one scenario; it does
-not define acceptance for cooperation, building, or adventure. This is a
-developer preview, not a claim
-of finished open-world autonomy. Success is measured by authoritative world and
-inventory changes, not by a tool claiming it succeeded.
+The real-client results establish concrete Body capabilities. They do not
+establish complete model-driven tasks with conversation and changing goals.
+Those are Agent experiments, run through the production entrypoint and checked
+against actual inventory, handoff receipts, and position. Historical Java and
+Scarpet runs remain evidence for their own scenarios.
 
 ## One Mind. One Body. One Source Of Truth.
 
-`openai-agents-python` runs the inner model/tool loop. MineBot owns the persistent
-control plane around it: tasks, context, lifecycle, progress, and governed tools.
-Python Body transactions plan crafting, inventory, work, and recovery over one
-provider-neutral contract. The Fabric Java Body executes physical objectives
-through public `/player` controls and returns authoritative facts over WebSocket.
-Every break/place/open proposal is rechecked by the shared Python governance
-policy immediately before mutation.
+The Responses path uses the base OpenAI SDK WebSocket transport and a small
+model/tool loop. Pending tools keep their original call IDs across responses;
+ordinary chat does not cancel their physical execution. Explicit controls
+cancel and settle Body work. The old Agents SDK Runner is a separate configured
+path, with no automatic fallback after native API failures.
 
-The Brain decides **what**. The Body resolves **how**. Before physical mutation,
-governance refuses protected claims and ambiguous/high-risk structure evidence.
+Both paths reuse the existing tool registry and Body transactions. The model
+owns goals, short plans, and strategy changes; the Body executes specified
+actions and returns real results. The selected backend enforces its control
+and mutation boundaries.
 
 ```text
 minebot/
   brain/      context, lifecycle, progress, capability registry
   app/        persistent runtime and the single composition root
   body/       navigation, work, inventory, crafting, combat, recovery
-  game/       Java Body protocol/client, governance, legacy debug adapters
+  game/       real-client IPC, Java Body protocol, governance, debug adapters
   contract/   shared facts and result schemas
   camera/     optional observer supervisor and recording/live fan-out
 
 minecraft/
+  client/     real-client Body adapter and upstream Baritone integration
   server/     Fabric Java Body and archived Scarpet regression source
   camera/     observer client and shared Java protocol
 
-tests/        unit, live Body, and real-agent gates
+tests/        focused regressions and opt-in real task experiments
 ```
 
 ## The Road Gets Stranger

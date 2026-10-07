@@ -4,7 +4,7 @@
 
 用户已授权替换普通 Agents SDK Runner 的模型—工具循环，采用基础 OpenAI SDK 的 Responses 原生异步工具与 WebSocket steering。机器人执行长动作时可以聊天、接收追加要求；真实动作结果自动进入后续模型请求；明确取消真正停止身体。每次模型请求使用最新目标、任务状态、动作结果和身体状态。
 
-理念来自 [Issue #1](../../references/issue-1-route-correction-20261006.md) 的完整 P01–P40。本计划不把已有契约、治理或进度机制当作必须保留的产品理念。
+理念来自 [Issue #1](https://github.com/qWaitCrypto/MineBot/issues/1) 的完整 P01–P40。本计划不把已有契约、治理或进度机制当作必须保留的产品理念。
 
 ## 范围与接口
 
@@ -36,7 +36,36 @@
 ## 当前进度
 
 - [x] 目标已创建，当前执行计划已切换。
-- [ ] 固定模型、SDK、端点组合。
-- [ ] Responses 内核与定向接口验证。
-- [ ] 生产入口与聊天/取消接通。
-- [ ] 真实连续任务与明确取消实验。
+- [ ] 固定一个原生协议可用的端点组合：当前 gpt-6.1-sol / OpenAI SDK 2.36.0 / websockets 16.0 已完成请求尝试，WebSocket 上游账户不可用。
+- [x] Responses 内核与定向接口验证。
+- [x] 生产入口、消息 steering、明确取消、短计划和最新上下文接通；会话回归覆盖 SQLite 消息队列与同步执行线程。
+- [ ] 真实模型 + Minecraft 连续任务和物理取消验收。
+
+## 启用与验证
+
+旧私有配置保持可用，默认仍为 `sdk`。新路径通过私有环境显式选择，不在 API 报错后自动切换：
+
+```dotenv
+MINEBOT_AGENT_KERNEL=responses
+MINEBOT_LLM_KIND=openai_responses
+MINEBOT_LLM_MODEL=gpt-6.1-sol
+```
+
+沿用现有端点和密钥配置；需要指定网络代理时使用 `MINEBOT_LLM_PROXY`。基础 SDK 的原生 WebSocket wire 方法承载新协议，不升级整套 Agents SDK。模型实际返回的调用 `async` 标志决定是否允许在该结果未返回时继续响应，不能把工具声明支持异步当作调用已经异步。
+
+```bash
+python -m pytest -q
+python tools/probe_responses_protocol.py --env-file /private/provider.env --model gpt-6.1-sol
+```
+
+协议实验只验证真实 API，不启动 Minecraft。它依次验证原生异步调用、未完成调用期间的新输入、原始 call_id 的迟到结果和 steering 自动后继响应。没有成功就返回具体阶段与错误。原生接口定义见 [异步工具](https://developers.openai.com/api/docs/guides/async-tool-calling)、[steering](https://developers.openai.com/api/docs/guides/steering)。
+
+新内核用 `update_plan` 和 `finish_task` 承载短计划与模型判断；计划 revision、记录 ID 由运行时填写。模型完成记录明确标注 `completion_authority=model`，不套用旧物资目标解析器，也不标成服务端已独立验证。真实任务实验仍用库存、交接与位置观测确认结果。
+
+## 当前结果（2026-10-07）
+
+默认行为回归通过 76 项，耗时 11 秒。7 项新内核行为回归覆盖迟到结果、重复事件、自动 steering 后继、同步调用所需结果、写动作互斥、独立读取、普通聊天、同步执行工作线程取消、短计划写入与模型完成记录；这里的模型和 Body 为协议/会话替身，不是 Minecraft 实验。旧绑定与上下文相关定向回归 67 项 / 4.82 秒通过，队列回归 13 项 / 23.47 秒通过，没有运行历史全量。
+
+现有私有端点 `2.1885566.xyz` 对 gpt-6-astra 和 gpt-6.1-sol 的 HTTP Responses 请求成功，但链式 HTTP 请求返回 400：`previous_response_id is not available for this user`。经显式网络代理，gpt-6.1-sol 的 WebSocket 握手可达，首次请求在任何响应事件之前被关闭：`1013 (try again later) no available account`。固定 SDK 的可复现实验停在 `async_dispatch`，返回 success=false。
+
+因此原生异步/steering 的真实 API 验证未通过，Minecraft 连续任务尚未启动，goal 未完成。下一步需要该端点提供可用的 WebSocket 上游账户，或换一个支持这条协议的私有配置，再运行同一协议实验和真实任务；不重复扩大接口测试。

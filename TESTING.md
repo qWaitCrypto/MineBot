@@ -74,6 +74,25 @@ first failed step has not verified the later steps.
 These tasks supply fixtures/resources and call Body actions or tool callables.
 They do not prove model planning, conversation, or adaptation.
 
+## Native Responses API experiment
+
+Before a real task on the new kernel, verify the actual endpoint with:
+
+```bash
+python tools/probe_responses_protocol.py \
+  --env-file /path/to/provider.env --model gpt-6.1-sol
+```
+
+This uses real API calls, without Minecraft. Its JSON distinguishes native
+async dispatch, conversation with a pending call, late result delivery and
+steering, and reports the concrete failed stage. `--proxy` selects a network
+route when needed. The default tests include seven protocol/session fixtures;
+their model and Body substitutes do not prove this live API experiment.
+
+Select the new production path with `MINEBOT_AGENT_KERNEL=responses` in the
+private profile after the endpoint supports it. Configuration and current
+results are in [RUNTIME.md](RUNTIME.md).
+
 ## Real Agent task and observation
 
 This collection experiment gives the production Agent a player goal and lets
