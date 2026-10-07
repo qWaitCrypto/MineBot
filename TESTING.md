@@ -11,10 +11,10 @@ python -m pip install -e '.[test]'
 python -m pytest -q
 ```
 
-The default and CI run the same 69 existing tests: real-client Body mapping,
-IPC responses and errors, cancellation, chat preemption, and truthful terminal
-results. They use doubles, require no game or model key, and took about three
-seconds on the development machine. There is no second smoke-test copy.
+The default and CI run the same focused tests: real-client Body mapping,
+IPC responses and errors, cancellation, chat preemption, truthful terminal
+results, and native Responses protocol/session behavior. The current 76 tests
+use doubles and require no game or model key. There is no second smoke-test copy.
 
 For a changed subsystem, name its existing test file. For example:
 
@@ -108,6 +108,26 @@ Model configuration follows the normal production environment. Keep the env
 file outside Git. The result, Agent output and model/tool trace are written
 together under `logs/agent-collect-*/`. Missing configuration, a model error,
 timeout or insufficient inventory is a failed experiment, with its reason.
+
+For the Responses kernel's continuous-task acceptance, use the same experiment:
+
+```bash
+python -m tests.e2e_real_client_agent_collect \
+  --disposable-local-server --continuity \
+  --env-file /path/to/provider.env --model gpt-6.1-sol
+```
+
+This mode first calls the actual native API protocol probe; a failure records
+`minecraft_task_started=false` and stops before touching the fixture. On success,
+it requires the second real client `Receiver` on IPC `8769`. The production
+interactive Agent chooses its own tools. The parent sends ordinary chat and
+an appended return request during a running collection call, checks the original
+call's successful result and API acknowledgement, then verifies Receiver's
+inventory and the return position through RCON. A separate navigation goal is
+cancelled after server-observed movement; cancellation must settle and position
+must remain stable while the Agent is still alive. Messages, receipts and server
+checks are recorded with the result. This mode has not passed live acceptance;
+see [RUNTIME.md](RUNTIME.md) for the current failed attempt.
 
 For other player goals, use the existing interactive production entrypoint
 with `MINEBOT_BODY_PROVIDER=real_client`, a configured model, client endpoint,

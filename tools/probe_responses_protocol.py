@@ -17,8 +17,8 @@ import openai
 from openai import AsyncOpenAI
 
 
-async def probe(args):
-    env = dict(os.environ)
+async def probe(args, *, environment=None):
+    env = dict(os.environ if environment is None else environment)
     if args.env_file:
         for raw in Path(args.env_file).read_text().splitlines():
             line = raw.strip().removeprefix("export ")
@@ -101,7 +101,7 @@ async def probe(args):
                     raise RuntimeError("The steering request was not reflected in the successor")
                 report.update(success=True, phase="completed", native_async=True, late_result=True, steering=True)
     except Exception as exc:
-        report.update(error_type=type(exc).__name__, reason=str(exc).replace(key, "[redacted]")[:600])
+        report.update(error_type=type(exc).__name__, reason=str(exc).replace(key, "[redacted]")[:600] or type(exc).__name__)
     finally:
         await client.close()
     report["events"] = events

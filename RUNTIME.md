@@ -56,6 +56,7 @@ MINEBOT_LLM_MODEL=gpt-6.1-sol
 ```bash
 python -m pytest -q
 python tools/probe_responses_protocol.py --env-file /private/provider.env --model gpt-6.1-sol
+python -m tests.e2e_real_client_agent_collect --disposable-local-server --continuity --env-file /private/provider.env --model gpt-6.1-sol
 ```
 
 协议实验只验证真实 API，不启动 Minecraft。它依次验证原生异步调用、未完成调用期间的新输入、原始 call_id 的迟到结果和 steering 自动后继响应。没有成功就返回具体阶段与错误。原生接口定义见 [异步工具](https://developers.openai.com/api/docs/guides/async-tool-calling)、[steering](https://developers.openai.com/api/docs/guides/steering)。
@@ -67,5 +68,7 @@ python tools/probe_responses_protocol.py --env-file /private/provider.env --mode
 默认行为回归通过 76 项，耗时 10.05 秒。7 项新内核行为回归覆盖迟到结果、重复事件、自动 steering 后继、同步调用所需结果、写动作互斥、独立读取、普通聊天、同步执行工作线程取消、短计划写入与模型完成记录；还检查只读超时不中断写动作，以及动作超时清理后仍能执行后续动作。明确取消先等待身体和异步工具结果收尾，再重置会话。这里的模型和 Body 为协议/会话替身，不是 Minecraft 实验。本次取消/超时修正对应的旧绑定定向回归 4 项 / 1.54 秒通过，没有运行历史全量。
 
 现有私有端点 `2.1885566.xyz` 对 gpt-6-astra 和 gpt-6.1-sol 的 HTTP Responses 请求成功，但链式 HTTP 请求返回 400：`previous_response_id is not available for this user`。经显式网络代理，gpt-6.1-sol 的 WebSocket 握手可达，首次请求在任何响应事件之前被关闭：`1013 (try again later) no available account`。固定 SDK 的可复现实验停在 `async_dispatch`，返回 success=false。
+
+现有真实采集脚本已增加 `--continuity` 模式，复用生产交互入口验证采集交接、途中聊天、追加返回和独立取消。模式先执行真实原生协议请求；本机 WSL 尝试在 WebSocket 连接阶段失败（ConnectionResetError），报告明确记录 Minecraft 任务未启动。Windows 的同模型协议复核仍为上游 `1013: no available account`。这些是失败记录，后续世界行为尚未执行。
 
 因此原生异步/steering 的真实 API 验证未通过，Minecraft 连续任务尚未启动，goal 未完成。下一步需要该端点提供可用的 WebSocket 上游账户，或换一个支持这条协议的私有配置，再运行同一协议实验和真实任务；不重复扩大接口测试。
