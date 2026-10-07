@@ -168,16 +168,15 @@ minebot> what happened while I was away?
 The old `minebot.app.console`, Scarpet app, and RCON client remain available for
 legacy directed debugging only. They are not loaded by the production entrypoint.
 
-Run the fast Body contract smoke test with:
+Run the fast behavioral regression used by CI with:
 
 ```bash
 python3 -m pytest
 ```
 
-For the testing split and real disposable-world task commands, see
-[Testing](TESTING.md). The full Python regression suite is still available
-with `python3 -m pytest tests/unit -q`; it is deliberately not the default
-feedback loop.
+For directed Body tasks and real model Agent experiments, see
+[Testing](TESTING.md). Run other existing test files explicitly when changing
+their subsystem; a full historical suite is not the default feedback loop.
 
 ## Make It More Reliable
 

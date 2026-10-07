@@ -169,3 +169,55 @@ also passed **80 tests and 8 subtests**. Java compilation and actual mixin loadi
 passed. The previously recorded Java collection baseline failures remain
 outside this suite. Moving targets, broad natural terrain, shared-world
 protection, Elytra flight and a complete model-driven task remain unverified.
+
+## Test reorganization and fresh task runs
+
+The default and CI now reuse 69 current interface/cancellation/terminal-result
+regressions rather than duplicate them in a smoke module. They passed in
+1.67 s. The changed registry, boundary, collective, volition and historical
+Agent checks passed 91 tests and 116 subtests in 2.59 s. About 2,600 lines of
+source-shape, duplicate smoke and old constant checks were removed. Historical
+backend regressions remain opt-in. This is test evidence, not game success.
+
+Fresh experiments used the same pinned tuple, loopback server, survival mode
+and seed `1470711406163257538`. Body cases used supplied fixtures/resources
+without a planning model. Their server checks and final state are in
+`logs/test-reorganization-20261007/`:
+
+| Task | Result | Report |
+|---|---|---|
+| Obstacle navigation and log collection | Passed, 4.826 s | `navigation-final.json` |
+| Navigation/exploration cancellation | Passed, 2.557 s | `controls.json` |
+| Four-block build and clear | Passed, 6.748 s | `building.json` |
+| Wheat harvest | Passed, 3.597 s | `farming-final.json` |
+| Menu crafting, chest transfer, smelt/reclaim and slot regressions | Passed, 28.151 s | `menus-retry.json` |
+| Named melee and ranged tool targets, decoy preservation | Passed, 8.560 s | `combat_tools.json` |
+| Down/up/surface tools, bounds and cancellation | Passed, 9.512 s | `vertical_tools.json` |
+| Bow/crossbow action damage, no ammunition and charging cancellation | Passed, 6.471 s | `ranged-retry.json` |
+| Food/place/gate/lever sequence | Failed at food: `consume_no_effect`; hunger remained 17; later steps not run | `interactions-final.json` |
+| Two-client handoff | Failed: `receiver_not_found`; Receiver launch segfaulted before joining | `handoff_tools-retry.json` |
+
+Initial navigation/farm assertions used an invalid player selector, omitted
+hotbar items, or required an exact message instead of accepting `Test passed.
+Count: 1`. Those were verifier failures and were corrected before the passing
+reruns. The first menu run reported `recipe_output_mismatch`; after waiting for
+the client to observe the crafting table, the complete menu case passed. The
+ranged negative fixture now supplies a living injured target so target death
+cannot turn the ammunition regression into a missing-target test. All earlier
+failed reports remain alongside the reruns.
+
+The new real-model task invokes the production Agent with `collect 3 logs`,
+empty inventory, three placed logs and a stone obstacle, with no tools given
+and no human action after submission. The fixture parent releases its IPC
+connection before launching the Agent; its initial IPC ownership mistake is
+retained in the first failed report. The final actual model run failed in
+43.763 s: provider `gpt-5.6-luna` returned `InternalServerError`, model transport
+recovery exhausted its retries, and the server inventory contained no logs.
+The record is `agent-collect-final/result.json`, with `agent.log` and
+`trace.jsonl` beside it. It is a failed Agent task, not planning/collection
+proof. Chat continuity and strategy adaptation were not exercised by this
+collection run. Elytra destination flight is still unverified.
+
+Use [TESTING.md](../../../TESTING.md) for the focused commands and observation
+procedure. These current failures are concrete follow-up work; the test
+reorganization does not fix the eating action or the model provider.

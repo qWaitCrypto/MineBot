@@ -1,69 +1,120 @@
 # Testing MineBot
 
-Testing is split by the evidence it can produce. The default command is a
-small contract smoke test. Real Minecraft tasks are explicit experiments, and
-their result is the acceptance record.
+Use a small behavioral regression for fast feedback, then observe the changed
+behavior in a real Minecraft task. Issue #1 P30–P40 sets this approach; test
+counts and mock success do not prove that the bot can finish a task.
 
-## Fast default
+## Default and CI
 
 ```bash
-python3 -m pytest
+python -m pip install -e '.[test]'
+python -m pytest -q
 ```
 
-This runs the six `tests/quick/` checks for the current real-client Body seam.
-They cover authoritative state mapping, one navigation terminal, cancellation,
-one structured action, the Agent registry entry point, and a concrete refusal.
-They use an IPC double and finish in a few seconds on the development
-environment. They do not claim that a Minecraft task works.
+The default and CI run the same 69 existing tests: real-client Body mapping,
+IPC responses and errors, cancellation, chat preemption, and truthful terminal
+results. They use doubles, require no game or model key, and took about three
+seconds on the development machine. There is no second smoke-test copy.
 
-## Focused Python regression
-
-Run the affected contract tests when changing the adapter or wire protocol:
+For a changed subsystem, name its existing test file. For example:
 
 ```bash
-python3 -m pytest \
-  tests/unit/test_real_client_body.py \
-  tests/unit/test_real_client_ipc.py \
-  tests/unit/test_real_client_protocol.py -q
+python -m pytest tests/unit/test_real_client_protocol.py -q
 ```
 
-The full `tests/unit` tree remains available for a deliberate broad regression,
-but it is not the default feedback loop. Root-level `*_test.py` files are a
-legacy mixed set and are also opt-in.
+Do not add tests that freeze filenames, source strings, class organization,
+arbitrary counts, or old tuning constants. Keep behavioral regressions for
+known failures and necessary boundaries. `tests/unit` and older root scripts
+remain explicitly runnable for changes to those modules; they are not a
+mandatory full-suite step for each edit. Pytest normally discovers `test_*.py`;
+historical `*_test.py` scripts must be named explicitly.
 
-## Real task experiments
+## Directed real Body tasks
 
-Run one disposable-world task at a time. The script prints each terminal,
-asserts the authoritative server result, and writes its evidence JSON under
-`logs/`:
+Start the disposable server at `127.0.0.1:25566`, with RCON at port `25576`,
+and a real client named `MineBotCombat` with IPC at `8768`. RCON is used by the
+experiment for fixture setup and independent server checks. The tested tuple
+is Minecraft 26.1.2, Fabric Loader 0.19.3, Fabric API 0.152.1, Java 25 and
+upstream Baritone 1.18.0. Client launch instructions are in
+[the client README](minecraft/client/body/README.md).
+
+Run the task relevant to the change:
 
 ```bash
-python3 tests/e2e_real_client_body_transactions.py \
+python -m tests.e2e_real_client_body_transactions \
   --disposable-local-server --case menus
 ```
 
-Available cases are `vertical`, `vertical_denied`, `vertical_tools`, `handoff`,
-`handoff_tools`, `ranged`, `menus`, and `combat_tools`. Start the selected
-compatible client
-and disposable server first. A missing client, timeout, or assertion is a
-failed experiment; record the printed exception and fixture state as the
-reason. Do not convert it to a skip or a generic "not guaranteed" result.
+| Case | Actual result checked |
+|---|---|
+| `navigation` | Cross a stone obstacle, arrive, collect a log into inventory |
+| `controls` | Cancel navigation/exploration and stop their processes/pathing |
+| `building` | Place four blocks, then clear them; check each server block |
+| `farming` | Harvest ripe wheat into inventory |
+| `interactions` | Eat, place a block, open a gate, operate a lever |
+| `menus` | Craft sticks/pickaxe/cake, move chest items, smelt and reclaim fuel, preserve inventory slots |
+| `combat_tools` | Melee and bow/crossbow against the named target; leave a decoy intact |
+| `vertical_tools` | Dig down/up, return to surface, enforce bounds, cancel |
+| `handoff_tools` | Give items to a second real client and verify its inventory |
 
-The older Java/FakePlayer task scripts remain useful historical evidence. Run
-one by name through the serial runner:
+The lower-level `vertical`, `handoff`, and `ranged` cases remain useful when
+changing those actions. `vertical_denied` needs a client launched without
+disposable-world permission. Handoff needs a second client named `Receiver`
+with IPC at `8769`. Elytra still needs a successful destination flight
+experiment; loading or starting/canceling its process does not prove flight.
+
+Each run returns a nonzero exit on failure and writes a timestamped JSON under
+`logs/` (or the explicit `--output` path): goal, fixture conditions, tuple,
+seed, initial/final state, action/tool terminals, server checks and a concrete
+failure reason. Keep failed reports when retrying. A case that stops at its
+first failed step has not verified the later steps.
+
+These tasks supply fixtures/resources and call Body actions or tool callables.
+They do not prove model planning, conversation, or adaptation.
+
+## Real Agent task and observation
+
+This collection experiment gives the production Agent a player goal and lets
+the real model choose its actions. It starts empty-handed with three placed
+logs behind a stone obstacle and checks inventory independently:
 
 ```bash
-python3 tests/run_e2e.py --filter furnace --required --fail-on-skip
+python -m tests.e2e_real_client_agent_collect \
+  --disposable-local-server --env-file /path/to/provider.env
 ```
 
-The runner refuses an unqualified full live matrix. Use `--all` only when the
-whole legacy matrix is intentionally being measured.
+Model configuration follows the normal production environment. Keep the env
+file outside Git. The result, Agent output and model/tool trace are written
+together under `logs/agent-collect-*/`. Missing configuration, a model error,
+timeout or insufficient inventory is a failed experiment, with its reason.
 
-## What counts as success
+For other player goals, use the existing interactive production entrypoint
+with `MINEBOT_BODY_PROVIDER=real_client`, a configured model, client endpoint,
+bot name and natural region:
 
-An interface test proves only the Python-to-Body contract. A task experiment
-passes only when the intended Minecraft state changed and the terminal agrees
-with that state. A failed experiment records the concrete reason, such as a
-missing target, unsupported tuple, cancellation timeout, or server-verified
-inventory mismatch. The record is the result; test count and framework
-coverage are not substitutes for it.
+```bash
+python -m minebot.app.real_server_session --interactive
+```
+
+Observe the goal → short plan → actions → world result. During the same task,
+ordinary chat should leave work running; `/cancel` should stop it. Introduce
+one actual obstacle when evaluating strategy changes. Record the initial
+conditions, messages, interventions, actual outcome and reason for failure.
+These are Agent experiments, not additional Body completion requirements.
+One collection success does not establish those other behaviors.
+
+## Historical experiments
+
+Old Java/FakePlayer and Scarpet scripts remain evidence for their respective
+routes. Run a relevant script explicitly, or select one legacy runner case:
+
+```bash
+python tests/run_e2e.py --filter furnace --required --fail-on-skip
+```
+
+`--all` is required to intentionally run that whole legacy matrix. An old
+unchecked plan or failing legacy scenario does not select current work.
+
+After a coherent change, run its focused regression and relevant real task.
+Once the result is established, stop; broaden testing only for a new failure
+or a specific unresolved risk.

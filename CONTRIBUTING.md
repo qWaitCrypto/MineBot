@@ -15,51 +15,45 @@ setting up an environment or promising support for a new platform.
 | Area | Start here | Typical contributions |
 |---|---|---|
 | Agent Runtime | `minebot/app/`, `minebot/brain/`, `minebot/contract/` | lifecycle, task truth, persistence, progress, Memory/Skills |
-| Body / Fabric Java | `minebot/body/`, `minebot/game/`, `minecraft/server/body/` | transactions, controllers, navigation, governance, server facts |
+| Body / Real Client | `minebot/body/`, `minebot/game/`, `minecraft/client/body/` | Baritone adaptation, native client actions, real results |
 | Eval / Failure Worlds | `tests/`, fixtures, traces | reproducible false success, stalls, recovery failures, safety boundaries |
 | Observability | `minebot/camera/`, trace and event surfaces | readable model -> Body -> server evidence |
 | Developer Experience | setup, CI, public docs | clean-clone behavior, compatibility, configuration, focused tests |
 
-The Fabric Java Body is the production game-logic path. Scarpet/RCON source is
-retained for historical regression and directed debugging, not as a production
-fallback.
+The current route is a real Minecraft client with upstream Baritone. Keep the
+usable Java FakePlayer backend; freeze non-essential self-built navigation
+expansion. Read [Issue #1](https://github.com/qWaitCrypto/MineBot/issues/1) for
+the full product and engineering principles.
 
 ## First Five Minutes
 
-The contributor truth gate needs no Minecraft server, Java runtime, LLM key, or
-external world:
+The default behavioral regression needs no Minecraft server, Java runtime or
+model key:
 
 ```bash
 python3.13 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e .
-python -m unittest discover -s tests -p 'test_contributor_truth_gate.py' -v
+python -m pip install -e '.[test]'
+python -m pytest -q
 ```
 
 Expected result:
 
 ```text
-Ran 3 tests
-
-OK
+69 passed
 ```
 
-The gate proves three narrow rules:
-
-- a terminal server event with completion evidence can produce success;
-- command acceptance or a model claim alone cannot produce success;
-- a terminal failure remains retryable failure.
-
-It does not prove the full Agent, Minecraft Body, or every unit test. Keep that
-distinction explicit in issues and pull requests.
+This checks current interfaces, cancellation, chat preemption and truthful
+results using doubles. It does not prove a Minecraft task. Use the focused
+regressions and real task commands in [TESTING.md](TESTING.md) for that evidence.
 
 ## Real Minecraft Body Work
 
-The Body path currently requires a manually prepared disposable Minecraft
-26.1.2 Fabric server with Carpet and the built MineBot Java Body mod. The Agent
-connects over WebSocket; RCON is not part of the production Body contract. The
-repository does not yet provide a newcomer-ready server bootstrap or a passing
-30-minute autonomy-quality lab.
+Prepare a disposable server and the selected compatible real-client tuple.
+Run one task relevant to the change and verify the resulting world/inventory
+state. A fixed 30-minute scenario is not a universal acceptance requirement.
+RCON may prepare and inspect experimental fixtures; the production Agent uses
+the abstract Body adapter.
 
 Do not run mutation tests against a shared or valuable world. Do not send real
 RCON credentials, model keys, private world data, or player information in an
@@ -77,7 +71,7 @@ the setup must be reproducible without assuming access to a maintainer's local
 - Server/world/inventory facts outrank model text and command acceptance.
 - Never broaden block mutation merely to make a scenario pass. Player structure
   risk and protected claims must remain governed before every mutation.
-- Keep the Java/WebSocket Body boundary provider-neutral from the Python Brain.
+- Keep backend details behind the abstract Body boundary.
 
 Large changes to Memory, high-level capabilities, multi-bot behavior, mutation
 permissions, public-server safety, or transport start as a
@@ -109,8 +103,8 @@ Keep the change bounded. The pull request template asks for:
 
 - the problem and explicit non-goals;
 - architecture and safety impact;
-- authoritative positive evidence;
-- a negative or regression case;
+- actual task results for behavior changes, including specific failures;
+- a targeted regression for a known failure or necessary boundary;
 - exact verification commands;
 - anything still unproved.
 

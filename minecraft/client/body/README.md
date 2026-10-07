@@ -15,7 +15,7 @@ Start MineBot's local test server first, then run from `minecraft/`:
 
 ```bash
 export MINEBOT_CLIENT_SERVER=127.0.0.1:25566
-export MINEBOT_CLIENT_USERNAME=MineBotPhaseA
+export MINEBOT_CLIENT_USERNAME=MineBotCombat
 export MINEBOT_CLIENT_IPC_PORT=8768
 # Only for an explicitly disposable loopback world:
 export MINEBOT_CLIENT_DISPOSABLE_WORLD=true

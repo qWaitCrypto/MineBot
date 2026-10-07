@@ -23,13 +23,17 @@ facts. Model text and command acceptance are not completion evidence.
 
 ## Negative / Regression Case
 
-<!-- Show at least one inverse, failure, cancellation, or regression case. -->
+<!-- For a known failure or a necessary boundary, show the relevant regression.
+     Scale verification to this change; a trivial edit needs no invented case. -->
 
 ## Verification
 
 ```text
 # Exact commands and results
 ```
+
+<!-- Use TESTING.md: focused behavioral regression and the relevant real task.
+     Label mock, directed Body and real-model Agent evidence separately. -->
 
 ## Still Unproved
 

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import time
 import threading
+import traceback
 
 from minebot.contract import Action
 from minebot.contract import Region
@@ -22,18 +23,44 @@ from minebot.game.real_client_body import RealClientBody
 from minebot.game.real_client_ipc import RealClientIpc
 
 
-def main() -> None:
+TASKS = {
+    "navigation": "cross an obstacle, collect logs, and confirm arrival/inventory",
+    "building": "build four blocks and clear them; check every server block",
+    "farming": "harvest ripe wheat through Baritone and confirm inventory",
+    "controls": "cancel navigation and exploration; verify old controls stop",
+    "interactions": "use food, place a block, open a gate, and operate a lever",
+    "vertical": "dig down, pillar up, return to surface; bounded refusals and cancel",
+    "vertical_denied": "refuse vertical mutation without disposable-world permission",
+    "vertical_tools": "Agent tool down/up/surface with chosen scaffold and cancel",
+    "handoff": "give two diamonds to a real recipient; full-inventory refusal",
+    "handoff_tools": "Agent give_player tool with server recipient/count verification",
+    "ranged": "bow/crossbow damage, missing ammunition and charging cancellation",
+    "menus": "craft, chest transfer, smelt/reclaim and inventory-slot regressions",
+    "combat_tools": "Agent melee and bow/crossbow against a named target, decoy intact",
+}
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--disposable-local-server", action="store_true", required=True)
-    parser.add_argument("--case", choices=("vertical", "vertical_denied", "vertical_tools", "handoff", "handoff_tools", "ranged", "menus", "combat_tools"), required=True)
+    parser.add_argument("--case", choices=TASKS, required=True)
     parser.add_argument("--client-name", default="MineBotCombat")
     parser.add_argument("--receiver-name", default="Receiver")
+    parser.add_argument("--output", type=Path, help="result JSON (default: timestamped file under logs/)")
     args = parser.parse_args()
     rcon = RconClient(RconConfig(password=os.environ.get("MINEBOT_TEST_RCON_PASSWORD", "test")))
     body = RealClientBody(args.client_name, RealClientIpc(timeout_s=30))
     records: list[dict[str, object]] = []
+    started = time.monotonic()
+    report = {"task": TASKS[args.case], "case": args.case,
+              "evidence": "directed_body_task", "success": False,
+              "server": "127.0.0.1:25566", "client": args.client_name,
+              "tuple": "MC 26.1.2 / Fabric 0.19.3 / API 0.152.1 / Java 25 / Baritone 1.18.0",
+              "conditions": "disposable fixture; supplied resources; no planning model",
+              "records": records}
 
     def command(text: str) -> str:
+        report["step"] = text
         return rcon.command(text)
 
     def wait_at(x: float, y: float, z: float) -> None:
@@ -46,8 +73,20 @@ def main() -> None:
             time.sleep(0.1)
         raise AssertionError("client did not observe the fixture teleport")
 
+    def wait_block(pos: list[int], block: str) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            observed = body.perceive("blockAt", dict(zip(("x", "y", "z"), pos))).data
+            if observed.get("type") == f"minecraft:{block}":
+                return
+            time.sleep(0.1)
+        raise AssertionError({"reason": "fixture block not observed", "pos": pos, "observed": observed})
+
     def action(name: str, params: dict[str, object], *, cancel: bool = False) -> dict[str, object]:
+        report["step"] = {"action": name, "params": params}
         request = Action.create(name, {"timeout_s": 30, **params})
+        record = {"action": name, "params": params, "action_id": request.id}
+        records.append(record)
         accepted = body.execute(request)
         assert accepted.ok and accepted.accepted, accepted
         if cancel:
@@ -55,9 +94,35 @@ def main() -> None:
             assert body.interrupt("fixture cancellation").ok
         event = body.await_action_terminal(request.id, timeout_s=40)
         data = dict(event.data)
-        records.append({"action": name, "params": params, "terminal": data})
+        record["terminal"] = data
         print(name, data["status"], data["reason"], data.get("elapsed_ms"), flush=True)
         return data
+
+    def tool(name: str, params: dict[str, object]) -> object:
+        report["step"] = {"tool": name, "params": params}
+        region = Region("disposable-task", (-256, 0, -256), (256, 320, 256))
+        registry = build_phase1_registry(body, Phase1RuntimeConfig(
+            region, body_provider="real_client",
+            governance_policy=GovernancePolicy(natural_regions=[region], bot_name=args.client_name)))
+        result = registry.get(name).callable(params)
+        records.append({"tool": name, "params": params, "result": result.to_payload()})
+        print(name, result.success, result.reason, flush=True)
+        assert result.success, result.to_payload()
+        return result
+
+    def flat_fixture(x: int) -> None:
+        command(f"fill {x} 149 -4 {x + 24} 149 6 minecraft:stone")
+        command(f"fill {x} 150 -4 {x + 24} 155 6 minecraft:air")
+        command(f"gamemode survival {args.client_name}")
+        command(f"effect clear {args.client_name}")
+        command(f"clear {args.client_name}")
+        command(f"tp {args.client_name} {x + 0.5} 150 0.5")
+        wait_at(x + 0.5, 150, 0.5)
+
+    def check_server(command_text: str) -> None:
+        observed = command(command_text)
+        records[-1].setdefault("server_checks", []).append({"command": command_text, "observed": observed})
+        assert observed.startswith("Test passed"), {"command": command_text, "observed": observed}
 
     def setup_vertical() -> None:
         # Enclosed shaft in a stone cube, high above the disposable terrain.
@@ -82,7 +147,77 @@ def main() -> None:
 
     try:
         body.get_state()
-        if args.case == "vertical_denied":
+        report["initial_state"] = body.ipc.state()
+        report["seed"] = command("seed")
+        report["difficulty"] = command("difficulty")
+        if args.case == "navigation":
+            flat_fixture(128)
+            command("fill 135 150 -1 135 152 1 minecraft:stone")
+            command("setblock 143 150 0 minecraft:oak_log")
+            command(f"give {args.client_name} minecraft:iron_axe")
+            tool("move_to", {"pos": [140, 150, 0], "timeout_s": 30})
+            check_server(f"execute if entity @a[name={args.client_name},x=140,y=150,z=0,distance=..2]")
+            data = action("mineResource", {"block": "oak_log", "quantity": 1})
+            assert data["success"], data
+            check_server(f'execute if data entity {args.client_name} Inventory[{{id:"minecraft:oak_log"}}]')
+            check_server("execute if block 143 150 0 minecraft:air")
+        elif args.case == "building":
+            flat_fixture(160)
+            command(f"give {args.client_name} minecraft:cobblestone 16")
+            command(f"give {args.client_name} minecraft:diamond_pickaxe")
+            data = action("buildStructure", {"origin": [164, 150, 0], "size": [2, 1, 2], "block": "cobblestone"})
+            assert data["success"], data
+            for x in (164, 165):
+                for z in (0, 1):
+                    check_server(f"execute if block {x} 150 {z} minecraft:cobblestone")
+            data = action("clearArea", {"start": [164, 150, 0], "end": [165, 150, 1]})
+            assert data["success"], data
+            for x in (164, 165):
+                for z in (0, 1):
+                    check_server(f"execute if block {x} 150 {z} minecraft:air")
+        elif args.case == "farming":
+            flat_fixture(192)
+            command("fill 195 149 0 198 149 0 minecraft:farmland[moisture=7]")
+            command("fill 195 150 0 198 150 0 minecraft:wheat[age=7]")
+            command("setblock 196 149 1 minecraft:water")
+            data = action("farmArea", {"anchor": [196, 150, 0], "range": 8})
+            assert data["success"], data
+            check_server(f'execute if data entity {args.client_name} Inventory[{{id:"minecraft:wheat"}}]')
+        elif args.case == "controls":
+            flat_fixture(128)
+            for name, params in (("navigate", {"goal": {"kind": "block", "x": 150, "y": 150, "z": 0}}),
+                                 ("explore", {"anchor": [128, 150, 0]})):
+                data = action(name, params, cancel=True)
+                assert data["status"] == "canceled", data
+                time.sleep(0.5)
+                settled = body.ipc.state()
+                records[-1]["settled_state"] = settled
+                assert not settled["any_process_active"] and not settled["pathing"], settled
+        elif args.case == "interactions":
+            flat_fixture(224)
+            command(f"give {args.client_name} minecraft:cobblestone 4")
+            command(f"give {args.client_name} minecraft:bread 2")
+            command(f"effect give {args.client_name} minecraft:hunger 3 100 true")
+            deadline = time.monotonic() + 5
+            while body.get_state().food >= 18:
+                if time.monotonic() >= deadline:
+                    raise AssertionError("fixture did not make player hungry")
+                time.sleep(0.1)
+            command(f"effect clear {args.client_name}")
+            food_before = body.get_state().food
+            tool("consume_item", {"item": "bread"})
+            assert body.get_state().food > food_before, "eating did not increase hunger points"
+            tool("place_block", {"pos": [226, 150, 0], "block_type": "cobblestone"})
+            check_server("execute if block 226 150 0 minecraft:cobblestone")
+            command("setblock 226 150 2 minecraft:oak_fence_gate")
+            wait_block([226, 150, 2], "oak_fence_gate")
+            tool("set_openable_state", {"pos": [226, 150, 2], "open": True})
+            check_server("execute if block 226 150 2 minecraft:oak_fence_gate[open=true]")
+            command("setblock 226 150 -2 minecraft:lever[face=floor]")
+            wait_block([226, 150, -2], "lever")
+            tool("set_switch_state", {"pos": [226, 150, -2], "powered": True})
+            check_server("execute if block 226 150 -2 minecraft:lever[powered=true]")
+        elif args.case == "vertical_denied":
             assert not body.ipc.state().get("disposable_world"), "launch without disposable-world opt-in"
             setup_vertical()
             data = action("digDown", {"target_y": 149, "max_distance": 8, "max_mutations": 16})
@@ -283,6 +418,7 @@ def main() -> None:
             command(f"clear {args.client_name}")
             command(f"recipe give {args.client_name} *")
             wait_at(100.5, 150, 0.5)
+            wait_block([102, 150, 0], "crafting_table")
             region = Region("disposable-menu-fixture", (98, 149, -4), (108, 155, 4))
             registry = build_phase1_registry(body, Phase1RuntimeConfig(
                 region, body_provider="real_client",
@@ -444,6 +580,9 @@ def main() -> None:
                 assert data["target_health"] < 20 and "20.0f" not in health, health
 
             # Existing damage on the target is not evidence of a new shot.
+            command("kill @e[type=zombie,name=RangedFixture]")
+            command('summon zombie 88.5 150 0.5 {NoAI:1b,Silent:1b,CustomName:"RangedFixture",PersistenceRequired:1b,Health:10.0f}')
+            assert command("data get entity @e[type=zombie,name=RangedFixture,limit=1] Health").endswith(": 10.0f")
             command(f"clear {args.client_name}")
             command(f"give {args.client_name} minecraft:bow")
             time.sleep(0.3)
@@ -453,14 +592,32 @@ def main() -> None:
             time.sleep(0.3)
             data = action("rangedAttack", {"target_name": "RangedFixture", "weapon": "bow"}, cancel=True)
             assert data["status"] == "canceled" and not data["any_process_active"], data
+        report["success"] = True
+        report["reason"] = "task and server checks passed"
+        return 0
+    except Exception as error:
+        detail = error.args[0] if error.args else str(error)
+        if isinstance(detail, dict):
+            detail = detail.get("reason") or {k: detail[k] for k in ("command", "observed") if k in detail} or "assertion failed; see failure trace"
+        report["reason"] = f"{type(error).__name__}: {detail}"
+        report["failure"] = traceback.format_exc()
+        return 1
     finally:
+        report["elapsed_s"] = round(time.monotonic() - started, 3)
+        try:
+            report["final_state"] = body.ipc.state()
+            if report["final_state"].get("any_process_active"):
+                body.interrupt("experiment ended")
+        except Exception as error:
+            report["final_state_error"] = f"{type(error).__name__}: {error}"
         body.close()
         rcon.close()
-        path = Path("logs") / f"real-client-{args.case}-{time.time_ns()}.json"
-        path.parent.mkdir(exist_ok=True)
-        path.write_text(json.dumps(records, indent=2), encoding="utf-8")
+        path = args.output or Path("logs") / f"real-client-{args.case}-{time.time_ns()}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"{'PASS' if report['success'] else 'FAIL'} {args.case}: {report.get('reason')}", flush=True)
         print(f"Evidence: {path}", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
