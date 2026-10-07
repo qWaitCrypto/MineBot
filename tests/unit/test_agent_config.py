@@ -11,6 +11,17 @@ from minebot.app.model_provider import is_retryable_model_error
 
 
 class AgentConfigTests(unittest.TestCase):
+    def test_responses_provider_defaults_to_native_http_with_explicit_sdk_opt_out(self):
+        env = {"MINEBOT_LLM_MODEL": "gpt-6.1-sol", "MINEBOT_LLM_KIND": "openai_responses",
+               "MINEBOT_LLM_API_KEY": "provider-key"}
+        provider = provider_registry_from_env(env)
+        self.assertEqual((provider.kernel, provider.responses_transport), ("responses", "http"))
+        client, model, _, _ = provider.responses_connection_config()
+        self.assertEqual((client.max_retries, model), (2, "gpt-6.1-sol"))
+        asyncio.run(provider.aclose())
+        legacy = provider_registry_from_env({**env, "MINEBOT_AGENT_KERNEL": "sdk"})
+        self.assertEqual(legacy.kernel, "sdk")
+
     def test_provider_config_prefers_minebot_env(self):
         provider = provider_registry_from_env(
             {

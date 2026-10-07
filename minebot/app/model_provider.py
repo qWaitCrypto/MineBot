@@ -182,7 +182,9 @@ class ModelProviderRegistry(ModelProvider):
         if cfg.kind != "openai_responses":
             raise ProviderConfigError("Responses kernel requires MINEBOT_LLM_KIND=openai_responses")
         if logical_name not in self._responses_clients:
-            self._responses_clients[logical_name] = self._client(cfg)
+            # Base SDK retries failures before opening the HTTP event stream.
+            # Once events arrive, the kernel owns continuation and never replays Body work.
+            self._responses_clients[logical_name] = self._client(cfg).with_options(max_retries=2)
         settings = {k: v for k, v in cfg.settings.items()
                     if k in {"temperature", "top_p", "tool_choice", "parallel_tool_calls", "reasoning"}}
         if "max_tokens" in cfg.settings:
@@ -230,7 +232,7 @@ class ModelProviderRegistry(ModelProvider):
                     "tracing": cfg.tracing,
                     "model_retry": {
                         "max_retries": _MODEL_RETRY_MAX_RETRIES,
-                        "client_max_retries": 0,
+                        "client_max_retries": 2 if self.kernel == "responses" and self.responses_transport == "http" else 0,
                         "request_timeout_s": _request_timeout_s(cfg),
                         "replay_guard": "sdk_stream_events",
                     },

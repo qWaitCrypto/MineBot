@@ -1398,7 +1398,7 @@ class AgentRuntime:
         return "\n\n".join(filter(None, [
             self.agent_context.system_prompt, preamble, self.agent_context.skill_preamble(),
             "CONTINUOUS_EXECUTION: Use asynchronous calls for long Body tools so independent chat can continue. Ordinary chat and the end of a model response do not stop physical work. "
-            "Use wait_for_tasks when a next action depends on a running tool. Do not issue a competing body write. "
+            "Tool results automatically resume the conversation when ready. Do not issue a competing body write. "
             "Finish actionable goals by executing and checking real results, not by only describing the next steps. "
             "Only report success supported by tool/state evidence; report a concrete blocker on failure.",
             "RECENT_TOOL_RESULTS: " + recent,

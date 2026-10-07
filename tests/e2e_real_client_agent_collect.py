@@ -195,6 +195,7 @@ def main() -> int:
         body.get_state()
         rcon.command("fill 32 149 24 56 149 34 minecraft:stone")
         rcon.command("fill 32 150 24 56 155 34 minecraft:air")
+        rcon.command("kill @e[type=minecraft:item,x=32,y=149,z=24,dx=24,dy=7,dz=10]")
         rcon.command("fill 39 150 27 39 152 29 minecraft:stone")
         rcon.command("fill 44 150 28 44 152 28 minecraft:oak_log")
         rcon.command(f"gamemode survival {bot}")

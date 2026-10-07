@@ -39,7 +39,8 @@ def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelPro
     if not env.get(api_key_env):
         raise AppConfigError(f"{api_key_env} is unset or empty")
 
-    kernel = env.get("MINEBOT_AGENT_KERNEL", "sdk")
+    default_kernel = "responses" if env.get("MINEBOT_LLM_KIND") == "openai_responses" else "sdk"
+    kernel = env.get("MINEBOT_AGENT_KERNEL", default_kernel)
     if kernel not in {"sdk", "responses"}:
         raise AppConfigError("MINEBOT_AGENT_KERNEL must be responses or sdk")
     kind = env.get("MINEBOT_LLM_KIND", "openai_responses" if kernel == "responses" else "openai_chat")

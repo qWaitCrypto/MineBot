@@ -13,7 +13,7 @@ python -m pytest -q
 
 The default and CI run the same focused tests: real-client Body mapping,
 IPC responses and errors, cancellation, chat preemption, truthful terminal
-results, and native Responses protocol/session behavior. The current 76 tests
+results, and native Responses protocol/session behavior. These tests
 use doubles and require no game or model key. There is no second smoke-test copy.
 
 For a changed subsystem, name its existing test file. For example:
@@ -87,11 +87,12 @@ This uses real API calls, without Minecraft. Its JSON distinguishes native
 async dispatch, conversation with a pending call and late result delivery,
 and reports the concrete failed stage. HTTP is the default; `--transport websocket`
 also verifies native mid-turn steering. `--proxy` selects a network
-route when needed. The default tests include seven protocol/session fixtures;
+route when needed. The default tests include eight protocol/session fixtures;
 their model and Body substitutes do not prove this live API experiment.
 
-Select the new production path with `MINEBOT_AGENT_KERNEL=responses` in the
-private profile with `MINEBOT_RESPONSES_TRANSPORT=http` (the new kernel default),
+An `openai_responses` provider defaults to the new production kernel;
+`MINEBOT_AGENT_KERNEL=sdk` explicitly selects the old loop. Use
+`MINEBOT_RESPONSES_TRANSPORT=http` (the new kernel default),
 or explicitly choose `websocket`. Configuration and current
 results are in [RUNTIME.md](RUNTIME.md).
 
@@ -130,8 +131,9 @@ call's successful result and API acknowledgement, then verifies Receiver's
 inventory and the return position through RCON. A separate navigation goal is
 cancelled after server-observed movement; cancellation must settle and position
 must remain stable while the Agent is still alive. Messages, receipts and server
-checks are recorded with the result. This mode has not passed live acceptance;
-see [RUNTIME.md](RUNTIME.md) for the current failed attempt.
+checks are recorded with the result. This mode passed live acceptance with
+gpt-6.1-sol over HTTP in 83.779 seconds; see [RUNTIME.md](RUNTIME.md) for the
+actual report and remaining WebSocket status.
 
 For other player goals, use the existing interactive production entrypoint
 with `MINEBOT_BODY_PROVIDER=real_client`, a configured model, client endpoint,

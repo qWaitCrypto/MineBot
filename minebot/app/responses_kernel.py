@@ -1,7 +1,7 @@
 """Native Responses loop; tool work belongs to the session, not a response.
 
-Uses the base SDK's raw WebSocket methods so the pinned SDK does not need to
-know newer event schemas. The wire protocol is native async tools / steering.
+Uses the base SDK's HTTP event stream or raw WebSocket connection. Tool calls
+use native async semantics; mid-turn steering is available on WebSocket.
 """
 
 from __future__ import annotations
@@ -32,15 +32,6 @@ class PendingCall:
 class ResponsesResult:
     final_output: str
     response_id: str | None
-
-
-WAIT_TOOL = {
-    "type": "function",
-    "name": "wait_for_tasks",
-    "description": "Wait for currently running tools when their results are needed. Ordinary chat can still arrive. Do not poll repeatedly.",
-    "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
-    "strict": True,
-}
 
 
 class _HttpResponsesConnection:
@@ -170,7 +161,7 @@ class ResponsesKernel:
 
     async def _create(self, inputs: list[dict[str, Any]]) -> None:
         instructions = await self.instructions()
-        tools = self.tools() + [WAIT_TOOL]
+        tools = self.tools()
         pending = [{"call_id": c.call_id, "tool": c.name, "done": c.task.done()} for c in self.pending]
         if pending:
             instructions += "\nRUNNING_TOOLS: " + json.dumps(pending, ensure_ascii=False)
@@ -199,10 +190,6 @@ class ResponsesKernel:
             return {"success": False, "reason": "tool_exception", "canRetry": False,
                     "metrics": {"error_type": type(exc).__name__, "message": str(exc)[:400]}}
 
-    async def _wait(self, tasks: list[asyncio.Task]) -> dict[str, Any]:
-        await asyncio.gather(*(asyncio.shield(task) for task in tasks))
-        return {"success": True, "reason": "tasks_settled"}
-
     def _dispatch(self, item: dict[str, Any]) -> None:
         if item.get("type") != "function_call":
             return
@@ -218,8 +205,6 @@ class ResponsesKernel:
         writer = next((c for c in self.pending if c.mutating and not c.task.done()), None)
         if self._halted:
             job = self._constant({"success": False, "reason": "cancelled", "canRetry": False})
-        elif name == "wait_for_tasks":
-            job = self._wait([c.task for c in self.pending if not c.task.done()])
         elif name not in definitions:
             job = self._constant({"success": False, "reason": "unknown_or_disabled_tool", "tool": name})
         elif mutating and writer:
@@ -267,7 +252,6 @@ class ResponsesKernel:
                 if not self._active and not self._auto_successor:
                     sync_waiting = any(not c.asynchronous and not c.task.done() for c in self.pending)
                     ready = [c for c in self.pending if c.task.done()]
-                    ready.sort(key=lambda c: c.name == "wait_for_tasks")
                     inputs = [] if sync_waiting else [{"type": "function_call_output", "call_id": c.call_id,
                                "output": json.dumps(c.task.result(), ensure_ascii=False)} for c in ready]
                     if not sync_waiting:

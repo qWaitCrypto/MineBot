@@ -2,7 +2,7 @@
 
 ## 用户行为与目标
 
-用户已授权替换普通 Agents SDK Runner 的模型—工具循环，采用基础 OpenAI SDK 的 Responses 原生异步工具与 WebSocket steering。机器人执行长动作时可以聊天、接收追加要求；真实动作结果自动进入后续模型请求；明确取消真正停止身体。每次模型请求使用最新目标、任务状态、动作结果和身体状态。
+用户已授权替换普通 Agents SDK Runner 的模型—工具循环，采用基础 OpenAI SDK 的 Responses 原生异步工具；WebSocket steering 是次要能力。机器人执行长动作时可以聊天、接收追加要求；真实动作结果自动进入后续模型请求；明确取消真正停止身体。每次模型请求使用最新目标、任务状态、动作结果和身体状态。
 
 理念来自 [Issue #1](https://github.com/qWaitCrypto/MineBot/issues/1) 的完整 P01–P40。本计划不把已有契约、治理或进度机制当作必须保留的产品理念。
 
@@ -42,11 +42,13 @@
 - [ ] WebSocket steering 真实验证：现有 provider 仍未提供可用账户，按用户优先级放在异步工具主线之后。
 - [x] Responses 内核与定向接口验证。
 - [x] 生产入口、消息 steering、明确取消、短计划和最新上下文接通；会话回归覆盖 SQLite 消息队列与同步执行线程。
-- [ ] 真实模型 + Minecraft 连续任务和物理取消验收。
+- [x] 真实模型 + Minecraft 连续任务和物理取消验收，83.779 秒通过。
 
 ## 启用与验证
 
-旧私有配置保持可用，默认仍为 `sdk`。新路径通过私有环境显式选择，不在 API 报错后自动切换：
+配置为 `openai_responses` 时默认使用已通过真实任务的新内核；`openai_chat` 和 `litellm` 继续使用 SDK 路径。可显式指定 `MINEBOT_AGENT_KERNEL=sdk` 使用旧循环，不在 API 报错后自动切换。
+
+已验证的配置是：
 
 ```dotenv
 MINEBOT_AGENT_KERNEL=responses
@@ -69,16 +71,25 @@ python -m tests.e2e_real_client_agent_collect --disposable-local-server --contin
 
 ## 当前结果（2026-10-07）
 
-默认行为回归通过 76 项，耗时 10.05 秒。7 项新内核行为回归覆盖迟到结果、重复事件、自动 steering 后继、同步调用所需结果、写动作互斥、独立读取、普通聊天、同步执行工作线程取消、短计划写入与模型完成记录；还检查只读超时不中断写动作，以及动作超时清理后仍能执行后续动作。明确取消先等待身体和异步工具结果收尾，再重置会话。这里的模型和 Body 为协议/会话替身，不是 Minecraft 实验。本次取消/超时修正对应的旧绑定定向回归 4 项 / 1.54 秒通过，没有运行历史全量。
+原生异步主线已通过真实验收：gpt-6.1-sol / OpenAI SDK 2.36.0 / HTTP Responses SSE / 当前私有端点。原生异步工具不要求 WebSocket；模型调用实际带 async=true，工具未完成时可以继续聊天，再按原始 call_id 接回迟到结果。[官方异步工具文档](https://developers.openai.com/api/docs/guides/async-tool-calling)。
 
-现有私有端点 `2.1885566.xyz` 对 gpt-6-astra 和 gpt-6.1-sol 的 HTTP Responses 请求成功，但链式 HTTP 请求返回 400：`previous_response_id is not available for this user`。经显式网络代理，gpt-6.1-sol 的 WebSocket 握手可达，首次请求在任何响应事件之前被关闭：`1013 (try again later) no available account`。固定 SDK 的可复现实验停在 `async_dispatch`，返回 success=false。
+真实模型通过生产交互入口完成以下任务，耗时 83.779 秒：
 
-现有真实采集脚本的 `--continuity` 模式复用生产交互入口，验证采集交接、途中聊天、追加返回和独立取消。早期脚本的 WebSocket 前置请求失败（ConnectionResetError），记录 Minecraft 任务未启动。现在真实任务直接验证实际采集调用的 async 标志及迟到结果交付，不再每次重复合成工具前置实验。Windows 的同模型协议复核仍为上游 `1013: no available account`。这些是失败记录，后续世界行为尚未执行。
+- 空库存出发，采集石墙后的三根橡木原木；采集期间发送普通聊天和“交接后返回出发点”。模型实际回复了两条消息，原采集调用继续运行，结果按原始 call_id 续接。
+- 交接初次距离不足，模型自行靠近并重试；服务器独立确认 Receiver 库存为三根原木。
+- 完成交接后返回出发点附近（33.710, 150, 28.255），距指定点约 1.24 格。
+- 单独开始行走，观察到实际移动后明确取消。身体终态已收尾，客户端 pathing=false、any_process_active=false；服务器一秒间隔的两次位置均为（35.079, 150, 28.488）。
 
-补充实测：同一端点的 gpt-6.1-sol 使用 HTTP Responses、完整 input 历史、store=false 和 reasoning.encrypted_content，避开 previous_response_id，三次请求均返回 200。首轮调用实际带 async=true；暂不提交工具结果，发送普通聊天后收到 ACK；随后用原始 call_id 提交 count=3，收到 COUNT=3。报告：logs/responses-http-async-20261007.json。工具结果为实验数据，尚未接入 Minecraft。
+结果、用户消息、原生异步调用/结果确认、取消回执和服务器观测在 [result.json](logs/agent-collect-1791368744299662501/result.json)；对应 trace.jsonl 和 agent.log 位于同目录。实验仅使用已选择的 disposable 本地世界；Agent 不持有 RCON。
 
-原生异步工具本身不要求 WebSocket；HTTP 可以在工具仍运行时发起下一轮模型请求。原生 response.steer 用于模型响应进行中注入要求，当前官方协议要求 WebSocket。HTTP 下等待当前模型响应结束再消费新消息，与原生 mid-turn steering 是不同的行为，不能混称。此前将整条原生异步路径判为不可用的结论已被以上实测修正。
+对应接口回归 70 项 / 15.75 秒通过；配置默认值与旧路径选择回归 15 项、3 个 subtests / 3.01 秒通过；真实客户端 Java 编译及加载通过。未运行历史全量，也未增加 Gate 或另一套测试平台。移除了会阻塞 HTTP 聊天的多余 wait_for_tasks 工具，结果就绪时由内核自动续接。请求打开事件流前的连接错误交给基础 SDK 最多重试两次；收到事件后的物理工具不会被 SDK 重放。
 
-Sub2API 源码核对固定为 0.2.14 / 3f1a2ea0a760730e3bc528105c00b4ee4f23e469（未确认现有 provider 部署版本）：默认 ctx_pool 与 http_bridge 入口只接受 response.create，会拒绝 response.steer；passthrough 会透传其他事件，具备尝试原生 steering 的通路，但尚无本端点的完整实测。1013/no available account 在网关账户选择失败时生成，需要管理员检查全局 WebSocket 配置、账户模式、分组/模型资格及账户可用性，不能仅凭该报错认定模型不支持。源码见 [入口](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_forwarder_ingress.go#L131-L264)、[透传](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_v2_passthrough_adapter.go#L1150-L1162)、[账户选择](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/handler/openai_gateway_handler.go#L2700-L2729)。
+失败实验保留在 logs/：交互入口误依赖 Java event_head；blockAt 缺少 interaction_ready；没有专用采集后端时 lambda 返回 None；即时挖掘只有客户端预测；拾取没有匹配 UUID 和距离。这些实际阻断已分别修正，挖掘复用上游 Baritone 的单方块 clear 过程，未扩建自研导航。一次客户端启动 SIGSEGV 和一次 HTTP 连接失败也记录为失败；最终实验通过并不覆盖或删除它们。
 
-HTTP 原生异步已通过真实 SDK/SSE 验证，新的 HTTP 行为回归与原有内核回归共 8 项通过。生产 Responses 路径现已支持该传输，独立执行、原始调用结果、读取并行、显式取消等语义复用同一循环。真实 Minecraft 验收进行中：交互入口曾因强制调用 Java event_head 退出，随后采集因 blockAt 缺失 interaction_ready 失败，日志分别在 logs/agent-collect-1791366834031649041 和 logs/agent-collect-1791366946608737030。正在按具体失败修正并重跑同一任务；不把协议回归或模型的完成声明代替世界结果。
+## WebSocket steering：待验证的次要能力
+
+代码保留原生 response.steer 路径及定向协议回归，尚未通过当前 provider 的真实 steering 验收。此前同一模型握手可达，但首次 response.create 在任何响应事件前被关闭：1013 / no available account。HTTP previous_response_id 也被该端点拒绝，当前 HTTP 路径因此使用完整历史、store=false 与 reasoning.encrypted_content。
+
+Sub2API 源码核对固定为 0.2.14 / 3f1a2ea0a760730e3bc528105c00b4ee4f23e469，未确认 provider 部署版本。ctx_pool 与 http_bridge 只接受 response.create；passthrough 能透传其他事件，但本端点尚未实测。需要 provider 的可用 WebSocket 账户与相应配置才能继续这一项。[入口](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_forwarder_ingress.go#L131-L264)、[透传](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_v2_passthrough_adapter.go#L1150-L1162)、[账户选择](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/handler/openai_gateway_handler.go#L2700-L2729)。
+
+HTTP 在当前模型响应结束后处理排队消息；WebSocket 原生 steering 可以在模型响应进行中注入要求，两者不混称。[官方 steering 文档](https://developers.openai.com/api/docs/guides/steering)。按用户最新优先级，这项不阻断已经完成的原生异步主线，不为它扩建 provider 平台。
