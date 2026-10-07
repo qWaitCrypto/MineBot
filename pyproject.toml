@@ -33,4 +33,6 @@ camera = ["websockets==16.0"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["tests"]
+# The default command is a fast, repeatable contract smoke test. Historical
+# unit suites and live experiments stay runnable by naming their path.
+testpaths = ["tests/quick"]

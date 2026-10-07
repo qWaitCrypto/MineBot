@@ -27,9 +27,9 @@ and you want to catch a test that should have run but silently skipped).
 
 Usage::
 
-    python3 tests/run_e2e.py                       # run all, 180s each
-    python3 tests/run_e2e.py --filter navigation    # name substring match
-    python3 tests/run_e2e.py --required --fail-on-skip   # hard gate (live up)
+    python3 tests/run_e2e.py --filter navigation    # one named task family
+    python3 tests/run_e2e.py --all                 # run the entire legacy matrix
+    python3 tests/run_e2e.py --filter navigation --required --fail-on-skip
     python3 tests/run_e2e.py --list                  # just list discovered
 
 Known long matrix tests get per-file timeout overrides. In particular,
@@ -212,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"glob under tests/ (default: {DEFAULT_PATTERN})")
     parser.add_argument("--filter", default=None,
                         help="only run tests whose name contains this substring")
+    parser.add_argument("--all", action="store_true",
+                        help="allow the full legacy e2e_body_*.py matrix")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S,
                         help=f"per-test timeout in seconds (default: {DEFAULT_TIMEOUT_S:g})")
     parser.add_argument("--log-dir", default=None,
@@ -227,6 +229,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-color", action="store_true",
                         help="disable ANSI colors")
     args = parser.parse_args(argv)
+
+    if not args.list and args.pattern == DEFAULT_PATTERN and args.filter is None and not args.all:
+        parser.error(
+            "refusing the full live matrix by default; choose --filter <task> "
+            "or pass --all explicitly"
+        )
 
     paths = discover(args.pattern, args.filter)
     if args.list:
