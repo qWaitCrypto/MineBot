@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 from uuid import uuid4
+from types import SimpleNamespace
 
 from agents import Agent, RunConfig, RunContextWrapper, Runner, RunHooks, Session
 from agents.exceptions import MaxTurnsExceeded, UserError
@@ -240,7 +241,7 @@ def tool_is_enabled(
     return True
 
 
-def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
+def tool_invoker_for(tool: RegisteredTool):
     async def on_invoke_tool(ctx: RunContextWrapper[RuntimeRunContext], input_json: str) -> JsonObject:
         trace = ctx.context.trace
         runtime = getattr(ctx.context, "runtime", None)
@@ -486,7 +487,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
         settlement_status: str | None = None
         try:
             if runtime is not None and epoch_member is not None:
-                captured = await runtime.run_sync(
+                captured = await runtime.run_tool(tool,
                     _capture_tool_execution,
                     tool,
                     params,
@@ -502,7 +503,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             elif runtime is None:
                 result = execute_tool(tool, params, ctx.context.weld_context)
             else:
-                result = await runtime.run_sync(
+                result = await runtime.run_tool(tool,
                     execute_tool,
                     tool,
                     params,
@@ -647,6 +648,10 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             pending_abort=pending_abort,
         )
 
+    return on_invoke_tool
+
+
+def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
     def is_enabled(ctx: RunContextWrapper[RuntimeRunContext], agent: Any) -> bool:
         enabled = tool_is_enabled(tool.sidecar, ctx.context.profile, ctx.context.facts_for_tool(tool.name))
         if ctx.context.trace is not None:
@@ -667,7 +672,7 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
         name=tool.name,
         description=tool.description,
         params_json_schema=tool.input_schema,
-        on_invoke_tool=on_invoke_tool,
+        on_invoke_tool=tool_invoker_for(tool),
         strict_json_schema=False,
         is_enabled=is_enabled,
         timeout_seconds=None,
@@ -1333,6 +1338,172 @@ class AgentRuntime:
         self._transport_error_incidents: set[str] = set()
         self.execution_lane = SerialExecutionLane(thread_name=f"minebot-{agent_name}")
         self.context_refreshers: list[Callable[[AgentContext], None]] = []
+        self.responses_kernel = None
+        self._native_context = None
+        self.native_task_workspace = None
+        self.native_task_outcome = None
+        self.native_plan = None
+        self._read_lane = SerialExecutionLane(thread_name=f"minebot-read-{agent_name}")
+        self.native_responses = runner_run is None and getattr(model_provider, "kernel", "sdk") == "responses"
+        if self.native_responses:
+            from minebot.app.responses_kernel import ResponsesKernel
+            client, model, settings, timeout = model_provider.responses_connection_config()
+            self.responses_kernel = ResponsesKernel(
+                client=client, model=model, settings=settings, request_timeout_s=timeout,
+                tools=self._responses_tools, instructions=self._responses_instructions,
+                invoke=self._invoke_responses_tool, emit=self.trace.emit, speak=self._responses_speak,
+                needs_work=lambda: bool(self.agent_context.goal_text.strip()) and self.native_task_outcome is None,
+                proxy=getattr(model_provider, "responses_proxy", None),
+            )
+
+    def _responses_tools(self) -> list[dict[str, Any]]:
+        ctx = self._native_context
+        if ctx is None:
+            return []
+        definitions = []
+        for name in self.registry.model_names():
+            tool = self.registry.get(name)
+            if tool.sidecar.source == "agent.task":
+                continue
+            if not tool_is_enabled(tool.sidecar, ctx.profile, ctx.facts_for_tool(name)):
+                continue
+            if tool.sidecar.can_mutate_body and not ctx.body_actions_allowed:
+                continue
+            definition = {"type": "function", "name": name, "description": tool.description,
+                          "parameters": tool.input_schema, "strict": False}
+            if tool.sidecar.can_mutate_body:
+                definition["async"] = True
+            definitions.append(definition)
+        if self.agent_context.goal_text.strip():
+            definitions.extend([
+                {"type": "function", "name": "update_plan", "description": "Keep a short current plan; change it when evidence or player requests change.",
+                 "parameters": {"type": "object", "properties": {"summary": {"type": "string"}, "steps": {"type": "array", "items": {"type": "string"}}}, "required": ["summary", "steps"], "additionalProperties": False}, "strict": True},
+                {"type": "function", "name": "finish_task", "description": "Close this goal after checking real results, or report the concrete reason it failed. Running body actions must settle first.",
+                 "parameters": {"type": "object", "properties": {"status": {"type": "string", "enum": ["complete", "blocked"]}, "summary": {"type": "string"}, "evidence": {"type": "array", "items": {"type": "string"}}}, "required": ["status", "summary", "evidence"], "additionalProperties": False}, "strict": True},
+            ])
+        return definitions
+
+    async def _responses_instructions(self) -> str:
+        # Reads have their own worker: a long write must not freeze context.
+        state = await self._read_lane.run(self.body.get_state)
+        self._remember_body_state(state)
+        self.agent_context.observe_state(state)
+        self._refresh_dynamic_context()
+        if self.native_task_workspace is not None:
+            self.native_task_workspace.sync_context(self.agent_context)
+        self.weld_context.goal_text = self.agent_context.goal_text
+        preamble = self.agent_context.compile(include_session_messages=True, continuous_tools=True).text
+        recent = json.dumps(self.last_tool_results, ensure_ascii=False)
+        return "\n\n".join(filter(None, [
+            self.agent_context.system_prompt, preamble, self.agent_context.skill_preamble(),
+            "CONTINUOUS_EXECUTION: Use asynchronous calls for long Body tools so independent chat can continue. Ordinary chat and the end of a model response do not stop physical work. "
+            "Use wait_for_tasks when a next action depends on a running tool. Do not issue a competing body write. "
+            "Finish actionable goals by executing and checking real results, not by only describing the next steps. "
+            "Only report success supported by tool/state evidence; report a concrete blocker on failure.",
+            "RECENT_TOOL_RESULTS: " + recent,
+            "CURRENT_PLAN: " + json.dumps(self.native_plan, ensure_ascii=False) if self.native_plan else "",
+            "TASK_OUTCOME: " + json.dumps(self.native_task_outcome, ensure_ascii=False) if self.native_task_outcome else "",
+        ]))
+
+    async def _invoke_responses_tool(self, name: str, arguments: str, call_id: str) -> JsonObject:
+        ctx = self._native_context
+        if ctx is None:
+            raise RuntimeError("Native tool called outside its session")
+        if name in {"finish_task", "update_plan"}:
+            params = json.loads(arguments)
+            if name == "update_plan":
+                plan = {"summary": str(params["summary"]), "steps": list(params["steps"])}
+                if self.native_task_workspace is not None:
+                    workspace = self.native_task_workspace
+                    current = workspace.store.get_plan(workspace.current_task.task_id)
+                    workspace.update_plan(expected_revision=0 if current is None else current.revision,
+                        summary=plan["summary"], steps=[{"title": step} for step in plan["steps"]])
+                else:
+                    self.native_plan = plan
+                return {"success": True, "reason": "plan_updated"}
+            if any(c.mutating and not c.task.done() for c in self.responses_kernel.pending):
+                return {"success": False, "reason": "body_work_pending", "canRetry": True}
+            if params.get("status") not in {"complete", "blocked"} or not params.get("summary") or not params.get("evidence"):
+                return {"success": False, "reason": "task_outcome_requires_actual_evidence", "canRetry": True}
+            outcome = {key: params[key] for key in ("status", "summary", "evidence")}
+            if self.native_task_workspace is not None:
+                from minebot.app.tasks import CheckpointDisposition
+                workspace = self.native_task_workspace
+                workspace.checkpoint(expected_task_revision=workspace.current_task.revision,
+                    disposition=CheckpointDisposition.COMPLETE if params["status"] == "complete" else CheckpointDisposition.YIELD,
+                    summary=params["summary"], evidence=params["evidence"])
+            self.native_task_outcome = outcome
+            self.trace.emit("task_outcome", **outcome)
+            return {"success": True, "reason": "task_outcome_recorded", "summary": outcome}
+        tool = self.registry.get(name)
+        if self.native_task_outcome is not None and tool.sidecar.can_mutate_body:
+            return {"success": False, "reason": "task_finished", "canRetry": False}
+        if not tool_is_enabled(tool.sidecar, ctx.profile, ctx.facts_for_tool(name)):
+            return {"success": False, "reason": "tool_disabled", "canRetry": False}
+        try:
+            return await tool_invoker_for(tool)(SimpleNamespace(context=ctx, tool_call_id=call_id), arguments)
+        except ProgressAbort as exc:
+            return {"success": False, "reason": "progress_yielded", "canRetry": True,
+                    "metrics": _progress_abort_metrics(exc)}
+        except BodyRecoveryRequired as exc:
+            return {"success": False, "reason": exc.reason, "canRetry": False, "metrics": exc.facts}
+
+    def _responses_speak(self, text: str) -> None:
+        self.trace.emit("assistant_message", content=text)
+        self.agent_context.observe_assistant_message(text)
+        if self.speech_sink:
+            try:
+                self.speech_sink(text)
+            except Exception as exc:
+                self.trace.emit("speech_sink_failed", error_type=type(exc).__name__)
+
+    def steer_pending_input(self) -> None:
+        if self.responses_kernel is None:
+            return
+        text, count = self.agent_context.pending_turn_input(fallback="")
+        if count:
+            # The model decides whether new input changes an already proposed
+            # outcome; the runtime must allow the newly requested work.
+            self.native_task_outcome = None
+            self.responses_kernel.steer(text)
+            self.agent_context.acknowledge_turn_input(count)
+
+    async def _run_responses_turn(self, extra_signals, *, body_actions_allowed: bool) -> AgentTurnOutcome:
+        prepared = await self._read_lane.run(self._prepare_turn, extra_signals)
+        if isinstance(prepared, AgentTurnOutcome):
+            return prepared
+        self._native_context = RuntimeRunContext(
+            agent_context=self.agent_context, weld_context=self.weld_context,
+            profile=prepared, tool_facts=self.tool_facts, trace=self.trace, runtime=self,
+            body_actions_allowed=body_actions_allowed,
+        )
+        text, count = self.agent_context.pending_turn_input(
+            fallback="Continue the current goal from real results." if self.agent_context.goal_text else "Respond to the latest message.")
+        # The kernel queues input before any await; a transport error is visible
+        # rather than invoking the same tool again through an SDK fallback.
+        self.agent_context.acknowledge_turn_input(count)
+        self.responses_kernel.resume()
+        try:
+            result = await self.responses_kernel.run(text, max_responses=self.max_turns)
+        except asyncio.CancelledError:
+            self.trace.emit("turn_cancelled", kernel="responses", pending_calls=[c.call_id for c in self.responses_kernel.pending])
+            raise
+        except Exception as exc:
+            self.trace.emit("responses_failed", error_type=type(exc).__name__, message=str(exc)[:500],
+                            pending_calls=[c.call_id for c in self.responses_kernel.pending])
+            self._raise_model_transport_error_if_retryable(exc)
+            return AgentTurnOutcome("failed", self.lifecycle.state, prepared, message=f"{type(exc).__name__}: {str(exc)[:400]}")
+        self.trace.emit("turn_completed", kernel="responses", lifecycle=self.lifecycle.state.value)
+        return AgentTurnOutcome("completed_turn", self.lifecycle.state, prepared, result=result)
+
+    async def run_tool(self, tool: RegisteredTool, callback: Callable[..., Any], *args, timeout_s=None):
+        lane = self._read_lane if self.native_responses and not tool.sidecar.can_mutate_body else self.execution_lane
+        return await lane.run(callback, *args, timeout_s=timeout_s)
+
+    async def reset_responses(self) -> None:
+        if self.responses_kernel is not None:
+            await self.responses_kernel.reset()
+            self.native_task_outcome = self.native_plan = None
 
     def set_tool_facts(self, tool_name: str, facts: dict[str, object]) -> None:
         self.tool_facts[tool_name] = dict(facts)
@@ -1351,6 +1522,8 @@ class AgentRuntime:
         continuation_budget: ContinuationEpochBudget | None = None,
         review_grant_stop_epoch_id: str | None = None,
     ) -> AgentTurnOutcome:
+        if self.native_responses:
+            return await self._run_responses_turn(extra_signals, body_actions_allowed=body_actions_allowed)
         self._turn_intent_kind = intent_kind
         self._turn_has_durable_goal = has_durable_goal
         self._turn_review_grant = review_grant_stop_epoch_id
@@ -1604,7 +1777,8 @@ class AgentRuntime:
 
     async def read_progress_state(self) -> BodyState | None:
         try:
-            return await self.run_sync(self._read_progress_state)
+            lane = self._read_lane if self.native_responses else self.execution_lane
+            return await lane.run(self._read_progress_state)
         except Exception as exc:
             self.trace.emit(
                 "progress_epoch_fingerprint_failed",
@@ -1619,6 +1793,8 @@ class AgentRuntime:
         return await self.execution_lane.wait_idle(timeout_s=timeout_s)
 
     def request_execution_cancel(self, reason: str) -> int:
+        if self.responses_kernel is not None:
+            self.responses_kernel.halt()
         return self.execution_lane.request_cancel(reason)
 
     async def cancel_active_execution(self, reason: str) -> bool:
@@ -1736,7 +1912,22 @@ class AgentRuntime:
                 }
             await asyncio.sleep(BODY_OWNER_SETTLE_POLL_S)
 
+    async def aclose(self) -> None:
+        if self.responses_kernel is not None:
+            if any(c.mutating and not c.task.done() for c in self.responses_kernel.pending):
+                await self.cancel_active_execution("runtime_closed")
+            self._read_lane.request_cancel("runtime_closed")
+            reads_idle = await self._read_lane.wait_idle(timeout_s=EXECUTION_LANE_CANCEL_TIMEOUT_S)
+            if reads_idle and self.execution_lane.active_count == 0:
+                await asyncio.gather(*(c.task for c in self.responses_kernel.pending), return_exceptions=True)
+            else:
+                self.trace.emit("runtime_close_unsettled", reads_idle=reads_idle,
+                                writer_count=self.execution_lane.active_count)
+            await self.responses_kernel.close()
+        self.close()
+
     def close(self) -> None:
+        self._read_lane.close()
         self.execution_lane.close()
         close_session = getattr(self.conversation_session, "close", None)
         if callable(close_session):

@@ -109,7 +109,7 @@ class WorkIntentQueue(Protocol):
         generation: int | None = None,
     ) -> WorkIntent: ...
 
-    def lease_next(self) -> WorkIntent | None: ...
+    def lease_next(self, *, kind: WorkIntentKind | None = None) -> WorkIntent | None: ...
 
     def bind_admission(self, intent: WorkIntent, checkpoint_id: str | None, evidence_cursor: int, task_id: str | None = None) -> WorkIntent: ...
 
@@ -201,15 +201,16 @@ class MemoryWorkIntentQueue:
             self._available.set()
             return intent
 
-    def lease_next(self) -> WorkIntent | None:
+    def lease_next(self, *, kind: WorkIntentKind | None = None) -> WorkIntent | None:
         with self._lock:
             queued = [
                 self._records[intent_id]
                 for intent_id in self._order
                 if self._records[intent_id].state is WorkIntentState.QUEUED
+                and (kind is None or self._records[intent_id].kind is kind)
             ]
             if not queued:
-                self._available.clear()
+                self._refresh_available()
                 return None
             selected = min(queued, key=lambda item: (-item.priority, self._order.index(item.intent_id)))
             leased = WorkIntent(
@@ -465,10 +466,11 @@ class PersistentWorkIntentQueue:
             self._available.set()
         return intent
 
-    def lease_next(self) -> WorkIntent | None:
+    def lease_next(self, *, kind: WorkIntentKind | None = None) -> WorkIntent | None:
         row = self.store.lease_next_work_intent(
             self.scope,
             lease_owner=self.lease_owner,
+            kind=None if kind is None else kind.value,
         )
         self._refresh_available()
         return None if row is None else _intent_from_row(row)

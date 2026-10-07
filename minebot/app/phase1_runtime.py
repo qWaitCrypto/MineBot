@@ -143,6 +143,7 @@ def build_phase1_agent_runtime(
             )
         ),
     )
+    parts.runtime.native_task_workspace = config.task_workspace
     context = CompositionContext(
         registry=registry,
         weld_context=parts.runtime.weld_context,

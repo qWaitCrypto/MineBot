@@ -64,6 +64,7 @@ class ContextFacts:
     body_state: BodyState | None = None
     profile: RuntimeProfile | None = None
     resume_facts: Mapping[str, object] | None = None
+    continuous_tools: bool = False
 
 
 @dataclass(frozen=True)
@@ -130,7 +131,7 @@ def _render_task_artifact(facts: ContextFacts) -> str | None:
 
 
 def _render_task_runtime_contract(facts: ContextFacts) -> str | None:
-    if facts.task_artifact is None:
+    if facts.task_artifact is None or facts.continuous_tools:
         return None
     task = facts.task_artifact.get("task")
     if isinstance(task, dict) and task.get("status") == "running":

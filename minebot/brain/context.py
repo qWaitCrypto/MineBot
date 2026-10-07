@@ -283,9 +283,11 @@ class AgentContext:
         *,
         include_goal: bool = True,
         include_session_messages: bool = True,
+        continuous_tools: bool = False,
     ) -> ContextFacts:
         """Immutable snapshot of everything observed, for the F2 compiler."""
         return ContextFacts(
+            continuous_tools=continuous_tools,
             goal_text=self.goal_text,
             goal_facts=self._goal_facts,
             turn=self._turn,
@@ -307,6 +309,7 @@ class AgentContext:
         include_goal: bool = True,
         include_session_messages: bool = True,
         budget: ContextBudget | None = None,
+        continuous_tools: bool = False,
     ) -> CompiledContext:
         """Compile the turn preamble through the F2 section pipeline.
 
@@ -319,6 +322,7 @@ class AgentContext:
             self.snapshot_facts(
                 include_goal=include_goal,
                 include_session_messages=include_session_messages,
+                continuous_tools=continuous_tools,
             ),
             budget,
         )

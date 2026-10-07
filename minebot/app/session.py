@@ -378,6 +378,10 @@ class AgentSession:
             and _command_requires_body_interrupt(command)
         ):
             await self._settle_command_body_interrupt(command)
+        if (command is not None and self.parts is not None
+                and getattr(self.parts.runtime, "native_responses", False)
+                and command.kind in {SessionCommandKind.START, SessionCommandKind.CANCEL, SessionCommandKind.REPLACE_GOAL, SessionCommandKind.QUIT}):
+            await self.parts.runtime.reset_responses()
         signals = (
             await self._apply_command(command)
             if command is not None
@@ -1631,10 +1635,18 @@ class AgentSession:
             self._active_turn_request = None
             self._suspended_turn_request = None
             self._trace("session_turn_completed", reason="assistant_final_output")
-            self._apply_task_checkpoint_lifecycle(
-                intent=intent,
-                checkpoint_before=checkpoint_before,
-            )
+            native = getattr(self.parts.runtime, "native_responses", False)
+            if native:
+                outcome = self.parts.runtime.native_task_outcome
+                if outcome and outcome["status"] == "complete":
+                    return self.complete_current_goal("model_tool_evidence", authority=CompletionAuthority.MODEL)
+                if outcome and outcome["status"] == "blocked":
+                    self._stand_down()
+            if not native:
+                self._apply_task_checkpoint_lifecycle(
+                    intent=intent,
+                    checkpoint_before=checkpoint_before,
+                )
             task = self.task_workspace.current_task if self.task_workspace is not None else None
             if task is not None and task.status in {
                 TaskStatus.WAITING_EVENT,
@@ -1895,6 +1907,12 @@ class AgentSession:
             "missing": state.missing,
         }
 
+    async def aclose(self) -> None:
+        if self.parts is not None:
+            await self.parts.runtime.aclose()
+        if self.work_queue is not None:
+            self.work_queue.close()
+
     def close(self) -> None:
         if self.parts is not None:
             self.parts.runtime.close()
@@ -1955,6 +1973,15 @@ class AgentSession:
                     preemption = _queued_preemption(self.work_queue, work_kind)
                     if preemption is not None:
                         reason, interrupt_body = preemption
+                        if (not interrupt_body and self.parts is not None
+                                and getattr(self.parts.runtime, "native_responses", False)):
+                            while (incoming := self.work_queue.lease_next(kind=WorkIntentKind.MESSAGE)) is not None:
+                                await self._apply_command(_command_from_intent(incoming))
+                                self._sync_task_context()
+                                self.parts.runtime.steer_pending_input()
+                                self.work_queue.complete(incoming)
+                            admission_version = self.work_queue.notification_version
+                            continue
                         return await preempt_work(reason, interrupt_body=interrupt_body)
                     admission_version = self.work_queue.notification_version
                 await asyncio.sleep(0.01)

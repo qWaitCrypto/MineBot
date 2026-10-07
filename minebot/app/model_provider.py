@@ -1,16 +1,8 @@
-"""Model Provider seam — the binding ring's first and most important job.
+"""Configured base OpenAI clients and the explicit legacy Agents SDK binding.
 
-Resolves a provider-blind :class:`ProviderConfig` (a logical name pointing at a
-vendor endpoint) into a concrete openai-agents ``Model``. This is the single
-translation point between MineBot's vendor-blind core and a specific LLM
-provider: swapping the vendor behind ``"primary"`` is a config change with zero
-core change.
-
-See ``docs/design-docs/agent-layer-architecture.md`` §6.1. The pure-data half
-(`ProviderConfig` / `Capabilities`) lives in
-:mod:`minebot.brain.provider` and is re-exported here for ergonomics.
-
-Only this module and ``app/runner.py`` may import openai-agents.
+The Responses kernel uses responses_connection_config; the old SDK path uses
+resolve/model_settings_for. Both reuse private provider configuration without
+silently falling back between execution kernels.
 """
 
 from __future__ import annotations
@@ -33,7 +25,7 @@ from agents import (
     retry_policies,
     set_tracing_disabled,
 )
-from httpx import TransportError
+from httpx import AsyncClient, TransportError
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from minebot.brain.provider import ApiShape, Capabilities, ProviderConfig, ProviderKind
@@ -142,6 +134,7 @@ class ModelProviderRegistry(ModelProvider):
         default: str | None = None,
         env: Mapping[str, str] | None = None,
         install_tracing_policy: bool = True,
+        kernel: str = "sdk",
     ) -> None:
         items = list(configs.values()) if isinstance(configs, Mapping) else list(configs)
         if not items:
@@ -157,6 +150,11 @@ class ModelProviderRegistry(ModelProvider):
         if self._default not in self._configs:
             raise ProviderConfigError(f"default provider {self._default!r} is not configured")
         self._env: Mapping[str, str] = os.environ if env is None else env
+        if kernel not in {"sdk", "responses"}:
+            raise ProviderConfigError("kernel must be sdk or responses")
+        self.kernel = kernel
+        self.responses_proxy = (os.environ if env is None else env).get("MINEBOT_LLM_PROXY") or None
+        self._responses_clients: dict[str, AsyncOpenAI] = {}
         self._models: dict[str, Model] = {}
         self._clients: list[AsyncOpenAI] = []
         if install_tracing_policy:
@@ -174,6 +172,19 @@ class ModelProviderRegistry(ModelProvider):
         if logical_name not in self._models:
             self._models[logical_name] = self._build(self._require(logical_name))
         return self._models[logical_name]
+
+    def responses_connection_config(self, logical_name: str = "primary") -> tuple[AsyncOpenAI, str, dict[str, Any], float]:
+        """Base SDK connection and wire settings for the native Responses loop."""
+        cfg = self._require(logical_name)
+        if cfg.kind != "openai_responses":
+            raise ProviderConfigError("Responses kernel requires MINEBOT_LLM_KIND=openai_responses")
+        if logical_name not in self._responses_clients:
+            self._responses_clients[logical_name] = self._client(cfg)
+        settings = {k: v for k, v in cfg.settings.items()
+                    if k in {"temperature", "top_p", "tool_choice", "parallel_tool_calls", "reasoning"}}
+        if "max_tokens" in cfg.settings:
+            settings["max_output_tokens"] = cfg.settings["max_tokens"]
+        return self._responses_clients[logical_name], cfg.model, settings, _request_timeout_s(cfg)
 
     def capabilities_for(self, logical_name: str) -> Capabilities:
         return self._require(logical_name).capabilities
@@ -274,6 +285,7 @@ class ModelProviderRegistry(ModelProvider):
             base_url=cfg.base_url,
             max_retries=0,
             timeout=_request_timeout_s(cfg),
+            http_client=AsyncClient(proxy=self.responses_proxy) if self.responses_proxy else None,
         )
         self._clients.append(client)
         return client

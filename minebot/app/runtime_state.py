@@ -1100,6 +1100,7 @@ class RuntimeStateStore:
         *,
         lease_owner: str,
         lease_seconds: float = 60.0,
+        kind: str | None = None,
     ) -> dict[str, object] | None:
         now = _utc_now()
         expires_at = _utc_after(lease_seconds)
@@ -1115,17 +1116,19 @@ class RuntimeStateStore:
                         revision = revision + 1
                     WHERE scope_key = ? AND state = 'leased'
                       AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+                      AND (? IS NULL OR kind = ?)
                     """,
-                    (scope.key, now),
+                    (scope.key, now, kind, kind),
                 )
                 row = self._connection.execute(
                     """
                     SELECT * FROM work_intents
                     WHERE scope_key = ? AND state = 'queued' AND available_at <= ?
+                      AND (? IS NULL OR kind = ?)
                     ORDER BY priority DESC, created_at ASC, intent_id ASC
                     LIMIT 1
                     """,
-                    (scope.key, now),
+                    (scope.key, now, kind, kind),
                 ).fetchone()
                 if row is None:
                     self._connection.commit()

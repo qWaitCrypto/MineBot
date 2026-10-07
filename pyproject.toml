@@ -4,13 +4,12 @@ version = "0.1.0"
 description = "MineBot body + agent layer"
 requires-python = ">=3.13"
 dependencies = [
-    # Agent framework — imported ONLY in the binding ring (minebot/app/).
-    # Pinned: the SDK adds surfaces fast and LitellmModel is beta
-    # (agent-layer-architecture.md §6, §12 watch-item).
+    # Explicit legacy SDK path and shared session/model binding types.
     "openai-agents==0.17.6",
-    # Verified with the pinned Runner; 2.53.0 requires cache_write_tokens
-    # that agents 0.17.6 does not supply when constructing Usage.
+    # Base Responses WebSocket transport uses native wire events. Keep the
+    # compatible SDK pair for MINEBOT_AGENT_KERNEL=sdk.
     "openai==2.36.0",
+    "websockets==16.0",
     "filelock>=3.16,<4",
     "PyYAML>=6.0.2,<7",
 ]
@@ -39,6 +38,7 @@ testpaths = [
     "tests/unit/test_real_client_body.py",
     "tests/unit/test_real_client_ipc.py",
     "tests/unit/test_session_message_preemption.py",
+    "tests/unit/test_responses_kernel.py",
     "tests/test_contributor_truth_gate.py",
 ]
 python_files = ["test_*.py"]

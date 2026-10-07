@@ -657,7 +657,7 @@ async def run_real_server_goal(
             )
             terminal_goal = _session_goal(session, goal)
             truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
-            if truth.satisfied:
+            if truth.satisfied and not (session.parts and session.parts.runtime.native_responses):
                 final = session.complete_current_goal("terminal_truth_satisfied")
                 truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
             if session.parts is not None:
@@ -668,7 +668,7 @@ async def run_real_server_goal(
                     message=final.message,
                     terminal_truth=truth.to_trace(),
                 )
-                session.parts.runtime.trace.close()
+                # Keep the sink open until async tool shutdown has settled.
             print(f"log={config.log_path}")
             print(
                 f"status={final.status} lifecycle={final.lifecycle.value} "
@@ -676,9 +676,8 @@ async def run_real_server_goal(
             )
             return truth.exit_code
         finally:
-            close = getattr(session, "close", None)
-            if callable(close):
-                close()
+            await session.aclose()
+            sink.close()
             await camera.close()
             await provider.aclose()
 
@@ -901,7 +900,6 @@ async def run_real_server_interactive(
                 message=final.message,
                 terminal_truth=truth.to_trace(),
             )
-            trace.close()
             print(f"log={config.log_path}")
             print(
                 f"status={final.status} lifecycle={final.lifecycle.value} "
@@ -915,9 +913,8 @@ async def run_real_server_interactive(
                 await reader
             with contextlib.suppress(asyncio.CancelledError):
                 await chat_reader
-            close = getattr(session, "close", None)
-            if callable(close):
-                close()
+            await session.aclose()
+            trace.close()
             if session.parts is None:
                 conversation_session.close()
             state_store.close()
@@ -1084,7 +1081,7 @@ async def _run_interactive_loop(
                 return last
             truth = safe_evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last, session=session)
             if truth.satisfied:
-                completed = session.complete_current_goal("terminal_truth_satisfied")
+                completed = last if (session.parts and session.parts.runtime.native_responses) else session.complete_current_goal("terminal_truth_satisfied")
                 completed_truth = safe_evaluate_terminal_truth(body, truth.goal, completed, session=session)
                 _announce_interactive_terminal(body, completed_truth)
                 last = completed
@@ -1807,6 +1804,14 @@ def safe_evaluate_terminal_truth(
     session: AgentSession | None = None,
 ) -> TerminalTruth:
     try:
+        parts = getattr(session, "parts", None) if session is not None else None
+        if parts is not None and getattr(parts.runtime, "native_responses", False):
+            outcome = parts.runtime.native_task_outcome
+            satisfied = bool(outcome and outcome["status"] == "complete")
+            return TerminalTruth(goal=goal, target=None, inventory_count=None,
+                satisfied=satisfied, status=final.status, lifecycle=final.lifecycle.value,
+                exit_code=0 if satisfied or final.status == "quit" else (8 if final.status == "failed" else 2),
+                facts={"completion_authority": "model", "outcome": outcome})
         return evaluate_terminal_truth(body, goal, final)
     except Exception as exc:
         parts = getattr(session, "parts", None) if session is not None else None
