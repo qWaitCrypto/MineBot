@@ -708,7 +708,7 @@ def _wire_action_for(action: Action) -> dict[str, object] | None:
     """
     names = {
         "engageEntity", "rangedAttack", "craftItem", "containerTransfer",
-        "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp",
+        "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp", "useItem",
     }
     if action.name not in names:
         return None
@@ -791,7 +791,7 @@ def _control_for(action: Action) -> tuple[str, dict[str, object]] | None:
         operation = "expand" if "Expand" in name else "contract" if "Contract" in name else "shift"
         return ("builder_selection", {"operation": operation, "direction": direction, "amount": amount})
     if name in {
-        "jump", "stop", "selectItem", "selectSlot", "lookAt", "useItem", "attackEntity",
+        "jump", "stop", "selectItem", "selectSlot", "lookAt", "attackEntity",
         "dropItem", "moveItem", "mineBlock", "collectBlock", "placeBlock",
         "igniteBlock", "sowCrop",
     }:

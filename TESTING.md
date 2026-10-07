@@ -52,6 +52,7 @@ python -m tests.e2e_real_client_body_transactions \
 | `building` | Place four blocks, then clear them; check each server block |
 | `farming` | Harvest ripe wheat into inventory |
 | `interactions` | Eat, place a block, open a gate, operate a lever |
+| `consumption` | Eat bread with server hunger/inventory checks; full-player and cancellation behavior |
 | `menus` | Craft sticks/pickaxe/cake, move chest items, smelt and reclaim fuel, preserve inventory slots |
 | `combat_tools` | Melee and bow/crossbow against the named target; leave a decoy intact |
 | `vertical_tools` | Dig down/up, return to surface, enforce bounds, cancel |

@@ -831,7 +831,7 @@ public final class MineBotClientBody implements ClientModInitializer {
                 if (client.player.isUsingItem() && client.gameMode != null) {
                     client.gameMode.releaseUsingItem(client.player);
                 }
-                if (run.kind.equals("rangedAttack")) {
+                if (run.kind.equals("rangedAttack") || run.kind.equals("useItem")) {
                     client.options.keyUse.setDown(false);
                 }
                 if (run.kind.equals("containerTransfer") || run.kind.equals("furnaceTransfer") || run.kind.equals("craftItem")) {
@@ -929,6 +929,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
             switch (current.kind) {
                 case "engageEntity" -> tickEngage(client, current);
+                case "useItem" -> tickUseItem(client, current);
                 case "rangedAttack" -> tickRanged(client, current);
                 case "craftItem" -> tickCraft(client, current);
                 case "containerTransfer", "furnaceTransfer" -> tickMenuTransfer(client, current);
@@ -940,6 +941,40 @@ public final class MineBotClientBody implements ClientModInitializer {
             requestStop("failed", error instanceof IllegalArgumentException ? error.getMessage()
                 : "client_action_failed:" + error.getClass().getSimpleName());
             LOG.warn("MINEBOT_BODY action_failed id={} action={} detail={}", current.id, current.kind, error.toString());
+        }
+    }
+
+    private void tickUseItem(Minecraft client, Run current) {
+        String mode = string(current.params, "mode", "once");
+        int duration = integer(current.params, "ticks", 1);
+        if ((!mode.equals("once") && !mode.equals("continuous")) || duration < 1) {
+            throw new IllegalArgumentException("invalid_use_duration_or_mode");
+        }
+        if (current.phase == 0) {
+            if (!current.item.isBlank()) selectItem(client, current.item);
+            else current.item = itemPath(client.player.getMainHandItem());
+            current.before = count(client, current.item);
+            current.phaseTick = current.ticks;
+            current.phase = 1;
+        }
+        if (count(client, current.item) < current.before) {
+            requestStop("completed", "item_consumed");
+            return;
+        }
+        int heldTicks = mode.equals("once") ? 1 : duration;
+        if (current.ticks - current.phaseTick >= heldTicks) {
+            requestStop("completed", "use_duration_elapsed");
+            return;
+        }
+        if (!itemPath(client.player.getMainHandItem()).equals(current.item)) {
+            requestStop("failed", "held_item_changed");
+            return;
+        }
+        // Minecraft cancels eating/charging when the use key is released.
+        // Keep native use alive across ticks, including a server slot update.
+        client.options.keyUse.setDown(true);
+        if (!client.player.isUsingItem()) {
+            client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
         }
     }
 
@@ -2063,6 +2098,8 @@ public final class MineBotClientBody implements ClientModInitializer {
             state.addProperty("dimension", client.level.dimension().identifier().toString());
             state.addProperty("health", client.player.getHealth());
             state.addProperty("food", client.player.getFoodData().getFoodLevel());
+            state.addProperty("using_item", client.player.isUsingItem());
+            state.addProperty("use_key_down", client.options.keyUse.isDown());
             state.addProperty("oxygen", client.player.getAirSupply());
             state.addProperty("yaw", client.player.getYRot());
             state.addProperty("pitch", client.player.getXRot());

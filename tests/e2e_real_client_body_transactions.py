@@ -29,6 +29,7 @@ TASKS = {
     "farming": "harvest ripe wheat through Baritone and confirm inventory",
     "controls": "cancel navigation and exploration; verify old controls stop",
     "interactions": "use food, place a block, open a gate, and operate a lever",
+    "consumption": "eat bread, confirm hunger/inventory, and cancel before eating completes",
     "vertical": "dig down, pillar up, return to surface; bounded refusals and cancel",
     "vertical_denied": "refuse vertical mutation without disposable-world permission",
     "vertical_tools": "Agent tool down/up/surface with chosen scaffold and cancel",
@@ -193,6 +194,36 @@ def main() -> int:
                 settled = body.ipc.state()
                 records[-1]["settled_state"] = settled
                 assert not settled["any_process_active"] and not settled["pathing"], settled
+        elif args.case == "consumption":
+            flat_fixture(224)
+            command(f"give {args.client_name} minecraft:bread 2")
+            command(f"effect give {args.client_name} minecraft:hunger 10 255 true")
+            deadline = time.monotonic() + 5
+            while body.get_state().food >= 18:
+                assert time.monotonic() < deadline, "fixture did not make player hungry"
+                time.sleep(0.1)
+            command(f"effect clear {args.client_name}")
+            food_before = body.get_state().food
+            tool("consume_item", {"item": "bread"})
+            check_server(f'execute if data entity {args.client_name} Inventory[{{id:"minecraft:bread",count:1}}]')
+            observed = command(f"data get entity {args.client_name} foodLevel")
+            records[-1]["server_food"] = observed
+            assert int(observed.rsplit(": ", 1)[-1]) > food_before, observed
+            tool("consume_item", {"item": "bread"})  # Already full; preserve remaining bread.
+            check_server(f'execute if data entity {args.client_name} Inventory[{{id:"minecraft:bread",count:1}}]')
+            command(f"effect give {args.client_name} minecraft:hunger 10 255 true")
+            deadline = time.monotonic() + 5
+            while body.get_state().food >= 18:
+                assert time.monotonic() < deadline, "fixture did not make player hungry"
+                time.sleep(0.1)
+            command(f"effect clear {args.client_name}")
+            data = action("useItem", {"mode": "continuous", "ticks": 80, "item": "bread"}, cancel=True)
+            assert data["status"] == "canceled", data
+            time.sleep(2)
+            check_server(f'execute if data entity {args.client_name} Inventory[{{id:"minecraft:bread",count:1}}]')
+            settled = body.ipc.state()
+            records[-1]["settled_state"] = settled
+            assert not settled["using_item"] and not settled["use_key_down"], settled
         elif args.case == "interactions":
             flat_fixture(224)
             command(f"give {args.client_name} minecraft:cobblestone 4")

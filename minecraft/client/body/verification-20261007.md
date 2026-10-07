@@ -221,3 +221,20 @@ collection run. Elytra destination flight is still unverified.
 Use [TESTING.md](../../../TESTING.md) for the focused commands and observation
 procedure. These current failures are concrete follow-up work; the test
 reorganization does not fix the eating action or the model provider.
+
+## Native food use fixed
+
+`useItem` previously returned after a single native click, ignoring the
+continuous-use tick duration. It now travels through the existing asynchronous
+client action lifecycle and holds the use key until consumption or the requested
+duration. Cancellation, timeout and completion release native use and the key.
+
+The `consumption` task passed on the same tuple in 11.296 s: two bread became
+one, the independent server `foodLevel` read was 20, a full player kept the
+remaining bread, and cancellation stopped eating before consumption. After a
+further two seconds the server still had one bread and client use/key flags
+were both false. Raw report: `logs/food-flight-20261007/consumption-retry.json`.
+The first new task run ate successfully but its second hunger fixture failed
+to drain the saturation restored by bread; the stronger hunger fixture corrected
+that experiment error. Body mapping regression passed 62 tests; existing use
+transaction regression passed 28 tests. Client Java compiled and loaded live.

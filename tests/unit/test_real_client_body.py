@@ -275,19 +275,24 @@ def test_real_client_body_interrupts_active_process() -> None:
 
 @pytest.mark.parametrize(
     "action_name",
-    ("engageEntity", "rangedAttack", "craftItem", "containerTransfer", "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp"),
+    ("engageEntity", "rangedAttack", "craftItem", "containerTransfer", "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp", "useItem"),
 )
 def test_real_client_body_routes_structured_actions_to_typed_client_wire(
     action_name: str,
 ) -> None:
     ipc = FakeClientIpc()
     body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
-    accepted = body.execute(Action(f"structured-{action_name}", action_name, {"timeout_ticks": 20}))
+    params = {"timeout_ticks": 20}
+    if action_name == "useItem":
+        params.update(mode="continuous", ticks=80)
+    accepted = body.execute(Action(f"structured-{action_name}", action_name, params))
     terminal = body.await_action_terminal(f"structured-{action_name}", timeout_s=1.0)
 
     assert accepted.ok and accepted.accepted
     assert terminal.data["success"] is True
     assert ipc.actions[0][0] == action_name
+    if action_name == "useItem":
+        assert ipc.actions[0][1]["mode"] == "continuous" and ipc.actions[0][1]["ticks"] == 80
 
 
 def test_real_client_body_adapts_exact_collect_block_without_fallback() -> None:
@@ -346,7 +351,7 @@ def test_real_client_body_maps_extended_baritone_controls(
 
 @pytest.mark.parametrize(
     "action_name",
-    ("jump", "stop", "selectSlot", "lookAt", "useItem", "attackEntity", "dropItem", "moveItem", "mineBlock", "placeBlock", "igniteBlock", "sowCrop"),
+    ("jump", "stop", "selectSlot", "lookAt", "attackEntity", "dropItem", "moveItem", "mineBlock", "placeBlock", "igniteBlock", "sowCrop"),
 )
 def test_real_client_body_routes_native_body_actions_to_client_primitive(
     action_name: str,
