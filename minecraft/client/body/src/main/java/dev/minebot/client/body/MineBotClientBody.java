@@ -17,6 +17,7 @@ import baritone.api.utils.BlockOptionalMeta;
 import baritone.api.utils.BlockOptionalMetaLookup;
 import baritone.api.utils.BetterBlockPos;
 import baritone.api.utils.Rotation;
+import baritone.api.utils.RotationUtils;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -459,8 +460,9 @@ public final class MineBotClientBody implements ClientModInitializer {
             candidate.target = parts[1];
         } else if (parts.length == 3 && parts[0].equals("explore")) {
             candidate.anchor = new BlockPos(Integer.parseInt(parts[1]), 0, Integer.parseInt(parts[2]));
-        } else if (parts.length == 2 && (parts[0].equals("follow") || parts[0].equals("pickup"))) {
+        } else if ((parts.length == 2 || (parts.length == 3 && parts[0].equals("follow"))) && (parts[0].equals("follow") || parts[0].equals("pickup"))) {
             candidate.target = parts[1];
+            if (parts.length == 3) candidate.range = Integer.parseInt(parts[2]);
             if (parts[0].equals("pickup")) candidate.item = parts[1];
         } else if (parts.length == 5 && parts[0].equals("farm")) {
             candidate.range = Integer.parseInt(parts[1]);
@@ -491,9 +493,14 @@ public final class MineBotClientBody implements ClientModInitializer {
                 case "mine" -> baritone.getMineProcess().mineByName(candidate.mineQuantity, candidate.targets);
                 case "get" -> baritone.getGetToBlockProcess().getToBlock(new BlockOptionalMeta(candidate.target));
                 case "explore" -> baritone.getExploreProcess().explore(candidate.anchor.getX(), candidate.anchor.getZ());
-                case "follow" -> baritone.getFollowProcess().follow(entity ->
-                    entity.getName().getString().equals(candidate.target)
-                        || BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath().equals(candidate.target));
+                case "follow" -> {
+                    candidate.previousFollowRadius = BaritoneAPI.getSettings().followRadius.value;
+                    if (parts.length == 3) BaritoneAPI.getSettings().followRadius.value = Math.max(0, candidate.range);
+                    baritone.getFollowProcess().follow(entity ->
+                        entity.getUUID().toString().equals(candidate.target)
+                            || entity.getName().getString().equals(candidate.target)
+                            || BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath().equals(candidate.target));
+                }
                 case "pickup" -> baritone.getFollowProcess().pickup(stack -> BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath().equals(candidate.target));
                 case "farm" -> baritone.getFarmProcess().farm(candidate.range, candidate.anchor);
                 case "build" -> baritone.getBuilderProcess().build("minebot-owned-fixture", new FillSchematic(candidate.sx, candidate.sy, candidate.sz, new BlockOptionalMeta(candidate.target)), candidate.anchor);
@@ -619,6 +626,9 @@ public final class MineBotClientBody implements ClientModInitializer {
             BlockPos pos = new BlockPos(params.get("x").getAsInt(), params.get("y").getAsInt(), params.get("z").getAsInt());
             JsonObject fact = blockFact(client.level.getBlockState(pos), pos);
             for (var entry : fact.entrySet()) data.add(entry.getKey(), entry.getValue());
+            double reach = params.has("interaction_radius") ? params.get("interaction_radius").getAsDouble() : 4.5;
+            if (!Double.isFinite(reach) || reach <= 0) throw new IllegalArgumentException("invalid_interaction_radius");
+            data.addProperty("interaction_ready", RotationUtils.reachable(baritone.getPlayerContext(), pos, Math.min(reach, 4.5)).isPresent());
         } else if (scope.equals("blockCells")) {
             JsonArray cells = new JsonArray();
             JsonArray raw = params.has("cells") && params.get("cells").isJsonArray() ? params.getAsJsonArray("cells") : new JsonArray();
@@ -2025,6 +2035,9 @@ public final class MineBotClientBody implements ClientModInitializer {
             status = "completed";
             reason = "damage_observed";
         }
+        if (current.previousFollowRadius != null) {
+            BaritoneAPI.getSettings().followRadius.value = current.previousFollowRadius;
+        }
         JsonObject response = state(client);
         response.addProperty("flight_observed", current.seenFlying);
         response.addProperty("type", "terminal");
@@ -2375,6 +2388,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         int verticalSettledTicks;
         int verticalIdleTicks;
         List<net.minecraft.world.item.Item> previousThrowawayItems;
+        Integer previousFollowRadius;
         String stopStatus;
         String stopReason;
         String lastPathEvent = "";

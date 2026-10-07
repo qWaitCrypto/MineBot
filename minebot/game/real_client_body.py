@@ -661,6 +661,11 @@ def _objective_for(action: Action) -> str | None:
         return f"near:{target[0]}:{target[1]}:{target[2]}:{max(1, math.ceil(float(params.get('arrival_radius', 1))))}"
     if name in {"mineResource", "baritoneMine"}:
         return _mine_objective(params)
+    if name in {"mineBlock", "collectBlock"}:
+        target = _position(params.get("target"))
+        if target is None:
+            return None
+        return f"clear:{target[0]}:{target[1]}:{target[2]}:{target[0]}:{target[1]}:{target[2]}"
     if name in {"getToBlock", "baritoneGetToBlock"}:
         return _item_objective("get", params.get("block") or params.get("target"))
     if name in {"explore", "baritoneExplore"}:
@@ -668,7 +673,10 @@ def _objective_for(action: Action) -> str | None:
         return None if anchor is None else f"explore:{anchor[0]}:{anchor[2]}"
     if name in {"followEntity", "baritoneFollow"}:
         target = params.get("target") or params.get("target_name") or params.get("target_type")
-        return None if not isinstance(target, str) or not target.strip() else f"follow:{target.strip()}"
+        if not isinstance(target, str) or not target.strip():
+            return None
+        radius = max(0, math.floor(float(params.get("keep_radius", 3)) - 1))
+        return f"follow:{target.strip()}:{radius}"
     if name in {"pickupItems", "baritonePickup"}:
         return _item_objective("pickup", params.get("item") or params.get("target"))
     if name in {"farmArea", "baritoneFarm"}:
@@ -792,7 +800,7 @@ def _control_for(action: Action) -> tuple[str, dict[str, object]] | None:
         return ("builder_selection", {"operation": operation, "direction": direction, "amount": amount})
     if name in {
         "jump", "stop", "selectItem", "selectSlot", "lookAt", "attackEntity",
-        "dropItem", "moveItem", "mineBlock", "collectBlock", "placeBlock",
+        "dropItem", "moveItem", "placeBlock",
         "igniteBlock", "sowCrop",
     }:
         return ("primitive", {"action_name": name, "params": params})

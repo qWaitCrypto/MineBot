@@ -295,14 +295,17 @@ def test_real_client_body_routes_structured_actions_to_typed_client_wire(
         assert ipc.actions[0][1]["mode"] == "continuous" and ipc.actions[0][1]["ticks"] == 80
 
 
-def test_real_client_body_adapts_exact_collect_block_without_fallback() -> None:
-    body = RealClientBody("CapProbe2", FakeClientIpc())  # type: ignore[arg-type]
+@pytest.mark.parametrize("name", ("mineBlock", "collectBlock"))
+def test_real_client_body_adapts_exact_collect_block_without_fallback(name) -> None:
+    ipc = FakeClientIpc()
+    body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]
 
-    result = body.execute(Action("a3", "collectBlock", {"target": [1, 2, 3]}))
+    result = body.execute(Action("a3", name, {"target": [1, 2, 3]}))
     terminal = body.await_action_terminal("a3", timeout_s=1.0)
 
     assert result.ok and result.accepted
     assert terminal.name == "mineDone"
+    assert ipc.commands[0][0] == "clear:1:2:3:1:2:3"
 
 
 def test_real_client_body_maps_baritone_controls_through_the_same_body_boundary() -> None:
@@ -351,7 +354,7 @@ def test_real_client_body_maps_extended_baritone_controls(
 
 @pytest.mark.parametrize(
     "action_name",
-    ("jump", "stop", "selectSlot", "lookAt", "attackEntity", "dropItem", "moveItem", "mineBlock", "placeBlock", "igniteBlock", "sowCrop"),
+    ("jump", "stop", "selectSlot", "lookAt", "attackEntity", "dropItem", "moveItem", "placeBlock", "igniteBlock", "sowCrop"),
 )
 def test_real_client_body_routes_native_body_actions_to_client_primitive(
     action_name: str,
@@ -363,8 +366,6 @@ def test_real_client_body_routes_native_body_actions_to_client_primitive(
         params["target"] = [5.0, 70.0, 9.0]
     elif action_name == "selectSlot":
         params["slot"] = 0
-    elif action_name == "mineBlock":
-        params["target"] = [4, 70, 9]
     elif action_name == "placeBlock":
         params["target"] = [4, 70, 9]
     elif action_name in {"igniteBlock", "sowCrop"}:
@@ -400,7 +401,7 @@ def test_real_client_primitive_refusal_is_distinct_from_transport_failure(error,
         ("mineResource", {"block": "oak_log"}, "mine:oak_log"),
         ("getToBlock", {"block": "crafting_table"}, "get:crafting_table"),
         ("explore", {"anchor": [8, 70, 7]}, "explore:8:7"),
-        ("followEntity", {"target": "Sheep"}, "follow:Sheep"),
+        ("followEntity", {"target": "Sheep", "keep_radius": 1.25}, "follow:Sheep:0"),
         ("pickupItems", {"item": "oak_log"}, "pickup:oak_log"),
         ("farmArea", {"anchor": [8, 70, 7], "range": 12}, "farm:12:8:70:7"),
         (

@@ -641,9 +641,10 @@ def build_phase1_registry(
     collect_objective_body = catalog.objective_body("collect_block_domain", body)
     dig_down_objective_body = catalog.objective_body("dig_down", body)
     dig_up_objective_body = catalog.objective_body("dig_up", body)
-    designated_collector = (
-        lambda pos, expected_block_id, expected_item_ids, excavation_budget, timeout_s:
-            _java_break_collect(
+    designated_collector = None
+    if collect_objective_body is not None:
+        def designated_collector(pos, expected_block_id, expected_item_ids, excavation_budget, timeout_s):
+            return _java_break_collect(
                 collect_objective_body,
                 pos,
                 expected_block_id=expected_block_id,
@@ -651,9 +652,6 @@ def build_phase1_registry(
                 excavation_budget=excavation_budget,
                 timeout_s=timeout_s,
             )
-        if collect_objective_body is not None
-        else None
-    )
     def bounded_resource_descent(
         target_y: int,
         timeout_s: float,
