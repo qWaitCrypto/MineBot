@@ -863,6 +863,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         current.ticks++;
+        if (current.kind.equals("elytra") && client.player.isFallFlying()) current.seenFlying = true;
         if (current.structured) {
             current.seenActive = true;
             if (current.stopStatus == null) {
@@ -882,9 +883,16 @@ public final class MineBotClientBody implements ClientModInitializer {
             } else if (current.elapsed() > current.timeout) {
                 requestStop("timeout", "deadline_exceeded");
             } else if (current.ticks > 20 && !processActive() && !baritone.getPathingBehavior().isPathing()) {
-                boolean finite = current.seenActive && (current.kind.equals("build") || current.kind.equals("clear")
-                    || current.kind.equals("get") || current.kind.equals("farm") || current.kind.equals("elytra"));
-                requestStop(finite ? "completed" : "failed", finite ? "process_finished_verify_world" : "baritone_stopped_without_result");
+                if (current.kind.equals("elytra")) {
+                    boolean arrived = current.seenFlying && client.player.onGround()
+                        && client.player.position().distanceToSqr(Vec3.atBottomCenterOf(current.anchor)) <= 64;
+                    requestStop(arrived ? "completed" : "failed", arrived ? "elytra_destination_reached"
+                        : current.seenFlying ? "elytra_stopped_outside_destination" : "elytra_stopped_without_flight");
+                } else {
+                    boolean finite = current.seenActive && (current.kind.equals("build") || current.kind.equals("clear")
+                        || current.kind.equals("get") || current.kind.equals("farm"));
+                    requestStop(finite ? "completed" : "failed", finite ? "process_finished_verify_world" : "baritone_stopped_without_result");
+                }
             }
         }
         if (current.ticks % 20 == 0) {
@@ -2018,6 +2026,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             reason = "damage_observed";
         }
         JsonObject response = state(client);
+        response.addProperty("flight_observed", current.seenFlying);
         response.addProperty("type", "terminal");
         response.addProperty("action_id", current.id);
         response.addProperty("status", status);
@@ -2316,6 +2325,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         int sy;
         int sz;
         boolean seenActive;
+        boolean seenFlying;
         String target;
         String item;
         String[] targets = new String[0];

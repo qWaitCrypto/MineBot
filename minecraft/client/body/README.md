@@ -28,6 +28,13 @@ objectives, plus typed combat, crafting, container/furnace, handoff and
 vertical-recovery actions. Typed client controls and world reads use the same
 correlated action id, progress/terminal result, and cancellation path.
 
+The real `consumption` and `flight` cases are described in
+[TESTING.md](../../../TESTING.md). Food use holds native input through
+consumption. Elytra completion requires observed flight and a grounded landing
+within eight blocks of the destination. The verified flight fixture uses a
+drop start with supplied equipment; measured results are in the
+[verification record](verification-20261007.md).
+
 The Agent session keeps Java as its default. To select this backend explicitly,
 set `MINEBOT_BODY_PROVIDER=real_client`, `MINEBOT_REAL_CLIENT_HOST` (default
 `127.0.0.1`), and `MINEBOT_REAL_CLIENT_PORT` (default `8768`) before starting

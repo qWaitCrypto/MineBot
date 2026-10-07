@@ -53,6 +53,7 @@ python -m tests.e2e_real_client_body_transactions \
 | `farming` | Harvest ripe wheat into inventory |
 | `interactions` | Eat, place a block, open a gate, operate a lever |
 | `consumption` | Eat bread with server hunger/inventory checks; full-player and cancellation behavior |
+| `flight` | Drop-start with Elytra, fly 128 blocks and land within eight blocks of the goal; server flight/position checks |
 | `menus` | Craft sticks/pickaxe/cake, move chest items, smelt and reclaim fuel, preserve inventory slots |
 | `combat_tools` | Melee and bow/crossbow against the named target; leave a decoy intact |
 | `vertical_tools` | Dig down/up, return to surface, enforce bounds, cancel |
@@ -61,8 +62,8 @@ python -m tests.e2e_real_client_body_transactions \
 The lower-level `vertical`, `handoff`, and `ranged` cases remain useful when
 changing those actions. `vertical_denied` needs a client launched without
 disposable-world permission. Handoff needs a second client named `Receiver`
-with IPC at `8769`. Elytra still needs a successful destination flight
-experiment; loading or starting/canceling its process does not prove flight.
+with IPC at `8769`. The flight fixture supplies Elytra and rockets and starts
+the player in a fall; Body/Baritone owns all subsequent flight and landing.
 
 Each run returns a nonzero exit on failure and writes a timestamped JSON under
 `logs/` (or the explicit `--output` path): goal, fixture conditions, tuple,

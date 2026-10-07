@@ -30,6 +30,7 @@ TASKS = {
     "controls": "cancel navigation and exploration; verify old controls stop",
     "interactions": "use food, place a block, open a gate, and operate a lever",
     "consumption": "eat bread, confirm hunger/inventory, and cancel before eating completes",
+    "flight": "fly 128 blocks with Elytra, land at the destination, and verify server position",
     "vertical": "dig down, pillar up, return to surface; bounded refusals and cancel",
     "vertical_denied": "refuse vertical mutation without disposable-world permission",
     "vertical_tools": "Agent tool down/up/surface with chosen scaffold and cancel",
@@ -194,6 +195,57 @@ def main() -> int:
                 settled = body.ipc.state()
                 records[-1]["settled_state"] = settled
                 assert not settled["any_process_active"] and not settled["pathing"], settled
+        elif args.case == "flight":
+            # A drop-start fixture, with supplied equipment. After the action
+            # begins, only Body/Baritone controls flight and landing.
+            command("forceload add 304 0 480 64")
+            command("fill 424 160 8 472 160 56 minecraft:stone")
+            command("fill 424 161 8 472 173 56 minecraft:air")
+            command(f"gamemode survival {args.client_name}")
+            command(f"effect clear {args.client_name}")
+            command(f"clear {args.client_name}")
+            command(f"item replace entity {args.client_name} armor.chest with minecraft:elytra")
+            command(f"give {args.client_name} minecraft:firework_rocket 128")
+            body.ipc.control("settings", allow_break=False, allow_place=False)
+            deadline = time.monotonic() + 5
+            while body.ipc.state().get("chest_item") != "elytra":
+                assert time.monotonic() < deadline, "client did not observe Elytra equipment"
+                time.sleep(0.1)
+            report["conditions"] = "disposable overworld; drop start at (320.5,220,32.5); supplied Elytra/128 rockets; no intervention after request"
+            request = Action.create("elytraTravel", {"target": [448, 161, 32], "timeout_s": 120})
+            record = {"action": request.name, "params": request.params, "action_id": request.id, "flight_samples": []}
+            records.append(record)
+            command(f"tp {args.client_name} 320.5 220 32.5")
+            deadline = time.monotonic() + 3
+            while True:
+                launch = body.ipc.state()
+                if abs(launch["position"][0] - 320.5) < 0.1 and not launch["on_ground"]:
+                    record["launch_state"] = launch
+                    break
+                assert time.monotonic() < deadline, "client did not observe drop-start fixture"
+                time.sleep(0.02)
+            accepted = body.execute(request)
+            assert accepted.accepted, accepted
+            terminal = []
+            def await_flight() -> None:
+                try:
+                    terminal.append(dict(body.await_action_terminal(request.id, timeout_s=130).data))
+                except Exception as error:
+                    terminal.append({"success": False, "reason": str(error)})
+            worker = threading.Thread(target=await_flight)
+            worker.start()
+            while worker.is_alive():
+                state = body.ipc.state()
+                sample = {"position": state.get("position"), "fall_flying": state.get("fall_flying"),
+                          "server_position": command(f"data get entity {args.client_name} Pos"),
+                          "server_flying": command(f"data get entity {args.client_name} FallFlying")}
+                record["flight_samples"].append(sample)
+                time.sleep(0.25)
+            record["terminal"] = terminal[0]
+            assert terminal[0]["success"], terminal[0]
+            assert any(s["server_flying"].endswith(": 1b") for s in record["flight_samples"]), "server never observed flight"
+            check_server(f"execute if entity @a[name={args.client_name},x=448.5,y=161,z=32.5,distance=..8]")
+            assert body.ipc.state()["on_ground"], "client did not land"
         elif args.case == "consumption":
             flat_fixture(224)
             command(f"give {args.client_name} minecraft:bread 2")
@@ -641,6 +693,17 @@ def main() -> int:
                 body.interrupt("experiment ended")
         except Exception as error:
             report["final_state_error"] = f"{type(error).__name__}: {error}"
+        if args.case == "flight":
+            try:
+                settings = report.get("initial_state", {})
+                body.ipc.control("settings", allow_break=settings.get("allow_break", True),
+                                 allow_place=settings.get("allow_place", True))
+            except Exception as error:
+                report["client_settings_cleanup_error"] = str(error)
+            try:
+                rcon.command("forceload remove 304 0 480 64")
+            except Exception as error:
+                report["fixture_cleanup_error"] = str(error)
         body.close()
         rcon.close()
         path = args.output or Path("logs") / f"real-client-{args.case}-{time.time_ns()}.json"

@@ -238,3 +238,35 @@ The first new task run ate successfully but its second hunger fixture failed
 to drain the saturation restored by bread; the stronger hunger fixture corrected
 that experiment error. Body mapping regression passed 62 tests; existing use
 transaction regression passed 28 tests. Client Java compiled and loaded live.
+
+## Elytra destination flight verified
+
+The selected tuple now passes a real survival Overworld flight through abstract
+`Body.execute(Action("elytraTravel", ...))`. The fixture supplies equipped
+Elytra and 128 rockets, loads the route chunks and a landing platform, and drops
+the player at `(320.5,220,32.5)`. After submission there is no teleport, manual
+steering or additional fixture intervention. Baritone handles gliding, boost,
+approach and landing; block breaking and placing are disabled during the task.
+
+The client action took **9.128 s** and landed at
+`(448.48551581989597,161,32.51589914382871)`, about **0.022 blocks** from the
+requested destination center `(448.5,161,32.5)` after roughly **128 blocks** of
+horizontal travel. Independent RCON samples observed `FallFlying:1b` 32 times;
+the final server distance check passed and the player was grounded. One rocket
+was consumed (128 → 127). Body returned `elytra_destination_reached` with
+`flight_observed=true`, no active process and no pathing. The complete fixture
+and result took 9.861 s. Raw report: `logs/food-flight-20261007/flight.json`.
+
+An Elytra process ending now succeeds only after flight was observed and the
+player landed within eight blocks of the requested position. Ending without
+flight or away from the destination returns a concrete failure. This removes
+the earlier generic `process_finished_verify_world` success for Elytra.
+
+This is the drop-start destination flight proof on the fixed tuple. It does
+not test ground-launch site selection or a long natural-terrain journey. The
+upstream [Elytra process source](https://github.com/cabaletta/baritone/blob/v1.18.0/src/main/java/baritone/process/ElytraProcess.java)
+was inspected to choose its supported falling-start behavior. Reproduce with:
+
+```bash
+python -m tests.e2e_real_client_body_transactions --disposable-local-server --case flight
+```
