@@ -43,25 +43,25 @@ _CAPABILITIES: tuple[RealClientCapability, ...] = (
     RealClientCapability("follow_entity", "follow", "verified", "Named/type target approach and cancellation"),
     RealClientCapability("pickup_items", "follow_pickup", "verified", "Dropped-item pickup with inventory delta"),
     RealClientCapability("farm_area", "farm", "verified", "Mature crop harvest in the validated fixture"),
-    RealClientCapability("build_structure", "builder", "verified", "Fill schematic with pause/resume"),
+    RealClientCapability("build_structure", "builder", "verified", "72-block multilayer fill with every block checked; file builder and pause/resume tested separately"),
     RealClientCapability("clear_area", "builder_clear", "verified", "Clear-area world verification"),
-    RealClientCapability("elytra_travel", "elytra", "verified", "Drop-start flight over 128 blocks and landing; server flight/position checks passed"),
+    RealClientCapability("elytra_travel", "elytra", "verified", "250-block drop-start flight and raised-platform landing; server position checked"),
     RealClientCapability("baritone_settings", "settings", "adapter", "Bounded settings mutation through the client seam"),
     RealClientCapability("explore_filter", "explore_filter", "adapter", "JSON filter application through the client seam"),
-    RealClientCapability("builder_controls", "builder", "adapter", "Pause, resume, and open schematic/litematic controls"),
-    RealClientCapability("builder_file", "builder", "adapter", "Client-local schematic or litematic file entry point"),
+    RealClientCapability("builder_controls", "builder", "adapter", "Pause/resume applied; open-editor bridges report schematica_not_installed/litematica_not_installed for this tuple"),
+    RealClientCapability("builder_file", "builder", "verified", "Sponge v2 file: 80-block doorway house; all 100 solid/air cells checked. Other file formats not exercised"),
     RealClientCapability("elytra_controls", "elytra", "adapter", "Repack and reset controls; drop-start flight verified separately"),
-    RealClientCapability("get_to_block_controls", "get_to_block", "adapter", "Blacklist-closest policy toggle"),
+    RealClientCapability("get_to_block_controls", "get_to_block", "verified", "Active get process blacklisted its nearest chest and reached the second chest; inactive use is rejected"),
     RealClientCapability("builder_inspection", "builder", "adapter", "Placeable-block and layer inspection"),
     RealClientCapability("builder_selections", "selection", "adapter", "Builder selection add, clear, and geometry transforms"),
     RealClientCapability("body_primitives", "minecraft_client", "adapter", "Native jump, look, use, combat attempt, inventory, block and crop actions"),
     RealClientCapability("world_reads", "minecraft_client", "adapter", "Authoritative client-world block and entity snapshots"),
-    RealClientCapability("engage_entity", "client_combat", "verified", "Agent engage_entity kills the named stationary zombie; closer decoy untouched"),
+    RealClientCapability("engage_entity", "client_combat", "verified", "Named moving zombie at 20 blocks killed; closer decoy remained undamaged"),
     RealClientCapability("ranged_attack", "client_combat", "verified", "Agent ranged_attack: backpack bow/crossbow hits, closer decoy untouched, concrete missing ammunition; directed cancel proof"),
-    RealClientCapability("craft_item", "client_inventory_menu", "verified", "Sticks, table stone pickaxe and cake/bucket remainder fixtures; other recipes need fixtures"),
-    RealClientCapability("container_transfer", "client_menu", "verified", "Chest transfers in both directions and capacity refusal; other containers need fixtures"),
+    RealClientCapability("craft_item", "client_inventory_menu", "verified", "64 sticks, 8 tables, 2 cakes with 6 bucket remainders; native recipe stack limits and batches verified"),
+    RealClientCapability("container_transfer", "client_menu", "verified", "96 diamonds out of a chest, 80 back across slots; capacity refusal verified separately"),
     RealClientCapability("furnace_transfer", "client_furnace_menu", "verified", "Raw iron input/fuel/cooking/output/reclaim lifecycle and idle fuel clear fixtures"),
-    RealClientCapability("handoff_item", "client_inventory", "verified", "Agent give_player: server recipient/count receipt and full-inventory failure with two real clients"),
+    RealClientCapability("handoff_item", "client_inventory", "verified", "80-item cross-stack handoff: server receiver 80, sender 16 from 96; two real clients"),
     RealClientCapability("vertical_recovery", "custom_goal", "verified", "Agent down/up/surface tools: grounded shaft results and chosen scaffold; directed cancel proof; mutations require disposable-world opt-in"),
 )
 CAPABILITY_REGISTRY: Mapping[str, RealClientCapability] = {item.name: item for item in _CAPABILITIES}
@@ -186,7 +186,7 @@ class RealClientBody:
                         "builder_active", "builder_paused", "elytra_active", "elytra_loaded",
                         "elytra_safe_to_cancel", "elytra_destination", "elytra_path_size",
                         "baritone_goal", "following", "allow_break", "allow_place",
-                        "explore_for_blocks", "replant_crops", "farm_max_scan_size",
+                        "explore_for_blocks", "replant_crops", "farm_max_scan_size", "build_in_layers",
                         "get_to_block_blacklist", "builder_placeable", "builder_min_layer",
                         "builder_max_layer", "builder_selections", "path_estimated_ticks",
                     )
@@ -270,9 +270,10 @@ class RealClientBody:
         if objective is None and control is None and wire_action is None:
             return _gap_result(action, self.bot_name, "unsupported_action")
         with self._lock:
-            if self._active is not None and (
-                control is None or control[0] not in {"builder_pause", "builder_resume"}
-            ):
+            allowed_controls = {"builder_pause", "builder_resume"}
+            if self._active is not None and self._active.action.name in {"getToBlock", "baritoneGetToBlock"}:
+                allowed_controls.add("get_to_block_blacklist")
+            if self._active is not None and (control is None or control[0] not in allowed_controls):
                 return _gap_result(action, self.bot_name, "body_busy")
             pending = _PendingAction(action=action, done=threading.Event())
             if control is None:
@@ -411,6 +412,19 @@ class RealClientBody:
         with self._lock:
             pending = self._active
         if pending is None:
+            try:
+                state = self._state_payload()
+                if state.get("any_process_active"):
+                    stopped = self.ipc.control("primitive", action_name="stop", params={})
+                    self._merge_state_payload(stopped)
+                    return Result(
+                        id=None, bot=self.bot_name, type="result", ok=True, accepted=True,
+                        complete=not bool(stopped.get("any_process_active")),
+                        data={"native_process_stop": True, "reason": reason or "interrupt_requested"},
+                    )
+            except RealClientIpcError as error:
+                return Result(id=None, bot=self.bot_name, type="result", ok=False, accepted=False,
+                              complete=True, error=f"cancel_transport:{type(error).__name__}")
             return Result(
                 id=None,
                 bot=self.bot_name,
@@ -591,9 +605,10 @@ def _body_state(bot_name: str, payload: Mapping[str, Any], *, pending: bool) -> 
         oxygen=_optional_int(payload.get("oxygen")),
         inventory_raw=raw_inventory,
         inventory_hash=hashlib.sha256(raw_inventory.encode()).hexdigest(),
-        effects=None,
-        time=0,
-        weather=None,
+        effects=[dict(effect) for effect in payload.get("effects", []) if isinstance(effect, Mapping)],
+        time=int(payload.get("time") or 0),
+        weather=payload.get("weather"),
+        sleeping=payload.get("sleeping"),
         dimension=str(payload.get("dimension") or "minecraft:overworld"),
         complete=True,
         missing=False,
@@ -654,8 +669,9 @@ def _objective_for(action: Action) -> str | None:
         target = params.get("target") or params.get("target_name") or params.get("target_type")
         if not isinstance(target, str) or not target.strip():
             return None
-        radius = max(0, math.floor(float(params.get("keep_radius", 3)) - 1))
-        return f"follow:{target.strip()}:{radius}"
+        keep_distance = max(0.0, float(params.get("keep_radius", 3)))
+        radius = max(0, math.floor(keep_distance - 1))
+        return f"follow:{target.strip()}:{radius}:{keep_distance}"
     if name in {"pickupItems", "baritonePickup"}:
         return _item_objective("pickup", params.get("item") or params.get("target"))
     if name in {"farmArea", "baritoneFarm"}:
@@ -718,7 +734,7 @@ def _control_for(action: Action) -> tuple[str, dict[str, object]] | None:
             values = {
                 key: value
                 for key, value in params.items()
-                if key in {"allow_break", "allow_place", "explore_for_blocks", "replant_crops", "farm_max_scan_size"}
+                if key in {"allow_break", "allow_place", "explore_for_blocks", "replant_crops", "farm_max_scan_size", "build_in_layers"}
             }
         return ("settings", dict(values)) if values else None
     if name in {"builderPause", "baritoneBuilderPause"}:

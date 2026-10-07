@@ -152,6 +152,7 @@ class PickupTransactions:
             if time.monotonic() - started >= config.max_wall_s:
                 return _pickup_outcome(after, deltas, collected_total, assist, "pickup_budget_exhausted")
             assist["scan_rounds"] = scan_round + 1
+            previous_total = collected_total
             scanned, scan_metrics = self._scan_candidates(config, expected_items)
             assist.setdefault("scans", []).append(scan_metrics)
             # The entity's cell is not necessarily a legal feet cell: item
@@ -227,6 +228,9 @@ class PickupTransactions:
                     return {"failed": after, "assist": assist}
                 if collected_total >= minimum_count:
                     return _pickup_outcome(after, deltas, collected_total, assist, "pickup_collected")
+                if collected_total > previous_total:
+                    blacklist.clear(); blacklist_positions.clear(); dynamic_fallback.clear()
+                    continue
                 if tracking.reason in {"preempted", "body_missing", "death", "respawned", "progress_yielded"}:
                     failure = ToolResult(
                         success=False,
@@ -303,6 +307,9 @@ class PickupTransactions:
                 return {"failed": after, "assist": assist}
             if collected_total >= minimum_count:
                 return _pickup_outcome(after, deltas, collected_total, assist, "pickup_collected")
+            if collected_total > previous_total:
+                blacklist.clear(); blacklist_positions.clear(); dynamic_fallback.clear()
+                continue
             blacklist.update(candidate.key for candidate in selected_candidates)
             blacklist_positions.update(
                 {candidate.key: candidate.pos for candidate in selected_candidates}

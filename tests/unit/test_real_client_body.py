@@ -405,7 +405,7 @@ def test_real_client_primitive_refusal_is_distinct_from_transport_failure(error,
         ("mineResource", {"block": "oak_log"}, "mine:oak_log"),
         ("getToBlock", {"block": "crafting_table"}, "get:crafting_table"),
         ("explore", {"anchor": [8, 70, 7]}, "explore:8:7"),
-        ("followEntity", {"target": "Sheep", "keep_radius": 1.25}, "follow:Sheep:0"),
+        ("followEntity", {"target": "Sheep", "keep_radius": 1.25}, "follow:Sheep:0:1.25"),
         ("pickupItems", {"item": "oak_log"}, "pickup:oak_log"),
         ("farmArea", {"anchor": [8, 70, 7], "range": 12}, "farm:12:8:70:7"),
         (
@@ -589,3 +589,26 @@ def test_real_client_vertical_tool_retains_liquid_refusal() -> None:
     registry = build_phase1_registry(body, Phase1RuntimeConfig(natural_region=REGION, body_provider="real_client"))
     result = registry.get("dig_down").callable({"target_y": 65})
     assert not result.success and result.reason == "vertical_liquid_hazard" and result.metrics["mutations"] == 0
+
+
+def test_state_preserves_clock_sleep_weather_and_effects():
+    ipc = FakeClientIpc()
+    snapshot = ipc.state() | {"time": 18000, "sleeping": True, "weather": "rain",
+                              "effects": [{"id": "minecraft:speed", "amplifier": 0, "duration": 200}]}
+    ipc.state = lambda: snapshot
+    body = RealClientBody("Bot", ipc)
+    state = body.get_state()
+    assert (state.time, state.sleeping, state.weather, state.effects) == (
+        18000, True, "rain", snapshot["effects"])
+    body.close()
+
+
+def test_interrupt_stops_native_process_without_pending_python_action():
+    ipc = FakeClientIpc()
+    snapshot = ipc.state() | {"any_process_active": True}
+    ipc.state = lambda: snapshot
+    body = RealClientBody("Bot", ipc)
+    result = body.interrupt("stop file build")
+    assert result.ok and result.data["native_process_stop"]
+    assert ipc.controls[-1] == ("primitive", {"action_name": "stop", "params": {}})
+    body.close()

@@ -80,6 +80,7 @@ class NearbyEntityTarget:
     pos: tuple[float, float, float]
     health: float | None
     distance: float
+    properties: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -377,6 +378,7 @@ def find_named_entity_target(
                 pos=pos,
                 health=float(item["health"]) if item.get("health") is not None else None,
                 distance=dist(state.pos, pos),
+                properties=dict(item.get("properties") or {}),
             )
         )
 
@@ -429,6 +431,7 @@ def find_entity_target(
                 pos=pos,
                 health=float(item["health"]) if item.get("health") is not None else None,
                 distance=dist(state.pos, pos),
+                properties=dict(item.get("properties") or {}),
             )
         )
 

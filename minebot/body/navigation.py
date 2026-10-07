@@ -1400,7 +1400,7 @@ class NavigationTransactions:
         maintenance_checks: int = 1,
         maintenance_interval_s: float = 0.0,
         danger_refresh: Callable[[], Position | tuple[float, float, float]] | None = None,
-        candidate_radii: tuple[int, ...] = (2, 4, 6, 8),
+        candidate_radii: tuple[int, ...] | None = None,
         max_candidates: int = 12,
         config: NavigationRunConfig | None = None,
     ) -> ToolResult:
@@ -1430,6 +1430,10 @@ class NavigationTransactions:
         danger_provider = danger_refresh or (lambda: static_danger)
         desired_distance = max(min_distance, target_distance or min_distance)
         required_distance = desired_distance + hazard_radius
+        if candidate_radii is None:
+            candidate_radii = (2, 4, 6, 8)
+            if required_distance > 8:
+                candidate_radii += (int(required_distance) + 2,)
         attempts: list[dict[str, object]] = []
         moved = False
         origin = _block_pos(self.body.get_state())

@@ -336,7 +336,7 @@ class UseTransactions:
         entity_name: str | None = None,
         search_radius: int = 24,
         min_distance: float = 0.0,
-        max_distance: float = 4.5,
+        max_distance: float = 3.0,
         vertical_tolerance: float = 1.5,
         watched_items: tuple[str, ...] | list[str] = (),
         required_watched_item_deltas: dict[str, int] | None = None,
@@ -370,7 +370,7 @@ class UseTransactions:
             self.navigator,
             target.pos,
             min_distance=min_distance,
-            max_distance=max_distance,
+            max_distance=min(3.0, max_distance),
             vertical_tolerance=vertical_tolerance,
             timeout_s=timeout_s,
             missing_reason="use_entity_navigation_missing",
@@ -416,6 +416,18 @@ class UseTransactions:
             look_timeout_s=look_timeout_s,
             timeout_s=timeout_s,
         )
+        if (result.reason == "use_unverified" and target.properties
+                and not required_watched_item_deltas and min_effect_delta <= 0 and min_position_delta <= 0):
+            after = refresh_entity_target(
+                self.body, target, radius=search_radius,
+                not_found_reason="use_entity_target_lost", wanted_types=tuple(entity_types), entity_name=entity_name,
+            )
+            if isinstance(after, NearbyEntityTarget) and after.properties != target.properties:
+                result = ToolResult(
+                    success=True, reason="entity_state_changed", can_retry=False,
+                    metrics={**result.metrics, "entity_properties_before": target.properties,
+                             "entity_properties_after": after.properties},
+                )
         return merge_context(
             result,
             {
@@ -531,7 +543,7 @@ class UseTransactions:
             self.body,
             self.navigator,
             pos,
-            interaction_radius=INTERACTION_RANGE,
+            interaction_radius=min(INTERACTION_RANGE, 3.5),
             timeout_s=approach_timeout_s,
             missing_reason="use_navigation_missing",
             failure_prefix="use_navigation_failed",
@@ -588,7 +600,7 @@ class UseTransactions:
             self.body,
             pos=pos,
             observe_pos=observed_pos,
-            look_target=look_target or _block_center_target(pos),
+            look_target=look_target or _block_use_look_target(self.body, pos),
             item=use_item,
             use_mode=use_mode,
             use_ticks=use_ticks,
@@ -688,7 +700,7 @@ class UseTransactions:
                     self.body,
                     pos=pos,
                     observe_pos=observed_pos,
-                    look_target=look_target or _block_center_target(pos),
+                    look_target=look_target or _block_use_look_target(self.body, pos),
                     item=use_item,
                     use_mode=use_mode,
                     use_ticks=use_ticks,
@@ -1667,6 +1679,14 @@ def _stop_body_controls(body: Body, *, timeout_s: float) -> ToolResult:
 
 def _block_params(pos: Position) -> dict[str, int]:
     return {"x": int(pos[0]), "y": int(pos[1]), "z": int(pos[2])}
+
+
+def _block_use_look_target(body: Body, pos: Position) -> tuple[float, float, float]:
+    # A ray aimed inside a floor block hits the nearer floor first. Aim at
+    # the exposed upper face when the player is above the target block.
+    if body.get_state().pos[1] >= pos[1] + 1:
+        return (pos[0] + 0.5, pos[1] + 1.0, pos[2] + 0.5)
+    return _block_center_target(pos)
 
 
 def _block_center_target(pos: Position) -> tuple[float, float, float]:

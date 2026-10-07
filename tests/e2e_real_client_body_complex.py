@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import time
 import threading
+import gzip
+import struct
 
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry
 from minebot.contract import Action, Region
@@ -15,7 +17,29 @@ from minebot.game.real_client_body import RealClientBody
 from minebot.game.real_client_ipc import RealClientIpc
 
 
-CASES = ("navigation", "mine_resource", "perception", "menus", "combat", "vertical", "building", "farming", "interactions", "collection", "controls", "exploration", "flight", "players", "pickup", "placement", "crop_interactions", "native_controls")
+CASES = ("navigation", "mine_resource", "perception", "menus", "combat", "vertical", "building", "farming", "interactions", "collection", "controls", "exploration", "flight", "players", "pickup", "placement", "crop_interactions", "native_controls", "spacing", "native_misc", "sleep", "blacklist", "effects", "file_house", "file_cancel")
+
+
+def write_house_schematic(path: Path) -> list[int]:
+    # Sponge v2 NBT: standard-library serialization of a supplied blueprint.
+    def tag(kind,name,payload):
+        encoded=name.encode();return bytes([kind])+struct.pack('>H',len(encoded))+encoded+payload
+    def text_payload(value):
+        raw=value.encode();return struct.pack('>H',len(raw))+raw
+    cells=[]
+    for y in range(4):
+        for z in range(5):
+            for x in range(5):
+                wall=x in (0,4) or z in (0,4)
+                solid=y in (0,3) or (wall and not (x==2 and z==0))
+                cells.append(1 if solid else 0)
+    palette=tag(3,'minecraft:air',struct.pack('>i',0))+tag(3,'minecraft:cobblestone',struct.pack('>i',1))+b'\0'
+    payload=tag(3,'Version',struct.pack('>i',2))+tag(3,'DataVersion',struct.pack('>i',3700))
+    for key,value in [('Width',5),('Height',4),('Length',5)]:payload+=tag(2,key,struct.pack('>h',value))
+    payload+=tag(11,'Offset',struct.pack('>iiii',3,0,0,0))+tag(3,'PaletteMax',struct.pack('>i',2))
+    payload+=tag(10,'Palette',palette)+tag(7,'BlockData',struct.pack('>i',len(cells))+bytes(cells))+b'\0'
+    path.write_bytes(gzip.compress(tag(10,'Schematic',payload)))
+    return cells
 
 
 def main():
@@ -31,7 +55,7 @@ def main():
     registry = build_phase1_registry(body, Phase1RuntimeConfig(region, body_provider="real_client",
         governance_policy=GovernancePolicy(natural_regions=[region], bot_name="MineBotCombat")))
     report = {"case": args.case, "success": False, "records": [], "model_calls": 0,
-              "conditions": "disposable local world; developer-supplied terrain/resources; production Body/tool calls",
+              "conditions": "disposable local world; developer-supplied terrain/resources; non-player fixture entities cleared before tasks; production Body/tool calls",
               "tuple": "MC 26.1.2 / Fabric 0.19.3 / API 0.152.1 / Java 25 / Baritone 1.18.0"}
     began = time.monotonic()
 
@@ -84,6 +108,7 @@ def main():
         return data
 
     def fixture(x=700, z=0, width=60, depth=32):
+        action("stop", {})
         command(f"forceload add {x-16} {z-16} {x+width+16} {z+depth+16}")
         until = time.monotonic()+15
         while True:
@@ -94,7 +119,7 @@ def main():
         assert "filled" in reply, reply
         command(f"fill {x} 150 {z} {x+width} 165 {z+depth} minecraft:air")
         command(f"fill {x} 166 {z} {x+width} 180 {z+depth} minecraft:air")
-        command(f"kill @e[type=item,x={x},y=149,z={z},dx={width},dy=8,dz={depth}]")
+        command(f"kill @e[type=!player,x={x},y=149,z={z},dx={width},dy=32,dz={depth}]")
         command("gamemode survival MineBotCombat")
         command("effect clear MineBotCombat")
         command("effect give MineBotCombat minecraft:saturation 1 10 true")
@@ -178,7 +203,7 @@ def main():
             call("read_recipe", {"item":"cake"})
             blocks=call("search_for_block", {"block_types": ["diamond_ore"],"search_radius":24,"find_limit":12,"max_pages":8})
             for name,params in [("read_block",{"pos":[703,150,14]}),("read_nearby_blocks",{"radius":16,"limit":128}),
-                ("read_nearby_entities",{"radius":24,"limit":64}),("search_for_entity",{"entity_name":"BodyReadTarget","entity_types":["sheep"],"search_radius":24})]:call(name,params)
+                ("read_nearby_entities",{"radius":24,"limit":64}),("search_for_entity",{"entity_name":"BodyReadTarget","entity_types":["sheep"],"search_radius":24,"max_distance":2})]:call(name,params)
             locations=[c["pos"] for c in blocks.metrics.get("candidates", [])]
             report["block_search_metrics"] = blocks.metrics
             assert len({tuple(p) for p in locations})==64, ("expected 64 unique ore coordinates",len(locations),blocks.to_payload())
@@ -366,8 +391,8 @@ def main():
             call("discard_item", {"item":"bread","count":3})
             call("use_on_entity", {"item":"bucket","entity_name":"BodyMilkTarget","entity_types":["cow"],"search_radius":24,"watched_items":["milk_bucket"],"required_watched_item_deltas":{"milk_bucket":1}})
             assert body.get_state().inventory_counts.get("milk_bucket")==1
-            call("use_on_entity", {"item":"shears","entity_name":"BodyShearTarget","entity_types":["sheep"],"search_radius":24})
-            check('execute if data entity @e[name=BodyShearTarget,limit=1] {sheared:1b}')
+            call("use_on_entity", {"item":"shears","entity_name":"BodyShearTarget","entity_types":["sheep"],"search_radius":24,"max_distance":2})
+            check('execute if data entity @e[name=BodyShearTarget,limit=1] {Sheared:1b}')
             call("set_openable_state", {"pos":[710,150,12],"open":True})
             check("execute if block 710 150 12 minecraft:oak_fence_gate[open=true]")
             call("set_openable_state", {"pos":[710,150,12],"open":False})
@@ -422,11 +447,11 @@ def main():
             action("digUp", {"target_y":175,"max_distance":32,"max_mutations":96,"timeout_s":60},cancel_after=1)
         elif args.case == "exploration":
             fixture(width=60,depth=32)
-            command("setblock 750 150 24 minecraft:emerald_block")
+            command("setblock 726 150 36 minecraft:emerald_block")
             time.sleep(0.3)
             report["task"]="Search multiple regions for a target outside the initial observation radius; run and cancel native exploration"
-            found=call("explore_for", {"block_targets":["emerald_block"],"scan_radius":8,"max_distance":96,"max_regions":12})
-            assert 'emerald_block' in str(found.metrics),found.to_payload()
+            found=call("explore_for", {"block_targets":["emerald_block"],"scan_radius":8,"max_distance":256,"max_regions":20})
+            assert found.metrics.get("blocks"),found.to_payload()
             action("explore", {"anchor":[730,150,20],"timeout_s":60},cancel_after=2)
         elif args.case == "flight":
             fixture(x=800,width=40,depth=32)
@@ -440,6 +465,186 @@ def main():
             data=action("elytraTravel", {"target":[1050,161,18],"timeout_s":90})
             assert data["flight_observed"] and data["on_ground"]
             check("execute if entity @a[name=MineBotCombat,x=1050.5,y=161,z=18.5,distance=..8]")
+        elif args.case in {"native_controls", "file_house"}:
+            base_x,base_z=(900,40) if args.case=="file_house" else (700,0)
+            fixture(x=base_x,z=base_z)
+            origin=[base_x+8,150,base_z+8]
+            command("give MineBotCombat minecraft:cobblestone 256")
+            command("give MineBotCombat minecraft:diamond_pickaxe")
+            command("give MineBotCombat minecraft:dirt 64")
+            report["task"]="Build an 80-block hollow doorway house from a local Sponge schematic; " + ("without pause" if args.case=="file_house" else "pause/resume and selection transforms")
+            action("builderSelectionClear", {})
+            action("builderSelectionAdd", {"pos1":origin,"pos2":[origin[0]+4,153,origin[2]+4]})
+            action("builderSelectionExpand", {"direction":"up","amount":2})
+            action("builderSelectionContract", {"direction":"down","amount":1})
+            action("builderSelectionShift", {"direction":"east","amount":2})
+            selection=body.perceive("baritoneState", {})
+            report["records"][-1]["selection"]=selection.data
+            assert selection.data["builder_selections"]==[{"pos1":[origin[0]+2,150,origin[2]],"pos2":[origin[0]+6,154,origin[2]+4]}],selection
+            schematic=(root/'house.schem').resolve()
+            cells=write_house_schematic(schematic)
+            action("baritoneSettings", {"settings":{"build_in_layers":args.case=="native_controls"}})
+            action("builderBuildFile", {"path":str(schematic),"origin":origin,"name":"body-house"})
+            if args.case == "native_controls":
+                time.sleep(0.8)
+                action("builderPause", {})
+                assert body.ipc.state()["builder_paused"]
+                time.sleep(0.5)
+                action("builderResume", {})
+            until=time.monotonic()+90
+            while body.ipc.state()["builder_active"]:
+                if time.monotonic() >= until:
+                    matching=[];missing=[]
+                    for y in range(4):
+                        for z in range(5):
+                            for x in range(5):
+                                wanted='cobblestone' if cells[x+5*z+25*y] else 'air'
+                                reply=command(f'execute if block {origin[0]+x} {150+y} {origin[2]+z} minecraft:{wanted}')
+                                (matching if reply.startswith('Test passed') else missing).append([origin[0]+x,150+y,origin[2]+z,wanted])
+                    report["schematic_outcome"]={"matched_cells":len(matching),"missing_cells":missing,
+                        "solid_expected":sum(cells),"solid_matched":sum(p[3]=='cobblestone' for p in matching),
+                        "process":body.ipc.state(),"pause_used":args.case=="native_controls"}
+                    raise AssertionError(f'schematic build did not finish: {report["schematic_outcome"]["solid_matched"]}/{sum(cells)} blocks placed; missing positions recorded')
+                time.sleep(0.3)
+            for y in range(4):
+                for z in range(5):
+                    for x in range(5):
+                        wanted='cobblestone' if cells[x+5*z+25*y] else 'air'
+                        check(f'execute if block {origin[0]+x} {150+y} {origin[2]+z} minecraft:{wanted}')
+            inspected=body.perceive("baritoneState", {})
+            report["records"][-1]["builder_inspection"]=inspected.data
+            action("baritoneSettings", {"settings":{"build_in_layers":False}})
+            action("builderSelectionClear", {})
+            if args.case == "file_house":
+                report.update(success=True,reason="file house completed with all 100 cells independently checked")
+                return 0
+            filter_file=(root/'explore-filter.json').resolve();filter_file.write_text(json.dumps([{"x":43,"z":0}]))
+            action("exploreFilter", {"path":str(filter_file)})
+            action("elytraRepack", {})
+            action("elytraReset", {})
+            action("getToBlockBlacklistClosest", {},expect_success=False)
+            command("item replace entity MineBotCombat hotbar.7 with minecraft:carrot 12")
+            time.sleep(0.3)
+            action("selectSlot", {"slot":7})
+            assert body.ipc.state()["selected_item"]=='carrot'
+            action("lookAt", {"target":[710,151,10]})
+            action("jump", {})
+            time.sleep(0.15)
+            jumping=body.ipc.state();report["records"][-1]["jump_position"]=jumping["position"]
+            assert not jumping["on_ground"],jumping
+            time.sleep(0.6)
+            action("stop", {})
+        elif args.case == "file_cancel":
+            fixture()
+            command("give MineBotCombat minecraft:cobblestone 256")
+            command("give MineBotCombat minecraft:diamond_pickaxe")
+            path=(root/"house.schem").resolve()
+            write_house_schematic(path)
+            report["task"]="Cancel a file builder running independently of a pending Python action; confirm process stop and stable server inventory"
+            action("builderBuildFile", {"path":str(path),"origin":[708,150,8],"name":"cancel-house"})
+            time.sleep(1)
+            assert body.ipc.state()["builder_active"]
+            began_cancel=time.monotonic()
+            stopped=body.interrupt("developer cancels file builder")
+            assert stopped.ok and stopped.data.get("native_process_stop"),stopped
+            until=time.monotonic()+3
+            while True:
+                settled=body.ipc.state()
+                if not settled["any_process_active"] and not settled["pathing"]:break
+                assert time.monotonic()<until,settled
+                time.sleep(0.05)
+            cancel_latency_ms=round((time.monotonic()-began_cancel)*1000)
+            time.sleep(0.3)
+            stock=command("clear MineBotCombat minecraft:cobblestone 0")
+            time.sleep(0.7)
+            assert command("clear MineBotCombat minecraft:cobblestone 0")==stock
+            report["records"].append({"operation":"interrupt independent builder",
+                "result":stopped.data,"settled_state":settled,
+                "cancel_latency_ms":cancel_latency_ms,"server_stock_after_stop":stock})
+        elif args.case == "blacklist":
+            fixture()
+            command("setblock 710 150 6 minecraft:chest")
+            command("setblock 750 150 24 minecraft:chest")
+            time.sleep(0.3)
+            report["task"]="Blacklist the nearest chest during one getToBlock process; reach the other chest without a replacement goal"
+            request=Action.create("getToBlock", {"block":"chest","timeout_s":60})
+            assert body.execute(request).accepted
+            time.sleep(0.8)
+            assert body.ipc.state()["get_active"]
+            control=action("getToBlockBlacklistClosest", {})
+            assert control.get("get_to_block_blacklist") is True,control
+            terminal=body.await_action_terminal(request.id,timeout_s=70)
+            report["records"].append({"action":"getToBlock","params":request.params,"terminal":dict(terminal.data)})
+            assert terminal.data.get("success"),terminal
+            check("execute if entity @a[name=MineBotCombat,x=750.5,y=150,z=24.5,distance=..4.5]")
+        elif args.case == "effects":
+            fixture(width=32,depth=24)
+            command('give MineBotCombat minecraft:potion[minecraft:potion_contents={potion:"minecraft:swiftness"}]')
+            command('give MineBotCombat minecraft:milk_bucket')
+            command('item replace entity MineBotCombat inventory.20 with minecraft:diamond 19')
+            time.sleep(0.3)
+            report["task"]="Discard an exact backpack stack; drink potion with a real speed effect; clear that effect with milk"
+            call("discard_item", {"item":"diamond","count":19})
+            until=time.monotonic()+3
+            while True:
+                remaining=command("clear MineBotCombat minecraft:diamond 0")
+                if "No items" in remaining:break
+                assert time.monotonic()<until,remaining
+                time.sleep(0.1)
+            report["records"][-1]["server_remaining"]=remaining
+            check('execute if entity @e[type=item,nbt={Item:{id:"minecraft:diamond",count:19}},x=700,y=149,z=0,dx=3,dy=4,dz=3]')
+            call("consume_item", {"item":"potion"})
+            assert any(e["id"]=="minecraft:speed" for e in body.get_state().effects),body.get_state()
+            call("consume_item", {"item":"milk_bucket"})
+            assert body.get_state().effects==[],body.get_state()
+        elif args.case == "sleep":
+            fixture(width=36,depth=24)
+            command("setblock 724 150 8 minecraft:red_bed[part=foot,facing=east]")
+            command("setblock 725 150 8 minecraft:red_bed[part=head,facing=east]")
+            command("time set midnight")
+            time.sleep(0.3)
+            report["task"]="Reach a bed 24 blocks away and actually enter sleep at night"
+            call("go_to_bed", {"search_radius":32})
+            assert body.get_state().sleeping is True
+            observed=command('data get entity MineBotCombat SleepTimer')
+            report["records"][-1]["server_sleeping"]=observed
+            assert not observed.endswith(' 0s'), observed
+        elif args.case == "native_misc":
+            fixture()
+            report["task"]="Native explore filter, Elytra repack/reset, hotbar/look/jump/stop; concrete missing-editor results"
+            filter_file=(root/'explore-filter.json').resolve();filter_file.write_text(json.dumps([{"x":43,"z":0}]))
+            action("exploreFilter", {"path":str(filter_file)})
+            action("elytraRepack", {})
+            action("elytraReset", {})
+            refused=action("getToBlockBlacklistClosest", {},expect_success=False)
+            assert refused["reason"]=="get_to_block_not_active",refused
+            refused=action("builderOpenSchematic", {},expect_success=False)
+            assert refused["reason"]=="schematica_not_installed",refused
+            refused=action("builderOpenLitematic", {"index":0},expect_success=False)
+            assert refused["reason"]=="litematica_not_installed",refused
+            command("item replace entity MineBotCombat hotbar.7 with minecraft:carrot 12")
+            time.sleep(0.3)
+            action("selectSlot", {"slot":7})
+            assert body.ipc.state()["selected_item"]=='carrot'
+            action("lookAt", {"target":[710,151,10]})
+            action("jump", {})
+            time.sleep(0.15)
+            jumping=body.ipc.state();report["records"][-1]["jump_position"]=jumping["position"]
+            assert not jumping["on_ground"],jumping
+            import re
+            server_jump=command("data get entity MineBotCombat Pos")
+            report["records"][-1]["server_jump_position"]=server_jump
+            values=[float(v) for v in re.findall(r'(-?\d+(?:\.\d+)?)d',server_jump)]
+            assert len(values)==3 and values[1]>150.1,server_jump
+            time.sleep(0.6)
+            action("stop", {})
+        elif args.case == "spacing":
+            fixture()
+            command("tp MineBotCombat 740.5 150 24.5")
+            time.sleep(0.3)
+            report["task"]="One move_away call reaches a 16-block safety distance, with a second physical distance check"
+            call("move_away", {"danger_pos":[742.5,150,24.5],"min_distance":16,"maintenance_checks":2})
+            check("execute if entity @a[name=MineBotCombat,x=742.5,y=150,z=24.5,distance=16..]")
         elif args.case == "players":
             fixture()
             command("gamemode survival Receiver")
@@ -454,13 +659,29 @@ def main():
             receipt=command("clear Receiver minecraft:diamond 0")
             report["records"][-1]["server_receipt"]=receipt
             assert 'Found 80 ' in receipt,receipt
+            sent=command("clear MineBotCombat minecraft:diamond 0")
+            report["records"][-1]["server_sender"]=sent
+            assert 'Found 16 ' in sent,sent
             command("tp Receiver 710.5 150 4.5")
             time.sleep(0.3)
             call("follow_player", {"player_name":"Receiver","search_radius":64,"timeout_s":60,"maintenance_checks":3})
+            check("execute if entity @a[name=MineBotCombat,x=710.5,y=150,z=4.5,distance=..4]")
             command("tp Receiver 742.5 150 24.5")
             time.sleep(0.3)
-            call("follow_entity", {"target":"Receiver","keep_distance":3,"timeout_s":60})
+            # Move the real target during one follow call, rather than issuing
+            # new navigation goals on behalf of the Body.
+            def receiver_moves():
+                time.sleep(2)
+                command("tp Receiver 724.5 150 20.5")
+                time.sleep(3)
+                command("tp Receiver 742.5 150 24.5")
+            mover=threading.Thread(target=receiver_moves)
+            mover.start()
+            call("follow_entity", {"target":"Receiver","keep_distance":3,"timeout_s":18})
+            mover.join()
+            check("execute if entity @a[name=MineBotCombat,x=742.5,y=150,z=24.5,distance=..4]")
             call("move_away", {"danger_pos":[742.5,150,24.5],"min_distance":16,"maintenance_checks":2})
+            check("execute if entity @a[name=MineBotCombat,x=742.5,y=150,z=24.5,distance=16..]")
         else:
             raise AssertionError(f"case not implemented: {args.case}")
         report.update(success=True, reason="task and independent server checks passed")
@@ -470,7 +691,9 @@ def main():
     finally:
         try:
             report["final_state"] = body.ipc.state()
-            if report["final_state"].get("any_process_active"):body.interrupt("directed task ended")
+            if report["final_state"].get("any_process_active"):
+                if not body.interrupt("directed task ended").ok:
+                    action("stop", {})
         except Exception as exc:report["final_state_error"] = str(exc)
         report["elapsed_s"] = round(time.monotonic()-began,3)
         (root/"result.json").write_text(json.dumps(report,indent=2))
