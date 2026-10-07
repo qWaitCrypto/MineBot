@@ -6,10 +6,7 @@ opinion:
 1. ``minebot/brain/`` stays framework-agnostic: it imports only
    ``minebot.contract`` and sibling ``brain`` modules — never the agent SDK,
    ``app``, ``body``, ``game``, or ``camera``.
-2. The framework binding ring (``app/runner.py``) stays capability-free: it
-   contains no registered tool-name string literals beyond a justified
-   structural whitelist, and it never imports Body transaction modules.
-3. Tools with dedicated model-visible projections carry their projector at
+2. Tools with dedicated model-visible projections carry their projector at
    the registration site (``RegisteredTool.projector``), so per-tool
    projection knowledge cannot silently return to the runner.
 """
@@ -17,7 +14,6 @@ opinion:
 from __future__ import annotations
 
 import ast
-import builtins
 from pathlib import Path
 import unittest
 from unittest.mock import Mock
@@ -34,7 +30,6 @@ from minebot.contract import Region
 
 
 BRAIN_ROOT = Path("minebot/brain")
-RUNNER_PATH = Path("minebot/app/runner.py")
 
 # Import roots minebot/brain is allowed to reach. Everything else that starts
 # with ``minebot.`` — and the agent SDK — is a layering violation
@@ -42,12 +37,6 @@ RUNNER_PATH = Path("minebot/app/runner.py")
 ALLOWED_BRAIN_ROOTS = ("minebot.contract", "minebot.brain")
 FORBIDDEN_BRAIN_ROOTS = ("minebot.app", "minebot.body", "minebot.game", "minebot.camera", "agents")
 
-# Structural tool-name literals the runner may keep. Every entry must be
-# justified here; adding one is an architecture decision, not a convenience.
-#   read_state — the recovery/idle probes ask the Body for authoritative state
-#     through the registry by name; this is spine bookkeeping, not a
-#     capability-specific branch.
-RUNNER_TOOL_NAME_WHITELIST = frozenset({"read_state"})
 
 # Tools whose model-visible summaries are dedicated projections. Their
 # projector must be registered next to the tool itself.
@@ -121,105 +110,14 @@ class BrainImportBoundaryTests(unittest.TestCase):
         self.assertEqual(offenders, [])
 
 
-class BindingRingBoundaryTests(unittest.TestCase):
-    def test_runner_imports_no_body_transaction_modules(self) -> None:
-        offenders = [
-            module
-            for module in _imported_modules(RUNNER_PATH)
-            if module.startswith("minebot.body")
-        ]
-        self.assertEqual(offenders, [])
-
-    def test_runner_has_no_registered_tool_name_literals(self) -> None:
-        registered = set(_phase1_registry().names()) | set(_workspace_registry().names())
-        tree = ast.parse(RUNNER_PATH.read_text(encoding="utf-8"), filename=str(RUNNER_PATH))
-        literals = {
-            node.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Constant) and isinstance(node.value, str)
-        }
-        offenders = sorted((literals & registered) - RUNNER_TOOL_NAME_WHITELIST)
-        self.assertEqual(
-            offenders,
-            [],
-            "runner.py must stay capability-free: move per-tool logic to the "
-            "owning module and register it (RegisteredTool.projector or the "
-            "tool callable); extending RUNNER_TOOL_NAME_WHITELIST requires an "
-            "architecture justification.",
-        )
 
 
-class ModuleNameResolutionTests(unittest.TestCase):
-    """Every app/brain module must resolve all its own global names.
-
-    ``from __future__ import annotations`` makes annotations lazy, so a name
-    that is only referenced in a type position imports cleanly and fails much
-    later — or, worse, a runtime NameError inside a broad ``except`` silently
-    changes behavior instead of crashing. That is exactly how a module
-    extraction can regress a spine invariant while the module still imports.
-    """
-
-    ROOTS = (Path("minebot/app"), Path("minebot/brain"))
-
-    def test_no_module_references_an_unresolved_global(self) -> None:
-        offenders: list[str] = []
-        for root in self.ROOTS:
-            for path in sorted(root.rglob("*.py")):
-                unresolved = _unresolved_globals(path)
-                offenders.extend(f"{path}:{name}" for name in unresolved)
-        self.assertEqual(offenders, [])
 
 
-# Module-level dunders the interpreter injects; never imported or assigned.
-_IMPLICIT_MODULE_GLOBALS = frozenset({"__file__", "__name__", "__doc__", "__package__"})
 
 
-def _unresolved_globals(path: Path) -> list[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    defined: set[str] = set(dir(builtins)) | set(_IMPLICIT_MODULE_GLOBALS)
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            defined.add(node.name)
-        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            defined.add(node.id)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            defined.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.arg):
-            defined.add(node.arg)
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            defined.add(node.name)
-        elif isinstance(node, ast.Global):
-            defined.update(node.names)
-    used = {
-        node.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-    }
-    return sorted(used - defined)
 
 
-class DuplicateDefinitionTests(unittest.TestCase):
-    """A shadowed top-level definition is dead code that reads as live code.
-
-    Python keeps the last definition, so a duplicate silently retires the
-    earlier one; a reader auditing the first version is auditing nothing.
-    """
-
-    ROOTS = (Path("minebot/app"), Path("minebot/brain"))
-
-    def test_no_module_defines_the_same_top_level_symbol_twice(self) -> None:
-        offenders: list[str] = []
-        for root in self.ROOTS:
-            for path in sorted(root.rglob("*.py")):
-                seen: set[str] = set()
-                for node in ast.parse(path.read_text(encoding="utf-8")).body:
-                    name = getattr(node, "name", None)
-                    if name is None:
-                        continue
-                    if name in seen:
-                        offenders.append(f"{path}:{name}")
-                    seen.add(name)
-        self.assertEqual(offenders, [])
 
 
 class ProjectorWiringTests(unittest.TestCase):

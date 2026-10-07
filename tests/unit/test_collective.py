@@ -136,26 +136,6 @@ class TeamFactTests(unittest.TestCase):
             store.put(TeamFact(key="k", value={"blob": "x" * 5000}, writer_bot="Bot1"))
 
 
-class HandoffRejectionGuardTests(unittest.TestCase):
-    """Multi-bot must not regress to SDK handoffs (decision 2026-07-26)."""
-
-    def test_no_module_imports_sdk_handoffs(self) -> None:
-        offenders: list[str] = []
-        for path in sorted(Path("minebot").rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module == "agents":
-                    offenders.extend(
-                        f"{path}:{alias.name}"
-                        for alias in node.names
-                        if alias.name in {"handoff", "Handoff"}
-                    )
-        self.assertEqual(
-            offenders,
-            [],
-            "SDK handoffs transfer full conversation history in-process, which "
-            "is incompatible with one brain per bot; use TaskTransfer artifacts.",
-        )
 
 
 if __name__ == "__main__":

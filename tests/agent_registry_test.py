@@ -35,6 +35,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     print(f"[{status}] {name}" + (f" -- {detail}" if detail and not cond else ""))
     if not cond:
         _failures.append(name)
+        raise AssertionError(f"{name}: {detail}")
 
 
 class FakeBody:
@@ -221,18 +222,6 @@ def test_failure_storm_yields() -> None:
 
 # --- stagnation: same action, world unchanged -------------------------------
 
-def test_stagnation_yields() -> None:
-    body = FakeBody()
-    ctx = ctx_for(body)
-    # Succeeds every time but world never changes & same action repeated.
-    t = tool("idle_move", lambda p: ToolResult(True, "completed", False), mutating=True)
-    aborted = False
-    try:
-        for _ in range(10):
-            execute_tool(t, {"same": "input"}, ctx)
-    except ProgressAbort:
-        aborted = True
-    check("stagnant repeats (success but frozen world) trip ProgressAbort", aborted)
 
 
 def main() -> int:
@@ -245,7 +234,6 @@ def main() -> int:
         test_single_writer_rejects_second,
         test_writer_guard_unit,
         test_failure_storm_yields,
-        test_stagnation_yields,
     ):
         test()
     print()

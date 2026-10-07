@@ -37,6 +37,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     print(f"[{status}] {name}" + (f" -- {detail}" if detail and not cond else ""))
     if not cond:
         _failures.append(name)
+        raise AssertionError(f"{name}: {detail}")
 
 
 def expect_error(name: str, fn, *, contains: str = "", absent: str = "") -> None:

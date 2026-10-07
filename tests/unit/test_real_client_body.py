@@ -407,7 +407,7 @@ def test_real_client_primitive_refusal_is_distinct_from_transport_failure(error,
         ("elytraTravel", {"target": [80, 90, 7]}, "elytra:80:90:7"),
     ),
 )
-def test_real_client_body_exposes_verified_process_families(
+def test_real_client_body_maps_process_objectives(
     action_name: str,
     params: dict[str, object],
     objective_prefix: str,

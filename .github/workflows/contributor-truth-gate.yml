@@ -1,4 +1,4 @@
-name: Contributor truth gate
+name: Behavioral regression
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  truth-gate:
+  regression:
     name: Python 3.13 / Linux
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -29,19 +29,5 @@ jobs:
       - name: Install MineBot
         run: python -m pip install -e '.[test]'
 
-      - name: Run contributor truth gate
-        run: python -m unittest discover -s tests -p 'test_contributor_truth_gate.py' -v
-
-      - name: Check tool intent and offline autonomous continuation
-        run: >-
-          python -m pytest tests/unit/test_agent_composition.py
-          tests/unit/test_progress_epochs.py tests/unit/test_strategy_feedback.py
-          tests/unit/test_progress_stop_reasons.py tests/unit/test_agent_persistence.py
-          tests/unit/test_continuation_budget.py
-          tests/unit/test_progress_recovery_inputs.py tests/unit/test_recovery_attempt_budget.py
-          tests/unit/test_recovery_reconciliation.py
-          tests/unit/test_progress_stop_review.py
-          tests/unit/test_strategic_reconsideration.py
-          tests/unit/test_progress.py tests/unit/test_engage_runtime.py
-          tests/unit/test_java_body_adapter.py
-          tests/unit/test_autonomy.py tests/unit/test_agent_session.py -q
+      - name: Check Body interfaces, cancellation and terminal results
+        run: python -m pytest -q

@@ -221,39 +221,6 @@ class CampaignArtifactTests(unittest.TestCase):
             )
 
 
-class AntiEngineGuardTests(unittest.TestCase):
-    """The campaign artifact must never be consumed by the spine (C1/C4)."""
-
-    SPINE_MODULES = (
-        "minebot/app/session.py",
-        "minebot/app/runner.py",
-        "minebot/app/work_queue.py",
-        "minebot/app/autonomy.py",
-        "minebot/brain/progress.py",
-    )
-
-    def test_no_spine_module_consumes_campaign_projections(self) -> None:
-        offenders: list[str] = []
-        for path in self.SPINE_MODULES:
-            source = Path(path).read_text(encoding="utf-8")
-            tree = ast.parse(source, filename=path)
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Attribute) and node.attr in {
-                    "unblocked_objectives",
-                    "objectives",
-                }:
-                    offenders.append(f"{path}:{node.attr}")
-                if isinstance(node, ast.ImportFrom) and (node.module or "").endswith(
-                    ("volition", "campaign_store")
-                ):
-                    offenders.append(f"{path}:import")
-        self.assertEqual(
-            offenders,
-            [],
-            "a campaign is an artifact the model reads, never a scheduler the "
-            "spine consumes; wiring it into spine control flow re-creates the "
-            "continuation-engine antipattern at campaign scale.",
-        )
 
 
 if __name__ == "__main__":

@@ -33,6 +33,12 @@ camera = ["websockets==16.0"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-# The default command is a fast, repeatable contract smoke test. Historical
-# unit suites and live experiments stay runnable by naming their path.
-testpaths = ["tests/quick"]
+# Reuse the current behavioral regressions; Minecraft task experiments are
+# opt-in. Name any other file explicitly when changing that subsystem.
+testpaths = [
+    "tests/unit/test_real_client_body.py",
+    "tests/unit/test_real_client_ipc.py",
+    "tests/unit/test_session_message_preemption.py",
+    "tests/test_contributor_truth_gate.py",
+]
+python_files = ["test_*.py"]

@@ -30,6 +30,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     print(f"[{status}] {name}" + (f" -- {detail}" if detail and not cond else ""))
     if not cond:
         _failures.append(name)
+        raise AssertionError(f"{name}: {detail}")
 
 
 def make_state(x: float = 0.0, dim: str | None = None) -> BodyState:

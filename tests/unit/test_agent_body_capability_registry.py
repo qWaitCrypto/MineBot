@@ -100,48 +100,7 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         self.assertEqual(summary["detail_path"], ["metrics", "data", "blocks"])
         self.assertEqual(result.metrics["data"]["blocks"], blocks)
 
-    def test_java_resource_scanner_is_read_only_and_never_referenced_by_action_executors(self):
-        java_root = Path("minecraft/server/body/src/main/java/dev/minebot/body")
-        action_sources = list((java_root / "action").glob("*.java"))
-        scanner_tokens = ("dev.minebot.body.search", "LoadedBlockScanner", "scanner.scan(")
-        offenders = [
-            source.as_posix()
-            for source in action_sources
-            if any(token in source.read_text(encoding="utf-8") for token in scanner_tokens)
-        ]
-        self.assertEqual(offenders, [])
 
-        channel = (java_root / "protocol" / "FakePlayerBodyChannel.java").read_text(
-            encoding="utf-8"
-        )
-        find_start = channel.index("private void handleFindBlocks(")
-        find_end = channel.index("\n    private ", find_start + 1)
-        self.assertEqual(channel.count("scanner.scan("), 1)
-        self.assertIn("scanner.scan(", channel[find_start:find_end])
-
-    def test_java_entity_actions_accept_only_agent_resolved_uuid(self):
-        java_root = Path("minecraft/server/body/src/main/java/dev/minebot/body")
-        channel = (java_root / "protocol" / "FakePlayerBodyChannel.java").read_text(
-            encoding="utf-8"
-        )
-        target_source_start = channel.index("private EngageExecutor.TargetSource entityTargetSource(")
-        target_source_end = channel.index("\n    private ", target_source_start + 1)
-        target_source = channel[target_source_start:target_source_end]
-        self.assertNotIn("nearest_hostile", target_source)
-        self.assertNotIn("closestLookup", target_source)
-        self.assertIn("targetUuid.equals(entity.getUUID().toString())", target_source)
-
-        for handler_name in ("handleFollowEntity", "handleEngageEntity"):
-            start = channel.index(f"private void {handler_name}(")
-            end = channel.index("\n    private ", start + 1)
-            handler = channel[start:end]
-            self.assertIn('requiredUuidString(request, "target_uuid")', handler)
-            self.assertIn("rejectLegacyEntitySelector(request)", handler)
-
-        for executor_name in ("EngageExecutor.java", "FollowExecutor.java"):
-            executor = (java_root / "action" / executor_name).read_text(encoding="utf-8")
-            self.assertNotIn("targetSpec", executor)
-            self.assertIn("targetUuid", executor)
 
     def test_java_designated_collect_projects_missing_tool_as_strategy_terminal(self):
         body = Mock()

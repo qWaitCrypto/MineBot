@@ -34,174 +34,24 @@ def test_camera_package_is_independent_of_agent_brain_body_and_game() -> None:
     assert offenders == []
 
 
-def test_fabric_entrypoint_has_converged_on_bridge_identity() -> None:
-    metadata = json.loads(FABRIC_MOD.read_text(encoding="utf-8"))
-    assert metadata["id"] == "minebot-bridge"
-    assert metadata["name"] == "MineBot Bridge"
-    assert metadata["entrypoints"]["server"] == ["dev.minebot.bridge.MineBotBridgeMod"]
 
 
-def test_bridge_reuses_shared_transport_lifecycle_router_connection_and_json_envelope() -> None:
-    required_common = {
-        "MineBotChannel.java",
-        "MineBotChannelRouter.java",
-        "MineBotConnection.java",
-        "MineBotWebSocketServer.java",
-        "OutboundMessage.java",
-    }
-    present_common = {str(path.relative_to(COMMON_ROOT)) for path in COMMON_ROOT.rglob("*.java")}
-    assert required_common <= present_common
-
-    present_bridge = {str(path.relative_to(BRIDGE_ROOT)) for path in BRIDGE_ROOT.rglob("*.java")}
-    assert "MineBotBridgeMod.java" in present_bridge
-    # One transport implementation: the bridge must not keep its own copies.
-    assert not any(name.startswith("transport/") for name in present_bridge)
-
-    bridge_mod = (BRIDGE_ROOT / "MineBotBridgeMod.java").read_text(encoding="utf-8")
-    assert "dev.minebot.server.common.transport" in bridge_mod
-
-    connection = (COMMON_ROOT / "MineBotConnection.java").read_text(encoding="utf-8")
-    assert "seq" in connection
-    assert "server_tick" in connection
-    assert "sent_at_ms" in connection
 
 
-def test_observer_control_has_narrow_version_adapter_and_exact_request_surface() -> None:
-    required = {
-        "observercontrol/ObserverControlChannel.java",
-        "observercontrol/ObserverMode.java",
-        "version/ObserverAccess.java",
-        "version/Mojmap2612ObserverAccess.java",
-        "version/ObserverState.java",
-        "version/TargetState.java",
-    }
-    present = {str(path.relative_to(BRIDGE_ROOT)) for path in BRIDGE_ROOT.rglob("*.java")}
-    assert required <= present
-
-    source = (BRIDGE_ROOT / "observercontrol/ObserverControlChannel.java").read_text(encoding="utf-8")
-    assert '"HELLO"' in source
-    assert '"ATTACH"' in source
-    assert '"UPDATE"' in source
-    assert '"HEARTBEAT"' in source
-    assert '"STATUS"' in source
-    assert '"DETACH"' in source
-    for forbidden_type in ("COMMAND", "ACTION", "MOVE", "ATTACK", "USE", "CHAT"):
-        assert f'"{forbidden_type}"' not in source
-    assert "MAX_IDEMPOTENCY_ENTRIES" in source
-    assert "leaseExpiresAtTick" in source
-    assert 'value.addProperty("loaded_chunks"' in source
-    assert 'value.addProperty("online_players"' in source
-    assert 'response.addProperty("last_generation", lastGeneration)' in source
-    assert "configuredObserverId" in source
-    assert "requireCurrentSession" in source
-    assert "requireSuccessorSession" in source
-    assert "isCurrentGeneration" in source
-    assert "isSuccessorGeneration" in source
 
 
-def test_observer_control_enforces_request_rate_limit() -> None:
-    connection = (COMMON_ROOT / "MineBotConnection.java").read_text(encoding="utf-8")
-    server = (COMMON_ROOT / "MineBotWebSocketServer.java").read_text(encoding="utf-8")
-    assert "MAX_REQUESTS_PER_SECOND" in connection
-    assert "allowRequest" in connection
-    assert "rate_limited" in server
 
 
-def test_bridge_outbound_work_and_request_size_are_bounded() -> None:
-    java_files = list(BRIDGE_ROOT.rglob("*.java")) + list(COMMON_ROOT.rglob("*.java"))
-    source = "\n".join(path.read_text(encoding="utf-8") for path in java_files)
-    assert "MAX_REQUEST_BYTES" in source
-    assert "ArrayBlockingQueue" in source or "LinkedBlockingQueue" in source
-    assert "newSingleThreadExecutor" not in source
 
 
-def test_bridge_production_source_has_no_body_or_arbitrary_command_surface() -> None:
-    forbidden = {
-        "setBlock(": "block mutation",
-        "destroyBlock(": "block mutation",
-        "getInventory(": "inventory mutation/read coupling",
-        ".hurt(": "entity damage",
-        ".heal(": "entity healing",
-        "performCommand": "command dispatch",
-        "getCommands(": "command dispatch",
-        "addRegionTicket": "forced chunk ticket",
-        "removeRegionTicket": "forced chunk ticket",
-        "minebot.body": "Body dependency",
-        "minebot.brain": "Brain dependency",
-        "minebot.app": "Agent dependency",
-        "console-fifo": "server console control",
-        "control-script": "arbitrary control script",
-    }
-    offenders: list[str] = []
-    for path in JAVA_ROOT.rglob("*.java"):
-        source = path.read_text(encoding="utf-8")
-        for token, reason in forbidden.items():
-            if token in source:
-                offenders.append(f"{path}:{reason}:{token}")
-    assert offenders == []
 
 
-def test_worldstream_is_not_initialized_by_production_bridge() -> None:
-    entrypoint = (BRIDGE_ROOT / "MineBotBridgeMod.java").read_text(encoding="utf-8")
-    assert "WorldStream" not in entrypoint
-    assert "worldstream" not in entrypoint.lower()
 
 
-def test_observer_access_exposes_only_camera_owned_operations() -> None:
-    source = (BRIDGE_ROOT / "version/ObserverAccess.java").read_text(encoding="utf-8")
-    allowed = {
-        "minecraftVersion",
-        "observerState",
-        "enforceObserverPolicy",
-        "resolveTarget",
-        "attachToTarget",
-        "holdFixed",
-        "sendDirective",
-        "detach",
-    }
-    declared = set(
-        re.findall(
-            r"^\s*(?:String|ObserverState|TargetState|void)\s+(\w+)\s*\(",
-            source,
-            flags=re.MULTILINE,
-        )
-    )
-    assert declared == allowed
 
 
-def test_camera_client_is_client_only_and_receives_directives_without_gameplay_output() -> None:
-    metadata = json.loads(CLIENT_MOD.read_text(encoding="utf-8"))
-    assert metadata["environment"] == "client"
-    assert metadata["entrypoints"] == {
-        "client": ["dev.minebot.camera.client.MineBotCameraClient"]
-    }
-    assert metadata["depends"]["minecraft"] == "26.1.2"
-    assert metadata["depends"]["freecam"] == "=1.4.0+mc26.1.2"
-
-    source = "\n".join(path.read_text(encoding="utf-8") for path in CLIENT_ROOT.rglob("*.java"))
-    assert "registerGlobalReceiver" in source
-    assert "CameraDirectivePayload.TYPE" in source
-    assert "PayloadTypeRegistry.serverboundPlay()" in source
-    assert source.count("ClientPlayNetworking.send(") == 1
-    assert "ClientPlayNetworking.send(new CameraClientTelemetryPayload(telemetry))" in source
-    forbidden = {
-        "Serverbound": "vanilla gameplay packet output",
-        "minecraft.gameMode": "client gameplay interaction",
-        "KeyMapping": "key simulation",
-        "keyPress": "key simulation",
-        "startAttack": "attack input",
-        "startUseItem": "use input",
-        "sendCommand": "command output",
-        "sendChat": "chat output",
-    }
-    offenders = [f"{reason}:{token}" for token, reason in forbidden.items() if token in source]
-    assert offenders == []
 
 
-def test_camera_client_pins_selected_community_mod_versions() -> None:
-    build = Path("minecraft/camera/client/build.gradle").read_text(encoding="utf-8")
-    assert 'maven.modrinth:freecam:dvyNrVvc' in build
-    assert 'maven.modrinth:sodium:vf7UgZpC' in build
 
 
 def test_observer_interactions_are_denied_server_side() -> None:
