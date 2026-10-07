@@ -65,6 +65,8 @@ class FakeClientIpc:
 
     def world_read(self, scope: str, params: dict[str, object]) -> dict[str, object]:
         del params
+        if scope == "findBlocks":
+            return {"ok": True, "complete": True, "data": {"matches": [{"x":4,"y":70,"z":9,"type":"minecraft:oak_log"}]}}
         return {
             "type": "world_read",
             "request_id": "world-1",
@@ -198,7 +200,7 @@ def test_real_client_world_reads_keep_existing_shapes() -> None:
 
     blocks = body.perceive("findBlocks", {"block_types": ["minecraft:oak_log"]})
     assert blocks.ok
-    assert blocks.data["matches"] == [{"x": 4, "y": 70, "z": 9, "type": "oak_log"}]
+    assert blocks.data["matches"] == [{"x": 4, "y": 70, "z": 9, "type": "minecraft:oak_log"}]
     entities = body.perceive("nearbyEntities", {"limit": 4})
     assert entities.ok
     assert entities.data["entities"][0]["name"] == "Sheep"
@@ -231,6 +233,8 @@ def test_real_client_body_executes_process_and_returns_terminal_event() -> None:
     ("goal", "objective"),
     (
         ({"kind": "near", "pos": [10, 70, 9], "radius": 0}, "near:10:70:9:0"),
+        ({"kind": "near", "pos": [10,70,9], "radius":0.5}, "near:10:70:9:0"),
+        ({"kind":"composite","goals":[{"kind":"near","pos":[10,70,9],"radius":0.5}]}, "any:near:10:70:9:0"),
         ({"kind": "block", "x": 10, "y": 70, "z": 9}, "block:10:70:9"),
         ({"kind": "composite", "mode": "any", "goals": [{"kind": "near", "pos": [10, 70, 9], "radius": 0}]},
          "any:near:10:70:9:0"),
@@ -275,7 +279,7 @@ def test_real_client_body_interrupts_active_process() -> None:
 
 @pytest.mark.parametrize(
     "action_name",
-    ("engageEntity", "rangedAttack", "craftItem", "containerTransfer", "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp", "useItem"),
+    ("engageEntity", "rangedAttack", "craftItem", "containerTransfer", "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp", "useItem", "placeBlock"),
 )
 def test_real_client_body_routes_structured_actions_to_typed_client_wire(
     action_name: str,
@@ -354,7 +358,7 @@ def test_real_client_body_maps_extended_baritone_controls(
 
 @pytest.mark.parametrize(
     "action_name",
-    ("jump", "stop", "selectSlot", "lookAt", "attackEntity", "dropItem", "moveItem", "placeBlock", "igniteBlock", "sowCrop"),
+    ("jump", "stop", "selectSlot", "lookAt", "attackEntity", "dropItem", "moveItem", "igniteBlock", "sowCrop"),
 )
 def test_real_client_body_routes_native_body_actions_to_client_primitive(
     action_name: str,
@@ -453,7 +457,7 @@ def test_real_client_provider_selects_the_abstract_body_and_routes_move_tool() -
 
     assert result.success
     assert result.reason == "arrived"
-    assert ipc.commands[0][0] == "near:10:70:9:1"
+    assert ipc.commands[0][0] == "near:10:70:9:0"
 
 
 def test_real_client_follow_uses_baritone_target_resolution() -> None:

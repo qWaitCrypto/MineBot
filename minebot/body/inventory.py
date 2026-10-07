@@ -619,7 +619,31 @@ class InventoryTransactions:
         if isinstance(variants, ToolResult):
             return variants
 
-        plan = _choose_craft_plan(slots, item=item, count=count, output_slot=output_slot, variants=variants)
+        structured = recipe_perception.data.get("variants") or []
+        max_stack = min((int(v.get("output_max_stack",64)) for v in structured if isinstance(v,dict)), default=64)
+        batch_limit = min((int(v.get("max_craft_count",64)) for v in structured if isinstance(v,dict)), default=64)
+        if count > batch_limit and count % variants[0].output_count == 0:
+            if output_slot is not None:
+                return ToolResult(False, "craft_output_no_space", False, metrics={"requested_count":count,"slot_capacity":max_stack})
+            batches = []
+            remaining = count
+            while remaining > 0:
+                amount = min(remaining, batch_limit)
+                result = self.craft_recipe(item=item, count=amount, search_radius=search_radius,
+                    residue_slots=residue_slots, destination_slots=destination_slots,
+                    crafting_table_item=crafting_table_item, temporary_table_radius=temporary_table_radius,
+                    temporary_table_context=temporary_table_context, auto_equip=auto_equip,
+                    residue_timeout_s=residue_timeout_s, craft_timeout_s=craft_timeout_s,
+                    approach_timeout_s=approach_timeout_s, place_timeout_s=place_timeout_s,
+                    reclaim_timeout_s=reclaim_timeout_s, keep_temporary_table=keep_temporary_table,
+                    cleanup_existing_bot_table=cleanup_existing_bot_table)
+                batches.append(result.to_payload())
+                if not result.success:
+                    return merge_context(result, {"requested_count":count,"crafted_count":count-remaining,"batches":batches})
+                remaining -= amount
+            return ToolResult(True, "completed", False, metrics={"item":item,"requested_count":count,"crafted_count":count,"batches":batches})
+
+        plan = _choose_craft_plan(slots, item=item, count=count, output_slot=output_slot, variants=variants, max_stack=max_stack)
         if isinstance(plan, ToolResult):
             return plan
 
@@ -653,6 +677,7 @@ class InventoryTransactions:
             remainders=[dict(entry) for entry in plan.remainders],
             crafting_table=tuple(workspace["table_pos"]) if isinstance(workspace, dict) else None,
             timeout_s=craft_timeout_s,
+            max_stack=max_stack,
         )
         craft_attempts = [craft.to_payload()]
         craft_reconciliation = None
@@ -675,6 +700,7 @@ class InventoryTransactions:
                     count=count,
                     output_slot=output_slot,
                     variants=variants,
+                    max_stack=max_stack,
                 )
                 if isinstance(refreshed_plan, ToolResult):
                     craft_reconciliation = {
@@ -1431,6 +1457,7 @@ def _choose_craft_plan(
     count: int,
     output_slot: int | None,
     variants: list[CraftRecipeVariant],
+    max_stack: int = 64,
 ) -> CraftPlan | ToolResult:
     item = _normalize_recipe_item(item)
     failures: list[dict[str, object]] = []
@@ -1473,6 +1500,7 @@ def _choose_craft_plan(
             count,
             preferred=output_slot,
             exclude={int(entry["slot"]) for entry in inputs},
+            max_stack=max_stack,
         )
         if selected_output_slot is None:
             failures.append(

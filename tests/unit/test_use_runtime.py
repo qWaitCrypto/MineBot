@@ -1102,7 +1102,8 @@ class UseRuntimeTests(unittest.TestCase):
                 block_perception((1, 63, -1), "minecraft:stone", "SOLID"),
                 block_perception((1, 64, -1), "minecraft:stone", "SOLID"),
                 block_perception((1, 62, -1), "minecraft:stone", "SOLID"),
-            ],
+            ] + [block_perception((x,y,z), "minecraft:stone", "SOLID")
+                 for x,z in [(2,0),(0,0),(1,1),(1,-1)] for y in (65,66,64)],
             events=[
                 stop_done(),
                 look_done(),

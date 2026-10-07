@@ -36,6 +36,7 @@ import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.core.Direction;
 import net.minecraft.world.entity.Entity;
@@ -490,7 +491,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         try {
             if (candidate.goal != null) baritone.getCustomGoalProcess().setGoalAndPath(candidate.goal);
             else switch (candidate.kind) {
-                case "mine" -> baritone.getMineProcess().mineByName(candidate.mineQuantity, candidate.targets);
+                case "mine" -> baritone.getMineProcess().mineByName(candidate.before + candidate.mineQuantity, candidate.targets);
                 case "get" -> baritone.getGetToBlockProcess().getToBlock(new BlockOptionalMeta(candidate.target));
                 case "explore" -> baritone.getExploreProcess().explore(candidate.anchor.getX(), candidate.anchor.getZ());
                 case "follow" -> {
@@ -639,31 +640,51 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
             data.add("cells", cells);
             data.addProperty("count", cells.size());
-        } else if (scope.equals("nearbyBlocks")) {
-            JsonArray blocks = new JsonArray();
-            JsonArray targets = params.has("block_types") && params.get("block_types").isJsonArray()
-                ? params.getAsJsonArray("block_types") : new JsonArray();
-            int radius = params.has("radius") ? Math.min(64, Math.max(1, params.get("radius").getAsInt())) : 16;
-            for (var target : targets) {
-                var locations = BaritoneAPI.getProvider().getWorldScanner().scanChunkRadius(
-                    baritone.getPlayerContext(), new BlockOptionalMetaLookup(target.getAsString().replace("minecraft:", "")), radius, 10, 64
-                );
-                locations.forEach(pos -> {
-                    JsonObject fact = new JsonObject();
-                    fact.addProperty("x", pos.getX());
-                    fact.addProperty("y", pos.getY());
-                    fact.addProperty("z", pos.getZ());
-                    fact.addProperty("type", target.getAsString().replace("minecraft:", ""));
-                    blocks.add(fact);
-                });
+        } else if (scope.equals("nearbyBlocks") || scope.equals("findBlocks")) {
+            java.util.Set<String> targets = new java.util.HashSet<>();
+            if (params.has("block_types")) for (var target : params.getAsJsonArray("block_types")) {
+                targets.add(target.getAsString().replace("minecraft:", ""));
             }
+            int radius = Math.min(64, Math.max(1, params.has("radius") ? params.get("radius").getAsInt() : 16));
+            int yRadius = Math.min(64, Math.max(1, params.has("y_radius") ? params.get("y_radius").getAsInt() : radius));
+            int limit = Math.min(256, Math.max(1, params.has("limit") ? params.get("limit").getAsInt() : 32));
+            int start = Math.max(0, params.has("start") ? params.get("start").getAsInt() : 0);
+            BlockPos center = client.player.blockPosition();
+            java.util.List<BlockPos> matches = new java.util.ArrayList<>();
+            boolean loaded = true;
+            for (int x = center.getX() - radius; x <= center.getX() + radius; x++) {
+                for (int z = center.getZ() - radius; z <= center.getZ() + radius; z++) {
+                    if (!client.level.hasChunk(x >> 4, z >> 4)) { loaded = false; continue; }
+                    for (int y = Math.max(client.level.getMinY(), center.getY() - yRadius);
+                         y <= Math.min(client.level.getMaxY() - 1, center.getY() + yRadius); y++) {
+                        BlockPos pos = new BlockPos(x, y, z);
+                        BlockState block = client.level.getBlockState(pos);
+                        if (!block.isAir() && (targets.isEmpty() || targets.contains(BuiltInRegistries.BLOCK.getKey(block.getBlock()).getPath()))) {
+                            matches.add(pos);
+                        }
+                    }
+                }
+            }
+            matches.sort(java.util.Comparator.comparingDouble((BlockPos pos) -> pos.distSqr(center))
+                .thenComparingInt(BlockPos::getX).thenComparingInt(BlockPos::getY).thenComparingInt(BlockPos::getZ));
+            JsonArray blocks = new JsonArray();
+            for (int i = start; i < Math.min(matches.size(), start + limit); i++) {
+                BlockPos pos = matches.get(i);
+                blocks.add(blockFact(client.level.getBlockState(pos), pos));
+            }
+            boolean more = start + limit < matches.size();
             data.add("blocks", blocks);
+            data.add("matches", blocks);
             data.addProperty("count", blocks.size());
+            data.addProperty("totalMatches", matches.size());
+            data.addProperty("coverage_complete", loaded);
+            if (more) data.addProperty("nextStart", start + limit);
+            response.addProperty("complete", loaded && !more);
         } else {
             throw new IllegalArgumentException("unsupported_world_read_scope");
         }
         response.addProperty("ok", true);
-        response.addProperty("complete", true);
+        if (!response.has("complete")) response.addProperty("complete", true);
         response.add("data", data);
         response.add("uncertainty", new JsonArray());
         connection.send(response);
@@ -886,7 +907,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             requestStop("canceled", "launch_cancel_requested");
         }
         if (current.stopStatus == null && !current.structured) {
-            if (current.item != null && count(client, current.item) - current.before >= 1) {
+            if (current.item != null && count(client, current.item) - current.before >= (current.kind.equals("mine") ? current.mineQuantity : 1)) {
                 requestStop("completed", "inventory_increased");
             } else if (current.goal != null && current.goal.isInGoal(client.player.blockPosition()) && client.player.onGround()) {
                 requestStop("completed", "goal_reached");
@@ -948,6 +969,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             switch (current.kind) {
                 case "engageEntity" -> tickEngage(client, current);
                 case "useItem" -> tickUseItem(client, current);
+                case "placeBlock" -> tickPlaceBlock(client, current);
                 case "rangedAttack" -> tickRanged(client, current);
                 case "craftItem" -> tickCraft(client, current);
                 case "containerTransfer", "furnaceTransfer" -> tickMenuTransfer(client, current);
@@ -962,38 +984,88 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
     }
 
+    private void tickPlaceBlock(Minecraft client, Run current) {
+        if (current.phase == 0) {
+            current.anchor = blockPosition(current.params, "target");
+            current.item = string(current.params, "block_type", "").replace("minecraft:", "");
+            if (current.item.isBlank()) throw new IllegalArgumentException("missing_block_type");
+            if (!client.level.getBlockState(current.anchor).canBeReplaced()) throw new IllegalArgumentException("target_occupied");
+            selectItem(client, current.item);
+            current.goal = new GoalNear(current.anchor, 3);
+            baritone.getCustomGoalProcess().setGoalAndPath(current.goal);
+            current.phase = 1;
+        }
+        if (current.phase == 1) {
+            if (client.player.position().distanceToSqr(Vec3.atCenterOf(current.anchor)) > 16 || !client.player.onGround()) return;
+            baritone.getPathingBehavior().cancelEverything();
+            Direction face = null;
+            BlockPos support = null;
+            String wantedFace = string(current.params, "face", "auto");
+            for (Direction candidate : Direction.values()) {
+                if (!wantedFace.equals("auto") && !candidate.getName().equals(wantedFace)) continue;
+                BlockPos neighbor = current.anchor.relative(candidate.getOpposite());
+                if (!client.level.getBlockState(neighbor).getCollisionShape(client.level, neighbor).isEmpty()) {
+                    face = candidate; support = neighbor; break;
+                }
+            }
+            if (support == null) throw new IllegalArgumentException("placement_support_missing");
+            Vec3 hit = Vec3.atCenterOf(support).add(Vec3.atLowerCornerOf(face.getUnitVec3i()).scale(0.5));
+            lookAt(client, lookParams(hit));
+            current.placementHit = new BlockHitResult(hit, face, support, false);
+            current.phase = 2;
+            current.phaseTick = current.ticks;
+            return;
+        }
+        if (current.phase == 2 && current.ticks - current.phaseTick >= 3) {
+            if (!client.player.isWithinBlockInteractionRange(current.placementHit.getBlockPos(), 0)) throw new IllegalArgumentException("target_out_of_range");
+            selectItem(client, current.item);
+            if (!client.gameMode.useItemOn(client.player, InteractionHand.MAIN_HAND, current.placementHit).consumesAction()) {
+                throw new IllegalArgumentException("block_place_rejected");
+            }
+            current.phase = 3;
+            current.phaseTick = current.ticks;
+        }
+        if (current.phase == 3 && current.placementConfirmed) requestStop("completed", "placed_server_confirmed");
+        else if (current.phase == 3 && current.ticks - current.phaseTick > 40) requestStop("failed", "placement_unconfirmed");
+    }
+
+    private static JsonObject lookParams(Vec3 target) {
+        JsonObject params = new JsonObject();
+        JsonArray xyz = new JsonArray(); xyz.add(target.x); xyz.add(target.y); xyz.add(target.z);
+        params.add("target", xyz); return params;
+    }
+
     private void tickUseItem(Minecraft client, Run current) {
         String mode = string(current.params, "mode", "once");
         int duration = integer(current.params, "ticks", 1);
-        if ((!mode.equals("once") && !mode.equals("continuous")) || duration < 1) {
-            throw new IllegalArgumentException("invalid_use_duration_or_mode");
-        }
+        if ((!mode.equals("once") && !mode.equals("continuous")) || duration < 1) throw new IllegalArgumentException("invalid_use_duration_or_mode");
         if (current.phase == 0) {
             if (!current.item.isBlank()) selectItem(client, current.item);
             else current.item = itemPath(client.player.getMainHandItem());
             current.before = count(client, current.item);
-            current.phaseTick = current.ticks;
-            current.phase = 1;
-        }
-        if (count(client, current.item) < current.before) {
-            requestStop("completed", "item_consumed");
+            current.phaseTick = current.ticks; current.phase = 1;
             return;
         }
-        int heldTicks = mode.equals("once") ? 1 : duration;
-        if (current.ticks - current.phaseTick >= heldTicks) {
-            requestStop("completed", "use_duration_elapsed");
+        if (mode.equals("once")) {
+            if (current.phase == 1 && current.ticks - current.phaseTick >= 3) {
+                InteractionResult result = InteractionResult.PASS;
+                if (client.hitResult instanceof EntityHitResult hit && client.player.distanceToSqr(hit.getEntity()) <= 25) {
+                    result = client.gameMode.interact(client.player, hit.getEntity(), hit, InteractionHand.MAIN_HAND);
+                } else if (client.hitResult instanceof BlockHitResult hit && hit.getType() == HitResult.Type.BLOCK
+                    && client.player.isWithinBlockInteractionRange(hit.getBlockPos(), 0)) {
+                    result = client.gameMode.useItemOn(client.player, InteractionHand.MAIN_HAND, hit);
+                }
+                if (!result.consumesAction()) client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
+                current.phase = 2; current.phaseTick = current.ticks;
+            }
+            if (current.phase == 2 && current.ticks - current.phaseTick >= 6) requestStop("completed", "interaction_applied");
             return;
         }
-        if (!itemPath(client.player.getMainHandItem()).equals(current.item)) {
-            requestStop("failed", "held_item_changed");
-            return;
-        }
-        // Minecraft cancels eating/charging when the use key is released.
-        // Keep native use alive across ticks, including a server slot update.
+        if (count(client, current.item) < current.before) { requestStop("completed", "item_consumed"); return; }
+        if (current.ticks - current.phaseTick >= duration) { requestStop("completed", "use_duration_elapsed"); return; }
+        if (!itemPath(client.player.getMainHandItem()).equals(current.item)) { requestStop("failed", "held_item_changed"); return; }
         client.options.keyUse.setDown(true);
-        if (!client.player.isUsingItem()) {
-            client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
-        }
+        if (!client.player.isUsingItem()) client.gameMode.useItem(client.player, InteractionHand.MAIN_HAND);
     }
 
     private void tickEngage(Minecraft client, Run current) {
@@ -1320,6 +1392,14 @@ public final class MineBotClientBody implements ClientModInitializer {
                 if (!requestedType.equals("crafting") && !(display instanceof FurnaceRecipeDisplay)) continue;
                 variant.addProperty("output_item", BuiltInRegistries.ITEM.getKey(output.getItem()).toString());
                 variant.addProperty("output_count", output.getCount());
+                variant.addProperty("output_max_stack", output.getMaxStackSize());
+                int maxCrafts = Math.max(1, output.getMaxStackSize() / output.getCount());
+                for (SlotDisplay ingredient : ingredients) {
+                    int ingredientCapacity = ingredient.resolveForStacks(context).stream()
+                        .mapToInt(ItemStack::getMaxStackSize).min().orElse(64);
+                    maxCrafts = Math.min(maxCrafts, ingredientCapacity);
+                }
+                variant.addProperty("max_craft_count", maxCrafts * output.getCount());
                 JsonArray groups = new JsonArray();
                 for (SlotDisplay ingredient : ingredients) {
                     JsonArray alternatives = new JsonArray();
@@ -1936,8 +2016,12 @@ public final class MineBotClientBody implements ClientModInitializer {
     }
 
     public static void observeBlockUpdate(BlockPos pos, BlockState state) {
-        if (instance == null || instance.run == null || !isVertical(instance.run)) return;
+        if (instance == null || instance.run == null) return;
         Run current = instance.run;
+        if (current.kind.equals("placeBlock") && current.phase == 3 && pos.equals(current.anchor)) {
+            current.placementConfirmed = BuiltInRegistries.BLOCK.getKey(state.getBlock()).getPath().equals(current.item);
+        }
+        if (!isVertical(current)) return;
         BlockState before = current.verticalTouched.get(pos);
         if (before != null && !before.equals(state) && current.verticalConfirmed.add(pos.immutable())) current.mutations++;
     }
@@ -2344,6 +2428,8 @@ public final class MineBotClientBody implements ClientModInitializer {
         String[] targets = new String[0];
         int mineQuantity = 1;
         boolean structured;
+        BlockHitResult placementHit;
+        boolean placementConfirmed;
         JsonObject params = new JsonObject();
         int phase;
         int phaseTick;

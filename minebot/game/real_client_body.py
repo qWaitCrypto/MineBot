@@ -222,14 +222,23 @@ class RealClientBody:
         limit = max(1, min(128, int(params.get("limit") or 64)))
         entities = [dict(item) for item in raw_entities if isinstance(item, Mapping)
                     and (item.get("health") is None or float(item["health"]) > 0)]
+        radius = max(1, min(64, float(params.get("radius") or 32)))
+        entities = [item for item in entities if float(item.get("dist2", float("inf"))) <= radius * radius]
+        raw_types = params.get("types") or params.get("entity_types") or []
+        if isinstance(raw_types, str):
+            raw_types = [raw_types]
+        types = {_unnamespace(str(value)) for value in raw_types}
+        if types:
+            entities = [item for item in entities if _unnamespace(str(item.get("type", ""))) in types]
         if scope == "nearbyHostiles":
             entities = [item for item in entities if bool(item.get("hostile"))]
+        entities.sort(key=lambda item: (float(item.get("dist2", float("inf"))), str(item.get("id", ""))))
         return PerceptionResult(
             bot=self.bot_name,
             scope=scope,
             type="perception",
             ok=True,
-            complete=True,
+            complete=len(entities) <= limit,
             data={"entities": entities[:limit], "count": min(len(entities), limit)},
             uncertainty=[],
         )
@@ -304,7 +313,15 @@ class RealClientBody:
             self._ensure_connected()
             if control is not None:
                 control_type, fields = control
+                drop_slot = None
+                if control_type == "primitive" and fields.get("action_name") == "dropItem":
+                    before = self.ipc.state()
+                    drop_slot = int(dict(fields.get("params") or {}).get("slot", before.get("selected_slot", 0)))
+                    count_before = next((int(slot.get("count",0)) for slot in before.get("inventory_slots",[]) if slot.get("slot")==drop_slot),0)
                 response = self.ipc.control(control_type, **fields)
+                if drop_slot is not None:
+                    response["count_before"] = count_before
+                    response["count_after"] = next((int(slot.get("count",0)) for slot in response.get("inventory_slots",[]) if slot.get("slot")==drop_slot),0)
                 event = _control_event(self.bot_name, pending.action, response)
                 self._merge_state_payload(response)
             elif wire_action is not None:
@@ -530,45 +547,7 @@ class RealClientBody:
         with self._lock:
             if self._active is not None:
                 return _gap_perception(self.bot_name, "findBlocks", "body_busy")
-        try:
-            self._ensure_connected()
-            locations: list[dict[str, object]] = []
-            for target in targets[:16]:
-                response = self.ipc.scan(_unnamespace(target))
-                for raw in response.get("locations") or []:
-                    if isinstance(raw, (list, tuple)) and len(raw) == 3:
-                        locations.append({"x": int(raw[0]), "y": int(raw[1]), "z": int(raw[2]), "type": _unnamespace(target)})
-        except Exception as error:
-            return _gap_perception(self.bot_name, "findBlocks", f"scan:{type(error).__name__}")
-        position = response.get("position") if targets else None
-        if isinstance(position, (list, tuple)) and len(position) == 3 and params.get("radius") is not None:
-            radius = max(1, min(64, int(params["radius"])))
-            y_radius = max(1, min(64, int(params.get("y_radius") or radius)))
-            locations = [pos for pos in locations if abs(pos["x"] - position[0]) <= radius
-                         and abs(pos["z"] - position[2]) <= radius and abs(pos["y"] - position[1]) <= y_radius]
-        limit = max(1, min(256, int(params.get("limit") or 32)))
-        start = max(0, int(params.get("start") or 0))
-        matches = locations[start : start + limit]
-        next_start = start + limit if start + limit < len(locations) else None
-        return PerceptionResult(
-            bot=self.bot_name,
-            scope="findBlocks",
-            type="perception",
-            ok=True,
-            complete=next_start is None,
-            data={
-                "start": start,
-                "limit": limit,
-                "count": len(matches),
-                "totalMatches": len(locations),
-                "nextStart": next_start,
-                "matches": matches,
-                "blocks": matches,
-                "coverage_complete": False,
-            },
-            uncertainty=[{"reason": "client_loaded_chunks_only"}],
-            next=None if next_start is None else str(next_start),
-        )
+        return self._world_read_perception("findBlocks", {**params, "block_types": targets})
 
     def _next_seq(self) -> int:
         with self._lock:
@@ -658,7 +637,7 @@ def _objective_for(action: Action) -> str | None:
                 target = _position(waypoints[-1])
         if target is None:
             return None
-        return f"near:{target[0]}:{target[1]}:{target[2]}:{max(1, math.ceil(float(params.get('arrival_radius', 1))))}"
+        return f"near:{target[0]}:{target[1]}:{target[2]}:{max(0, math.floor(float(params.get('arrival_radius', 1))))}"
     if name in {"mineResource", "baritoneMine"}:
         return _mine_objective(params)
     if name in {"mineBlock", "collectBlock"}:
@@ -716,7 +695,7 @@ def _wire_action_for(action: Action) -> dict[str, object] | None:
     """
     names = {
         "engageEntity", "rangedAttack", "craftItem", "containerTransfer",
-        "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp", "useItem",
+        "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp", "useItem", "placeBlock",
     }
     if action.name not in names:
         return None
@@ -800,7 +779,7 @@ def _control_for(action: Action) -> tuple[str, dict[str, object]] | None:
         return ("builder_selection", {"operation": operation, "direction": direction, "amount": amount})
     if name in {
         "jump", "stop", "selectItem", "selectSlot", "lookAt", "attackEntity",
-        "dropItem", "moveItem", "placeBlock",
+        "dropItem", "moveItem",
         "igniteBlock", "sowCrop",
     }:
         return ("primitive", {"action_name": name, "params": params})
@@ -820,7 +799,7 @@ def _goal_objective(raw_goal: object, arrival_radius: object) -> str | None:
             return None
         radius_raw = raw_goal.get("range", raw_goal.get("radius", arrival_radius or 1))
         try:
-            radius = max(0, math.ceil(float(radius_raw)))
+            radius = max(0, math.floor(float(radius_raw)))
         except (TypeError, ValueError):
             return None
         return f"near:{position[0]}:{position[1]}:{position[2]}:{radius}"
@@ -881,7 +860,7 @@ def _goal_token(raw_goal: object) -> str | None:
         if position is None:
             return None
         try:
-            radius = max(0, math.ceil(float(raw_goal.get("range", raw_goal.get("radius", 1)))))
+            radius = max(0, math.floor(float(raw_goal.get("range", raw_goal.get("radius", 1)))))
         except (TypeError, ValueError):
             return None
         return f"near:{position[0]}:{position[1]}:{position[2]}:{radius}"

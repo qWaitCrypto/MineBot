@@ -821,8 +821,12 @@ def interaction_stand_points(
         include_target=include_target,
         interaction_radius=interaction_radius,
     )
-    if isinstance(one_below, ToolResult) or one_below or not expand_vertical:
+    if isinstance(one_below, ToolResult) or one_below:
         return one_below
+    one_above = _interaction_reach_band(body, target, vertical_offset=1,
+        include_target=include_target, interaction_radius=interaction_radius)
+    if isinstance(one_above, ToolResult) or one_above or not expand_vertical:
+        return one_above
 
     current_y = body.get_state().pos[1]
     extra_levels = _interaction_vertical_reach_levels(
@@ -1035,6 +1039,11 @@ def _entity_distance_band_stand_points(
         center = (pos[0] + 0.5, pos[1] if height is None else height, pos[2] + 0.5)
         distance = dist(center, target)
         if distance < min_distance or (max_distance is not None and distance > max_distance):
+            continue
+        # Navigation may stop at the edge of the feet cell. Keep the whole
+        # horizontal cell within reach instead of trusting its center alone.
+        if max_distance is not None and max(dist((x, center[1], z), target)
+                for x in (pos[0], pos[0]+1) for z in (pos[2], pos[2]+1)) > max_distance:
             continue
         candidates.append((dist(state.pos, center), pos))
 
