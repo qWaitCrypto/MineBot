@@ -7,7 +7,6 @@ sequence. Parent-only RCON prepares fixtures and independently checks results.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import os
 from pathlib import Path
@@ -15,7 +14,6 @@ import re
 import subprocess
 import sys
 import time
-from types import SimpleNamespace
 
 from minebot.app.local_launcher import load_runtime_environment
 from minebot.game.rcon import RconClient, RconConfig
@@ -80,11 +78,17 @@ def run_continuity(args, environment, rcon, bot, goal, report, log):
         return tuple(float(v.strip().rstrip("dDfF")) for v in values[1].split(","))
 
     try:
-        collecting = wait("collecting_before_chat", lambda es: pending_tool(
-            es, 0, lambda e: "collect" in e.get("tool", "")) if any(
-            e.get("event") == "body_state" and (e.get("pending_action_count") or 0) > 0
-            for e in es) else None)
+        def collecting_active(es):
+            call = pending_tool(es, 0, lambda e: "collect" in e.get("tool", ""))
+            if call and sum((a - b) ** 2 for a, b in zip(position(), (32.5, 150, 28.5))) > 0.25:
+                return call
+            return None
+        collecting = wait("collecting_before_chat", collecting_active)
         report["collect_call_id"] = collecting["tool_call_id"]
+        report["native_async_call"] = next((e for e in events()
+            if e.get("event") == "responses_tool_started" and e.get("tool_call_id") == collecting["tool_call_id"]), None)
+        if not report["native_async_call"] or not report["native_async_call"].get("asynchronous"):
+            raise RuntimeError("The actual collection call was not native async")
         chat_cursor = len(events())
         send("How is it going? Keep doing the job.")
         send("After giving the logs to Receiver, return to our starting point (32.5, 150, 28.5).")
@@ -159,6 +163,7 @@ def main() -> int:
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--continuity", action="store_true", help="Native Responses collection/handoff, chat, appended return and explicit cancel")
     parser.add_argument("--model", help="Optional experiment model override")
+    parser.add_argument("--transport", choices=("http", "websocket"), default="http")
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--output-dir", type=Path, default=Path("logs") / f"agent-collect-{time.time_ns()}")
     args = parser.parse_args()
@@ -178,15 +183,9 @@ def main() -> int:
         if args.model:
             environment["MINEBOT_LLM_MODEL"] = args.model
         if args.continuity:
-            from tools.probe_responses_protocol import probe
-            environment.update(MINEBOT_AGENT_KERNEL="responses", MINEBOT_LLM_KIND="openai_responses")
+            environment.update(MINEBOT_AGENT_KERNEL="responses", MINEBOT_LLM_KIND="openai_responses", MINEBOT_RESPONSES_TRANSPORT=args.transport)
+            report["transport"] = args.transport
             report["conditions"] = "empty inventories; three logs behind a stone obstacle; Receiver at far end; user chat and appended return during collection; separate movement cancellation"
-            report["phase"] = "native_api_protocol"
-            report["protocol"] = asyncio.run(probe(SimpleNamespace(
-                env_file=None, model=environment.get("MINEBOT_LLM_MODEL"),
-                proxy=environment.get("MINEBOT_LLM_PROXY")), environment=environment))
-            if not report["protocol"]["success"]:
-                raise RuntimeError(f"Native API failed at {report['protocol']['phase']}: {report['protocol'].get('error_type')}: {report['protocol'].get('reason')}; Minecraft task not started")
             receiver = RealClientBody("Receiver", RealClientIpc(port=8769, timeout_s=5))
             try:
                 receiver.get_state()

@@ -1354,6 +1354,7 @@ class AgentRuntime:
                 invoke=self._invoke_responses_tool, emit=self.trace.emit, speak=self._responses_speak,
                 needs_work=lambda: bool(self.agent_context.goal_text.strip()) and self.native_task_outcome is None,
                 proxy=getattr(model_provider, "responses_proxy", None),
+                transport=getattr(model_provider, "responses_transport", "websocket"),
             )
 
     def _responses_tools(self) -> list[dict[str, Any]]:

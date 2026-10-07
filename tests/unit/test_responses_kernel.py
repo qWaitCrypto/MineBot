@@ -99,6 +99,72 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all("tools" in e for e in wire.sent))
         await kernel.close()
 
+    async def test_http_keeps_work_alive_and_replays_native_history_for_late_result(self):
+        release, started, finish_response = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        requests, spoken = [], []
+        class Stream:
+            def __init__(self, number):
+                self.number = number
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                pass
+            async def __aiter__(self):
+                rid = f"http{self.number}"
+                yield SimpleNamespace(model_dump=lambda **kw: created(rid))
+                output = []
+                if self.number == 1:
+                    event = call("http-original")
+                    output = [{"type": "reasoning", "encrypted_content": "opaque"}, event["item"]]
+                    yield SimpleNamespace(model_dump=lambda **kw: event)
+                    await finish_response.wait()
+                else:
+                    item = {"type": "message", "role": "assistant", "id": rid + "-text",
+                            "content": [{"type": "output_text", "text": "ACK" if self.number == 2 else "COUNT=3"}]}
+                    output = [item]
+                event = terminal(rid)
+                event["response"]["output"] = output
+                yield SimpleNamespace(model_dump=lambda **kw: event)
+        async def create(**params):
+            requests.append(params)
+            return Stream(len(requests))
+        async def invoke(*args):
+            started.set()
+            await release.wait()
+            return {"success": True, "count": 3}
+        async def instructions():
+            return "inventory=3" if release.is_set() else "inventory=0"
+        kernel = ResponsesKernel(client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            model="test", tools=lambda: [{"type": "function", "name": "work", "async": True}],
+            instructions=instructions, invoke=invoke, emit=lambda *a, **kw: None,
+            speak=spoken.append, transport="http", request_timeout_s=2)
+        run = asyncio.create_task(kernel.run("Collect"))
+        try:
+            await started.wait()
+            kernel.steer("How is it going?")
+            await asyncio.sleep(0.01)
+            self.assertEqual(len(requests), 1)  # HTTP input waits for the model, not the body.
+            finish_response.set()
+            await until(lambda: "ACK" in spoken)
+            self.assertFalse(kernel.calls["http-original"].task.done())
+            self.assertEqual(requests[1]["input"][-1]["content"], "How is it going?")
+            release.set()
+            await asyncio.wait_for(run, 2)
+            self.assertEqual(spoken, ["ACK", "COUNT=3"])
+            last = requests[-1]
+            self.assertEqual(sum(i.get("type") == "function_call_output" for i in last["input"]), 1)
+            self.assertEqual(last["input"][-1]["call_id"], "http-original")
+            self.assertTrue(any(i.get("encrypted_content") == "opaque" for i in last["input"]))
+            self.assertIn("inventory=3", last["instructions"])
+            self.assertNotIn("inventory=0", last["instructions"])
+            self.assertTrue(all(not p["store"] and "previous_response_id" not in p for p in requests))
+        finally:
+            release.set()
+            finish_response.set()
+            run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
+            await kernel.close()
+
     async def test_native_steering_uses_automatic_successor_without_duplicate_input(self):
         release, started = asyncio.Event(), asyncio.Event()
         async def invoke(*args):

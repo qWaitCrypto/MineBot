@@ -10,11 +10,15 @@ import json
 import os
 from pathlib import Path
 import shlex
+import sys
 from urllib.parse import urlparse
 
 import httpx
 import openai
 from openai import AsyncOpenAI
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 async def probe(args, *, environment=None):
@@ -39,12 +43,19 @@ async def probe(args, *, environment=None):
             "async": True, "strict": True, "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}}
     client = AsyncOpenAI(api_key=key, base_url=base_url, max_retries=0, timeout=25,
                          http_client=httpx.AsyncClient(proxy=proxy) if proxy else None)
+    transport = getattr(args, "transport", None) or env.get("MINEBOT_RESPONSES_TRANSPORT", "http")
+    report["transport"] = transport
     events = []
     try:
         options = {"open_timeout": 15}
         if proxy:
             options["proxy"] = proxy
-        async with client.responses.connect(max_retries=0, websocket_connection_options=options) as ws:
+        if transport == "http":
+            from minebot.app.responses_kernel import _HttpResponsesConnection
+            connection = _HttpResponsesConnection(client)
+        else:
+            connection = client.responses.connect(max_retries=0, websocket_connection_options=options)
+        async with connection as ws:
             async def send(value):
                 await ws.send_raw(json.dumps(value))
 
@@ -64,7 +75,7 @@ async def probe(args, *, environment=None):
 
             def create(inputs, previous=None, **extra):
                 value = {"type": "response.create", "model": model, "tools": [tool], "input": inputs,
-                         "store": True, "max_output_tokens": 256, **extra}
+                         "store": True, "max_output_tokens": 256, "reasoning": {"effort": "low"}, **extra}
                 if previous:
                     value["previous_response_id"] = previous
                 return value
@@ -80,6 +91,10 @@ async def probe(args, *, environment=None):
                 report["phase"] = "pending_user_turn"
                 await send(create("While that job is still pending, reply ACK.", first["id"], tool_choice="none"))
                 second = await receive()
+                chat = "\n".join(part.get("text", "") for item in second.get("output", []) for part in item.get("content", []))
+                if "ACK" not in chat:
+                    raise RuntimeError("Conversation with a pending native async call did not return ACK")
+                report["pending_chat"] = True
                 report["phase"] = "late_result"
                 await send(create([{"type": "function_call_output", "call_id": call["call_id"],
                                     "output": '{"count":3}'}], second["id"], tool_choice="none",
@@ -88,20 +103,25 @@ async def probe(args, *, environment=None):
                 text = "\n".join(part.get("text", "") for item in third.get("output", []) for part in item.get("content", []))
                 if "COUNT=3" not in text:
                     raise RuntimeError("Late result was not reflected in the response: " + text[:200])
-                report["phase"] = "steering"
-                async def steer(rid):
-                    await send({"type": "response.steer", "previous_response_id": rid, "input": "Stop counting. Reply exactly STEERED."})
-                await send(create("Count slowly from 1 to 100 in words.", third["id"], tool_choice="none", max_output_tokens=1024))
-                before = await receive(steer)
-                after = await receive()
-                if before["id"] == after["id"] or "response.steer.accepted" not in events:
-                    raise RuntimeError("Steering did not produce an accepted automatic successor")
-                text = "\n".join(part.get("text", "") for item in after.get("output", []) for part in item.get("content", []))
-                if "STEERED" not in text:
-                    raise RuntimeError("The steering request was not reflected in the successor")
-                report.update(success=True, phase="completed", native_async=True, late_result=True, steering=True)
+                if transport == "http":
+                    report.update(success=True, phase="completed", native_async=True, late_result=True, steering=False)
+                else:
+                    report["phase"] = "steering"
+                    async def steer(rid):
+                        await send({"type": "response.steer", "previous_response_id": rid, "input": "Stop counting. Reply exactly STEERED."})
+                    await send(create("Count slowly from 1 to 100 in words.", third["id"], tool_choice="none", max_output_tokens=1024))
+                    before = await receive(steer)
+                    after = await receive()
+                    if before["id"] == after["id"] or "response.steer.accepted" not in events:
+                        raise RuntimeError("Steering did not produce an accepted automatic successor")
+                    text = "\n".join(part.get("text", "") for item in after.get("output", []) for part in item.get("content", []))
+                    if "STEERED" not in text:
+                        raise RuntimeError("The steering request was not reflected in the successor")
+                    report.update(success=True, phase="completed", native_async=True, late_result=True, steering=True)
     except Exception as exc:
         report.update(error_type=type(exc).__name__, reason=str(exc).replace(key, "[redacted]")[:600] or type(exc).__name__)
+        if exc.__cause__ is not None:
+            report["cause"] = type(exc.__cause__).__name__ + ": " + str(exc.__cause__).replace(key, "[redacted]")[:300]
     finally:
         await client.close()
     report["events"] = events
@@ -113,6 +133,7 @@ def main():
     parser.add_argument("--env-file")
     parser.add_argument("--model")
     parser.add_argument("--proxy")
+    parser.add_argument("--transport", choices=("http", "websocket"), help="HTTP verifies native async; WebSocket also verifies mid-turn steering")
     args = parser.parse_args()
     report = asyncio.run(probe(args))
     print(json.dumps(report, ensure_ascii=False, indent=2))

@@ -754,21 +754,26 @@ async def run_real_server_interactive(
                 scope=scope,
             )
             await conversation_session.sync_archive()
-            body_event_pump = BodyEventPump(
-                body,
-                work_queue,
-                state_store,
-                scope,
-            )
-            startup_reconciliation = enqueue_startup_reconciliation(
-                body=body,
-                event_pump=body_event_pump,
-                queue=work_queue,
-                workspace=task_workspace,
-                orphaned_intents=work_queue.orphaned_intents,
-                app_reloaded=app_reloaded,
-                terminal_probe=_startup_terminal_probe,
-            )
+            body_event_pump = startup_reconciliation = None
+            # Persistent server event cursors are an optional backend facility.
+            # Client tools return their own terminals; fresh state is read by
+            # the model kernel before every request.
+            if callable(getattr(body, "event_head", None)):
+                body_event_pump = BodyEventPump(
+                    body,
+                    work_queue,
+                    state_store,
+                    scope,
+                )
+                startup_reconciliation = enqueue_startup_reconciliation(
+                    body=body,
+                    event_pump=body_event_pump,
+                    queue=work_queue,
+                    workspace=task_workspace,
+                    orphaned_intents=work_queue.orphaned_intents,
+                    app_reloaded=app_reloaded,
+                    terminal_probe=_startup_terminal_probe,
+                )
         except (
             BodyProtocolError,
             RuntimeIdentityError,
@@ -834,17 +839,18 @@ async def run_real_server_interactive(
                 trace=trace,
             )
             trace.emit("runtime_scope", **scope.to_payload(), scope_key=scope.key)
-            trace.emit(
-                "startup_reconciliation",
-                intent_id=startup_reconciliation.intent.intent_id,
-                decision=startup_reconciliation.decision.value,
-                event_count=len(startup_reconciliation.events),
-                orphaned_intent_count=len(startup_reconciliation.orphaned_intents),
-                inventory_counts=startup_reconciliation.inventory_counts,
-                state_missing=startup_reconciliation.state.missing,
-                state_pos=list(startup_reconciliation.state.pos),
-                app_reloaded=app_reloaded,
-            )
+            if startup_reconciliation is not None:
+                trace.emit(
+                    "startup_reconciliation",
+                    intent_id=startup_reconciliation.intent.intent_id,
+                    decision=startup_reconciliation.decision.value,
+                    event_count=len(startup_reconciliation.events),
+                    orphaned_intent_count=len(startup_reconciliation.orphaned_intents),
+                    inventory_counts=startup_reconciliation.inventory_counts,
+                    state_missing=startup_reconciliation.state.missing,
+                    state_pos=list(startup_reconciliation.state.pos),
+                    app_reloaded=app_reloaded,
+                )
             return parts
 
         session = AgentSession(

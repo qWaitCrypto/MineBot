@@ -6,13 +6,15 @@
 
 理念来自 [Issue #1](https://github.com/qWaitCrypto/MineBot/issues/1) 的完整 P01–P40。本计划不把已有契约、治理或进度机制当作必须保留的产品理念。
 
+2026-10-07 用户进一步明确：原生异步工具是主线，原生 response.steer 是次要能力。当前优先使用已实测的 HTTP Responses 完成连续任务；WebSocket 路径保留，实际 steering 验证单独记录。
+
 ## 范围与接口
 
 - 复用 ToolRegistry、真实客户端 Body、工具结果投影和物理取消。
 - 长动作独立于模型协程存活；按原始 call_id 保留 pending 调用，终态以真实 function_call_output 返回。模型轮次结束和普通聊天不取消身体。
 - 同一身体只有一个写动作；读取和取消不能排在长写动作后面。
-- 活跃响应期间使用 response.steer 接收用户消息；模型空闲时以普通新输入续接。accepted、pending、steered 和自动后继响应遵循原生协议，避免重复消息。
-- 工具结果在合法续接点提交，引用最新 response_id；每次 response.create 重新提供工具定义和最新 instructions。
+- HTTP 路径在当前模型响应结束后提交排队的新消息，身体工具独立运行。WebSocket 路径在活跃响应期间使用 response.steer；accepted、pending、steered 和自动后继响应遵循原生协议，避免重复消息。
+- 工具结果在合法续接点按原始 call_id 提交。HTTP 使用完整 input/output 历史、store=false 与 reasoning.encrypted_content；WebSocket 引用最新 response_id。每次请求重新提供工具定义和最新 instructions。
 - 只固定一个真实可用的模型、SDK、端点组合。先核对现有端点；不自动退回同步 Runner 并声称异步已完成。
 - 不移植 Pi，不建立 provider 平台、Gate、世界保护工程或长期记忆平台；不重写整个 Brain/Body。
 
@@ -36,7 +38,8 @@
 ## 当前进度
 
 - [x] 目标已创建，当前执行计划已切换。
-- [ ] 固定一个完整协议可用的端点组合：gpt-6.1-sol / OpenAI SDK 2.36.0 的 HTTP 原生异步工具已实测通过；WebSocket steering 仍因账户筛选失败而未验证。
+- [x] 固定 gpt-6.1-sol / OpenAI SDK 2.36.0 / 现有端点的 HTTP 原生异步组合，普通请求和原生 SSE 均已实测。
+- [ ] WebSocket steering 真实验证：现有 provider 仍未提供可用账户，按用户优先级放在异步工具主线之后。
 - [x] Responses 内核与定向接口验证。
 - [x] 生产入口、消息 steering、明确取消、短计划和最新上下文接通；会话回归覆盖 SQLite 消息队列与同步执行线程。
 - [ ] 真实模型 + Minecraft 连续任务和物理取消验收。
@@ -49,9 +52,10 @@
 MINEBOT_AGENT_KERNEL=responses
 MINEBOT_LLM_KIND=openai_responses
 MINEBOT_LLM_MODEL=gpt-6.1-sol
+MINEBOT_RESPONSES_TRANSPORT=http
 ```
 
-沿用现有端点和密钥配置；需要指定网络代理时使用 `MINEBOT_LLM_PROXY`。基础 SDK 的原生 WebSocket wire 方法承载新协议，不升级整套 Agents SDK。模型实际返回的调用 `async` 标志决定是否允许在该结果未返回时继续响应，不能把工具声明支持异步当作调用已经异步。
+沿用现有端点和密钥配置；需要指定网络代理时使用 `MINEBOT_LLM_PROXY`。新内核默认选 HTTP/SSE，可显式设置 MINEBOT_RESPONSES_TRANSPORT=websocket；使用基础 SDK 的两种原生接口，不升级整套 Agents SDK，也不在失败后自动切换传输。模型实际返回的调用 `async` 标志决定是否允许在该结果未返回时继续响应，不能把工具声明支持异步当作调用已经异步。
 
 ```bash
 python -m pytest -q
@@ -59,7 +63,7 @@ python tools/probe_responses_protocol.py --env-file /private/provider.env --mode
 python -m tests.e2e_real_client_agent_collect --disposable-local-server --continuity --env-file /private/provider.env --model gpt-6.1-sol
 ```
 
-协议实验只验证真实 API，不启动 Minecraft。它依次验证原生异步调用、未完成调用期间的新输入、原始 call_id 的迟到结果和 steering 自动后继响应。没有成功就返回具体阶段与错误。原生接口定义见 [异步工具](https://developers.openai.com/api/docs/guides/async-tool-calling)、[steering](https://developers.openai.com/api/docs/guides/steering)。
+协议实验只验证真实 API，不启动 Minecraft。默认 HTTP 验证原生异步调用、未完成调用期间的新输入和原始 call_id 的迟到结果；--transport websocket 另验 steering 自动后继响应。没有成功就返回具体阶段与错误。原生接口定义见 [异步工具](https://developers.openai.com/api/docs/guides/async-tool-calling)、[steering](https://developers.openai.com/api/docs/guides/steering)。
 
 新内核用 `update_plan` 和 `finish_task` 承载短计划与模型判断；计划 revision、记录 ID 由运行时填写。模型完成记录明确标注 `completion_authority=model`，不套用旧物资目标解析器，也不标成服务端已独立验证。真实任务实验仍用库存、交接与位置观测确认结果。
 
@@ -69,7 +73,7 @@ python -m tests.e2e_real_client_agent_collect --disposable-local-server --contin
 
 现有私有端点 `2.1885566.xyz` 对 gpt-6-astra 和 gpt-6.1-sol 的 HTTP Responses 请求成功，但链式 HTTP 请求返回 400：`previous_response_id is not available for this user`。经显式网络代理，gpt-6.1-sol 的 WebSocket 握手可达，首次请求在任何响应事件之前被关闭：`1013 (try again later) no available account`。固定 SDK 的可复现实验停在 `async_dispatch`，返回 success=false。
 
-现有真实采集脚本已增加 `--continuity` 模式，复用生产交互入口验证采集交接、途中聊天、追加返回和独立取消。模式先执行真实原生协议请求；本机 WSL 尝试在 WebSocket 连接阶段失败（ConnectionResetError），报告明确记录 Minecraft 任务未启动。Windows 的同模型协议复核仍为上游 `1013: no available account`。这些是失败记录，后续世界行为尚未执行。
+现有真实采集脚本的 `--continuity` 模式复用生产交互入口，验证采集交接、途中聊天、追加返回和独立取消。早期脚本的 WebSocket 前置请求失败（ConnectionResetError），记录 Minecraft 任务未启动。现在真实任务直接验证实际采集调用的 async 标志及迟到结果交付，不再每次重复合成工具前置实验。Windows 的同模型协议复核仍为上游 `1013: no available account`。这些是失败记录，后续世界行为尚未执行。
 
 补充实测：同一端点的 gpt-6.1-sol 使用 HTTP Responses、完整 input 历史、store=false 和 reasoning.encrypted_content，避开 previous_response_id，三次请求均返回 200。首轮调用实际带 async=true；暂不提交工具结果，发送普通聊天后收到 ACK；随后用原始 call_id 提交 count=3，收到 COUNT=3。报告：logs/responses-http-async-20261007.json。工具结果为实验数据，尚未接入 Minecraft。
 
@@ -77,4 +81,4 @@ python -m tests.e2e_real_client_agent_collect --disposable-local-server --contin
 
 Sub2API 源码核对固定为 0.2.14 / 3f1a2ea0a760730e3bc528105c00b4ee4f23e469（未确认现有 provider 部署版本）：默认 ctx_pool 与 http_bridge 入口只接受 response.create，会拒绝 response.steer；passthrough 会透传其他事件，具备尝试原生 steering 的通路，但尚无本端点的完整实测。1013/no available account 在网关账户选择失败时生成，需要管理员检查全局 WebSocket 配置、账户模式、分组/模型资格及账户可用性，不能仅凭该报错认定模型不支持。源码见 [入口](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_forwarder_ingress.go#L131-L264)、[透传](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_v2_passthrough_adapter.go#L1150-L1162)、[账户选择](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/handler/openai_gateway_handler.go#L2700-L2729)。
 
-HTTP 原生异步的真实 API 验证已通过；原生 WebSocket steering 和 Minecraft 连续任务仍未完成，goal 保持未完成。后续可以明确采用 HTTP 原生异步推进身体/聊天的连续运行验收，同时继续核实 provider 的 passthrough 配置；若保持原生 mid-turn steering 为验收项，仍需该 WebSocket 通路实际成功。当前生产 Responses 内核仍使用 WebSocket，没有在接口失败后自动改成 HTTP。
+HTTP 原生异步已通过真实 SDK/SSE 验证，新的 HTTP 行为回归与原有内核回归共 8 项通过。生产 Responses 路径现已支持该传输，独立执行、原始调用结果、读取并行、显式取消等语义复用同一循环。真实 Minecraft 验收进行中：交互入口曾因强制调用 Java event_head 退出，随后采集因 blockAt 缺失 interaction_ready 失败，日志分别在 logs/agent-collect-1791366834031649041 和 logs/agent-collect-1791366946608737030。正在按具体失败修正并重跑同一任务；不把协议回归或模型的完成声明代替世界结果。

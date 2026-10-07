@@ -154,6 +154,9 @@ class ModelProviderRegistry(ModelProvider):
             raise ProviderConfigError("kernel must be sdk or responses")
         self.kernel = kernel
         self.responses_proxy = (os.environ if env is None else env).get("MINEBOT_LLM_PROXY") or None
+        self.responses_transport = self._env.get("MINEBOT_RESPONSES_TRANSPORT", "http")
+        if self.responses_transport not in {"http", "websocket"}:
+            raise ProviderConfigError("MINEBOT_RESPONSES_TRANSPORT must be http or websocket")
         self._responses_clients: dict[str, AsyncOpenAI] = {}
         self._models: dict[str, Model] = {}
         self._clients: list[AsyncOpenAI] = []

@@ -1,4 +1,4 @@
-"""Responses WebSocket loop; tool work belongs to the session, not a response.
+"""Native Responses loop; tool work belongs to the session, not a response.
 
 Uses the base SDK's raw WebSocket methods so the pinned SDK does not need to
 know newer event schemas. The wire protocol is native async tools / steering.
@@ -43,6 +43,64 @@ WAIT_TOOL = {
 }
 
 
+class _HttpResponsesConnection:
+    """Read native SSE events; retain full history for stateless continuation."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+        self.history: list[dict[str, Any]] = []
+        self.events: asyncio.Queue[dict[str, Any] | Exception] = asyncio.Queue()
+        self.request: asyncio.Task | None = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        if self.request is not None:
+            self.request.cancel()
+            await asyncio.gather(self.request, return_exceptions=True)
+
+    async def send_raw(self, raw: str) -> None:
+        payload = json.loads(raw)
+        if payload.pop("type") != "response.create":
+            raise ResponsesProtocolError("HTTP Responses does not support native mid-turn steering")
+        if self.request is not None:
+            await self.request
+        payload.pop("previous_response_id", None)
+        inputs = payload["input"]
+        if isinstance(inputs, str):
+            inputs = [{"role": "user", "content": inputs}]
+        payload.update(input=self.history + inputs, store=False, stream=True)
+        payload["include"] = list(dict.fromkeys(payload.get("include", []) + ["reasoning.encrypted_content"]))
+        self.history.extend(inputs)
+        self.request = asyncio.create_task(self._stream(payload))
+
+    async def _stream(self, payload: dict[str, Any]) -> None:
+        try:
+            terminal = False
+            async with await self.client.responses.create(**payload) as stream:
+                async for item in stream:
+                    event = item.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    terminal = event.get("type") in {"response.completed", "response.incomplete", "response.failed"}
+                    if terminal:
+                        self.history.extend(event["response"].get("output", []))
+                    self.events.put_nowait(event)
+                    if terminal:
+                        break
+            if not terminal:
+                raise ResponsesProtocolError("HTTP Responses stream ended without a terminal event")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.events.put_nowait(exc)
+
+    async def recv_bytes(self) -> bytes:
+        event = await self.events.get()
+        if isinstance(event, Exception):
+            raise event
+        return json.dumps(event, ensure_ascii=False).encode()
+
+
 class ResponsesKernel:
     def __init__(
         self,
@@ -58,6 +116,7 @@ class ResponsesKernel:
         request_timeout_s: float = 120.0,
         needs_work: Callable[[], bool] = lambda: False,
         proxy: str | None = None,
+        transport: str = "websocket",
     ) -> None:
         self.client, self.model = client, model
         self.tools, self.instructions, self.invoke = tools, instructions, invoke
@@ -66,6 +125,9 @@ class ResponsesKernel:
         self.request_timeout_s = request_timeout_s
         self.needs_work = needs_work
         self.proxy = proxy
+        if transport not in {"websocket", "http"}:
+            raise ValueError("Responses transport must be websocket or http")
+        self.transport = transport
         self.calls: dict[str, PendingCall] = {}
         self.previous_response_id: str | None = None
         self._connection: Any = None
@@ -96,8 +158,11 @@ class ResponsesKernel:
     async def _connect(self) -> None:
         if self._connection is None:
             # Reconnecting would lose accepted steering held by the server.
-            options = {"proxy": self.proxy} if self.proxy else {}
-            self._manager = self.client.responses.connect(max_retries=0, websocket_connection_options=options)
+            if self.transport == "http":
+                self._manager = _HttpResponsesConnection(self.client)
+            else:
+                options = {"proxy": self.proxy} if self.proxy else {}
+                self._manager = self.client.responses.connect(max_retries=0, websocket_connection_options=options)
             self._connection = await self._manager.__aenter__()
 
     async def _send(self, event: dict[str, Any]) -> None:
@@ -120,7 +185,7 @@ class ResponsesKernel:
         self._submitted_calls = [item["call_id"] for item in inputs if item.get("type") == "function_call_output"]
         self._active = True
         self._active_response_id = None
-        self.emit("responses_request", previous_response_id=self.previous_response_id,
+        self.emit("responses_request", transport=self.transport, previous_response_id=self.previous_response_id,
                   pending_calls=[c.call_id for c in self.pending], instruction_chars=len(instructions))
 
     async def _invoke(self, name: str, arguments: str, call_id: str) -> dict[str, Any]:
@@ -222,7 +287,7 @@ class ResponsesKernel:
                 done, _ = await asyncio.wait(futures, return_when=asyncio.FIRST_COMPLETED,
                                             timeout=self.request_timeout_s if self._active or self._auto_successor else None)
                 if not done:
-                    raise ResponsesProtocolError("Timed out waiting for a Responses WebSocket event")
+                    raise ResponsesProtocolError(f"Timed out waiting for a Responses {self.transport} event")
                 if reader in done:
                     event = json.loads(reader.result())
                     reader = asyncio.create_task(self._connection.recv_bytes())
@@ -236,10 +301,11 @@ class ResponsesKernel:
                         self.previous_response_id = event["response"]["id"]
                         self._active_response_id = self.previous_response_id
                         self._active, self._auto_successor = True, False
-                        for value in queued:
-                            await self._send({"type": "response.steer", "previous_response_id": self.previous_response_id, "input": value})
-                            self._steering.append(value)
-                        queued.clear()
+                        if self.transport == "websocket":
+                            for value in queued:
+                                await self._send({"type": "response.steer", "previous_response_id": self.previous_response_id, "input": value})
+                                self._steering.append(value)
+                            queued.clear()
                     elif kind == "response.output_item.done":
                         final_text = self._observe_item(event["item"]) or final_text
                     elif kind == "response.steer.accepted":
@@ -267,7 +333,7 @@ class ResponsesKernel:
                 if message in done:
                     value = message.result()
                     message = asyncio.create_task(self._messages.get())
-                    if self._active and self._active_response_id:
+                    if self.transport == "websocket" and self._active and self._active_response_id:
                         await self._send({"type": "response.steer", "previous_response_id": self._active_response_id, "input": value})
                         self._steering.append(value)
                     else:

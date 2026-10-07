@@ -76,7 +76,7 @@ They do not prove model planning, conversation, or adaptation.
 
 ## Native Responses API experiment
 
-Before a real task on the new kernel, verify the actual endpoint with:
+When selecting or diagnosing an endpoint, verify its actual native protocol with:
 
 ```bash
 python tools/probe_responses_protocol.py \
@@ -84,13 +84,15 @@ python tools/probe_responses_protocol.py \
 ```
 
 This uses real API calls, without Minecraft. Its JSON distinguishes native
-async dispatch, conversation with a pending call, late result delivery and
-steering, and reports the concrete failed stage. `--proxy` selects a network
+async dispatch, conversation with a pending call and late result delivery,
+and reports the concrete failed stage. HTTP is the default; `--transport websocket`
+also verifies native mid-turn steering. `--proxy` selects a network
 route when needed. The default tests include seven protocol/session fixtures;
 their model and Body substitutes do not prove this live API experiment.
 
 Select the new production path with `MINEBOT_AGENT_KERNEL=responses` in the
-private profile after the endpoint supports it. Configuration and current
+private profile with `MINEBOT_RESPONSES_TRANSPORT=http` (the new kernel default),
+or explicitly choose `websocket`. Configuration and current
 results are in [RUNTIME.md](RUNTIME.md).
 
 ## Real Agent task and observation
@@ -117,11 +119,13 @@ python -m tests.e2e_real_client_agent_collect \
   --env-file /path/to/provider.env --model gpt-6.1-sol
 ```
 
-This mode first calls the actual native API protocol probe; a failure records
-`minecraft_task_started=false` and stops before touching the fixture. On success,
-it requires the second real client `Receiver` on IPC `8769`. The production
+This mode requires the second real client `Receiver` on IPC `8769`. It verifies
+the actual collection call has the native async flag and that its original
+result is accepted by the model. It does not repeat the synthetic API probe.
+`--transport http` is the default; `websocket` remains an explicit option. The production
 interactive Agent chooses its own tools. The parent sends ordinary chat and
-an appended return request during a running collection call, checks the original
+an appended return request during server-observed movement in a running collection
+call, checks the original
 call's successful result and API acknowledgement, then verifies Receiver's
 inventory and the return position through RCON. A separate navigation goal is
 cancelled after server-observed movement; cancellation must settle and position
