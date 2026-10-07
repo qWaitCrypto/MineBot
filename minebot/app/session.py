@@ -215,6 +215,9 @@ class AgentSession:
         if self.parts is not None and always_interrupt:
             cancellation_reason = f"session_command:{command.kind.value}"
             self.parts.authority.invalidate_generation(cancellation_reason)
+            kernel = getattr(self.parts.runtime, "responses_kernel", None)
+            if kernel is not None:
+                kernel.halt()
         superseded = superseded_kinds_for(intent_kind)
         if superseded:
             self.work_queue.supersede(

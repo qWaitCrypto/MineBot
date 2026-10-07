@@ -259,6 +259,17 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         work = asyncio.create_task(session.step())
         try:
             await until(started.is_set)
+            def slow_read(params):
+                while True:
+                    execution_checkpoint()
+                    time.sleep(0.005)
+            registry.register(RegisteredTool(name="read", description="Read with a deadline", callable=slow_read,
+                input_schema={"type": "object", "properties": {}},
+                sidecar=ToolSidecar(progress_key="read", mutating=False, timeout_s=0.02)))
+            result = await session.parts.runtime._invoke_responses_tool("read", "{}", "read-deadline")
+            self.assertFalse(result["success"])
+            self.assertFalse(stopped.is_set())
+            self.assertEqual(body.interrupt_reasons, [])
             session.submit(SessionCommand.message("Then come back", sender="Player"))
             await until(lambda: any(e["type"] == "response.steer" for e in wire.sent))
             self.assertFalse(stopped.is_set())
@@ -283,9 +294,14 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         from minebot.contract import ToolResult
         from tests.unit.test_agent_runner_spine import FakeBody
         body, registry = FakeBody(), ToolRegistry()
+        moves = []
         def move(params):
+            moves.append(params)
+            if len(moves) == 1:
+                from minebot.app.execution_lane import ToolExecutionTimeout
+                raise ToolExecutionTimeout(timeout_s=0.01, execution_elapsed_s=0.02, queue_wait_s=0)
             body.x = 3.0
-            return ToolResult(True, "arrived", metrics={"pos": [3, 64, 0]})
+            return ToolResult(True, "arrived", can_retry=False, metrics={"pos": [3, 64, 0]})
         registry.register(RegisteredTool("work", "Move", {"type": "object", "properties": {}},
             move, ToolSidecar("work", False, body_mutating=True)))
         task_ids = []
@@ -299,6 +315,8 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
                 plan["item"]["arguments"] = json.dumps({"summary": "Move and check", "steps": ["Move three blocks", "Check position"]})
                 wire.feed(plan, call("move"))
             elif n == 3:
+                wire.feed(call("retry-move"))
+            elif n == 4:
                 finish = call("finish", "finish_task")
                 finish["item"]["arguments"] = json.dumps({"status": "complete", "summary": "Arrived", "evidence": ["position is 3,64,0"]})
                 wire.feed(finish)
@@ -323,12 +341,19 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
             result = await asyncio.wait_for(session.step(), 10)
             self.assertEqual(result.status, "completed", (result.message, session.parts.runtime.trace.snapshot()[-8:]) if session.parts else result.message)
             self.assertEqual(body.x, 3)
+            self.assertEqual(len(moves), 2)
+            self.assertTrue(body.interrupt_reasons)
             self.assertEqual(session.parts.runtime.native_task_outcome["status"], "complete")
             self.assertEqual(store.get_task(task_ids[0]).completion_authority.value, "model")
             self.assertEqual(store.get_plan(task_ids[0]).summary, "Move and check")
-            self.assertEqual(len(wire.sent), 4)
-            self.assertIn("3.0", wire.sent[2]["instructions"])
-            self.assertIn("move", [item.get("call_id") for item in wire.sent[2]["input"]])
+            outputs = {item["call_id"]: json.loads(item["output"])
+                       for event in wire.sent for item in event.get("input", [])
+                       if item.get("type") == "function_call_output"}
+            self.assertFalse(outputs["move"]["success"])
+            self.assertTrue(outputs["retry-move"]["success"], outputs)
+            continuation = next(event for event in wire.sent if any(
+                item.get("call_id") == "retry-move" for item in event.get("input", [])))
+            self.assertIn("pos=(3.0, 64.0, 0.0)", continuation["instructions"])
         finally:
             await session.aclose()
             store.close()

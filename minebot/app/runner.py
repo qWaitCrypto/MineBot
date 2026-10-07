@@ -511,7 +511,7 @@ def tool_invoker_for(tool: RegisteredTool):
                     timeout_s=tool.sidecar.timeout_s,
                 )
         except asyncio.CancelledError:
-            if runtime is not None:
+            if runtime is not None and (not getattr(runtime, "native_responses", False) or tool.sidecar.can_mutate_body):
                 await runtime.cancel_active_execution(f"tool_cancelled:{tool.name}")
             if epoch_adapter is not None and epoch_member is not None:
                 epoch_adapter.cancel_member(epoch_member, "tool_cancelled")
@@ -548,7 +548,7 @@ def tool_invoker_for(tool: RegisteredTool):
             cancellation_facts: JsonObject | None = None
             if isinstance(exc, (ToolExecutionTimeout, BodyActionTimeoutError)):
                 settlement_status = "timeout"
-                if runtime is not None:
+                if runtime is not None and (not getattr(runtime, "native_responses", False) or tool.sidecar.can_mutate_body):
                     cancellation_reason = _tool_timeout_cancellation_reason(tool.name, exc)
                     cancellation_facts = await runtime.cancel_active_execution_with_facts(
                         cancellation_reason
@@ -1500,8 +1500,24 @@ class AgentRuntime:
         lane = self._read_lane if self.native_responses and not tool.sidecar.can_mutate_body else self.execution_lane
         return await lane.run(callback, *args, timeout_s=timeout_s)
 
+    async def _drain_responses_calls(self, reason: str) -> None:
+        # Physical idle precedes the async wrappers observing cancellation.
+        # Keep ownership until both lanes and those wrappers have settled.
+        deadline = time.monotonic() + EXECUTION_LANE_CANCEL_TIMEOUT_S
+        self._read_lane.request_cancel(reason)
+        reads_idle = await self._read_lane.wait_idle(timeout_s=max(0.0, deadline - time.monotonic()))
+        if not reads_idle or self.execution_lane.active_count:
+            raise RuntimeError("Responses tools did not settle: execution workers are still running")
+        tasks = [c.task for c in self.responses_kernel.pending if not c.task.done()]
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - time.monotonic()))
+            if pending:
+                raise RuntimeError("Responses tools did not settle: async results are still pending")
+
     async def reset_responses(self) -> None:
         if self.responses_kernel is not None:
+            self.responses_kernel.halt()
+            await self._drain_responses_calls("session_reset")
             await self.responses_kernel.reset()
             self.native_task_outcome = self.native_plan = None
 
@@ -1793,8 +1809,6 @@ class AgentRuntime:
         return await self.execution_lane.wait_idle(timeout_s=timeout_s)
 
     def request_execution_cancel(self, reason: str) -> int:
-        if self.responses_kernel is not None:
-            self.responses_kernel.halt()
         return self.execution_lane.request_cancel(reason)
 
     async def cancel_active_execution(self, reason: str) -> bool:
@@ -1914,14 +1928,13 @@ class AgentRuntime:
 
     async def aclose(self) -> None:
         if self.responses_kernel is not None:
+            self.responses_kernel.halt()
             if any(c.mutating and not c.task.done() for c in self.responses_kernel.pending):
                 await self.cancel_active_execution("runtime_closed")
-            self._read_lane.request_cancel("runtime_closed")
-            reads_idle = await self._read_lane.wait_idle(timeout_s=EXECUTION_LANE_CANCEL_TIMEOUT_S)
-            if reads_idle and self.execution_lane.active_count == 0:
-                await asyncio.gather(*(c.task for c in self.responses_kernel.pending), return_exceptions=True)
-            else:
-                self.trace.emit("runtime_close_unsettled", reads_idle=reads_idle,
+            try:
+                await self._drain_responses_calls("runtime_closed")
+            except RuntimeError as exc:
+                self.trace.emit("runtime_close_unsettled", message=str(exc),
                                 writer_count=self.execution_lane.active_count)
             await self.responses_kernel.close()
         self.close()
