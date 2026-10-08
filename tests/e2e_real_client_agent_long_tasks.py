@@ -319,7 +319,9 @@ def run_case(args, case):
             report["transport_success"] = True
             report["cancellation"] = check_cancel(process, rcon, out, report["home"], send)
     except (Exception, KeyboardInterrupt) as error:
-        report["reason"] = f"{type(error).__name__}: {error}"
+        report.update(success=False, reason=f"{type(error).__name__}: {error}")
+        if isinstance(error, KeyboardInterrupt):
+            args.operator_stopped = True
     finally:
         if process is not None:
             if process.poll() is None:
@@ -369,7 +371,11 @@ def main():
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt("operator stop")))
     cases = list(LIMITS) if args.case == "all" else [args.case]
-    results = [run_case(args, case) for case in cases]
+    results = []
+    for case in cases:
+        results.append(run_case(args, case))
+        if getattr(args, "operator_stopped", False):
+            break
     return 0 if all(results) else 1
 
 
