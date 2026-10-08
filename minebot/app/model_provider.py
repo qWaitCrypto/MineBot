@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -157,6 +158,14 @@ class ModelProviderRegistry(ModelProvider):
         self.responses_transport = self._env.get("MINEBOT_RESPONSES_TRANSPORT", "http")
         if self.responses_transport not in {"http", "websocket"}:
             raise ProviderConfigError("MINEBOT_RESPONSES_TRANSPORT must be http or websocket")
+        if any(cfg.auth == "chatgpt" for cfg in items):
+            if kernel != "responses" or self.responses_transport != "http":
+                raise ProviderConfigError("ChatGPT login uses the Responses HTTP kernel")
+            for cfg in items:
+                if cfg.auth == "chatgpt" and (cfg.kind != "openai_responses"
+                        or (cfg.base_url and cfg.base_url.rstrip("/") != "https://api.openai.com/v1")):
+                    raise ProviderConfigError("ChatGPT OAuth credentials can only use the official Responses endpoint")
+        self.responses_tool_namespace = "minebot" if self._configs[self._default].auth == "chatgpt" else None
         self._responses_clients: dict[str, AsyncOpenAI] = {}
         self._models: dict[str, Model] = {}
         self._clients: list[AsyncOpenAI] = []
@@ -189,6 +198,13 @@ class ModelProviderRegistry(ModelProvider):
                     if k in {"temperature", "top_p", "tool_choice", "parallel_tool_calls", "reasoning"}}
         if "max_tokens" in cfg.settings:
             settings["max_output_tokens"] = cfg.settings["max_tokens"]
+        if cfg.auth == "chatgpt":
+            # Subscription route excludes sampling and explicit output caps.
+            for key in ("temperature", "top_p", "max_output_tokens"):
+                settings.pop(key, None)
+        threshold = cfg.settings.get("compact_threshold", 64_000 if cfg.auth == "chatgpt" else 0)
+        if threshold:
+            settings["context_management"] = [{"type": "compaction", "compact_threshold": threshold}]
         return self._responses_clients[logical_name], cfg.model, settings, _request_timeout_s(cfg)
 
     def capabilities_for(self, logical_name: str) -> Capabilities:
@@ -222,6 +238,7 @@ class ModelProviderRegistry(ModelProvider):
                     "api_shape": cfg.api_shape,
                     "base_url_host": base_url_host,
                     "api_key_env": cfg.api_key_env,
+                    "auth": cfg.auth,
                     "capabilities": {
                         "json_schema": cfg.capabilities.json_schema,
                         "multimodal": cfg.capabilities.multimodal,
@@ -285,9 +302,15 @@ class ModelProviderRegistry(ModelProvider):
         # The agents SDK owns replay-aware retries. Disabling the OpenAI
         # client's hidden retry layer keeps one bounded attempt budget and
         # prevents nested retries from multiplying model wait time.
+        if cfg.auth == "chatgpt":
+            from minebot.app.chatgpt_auth import ChatGPTAuth
+            path = self._env.get("MINEBOT_CHATGPT_AUTH_FILE")
+            credential = ChatGPTAuth(Path(path) if path else None, proxy=self.responses_proxy)
+        else:
+            credential = self._api_key(cfg)
         client = AsyncOpenAI(
-            api_key=self._api_key(cfg),
-            base_url=cfg.base_url,
+            api_key=credential,
+            base_url="https://api.openai.com/v1" if cfg.auth == "chatgpt" else cfg.base_url,
             max_retries=0,
             timeout=_request_timeout_s(cfg),
             http_client=AsyncClient(proxy=self.responses_proxy) if self.responses_proxy else None,

@@ -61,6 +61,7 @@ class ProviderConfig:
     include_usage: bool = False
     tracing: bool = False
     settings: dict[str, Any] = field(default_factory=dict)
+    auth: Literal["api_key", "chatgpt"] = "api_key"
 
     def __post_init__(self) -> None:
         if not self.name:

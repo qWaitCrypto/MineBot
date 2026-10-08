@@ -29,6 +29,9 @@ class AppConfigError(RuntimeError):
 
 def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelProviderRegistry:
     env = os.environ if env is None else env
+    auth = env.get("MINEBOT_LLM_AUTH", "api_key")
+    if auth not in {"api_key", "chatgpt"}:
+        raise AppConfigError("MINEBOT_LLM_AUTH must be api_key or chatgpt")
     model = env.get("MINEBOT_LLM_MODEL") or env.get("OPENAI_MODEL")
     if not model:
         raise AppConfigError("MINEBOT_LLM_MODEL or OPENAI_MODEL is unset")
@@ -36,10 +39,10 @@ def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelPro
     api_key_env = env.get("MINEBOT_LLM_API_KEY_ENV")
     if not api_key_env:
         api_key_env = DEFAULT_API_KEY_ENV if env.get(DEFAULT_API_KEY_ENV) else DEFAULT_OPENAI_API_KEY_ENV
-    if not env.get(api_key_env):
+    if auth == "api_key" and not env.get(api_key_env):
         raise AppConfigError(f"{api_key_env} is unset or empty")
 
-    default_kernel = "responses" if env.get("MINEBOT_LLM_KIND") == "openai_responses" else "sdk"
+    default_kernel = "responses" if auth == "chatgpt" or env.get("MINEBOT_LLM_KIND") == "openai_responses" else "sdk"
     kernel = env.get("MINEBOT_AGENT_KERNEL", default_kernel)
     if kernel not in {"sdk", "responses"}:
         raise AppConfigError("MINEBOT_AGENT_KERNEL must be responses or sdk")
@@ -48,6 +51,12 @@ def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelPro
         raise AppConfigError("MINEBOT_LLM_KIND must be openai_chat, openai_responses, or litellm")
 
     base_url = env.get("MINEBOT_LLM_BASE_URL") or env.get("OPENAI_BASE_URL") or None
+    if auth == "chatgpt":
+        if kernel != "responses" or kind != "openai_responses":
+            raise AppConfigError("ChatGPT login requires the Responses kernel and openai_responses")
+        if base_url and base_url.rstrip("/") != "https://api.openai.com/v1":
+            raise AppConfigError("ChatGPT login requires the official base URL; unset custom provider URLs")
+        base_url, api_key_env = "https://api.openai.com/v1", None
     fast_model = env.get("MINEBOT_LLM_FAST_MODEL") or env.get("OPENAI_FAST_MODEL") or model
     settings = _settings_from_env(env)
     configs = [
@@ -58,6 +67,7 @@ def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelPro
             base_url=base_url,
             api_key_env=api_key_env,
             settings=settings,
+            auth=auth,
         ),
         ProviderConfig(
             name="fast",
@@ -66,6 +76,7 @@ def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelPro
             base_url=base_url,
             api_key_env=api_key_env,
             settings=settings,
+            auth=auth,
         ),
     ]
     return ModelProviderRegistry(configs, default="primary", env=env, kernel=kernel)
@@ -109,6 +120,14 @@ def _settings_from_env(env: Mapping[str, str]) -> dict[str, object]:
                 f"{MIN_MODEL_REQUEST_TIMEOUT_S:g} and {MAX_MODEL_REQUEST_TIMEOUT_S:g} seconds"
             )
         settings["request_timeout_s"] = request_timeout_s
+    if env.get("MINEBOT_RESPONSES_COMPACT_THRESHOLD"):
+        try:
+            threshold = int(env["MINEBOT_RESPONSES_COMPACT_THRESHOLD"])
+        except ValueError:
+            raise AppConfigError("MINEBOT_RESPONSES_COMPACT_THRESHOLD must be an integer") from None
+        if threshold < 0:
+            raise AppConfigError("MINEBOT_RESPONSES_COMPACT_THRESHOLD must be nonnegative (0 disables)")
+        settings["compact_threshold"] = threshold
     return settings
 
 

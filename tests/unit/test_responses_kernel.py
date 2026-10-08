@@ -52,6 +52,53 @@ async def until(predicate):
 
 
 class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_namespaced_async_calls_and_compaction_keep_native_results(self):
+        from minebot.app.responses_kernel import _HttpResponsesConnection
+
+        invokes = []
+        async def invoke(name, arguments, call_id):
+            invokes.append((name, call_id))
+            return {"success": True}
+        async def on_send(event, wire):
+            self.assertEqual(event["tools"][0]["type"], "namespace")
+            self.assertEqual(event["tools"][0]["name"], "minebot")
+            if len(wire.sent) == 1:
+                item = {**call("native")["item"], "namespace": "minebot"}
+                wire.feed(created("r1"), {"type": "response.output_item.done", "item": item}, terminal("r1"))
+            else:
+                self.assertEqual(event["input"][0]["call_id"], "native")
+                wire.feed(created("r2"), terminal("r2"))
+        wire = Wire(on_send)
+        kernel = self.kernel(wire, invoke)
+        kernel.tool_namespace = "minebot"
+        await kernel.run("work")
+        self.assertEqual(invokes, [("work", "native")])
+        await kernel.close()
+
+        compact = {"type": "compaction", "encrypted_content": "opaque"}
+        pending = call("pending")["item"]
+        output = {"type": "function_call_output", "call_id": "pending", "output": '{"success":true}'}
+        requests = []
+        class Stream:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def __aiter__(self):
+                event = terminal("compacted")
+                event["response"]["output"] = [compact] if len(requests) == 1 else []
+                yield SimpleNamespace(model_dump=lambda **kw: event)
+        async def create(**params):
+            requests.append(params)
+            return Stream()
+        connection = _HttpResponsesConnection(SimpleNamespace(responses=SimpleNamespace(create=create)))
+        connection.history = [{"role": "user", "content": "goal"}, pending, compact]
+        async with connection:
+            for inputs in ([{"role": "user", "content": "status?"}], [output], [{"role": "user", "content": "next"}]):
+                await connection.send_raw(json.dumps({"type": "response.create", "input": inputs}))
+                await connection.recv_bytes()
+        self.assertIn(pending, requests[1]["input"])
+        self.assertNotIn(pending, requests[2]["input"])
+        self.assertEqual(requests[2]["input"], [compact, output, {"role": "user", "content": "next"}])
+
     def test_working_context_keeps_requirements_failures_and_native_calls(self):
         from minebot.app.conversation import model_input_chars, responses_working_input
 

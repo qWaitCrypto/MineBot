@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +29,7 @@ class PendingCall:
     mutating: bool
     asynchronous: bool
     delivered: bool = False
+    namespace: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,8 @@ class _HttpResponsesConnection:
                         self.history.append(event["item"])
                     if terminal:
                         self.history[output_start:] = event["response"].get("output", [])
+                        if event["type"] == "response.completed":
+                            self._prune_compacted_history()
                     self.events.put_nowait(event)
                     if terminal:
                         break
@@ -98,6 +102,19 @@ class _HttpResponsesConnection:
             raise
         except Exception as exc:
             self.events.put_nowait(exc)
+
+    def _prune_compacted_history(self) -> None:
+        # Only inline compaction output has this pruning rule. Do not apply it
+        # to /responses/compact's returned window. Keep unresolved native calls
+        # visible until their outputs have been supplied.
+        latest = next((i for i in range(len(self.history) - 1, -1, -1)
+                       if self.history[i].get("type") == "compaction"), None)
+        if latest is None:
+            return
+        calls = {item["call_id"] for item in self.history[:latest] if item.get("type") == "function_call"}
+        results = {item["call_id"] for item in self.history if item.get("type") == "function_call_output"}
+        if calls <= results:
+            del self.history[:latest]
 
     async def recv_bytes(self) -> bytes:
         event = await self.events.get()
@@ -122,6 +139,7 @@ class ResponsesKernel:
         needs_work: Callable[[], bool] = lambda: False,
         proxy: str | None = None,
         transport: str = "websocket",
+        tool_namespace: str | None = None,
     ) -> None:
         self.client, self.model = client, model
         self.tools, self.instructions, self.invoke = tools, instructions, invoke
@@ -133,6 +151,8 @@ class ResponsesKernel:
         if transport not in {"websocket", "http"}:
             raise ValueError("Responses transport must be websocket or http")
         self.transport = transport
+        self.tool_namespace = tool_namespace
+        self._request_started_at = 0.0
         self.calls: dict[str, PendingCall] = {}
         self.previous_response_id: str | None = None
         self._connection: Any = None
@@ -177,6 +197,9 @@ class ResponsesKernel:
     async def _create(self, inputs: list[dict[str, Any]]) -> None:
         instructions = await self.instructions()
         tools = self.tools()
+        if self.tool_namespace and tools:
+            tools = [{"type": "namespace", "name": self.tool_namespace,
+                      "description": "Minecraft observations, actions and current task controls.", "tools": tools}]
         pending = [{"call_id": c.call_id, "tool": c.name, "done": c.task.done()} for c in self.pending]
         if pending:
             instructions += "\nRUNNING_TOOLS: " + json.dumps(pending, ensure_ascii=False)
@@ -185,8 +208,13 @@ class ResponsesKernel:
             "instructions": instructions, "tools": tools,
             "input": inputs, "store": True, **self.settings,
         }
+        if any(not call.task.done() for call in self.pending):
+            # Don't request compaction while a previous physical action still
+            # owes its native result. The next settled request can compact.
+            event.pop("context_management", None)
         if self.previous_response_id:
             event["previous_response_id"] = self.previous_response_id
+        self._request_started_at = time.monotonic()
         await self._send(event)
         self._submitted_calls = [item["call_id"] for item in inputs if item.get("type") == "function_call_output"]
         self._active = True
@@ -210,10 +238,11 @@ class ResponsesKernel:
         if item.get("type") != "function_call":
             return
         call_id, name = item["call_id"], item["name"]
+        namespace = item.get("namespace")
         arguments = item.get("arguments", "{}")
         if call_id in self.calls:
             old = self.calls[call_id]
-            if (name, arguments) != (old.name, old.arguments):
+            if (name, arguments, namespace) != (old.name, old.arguments, old.namespace):
                 raise ResponsesProtocolError("Conflicting duplicate function call: " + call_id)
             return
         definitions = {tool["name"]: tool for tool in self.tools()}
@@ -221,7 +250,7 @@ class ResponsesKernel:
         writer = next((c for c in self.pending if c.mutating and not c.task.done()), None)
         if self._halted:
             job = self._constant({"success": False, "reason": "cancelled", "canRetry": False})
-        elif name not in definitions:
+        elif name not in definitions or namespace not in {None, self.tool_namespace}:
             job = self._constant({"success": False, "reason": "unknown_or_disabled_tool", "tool": name})
         elif mutating and writer:
             job = self._constant({"success": False, "reason": "owner_busy", "canRetry": True,
@@ -230,6 +259,7 @@ class ResponsesKernel:
             job = self._invoke(name, arguments, call_id)
         asynchronous = bool(item.get("async", False))
         self.calls[call_id] = PendingCall(call_id, name, arguments, asyncio.create_task(job), mutating, asynchronous)
+        self.calls[call_id].namespace = namespace
         self.emit("responses_tool_started", tool=name, tool_call_id=call_id, asynchronous=asynchronous)
 
     @staticmethod
@@ -298,6 +328,8 @@ class ResponsesKernel:
                     reader = asyncio.create_task(self._connection.recv_bytes())
                     kind = event.get("type")
                     if kind == "response.created":
+                        self.emit("responses_created", response_model=event["response"].get("model"),
+                                  latency_s=round(time.monotonic() - self._request_started_at, 3))
                         for call_id in self._submitted_calls:
                             call = self.calls[call_id]
                             call.delivered = True
@@ -331,7 +363,11 @@ class ResponsesKernel:
                         reason = (response.get("incomplete_details") or {}).get("reason")
                         if kind == "response.failed" or (kind == "response.incomplete" and reason != "steered"):
                             raise ResponsesProtocolError(f"{kind}: {reason or response.get('error')}")
-                        self.emit("responses_terminal", response_id=self.previous_response_id, reason=reason, status=response.get("status"))
+                        self.emit("responses_terminal", response_id=self.previous_response_id, reason=reason,
+                                  status=response.get("status"), response_model=response.get("model"),
+                                  usage=response.get("usage"),
+                                  compactions=sum(item.get("type") == "compaction" for item in response.get("output", [])),
+                                  elapsed_s=round(time.monotonic() - self._request_started_at, 3))
                     elif kind == "error":
                         error = event.get("error", event)
                         raise ResponsesProtocolError(f"{error.get('code', 'api_error')}: {error.get('message', '')}")

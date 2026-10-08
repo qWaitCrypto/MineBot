@@ -78,6 +78,20 @@ They do not prove model planning, conversation, or adaptation.
 
 ## Native Responses API experiment
 
+Official ChatGPT login uses the same production kernel and local tools:
+
+```bash
+python -m minebot.app.chatgpt_auth login
+python -m tests.probes.official_chatgpt_async --output logs/chatgpt-async.jsonl
+```
+
+This short opt-in experiment requires a native async call, a model reply to
+chat while that call is still running, and its actual late receipt on the
+original call. It does not touch Minecraft. The JSON includes actual model,
+usage/cache fields and terminal status; a login page or a mock pass does not
+prove API access. OAuth-specific regressions can be run with
+`python -m pytest tests/unit/test_chatgpt_auth.py -q`.
+
 When selecting or diagnosing an endpoint, verify its actual native protocol with:
 
 ```bash

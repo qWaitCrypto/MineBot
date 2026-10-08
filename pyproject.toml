@@ -9,6 +9,8 @@ dependencies = [
     # Base Responses WebSocket transport uses native wire events. Keep the
     # compatible SDK pair for MINEBOT_AGENT_KERNEL=sdk.
     "openai==2.36.0",
+    "authlib>=1.6,<1.8",
+    "PyJWT[crypto]>=2.10,<3",
     "websockets==16.0",
     "filelock>=3.16,<4",
     "PyYAML>=6.0.2,<7",
@@ -19,6 +21,7 @@ dependencies = [
 [project.scripts]
 minebot-camera = "minebot.camera.cli.main:main"
 minebot-local = "minebot.app.local_launcher:main"
+minebot-auth = "minebot.app.chatgpt_auth:main"
 
 [tool.setuptools.package-data]
 "minebot.skills" = ["catalog/*/SKILL.md"]

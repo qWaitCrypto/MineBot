@@ -1364,6 +1364,7 @@ class AgentRuntime:
                 needs_work=lambda: bool(self.agent_context.goal_text.strip()) and self.native_task_outcome is None,
                 proxy=getattr(model_provider, "responses_proxy", None),
                 transport=getattr(model_provider, "responses_transport", "websocket"),
+                tool_namespace=getattr(model_provider, "responses_tool_namespace", None),
             )
 
     def _responses_tools(self) -> list[dict[str, Any]]:

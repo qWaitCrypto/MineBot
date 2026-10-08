@@ -1,5 +1,59 @@
 # Responses Agent 内核（2026-10-07）
 
+## 2026-10-08：官方 ChatGPT 登录适配，真实授权待完成
+
+现有 Python Responses HTTP 内核新增官方 ChatGPT 套餐登录方式，使用
+[官方本地开源应用 OAuth 流程](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)，
+直接请求 `https://api.openai.com/v1/responses`，不读取 Codex 登录凭证，
+不经过原第三方模型映射端点。原 API key 和显式 legacy SDK 路径保留。
+
+```bash
+python -m pip install -e '.[test]'
+minebot-auth login
+minebot-auth status
+minebot-auth models
+export MINEBOT_LLM_AUTH=chatgpt
+export MINEBOT_LLM_MODEL=gpt-6.1-sol
+unset MINEBOT_LLM_BASE_URL OPENAI_BASE_URL
+```
+
+也可用 `python -m minebot.app.chatgpt_auth` 代替 `minebot-auth`。
+`login --no-browser --port 14650` 只打印授权链接并等待本人浏览器授权。
+默认凭证文件为 `~/.config/minebot/chatgpt.json`，可用
+`MINEBOT_CHATGPT_AUTH_FILE` 指定仓库外路径；Unix 原子写入且权限为 0600。
+保存稳定 host ID、已签发 client ID 与验证后的身份；请求前自动续期，
+跨进程串行处理 refresh token 轮换。`logout` 尝试远程撤销并清理本地凭证，
+远程失败明确报告未确认撤销。模型和工具看不到这些凭证。
+
+适配只改变官方请求格式：工具放进 `minebot` namespace，仍使用原
+ToolRegistry/Body，保留原生 `async: true` 与原始 `call_id`。HTTP 使用
+完整 input、`store=false`、`stream=true` 和加密 reasoning；不发送套餐通道
+不支持的采样参数/输出上限，不允许向自定义地址发送 OAuth 凭证。
+
+对持续任务有用的功能：
+
+- 官方模式默认请求 64,000 token 阈值的服务端内联 compaction；通过
+  `MINEBOT_RESPONSES_COMPACT_THRESHOLD=0` 关闭或设另一阈值。旧端点默认关闭。
+  只按内联压缩规则保留最新加密 compaction 项及之后历史；未返回结果的
+  native call 保留。上一动作尚运行时不请求压缩。该阈值和已有的
+  64,000 **字符**观察详情软预算是两件事。
+- 使用官方自动 prompt caching，不增加凑缓存的提示。终态日志保留实际
+  usage（含服务端返回的 cached tokens）、响应模型与请求时间。
+- 订阅通道不支持的后台模式、托管工具和 tool_search 不加入本轮。
+
+当前证据：32 项相关行为测试和 3 个 subtests 通过，覆盖本地 PKCE
+回调、真实签名 ID token 验证/nonce/audience、并发续期只轮换一次、
+namespace 异步结果以及内联压缩后的历史；没有用这些替代真实 API 验收。
+另跑旧入口测试 74 项通过、6 项失败；相同 6 项在未修改 HEAD 的独立
+副本同样失败，均为旧 doubles 缺少 `native_responses`/`parts`/`aclose`。
+它们不属于本轮登录实现，不修改生产行为去迎合旧 doubles。
+
+首次人工打开授权页报告 `Operation timed out`；本地回调及官方 discovery
+可达，但尚未收到 client ID/token。因此官方原生异步、实际 compaction、
+缓存命中和建房续跑均未验收。已有第三方实验与失败不改写为官方成功。
+下一步是完成人工授权，运行下面的短异步往返实验，成功后独立重启原建房
+会话；当前没有正在施工的 Agent。
+
 ## 2026-10-08：不限时双层小屋实验启动失败
 
 用户已明确启动 [TESTING.md](TESTING.md) 的空库存建房任务：外轮廓 10×10、
