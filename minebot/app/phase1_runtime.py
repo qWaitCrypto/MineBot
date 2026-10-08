@@ -1366,7 +1366,7 @@ def _find_hostiles_tool(body: Body) -> RegisteredTool:
 def _craft_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:
     return RegisteredTool(
         "craft_item",
-        "Craft an item from materials already in inventory. Handles recipe lookup, nearby/temporary crafting table lifecycle, and residue cleanup. Fails honestly with missing materials if ingredients are absent; it does not gather them.",
+        "Craft at least the requested count from materials already in inventory, rounding up to complete recipe batches. Handles recipe lookup, nearby/temporary crafting table lifecycle, and residue cleanup. Fails honestly with missing materials if ingredients are absent; it does not gather them.",
         {
             "type": "object",
             "properties": {
@@ -1374,7 +1374,10 @@ def _craft_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:
                     "type": "string",
                     "description": "Output item to craft, e.g. 'stone_pickaxe'.",
                 },
-                "count": {"type": "integer", "minimum": 1, "default": 1},
+                "count": {
+                    "type": "integer", "minimum": 1, "default": 1,
+                    "description": "Minimum number of new items to craft. Rounded up to whole recipe batches; crafted_count reports the actual output.",
+                },
                 "auto_equip": {"type": "boolean", "default": False},
             },
             "required": ["item"],

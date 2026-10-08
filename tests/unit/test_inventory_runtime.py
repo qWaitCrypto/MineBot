@@ -1,8 +1,12 @@
 import unittest
+from unittest.mock import patch
 
 from minebot.body import InventoryTransactions
 from minebot.body.inventory import _parse_recipe_variants
 from minebot.contract import Action, Event, PerceptionResult, Result, ToolResult
+
+
+DOOR_RECIPE = '[[[[acacia_door, 3]], [[acacia_planks], [acacia_planks], [acacia_planks], [acacia_planks], [acacia_planks], [acacia_planks]], [shaped, 2, 3]]]'
 
 
 class FakeInventoryBody:
@@ -713,6 +717,50 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertEqual([action.name for action in body.actions], ["craftItem"])
         self.assertEqual(body.actions[0].params["inputs"], [{"slot": 0, "item": "minecraft:oak_log", "count": 1}])
         self.assertEqual(body.actions[0].params["output"], {"slot": 1, "item": "minecraft:oak_planks", "count": 4})
+
+    def test_craft_recipe_rounds_up_to_complete_recipe_batches(self):
+        for requested, crafted in ((1, 3), (4, 6), (3, 3)):
+            with self.subTest(requested=requested):
+                before = [slot(0, "minecraft:acacia_planks", crafted * 2), slot(1)]
+                after = [slot(0), slot(1, "minecraft:acacia_door", crafted)]
+                body = FakeInventoryBody(
+                    [perception(before)] * 3 + [perception(after)] * 2,
+                    recipe_data={"minecraft:acacia_door": DOOR_RECIPE},
+                )
+                runtime = InventoryTransactions(body)
+                with patch.object(runtime, "_resolve_crafting_workspace", return_value={"mode": "existing_table", "table_pos": [0, 64, 0]}):
+                    result = runtime.craft_recipe(item="minecraft:acacia_door", count=requested)
+                self.assertTrue(result.success, result.to_payload())
+                self.assertEqual(result.metrics["requested_count"], requested)
+                self.assertEqual(result.metrics["crafted_count"], crafted)
+                self.assertEqual(body.actions[0].params["output"]["count"], crafted)
+                self.assertEqual(body.actions[0].params["inputs"][0]["count"], crafted * 2)
+
+    def test_craft_recipe_rounds_across_output_stack_boundary(self):
+        before = [slot(i, "minecraft:acacia_planks", 44) for i in range(3)] + [slot(3), slot(4)]
+        middle = [slot(i, "minecraft:acacia_planks", 2) for i in range(3)] + [slot(3, "minecraft:acacia_door", 63), slot(4)]
+        after = [slot(i) for i in range(3)] + [slot(3, "minecraft:acacia_door", 63), slot(4, "minecraft:acacia_door", 3)]
+        body = FakeInventoryBody(
+            [perception(before)] * 5 + [perception(middle)] * 5 + [perception(after)] * 2,
+            recipe_data={"minecraft:acacia_door": DOOR_RECIPE},
+        )
+        runtime = InventoryTransactions(body)
+        with patch.object(runtime, "_resolve_crafting_workspace", return_value={"mode": "existing_table", "table_pos": [0, 64, 0]}):
+            result = runtime.craft_recipe(item="minecraft:acacia_door", count=64)
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["requested_count"], 64)
+        self.assertEqual(result.metrics["crafted_count"], 66)
+        self.assertEqual([action.params["output"]["count"] for action in body.actions], [63, 3])
+
+    def test_craft_recipe_checks_rounded_materials_and_output_capacity(self):
+        for planks, doors, failure in ((6, 0, "inputs_not_available"), (12, 60, "output_no_space")):
+            with self.subTest(failure=failure):
+                before = [slot(0, "minecraft:acacia_planks", planks), slot(1, "minecraft:acacia_door", doors)]
+                body = FakeInventoryBody([perception(before)] * 2, recipe_data={"minecraft:acacia_door": DOOR_RECIPE})
+                result = InventoryTransactions(body).craft_recipe(item="minecraft:acacia_door", count=4, output_slot=1)
+                self.assertFalse(result.success)
+                self.assertEqual(result.metrics["variant_failures"][0]["reason"], failure)
+                self.assertEqual(body.actions, [])
 
     def test_craft_recipe_auto_equip_selects_mainhand_outputs(self):
         body = FakeInventoryBody(

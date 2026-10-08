@@ -569,6 +569,7 @@ class InventoryTransactions:
         keep_temporary_table: bool = False,
         cleanup_existing_bot_table: bool = False,
     ) -> ToolResult:
+        """Craft at least count new items, rounding up to whole recipe batches."""
         if count <= 0:
             return ToolResult(
                 success=False,
@@ -626,13 +627,15 @@ class InventoryTransactions:
         structured = recipe_perception.data.get("variants") or []
         max_stack = min((int(v.get("output_max_stack",64)) for v in structured if isinstance(v,dict)), default=64)
         batch_limit = min((int(v.get("max_craft_count",64)) for v in structured if isinstance(v,dict)), default=64)
-        if count > batch_limit and count % variants[0].output_count == 0:
-            if output_slot is not None:
+        # Rounding a batch must still fit the executor's output capacity.
+        batch_size = min(batch_limit // variant.output_count * variant.output_count for variant in variants)
+        if count > batch_size:
+            if output_slot is not None or batch_size <= 0:
                 return ToolResult(False, "craft_output_no_space", False, metrics={"requested_count":count,"slot_capacity":max_stack})
             batches = []
-            remaining = count
-            while remaining > 0:
-                amount = min(remaining, batch_limit)
+            crafted_count = 0
+            while crafted_count < count:
+                amount = min(count - crafted_count, batch_size)
                 result = self.craft_recipe(item=item, count=amount, search_radius=search_radius,
                     residue_slots=residue_slots, destination_slots=destination_slots,
                     crafting_table_item=crafting_table_item, temporary_table_radius=temporary_table_radius,
@@ -642,11 +645,11 @@ class InventoryTransactions:
                     reclaim_timeout_s=reclaim_timeout_s, keep_temporary_table=keep_temporary_table,
                     cleanup_existing_bot_table=cleanup_existing_bot_table)
                 batches.append(result.to_payload())
+                crafted_count += int((result.metrics or {}).get("crafted_count", 0))
                 if not result.success:
                     return merge_context(result, {"requested_count":count,
-                        "crafted_count":count-remaining + int((result.metrics or {}).get("crafted_count", 0)),"batches":batches})
-                remaining -= amount
-            return ToolResult(True, "completed", False, metrics={"item":item,"requested_count":count,"crafted_count":count,"batches":batches})
+                        "crafted_count":crafted_count,"batches":batches})
+            return ToolResult(True, "completed", False, metrics={"item":item,"requested_count":count,"crafted_count":crafted_count,"batches":batches})
 
         plan = _choose_craft_plan(slots, item=item, count=count, output_slot=output_slot, variants=variants, max_stack=max_stack)
         if isinstance(plan, ToolResult):
@@ -1469,17 +1472,8 @@ def _choose_craft_plan(
     item = _normalize_recipe_item(item)
     failures: list[dict[str, object]] = []
     for index, variant in enumerate(sorted(variants, key=lambda candidate: (candidate.requires_table, candidate.width * candidate.height))):
-        if count % variant.output_count != 0:
-            failures.append(
-                {
-                    "variant_index": index,
-                    "reason": "requested_count_not_multiple",
-                    "output_count": variant.output_count,
-                    "requires_table": variant.requires_table,
-                }
-            )
-            continue
-        crafts = count // variant.output_count
+        crafts = (count + variant.output_count - 1) // variant.output_count
+        crafted_count = crafts * variant.output_count
         inputs, chosen_items = _allocate_recipe_inputs(slots, variant, crafts)
         if inputs is None:
             failures.append(
@@ -1504,7 +1498,7 @@ def _choose_craft_plan(
         selected_output_slot = _find_craft_output_slot(
             slots,
             item,
-            count,
+            crafted_count,
             preferred=output_slot,
             exclude={int(entry["slot"]) for entry in inputs},
             max_stack=max_stack,
@@ -1521,7 +1515,7 @@ def _choose_craft_plan(
         return CraftPlan(
             item=item,
             requested_count=count,
-            crafted_count=count,
+            crafted_count=crafted_count,
             output_slot=selected_output_slot,
             variant_index=index,
             variant=variant,
