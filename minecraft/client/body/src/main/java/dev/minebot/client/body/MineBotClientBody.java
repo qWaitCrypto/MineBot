@@ -2389,8 +2389,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
             state.add("following", following);
             state.addProperty("any_process_active", processActive());
-            baritone.getPathingBehavior().estimatedTicksToGoal()
-                .ifPresent(value -> state.addProperty("path_estimated_ticks", value));
+            // Goal heuristics can be expensive; never evaluate them while sampling client state.
             var goal = baritone.getPathingBehavior().getGoal();
             state.addProperty("baritone_goal", goal == null ? "" : goal.toString());
             state.addProperty("build_in_layers", BaritoneAPI.getSettings().buildInLayers.value);
