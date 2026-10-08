@@ -192,10 +192,12 @@ or a specific unresolved risk.
 
 ## Open-ended task: a 10×10 two-storey house from an empty inventory
 
-Status: launched by the maintainer on 2026-10-08; no completion result yet.
-Run directory: `logs/house-20261008-145412/`. Uses the production Responses HTTP
-kernel (`gpt-6.1-sol`), real client and visible viewer. Total time and session
-step limits are both disabled. The task card below is the submitted goal.
+Status: startup failed on 2026-10-08; no physical construction occurred.
+Run directory: `logs/house-20261008-145412/`. The first model session failed on
+native async result submission (HTTP 400); the same-configuration second session
+failed with upstream service temporarily unavailable. Both traces are retained.
+The task card remains the requested goal, with no total time/session step limit.
+Resume a new attempt after the model connection is usable; do not report it running.
 
 初始条件：全新 disposable 世界，固定并记录种子；生存、和平难度、正常
 昼夜与随机刻，满生命/饱食；背包、护甲、副手、经验均为空。不开物品赠送、
