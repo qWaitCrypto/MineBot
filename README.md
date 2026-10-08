@@ -49,19 +49,18 @@ passed a live experiment with `gpt-6.1-sol`. See
 [RUNTIME.md](RUNTIME.md) for the implementation, setup, and actual experiment
 result. Success requires observed world state, not command acceptance.
 
-To watch the existing client from Windows, use the same entrypoint each time:
+The default Windows view is the real Minecraft window through WSLg, using
+`DISPLAY=:0`. No capture, stream, or separate player is needed. Open it with:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\watch-client.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\open-client.ps1 -DisposableWorld
 ```
 
-`MineBot LIVE` captures only the game window and fills a 1280×720 view. It reuses
-one viewer, reconnects after capture failure, and can be closed independently
-of the Agent. Defaults: WSL `Ubuntu-24.04`, repo `/home/qwait/MineBot`, display
-`:99`; override with `-Distro`, `-Repo`, `-Display`, or `-Port`. Requires Windows
-`ffplay` and WSL `ffmpeg`/`xwininfo`. Capture state and logs live under
-`~/.local/state/minebot/live-view-18990/`; Windows viewer logs are under
-`%LOCALAPPDATA%\MineBot\live-view`.
+This defaults to the local test server `127.0.0.1:25566`, bot `MineBotCombat`,
+and IPC port `8768`; use `-Server`, `-Bot`, `-Port`, `-Distro`, or `-Repo` to
+change them. Omit `-DisposableWorld` for a non-disposable server. An existing
+client is reused rather than launched twice. Xvfb and `watch-client.ps1` remain
+optional headless observation tools; they are no longer the desktop default.
 
 ## Built To Finish
 

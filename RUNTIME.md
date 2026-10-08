@@ -1,20 +1,23 @@
 # Responses Agent 内核（2026-10-07）
 
-## 2026-10-08：观察窗口固定入口
+## 2026-10-08：直接显示真实客户端
 
-Windows 固定入口为 `tools/watch-client.ps1`，窗口名 `MineBot LIVE`；抓取端
-为 `python -m minebot.camera.live_view`。此前捕获整个 1280×720 虚拟桌面，
-其中游戏仅 854×480，因而带入四周黑边。现在按 Minecraft 窗口 ID 抓取，
-等比缩放并裁齐比例差，统一输出 1280×720、15 FPS。
-按帧序号生成递增时间戳，避免 X11 停顿后重复 PTS 导致编码退出。
+默认在 WSLg `DISPLAY=:0` 启动真实 Minecraft 客户端，窗口直接出现在 Windows
+桌面，不经过抓帧、编码或播放器。入口为 `tools/open-client.ps1`；检测到 IPC
+端口已有客户端时不会再启动第二个。世界、角色和 Body IPC 路径不变。
 
-抓取和 Windows 窗口均为单实例；播放器设读取超时并自动重连，抓取退出后
-重新发现游戏窗口。真实复验：黑边前后抓帧已核对；杀掉抓取子进程后，
-同一播放器 PID 恢复播放，随后持续输出 15 FPS；重复打开固定入口没有
-新增窗口。没有重启 Minecraft 或 Agent；客户端实际重启场景未在施工中验证。
-证据位于 `logs/house-20261008-145412/attempt-3-official/` 的
-`observer-before.png`、`observer-after.png` 和 `observer-reconnect-proof.json`。
-旧临时 TCP 推流已停止，后续均使用上述入口。
+此前实验强制使用 Xvfb `:99`，才需要额外推流。原 `MineBot LIVE` 播放器在
+重连后确实出现解码停滞；仅看到发送端帧号增长不能证明用户画面正常。
+在模型和 Body 均空闲时，10 秒原始客户端帧的像素校验均不同，客户端本身仍在渲染。
+独立 JPEG/WPF 窗口对照虽能恢复，但用户选择直接显示客户端，未将该替代播放器纳入主线。
+旧抓帧入口仅作为无桌面环境的备用，停止继续扩建。
+
+本次已从 Windows 确认 `msrdc` 原生窗口标题为
+`Minecraft* 26.1.2 - Multiplayer (3rd-party Server) (Ubuntu-24.04)`，
+且客户端连接原测试世界。旧播放器、抓帧进程和 Xvfb 已停止。
+证据：`logs/house-20261008-145412/attempt-4-mining-fix/client-wslg.log`，
+以及第三次实验的 `clear-area-control-fault/`。建房续跑保留世界和背包，
+开发者补清地基及切换显示造成的中断如实记在实验根目录 `run.json`。
 
 ## 2026-10-08：官方 ChatGPT 登录与原生异步实测通过
 
