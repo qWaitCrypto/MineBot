@@ -111,3 +111,38 @@ python -m tests.e2e_real_client_agent_collect --disposable-local-server --contin
 Sub2API 源码核对固定为 0.2.14 / 3f1a2ea0a760730e3bc528105c00b4ee4f23e469，未确认 provider 部署版本。ctx_pool 与 http_bridge 只接受 response.create；passthrough 能透传其他事件，但本端点尚未实测。需要 provider 的可用 WebSocket 账户与相应配置才能继续这一项。[入口](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_forwarder_ingress.go#L131-L264)、[透传](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/service/openai_ws_v2_passthrough_adapter.go#L1150-L1162)、[账户选择](https://github.com/Wei-Shaw/sub2api/blob/3f1a2ea0a760730e3bc528105c00b4ee4f23e469/backend/internal/handler/openai_gateway_handler.go#L2700-L2729)。
 
 HTTP 在当前模型响应结束后处理排队消息；WebSocket 原生 steering 可以在模型响应进行中注入要求，两者不混称。[官方 steering 文档](https://developers.openai.com/api/docs/guides/steering)。用户已明确不继续这项工作。以下源码与失败记录保留为历史证据，不触发后续开发或验证。
+
+
+## 上下文管理调研（2026-10-08，待讨论）
+
+这里只记录分析和候选方案，没有新增上下文实现或可执行计划。检索窗口为 2026-07-08 至 2026-10-08；有明确发布日期的研究与当前官方能力分开描述，不把旧功能写成最近三个月的新发布。
+
+现状：旧 SDK 会话已有 12 轮 / 96 items / 64,000 字符窗口；Responses HTTP 的 `_HttpResponsesConnection.history` 仍完整累积并在每轮重发。`AgentContext` / `ContextCompiler` 已能组织目标、任务、身体状态、近期结果，但这不限制原始 Responses 历史。现有 TaskWorkspace 和完整工具观测归档可以复用，无需另建存储平台。
+
+近期值得借鉴的研究：
+
+| 日期与来源 | 具体进展 | 对 MineBot 的判断 |
+| --- | --- | --- |
+| 2026-07-11，[Compaction as Epistemic Failure](https://arxiv.org/abs/2607.13071) | 记录压缩将超时/终止过程的部分输出写成已确认结果的案例 | 摘要不能把 pending、失败或客户端预测改写成成功；动作事实保留真实终态与观测引用。该研究是案例分析，不证明所有压缩都会这样。 |
+| 2026-08-24，[The Compaction Cliff](https://arxiv.org/html/2608.22752v1) | 分类型保留约束、程序、事实、偏好和事件，研究多轮均匀压缩丢失约束的问题 | 玩家明确要求与项目适用约束原样注入；旧工具输出允许缩短。借鉴保留策略，不引入论文的分类器/验证平台。 |
+| 2026-09-29，[PAIR](https://arxiv.org/html/2609.36526v1) | 从同一个环境状态比较压缩前后的后续执行，定位有害压缩并修改对应摘要段落 | 用真实续行动作判断压缩是否有效，失败时检查丢了哪条事实。论文实验在 AppWorld、OfficeBench 和零售任务，不是 Minecraft；不搬入离线训练/反复 rollout 管线。 |
+| 2026-09-30，[ReCAP](https://arxiv.org/html/2609.40118v1) | 根据当前请求、过去 attention 重要度与消息依赖，挑选历史及其支持证据 | 借鉴按当前任务找回相关事实、调用与结果一起保留。完整方法需要 attention；闭源 API 要额外代理模型估算，当前不划算。论文性能不代表本项目性能。 |
+
+当前成熟接口也可用作候选，但以下文档没有足够发布日期证据，不能当作近三个月发布：
+
+- [OpenAI Responses compaction](https://developers.openai.com/api/docs/guides/compaction)：支持 `context_management` 阈值触发的服务端压缩和独立 `/responses/compact`。支持 `store=false` 的 input-array 续接，不依赖 WebSocket 或 `previous_response_id`；压缩状态是不可读的加密 item。自动压缩后可按文档删去最新压缩项之前的历史；独立 compact 返回的窗口则必须整体保留，不能套用前一种裁剪方式。当前 provider 的 compaction 尚未实测，不能宣称支持；异步 pending 与压缩的组合也需验证。
+- [Pi compaction 文档](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/compaction.md)：结构化目标/约束/进度/决策/下一步摘要，加最近完整消息，调用和结果不得被裁开。这个模式可以借鉴，不需要为它更换内核。
+
+建议首先做任务工作上下文，而不是先做跨会话长期记忆：
+
+| 内容 | 来源与更新方式 |
+| --- | --- |
+| 玩家当前目标、追加要求、适用约束 | 持续保留有效原文；取消、完成或用户修改后更新，不让摘要自行改写要求。 |
+| 当前阶段、缺少材料、障碍、改变策略的理由 | 复用现有任务/短计划；由模型根据实际行动更新，运行时不写游戏策略。 |
+| 位置、库存、健康、目标是否仍存在 | Body 新读取的状态；旧观测写明时间，不把旧库存当作现在的库存。 |
+| 最近完整行动、失败、未完成原始 call_id | 保留调用与结果关系；pending 和未交付结果不剪掉，不因压缩重执行身体动作。 |
+| 更早的动作细节、地点、资源和蓝图证据 | 完整记录复用现有归档，工作上下文只保留任务相关结论和可查回引用。 |
+
+历史压缩优先考虑已验证 provider 下的原生 compaction；明确任务状态仍单独注入。若该接口实际不可用，采用小型结构化滚动摘要加完整近期行动窗口，不扩成兼容平台。最初只在已完成行动的边界压缩，避免先引入 pending 压缩竞态；这是实施建议，不是官方对异步组合的保证。
+
+例子：采木交接后玩家追加“回出发点”。上下文需要保留追加要求、出发点坐标、原采集调用、交接结果及距离不足后靠近的理由；当前库存重新读取，不反复携带完整方块扫描。验证看压缩后是否继续正确行动、是否遗忘要求或重复动作，以及实际输入量/延迟；不以摘要长度或模块数量验收。
