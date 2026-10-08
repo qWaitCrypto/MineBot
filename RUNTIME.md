@@ -56,9 +56,32 @@ namespace 异步结果以及内联压缩后的历史；没有用这些替代真�
 报告 `Operation timed out`。未收到注册 ID 或令牌，问题发生在官方账户选择
 阶段，尚未进入本地回调。公开状态接口显示正常，不能据此排除局部故障。
 脚本无浏览器会话的 HTTP 403 带 Cloudflare challenge，不能当成浏览器
-失败的状态码。根因尚未确定；已停止无证据的重复登录，等待错误页面请求的
-HTTP 状态和 request ID。登录监听已停止，建房未重启。下一步定位并完成
-授权，再运行短异步往返实验；成功后独立重启原建房会话。
+失败的状态码。用户浏览器随后确认该页面 HTTP 200，request ID 为
+`3775ada0-a1aa-4ef0-bd16-f670e67002c3`；200 表示错误页面已返回，
+不表示 OAuth 成功。期间操作员过早关闭监听，另造成一次本地
+`ERR_CONNECTION_REFUSED`；这是独立的操作失误，不作为上游超时证据。
+
+改用官方 [Sign in with ChatGPT DevKit](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt)
+做最小对照：固定源码 `0a36fefeb913055c8c7a1a29b63d82b96b2e841a`，只构建
+未修改的 `@siwc/local`；直接运行于 Windows / Node 24.19.0，同一个本地
+代理，凭证适配 Windows DPAPI CurrentUser（加解密往返已通过）。
+SDK discovery 为 200，Windows 本机 `127.0.0.1:14651` 回调监听可达；
+官方 SDK 生成链接后，用户仍报告 `Operation timed out`，尚未收到回调。
+该对照排除了必须依赖自写 OAuth 才出现错误、必须经过 WSL 回调转发才
+出现错误的说法；未定位到账号、网络或服务端中的具体根因。对照脚本与
+原样 SDK 位于仓库外 `C:/Users/qwait/AppData/Local/MineBot/siwc-control/`，
+日志为 `logs/chatgpt-login-20261008/authorization-failure.json`。
+
+用户说明 Codex 与 Pi 登录可用。源码对照发现 Pi 同时提供 Codex OAuth
+与新的 ChatGPT 套餐 OAuth：前者使用 `/oauth/authorize`、预注册客户端与
+`chatgpt.com/backend-api`；后者使用 `/api/accounts/authorize`、动态注册和
+`api.openai.com/v1`。Pi 源码固定为 `7f9e1198f2f7a8cf5ea18d5010ba081d4d60c333`。
+尚未确认用户成功的是哪一个 Pi 入口，不能将其直接当作新接口成功的证据，
+也不能据当前失败笼统判断代理不通。
+
+不再在条件未改变时反复授权或修改 Body/异步内核；官方登录、模型列表、
+真实异步调用、compaction 和建房续跑仍未验收。需先解决浏览器授权失败，
+再执行短异步往返；成功后独立重启原建房会话。
 
 ## 2026-10-08：不限时双层小屋实验启动失败
 
