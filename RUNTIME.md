@@ -71,7 +71,15 @@ python -m tests.probes.official_chatgpt_async --output logs/chatgpt-native-async
 本次短实验未触发 compaction，cached tokens 为 0；实现和接口接通不能
 当作这两项的真实效果验证。建房状态单独记录在下一节。
 
-## 2026-10-08：不限时双层小屋实验启动失败
+## 2026-10-08：不限时双层小屋第三次会话运行中
+
+第三次会话 `attempt-3-official/` 已于 16:39 启动，使用新官方 ChatGPT
+Auth、`gpt-6.1-sol` 和相同生产 Responses HTTP 内核。开跑前再次确认
+原出生点、库存为空；前两次失败没有发生物理动作，世界和旧记录保留。
+真实异步 `collect_resource` 已执行，客户端状态已观测到 `acacia_log: 10`，
+角色离开出生点。桌面观察窗口 `MineBot - house LIVE` 已恢复，观察提醒启用。
+没有总时限或总步骤上限，目前尚无房屋完成结果。以下保留最初启动与失败。
+Auth/API key 切换兼容检查按用户要求留待本轮测试之后。
 
 用户已明确启动 [TESTING.md](TESTING.md) 的空库存建房任务：外轮廓 10×10、
 双层实际可用、内部设施合理；材料与物品数量自主决定，无总时限。
@@ -93,10 +101,10 @@ python -m tests.probes.official_chatgpt_async --output logs/chatgpt-native-async
 空库存和身体空闲，随后收到 `response.failed`：
 `Upstream service temporarily unavailable`，会话也已退出。服务端复核
 角色仍在出生点、库存为空，两次都未发生物理动作。这轮是启动失败，
-没有正在施工的 Agent。观察提醒已停用，客户端和新世界保留。
+当时没有正在施工的 Agent，观察提醒停用，客户端和新世界保留。
 第一会话的失败不覆盖、不并入成功，期间没有补物资或修改执行代码。
-用户随后提出调研官方 ChatGPT OAuth 接入；建房目标仍保留，连接可用后
-再开始独立尝试，最终仍按实物验收。
+用户随后提出接入官方 ChatGPT OAuth；接通后已按上述第三次会话独立恢复，
+最终仍按实物验收。
 
 
 ## 2026-10-08：客户端动作朝向已实现
