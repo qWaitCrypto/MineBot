@@ -55,6 +55,38 @@ Agent 自行读取库存、更新计划并导航返回住宅，实际位置已�
 证据：本实验目录 `observed-tree-last-block-stall.json`、
 `observed-stall-0024-blocks.json` 和 `observed-stall-0022.png`。
 
+### 2026-10-09：模型接口、代理与 SSE 对照，原超时尚未复现
+
+用户要求先厘清环境与接口差异，不据字符数重做上下文。仅独立 API 实验，
+没有向建房 Agent 注入消息、执行游戏工具、改配置、重启或更改执行代码。
+Codex 桌面日志实际为 `wss://chatgpt.com/backend-api/codex/responses`；
+MineBot 为新 SIWC Auth 的 `https://api.openai.com/v1/responses` HTTP/SSE。
+两个 OAuth 注册使用同一账户邮箱；Windows 系统代理和 WSL HTTP/HTTPS 代理均为
+`127.0.0.1:7897`，不据此假定不同域名的代理规则完全相同。
+
+固定 `gpt-6.1-sol / medium`，服务端 usage 与完整 SSE 终态记录如下：
+
+| 对照 | Input tokens | 耗时（秒） |
+| --- | ---: | ---: |
+| WSL / 新 Auth / 短请求 | 27 | 4.556 |
+| WSL / Codex Auth / 短请求 | 27 | 4.252 |
+| WSL / 新 Auth / 长记录 | 72,858 | 5.827 |
+| WSL / Codex Auth / 长记录 | 72,858 | 5.347 |
+| Windows / 新 Auth / 短请求 | 27 | 5.181 |
+| Windows / 新 Auth / 长记录 | 72,858 | 5.456 |
+| 生产 Registry + SDK SSE / 长记录 / 不触发压缩 | 72,858 | 7.018 |
+
+长记录为真实实验至 seq1090 的工具结果和对话回放，使用仅报告下一步的离线工具，
+不包含原请求加密推理和完整生产工具表，不能当作原超时请求的精确重放。
+同一长记录设置 64k-token 原生自动压缩，新 Auth 32.001 秒、Codex Auth 29.569 秒，
+都收到 `response.output_item.done` 的 compaction item；生产 SDK 启用压缩的一次为
+51.141 秒。压缩真实可用并有额外等待，尚未证明它导致原来的 120 秒超时。
+终态 `output=[]` 会使仅从终态统计的 compactions=0 漏计；不能据此宣称压缩未工作。
+生产日志脱敏器也把 numeric token usage 屏蔽，无法从旧 trace 还原失败轮的实际 token 数。
+截至检查时 129 个已结束请求中有四次流故障：一次 incomplete chunked read、三次事件等待超时；
+本组对照全部完成，未复现这些故障，不能称已修好，也未通过调大超时掩盖它们。
+证据：`logs/provider-latency-20261009/result.json` 及同目录逐事件时间记录。
+
 ## 2026-10-08：模型选择探索目的地，Baritone 执行
 
 新增 `observe_environment`，真实客户端的 `explore_for` 改为接受模型选定的坐标、方向或区域。
