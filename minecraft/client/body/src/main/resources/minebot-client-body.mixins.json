@@ -6,7 +6,8 @@
     "ServerNameResolverMixin",
     "ItemPickupMixin",
     "VerticalInteractionMixin",
-    "MenuSyncMixin"
+    "MenuSyncMixin",
+    "AttentionMixin"
   ],
   "injectors": {
     "defaultRequire": 1

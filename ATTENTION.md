@@ -1,6 +1,6 @@
-# Client attention design
+# Client attention
 
-Status: design, not yet applied to the client. Collection changes are separate.
+Status: implemented in the real client. Directed results are recorded below.
 
 The user should see purposeful movement and attention without losing accurate
 digging, placement or combat. Attention belongs to the action already running;
@@ -12,31 +12,37 @@ nearby entities do not automatically become targets.
 | Mining/building | Baritone's block interaction rotation; look at the block being worked on, including upward tree work. |
 | Melee/bow/crossbow | Existing combat aim owns yaw and pitch while striking, charging or shooting. Movement can strafe or retreat without replacing that aim. During distant approach, path rotation remains available. |
 | Follow | Face the path while catching up. Once within the requested distance and no longer pathing, look toward the resolved target. Keep that identity until the action ends or the target is lost. |
-| Handoff/menu interaction | Face the recipient or block during the actual interaction. Approach still uses path rotation. |
+| Handoff/menu interaction | Face the recipient or block. The brief downward drop uses physical throw aim; the sender then leaves the overlapping pickup area using native pathing and looks back at the recipient. Approach uses path rotation. |
 | Explicit look/idle | Honor the explicit look. After it finishes, keep the current view until a new action needs it; no compulsory scanning or random target switching. |
 | Elytra | Flight keeps its existing yaw/pitch control; ground attention does not alter flight. |
 
-Start with upstream settings: ground travel uses `freeLook=false` and
-`remainWithExistingLookDirection=false`. Keep `blockFreeLook=false`.
-Baritone 1.18.0 otherwise defaults to keeping the visible camera separate from
-movement. Its own `LookBehavior` already distinguishes travel and interaction
-rotations; use that mechanism rather than a parallel per-tick velocity controller.
+Ground actions temporarily set `freeLook=false`,
+`remainWithExistingLookDirection=false`, `blockFreeLook=false` and
+`smoothLook=false`. Snapshot and restore all four on completion, failure,
+cancellation and server disconnect. Elytra leaves these settings alone.
 
-Smooth visible travel turns only. Precise interaction and projectile aim bypass
-cosmetic smoothing. If upstream `smoothLook` is used, check its +/-180-degree
-transition on this tuple before enabling it: averaging raw yaw can turn the
-wrong way at that boundary. Near-target attention should use wrapped angle
-differences and a turn-rate limit, and should stop on cancellation/target loss.
+`AttentionMixin` observes upstream `LookBehavior.updateTarget` and the native
+PRE/POST player update. After Baritone applies movement and packet rotation,
+only the visible travel yaw is limited to 24 degrees per tick using wrapped
+angle differences. Block interaction targets bypass this cosmetic step.
+The built-in raw-yaw averaging stays disabled during ground actions, so the
++/-180 transition takes the short turn. Native movement and aiming targets
+are unchanged; there is no velocity-based rotation controller.
 
-Apply and restore these settings within the owning action. Near-target following
-only writes rotation while navigation is idle. Combat and block interactions do
-not accept a lower-priority attention update. Ordinary chat does not replace the
-action or issue a competing look command.
+Near-target following uses a wrapped yaw/pitch turn limit while pathing is
+idle. Navigation and attention share the same resolved entity. Nearby decoys
+do not replace it. Ranged attacks stop their approach process before charging
+or shooting; projectile and melee aim remains precise. Menu opens and native
+block/entity interactions face their actual targets. Explicit look is honored,
+and idle has no automatic scanning. Ordinary chat does not issue a look action.
 
-Acceptance is one short visible sequence: turn around a corner, work on a high
-block, approach/follow the selected player past a decoy, shoot the selected
-moving target, then cancel. Confirm arrival, actual block/inventory and damage,
-target identity, and stopped controls. No new attention framework is needed.
+The directed `attention` case checks one visible sequence: +/-180 travel,
+forced corner, high block, named moving follow target past a decoy, menu,
+explicit look, then moving cancellation. It records rotations and restored
+settings alongside actual arrival, block/inventory and stopped processes.
+Existing combat, menu and handoff cases cover their physical results; no new
+test framework is used. The one-hour empty-inventory task in
+[TESTING.md](TESTING.md) is a proposal, not an executed result.
 
 Sources: [Baritone settings](https://github.com/cabaletta/baritone/blob/v1.18.0/src/api/java/baritone/api/Settings.java)
 and [LookBehavior](https://github.com/cabaletta/baritone/blob/v1.18.0/src/main/java/baritone/behavior/LookBehavior.java).

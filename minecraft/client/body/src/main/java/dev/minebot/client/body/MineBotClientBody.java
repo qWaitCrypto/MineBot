@@ -40,6 +40,7 @@ import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.core.Direction;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
@@ -138,6 +139,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             if (run != null) {
                 requestStop("failed", "server_disconnected");
             }
+            restoreAttention(run);
             ready = false;
             joinedTicks = 0;
             if (menuRead != null) finishMenuRead(client, "server_disconnected");
@@ -436,6 +438,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             candidate.before = count(client, candidate.item);
             usedIds.add(id);
             run = candidate;
+            beginAttention(candidate);
             emit(candidate, envelope("accepted", id));
             LOG.info("MINEBOT_BODY action_started id={} action={}", id, actionName);
             return;
@@ -505,6 +508,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         candidate.before = count(client, candidate.item);
         usedIds.add(id);
         run = candidate;
+        beginAttention(candidate);
         try {
             if (candidate.goal != null) baritone.getCustomGoalProcess().setGoalAndPath(candidate.goal);
             else switch (candidate.kind) {
@@ -514,10 +518,9 @@ public final class MineBotClientBody implements ClientModInitializer {
                 case "follow" -> {
                     candidate.previousFollowRadius = BaritoneAPI.getSettings().followRadius.value;
                     if (parts.length >= 3) BaritoneAPI.getSettings().followRadius.value = Math.max(0, candidate.range);
-                    baritone.getFollowProcess().follow(entity ->
-                        entity.getUUID().toString().equals(candidate.target)
-                            || entity.getName().getString().equals(candidate.target)
-                            || BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath().equals(candidate.target));
+                    // Resolve once in tickFollow; navigation and attention use
+                    // the same entity, including type-based requests.
+                    baritone.getFollowProcess().follow(entity -> entity == candidate.targetEntity);
                 }
                 case "pickup" -> baritone.getFollowProcess().pickup(stack -> BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath().equals(candidate.target));
                 case "farm" -> baritone.getFarmProcess().farm(candidate.range, candidate.anchor);
@@ -805,6 +808,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
         }
         if (selected == null) throw new IllegalArgumentException("target_not_found");
+        lookAt(client, lookParams(selected.getEyePosition()));
         client.gameMode.attack(client.player, selected);
     }
 
@@ -856,6 +860,7 @@ public final class MineBotClientBody implements ClientModInitializer {
     private static void mineBlock(Minecraft client, JsonObject params) {
         BlockPos target = blockPosition(params, "target");
         if (!client.player.isWithinBlockInteractionRange(target, 5.0)) throw new IllegalArgumentException("target_out_of_range");
+        lookAt(client, lookParams(Vec3.atCenterOf(target)));
         if (!client.gameMode.destroyBlock(target)) throw new IllegalArgumentException("block_break_rejected");
     }
 
@@ -872,6 +877,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         if (params.has("item")) selectItem(client, string(params, "item", ""));
         if (params.has("seed_item")) selectItem(client, string(params, "seed_item", ""));
         BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(target), Direction.UP, target, false);
+        lookAt(client, lookParams(hit.getLocation()));
         InteractionResult result = client.gameMode.useItemOn(client.player, InteractionHand.MAIN_HAND, hit);
         if (!result.consumesAction()) throw new IllegalArgumentException(action + "_rejected");
     }
@@ -1003,6 +1009,15 @@ public final class MineBotClientBody implements ClientModInitializer {
             boolean reached = client.player.onGround()
                 && client.player.distanceTo(current.targetEntity) <= current.followKeepDistance;
             requestStop(reached ? "completed" : "timeout", reached ? "follow_window_completed" : "follow_distance_not_reached");
+        }
+        if (current.stopStatus == null && current.targetEntity != null) {
+            if (!baritone.getFollowProcess().isActive()) {
+                baritone.getFollowProcess().follow(entity -> entity == current.targetEntity);
+            }
+            if (!baritone.getPathingBehavior().isPathing()
+                && client.player.distanceTo(current.targetEntity) <= current.followKeepDistance) {
+                lookAtEntityGently(client, current.targetEntity);
+            }
         }
     }
 
@@ -1282,6 +1297,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             approachCombatTarget(client, target, number(current.params, "approach_range", 3.0));
             return;
         }
+        baritone.getPathingBehavior().cancelEverything();
         lookAtEntity(client, target);
         int expected = Math.max(1, integer(current.params, "expected_shots", 1));
         int interval = Math.max(1, integer(current.params, "use_interval_ticks", weapon.equals("crossbow") ? 30 : 20));
@@ -1412,6 +1428,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             throw new IllegalArgumentException("menu_busy");
         }
         BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
+        lookAt(client, lookParams(hit.getLocation()));
         if (!client.gameMode.useItemOn(client.player, InteractionHand.MAIN_HAND, hit).consumesAction()) {
             throw new IllegalArgumentException("container_open_rejected");
         }
@@ -1981,17 +1998,19 @@ public final class MineBotClientBody implements ClientModInitializer {
         String item = string(current.params, "item", "").replace("minecraft:", "");
         int slot = integer(current.params, "slot", client.player.getInventory().getSelectedSlot());
         int wanted = Math.max(1, integer(current.params, "count", 1));
-        Entity recipient = null;
+        Entity recipient = current.targetEntity;
         for (Entity entity : client.level.getEntities(client.player, client.player.getBoundingBox().inflate(32.0), value -> true)) {
+            if (recipient != null) break;
             if (entity.getName().getString().equals(receiver)) {
                 recipient = entity;
                 break;
             }
         }
-        if (recipient == null) {
+        if (recipient == null || recipient.isRemoved() || !recipient.isAlive()) {
             requestStop("failed", "receiver_not_found");
             return;
         }
+        current.targetEntity = recipient;
         if (current.phase == 0) {
             if (recipient == client.player) {
                 requestStop("failed", "handoff_to_self");
@@ -2020,7 +2039,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             baritone.getPathingBehavior().cancelEverything();
             // Drop downward after rotation is sent; a horizontal throw can
             // pass the recipient before vanilla's pickup delay expires.
-            lookAtDropPoint(client);
+            lookAtDropPoint(client, recipient);
             current.handoffReceiverId = recipient.getUUID().toString();
             current.handoffReceiverName = recipient.getName().getString();
             current.handoffExpected = wanted;
@@ -2036,7 +2055,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             // Let the client send the downward rotation before the drop
             // packet.  A vertical throw keeps the item in the receiver's
             // pickup radius through vanilla's ten-tick pickup delay.
-            lookAtDropPoint(client);
+            lookAtDropPoint(client, recipient);
             if (current.ticks - current.phaseTick < 2 || client.player.getXRot() < 85.0f) return;
             ItemStack held = client.player.getMainHandItem();
             if (held.isEmpty() || !itemPath(held).equals(item)) {
@@ -2053,9 +2072,18 @@ public final class MineBotClientBody implements ClientModInitializer {
                 current.phaseTick = current.ticks;
                 return;
             }
+            // Vanilla permits the sender to pick up its own drops. Leave
+            // that overlapping pickup area during the native pickup delay;
+            // facing the receiver alone cannot transfer item ownership.
+            current.goal = new GoalRunAway(3.0, recipient.blockPosition());
+            baritone.getCustomGoalProcess().setGoalAndPath(current.goal);
             current.phase = 2;
             current.phaseTick = current.ticks;
             return;
+        }
+        if (current.goal.isInGoal(client.player.blockPosition()) && client.player.onGround()) {
+            baritone.getPathingBehavior().cancelEverything();
+            lookAtEntityGently(client, recipient);
         }
         for (Entity entity : client.level.entitiesForRendering()) {
             if (entity instanceof ItemEntity drop && !current.handoffExistingDrops.contains(drop.getId())
@@ -2066,6 +2094,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         if (current.handoffPickedUp >= current.handoffExpected
             && count(client, item) == current.before - current.handoffExpected) {
             current.handoffReceipt = true;
+            lookAtEntity(client, recipient);
             requestStop("completed", "handoff_pickup_observed");
             return;
         }
@@ -2097,9 +2126,53 @@ public final class MineBotClientBody implements ClientModInitializer {
         current.handoffPickedUp += received;
     }
 
-    private static void lookAtDropPoint(Minecraft client) {
+    private static void lookAtDropPoint(Minecraft client, Entity recipient) {
+        float yaw = (float) Math.toDegrees(Math.atan2(recipient.getZ() - client.player.getZ(),
+            recipient.getX() - client.player.getX())) - 90.0f;
         BaritoneAPI.getProvider().getBaritoneForMinecraft(client).getLookBehavior()
-            .updateTarget(new Rotation(client.player.getYRot(), 90.0f), true);
+            .updateTarget(new Rotation(yaw, 90.0f), true);
+    }
+
+    private static void lookAtEntityGently(Minecraft client, Entity target) {
+        double dx = target.getX() - client.player.getX();
+        double dy = target.getEyeY() - client.player.getEyeY();
+        double dz = target.getZ() - client.player.getZ();
+        float yaw = (float) Math.toDegrees(Math.atan2(dz, dx)) - 90.0f;
+        float pitch = (float) -Math.toDegrees(Math.atan2(dy, Math.hypot(dx, dz)));
+        yaw = client.player.getYRot() + Mth.clamp(Mth.wrapDegrees(yaw - client.player.getYRot()), -24.0f, 24.0f);
+        pitch = client.player.getXRot() + Mth.clamp(pitch - client.player.getXRot(), -8.0f, 8.0f);
+        BaritoneAPI.getProvider().getBaritoneForMinecraft(client).getLookBehavior()
+            .updateTarget(new Rotation(yaw, pitch), true);
+    }
+
+    private static void beginAttention(Run current) {
+        if (current.kind.equals("elytra")) return;
+        var settings = BaritoneAPI.getSettings();
+        current.attentionSettings = new boolean[] {settings.freeLook.value, settings.blockFreeLook.value,
+            settings.remainWithExistingLookDirection.value, settings.smoothLook.value};
+        settings.freeLook.value = false;
+        settings.blockFreeLook.value = false;
+        settings.remainWithExistingLookDirection.value = false;
+        settings.smoothLook.value = false;
+    }
+
+    private static void restoreAttention(Run current) {
+        if (current == null || current.attentionSettings == null) return;
+        var settings = BaritoneAPI.getSettings();
+        settings.freeLook.value = current.attentionSettings[0];
+        settings.blockFreeLook.value = current.attentionSettings[1];
+        settings.remainWithExistingLookDirection.value = current.attentionSettings[2];
+        settings.smoothLook.value = current.attentionSettings[3];
+        current.attentionSettings = null;
+    }
+
+    /** Cosmetic camera update after upstream has applied movement/packet rotation. */
+    public static void smoothTravelLook(float previousYaw, boolean blockInteract) {
+        if (instance == null || instance.run == null || instance.run.stopStatus != null || blockInteract) return;
+        Minecraft client = Minecraft.getInstance();
+        if (client.player == null || client.player.isFallFlying() || instance.run.kind.equals("elytra")) return;
+        float delta = Mth.wrapDegrees(client.player.getYRot() - previousYaw);
+        client.player.setYRot(previousYaw + Mth.clamp(delta, -24.0f, 24.0f));
     }
 
     private void tickVertical(Minecraft client, Run current) {
@@ -2278,6 +2351,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         if (current.previousFollowRadius != null) {
             BaritoneAPI.getSettings().followRadius.value = current.previousFollowRadius;
         }
+        restoreAttention(current);
         JsonObject response = state(client);
         response.addProperty("flight_observed", current.seenFlying);
         response.addProperty("type", "terminal");
@@ -2487,6 +2561,10 @@ public final class MineBotClientBody implements ClientModInitializer {
             state.addProperty("replant_crops", BaritoneAPI.getSettings().replantCrops.value);
             state.addProperty("farm_max_scan_size", BaritoneAPI.getSettings().farmMaxScanSize.value);
             state.addProperty("legit_mine_y", BaritoneAPI.getSettings().legitMineYLevel.value);
+            state.addProperty("free_look", BaritoneAPI.getSettings().freeLook.value);
+            state.addProperty("block_free_look", BaritoneAPI.getSettings().blockFreeLook.value);
+            state.addProperty("remain_with_existing_look", BaritoneAPI.getSettings().remainWithExistingLookDirection.value);
+            state.addProperty("smooth_look", BaritoneAPI.getSettings().smoothLook.value);
         }
         return state;
     }
@@ -2665,6 +2743,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         final Set<BlockPos> collectionTargets = new HashSet<>();
         final Set<String> collectionBlocks = new HashSet<>();
         final Set<String> collectionItems = new HashSet<>();
+        boolean[] attentionSettings;
         double followKeepDistance = 3.0;
         String stopStatus;
         String stopReason;

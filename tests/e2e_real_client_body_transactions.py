@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -24,6 +25,7 @@ from minebot.game.real_client_ipc import RealClientIpc
 
 
 TASKS = {
+    "attention": "visible path turns, high block, named follow, menu, explicit look and cancel",
     "collection": "finish small trees; demand-based stone/iron/giant tree and cancel",
     "navigation": "cross an obstacle, collect logs, and confirm arrival/inventory",
     "building": "build four blocks and clear them; check every server block",
@@ -65,7 +67,7 @@ def main() -> int:
     def command(text: str) -> str:
         report["step"] = text
         reply = rcon.command(text)
-        if args.case == "collection" and text.startswith(("fill ", "forceload ", "setblock ", "give ", "tp ", "gamemode ")):
+        if args.case in {"collection", "attention"} and text.startswith(("fill ", "forceload ", "setblock ", "give ", "tp ", "gamemode ")):
             report.setdefault("fixture_commands", []).append({"command": text, "reply": reply})
             assert not any(error in reply for error in ("not loaded", "Incorrect argument", "Unknown or incomplete")), reply
         return reply
@@ -223,6 +225,112 @@ def main() -> int:
                               "expected_item_ids": ["oak_log"]}, cancel=True)
             assert canceled["status"] == "canceled", canceled
             assert not body.ipc.state()["any_process_active"]
+        elif args.case == "attention":
+            assert report["initial_state"]["disposable_world"] is True
+            command("forceload add 272 -6 312 24")
+            time.sleep(1)
+            command("fill 272 65 -6 312 69 24 minecraft:dirt")
+            command("fill 272 70 -6 312 82 24 minecraft:air")
+            command(f"gamemode survival {args.client_name}")
+            command(f"give {args.client_name} minecraft:iron_axe")
+            command(f"give {args.client_name} minecraft:dirt 64")
+            settings = ("free_look", "block_free_look", "remain_with_existing_look", "smooth_look")
+            original = {key: report["initial_state"][key] for key in settings}
+
+            def sampled(name, params, *, stimulus=None, cancel=False):
+                request = Action.create(name, params)
+                record = {"action": name, "params": params, "action_id": request.id, "samples": []}
+                records.append(record)
+                start = body.ipc.state()["position"]
+                accepted = body.execute(request)
+                assert accepted.ok and accepted.accepted, accepted
+                terminal = []
+                def wait():
+                    try:
+                        terminal.append(dict(body.await_action_terminal(request.id, timeout_s=45).data))
+                    except Exception as error:
+                        terminal.append({"success": False, "reason": str(error)})
+                waiter = threading.Thread(target=wait, daemon=True)
+                waiter.start()
+                began, sent_cancel = time.monotonic(), False
+                while waiter.is_alive():
+                    state = body.ipc.state()
+                    record["samples"].append({key: state.get(key) for key in (
+                        "position", "yaw", "pitch", "pathing", "following", *settings)})
+                    if stimulus:
+                        stimulus(time.monotonic() - began)
+                    if cancel and not sent_cancel and math.dist(start, state["position"]) > 0.5:
+                        assert body.interrupt("attention fixture cancellation").ok
+                        sent_cancel = True
+                    time.sleep(0.1)
+                record["terminal"] = terminal[0]
+                assert terminal[0].get("status") == ("canceled" if cancel else "completed"), terminal[0]
+                settled = body.ipc.state()
+                record["restored_settings"] = {key: settled[key] for key in settings}
+                assert record["restored_settings"] == original, record["restored_settings"]
+                if cancel:
+                    assert sent_cancel and not settled["any_process_active"] and not settled["pathing"], settled
+                print(name, terminal[0].get("reason"), terminal[0].get("elapsed_ms"), flush=True)
+                return record
+
+            # Cross +/-180 on a straight path, then take a forced corner.
+            command(f"tp {args.client_name} 274.5 70 0.5 179 0")
+            wait_at(274.5, 70, 0.5)
+            body.ipc.control("settings", allow_break=False, allow_place=False)
+            north = sampled("moveTo", {"target": [274, 70, -3], "arrival_radius": 0, "timeout_s": 10})
+            assert all(abs((sample["yaw"] - 180 + 180) % 360 - 180) < 15 for sample in north["samples"])
+            command("fill 282 70 -6 282 73 9 minecraft:stone")
+            travel = sampled("moveTo", {"target": [300, 70, 16], "arrival_radius": 0, "timeout_s": 30})
+            aligned = []
+            for previous, current in zip(travel["samples"], travel["samples"][1:]):
+                dx, dz = (current["position"][i] - previous["position"][i] for i in (0, 2))
+                if math.hypot(dx, dz) > 0.1:
+                    heading = math.degrees(math.atan2(dz, dx)) - 90
+                    aligned.append(abs((current["yaw"] - heading + 180) % 360 - 180) < 45)
+            travel["moving_samples"] = len(aligned)
+            travel["facing_travel_fraction"] = sum(aligned) / max(1, len(aligned))
+            assert len(aligned) > 10 and travel["facing_travel_fraction"] > 0.7, travel["facing_travel_fraction"]
+            check_server(f"execute if entity @a[name={args.client_name},x=300,y=70,z=16,distance=..1]")
+            body.ipc.control("settings", allow_break=True, allow_place=True)
+            command("setblock 300 74 17 minecraft:oak_log")
+            before = body.get_state().inventory_counts.get("oak_log", 0)
+            high = sampled("collectBlocks", {"targets": [[300, 74, 17]], "expected_block_ids": ["oak_log"],
+                           "expected_item_ids": ["oak_log"], "timeout_s": 20})
+            assert any(sample["pitch"] < -20 for sample in high["samples"])
+            assert body.get_state().inventory_counts.get("oak_log", 0) == before + 1
+            check_server("execute if block 300 74 17 minecraft:air")
+            for name, x, z in (("AttentionTarget", 294.5, 16.5), ("AttentionDecoy", 301.5, 20.5)):
+                command(f"kill @e[type=cow,name={name}]")
+                command(f'summon cow {x} 70 {z} {{NoAI:1b,Silent:1b,CustomName:"{name}",PersistenceRequired:1b}}')
+            moved = []
+            def move_target(elapsed):
+                if elapsed > 2 and not moved:
+                    moved.append(command("tp @e[type=cow,name=AttentionTarget,limit=1] 288.5 70 21.5"))
+            follow = sampled("followEntity", {"target_name": "AttentionTarget", "keep_radius": 3, "timeout_s": 12}, stimulus=move_target)
+            stable = [sample for sample in follow["samples"][-10:] if not sample["pathing"]]
+            assert stable, "follow never settled near target"
+            for sample in stable:
+                dx, dz = 288.5 - sample["position"][0], 21.5 - sample["position"][2]
+                heading = math.degrees(math.atan2(dz, dx)) - 90
+                assert abs((sample["yaw"] - heading + 180) % 360 - 180) < 15, sample
+            assert not command("data get entity @e[type=cow,name=AttentionDecoy,limit=1] Health").endswith(": 0.0f")
+            state = body.ipc.state()
+            chest = [math.floor(state["position"][0]) + 2, 70, math.floor(state["position"][2])]
+            xyz = " ".join(map(str, chest))
+            command(f"setblock {xyz} minecraft:chest")
+            command(f"item replace block {xyz} container.0 with minecraft:stone 3")
+            slot = next(slot["slot"] for slot in state["inventory_slots"] if slot["slot"] < 36 and slot["empty"])
+            transfer = action("containerTransfer", {"pos": chest, "direction": "container_to_bot",
+                "container_slot": 0, "bot_slot": slot, "count": 1, "item": "stone"})
+            assert transfer["success"], transfer
+            check_server(f'execute if data entity {args.client_name} Inventory[{{id:"minecraft:stone"}}]')
+            state = body.ipc.state()
+            target = [state["position"][0], state["position"][1] + 1.62, state["position"][2] - 10]
+            assert action("lookAt", {"target": target})["success"]
+            yaw = body.ipc.state()["yaw"]
+            time.sleep(0.6)
+            assert abs((body.ipc.state()["yaw"] - yaw + 180) % 360 - 180) < 0.2
+            sampled("moveTo", {"target": [308, 70, 22], "arrival_radius": 0, "timeout_s": 30}, cancel=True)
         elif args.case == "navigation":
             flat_fixture(128)
             command("fill 135 150 -1 135 152 1 minecraft:stone")
@@ -759,6 +867,15 @@ def main() -> int:
     finally:
         if args.case == "collection":
             rcon.command("forceload remove 208 -6 236 8")
+        if args.case == "attention":
+            rcon.command("forceload remove 272 -6 312 24")
+            for name in ("AttentionTarget", "AttentionDecoy"):
+                rcon.command(f"kill @e[type=cow,name={name}]")
+            try:
+                body.ipc.control("settings", allow_break=report["initial_state"].get("allow_break", True),
+                                 allow_place=report["initial_state"].get("allow_place", True))
+            except Exception as error:
+                report["client_settings_cleanup_error"] = str(error)
         report["elapsed_s"] = round(time.monotonic() - started, 3)
         try:
             report["final_state"] = body.ipc.state()

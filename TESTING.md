@@ -47,6 +47,7 @@ python -m tests.e2e_real_client_body_transactions \
 
 | Case | Actual result checked |
 |---|---|
+| `attention` | Visible path turns and wraparound, high-block aim, selected moving follow target, menu, explicit look, cancel and setting restoration |
 | `collection` | Finish two small trees before switching; collect requested stone/iron and part of a giant tree; cancel |
 | `navigation` | Cross a stone obstacle, arrive, collect a log into inventory |
 | `controls` | Cancel navigation/exploration and stop their processes/pathing |
@@ -187,3 +188,46 @@ unchecked plan or failing legacy scenario does not select current work.
 After a coherent change, run its focused regression and relevant real task.
 Once the result is established, stop; broaden testing only for a new failure
 or a specific unresolved risk.
+
+
+## Proposed one-hour task: a camp from an empty inventory
+
+Status: task design only; not run. The next model run uses this card after the
+maintainer chooses to start it. Reuse the current Responses HTTP kernel, real
+client and visible viewer; do not add a new test runtime.
+
+初始条件：全新 disposable 世界，固定并记录种子；生存、和平难度、正常
+昼夜与随机刻，满生命/饱食；背包、护甲、副手、经验均为空。不开物品赠送、
+奖励箱或预建营地，不继承旧实验产物。开跑前只检查出生附近确有树林、
+露石和可用的自然建造地，记录出生点 B 和空地位置，不提供矿脉坐标。
+若默认出生条件不符，就在开跑前明确选定自然出生区域并披露；不在运行中
+传送补救。这个限定先检验连续办事，不同时加入怪物生存考题。
+
+给 Agent 的目标：
+
+> 从空库存开始，在出生点 B 附近建一个可用的小营地。造出并保留一把铁镐、
+> 一把铁斧；建一间外轮廓 5×5、内部至少两格净高的小屋，地板、屋顶和四面
+> 墙完整，留两格高入口，入口可实际通过。屋里放工作台、熔炉和箱子，安装
+> 四支火把。箱里存好 16 根任意原木、64 圆石和 4 铁锭，消耗过的材料不算
+> 最终储备。所有资源自己采集、加工；完成后回门口，汇报实际物资和营地坐标。
+> 一小时是上限，提前完成就结束。你自己安排采集、工具升级、熔炼和建造次序。
+
+这是一个连续目标，不按分钟强制切阶段。观察时大致关注：前 15 分钟能否
+形成木石工具/熔炉生产链；随后能否完成炼铁和铁工具；后半程能否建成、
+补齐储备并返回。时间点是诊断参考，不是分数线，也不要求模型机械照表走。
+
+运行中只通过真实用户消息干预：在一次实际长动作进行时问“做到哪一步了？”，
+检查回复时原动作仍在；约 20 分钟追加“箱里的原木改成 24 根”，最终按
+24 验收。若提前结束，就在结束前的工作阶段追加，不重启目标。自然障碍
+如河流、坡地或采矿失败只观察 Agent 是否调整；不为凑恢复事件临时造墙。
+完成后若还有时间，单独让它走向营地外 100 格，实际移动后明确取消，确认
+旧控制停止。若做到一小时仍未完成，就取消当前工作并按缺少的实际结果记失败。
+
+验收只看实物：服务器核对箱子和背包；检查屋顶、地板、围墙、入口及三个
+工作方块，观察角色实际进入和返回。聊天/追加/取消从现有 trace 和实际动作
+核对。成功就写完成及耗时；失败就写缺少什么、最后失败调用和主要耗时去向。
+从零运行途中不补物资、不改代码、不重启拼接成功；需要修复就保留这次失败，
+直接复现对应调用后另开一轮。RCON 在开跑后只读，Agent 不得到 RCON。
+
+本轮用现有 JSONL、任务日志和开头/末尾状态即可；无需扩建评分、Gate 或
+测试平台。模型调用/等待、实际采集/施工及工具内部停等从已有时间线区分。
