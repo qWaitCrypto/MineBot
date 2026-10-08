@@ -965,7 +965,11 @@ public final class MineBotClientBody implements ClientModInitializer {
                 tickFollow(client, current);
             } else if (current.elapsed() > current.timeout) {
                 requestStop("timeout", "deadline_exceeded");
-            } else if (current.ticks > 20 && !processActive() && !baritone.getPathingBehavior().isPathing()) {
+            } else if (current.ticks > 20 && !processActive() && !baritone.getPathingBehavior().isPathing()
+                // Baritone may release control one tick before landing in the
+                // goal cell. Let the existing arrival check observe the landing;
+                // the action deadline still bounds an unsettled destination.
+                && !(current.goal != null && current.goal.isInGoal(client.player.blockPosition()))) {
                 if (current.kind.equals("elytra")) {
                     boolean arrived = current.seenFlying && client.player.onGround()
                         && client.player.position().distanceToSqr(Vec3.atBottomCenterOf(current.anchor)) <= 64;
