@@ -40,6 +40,21 @@ Agent 随后自行读背包并成功制作 48 块木板、工作台和木镐，�
 没有开发者取消、注入、补给、代建或重启。证据为本实验目录
 `observed-collection-stall-diagnosis.json`，此次卡顿不因随后继续而算已修复。
 
+### 2026-10-09 00:18–00:23：树顶最后一格反复重算路径，尚未修复
+
+`collect_resource(logs,160)` 的 `collectBlocks` 动作
+`1b4765fa-0153-4545-8eb1-de25c1714d0c` 选中 `[-89,70..75,-264]` 六格原木。
+角色停在 `[-89.7000,70,-263.5110]`，原木总量停在 102，斧头耐久没有变化。
+终态记录 2911 次 `CALC_STARTED`、2910 次 `CALC_FINISHED_NOW_EXECUTING`，
+300169 ms 后返回 `timeout / deadline_exceeded`，该子动作库存增加 4 根。
+服务端逐格确认 y70..74 已为空气，y75 仍为橡木原木；与前次全部已砍掉的拾取卡顿不同，
+此次卡在树顶剩余方块的物理执行。站位、遮挡或瞄准的具体原因尚未独立直接复现。
+反复重算但无实际进展仍只等总期限，是此次观察到的收尾缺陷。
+Agent 自行读取库存、更新计划并导航返回住宅，实际位置已继续变化。
+没有人工取消、注入、补给、施工、重启或执行代码变更。
+证据：本实验目录 `observed-tree-last-block-stall.json`、
+`observed-stall-0024-blocks.json` 和 `observed-stall-0022.png`。
+
 ## 2026-10-08：模型选择探索目的地，Baritone 执行
 
 新增 `observe_environment`，真实客户端的 `explore_for` 改为接受模型选定的坐标、方向或区域。
