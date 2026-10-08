@@ -711,7 +711,7 @@ def _wire_action_for(action: Action) -> dict[str, object] | None:
     """
     names = {
         "engageEntity", "rangedAttack", "craftItem", "containerTransfer",
-        "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp", "useItem", "placeBlock",
+        "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp", "useItem", "placeBlock", "collectBlocks",
     }
     if action.name not in names:
         return None
@@ -1011,6 +1011,7 @@ def _terminal_name(action_name: str) -> str:
         "moveTo": "moveDone",
         "navigateTo": "navigateDone",
         "mineResource": "mineDone",
+        "collectBlocks": "mineDone",
         "baritoneMine": "mineDone",
         "getToBlock": "getToBlockDone",
         "baritoneGetToBlock": "getToBlockDone",

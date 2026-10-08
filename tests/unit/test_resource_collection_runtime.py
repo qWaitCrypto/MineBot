@@ -3,6 +3,7 @@ from dataclasses import replace
 from unittest.mock import patch
 
 from minebot.body.interaction_support import NearbyBlockSearch, NearbyBlockTarget
+from minebot.body.cluster_collection import resource_cluster
 from minebot.body.resource_collection import (
     ResourceCollectionConfig,
     ResourceCollectionTransactions,
@@ -115,6 +116,30 @@ class ResourceBody:
                 data={"cells": cells, "count": len(cells), "total": len(cells), "next": None},
             )
         raise AssertionError(f"unexpected perception scope {scope}")
+
+
+def test_connected_tree_includes_upper_trunk_and_branch_but_not_next_tree():
+    trunk = [(0, y, 0) for y in range(65, 72)]
+    branch = [(1, 70, 0), (2, 71, 0)]
+    other = [(5, y, 0) for y in range(65, 72)]
+    body = ResourceBody([(pos, "oak_log") for pos in trunk + branch + other])
+    selected = resource_cluster(body, trunk[0], ("oak_log",), 256, tree=True)
+    assert set(selected) == set(trunk + branch)
+
+
+def test_ore_cluster_stays_connected_and_stops_at_requested_quantity():
+    vein = [(0, 65, 0), (1, 65, 0), (2, 65, 0), (3, 65, 0)]
+    body = ResourceBody([(pos, "iron_ore") for pos in vein + [(0, 66, 1)]])
+    selected = resource_cluster(body, vein[0], ("iron_ore",), 3)
+    assert selected == vein[:3]
+
+
+def test_large_tree_returns_bounded_work_instead_of_requiring_the_whole_tree():
+    trunk = [(x, y, z) for y in range(65, 100) for x in (0, 1) for z in (0, 1)]
+    body = ResourceBody([(pos, "jungle_log") for pos in trunk])
+    selected = resource_cluster(body, trunk[0], ("jungle_log",), 18, tree=True)
+    assert len(selected) == 18
+    assert set(selected) < set(trunk)
 
 
 class EgressRepositioningResourceBody(ResourceBody):

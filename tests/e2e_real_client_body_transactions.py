@@ -24,6 +24,7 @@ from minebot.game.real_client_ipc import RealClientIpc
 
 
 TASKS = {
+    "collection": "finish small trees; demand-based stone/iron/giant tree and cancel",
     "navigation": "cross an obstacle, collect logs, and confirm arrival/inventory",
     "building": "build four blocks and clear them; check every server block",
     "farming": "harvest ripe wheat through Baritone and confirm inventory",
@@ -63,7 +64,11 @@ def main() -> int:
 
     def command(text: str) -> str:
         report["step"] = text
-        return rcon.command(text)
+        reply = rcon.command(text)
+        if args.case == "collection" and text.startswith(("fill ", "forceload ", "setblock ", "give ", "tp ", "gamemode ")):
+            report.setdefault("fixture_commands", []).append({"command": text, "reply": reply})
+            assert not any(error in reply for error in ("not loaded", "Incorrect argument", "Unknown or incomplete")), reply
+        return reply
 
     def wait_at(x: float, y: float, z: float) -> None:
         deadline = time.monotonic() + 10
@@ -106,6 +111,17 @@ def main() -> int:
         registry = build_phase1_registry(body, Phase1RuntimeConfig(
             region, body_provider="real_client",
             governance_policy=GovernancePolicy(natural_regions=[region], bot_name=args.client_name)))
+        if name == "collect_resource":
+            from minebot.brain.composition import CompositionBudget, CompositionContext, collect_resource_tool
+            from minebot.brain.lifecycle import LifecycleState
+            from minebot.brain.modes import ModeRuntime
+            from minebot.brain.progress import ProgressAuthority
+            from minebot.brain.registry import WeldContext
+            registry.register(collect_resource_tool(CompositionContext(
+                registry=registry,
+                weld_context=WeldContext(body=body, authority=ProgressAuthority(), goal_text="collect fixture resources"),
+                runtime_profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+                budget=CompositionBudget(max_candidates=96, max_mutating_calls=96, max_wall_s=300))))
         result = registry.get(name).callable(params)
         records.append({"tool": name, "params": params, "result": result.to_payload()})
         print(name, result.success, result.reason, flush=True)
@@ -152,7 +168,62 @@ def main() -> int:
         report["initial_state"] = body.ipc.state()
         report["seed"] = command("seed")
         report["difficulty"] = command("difficulty")
-        if args.case == "navigation":
+        if args.case == "collection":
+            # Preserve existing inventory. This is an isolated supplied fixture,
+            # not a from-zero model task.
+            assert report["initial_state"]["disposable_world"] is True
+            command("forceload add 208 -6 236 8")
+            time.sleep(1)
+            command("fill 208 60 -6 236 69 8 minecraft:dirt")
+            command("fill 208 70 -6 236 100 8 minecraft:air")
+            command(f"gamemode survival {args.client_name}")
+            command(f"tp {args.client_name} 208.5 70 0.5")
+            wait_at(208.5, 70, 0.5)
+            for item in ("iron_axe", "iron_pickaxe"):
+                command(f"give {args.client_name} minecraft:{item}")
+            command(f"give {args.client_name} minecraft:dirt 64")
+            command("kill @e[type=minecraft:item,x=208,y=70,z=-6,dx=28,dy=30,dz=14]")
+            first = [[212, y, 0] for y in range(70, 76)] + [[213, 74, 0], [214, 75, 0]]
+            second = [[221, y, 0] for y in range(70, 78)]
+            third = [[230, y, 0] for y in range(70, 76)]
+            for pos in first + second + third:
+                command(f"setblock {' '.join(map(str, pos))} minecraft:oak_log")
+            before = body.get_state().inventory_counts.get("oak_log", 0)
+            tool("collect_resource", {"item": "oak_log", "count": before + 9})
+            assert body.get_state().inventory_counts.get("oak_log", 0) >= before + 16
+            for pos in first + second:
+                check_server(f"execute if block {' '.join(map(str, pos))} minecraft:air")
+            for pos in third:
+                check_server(f"execute if block {' '.join(map(str, pos))} minecraft:oak_log")
+            records[-1]["server_inventory"] = command(f"data get entity {args.client_name} Inventory")
+            command("fill 212 70 3 219 72 5 minecraft:stone")
+            before = body.get_state().inventory_counts.get("cobblestone", 0)
+            tool("collect_resource", {"item": "cobblestone", "count": before + 40})
+            assert body.get_state().inventory_counts.get("cobblestone", 0) >= before + 40
+            records[-1]["server_inventory"] = command(f"data get entity {args.client_name} Inventory")
+            # The task ends with a real inventory result, without clearing all
+            # 72 connected stone cells just because they touch each other.
+            remaining_stone = sum("Test passed" in command(f"execute if block {x} {y} {z} minecraft:stone")
+                                  for x in range(212, 220) for y in range(70, 73) for z in range(3, 6))
+            records[-1]["remaining_stone"] = remaining_stone
+            assert remaining_stone > 0, remaining_stone
+            command("fill 212 70 -2 215 72 -2 minecraft:iron_ore")
+            before = body.get_state().inventory_counts.get("raw_iron", 0)
+            tool("collect_resource", {"item": "raw_iron", "count": before + 12})
+            assert body.get_state().inventory_counts.get("raw_iron", 0) >= before + 12
+            records[-1]["server_inventory"] = command(f"data get entity {args.client_name} Inventory")
+            command("fill 212 70 -5 213 89 -4 minecraft:jungle_log")
+            before = body.get_state().inventory_counts.get("jungle_log", 0)
+            tool("collect_resource", {"item": "jungle_log", "count": before + 8})
+            assert body.get_state().inventory_counts.get("jungle_log", 0) >= before + 8
+            check_server("execute if block 212 89 -5 minecraft:jungle_log")
+            records[-1]["server_inventory"] = command(f"data get entity {args.client_name} Inventory")
+            targets = [[230, y, 0] for y in range(70, 76)]
+            canceled = action("collectBlocks", {"targets": targets, "expected_block_ids": ["oak_log"],
+                              "expected_item_ids": ["oak_log"]}, cancel=True)
+            assert canceled["status"] == "canceled", canceled
+            assert not body.ipc.state()["any_process_active"]
+        elif args.case == "navigation":
             flat_fixture(128)
             command("fill 135 150 -1 135 152 1 minecraft:stone")
             command("setblock 143 150 0 minecraft:oak_log")
@@ -678,7 +749,7 @@ def main() -> int:
         report["success"] = True
         report["reason"] = "task and server checks passed"
         return 0
-    except Exception as error:
+    except (Exception, KeyboardInterrupt) as error:
         detail = error.args[0] if error.args else str(error)
         if isinstance(detail, dict):
             detail = detail.get("reason") or {k: detail[k] for k in ("command", "observed") if k in detail} or "assertion failed; see failure trace"
@@ -686,6 +757,8 @@ def main() -> int:
         report["failure"] = traceback.format_exc()
         return 1
     finally:
+        if args.case == "collection":
+            rcon.command("forceload remove 208 -6 236 8")
         report["elapsed_s"] = round(time.monotonic() - started, 3)
         try:
             report["final_state"] = body.ipc.state()

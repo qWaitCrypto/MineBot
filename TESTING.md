@@ -47,6 +47,7 @@ python -m tests.e2e_real_client_body_transactions \
 
 | Case | Actual result checked |
 |---|---|
+| `collection` | Finish two small trees before switching; collect requested stone/iron and part of a giant tree; cancel |
 | `navigation` | Cross a stone obstacle, arrive, collect a log into inventory |
 | `controls` | Cancel navigation/exploration and stop their processes/pathing |
 | `building` | Place four blocks, then clear them; check each server block |

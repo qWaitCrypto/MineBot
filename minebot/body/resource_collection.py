@@ -91,6 +91,7 @@ class ResourceCollectionTransactions:
         bounded_mobility_egress: BoundedMobilityEgress | None = None,
         bounded_vertical_descent: BoundedVerticalDescent | None = None,
         designated_collector: DesignatedCollector | None = None,
+        batch_collector: Callable[..., ToolResult | None] | None = None,
     ) -> None:
         self.body = body
         self.navigator = navigator
@@ -99,6 +100,7 @@ class ResourceCollectionTransactions:
         self.bounded_mobility_egress = bounded_mobility_egress
         self.bounded_vertical_descent = bounded_vertical_descent
         self.designated_collector = designated_collector
+        self.batch_collector = batch_collector
 
     def collect_block_domain(
         self,
@@ -113,6 +115,12 @@ class ResourceCollectionTransactions:
         invalid = _validate_request(block_types, expected_drops, remaining_count, cfg)
         if invalid is not None:
             return invalid
+
+        if self.batch_collector is not None:
+            batched = self.batch_collector(block_types=block_types, expected_drops=expected_drops,
+                remaining_count=remaining_count, dry=dry, config=cfg)
+            if batched is not None:
+                return batched
 
         normalized_blocks = tuple(dict.fromkeys(_normalize_item(item) for item in block_types))
         normalized_drops = tuple(dict.fromkeys(_normalize_item(item) for item in expected_drops))

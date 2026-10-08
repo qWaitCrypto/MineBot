@@ -639,6 +639,20 @@ def register_fake_acquisition_leaf_tools(registry, body, *, fail_tool=None):
 
 
 class AgentCompositionTests(unittest.TestCase):
+    def test_inventory_minimum_does_not_hide_unfinished_cluster_pickup(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(body, {
+            "success": False, "reason": "cluster_pickup_not_observed", "delta": 11,
+            "metrics": {"collection_strategy": "native_resource_collection"}})
+        registry.register(domain)
+        context, _events = composition_context(body, registry)
+        result = collect_resource({"item": "oak_log", "count": 9}, context)
+        self.assertFalse(result.success)
+        self.assertEqual(result.metrics["after_count"], 11)
+        self.assertEqual(result.metrics["last_failure"]["reason"], "cluster_pickup_not_observed")
+
     def test_read_inventory_tool_pages_to_avoid_truncated_payloads(self):
         body = PagedInventoryBody()
         registry = ToolRegistry()
@@ -1431,7 +1445,7 @@ class AgentCompositionTests(unittest.TestCase):
         )
         self.assertEqual(result.metrics["governance_confirmation"], confirmation)
 
-    def test_collect_resource_framework_contract_exposes_the_full_collect_n_process(self):
+    def test_collection_and_tool_acquisition_expose_result_projectors(self):
         body = FakeBody()
         registry = ToolRegistry()
         register_inventory_tools(registry, body)
@@ -1440,14 +1454,6 @@ class AgentCompositionTests(unittest.TestCase):
 
         tool = registry.get("collect_resource")
 
-        self.assertIn("bounded Python orchestration", tool.description)
-        self.assertIn("candidate ordering", tool.description)
-        self.assertIn("designated target", tool.description)
-        self.assertIn("governed excavation", tool.description)
-        self.assertIn("typed terminal", tool.description)
-        self.assertIn("pickup", tool.description)
-        self.assertIn("authoritative truth", tool.description)
-        self.assertNotIn("persistent Java Body process", tool.description)
         self.assertIsNotNone(tool.projector)
 
         register_ensure_tool_for_tool(registry, ctx, acquisition_recipe_lookup)

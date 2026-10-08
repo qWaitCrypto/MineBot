@@ -12,6 +12,7 @@ import baritone.api.pathing.goals.GoalNear;
 import baritone.api.pathing.goals.GoalRunAway;
 import baritone.api.pathing.goals.GoalYLevel;
 import baritone.api.schematic.FillSchematic;
+import baritone.api.schematic.MaskSchematic;
 import baritone.api.selection.ISelection;
 import baritone.api.utils.BlockOptionalMeta;
 import baritone.api.utils.BlockOptionalMetaLookup;
@@ -1027,6 +1028,7 @@ public final class MineBotClientBody implements ClientModInitializer {
                 case "engageEntity" -> tickEngage(client, current);
                 case "useItem" -> tickUseItem(client, current);
                 case "placeBlock" -> tickPlaceBlock(client, current);
+                case "collectBlocks" -> tickCollectBlocks(client, current);
                 case "rangedAttack" -> tickRanged(client, current);
                 case "craftItem" -> tickCraft(client, current);
                 case "containerTransfer", "furnaceTransfer" -> tickMenuTransfer(client, current);
@@ -1039,6 +1041,87 @@ public final class MineBotClientBody implements ClientModInitializer {
                 : "client_action_failed:" + error.getClass().getSimpleName());
             LOG.warn("MINEBOT_BODY action_failed id={} action={} detail={}", current.id, current.kind, error.toString());
         }
+    }
+
+    private void tickCollectBlocks(Minecraft client, Run current) {
+        if (current.phase == 0) {
+            if (!Boolean.getBoolean("minebot.client.disposable_world")) {
+                throw new IllegalArgumentException("native_mutation_requires_disposable_world");
+            }
+            JsonArray targets = current.params.getAsJsonArray("targets");
+            if (targets == null || targets.isEmpty() || targets.size() > 256) {
+                throw new IllegalArgumentException("invalid_collection_targets");
+            }
+            for (var id : current.params.getAsJsonArray("expected_block_ids")) {
+                current.collectionBlocks.add(id.getAsString().replace("minecraft:", ""));
+            }
+            for (var id : current.params.getAsJsonArray("expected_item_ids")) {
+                current.collectionItems.add(id.getAsString().replace("minecraft:", ""));
+            }
+            if (current.collectionBlocks.isEmpty() || current.collectionItems.isEmpty()) {
+                throw new IllegalArgumentException("missing_collection_filter");
+            }
+            for (var raw : targets) {
+                JsonArray xyz = raw.getAsJsonArray();
+                BlockPos pos = new BlockPos(xyz.get(0).getAsInt(), xyz.get(1).getAsInt(), xyz.get(2).getAsInt());
+                if (!client.level.hasChunkAt(pos) || !current.collectionBlocks.contains(
+                    BuiltInRegistries.BLOCK.getKey(client.level.getBlockState(pos).getBlock()).getPath())) {
+                    throw new IllegalArgumentException("collection_target_changed");
+                }
+                current.collectionTargets.add(pos);
+            }
+            int minX = current.collectionTargets.stream().mapToInt(BlockPos::getX).min().orElseThrow();
+            int minY = current.collectionTargets.stream().mapToInt(BlockPos::getY).min().orElseThrow();
+            int minZ = current.collectionTargets.stream().mapToInt(BlockPos::getZ).min().orElseThrow();
+            int sizeX = current.collectionTargets.stream().mapToInt(BlockPos::getX).max().orElseThrow() - minX + 1;
+            int sizeY = current.collectionTargets.stream().mapToInt(BlockPos::getY).max().orElseThrow() - minY + 1;
+            int sizeZ = current.collectionTargets.stream().mapToInt(BlockPos::getZ).max().orElseThrow() - minZ + 1;
+            if (Math.max(sizeX, Math.max(sizeY, sizeZ)) > 64) {
+                throw new IllegalArgumentException("collection_cluster_too_large");
+            }
+            BlockPos origin = new BlockPos(minX, minY, minZ);
+            current.before = collectionCount(client, current);
+            // Upstream builder handles movement, tool choice, digging and scaffolding.
+            // Only the selected resource cells belong to this clearing schematic.
+            var air = new FillSchematic(sizeX, sizeY, sizeZ, new BlockOptionalMeta("air"));
+            var mask = new MaskSchematic(air) {
+                @Override
+                protected boolean partOfMask(int x, int y, int z, BlockState state) {
+                    BlockPos pos = origin.offset(x, y, z);
+                    return current.collectionTargets.contains(pos) && (state == null || state.isAir()
+                        || current.collectionBlocks.contains(BuiltInRegistries.BLOCK.getKey(state.getBlock()).getPath()));
+                }
+            };
+            baritone.getBuilderProcess().build("minebot-resource-cluster", mask, origin);
+            current.phase = 1;
+            current.phaseTick = current.ticks;
+            return;
+        }
+        boolean removed = current.collectionTargets.stream().allMatch(pos -> client.level.getBlockState(pos).isAir());
+        if (removed && collectionCount(client, current) - current.before >= current.collectionTargets.size()) {
+            requestStop("completed", "resource_cluster_collected");
+        } else if (removed && current.phase == 1) {
+            baritone.getPathingBehavior().cancelEverything();
+            current.previousFollowRadius = BaritoneAPI.getSettings().followRadius.value;
+            BaritoneAPI.getSettings().followRadius.value = 0;
+            baritone.getFollowProcess().follow(entity -> entity instanceof ItemEntity item
+                && current.collectionItems.contains(itemPath(item.getItem()))
+                && current.collectionTargets.stream().anyMatch(pos ->
+                    Math.abs(item.getX() - pos.getX()) <= 4 && Math.abs(item.getZ() - pos.getZ()) <= 4
+                    && item.getY() >= pos.getY() - 3 && item.getY() <= pos.getY() + 3));
+            current.phase = 2;
+            current.phaseTick = current.ticks;
+        } else if (current.phase == 2 && current.ticks - current.phaseTick > 20
+            && !baritone.getFollowProcess().isActive()) {
+            requestStop("failed", "cluster_pickup_not_observed");
+        } else if (current.phase == 1 && current.ticks - current.phaseTick > 20
+            && !baritone.getBuilderProcess().isActive() && !baritone.getPathingBehavior().isPathing()) {
+            requestStop("failed", "resource_cluster_incomplete");
+        }
+    }
+
+    private static int collectionCount(Minecraft client, Run current) {
+        return current.collectionItems.stream().mapToInt(item -> count(client, item)).sum();
     }
 
     private void tickPlaceBlock(Minecraft client, Run current) {
@@ -2209,6 +2292,11 @@ public final class MineBotClientBody implements ClientModInitializer {
         response.addProperty("inventory_before", current.before);
         response.addProperty("inventory_after", count(client, current.item));
         response.addProperty("inventory_delta", count(client, current.item) - current.before);
+        if (current.kind.equals("collectBlocks")) {
+            response.addProperty("inventory_after", collectionCount(client, current));
+            response.addProperty("inventory_delta", collectionCount(client, current) - current.before);
+            response.addProperty("target_count", current.collectionTargets.size());
+        }
         response.addProperty("process_kind", current.kind);
         response.addProperty("seen_active", current.seenActive);
         response.addProperty("last_path_event", current.lastPathEvent);
@@ -2574,6 +2662,9 @@ public final class MineBotClientBody implements ClientModInitializer {
         int verticalIdleTicks;
         List<net.minecraft.world.item.Item> previousThrowawayItems;
         Integer previousFollowRadius;
+        final Set<BlockPos> collectionTargets = new HashSet<>();
+        final Set<String> collectionBlocks = new HashSet<>();
+        final Set<String> collectionItems = new HashSet<>();
         double followKeepDistance = 3.0;
         String stopStatus;
         String stopReason;

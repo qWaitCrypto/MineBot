@@ -49,6 +49,7 @@ from minebot.body import (
     UseTransactions,
     VoxelStructureRiskAssessor,
 )
+from minebot.body.cluster_collection import collect_native_cluster
 from minebot.body.combat import CombatTransactions, find_hostiles
 from minebot.body.furnace import DEFAULT_SMELT_SECONDS_PER_ITEM, resolve_smelt_output, select_fuel
 from minebot.body.inventory import _parse_recipe_variants
@@ -685,6 +686,8 @@ def build_phase1_registry(
         bounded_mobility_egress=bounded_resource_egress,
         bounded_vertical_descent=bounded_resource_descent,
         designated_collector=designated_collector,
+        batch_collector=(lambda **kwargs: collect_native_cluster(body, **kwargs))
+            if config.body_provider == "real_client" else None,
     )
     inventory_txn = InventoryTransactions(body, navigator=approach_navigator, governance=policy, work=work)
     furnace_txn = FurnaceTransactions(body, navigator=approach_navigator, governance=policy, work=work)

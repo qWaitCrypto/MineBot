@@ -258,12 +258,11 @@ def collect_resource_tool(context: CompositionContext) -> RegisteredTool:
     return RegisteredTool(
         name="collect_resource",
         description=(
-            "Reach the caller's requested inventory total through bounded Python orchestration over authoritative "
-            "Body reads and caller-designated physical objectives. Existing inventory counts toward the total; "
+            "Collect a resource batch to the requested inventory total. Existing inventory counts toward the total; "
+            "logs are a minimum: collection may finish the current tree and exceed the requested count. "
+            "Request the amount needed for the next stage together, rather than issuing one call per block. "
             "item and count describe this stage and are never overridden by global goal wording. "
-            "The orchestration layer owns discovery, candidate ordering, blacklists, count and retry "
-            "budgets; each Body action owns only navigation and governed excavation/break/pickup mechanics for its "
-            "designated target and returns a typed terminal with authoritative truth. When a recipe or goal accepts any "
+            "The tool handles discovery, local collection and inventory verification. When a recipe or goal accepts any "
             "equivalent material family, request "
             "the family name, e.g. item='logs' for any log/stem; use an exact species such as "
             "item='oak_log' only when that exact species is part of the goal or known recipe output."
@@ -489,6 +488,8 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     skipped = _resource_process_skips(body_metrics)
     body_reason = str(body_process.get("reason") or "resource_process_failed")
     complete = current_count >= count
+    if body_metrics.get("collection_strategy") == "native_resource_collection":
+        complete = complete and bool(body_process.get("success"))
 
     if complete:
         result_reason = "collected"
