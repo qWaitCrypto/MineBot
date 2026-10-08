@@ -28,6 +28,13 @@ window visible when observing real Body or Agent experiments. For an explicitly
 headless run, prefix the same command with `xvfb-run -a`; Xvfb renders to a
 virtual display and does not show a desktop window.
 
+WSLg can create a transparent Windows window despite a ready client. On this
+machine, WSL 2.7.3 reports `[WARN:COPY MODE]`, a shared-memory error in
+`/mnt/wslg/weston.log`, and Windows RDP graphics decoding error `0x80070490`.
+Check the actual Windows picture before reporting the window as visible.
+An existing FFmpeg/FFplay loopback stream can temporarily show the same client's
+live picture in a Windows viewer; that viewer does not forward game input.
+
 After the client reports readiness, `RealClientBody` can submit navigation,
 mine, get-to-block, explore, follow/pickup, farm, Builder/Clear and Elytra
 objectives, plus typed combat, crafting, container/furnace, handoff and
