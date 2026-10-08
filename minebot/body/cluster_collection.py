@@ -1,4 +1,4 @@
-"""Keep small tree work continuous; leave bulk mining to upstream MineProcess."""
+"""Finish bounded local resource clusters; leave bulk mining to MineProcess."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 def resource_cluster(
     body: Body, anchor: Position, block_types: tuple[str, ...], limit: int, *, tree: bool = False,
+    include_neighbors: bool = False,
 ) -> list[Position]:
     """Read a bounded connected prefix, including logs above the search page.
 
@@ -26,6 +27,9 @@ def resource_cluster(
         (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
     wanted = set(block_types)
     found, seen, frontier = [], set(), {anchor}
+    if include_neighbors:
+        # MineProcess may already have removed the last selected resource cell.
+        frontier.update(tuple(anchor[i] + offset[i] for i in range(3)) for offset in offsets)
     while frontier:
         execution_checkpoint()
         cells = sorted(frontier)
@@ -67,6 +71,7 @@ def collect_native_cluster(
     before = inventory_total()
     deadline = time.monotonic() + config.max_wall_s
     attempts, excluded, actions_used = [], set(), 0
+    finish_target: Position | None = None
 
     def result(success: bool, reason: str) -> ToolResult:
         current = inventory_total()
@@ -78,15 +83,17 @@ def collect_native_cluster(
     while time.monotonic() < deadline and actions_used < config.mutation_budget:
         execution_checkpoint()
         current = inventory_total()
-        if current - before >= remaining_count:
+        finishing = current - before >= remaining_count
+        if finishing and finish_target is None:
             return result(True, "resource_collected")
-        needed = remaining_count - (current - before)
+        needed = max(0, remaining_count - (current - before))
         timeout = min(300.0, deadline - time.monotonic())
         if timeout <= 0:
             break
         cluster: list[Position] = []
-        anchor = None
-        if tree:
+        anchor = finish_target if finishing else None
+        finish_target = None
+        if tree and not finishing:
             scan = body.perceive("findBlocks", {"block_types": list(blocks),
                 "radius": config.search_radius, "y_radius": min(64, max(16, config.search_radius)), "limit": 256})
             if not scan.ok:
@@ -98,18 +105,24 @@ def collect_native_cluster(
                 return result(False, "resource_candidates_not_found")
             origin = body.get_state().pos
             anchor = min(candidates, key=lambda pos: math.dist(origin, pos))
+        if anchor is not None:
             # Spend a little of the remaining task time finishing the current
-            # tree, rather than making every connected forest an obligation.
-            # One extra log per second is a conservative work estimate, not a
-            # tree-size classification. Probe one beyond the allowance.
-            finish_allowance = int(min(10.0, timeout * 0.1))
+            # cluster, without making a forest or mountain an obligation.
+            # One extra block per second is a work estimate, not a resource-size
+            # classification. Probe one beyond the allowance.
+            finish_allowance = int(timeout * 0.1)
             probe_limit = min(257, needed + finish_allowance + 1)
-            cluster = resource_cluster(body, anchor, blocks, probe_limit, tree=True)
+            cluster = resource_cluster(body, anchor, blocks, probe_limit,
+                tree=tree or all(b.endswith("_ore") for b in blocks), include_neighbors=finishing)
             if not cluster:
+                if finishing:
+                    return result(True, "resource_collected")
                 excluded.add(anchor)
                 continue
             if len(cluster) >= probe_limit or len(cluster) > 256:
                 cluster = []
+        if finishing and not cluster:
+            return result(True, "resource_collected")
         timeout = min(300.0, deadline - time.monotonic())
         if timeout <= 0:
             break
@@ -137,5 +150,9 @@ def collect_native_cluster(
         actions_used += 1
         if not terminal.success:
             return result(False, terminal.reason)
+        if action.name == "mineResource":
+            selected = (terminal.metrics or {}).get("last_resource_target")
+            if isinstance(selected, list) and len(selected) == 3:
+                finish_target = tuple(int(value) for value in selected)
     complete = inventory_total() - before >= remaining_count
     return result(complete, "resource_collected" if complete else "resource_domain_budget_exhausted")

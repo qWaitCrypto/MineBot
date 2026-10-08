@@ -5,6 +5,7 @@ import baritone.api.IBaritone;
 import baritone.api.event.events.PathEvent;
 import baritone.api.event.listener.AbstractGameEventListener;
 import baritone.api.pathing.goals.GoalBlock;
+import baritone.api.pathing.goals.GoalTwoBlocks;
 import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalComposite;
 import baritone.api.pathing.goals.GoalXZ;
@@ -19,6 +20,7 @@ import baritone.api.utils.BlockOptionalMetaLookup;
 import baritone.api.utils.BetterBlockPos;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.RotationUtils;
+import baritone.api.utils.input.Input;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -933,6 +935,15 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         current.ticks++;
+        if (current.kind.equals("mine") && current.stopStatus == null
+            && baritone.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)) {
+            baritone.getPlayerContext().getSelectedBlock().ifPresent(pos -> {
+                String block = BuiltInRegistries.BLOCK.getKey(client.level.getBlockState(pos).getBlock()).getPath();
+                for (String target : current.targets) {
+                    if (target.replace("minecraft:", "").equals(block)) current.lastResourceTarget = pos.immutable();
+                }
+            });
+        }
         if (current.kind.equals("elytra") && client.player.isFallFlying()) current.seenFlying = true;
         if (current.structured) {
             current.seenActive = true;
@@ -1112,6 +1123,15 @@ public final class MineBotClientBody implements ClientModInitializer {
             }
             BlockPos origin = new BlockPos(minX, minY, minZ);
             current.before = collectionCount(client, current);
+            current.collectionTree = current.collectionBlocks.stream().allMatch(id -> id.endsWith("_log") || id.endsWith("_stem"));
+            if (!current.collectionTree) {
+                // Use upstream mining-style goals for finite ore clusters.
+                // Builder clearing can keep swinging without moving on stone.
+                startCollectionGoal(client, current);
+                current.phase = 1;
+                current.phaseTick = current.ticks;
+                return;
+            }
             // Upstream builder handles movement, tool choice, digging and scaffolding.
             // Only the selected resource cells belong to this clearing schematic.
             var air = new FillSchematic(sizeX, sizeY, sizeZ, new BlockOptionalMeta("air"));
@@ -1146,9 +1166,22 @@ public final class MineBotClientBody implements ClientModInitializer {
             && !baritone.getFollowProcess().isActive()) {
             requestStop("failed", "cluster_pickup_not_observed");
         } else if (current.phase == 1 && current.ticks - current.phaseTick > 20
-            && !baritone.getBuilderProcess().isActive() && !baritone.getPathingBehavior().isPathing()) {
-            requestStop("failed", "resource_cluster_incomplete");
+            && !baritone.getBuilderProcess().isActive() && !baritone.getCustomGoalProcess().isActive()
+            && !baritone.getPathingBehavior().isPathing()) {
+            if (!current.collectionTree && current.goal.isInGoal(client.player.blockPosition())) {
+                startCollectionGoal(client, current);
+                current.phaseTick = current.ticks;
+            } else {
+                requestStop("failed", "resource_cluster_incomplete");
+            }
         }
+    }
+
+    private void startCollectionGoal(Minecraft client, Run current) {
+        current.goal = new GoalComposite(current.collectionTargets.stream()
+            .filter(pos -> !client.level.getBlockState(pos).isAir())
+            .map(GoalTwoBlocks::new).toArray(Goal[]::new));
+        baritone.getCustomGoalProcess().setGoalAndPath(current.goal);
     }
 
     private static int collectionCount(Minecraft client, Run current) {
@@ -2389,6 +2422,13 @@ public final class MineBotClientBody implements ClientModInitializer {
         response.addProperty("inventory_before", current.before);
         response.addProperty("inventory_after", count(client, current.item));
         response.addProperty("inventory_delta", count(client, current.item) - current.before);
+        if (current.lastResourceTarget != null) {
+            JsonArray target = new JsonArray();
+            target.add(current.lastResourceTarget.getX());
+            target.add(current.lastResourceTarget.getY());
+            target.add(current.lastResourceTarget.getZ());
+            response.add("last_resource_target", target);
+        }
         if (current.kind.equals("collectBlocks")) {
             response.addProperty("inventory_after", collectionCount(client, current));
             response.addProperty("inventory_delta", collectionCount(client, current) - current.before);
@@ -2716,6 +2756,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         String item;
         String[] targets = new String[0];
         int mineQuantity = 1;
+        BlockPos lastResourceTarget;
         boolean structured;
         BlockHitResult placementHit;
         boolean placementConfirmed;
@@ -2768,6 +2809,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         final Set<BlockPos> collectionTargets = new HashSet<>();
         final Set<String> collectionBlocks = new HashSet<>();
         final Set<String> collectionItems = new HashSet<>();
+        boolean collectionTree;
         boolean[] attentionSettings;
         double[] attentionNoise;
         double followKeepDistance = 3.0;

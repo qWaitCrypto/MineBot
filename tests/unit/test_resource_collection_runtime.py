@@ -3,13 +3,13 @@ from dataclasses import replace
 from unittest.mock import patch
 
 from minebot.body.interaction_support import NearbyBlockSearch, NearbyBlockTarget
-from minebot.body.cluster_collection import resource_cluster
+from minebot.body.cluster_collection import collect_native_cluster, resource_cluster
 from minebot.body.resource_collection import (
     ResourceCollectionConfig,
     ResourceCollectionTransactions,
     _active_targets,
 )
-from minebot.contract import BodyState, PerceptionResult, ToolResult
+from minebot.contract import BodyState, Event, PerceptionResult, Result, ToolResult
 from minebot.game.navigation import GoalComposite
 
 
@@ -127,7 +127,7 @@ def test_connected_tree_includes_upper_trunk_and_branch_but_not_next_tree():
     assert set(selected) == set(trunk + branch)
 
 
-def test_ore_cluster_stays_connected_and_stops_at_requested_quantity():
+def test_ore_probe_stays_connected_and_honors_read_limit():
     vein = [(0, 65, 0), (1, 65, 0), (2, 65, 0), (3, 65, 0)]
     body = ResourceBody([(pos, "iron_ore") for pos in vein + [(0, 66, 1)]])
     selected = resource_cluster(body, vein[0], ("iron_ore",), 3)
@@ -140,6 +140,64 @@ def test_large_tree_returns_bounded_work_instead_of_requiring_the_whole_tree():
     selected = resource_cluster(body, trunk[0], ("jungle_log",), 18, tree=True)
     assert len(selected) == 18
     assert set(selected) < set(trunk)
+
+
+class NativeResourceBody(ResourceBody):
+    def __init__(self, targets, *, finish_success=True):
+        super().__init__(targets)
+        self.counts, self.actions, self.finish_success = {}, [], finish_success
+
+    def get_state(self):
+        return replace(super().get_state(), inventory_counts=dict(self.counts))
+
+    def perceive(self, scope, params):
+        if scope == "baritoneState":
+            return PerceptionResult(bot=self.bot_name, scope=scope, type="perception",
+                                    ok=True, complete=True, data={"disposable_world": True})
+        return super().perceive(scope, params)
+
+    def execute(self, action):
+        self.actions.append(action)
+        return Result(id=action.id, bot=self.bot_name, type="result", ok=True, accepted=True, complete=False)
+
+    def await_action_terminal(self, action_id, timeout_s):
+        action = self.actions[-1]
+        selected = self.targets[:action.params["quantity"]] if action.name == "mineResource" else [
+            entry for entry in self.targets if list(entry[0]) in action.params["targets"]]
+        success = action.name == "mineResource" or self.finish_success
+        if success:
+            self.targets = [entry for entry in self.targets if entry not in selected]
+            self.counts["raw_iron"] = self.counts.get("raw_iron", 0) + len(selected)
+        return Event(seq=1, tick=1, bot=self.bot_name, name="collectCompleted", data={
+            "success": success, "stopped_reason": "completed" if success else "cluster_pickup_not_observed",
+            "last_resource_target": list(selected[-1][0])})
+
+
+def test_native_collection_finishes_current_ore_vein_after_inventory_minimum():
+    vein = [(x, 65, z) for x in range(4) for z in range(4)]
+    other = [(12, 65, 0)]
+    body = NativeResourceBody([(pos, "iron_ore") for pos in vein + other])
+    result = collect_native_cluster(body, block_types=("iron_ore",), expected_drops=("raw_iron",),
+        remaining_count=2, dry=False, config=ResourceCollectionConfig(max_wall_s=300))
+    assert result.success and result.metrics["collected"] == 16
+    assert body.targets == [(other[0], "iron_ore")]
+    assert [action.name for action in body.actions] == ["mineResource", "collectBlocks"]
+
+
+def test_native_collection_keeps_large_resource_body_demand_bounded():
+    body = NativeResourceBody([((x, 65, 0), "iron_ore") for x in range(100)])
+    result = collect_native_cluster(body, block_types=("iron_ore",), expected_drops=("raw_iron",),
+        remaining_count=2, dry=False, config=ResourceCollectionConfig(max_wall_s=300))
+    assert result.success and result.metrics["collected"] == 2
+    assert len(body.actions) == 1 and len(body.targets) == 98
+
+
+def test_native_collection_does_not_hide_failed_vein_pickup_after_inventory_minimum():
+    body = NativeResourceBody([((x, 65, 0), "iron_ore") for x in range(16)], finish_success=False)
+    result = collect_native_cluster(body, block_types=("iron_ore",), expected_drops=("raw_iron",),
+        remaining_count=2, dry=False, config=ResourceCollectionConfig(max_wall_s=300))
+    assert not result.success and result.reason == "cluster_pickup_not_observed"
+    assert result.metrics["collected"] == 2
 
 
 class EgressRepositioningResourceBody(ResourceBody):
