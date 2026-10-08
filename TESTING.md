@@ -98,6 +98,20 @@ results are in [RUNTIME.md](RUNTIME.md).
 
 ## Real Agent task and observation
 
+The user-authorized visible 30/45/60-minute resource, building and transport
+tasks are described in [the current task cards](docs/exec-plans/active/visible-agent-tasks-20261008.md).
+With the existing disposable server, client and live viewer running:
+
+```bash
+python -m tests.e2e_real_client_agent_long_tasks \
+  --disposable-local-server --case resources --env-file /path/to/provider.env
+```
+
+Choose `camp`, `logistics`, or `all` for the other tasks. Limits are maxima;
+completed or concretely failed tasks stop early. This runs the production model
+and tools, with parent-only fixture setup/server checks and recorded chat.
+It is opt-in, never part of default pytest, and does not replace the Body baseline.
+
 This collection experiment gives the production Agent a player goal and lets
 the real model choose its actions. It starts empty-handed with three placed
 logs behind a stone obstacle and checks inventory independently:
