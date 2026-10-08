@@ -41,8 +41,8 @@ forced corner, high block, named moving follow target past a decoy, menu,
 explicit look, then moving cancellation. It records rotations and restored
 settings alongside actual arrival, block/inventory and stopped processes.
 Existing combat, menu and handoff cases cover their physical results; no new
-test framework is used. The one-hour empty-inventory task in
-[TESTING.md](TESTING.md) is a proposal, not an executed result.
+test framework is used. The open-ended empty-inventory task to build a 10×10
+two-storey house in [TESTING.md](TESTING.md) is a proposal, not an executed result.
 
 Sources: [Baritone settings](https://github.com/cabaletta/baritone/blob/v1.18.0/src/api/java/baritone/api/Settings.java)
 and [LookBehavior](https://github.com/cabaletta/baritone/blob/v1.18.0/src/main/java/baritone/behavior/LookBehavior.java).
