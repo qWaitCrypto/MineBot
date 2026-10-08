@@ -111,8 +111,7 @@ class SkillFormatTests(unittest.TestCase):
         self.assertNotIn("/player", loaded.content)
         self.assertIn("Create, revise, merge, or retire", catalog.load("skill-authoring").description)
         exploration = catalog.load("evidence-led-exploration")
-        self.assertIn("bounded multi-target coverage", exploration.description)
-        self.assertIn("all compatible unresolved objectives", exploration.content)
+        self.assertIn("explore_for", exploration.tools)
 
     def test_parser_rejects_alias_duplicate_unknown_field_and_raw_command(self):
         base = f"""---

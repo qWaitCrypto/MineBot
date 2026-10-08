@@ -16,6 +16,7 @@ from agents import Session
 from minebot.app.body_capability_tools import _java_dig_down, body_capability_tools
 from minebot.app.body_tool_catalog import CanonicalBodyToolCatalog
 from minebot.app.client_body_tools import client_body_tools
+from minebot.app.spatial_exploration import SpatialExploration, spatial_exploration_tools
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.conversation_tools import register_conversation_archive_tools
 from minebot.app.memory import MemoryWorkspace, register_memory_tools
@@ -639,6 +640,7 @@ def build_phase1_registry(
         config.exploration_coverage_store or MemoryExplorationCoverageStore(),
         mobility_egress=mobility_egress,
     )
+    spatial_tools = spatial_exploration_tools(SpatialExploration(exploration)) if config.body_provider == "real_client" else None
     block_approach = BlockApproachTransactions(body, approach_navigator)
     collect_objective_body = catalog.objective_body("collect_block_domain", body)
     dig_down_objective_body = catalog.objective_body("dig_down", body)
@@ -707,7 +709,7 @@ def build_phase1_registry(
             _read_state_tool(body),
             inventory_tool(body),
             _move_to_tool(navigator, move_objective_body),
-            _explore_for_tool(exploration),
+            spatial_tools[1] if spatial_tools is not None else _explore_for_tool(exploration),
             _go_to_surface_tool(work, surface_objective_body),
             _follow_tool(navigator),
             _engage_tool(combat),
@@ -737,6 +739,7 @@ def build_phase1_registry(
     )
     catalog.assert_stage_complete("base")
     if config.body_provider == "real_client":
+        registry.register(spatial_tools[0])
         for tool in client_body_tools(body):
             registry.register(tool)
     return registry
@@ -983,9 +986,9 @@ def _move_to_tool(
     return RegisteredTool(
         "move_to",
         "Travel to a coordinate or coordinate radius through the Body navigation transaction. "
-        "Use only a destination supplied by the user/task or returned by authoritative world "
-        "observation; never invent a coordinate to search or escape. Use explore_for to discover "
-        "new terrain and go_to_surface for vertical egress. "
+        "You may choose a waypoint as a planning hypothesis, including unobserved terrain. "
+        "Do not claim an unobserved target exists there. Use explore_for for directed search while "
+        "walking, observe_environment to choose useful terrain, and go_to_surface for vertical egress. "
         "This is generic spatial travel: arrival does not prove line of sight, interaction readiness, "
         "or access to a nearby block. Use get_to_block for one block-approach objective and "
         "collect_resource for count-based acquisition.",

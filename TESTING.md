@@ -31,6 +31,20 @@ historical `*_test.py` scripts must be named explicitly.
 
 ## Directed real Body tasks
 
+Model-directed exploration uses a separate role and IPC port:
+
+```bash
+python -m pytest tests/unit/test_spatial_exploration.py -q
+python -m tests.e2e_model_directed_exploration --disposable-local-server --port 8773 --bot ExploreProbe
+python -m tests.e2e_model_directed_exploration --disposable-local-server --port 8773 --bot ExploreProbe \
+  --natural-only --output logs/exploration-natural.json
+```
+
+Launch that independent real client first; these commands do not launch an
+Agent. The first real test supplies an isolated terrain/ore/sheep fixture;
+the second selects an observed destination on natural terrain. Neither proves
+autonomous model search. Both use upstream Baritone through production tools.
+
 Start the disposable server at `127.0.0.1:25566`, with RCON at port `25576`,
 and a real client named `MineBotCombat` with IPC at `8768`. RCON is used by the
 experiment for fixture setup and independent server checks. The tested tuple

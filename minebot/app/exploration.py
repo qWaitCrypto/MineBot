@@ -17,7 +17,7 @@ class PersistentExplorationCoverageStore(ExplorationCoverageStore):
         self.store = store
         self.scope = scope
 
-    def list_regions(self, dimension: str, query_signature: str) -> tuple[CoverageRegion, ...]:
+    def list_regions(self, dimension: str, query_signature: str | None = None) -> tuple[CoverageRegion, ...]:
         events = self.store.list_exploration_coverage(
             self.scope,
             dimension=dimension,

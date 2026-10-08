@@ -1,72 +1,71 @@
 ---
 name: evidence-led-exploration
-description: Explore beyond known local facts with bounded multi-target coverage when a goal remains active but nearby authoritative searches contain no usable target.
+description: Choose useful exploration destinations from environment observations, Minecraft knowledge and search history; search while travelling.
 tools:
+  - explore_for
+  - read_state
   - collect_resource
   - engage_entity
-  - explore_for
   - mine_block_collect
-  - read_state
 ---
 
-# Evidence Led Exploration
+# Exploration
 
 ## Use When
 
-Use this methodology when the current objective is still valid, local world
-facts contain no usable target, and moving to new information frontiers is the
-next justified commitment.
+When local observations contain no useful target, decide where to search next.
+On the real-client backend, `observe_environment` gives compass sectors,
+biomes, heights, water, difficulty, surface/underground position, nearby entities
+and recent searches. Samples are loaded client facts; gaps remain unknown.
 
 ## Do Not Use When
 
-Do not load it when a known reachable target already supports a material action,
-when the goal is complete, or when a typed terminal says the approach is
-exhausted without a materially different strategy.
+Act on an already known useful target instead of searching again. Stop when
+the goal is complete or the user cancels it.
 
 ## Method
 
-1. Read current task context and authoritative Body state. Choose target classes
-   from all compatible unresolved objectives, not only the first serialized plan
-   step, and group those block and entity targets into one `explore_for` call
-   instead of rewalking the same area. Do not spend a second frontier budget on
-   one non-gating target while other useful targets could be observed along the
-   same route. Use supported groups such as `#logs` and `#flowers` when any family
-   member satisfies the objective; use exact block names only when the exact
-   species is required.
-2. Set finite distance and region budgets. Ask for target predicates, never
-   invent reconnaissance coordinates or steer movement step by step. For
-   ordinary resource or task progress, omit `return_policy` or use
-   `first_match`: act as soon as one requested target is seen, and retain the
-   returned cursor for the remaining search. Use `region_budget` only when an
-   explicit area survey is itself the objective.
-3. On `found`, retain the resume cursor, then use the returned block positions or entity identities to choose a
-   governed material operation. For a concrete block position, prefer
-   `mine_block_collect(pos=...)` (and use `engage_entity` for a concrete entity);
-   `collect_resource` is a fresh local candidate transaction and does not consume
-   coordinates returned by `explore_for`. The discovery itself is not completion
-   of that material objective.
-4. On `budget_exhausted`, retain the resume cursor and coverage evidence. Continue
-   only when the active durable task, checkpoint budget, and new evidence justify
-   another model-authored commitment. Before extending the same sparse target,
-   either add compatible outstanding targets to the request or switch to a
-   capability-unlocking objective.
-5. On `mobility_blocked`, `unloaded_boundary`, interruption, or death, adapt from
-   the typed cause and fresh state. Do not replay the same frontier request as if
-   wording changes created new evidence.
+Choose a destination coordinate, compass direction or rectangular region in
+`explore_for`. You may propose a coordinate in unknown terrain. That is a search
+hypothesis, not evidence that a sheep, ore or structure exists there. Combine
+observed terrain with Minecraft knowledge: search likely habitats, follow a
+promising terrain transition, investigate an observed landmark, or continue into
+new space. Explain the choice briefly; do not move a few blocks around the same
+base repeatedly when a target needs a wider search. Check difficulty and time
+before relying on natural mob spawning.
+
+Use `space=surface` for a surface search; it resolves local surface heights.
+Use `underground` with a chosen `target_y` for underground searches, or `any`
+when altitude is irrelevant. Surface-required and inaccessible-terrain results
+are actual constraints: choose a different approach rather than repeat blindly.
+
+Targets are optional for reconnaissance. With targets, `first_match` watches
+while walking and returns immediately after discovery and physical stopping.
+Use `region_budget` for a deliberate area survey that should continue past a
+discovery. A survey follows orderly strips inside your selected rectangle.
 
 ## Evidence Of Success
 
-Trust authoritative target facts, covered-region evidence, final position, and
-the terminal truth of the later material operation. A longer walk, a successful
-tool return without a match, or model prose is not objective completion.
+Use returned target identities/positions for the next action. Discovery is not
+collection or task completion. A completed route with `target_found=false`
+means the sampled route produced no match, not that the entire biome is empty.
+Searches retain geographic history across different target lists; a previous
+negative sample is specific to its target list, time, radius and height.
 
 ## Failure And Adaptation
 
-Change target class, budget, or physical approach only when accumulated evidence
-supports the change. If safe frontiers or the continuation budget are exhausted,
-checkpoint or yield with the exact typed blocker rather than extending retries.
+After a bounded leg, compare final position, net displacement, sample locations,
+remaining route and specific failure with the intention. You choose whether to
+continue toward `next_destination`, explore a different region, return or change
+the objective. The runtime records history without cursor/revision paperwork.
+Moving entities can enter an area previously searched, so revisiting can be a
+deliberate choice. Ordinary chat does not cancel travel; explicit cancel does.
 
 ## Boundaries
 
-Exploration never weakens player-block governance, creates a second scheduler,
-grants continuation by itself, hides tools, or moves Brain decisions into Body.
+All physical movement and pathfinding use the upstream Baritone Body. Respect
+player-block protection and the selected search space. Environment sampling
+does not claim to observe unloaded terrain.
+
+Legacy FakePlayer tools retain their existing frontier/cursor interface; use
+the parameters actually exposed by that backend.

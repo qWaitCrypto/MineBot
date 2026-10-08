@@ -1917,19 +1917,22 @@ class RuntimeStateStore:
         scope: RuntimeScope,
         *,
         dimension: str,
-        query_signature: str,
+        query_signature: str | None = None,
     ) -> list[dict[str, object]]:
         dimension_value = _required_text("dimension", dimension, max_length=128)
-        signature_value = _required_text("query_signature", query_signature, max_length=128)
+        signature_value = (
+            _required_text("query_signature", query_signature, max_length=128)
+            if query_signature is not None else None
+        )
         with self._lock:
             self._require_open()
             rows = self._connection.execute(
                 """
                 SELECT * FROM exploration_coverage
-                WHERE scope_key = ? AND dimension = ? AND query_signature = ?
+                WHERE scope_key = ? AND dimension = ? AND (? IS NULL OR query_signature = ?)
                 ORDER BY cursor ASC
                 """,
-                (scope.key, dimension_value, signature_value),
+                (scope.key, dimension_value, signature_value, signature_value),
             ).fetchall()
         return [_exploration_coverage_from_row(row) for row in rows]
 

@@ -165,7 +165,7 @@ class RealClientBody:
             return self._world_read_perception(scope, params)
         if scope == "findBlocks":
             return self._find_blocks_perception(params)
-        if scope in {"blockAt", "blockCells", "nearbyBlocks"}:
+        if scope in {"blockAt", "blockCells", "nearbyBlocks", "environment"}:
             return self._world_read_perception(scope, params)
         if scope in {"baritoneState", "processState"}:
             try:
@@ -559,7 +559,7 @@ class RealClientBody:
         if not targets:
             return _gap_perception(self.bot_name, "findBlocks", "invalid_request:no_block_types")
         with self._lock:
-            if self._active is not None:
+            if self._active is not None and self._active.action.name != "navigate":
                 return _gap_perception(self.bot_name, "findBlocks", "body_busy")
         return self._world_read_perception("findBlocks", {**params, "block_types": targets})
 

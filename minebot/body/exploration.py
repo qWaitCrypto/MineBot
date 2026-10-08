@@ -206,7 +206,7 @@ class CoverageRegion:
 
 
 class ExplorationCoverageStore(Protocol):
-    def list_regions(self, dimension: str, query_signature: str) -> tuple[CoverageRegion, ...]: ...
+    def list_regions(self, dimension: str, query_signature: str | None = None) -> tuple[CoverageRegion, ...]: ...
 
     def record_region(
         self,
@@ -229,11 +229,12 @@ class MemoryExplorationCoverageStore:
     def __init__(self) -> None:
         self._events: list[dict[str, object]] = []
 
-    def list_regions(self, dimension: str, query_signature: str) -> tuple[CoverageRegion, ...]:
+    def list_regions(self, dimension: str, query_signature: str | None = None) -> tuple[CoverageRegion, ...]:
         matching = [
             event
             for event in self._events
-            if event["dimension"] == dimension and event["query_signature"] == query_signature
+            if event["dimension"] == dimension
+            and (query_signature is None or event["query_signature"] == query_signature)
         ]
         return fold_coverage_events(matching)
 

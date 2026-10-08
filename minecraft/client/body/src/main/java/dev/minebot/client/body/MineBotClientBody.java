@@ -646,7 +646,9 @@ public final class MineBotClientBody implements ClientModInitializer {
         JsonObject response = envelope("world_read", string(request, "request_id", ""));
         response.addProperty("request_id", string(request, "request_id", ""));
         JsonObject data = new JsonObject();
-        if (scope.equals("recipeData")) {
+        if (scope.equals("environment")) {
+            data = environment(client, params);
+        } else if (scope.equals("recipeData")) {
             data = recipeData(client, params);
         } else if (scope.equals("blockAt")) {
             BlockPos pos = new BlockPos(params.get("x").getAsInt(), params.get("y").getAsInt(), params.get("z").getAsInt());
@@ -679,7 +681,8 @@ public final class MineBotClientBody implements ClientModInitializer {
             boolean loaded = true;
             for (int x = center.getX() - radius; x <= center.getX() + radius; x++) {
                 for (int z = center.getZ() - radius; z <= center.getZ() + radius; z++) {
-                    if (!client.level.hasChunk(x >> 4, z >> 4)) { loaded = false; continue; }
+                    if (client.level.getChunkSource().getChunk(x >> 4, z >> 4,
+                        net.minecraft.world.level.chunk.status.ChunkStatus.FULL, false) == null) { loaded = false; continue; }
                     for (int y = Math.max(client.level.getMinY(), center.getY() - yRadius);
                          y <= Math.min(client.level.getMaxY() - 1, center.getY() + yRadius); y++) {
                         BlockPos pos = new BlockPos(x, y, z);
@@ -703,6 +706,13 @@ public final class MineBotClientBody implements ClientModInitializer {
             data.addProperty("count", blocks.size());
             data.addProperty("totalMatches", matches.size());
             data.addProperty("coverage_complete", loaded);
+            if (!loaded) {
+                JsonArray uncertainty = new JsonArray();
+                JsonObject boundary = new JsonObject();
+                boundary.addProperty("reason", "unloaded_boundary");
+                uncertainty.add(boundary);
+                response.add("uncertainty", uncertainty);
+            }
             if (more) data.addProperty("nextStart", start + limit);
             response.addProperty("complete", loaded && !more);
         } else {
@@ -711,8 +721,81 @@ public final class MineBotClientBody implements ClientModInitializer {
         response.addProperty("ok", true);
         if (!response.has("complete")) response.addProperty("complete", true);
         response.add("data", data);
-        response.add("uncertainty", new JsonArray());
+        if (!response.has("uncertainty")) response.add("uncertainty", new JsonArray());
         connection.send(response);
+    }
+
+    /** Loaded client terrain only: no chunk loading, world seed or server-wide lookup. */
+    private static JsonObject environment(Minecraft client, JsonObject params) {
+        JsonObject data = new JsonObject();
+        BlockPos here = client.player.blockPosition();
+        int surface = client.level.getHeight(
+            net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+            here.getX(), here.getZ());
+        data.add("pos", xyz(here));
+        data.addProperty("dimension", client.level.dimension().identifier().toString());
+        data.addProperty("difficulty", client.level.getDifficulty().name().toLowerCase(java.util.Locale.ROOT));
+        data.addProperty("time", Math.floorMod(client.level.getOverworldClockTime(), 24000));
+        data.addProperty("weather", client.level.isThundering() ? "thunder" : client.level.isRaining() ? "rain" : "clear");
+        data.addProperty("can_see_sky", client.level.canSeeSky(here));
+        data.addProperty("surface_y", surface);
+        data.addProperty("depth_below_surface", Math.max(0, surface - here.getY()));
+        data.addProperty("space", client.player.isUnderWater() ? "underwater"
+            : surface - here.getY() > 4 ? "underground" : "surface");
+        data.addProperty("biome", client.level.getBiome(here).unwrapKey()
+            .map(key -> key.identifier().toString()).orElse("unknown"));
+        JsonArray columns = new JsonArray();
+        if (params.has("columns")) {
+            columns = params.getAsJsonArray("columns");
+            if (columns.size() > 128) throw new IllegalArgumentException("too_many_columns");
+        } else {
+            int radius = Math.max(16, Math.min(96, params.has("radius") ? params.get("radius").getAsInt() : 48));
+            for (int dx = -radius; dx <= radius; dx += 16) {
+                for (int dz = -radius; dz <= radius; dz += 16) {
+                    JsonArray xz = new JsonArray();
+                    xz.add(here.getX() + dx); xz.add(here.getZ() + dz); columns.add(xz);
+                }
+            }
+        }
+        JsonArray samples = new JsonArray();
+        for (var column : columns) {
+            JsonArray xz = column.getAsJsonArray();
+            if (xz.size() != 2) throw new IllegalArgumentException("invalid_column");
+            int x = xz.get(0).getAsInt(), z = xz.get(1).getAsInt();
+            JsonObject sample = new JsonObject();
+            sample.add("xz", xz.deepCopy());
+            boolean loaded = client.level.getChunkSource().getChunk(x >> 4, z >> 4,
+                net.minecraft.world.level.chunk.status.ChunkStatus.FULL, false) != null;
+            sample.addProperty("loaded", loaded);
+            if (loaded) {
+                int y = client.level.getHeight(
+                    net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                BlockPos feet = new BlockPos(x, y, z);
+                BlockState ground = client.level.getBlockState(feet.below());
+                boolean dry = ground.getFluidState().isEmpty();
+                sample.add("surface_pos", xyz(feet));
+                sample.addProperty("biome", client.level.getBiome(feet).unwrapKey()
+                    .map(key -> key.identifier().toString()).orElse("unknown"));
+                sample.addProperty("surface_block", BuiltInRegistries.BLOCK.getKey(ground.getBlock()).toString());
+                sample.addProperty("water", !dry);
+                sample.addProperty("canopy_height", Math.max(0, client.level.getHeight(
+                    net.minecraft.world.level.levelgen.Heightmap.Types.WORLD_SURFACE, x, z) - y));
+                sample.addProperty("standable", dry && !ground.getCollisionShape(client.level, feet.below()).isEmpty()
+                    && client.level.getBlockState(feet).getCollisionShape(client.level, feet).isEmpty()
+                    && client.level.getBlockState(feet.above()).getCollisionShape(client.level, feet.above()).isEmpty());
+            }
+            samples.add(sample);
+        }
+        data.add("samples", samples);
+        data.addProperty("source", "loaded_client_heightmap_and_blocks");
+        data.addProperty("sampling", "point samples; gaps are unknown; standable does not prove reachable");
+        return data;
+    }
+
+    private static JsonArray xyz(BlockPos pos) {
+        JsonArray result = new JsonArray();
+        result.add(pos.getX()); result.add(pos.getY()); result.add(pos.getZ());
+        return result;
     }
 
     private static JsonObject blockFact(BlockState state, BlockPos pos) {
@@ -2511,6 +2594,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             state.addProperty("on_ground", client.player.onGround());
             state.addProperty("creative", client.player.getAbilities().instabuild);
             state.addProperty("dimension", client.level.dimension().identifier().toString());
+            state.addProperty("difficulty", client.level.getDifficulty().name().toLowerCase(java.util.Locale.ROOT));
             state.addProperty("health", client.player.getHealth());
             state.addProperty("food", client.player.getFoodData().getFoodLevel());
             state.addProperty("time", Math.floorMod(client.level.getOverworldClockTime(), 24000));
