@@ -1,5 +1,23 @@
 # Responses Agent 内核（2026-10-07）
 
+## 2026-10-08：Body 连接和原生异步复查
+
+按 Issue #1 P01–P40 检查现有运行链。本次只补 Agent 入口和异步续接的具体缺口；上下文管理留待调研讨论，不启动 30 分钟模型运行。
+
+原有 44 个基础工具继续复用 ToolRegistry。真实客户端增加 `mine_resource`、`build_structure`、`clear_area`、`farm_area`、`elytra_travel`、`read_body_processes`、`build_schematic` 七个薄入口，不暴露任意命令。批量变更复用客户端已有 disposable-world 标志；Java 后端不注册这些客户端入口。文件蓝图限定本次验证过的 Sponge v2、零 Offset；使用 nbtlib 读取，并在施工结束后通过 Body 批量核对每个实心/空气格。区域建造和清除也核对目标格。
+
+工具分派按声明的 JSON Schema 校验参数；错误字段、类型、数量和缺参在执行前返回具体 `invalid_tool_input`，模型可修正。`finish_task` 等到动作结果实际提交给模型后才可关闭任务。HTTP 流中断保留完整调用项、原始 call_id、正在执行的工具和未提交用户消息；恢复不重放物理动作，也不重复添加已提交的工具结果。
+
+生产分派实验使用 `--through-agent`，经过与 Responses 相同的调用/投影入口，`model_calls=0`；它证明连接，不冒充模型任务。批量采矿净增 24 根原木；72 格区域建造/清除；80 株农事；Sponge 房屋 100 格核对；250 格飞行均有真实结果。飞行首次进入飞行后摔死、最终超时；相同参数直接调用和再次 Agent 分派均成功，首次摔死原因未定位，失败报告保留。
+
+2026-10-08 原生协议复验 **未通过**：gpt-6.1-sol / SDK 2.36.0 / 当前私有端点 / HTTP SSE，先收到 async=true 调用、待完成期间收到 ACK，但迟到结果请求返回 HTTP 400：`Async tools are not supported with gpt-6.1-sol.`。此前 2026-10-07 的成功记录仍作为历史事实；不能用它覆盖本次拒绝，也不自动换模型、换内核或启动 provider 平台。直连与代理请求的连接失败同样保留。报告在 `logs/agent-body-review-20261008/protocol*.json`。
+
+相关接口回归 180 项和 116 个 subtests 通过；包含流中断后原始结果续接、用户消息保留、错误参数不执行和完成前等待结果。真实实验见 `logs/body-complex-20261007/` 的 2026-10-08 记录，可复现：
+
+```bash
+python -m tests.e2e_real_client_body_complex --disposable-local-server --case <任务> --through-agent
+```
+
 ## 用户行为与目标
 
 用户已授权替换普通 Agents SDK Runner 的模型—工具循环，采用基础 OpenAI SDK 的 Responses 原生异步工具；WebSocket steering 是次要能力。机器人执行长动作时可以聊天、接收追加要求；真实动作结果自动进入后续模型请求；明确取消真正停止身体。每次模型请求使用最新目标、任务状态、动作结果和身体状态。

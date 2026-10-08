@@ -61,20 +61,27 @@ class _HttpResponsesConnection:
         inputs = payload["input"]
         if isinstance(inputs, str):
             inputs = [{"role": "user", "content": inputs}]
+        returned = {i["call_id"] for i in self.history if i.get("type") == "function_call_output"}
+        inputs = [i for i in inputs if i.get("type") != "function_call_output" or i["call_id"] not in returned]
         payload.update(input=self.history + inputs, store=False, stream=True)
         payload["include"] = list(dict.fromkeys(payload.get("include", []) + ["reasoning.encrypted_content"]))
         self.history.extend(inputs)
         self.request = asyncio.create_task(self._stream(payload))
 
     async def _stream(self, payload: dict[str, Any]) -> None:
+        output_start = len(self.history)
         try:
             terminal = False
             async with await self.client.responses.create(**payload) as stream:
                 async for item in stream:
                     event = item.model_dump(mode="json", by_alias=True, exclude_none=True)
                     terminal = event.get("type") in {"response.completed", "response.incomplete", "response.failed"}
+                    if event.get("type") == "response.output_item.done":
+                        # A complete call may already be executing when the
+                        # stream fails. Keep its original call_id for recovery.
+                        self.history.append(event["item"])
                     if terminal:
-                        self.history.extend(event["response"].get("output", []))
+                        self.history[output_start:] = event["response"].get("output", [])
                     self.events.put_nowait(event)
                     if terminal:
                         break
@@ -132,6 +139,7 @@ class ResponsesKernel:
         self._running = False
         self._halted = False
         self._submitted_calls: list[str] = []
+        self._queued_inputs: list[str] = []
 
     def halt(self) -> None:
         self._halted = True
@@ -241,9 +249,14 @@ class ResponsesKernel:
         self._running = True
         reader = message = None
         final_text, response_count = "", 0
-        queued: list[str] = [text] if text else []
+        queued = self._queued_inputs
+        if text:
+            queued.append(text)
         try:
             await self._connect()
+            if self.transport == "http":
+                for item in self._connection.history:
+                    self._dispatch(item)
             reader = asyncio.create_task(self._connection.recv_bytes())
             message = asyncio.create_task(self._messages.get())
             while True:
@@ -322,11 +335,23 @@ class ResponsesKernel:
                         self._steering.append(value)
                     else:
                         queued.append(value)
+        except BaseException:
+            if self.transport == "http":
+                # Preserve jobs, completed items and queued user input. A new
+                # run can continue the same history after a failed SSE stream.
+                if self._manager is not None:
+                    await self._manager.__aexit__(None, None, None)
+                self._active = False
+                self._active_response_id = None
+                self._submitted_calls.clear()
+            raise
         finally:
             self._running = False
             # Tool tasks intentionally survive model cancellation/failure.
             for future in (reader, message):
                 if future is not None:
+                    if future is message and future.done() and not future.cancelled():
+                        queued.append(future.result())
                     future.cancel()
                     await asyncio.gather(future, return_exceptions=True)
 
@@ -349,6 +374,7 @@ class ResponsesKernel:
         self._submitted_calls.clear()
         self.previous_response_id = None
         self._spoken_items.clear()
+        self._queued_inputs.clear()
         while not self._messages.empty():
             self._messages.get_nowait()
         self._halted = False

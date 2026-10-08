@@ -12,6 +12,8 @@ dependencies = [
     "websockets==16.0",
     "filelock>=3.16,<4",
     "PyYAML>=6.0.2,<7",
+    "jsonschema>=4.23,<5",
+    "nbtlib>=2.0.4,<3",
 ]
 
 [project.scripts]

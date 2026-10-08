@@ -16,6 +16,7 @@ from typing import Any
 from uuid import uuid4
 from types import SimpleNamespace
 
+from jsonschema import Draft202012Validator
 from agents import Agent, RunConfig, RunContextWrapper, Runner, RunHooks, Session
 from agents.exceptions import MaxTurnsExceeded, UserError
 from agents.items import ItemHelpers, MessageOutputItem, ToolCallItem, ToolCallOutputItem
@@ -242,6 +243,8 @@ def tool_is_enabled(
 
 
 def tool_invoker_for(tool: RegisteredTool):
+    validator = Draft202012Validator(tool.input_schema)
+
     async def on_invoke_tool(ctx: RunContextWrapper[RuntimeRunContext], input_json: str) -> JsonObject:
         trace = ctx.context.trace
         runtime = getattr(ctx.context, "runtime", None)
@@ -447,6 +450,12 @@ def tool_invoker_for(tool: RegisteredTool):
                 ),
                 status="rejected",
             )
+        invalid = next(validator.iter_errors(params), None)
+        if invalid is not None:
+            return finalize({
+                "success": False, "reason": "invalid_tool_input", "canRetry": True,
+                "metrics": {"path": list(invalid.absolute_path), "error": invalid.message[:400]},
+            }, status="rejected")
         if not ctx.context.body_actions_allowed and tool.sidecar.can_mutate_body:
             result = {
                 "success": False,
@@ -1422,7 +1431,7 @@ class AgentRuntime:
                 else:
                     self.native_plan = plan
                 return {"success": True, "reason": "plan_updated"}
-            if any(c.mutating and not c.task.done() for c in self.responses_kernel.pending):
+            if any(c.mutating for c in self.responses_kernel.pending):
                 return {"success": False, "reason": "body_work_pending", "canRetry": True}
             if params.get("status") not in {"complete", "blocked"} or not params.get("summary") or not params.get("evidence"):
                 return {"success": False, "reason": "task_outcome_requires_actual_evidence", "canRetry": True}

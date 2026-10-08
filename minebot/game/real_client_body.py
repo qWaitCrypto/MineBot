@@ -181,7 +181,7 @@ class RealClientBody:
                 data={
                     key: state[key]
                     for key in (
-                        "pathing", "any_process_active", "mine_active", "goal_active",
+                        "pathing", "any_process_active", "disposable_world", "mine_active", "goal_active",
                         "get_active", "explore_active", "follow_active", "farm_active",
                         "builder_active", "builder_paused", "elytra_active", "elytra_loaded",
                         "elytra_safe_to_cancel", "elytra_destination", "elytra_path_size",

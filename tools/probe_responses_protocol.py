@@ -41,9 +41,9 @@ async def probe(args, *, environment=None):
               "sdk": openai.__version__, "phase": "connect"}
     tool = {"type": "function", "name": "slow_job", "description": "Start asynchronous work. Its real result will arrive later.",
             "async": True, "strict": True, "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}}
-    client = AsyncOpenAI(api_key=key, base_url=base_url, max_retries=0, timeout=25,
-                         http_client=httpx.AsyncClient(proxy=proxy) if proxy else None)
     transport = getattr(args, "transport", None) or env.get("MINEBOT_RESPONSES_TRANSPORT", "http")
+    client = AsyncOpenAI(api_key=key, base_url=base_url, max_retries=2 if transport == "http" else 0, timeout=25,
+                         http_client=httpx.AsyncClient(proxy=proxy) if proxy else None)
     report["transport"] = transport
     events = []
     try:

@@ -15,6 +15,7 @@ from agents import Session
 
 from minebot.app.body_capability_tools import _java_dig_down, body_capability_tools
 from minebot.app.body_tool_catalog import CanonicalBodyToolCatalog
+from minebot.app.client_body_tools import client_body_tools
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.conversation_tools import register_conversation_archive_tools
 from minebot.app.memory import MemoryWorkspace, register_memory_tools
@@ -732,6 +733,9 @@ def build_phase1_registry(
         )
     )
     catalog.assert_stage_complete("base")
+    if config.body_provider == "real_client":
+        for tool in client_body_tools(body):
+            registry.register(tool)
     return registry
 
 

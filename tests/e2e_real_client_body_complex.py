@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 import time
@@ -10,7 +11,7 @@ import gzip
 import struct
 
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_registry
-from minebot.contract import Action, Region
+from minebot.contract import Action, Region, ToolResult
 from minebot.game.governance import GovernancePolicy
 from minebot.game.rcon import RconClient, RconConfig
 from minebot.game.real_client_body import RealClientBody
@@ -46,6 +47,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--disposable-local-server", action="store_true", required=True)
     parser.add_argument("--case", choices=CASES, required=True)
+    parser.add_argument("--through-agent", action="store_true", help="Use production Agent dispatch and model-result projection, without model calls")
     args = parser.parse_args()
     root = Path("logs") / "body-complex-20261007" / f"{args.case}-{time.time_ns()}"
     root.mkdir(parents=True, exist_ok=True)
@@ -58,6 +60,19 @@ def main():
               "conditions": "disposable local world; developer-supplied terrain/resources; non-player fixture entities cleared before tasks; production Body/tool calls",
               "tuple": "MC 26.1.2 / Fabric 0.19.3 / API 0.152.1 / Java 25 / Baritone 1.18.0"}
     began = time.monotonic()
+    runtime = None
+    if args.through_agent:
+        from minebot.app.phase1_runtime import build_phase1_agent_runtime
+        from minebot.app.runner import RuntimeRunContext
+        parts = build_phase1_agent_runtime(body=body, goal_text=f"Validate {args.case}", model_provider=None,
+            config=Phase1RuntimeConfig(region, body_provider="real_client",
+                governance_policy=GovernancePolicy(natural_regions=[region], bot_name="MineBotCombat")))
+        runtime = parts.runtime
+        runtime.native_responses = True
+        runtime._native_context = RuntimeRunContext(agent_context=parts.context, weld_context=runtime.weld_context,
+            profile=parts.modes.profile_for(parts.lifecycle.state), trace=runtime.trace, runtime=runtime)
+        registry = runtime.registry
+    report["through_agent_dispatch"] = args.through_agent
 
     def command(text):
         return rcon.command(text)
@@ -73,9 +88,20 @@ def main():
         registered = registry.get(name)
         assert set(params) <= set(registered.input_schema.get("properties",{})), ("invalid experiment tool parameters", name, params)
         assert set(registered.input_schema.get("required",[])) <= set(params), ("missing experiment parameters",name)
-        result = registered.callable(params)
+        model_payload = None
+        if runtime is None:
+            result = registered.callable(params)
+        else:
+            call_id = f"direct-{len(report['records'])}-{name}"
+            model_payload = asyncio.run(runtime._invoke_responses_tool(name, json.dumps(params), call_id))
+            full = next(e["full_result"] for e in reversed(runtime.trace.snapshot())
+                        if e.get("event") == "tool_result" and e.get("tool_call_id") == call_id)
+            result = ToolResult(bool(full["success"]), full["reason"], can_retry=bool(full.get("canRetry")), metrics=full.get("metrics", {}))
         report["records"].append({"tool": name, "params": params, "result": result.to_payload(),
                                   "elapsed_s": round(time.monotonic() - started, 3)})
+        if model_payload is not None:
+            report["records"][-1]["model_result"] = model_payload
+            report["records"][-1]["model_tool"] = next(t for t in runtime._responses_tools() if t["name"] == name)
         print(name, result.success, result.reason, flush=True)
         assert result.success, result.to_payload()
         return result
@@ -138,6 +164,8 @@ def main():
 
     try:
         body.get_state()
+        if args.through_agent:
+            call("read_body_processes", {})
         report["seed"] = command("seed")
         report["difficulty"] = command("difficulty")
         if args.case == "navigation":
@@ -173,7 +201,7 @@ def main():
                 time.sleep(0.1)
             report["fixture_ore_observation"] = observed.data
             report["task"] = "One mineResource call must collect 24 logs from three separated three-high clusters"
-            data = action("mineResource", {"block": "oak_log", "quantity": 24, "timeout_s": 120})
+            data = call("mine_resource", {"block": "oak_log", "quantity": 24, "timeout_s": 120}).metrics
             observed = command("clear MineBotCombat minecraft:oak_log 0")
             report["server_inventory_count"] = observed
             assert body.get_state().inventory_counts.get("oak_log",0)>=29, observed
@@ -297,11 +325,11 @@ def main():
             command("give MineBotCombat minecraft:diamond_pickaxe")
             action("baritoneSettings", {"settings":{"allow_break":True,"allow_place":True}})
             report["task"]="Build an elevated 6x3x4 solid volume, inspect builder, then clear exactly that volume"
-            action("buildStructure", {"anchor":[708,150,8],"size":[6,3,4],"block":"cobblestone","timeout_s":120})
+            call("build_structure", {"anchor":[708,150,8],"size":[6,3,4],"block":"cobblestone","timeout_s":120})
             for x in range(708,714):
                 for y in range(150,153):
                     for z in range(8,12):check(f"execute if block {x} {y} {z} minecraft:cobblestone")
-            action("clearArea", {"start":[708,150,8],"end":[713,152,11],"timeout_s":120})
+            call("clear_area", {"start":[708,150,8],"end":[713,152,11],"timeout_s":120})
             for x in range(708,714):
                 for y in range(150,153):
                     for z in range(8,12):check(f"execute if block {x} {y} {z} minecraft:air")
@@ -348,7 +376,7 @@ def main():
             command("give MineBotCombat minecraft:wheat_seeds 128")
             action("baritoneSettings", {"settings":{"allow_break":True,"allow_place":True,"replant_crops":True}})
             report["task"]="Harvest and replant an 80-crop irrigated wheat field with one farmArea call"
-            action("farmArea", {"anchor":[708,150,8],"range":12,"timeout_s":120})
+            call("farm_area", {"anchor":[708,150,8],"range":12,"timeout_s":120})
             assert body.get_state().inventory_counts.get("wheat",0)>=80
             for x in range(704,713):
                 for z in range(4,13):
@@ -462,7 +490,7 @@ def main():
             command("tp MineBotCombat 800.5 250 18.5")
             time.sleep(0.3)
             report["task"]="250-block Elytra flight from a drop start to a raised landing platform"
-            data=action("elytraTravel", {"target":[1050,161,18],"timeout_s":90})
+            data=call("elytra_travel", {"target":[1050,161,18],"timeout_s":90}).metrics
             assert data["flight_observed"] and data["on_ground"]
             check("execute if entity @a[name=MineBotCombat,x=1050.5,y=161,z=18.5,distance=..8]")
         elif args.case in {"native_controls", "file_house"}:
@@ -484,7 +512,10 @@ def main():
             schematic=(root/'house.schem').resolve()
             cells=write_house_schematic(schematic)
             action("baritoneSettings", {"settings":{"build_in_layers":args.case=="native_controls"}})
-            action("builderBuildFile", {"path":str(schematic),"origin":origin,"name":"body-house"})
+            if args.case == "file_house":
+                call("build_schematic", {"path": str(schematic), "origin": origin, "timeout_s": 90})
+            else:
+                action("builderBuildFile", {"path":str(schematic),"origin":origin,"name":"body-house"})
             if args.case == "native_controls":
                 time.sleep(0.8)
                 action("builderPause", {})
@@ -697,6 +728,8 @@ def main():
         except Exception as exc:report["final_state_error"] = str(exc)
         report["elapsed_s"] = round(time.monotonic()-began,3)
         (root/"result.json").write_text(json.dumps(report,indent=2))
+        if runtime is not None:
+            asyncio.run(runtime.aclose())
         body.close();rcon.close()
         print("PASS" if report["success"] else "FAIL", root/"result.json",flush=True)
     return 0 if report["success"] else 1

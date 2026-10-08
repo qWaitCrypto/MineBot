@@ -2265,6 +2265,7 @@ public final class MineBotClientBody implements ClientModInitializer {
 
     private JsonObject state(Minecraft client) {
         JsonObject state = new JsonObject();
+        state.addProperty("disposable_world", Boolean.getBoolean("minebot.client.disposable_world"));
         state.addProperty("protocol", "minebot-client-spike/1");
         state.addProperty("ready", ready);
         state.addProperty("disposable_world", Boolean.getBoolean("minebot.client.disposable_world"));

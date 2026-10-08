@@ -196,6 +196,71 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum("Then return home" in json.dumps(e) for e in wire.sent), 1)
         await kernel.close()
 
+    async def test_http_failed_stream_preserves_running_call_and_resumes_once(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        requests, invoked = [], []
+        class Stream:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def __aiter__(self):
+                yield SimpleNamespace(model_dump=lambda **kw: created(f"r{len(requests)}"))
+                if len(requests) == 1:
+                    yield SimpleNamespace(model_dump=lambda **kw: call("original"))
+                    await started.wait()
+                    raise OSError("stream interrupted")
+                yield SimpleNamespace(model_dump=lambda **kw: terminal("r2"))
+        async def create(**params):
+            requests.append(params)
+            return Stream()
+        async def invoke(name, arguments, call_id):
+            invoked.append(call_id)
+            started.set()
+            await release.wait()
+            return {"success": True, "count": 24}
+        async def instructions(): return "Fresh world state"
+        kernel = ResponsesKernel(client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            model="test", tools=lambda: [{"name": "work", "async": True}], instructions=instructions,
+            invoke=invoke, emit=lambda *a, **kw: None, speak=lambda text: None, transport="http")
+        try:
+            with self.assertRaisesRegex(OSError, "stream interrupted"):
+                await kernel.run("Collect 24 logs")
+            self.assertFalse(kernel.calls["original"].task.done())
+            release.set()
+            await asyncio.wait_for(kernel.run("Continue from the actual result"), 2)
+            history = requests[-1]["input"]
+            self.assertEqual(invoked, ["original"])
+            self.assertEqual(sum(i.get("call_id") == "original" and i.get("type") == "function_call" for i in history), 1)
+            self.assertEqual(sum(i.get("call_id") == "original" and i.get("type") == "function_call_output" for i in history), 1)
+        finally:
+            release.set()
+            await kernel.close()
+
+    async def test_http_context_failure_keeps_unsubmitted_user_message(self):
+        requests, failures = [], [True]
+        class Stream:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def __aiter__(self):
+                yield SimpleNamespace(model_dump=lambda **kw: created("r1"))
+                yield SimpleNamespace(model_dump=lambda **kw: terminal("r1"))
+        async def create(**params):
+            requests.append(params)
+            return Stream()
+        async def instructions():
+            if failures.pop() if failures else False:
+                raise OSError("state read failed")
+            return "Current state"
+        kernel = ResponsesKernel(client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            model="test", tools=lambda: [], instructions=instructions, invoke=None,
+            emit=lambda *a, **kw: None, speak=lambda text: None, transport="http")
+        try:
+            with self.assertRaisesRegex(OSError, "state read failed"):
+                await kernel.run("After handoff, return home")
+            await kernel.run("")
+            self.assertEqual(requests[0]["input"], [{"role": "user", "content": "After handoff, return home"}])
+        finally:
+            await kernel.close()
+
     async def test_read_does_not_wait_for_writer_and_competing_write_is_rejected(self):
         release, read = asyncio.Event(), asyncio.Event()
         invokes = []
@@ -352,6 +417,42 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
             await session.aclose()
             store.close()
             temporary.cleanup()
+
+    async def test_native_binding_rejects_bad_input_and_waits_for_result_delivery_before_finish(self):
+        from minebot.app.runner import RuntimeRunContext, tool_invoker_for
+        from minebot.app.wiring import build_agent_runtime
+        from minebot.app.responses_kernel import PendingCall
+        from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
+        from tests.unit.test_agent_runner_spine import FakeBody
+        calls, registry = [], ToolRegistry()
+        tool = registry.register(RegisteredTool("work", "Collect", {
+            "type": "object", "properties": {"count": {"type": "integer", "minimum": 1}},
+            "required": ["count"], "additionalProperties": False},
+            lambda params: calls.append(params), ToolSidecar("work", False, body_mutating=True)))
+        wire = Wire(lambda *args: None)
+        provider = SimpleNamespace(kernel="responses", responses_connection_config=lambda: (
+            SimpleNamespace(responses=SimpleNamespace(connect=lambda **kw: wire)), "test", {}, 2))
+        parts = build_agent_runtime(body=FakeBody(), registry=registry, goal_text="Collect", model_provider=provider)
+        runtime = parts.runtime
+        ctx = RuntimeRunContext(agent_context=parts.context, weld_context=runtime.weld_context,
+            profile=parts.modes.profile_for(parts.lifecycle.state), trace=runtime.trace, runtime=runtime)
+        runtime._native_context = ctx
+        try:
+            for arguments in ({}, {"count": -1}, {"count": "3"}, {"count": 3, "typo": True}):
+                result = await tool_invoker_for(tool)(SimpleNamespace(context=ctx, tool_call_id="bad"), json.dumps(arguments))
+                self.assertEqual(result["reason"], "invalid_tool_input")
+            self.assertEqual(calls, [])
+            task = asyncio.create_task(asyncio.sleep(0, result={"success": True, "count": 3}))
+            await task
+            call_result = PendingCall("original", "work", '{"count":3}', task, True, True)
+            runtime.responses_kernel.calls["original"] = call_result
+            finish = json.dumps({"status": "complete", "summary": "Collected", "evidence": ["count=3"]})
+            result = await runtime._invoke_responses_tool("finish_task", finish, "finish")
+            self.assertEqual(result["reason"], "body_work_pending")
+            call_result.delivered = True
+            self.assertTrue((await runtime._invoke_responses_tool("finish_task", finish, "finish2"))["success"])
+        finally:
+            await runtime.aclose()
 
     async def test_unfinished_goal_continues_after_text_and_finishes_from_tool_evidence(self):
         from minebot.app.session import AgentSession, SessionCommand

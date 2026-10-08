@@ -1980,7 +1980,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             RegisteredTool(
                 name="collect_resource",
                 description="Collect",
-                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                input_schema={"type": "object", "properties": {"item": {"type": "string"}, "count": {"type": "integer", "minimum": 1}}, "additionalProperties": False},
                 callable=collect_callable,
                 sidecar=ToolSidecar(progress_key="collect_resource", mutating=False, tool_type="resource"),
             )
@@ -2047,7 +2047,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             RegisteredTool(
                 name="collect_resource",
                 description="Collect",
-                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                input_schema={"type": "object", "properties": {"item": {"type": "string"}, "count": {"type": "integer", "minimum": 1}}, "additionalProperties": False},
                 callable=collect_callable,
                 sidecar=ToolSidecar(progress_key="collect_resource", mutating=False, tool_type="resource"),
             )
@@ -2131,7 +2131,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             RegisteredTool(
                 name="collect_resource",
                 description="Collect",
-                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                input_schema={"type": "object", "properties": {"item": {"type": "string"}, "count": {"type": "integer", "minimum": 1}}, "additionalProperties": False},
                 callable=collect_callable,
                 sidecar=ToolSidecar(progress_key="collect_resource", mutating=False, tool_type="resource"),
             )
@@ -2217,7 +2217,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             RegisteredTool(
                 name="collect_resource",
                 description="Collect",
-                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                input_schema={"type": "object", "properties": {"item": {"type": "string"}, "count": {"type": "integer", "minimum": 1}}, "additionalProperties": False},
                 callable=collect_callable,
                 sidecar=ToolSidecar(progress_key="collect_resource", mutating=False, tool_type="resource"),
             )
@@ -2294,7 +2294,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             RegisteredTool(
                 name="ensure_tool_for",
                 description="Ensure",
-                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                input_schema={"type": "object", "properties": {"resource": {"type": "string"}}, "additionalProperties": False},
                 callable=ensure_callable,
                 sidecar=ToolSidecar(progress_key="ensure_tool_for", mutating=False, tool_type="resource"),
             )
