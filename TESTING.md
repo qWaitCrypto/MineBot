@@ -190,11 +190,12 @@ Once the result is established, stop; broaden testing only for a new failure
 or a specific unresolved risk.
 
 
-## Proposed open-ended task: a 10×10 two-storey house from an empty inventory
+## Open-ended task: a 10×10 two-storey house from an empty inventory
 
-Status: task design only; not run. The next model run uses this card after the
-maintainer chooses to start it. Reuse the current Responses HTTP kernel, real
-client and visible viewer; do not add a new test runtime.
+Status: launched by the maintainer on 2026-10-08; no completion result yet.
+Run directory: `logs/house-20261008-145412/`. Uses the production Responses HTTP
+kernel (`gpt-6.1-sol`), real client and visible viewer. Total time and session
+step limits are both disabled. The task card below is the submitted goal.
 
 初始条件：全新 disposable 世界，固定并记录种子；生存、和平难度、正常
 昼夜与随机刻，满生命/饱食；背包、护甲、副手、经验均为空。不开物品赠送、

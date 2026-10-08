@@ -42,7 +42,7 @@ explicit look, then moving cancellation. It records rotations and restored
 settings alongside actual arrival, block/inventory and stopped processes.
 Existing combat, menu and handoff cases cover their physical results; no new
 test framework is used. The open-ended empty-inventory task to build a 10×10
-two-storey house in [TESTING.md](TESTING.md) is a proposal, not an executed result.
+two-storey house in [TESTING.md](TESTING.md) has started; no completion result yet.
 
 Sources: [Baritone settings](https://github.com/cabaletta/baritone/blob/v1.18.0/src/api/java/baritone/api/Settings.java)
 and [LookBehavior](https://github.com/cabaletta/baritone/blob/v1.18.0/src/main/java/baritone/behavior/LookBehavior.java).
