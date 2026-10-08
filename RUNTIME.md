@@ -1,5 +1,8 @@
 # Responses Agent 内核（2026-10-07）
 
+Body 中间执行状态的逐工具设计见 [BODY_EXECUTION_STATE.md](BODY_EXECUTION_STATE.md)
+（2026-10-08，设计稿，尚未实现；不改变现有模型调用或反射策略）。
+
 ## 2026-10-08：直接显示真实客户端
 
 默认在 WSLg `DISPLAY=:0` 启动真实 Minecraft 客户端，窗口直接出现在 Windows
