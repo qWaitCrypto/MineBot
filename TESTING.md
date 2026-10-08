@@ -99,7 +99,7 @@ results are in [RUNTIME.md](RUNTIME.md).
 ## Real Agent task and observation
 
 The user-authorized visible 30/45/60-minute resource, building and transport
-tasks are described in [the current task cards](docs/exec-plans/active/visible-agent-tasks-20261008.md).
+tasks are described in [the task record](docs/exec-plans/completed/visible-agent-tasks-20261008.md).
 With the existing disposable server, client and live viewer running:
 
 ```bash
@@ -107,10 +107,17 @@ python -m tests.e2e_real_client_agent_long_tasks \
   --disposable-local-server --case resources --env-file /path/to/provider.env
 ```
 
-Choose `camp`, `logistics`, or `all` for the other tasks. Limits are maxima;
+Choose `camp`, `logistics`, or `all` for the other tasks; repeat `--case` to
+select a sequence. Use a fresh output directory for a retry; existing reports
+are never overwritten. Limits are maxima;
 completed or concretely failed tasks stop early. This runs the production model
 and tools, with parent-only fixture setup/server checks and recorded chat.
 It is opt-in, never part of default pytest, and does not replace the Body baseline.
+
+The 2026-10-08 runs did not complete any of the three full goals. Their concrete
+results, scene corrections and one directly reproduced Body fix are recorded
+in [RUNTIME.md](RUNTIME.md). Cold distant chunk generation can disconnect the
+client during setup; preserve that setup failure separately from an Agent run.
 
 This collection experiment gives the production Agent a player goal and lets
 the real model choose its actions. It starts empty-handed with three placed

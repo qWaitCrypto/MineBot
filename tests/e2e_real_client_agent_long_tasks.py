@@ -69,7 +69,9 @@ def prepare(case, rcon, report):
 
     report["seed"] = rcon.command("seed")
     report["previous_difficulty"] = rcon.command("difficulty")
+    report["previous_random_tick_speed"] = rcon.command("gamerule minecraft:random_tick_speed")
     cmd("difficulty peaceful")
+    cmd("gamerule minecraft:random_tick_speed 3")
     cmd(f"gamemode survival {BOT}")
     cmd(f"clear {BOT}")
     cells, inventory = [], {}
@@ -109,7 +111,7 @@ def prepare(case, rcon, report):
                     cells.append(([x, y, z], block))
         for x in range(1224, 1232):
             for z in range(1452, 1456):
-                cells.extend([([x, 179, z], "farmland[moisture=7]"), ([x, 180, z], "wheat")])
+                cells.extend([([x, 179, z], "farmland"), ([x, 180, z], "wheat")])
         goal = ("在这块供料实验地建营地，45分钟上限。木屋范围 x=1210..1218,z=1450..1456，"
                 "y=180整层橡木木板地板，y=184整层木板平屋顶；四周y=181..183木板墙，内部保持空气。"
                 "入口在(1214,181,1450)和其上方，两格留空；玻璃窗在x=1210和1218、z=1453和1454、y=182，共四块。"
@@ -168,6 +170,10 @@ def verify(rcon, report):
     wrong = []
     for xyz, block in report["expected_cells"]:
         reply = rcon.command(f"execute if block {' '.join(map(str, xyz))} minecraft:{block}")
+        if block == "farmland" and "Test passed" in reply:
+            dry = rcon.command(f"execute if block {' '.join(map(str, xyz))} minecraft:farmland[moisture=0]")
+            if "Test passed" in dry:
+                reply = "Test failed: dry farmland"
         if "Test passed" not in reply:
             wrong.append({"position": xyz, "expected": block, "reply": reply})
     pos = position(rcon)
@@ -217,6 +223,8 @@ def check_cancel(process, rcon, out, home, send):
 
 def run_case(args, case):
     out = args.output_dir / case
+    if (out / "result.json").exists():
+        raise SystemExit(f"Report already exists; choose a new --output-dir: {out}")
     out.mkdir(parents=True, exist_ok=True)
     report = {"case": case, "success": False, "evidence": "real_model_agent_task", "tuple": TUPLE,
               "model": args.model, "messages": [], "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
@@ -263,7 +271,7 @@ def run_case(args, case):
         save()
         print(f"START {case} pid={process.pid} limit={limit}s report={out / 'result.json'}", flush=True)
         cursor, outcome, latest, last_sample = 0, None, [], -60
-        fatal = None
+        fatal = session_failure = None
         sent_chat = sent_append = False
         while time.monotonic()-started < limit:
             elapsed = time.monotonic()-started
@@ -287,6 +295,8 @@ def run_case(args, case):
                             outcome = event
                         if event.get("event") == "model_transport_recovery_exhausted":
                             fatal = event
+                        if event.get("event") == "session_terminal" and event.get("status") == "failed":
+                            session_failure = event
             if outcome is not None or fatal is not None or process.poll() is not None:
                 break
             if elapsed >= 180 and not sent_chat:
@@ -317,6 +327,9 @@ def run_case(args, case):
         elif fatal:
             report["failure_event"] = fatal
             report["reason"] = f"model connection recovery exhausted: {fatal}"
+        elif session_failure:
+            report["failure_event"] = session_failure
+            report["reason"] = f"Agent failed: {session_failure.get('message')}"
         elif outcome:
             report["reason"] = f"model outcome={outcome.get('status')}: {outcome.get('summary')}; actual checks={actual}"
         elif process.poll() is not None:
