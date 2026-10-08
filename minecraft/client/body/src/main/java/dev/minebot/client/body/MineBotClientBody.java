@@ -2150,6 +2150,10 @@ public final class MineBotClientBody implements ClientModInitializer {
         var settings = BaritoneAPI.getSettings();
         current.attentionSettings = new boolean[] {settings.freeLook.value, settings.blockFreeLook.value,
             settings.remainWithExistingLookDirection.value, settings.smoothLook.value};
+        current.attentionNoise = new double[] {settings.randomLooking.value, settings.randomLooking113.value};
+        // Aim jitter changes which edge block is reachable and repeatedly resets survival mining.
+        settings.randomLooking.value = 0.0;
+        settings.randomLooking113.value = 0.0;
         settings.freeLook.value = false;
         settings.blockFreeLook.value = false;
         settings.remainWithExistingLookDirection.value = false;
@@ -2163,6 +2167,9 @@ public final class MineBotClientBody implements ClientModInitializer {
         settings.blockFreeLook.value = current.attentionSettings[1];
         settings.remainWithExistingLookDirection.value = current.attentionSettings[2];
         settings.smoothLook.value = current.attentionSettings[3];
+        settings.randomLooking.value = current.attentionNoise[0];
+        settings.randomLooking113.value = current.attentionNoise[1];
+        current.attentionNoise = null;
         current.attentionSettings = null;
     }
 
@@ -2565,6 +2572,8 @@ public final class MineBotClientBody implements ClientModInitializer {
             state.addProperty("block_free_look", BaritoneAPI.getSettings().blockFreeLook.value);
             state.addProperty("remain_with_existing_look", BaritoneAPI.getSettings().remainWithExistingLookDirection.value);
             state.addProperty("smooth_look", BaritoneAPI.getSettings().smoothLook.value);
+            state.addProperty("random_looking", BaritoneAPI.getSettings().randomLooking.value);
+            state.addProperty("random_looking_113", BaritoneAPI.getSettings().randomLooking113.value);
         }
         return state;
     }
@@ -2744,6 +2753,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         final Set<String> collectionBlocks = new HashSet<>();
         final Set<String> collectionItems = new HashSet<>();
         boolean[] attentionSettings;
+        double[] attentionNoise;
         double followKeepDistance = 3.0;
         String stopStatus;
         String stopReason;
