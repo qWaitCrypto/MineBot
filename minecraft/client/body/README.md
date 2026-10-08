@@ -19,8 +19,14 @@ export MINEBOT_CLIENT_USERNAME=MineBotCombat
 export MINEBOT_CLIENT_IPC_PORT=8768
 # Only for an explicitly disposable loopback world:
 export MINEBOT_CLIENT_DISPOSABLE_WORLD=true
-xvfb-run -a ./gradlew :client:body:runClient --no-daemon --console=plain
+./gradlew :client:body:runClient --no-daemon --console=plain
 ```
+
+This opens the controlled client's window on the current desktop. In WSL with
+WSLg, use `DISPLAY=:0` so the window appears on the Windows desktop. Keep this
+window visible when observing real Body or Agent experiments. For an explicitly
+headless run, prefix the same command with `xvfb-run -a`; Xvfb renders to a
+virtual display and does not show a desktop window.
 
 After the client reports readiness, `RealClientBody` can submit navigation,
 mine, get-to-block, explore, follow/pickup, farm, Builder/Clear and Elytra
