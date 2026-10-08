@@ -669,6 +669,11 @@ class AgentRunnerSpineTests(unittest.TestCase):
             return "first"
 
         def second_call():
+            from minebot.contract import Action, action_with_timeout, action_wait_timeout_s
+            action = action_with_timeout(Action.create("mineBlock", {}), 30)
+            self.assertLessEqual(action.params["timeout_ms"], 50)
+            self.assertGreater(action.params["timeout_ms"], 0)
+            self.assertEqual(action_wait_timeout_s(action), action.params["timeout_ms"] / 1000 + 5)
             threading.Event().wait(0.01)
             return "second"
 

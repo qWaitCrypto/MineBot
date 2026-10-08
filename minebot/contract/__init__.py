@@ -44,6 +44,8 @@ from .messages import (
 )
 from .body_iface import Body
 from .execution import (
+    action_with_timeout,
+    action_wait_timeout_s,
     ExecutionCancellation,
     ExecutionCancelled,
     execution_cancellation_scope,
@@ -65,6 +67,8 @@ from .results import body_rejection_to_tool_result, terminal_event_to_tool_resul
 
 __all__ = [
     "Action",
+    "action_with_timeout",
+    "action_wait_timeout_s",
     "Body",
     "BodyState",
     "BotPlacement",

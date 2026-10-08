@@ -7,6 +7,7 @@ from math import dist, floor
 from time import monotonic, sleep
 from typing import Callable
 
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.body.combat import entity_target_terminal_mismatch, resolve_entity_target
 from minebot.contract import (
     Action,
@@ -19,7 +20,6 @@ from minebot.contract import (
     LocalProgressController,
     PlaceContext,
     Position,
-    ProgressAbort,
     ProgressController,
     ToolResult,
     body_rejection_to_tool_result,
@@ -766,14 +766,6 @@ class NavigationTransactions:
                         },
                     },
                 )
-
-            try:
-                self.progress.require_can_continue(f"navigate_to:{nav_goal.payload()}")
-            except ProgressAbort as exc:
-                return _result(False, "progress_yielded", True, goal_anchor, executed, {
-                    "error": str(exc), "progress_stop_reason": exc.stop_reason.value,
-                })
-
             action_params = _compact_navigate_action_params(
                 {
                     "target": [gx, gy, gz],
@@ -830,6 +822,7 @@ class NavigationTransactions:
             action = Action.create("navigateTo", action_params)
             from minebot.game.protocol import build_action_call
 
+            action = action_with_timeout(action, cfg.segment_timeout_s)
             action_command_len = len(build_action_call(getattr(self.body, "bot_name", ""), action))
             result = self.body.execute(action)
             if not (result.ok and result.accepted):
@@ -855,7 +848,7 @@ class NavigationTransactions:
             while True:
                 terminal = self.body.await_action_terminal(
                     action.id,
-                    timeout_s=cfg.segment_timeout_s + 5.0,
+                    timeout_s=action_wait_timeout_s(action),
                     terminal_events={
                         "navigateDone",
                         "navigateMutationProposed",
@@ -1293,13 +1286,6 @@ class NavigationTransactions:
         generation = self.progress.current_generation()
         if not self.progress.generation_current(generation):
             return _result(False, "preempted", True, _block_pos(self.body.get_state()), [], {"generation_current": False})
-        try:
-            self.progress.require_can_continue(f"follow_entity:{target_spec}")
-        except ProgressAbort as exc:
-            return _result(False, "progress_yielded", True, _block_pos(self.body.get_state()), [], {
-                "error": str(exc), "target_spec": target_spec,
-                "progress_stop_reason": exc.stop_reason.value,
-            })
 
         settle = _wait_for_survival_reflex_idle(
             self.body,
@@ -1344,6 +1330,7 @@ class NavigationTransactions:
                 "timeout_ticks": max(20, int(timeout_s * 20)),
             },
         )
+        action = action_with_timeout(action, timeout_s)
         result = self.body.execute(action)
         if not (result.ok and result.accepted):
             rejected = body_rejection_to_tool_result(
@@ -1363,7 +1350,7 @@ class NavigationTransactions:
 
         terminal = self.body.await_action_terminal(
             action.id,
-            timeout_s=timeout_s + 5.0,
+            timeout_s=action_wait_timeout_s(action),
             terminal_events={"followDone", "death", "respawned"},
         )
         if not self.progress.generation_current(generation):

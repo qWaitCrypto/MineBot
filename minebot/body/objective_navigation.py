@@ -8,6 +8,7 @@ from math import ceil, floor
 from time import monotonic, sleep
 from typing import Callable
 
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.body.combat import entity_target_terminal_mismatch, resolve_entity_target
 from minebot.body.navigation import (
     NavigationRunConfig,
@@ -220,6 +221,7 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
         if final_reach_distance is not None:
             action_params["final_reach_distance"] = final_reach_distance
         action = Action.create("navigate", dict(action_params))
+        action = action_with_timeout(action, timeout_s)
         after_seq = int(getattr(self.body, "last_seq", 0) or 0)
         try:
             result = self.body.execute(action)
@@ -243,7 +245,7 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
                     },
                 )
             try:
-                terminal = await_terminal(action.id, timeout_s=timeout_s + 5.0)
+                terminal = await_terminal(action.id, timeout_s=action_wait_timeout_s(action))
             except Exception as error:
                 return ToolResult(
                     False,
@@ -363,6 +365,7 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
         if resolved is not None:
             action.params["target_uuid"] = resolved.target_uuid
         try:
+            action = action_with_timeout(action, timeout_s)
             accepted = self.body.execute(action)
         except Exception as error:
             return ToolResult(
@@ -388,7 +391,7 @@ class ObjectiveNavigationTransactions(NavigationTransactions):
             )
         terminal = self.body.await_action_terminal(
             action.id,
-            timeout_s=timeout_s + 5.0,
+            timeout_s=action_wait_timeout_s(action),
             terminal_events={"followDone", "death", "respawned"},
         )
         if resolved is not None:

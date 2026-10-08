@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from minebot.app.responses_kernel import ResponsesKernel, ResponsesProtocolError
+from minebot.app.responses_kernel import ResponsesKernel, ResponsesProtocolError, ResponsesTransportError
 
 
 class Wire:
@@ -296,6 +296,11 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         await kernel.close()
 
     async def test_http_failed_stream_preserves_running_call_and_resumes_once(self):
+        for failure in ("interrupted", "timeout", "eof", "api_error"):
+            with self.subTest(failure=failure):
+                await self._http_failed_stream_preserves_running_call_and_resumes_once(failure)
+
+    async def _http_failed_stream_preserves_running_call_and_resumes_once(self, failure):
         started, release = asyncio.Event(), asyncio.Event()
         requests, invoked = [], []
         class Stream:
@@ -306,7 +311,13 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
                 if len(requests) == 1:
                     yield SimpleNamespace(model_dump=lambda **kw: call("original"))
                     await started.wait()
-                    raise OSError("stream interrupted")
+                    if failure == "interrupted":
+                        raise OSError("stream interrupted")
+                    if failure == "timeout":
+                        await asyncio.Event().wait()
+                    if failure == "api_error":
+                        yield SimpleNamespace(model_dump=lambda **kw: {"type": "error", "code": "server_error", "message": "unavailable"})
+                    return
                 yield SimpleNamespace(model_dump=lambda **kw: terminal("r2"))
         async def create(**params):
             requests.append(params)
@@ -319,10 +330,12 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         async def instructions(): return "Fresh world state"
         kernel = ResponsesKernel(client=SimpleNamespace(responses=SimpleNamespace(create=create)),
             model="test", tools=lambda: [{"name": "work", "async": True}], instructions=instructions,
-            invoke=invoke, emit=lambda *a, **kw: None, speak=lambda text: None, transport="http")
+            invoke=invoke, emit=lambda *a, **kw: None, speak=lambda text: None, transport="http", request_timeout_s=0.1)
         try:
-            with self.assertRaisesRegex(OSError, "stream interrupted"):
+            with self.assertRaises(ResponsesTransportError) as failure:
                 await kernel.run("Collect 24 logs")
+            from minebot.app.model_provider import is_retryable_model_error
+            self.assertTrue(is_retryable_model_error(failure.exception))
             self.assertFalse(kernel.calls["original"].task.done())
             release.set()
             await asyncio.wait_for(kernel.run("Continue from the actual result"), 2)

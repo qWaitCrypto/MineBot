@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from math import dist
 import time
 
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.body.interaction_support import (
     INTERACTION_RANGE,
     InteractionNavigator,
@@ -1000,11 +1001,12 @@ class UseTransactions:
 
 def _dispatch(body: Body, name: str, params: dict[str, object], *, timeout_s: float) -> ToolResult:
     action = Action.create(name, params)
+    action = action_with_timeout(action, timeout_s)
     accepted = body.execute(action)
     rejected = _acceptance_failure(accepted)
     if rejected is not None:
         return rejected
-    terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+    terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
     return terminal_event_to_tool_result(terminal)
 
 
@@ -1582,11 +1584,12 @@ def _recover_line_of_sight(
 
 def _look_at(body: Body, target: tuple[float, float, float], *, timeout_s: float) -> ToolResult:
     action = Action.create("lookAt", {"target": list(target)})
+    action = action_with_timeout(action, timeout_s)
     accepted = body.execute(action)
     rejected = _acceptance_failure(accepted)
     if rejected is not None:
         return rejected
-    terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+    terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
     result = terminal_event_to_tool_result(terminal)
     if result.success:
         return ToolResult(
@@ -1623,11 +1626,12 @@ def _move_to_stand_center(
             "max_deviation": 1.5,
         },
     )
+    action = action_with_timeout(action, timeout_s)
     accepted = body.execute(action)
     rejected = _acceptance_failure(accepted)
     if rejected is not None:
         return rejected
-    terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+    terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
     result = terminal_event_to_tool_result(terminal)
     if result.success:
         stop_result = _stop_body_controls(body, timeout_s=min(timeout_s, 2.0))
@@ -1669,11 +1673,12 @@ def _move_to_stand_center(
 
 def _stop_body_controls(body: Body, *, timeout_s: float) -> ToolResult:
     action = Action.create("stop", {})
+    action = action_with_timeout(action, timeout_s)
     accepted = body.execute(action)
     rejected = _acceptance_failure(accepted)
     if rejected is not None:
         return rejected
-    terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+    terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
     return terminal_event_to_tool_result(terminal)
 
 

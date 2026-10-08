@@ -1757,7 +1757,7 @@ class AgentSessionTests(unittest.TestCase):
         self.assertFalse(any(event["event"] == "session_step_failed" for event in events))
         session.close()
 
-    def test_transient_model_recovery_is_bounded(self):
+    def test_transient_model_outage_keeps_session_online_and_cancelable(self):
         def parts_factory(goal: str) -> AgentRuntimeParts:
             body = FakeBody()
 
@@ -1793,17 +1793,24 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(asyncio.run(session.step()).status, "retrying")
         exhausted = asyncio.run(session.step())
 
-        self.assertEqual(exhausted.status, "failed")
-        self.assertEqual(exhausted.message, "model_transport_recovery_exhausted")
-        self.assertFalse(session.has_pending_work)
+        self.assertEqual(exhausted.status, "retrying")
+        self.assertTrue(session.has_pending_work)
+        self.assertTrue(session.has_active_goal)
         events = session.parts.runtime.trace.snapshot()
         self.assertEqual(
             sum(event["event"] == "model_transport_recovery_queued" for event in events),
-            2,
+            3,
         )
-        self.assertTrue(
-            any(event["event"] == "model_transport_recovery_exhausted" for event in events)
-        )
+        self.assertEqual(events[-1]["retry_delay_s"], 60)
+
+        async def cancel_during_wait():
+            waiting = asyncio.create_task(session.step())
+            await asyncio.sleep(0.03)
+            session.submit(SessionCommand.cancel())
+            self.assertEqual((await asyncio.wait_for(waiting, 1)).status, "preempted")
+            await session.step()
+        asyncio.run(cancel_during_wait())
+        self.assertFalse(session.has_active_goal)
         session.close()
 
     def test_insufficient_quota_fails_once_without_outer_recovery(self):

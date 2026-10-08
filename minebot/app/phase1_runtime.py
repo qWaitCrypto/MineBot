@@ -1396,7 +1396,9 @@ def _craft_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:
             permission="craft",
             body_scope=("inventory", "blocks"),
             terminal_truth=("inventory", "ToolResult"),
-            timeout_s=45.0,
+            # Finite recipe batches each own an execution deadline. A fixed
+            # wrapper deadline otherwise cancels valid large requests midway.
+            timeout_s=None,
         ),
     )
 

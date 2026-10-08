@@ -1183,11 +1183,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(authority.failure_steps, 0)
         authority.require_can_continue("collect 7 raw iron")
 
-    def test_weld_counts_repeated_read_only_observation_loops(self):
-        # Read-only tools do not acquire the Body writer and do not feed the
-        # failure-storm sensor, but repeated identical observations with no world
-        # fingerprint change still have to trip stagnation. Otherwise a model can
-        # spin forever on tool-only read_inventory calls.
+    def test_weld_does_not_treat_reads_as_physical_stagnation(self):
         body = FakeBody()
         body.get_state = lambda: state("stable")
         authority = ProgressAuthority()
@@ -1204,19 +1200,16 @@ class AgentCompositionTests(unittest.TestCase):
             ToolSidecar("read_inventory", mutating=False, source="body.perception", permission="read_state"),
         )
 
-        with self.assertRaises(ProgressAbort) as cm:
-            for _ in range(10):
-                execute_tool(tool, {}, weld)
+        for _ in range(10):
+            self.assertEqual(execute_tool(tool, {}, weld)["reason"], "inventory_counted")
 
-        self.assertGreaterEqual(cm.exception.facts.stagnant_steps, 3)
-        self.assertEqual(cm.exception.facts.failure_steps, 0)
+        self.assertEqual((authority.stagnant_steps, authority.stalled_steps, authority.failure_steps), (0, 0, 0))
 
 
     def test_weld_does_not_count_outer_agent_composition_observation(self):
         # collect_resource is mutating=False by design because its leaf Body
         # calls own progress accounting. The outer composition wrapper must not
-        # become a second progress engine just because read-only body tools are
-        # now observed for anti-spin protection.
+        # become a second progress engine.
         body = FakeBody()
         body.get_state = lambda: state("stable")
         authority = ProgressAuthority()
@@ -1240,9 +1233,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(authority.stalled_steps, 0)
         self.assertEqual(authority.failure_steps, 0)
 
-    def test_weld_counts_genuine_failure_toward_storm(self):
-        # A non-skip failure (a real error) is still counted and still trips the
-        # storm via the weld itself — the skip set must not swallow genuine failures.
+    def test_weld_counts_genuine_failures_without_hiding_their_receipts(self):
         body = FakeBody()
         authority = ProgressAuthority()
         weld = WeldContext(body=body, authority=authority, goal_text="g")
@@ -1252,13 +1243,11 @@ class AgentCompositionTests(unittest.TestCase):
             execute_tool(miner, {"pos": [1, 59, 0]}, weld)
         self.assertEqual(authority.failure_steps, FAILURE_STORM_LIMIT - 1)
 
-        with self.assertRaises(ProgressAbort):
-            execute_tool(miner, {"pos": [1, 59, 0]}, weld)
+        result = execute_tool(miner, {"pos": [1, 59, 0]}, weld)
+        self.assertEqual(result["reason"], "mine_failed:real_error")
+        self.assertEqual(authority.failure_steps, FAILURE_STORM_LIMIT)
 
-    def test_weld_surfaces_inner_progress_yield_without_double_counting_failure(self):
-        # Long Body transactions (navigation/combat) feed intermediate progress
-        # into the same authority. If they return progress_yielded, the wrapper
-        # must surface that yield instead of recording one more failed tool call.
+    def test_weld_returns_legacy_inner_yield_receipt_unchanged(self):
         body = FakeBody()
         authority = ProgressAuthority()
         authority.note_step(
@@ -1279,12 +1268,7 @@ class AgentCompositionTests(unittest.TestCase):
             ToolSidecar("move_to", mutating=True, permission="move"),
         )
 
-        before = authority.failure_steps
-        with self.assertRaises(ProgressAbort) as cm:
-            execute_tool(tool, {"pos": [64, 64, 64]}, weld)
-
-        self.assertEqual(authority.failure_steps, before)
-        self.assertEqual(cm.exception.facts.failure_steps, before)
+        self.assertEqual(execute_tool(tool, {"pos": [64, 64, 64]}, weld), callable_({}).to_payload())
 
 
     def test_resource_plan_maps_stone_cobblestone_and_raw_gold_aliases(self):

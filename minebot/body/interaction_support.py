@@ -9,6 +9,7 @@ from math import dist
 import time
 from typing import Protocol
 
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.body.navigation import (
     SERVER_GOAL_SET_LIMIT,
     NavigationRunConfig,
@@ -627,6 +628,7 @@ def move_to_block_center(
             "max_deviation": 1.5,
         },
     )
+    action = action_with_timeout(action, timeout_s)
     accepted = body.execute(action)
     if not (accepted.ok and accepted.accepted):
         return body_rejection_to_tool_result(
@@ -638,7 +640,7 @@ def move_to_block_center(
                 "center_radius": precise_radius,
             },
         )
-    terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+    terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
     result = terminal_event_to_tool_result(terminal)
     stop_result = (
         _stop_body_controls(body, timeout_s=min(timeout_s, 2.0))
@@ -663,13 +665,14 @@ def move_to_block_center(
 
 def _stop_body_controls(body: Body, *, timeout_s: float) -> ToolResult:
     action = Action.create("stop", {})
+    action = action_with_timeout(action, timeout_s)
     accepted = body.execute(action)
     if not (accepted.ok and accepted.accepted):
         return body_rejection_to_tool_result(
             accepted,
             {"action_id": action.id},
         )
-    terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+    terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
     result = terminal_event_to_tool_result(terminal)
     return ToolResult(
         success=result.success,

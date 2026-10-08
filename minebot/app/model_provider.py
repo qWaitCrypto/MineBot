@@ -423,13 +423,15 @@ def is_retryable_model_error(exc: BaseException) -> bool:
     the interrupted turn and its already committed tool effects.
     """
 
+    from minebot.app.responses_kernel import ResponsesTransportError
+
     errors = tuple(_iter_model_error_chain(exc))
     if _is_permanent_model_error(exc):
         return False
 
     error_codes = _model_error_codes(errors)
     for current in errors:
-        if isinstance(current, (APIConnectionError, APITimeoutError, TransportError)):
+        if isinstance(current, (APIConnectionError, APITimeoutError, TransportError, ResponsesTransportError)):
             return True
         if isinstance(current, APIStatusError):
             if current.status_code in _MODEL_RETRY_HTTP_STATUSES:

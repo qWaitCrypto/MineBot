@@ -20,6 +20,10 @@ class ResponsesProtocolError(RuntimeError):
     """A concrete API/protocol failure, without silently changing kernels."""
 
 
+class ResponsesTransportError(TimeoutError):
+    """The response stream was lost; session-owned tool work remains valid."""
+
+
 @dataclass
 class PendingCall:
     call_id: str
@@ -55,6 +59,11 @@ class _HttpResponsesConnection:
         if self.request is not None:
             self.request.cancel()
             await asyncio.gather(self.request, return_exceptions=True)
+            self.request = None
+        # History and tool receipts survive. Events from the abandoned stream
+        # must never be mistaken for events belonging to its successor.
+        while not self.events.empty():
+            self.events.get_nowait()
 
     async def send_raw(self, raw: str) -> None:
         payload = json.loads(raw)
@@ -109,9 +118,13 @@ class _HttpResponsesConnection:
                     if terminal:
                         break
             if not terminal:
-                raise ResponsesProtocolError("HTTP Responses stream ended without a terminal event")
+                raise ResponsesTransportError("HTTP Responses stream ended without a terminal event")
         except asyncio.CancelledError:
             raise
+        except OSError as exc:
+            error = ResponsesTransportError(f"HTTP Responses stream interrupted: {exc}")
+            error.__cause__ = exc
+            self.events.put_nowait(error)
         except Exception as exc:
             self.events.put_nowait(exc)
 
@@ -334,7 +347,7 @@ class ResponsesKernel:
                 done, _ = await asyncio.wait(futures, return_when=asyncio.FIRST_COMPLETED,
                                             timeout=self.request_timeout_s if self._active or self._auto_successor else None)
                 if not done:
-                    raise ResponsesProtocolError(f"Timed out waiting for a Responses {self.transport} event")
+                    raise ResponsesTransportError(f"Timed out waiting for a Responses {self.transport} event")
                 if reader in done:
                     event = json.loads(reader.result())
                     reader = asyncio.create_task(self._connection.recv_bytes())
@@ -374,6 +387,9 @@ class ResponsesKernel:
                             final_text = self._observe_item(item) or final_text
                         reason = (response.get("incomplete_details") or {}).get("reason")
                         if kind == "response.failed" or (kind == "response.incomplete" and reason != "steered"):
+                            error = response.get("error") or {}
+                            if error.get("code") in {"server_error", "rate_limit_exceeded", "request_timeout"}:
+                                raise ResponsesTransportError(f"{kind}: {error}")
                             raise ResponsesProtocolError(f"{kind}: {reason or response.get('error')}")
                         self.emit("responses_terminal", response_id=self.previous_response_id, reason=reason,
                                   status=response.get("status"), response_model=response.get("model"),
@@ -382,6 +398,8 @@ class ResponsesKernel:
                                   elapsed_s=round(time.monotonic() - self._request_started_at, 3))
                     elif kind == "error":
                         error = event.get("error", event)
+                        if error.get("code") in {"server_error", "rate_limit_exceeded", "request_timeout"}:
+                            raise ResponsesTransportError(f"{error.get('code')}: {error.get('message', '')}")
                         raise ResponsesProtocolError(f"{error.get('code', 'api_error')}: {error.get('message', '')}")
                 if message in done:
                     value = message.result()

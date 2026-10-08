@@ -68,6 +68,7 @@ class FakeInventoryBody:
 
     def await_action_terminal(self, action_id: str, timeout_s: float = 15.0) -> Event:
         action = next(action for action in self.actions if action.id == action_id)
+        assert timeout_s == action.params["timeout_ms"] / 1000 + 5
         if action.name == "moveItem":
             return Event(
                 seq=len(self.actions),
@@ -316,7 +317,7 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.metrics["dropped_count"], 5)
         self.assertEqual([action.name for action in body.actions], ["dropItem"])
-        self.assertEqual(body.actions[0].params, {"slot": 0, "mode": "all"})
+        self.assertEqual({k: body.actions[0].params[k] for k in ("slot", "mode")}, {"slot": 0, "mode": "all"})
 
     def test_partial_hotbar_discard_uses_single_item_drops(self):
         body = FakeInventoryBody([perception([slot(0, "minecraft:dirt", 5), slot(1)])], drop_delta=5)
@@ -570,7 +571,7 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertEqual(result.reason, "completed")
         self.assertEqual([action.name for action in body.actions], ["craftItem"])
         self.assertEqual(
-            body.actions[0].params,
+            {k: v for k, v in body.actions[0].params.items() if not k.startswith("timeout_")},
             {
                 "inputs": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
                 "output": {"slot": 1, "item": "minecraft:oak_planks", "count": 4},
@@ -970,9 +971,8 @@ class InventoryRuntimeTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.reason, "completed")
         self.assertEqual([action.name for action in body.actions], ["moveItem", "moveItem", "moveItem"])
-        self.assertEqual(body.actions[0].params, {"from_slot": 41, "to_slot": 0, "count": 4})
-        self.assertEqual(body.actions[1].params, {"from_slot": 41, "to_slot": 1, "count": 2})
-        self.assertEqual(body.actions[2].params, {"from_slot": 42, "to_slot": 2, "count": 2})
+        self.assertEqual([tuple(action.params[k] for k in ("from_slot", "to_slot", "count")) for action in body.actions],
+                         [(41, 0, 4), (41, 1, 2), (42, 2, 2)])
 
     def test_cleanup_crafting_residue_reports_already_clean_without_dispatch(self):
         body = FakeInventoryBody([perception([slot(0), slot(41), slot(42)])])

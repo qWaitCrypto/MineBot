@@ -1,30 +1,7 @@
-"""Tool registry + progress weld — owned seams ① and ② (agent core).
+"""Framework-neutral tool registration, single-writer control and result delivery.
 
-This module is the single source of truth for tools and the mandatory progress
-weld every Body-mutating tool call passes through. It is framework-agnostic:
-it imports only ``minebot.contract`` and the sibling ``ProgressAuthority``; it
-never imports the agent SDK, transport (``game/``), or Body transaction
-implementations (``body/``). The Body is reached only through the neutral
-``Body`` protocol from ``contract/``.
-
-Two designs live here:
-
-- **Registry (seam ①).** One registration emits two faces:
-  *framework face* (``name`` / ``description`` / ``input_schema`` — all the LLM
-  and SDK see) and the *governance sidecar* (``permission`` / ``progress_key`` /
-  ``body_scope`` / ``terminal_truth`` / ``mutating`` / ``timeout_s`` — owned by
-  the registry, never shown to the model). See
-  ``body-agent-interface-schema.md`` §3.
-
-- **Progress weld (seam ②).** Routes every mutating tool call through the one
-  ``ProgressAuthority`` so stall / stagnation / failure-storm detection cannot be
-  bypassed — the discipline the SDK's Runner lacks. See
-  ``agent-layer-architecture.md`` §5.2 and ``body-agent-interface-schema.md`` §8.
-
-The weld's runtime dependencies (the live ``Body``, the shared
-``ProgressAuthority``, the current goal text, the per-bot single-writer guard)
-are **injected at call time** via :class:`WeldContext`. The registry holds none
-of them, so it stays a pure data structure that the composition root wires up.
+Progress observations are advisory. They cannot veto a new action or replace
+its actual result; cancellation generations still reject stale completions.
 """
 
 from __future__ import annotations
@@ -38,8 +15,6 @@ from minebot.contract import (
     Body,
     BodyState,
     JsonObject,
-    ProgressAbort,
-    ProgressStopReason,
     ToolResult,
     is_candidate_skip,
     is_governance_decision_required,
@@ -257,26 +232,12 @@ def _action_key(progress_key: str, tool_input: JsonObject) -> tuple[Any, ...]:
 
 
 def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext) -> JsonObject:
-    """Run one tool through the progress weld; return a ToolResult payload.
-
-    Non-mutating tools (read/perception) bypass progress accounting and the
-    single-writer — they are concurrent observations, not progress steps
-    (schema §8). Mutating tools run the full 7-step weld and may raise
-    ``ProgressAbort`` (surfaced upstream as a yield, never a crash).
-    """
+    """Return the tool's receipt, preserving single-writer and cancel semantics."""
     sidecar = tool.sidecar
 
-    # Read-only path: concurrent observation, no single-writer. Body state /
-    # perception reads still feed stagnation/stall sensors so tool-only
-    # observation loops cannot run forever. Agent composition tools stay leaf-led
-    # per phase1 design: their inner Body calls own progress accounting.
+    # Reading new world information need not change position or inventory.
     if not sidecar.mutating:
-        result = tool.callable(tool_input)
-        if sidecar.source.startswith("body."):
-            fingerprint = ctx.authority.fingerprint(ctx.body.get_state())
-            ctx.authority.observe_step(_action_key(sidecar.progress_key, tool_input), fingerprint)
-            ctx.authority.require_can_continue(ctx.goal_text)
-        return result.to_payload()
+        return tool.callable(tool_input).to_payload()
 
     # Mutating path — single-writer first (schema §8).
     if not ctx.writer.try_acquire(sidecar.progress_key):
@@ -304,26 +265,6 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
         if not ctx.authority.generation_current(generation):
             return PREEMPTED_PAYLOAD
 
-        # Some long Body transactions feed intermediate movement/combat steps
-        # into this same ProgressAuthority. If that inner controller already
-        # yielded, surface the yield directly instead of counting the wrapper
-        # call as another failed tool result.
-        if result.reason == PROGRESS_YIELDED_REASON:
-            facts = ctx.authority.facts(ctx.goal_text)
-            try:
-                stop_reason = ProgressStopReason(
-                    (result.metrics or {}).get("progress_stop_reason", "unknown")
-                )
-            except (TypeError, ValueError):
-                stop_reason = ProgressStopReason.UNKNOWN
-            raise ProgressAbort(
-                "progress authority yielded: "
-                f"goal={facts.goal!r} stagnant={facts.stagnant_steps} "
-                f"stalled={facts.stalled_steps} failures={facts.failure_steps}",
-                facts=facts,
-                stop_reason=stop_reason,
-            )
-
         post_fingerprint = ctx.authority.fingerprint(post_state)  # step 5: post fp
         action_key = _action_key(sidecar.progress_key, tool_input)
         # A candidate-skip ("this target is unsuitable, pick another") is neutral:
@@ -338,7 +279,6 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
         ctx.authority.note_step(                          # step 6: feed sensors
             action_key, success=result.success, fingerprint=post_fingerprint, neutral=neutral
         )
-        ctx.authority.require_can_continue(ctx.goal_text)  # step 7: trip -> ProgressAbort
         return result.to_payload()
     finally:
         ctx.writer.release(sidecar.progress_key)
@@ -355,5 +295,4 @@ __all__ = [
     "WeldContext",
     "execute_tool",
     "PREEMPTED_PAYLOAD",
-    "ProgressAbort",
 ]

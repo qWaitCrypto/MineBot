@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.contract import (
     Action,
     Body,
     LocalProgressController,
-    ProgressAbort,
     ProgressController,
     ToolResult,
     body_rejection_to_tool_result,
@@ -207,10 +207,6 @@ class CombatTransactions:
         start = _pos(self.body.get_state())
         if not self.progress.generation_current(generation):
             return _result(False, "preempted", True, start)
-        try:
-            self.progress.require_can_continue(f"ranged_attack:{target_spec}")
-        except ProgressAbort as exc:
-            return _result(False, "progress_yielded", True, start, {"error": str(exc)})
         resolved = resolve_entity_target(self.body, target_spec, radius=32)
         if isinstance(resolved, ToolResult):
             return resolved
@@ -264,13 +260,6 @@ class CombatTransactions:
         generation = self.progress.current_generation()
         if not self.progress.generation_current(generation):
             return _result(False, "preempted", True, _pos(self.body.get_state()), {"generation_current": False, "target_spec": target_spec})
-        try:
-            self.progress.require_can_continue(f"engage_entity:{target_spec}")
-        except ProgressAbort as exc:
-            return _result(False, "progress_yielded", True, _pos(self.body.get_state()), {
-                "error": str(exc), "target_spec": target_spec,
-                "progress_stop_reason": exc.stop_reason.value,
-            })
 
         resolved = resolve_entity_target(self.body, target_spec, radius=32)
         if isinstance(resolved, ToolResult):
@@ -290,6 +279,7 @@ class CombatTransactions:
                 "disengage_health": disengage_health,
             },
         )
+        action = action_with_timeout(action, timeout_s)
         result = self.body.execute(action)
         start = _pos(self.body.get_state())
         if not (result.ok and result.accepted):
@@ -315,7 +305,7 @@ class CombatTransactions:
 
         terminal = self.body.await_action_terminal(
             action.id,
-            timeout_s=timeout_s + 5.0,
+            timeout_s=action_wait_timeout_s(action),
             terminal_events={"engageDone", "death", "respawned"},
         )
         if not self.progress.generation_current(generation):

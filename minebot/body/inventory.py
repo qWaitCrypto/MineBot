@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import ceil
 
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.body.block_work import BlockWork
 from minebot.body.inventory_read import preferred_inventory_page_size
 from minebot.body.interaction_support import (
@@ -169,11 +170,12 @@ class InventoryTransactions:
                         "count": move["count"],
                     },
                 )
+                action = action_with_timeout(action, timeout_s)
                 accepted = self.body.execute(action)
                 rejected = _acceptance_failure(accepted, plan, executed)
                 if rejected is not None:
                     return rejected
-                terminal = self.body.await_action_terminal(action.id, timeout_s=timeout_s)
+                terminal = self.body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
                 result = terminal_event_to_tool_result(terminal)
                 executed.append(
                     {
@@ -191,11 +193,12 @@ class InventoryTransactions:
 
             mode = str(move.get("mode") or "all")
             action = Action.create("dropItem", {"slot": move["drop_slot"], "mode": mode})
+            action = action_with_timeout(action, timeout_s)
             accepted = self.body.execute(action)
             rejected = _acceptance_failure(accepted, plan, executed)
             if rejected is not None:
                 return rejected
-            terminal = self.body.await_action_terminal(action.id, timeout_s=timeout_s)
+            terminal = self.body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
             result = terminal_event_to_tool_result(terminal)
             before = int((result.metrics or {}).get("count_before") or 0)
             after = int((result.metrics or {}).get("count_after") or 0)
@@ -365,7 +368,7 @@ class InventoryTransactions:
         remainders: list[dict[str, object]] | None = None,
         crafting_table: Position | None = None,
         max_stack: int = 64,
-        timeout_s: float = 2.0,
+        timeout_s: float | None = None,
     ) -> ToolResult:
         normalized_inputs = _normalize_craft_inputs(inputs)
         normalized_output = _normalize_craft_output(output)
@@ -395,7 +398,7 @@ class InventoryTransactions:
                 "max_stack": max_stack,
                 **({"crafting_table": list(crafting_table)} if crafting_table is not None else {}),
             },
-            timeout_s=timeout_s,
+            timeout_s=timeout_s if timeout_s is not None else 8 + int(normalized_output["count"]),
         )
         metrics = {
             "inputs": [dict(entry) for entry in normalized_inputs],
@@ -414,7 +417,8 @@ class InventoryTransactions:
                 reason=dispatch.reason,
                 can_retry=dispatch.can_retry,
                 next_suggestion=dispatch.next_suggestion,
-                metrics={**metrics, "craft": dict(dispatch.metrics or {})},
+                metrics={**metrics, "craft": dict(dispatch.metrics or {}),
+                         "crafted_count": max(0, int((dispatch.metrics or {}).get("inventory_delta", 0)))},
             )
 
         after_inventory = _read_inventory(self.body)
@@ -558,7 +562,7 @@ class InventoryTransactions:
         temporary_table_context: PlaceContext | str = PlaceContext.DIRECT,
         auto_equip: bool = False,
         residue_timeout_s: float = 4.0,
-        craft_timeout_s: float = 4.0,
+        craft_timeout_s: float | None = None,
         approach_timeout_s: float = 12.0,
         place_timeout_s: float = 12.0,
         reclaim_timeout_s: float = 12.0,
@@ -639,7 +643,8 @@ class InventoryTransactions:
                     cleanup_existing_bot_table=cleanup_existing_bot_table)
                 batches.append(result.to_payload())
                 if not result.success:
-                    return merge_context(result, {"requested_count":count,"crafted_count":count-remaining,"batches":batches})
+                    return merge_context(result, {"requested_count":count,
+                        "crafted_count":count-remaining + int((result.metrics or {}).get("crafted_count", 0)),"batches":batches})
                 remaining -= amount
             return ToolResult(True, "completed", False, metrics={"item":item,"requested_count":count,"crafted_count":count,"batches":batches})
 
@@ -647,6 +652,7 @@ class InventoryTransactions:
         if isinstance(plan, ToolResult):
             return plan
 
+        batch_timeout_s = craft_timeout_s if craft_timeout_s is not None else 8 + ceil(plan.crafted_count / plan.variant.output_count)
         workspace = None
         if plan.variant.requires_table:
             workspace = self._resolve_crafting_workspace(
@@ -676,7 +682,7 @@ class InventoryTransactions:
             output={"slot": plan.output_slot, "item": plan.item, "count": plan.crafted_count},
             remainders=[dict(entry) for entry in plan.remainders],
             crafting_table=tuple(workspace["table_pos"]) if isinstance(workspace, dict) else None,
-            timeout_s=craft_timeout_s,
+            timeout_s=batch_timeout_s,
             max_stack=max_stack,
         )
         craft_attempts = [craft.to_payload()]
@@ -715,7 +721,7 @@ class InventoryTransactions:
                         output={"slot": plan.output_slot, "item": plan.item, "count": plan.crafted_count},
                         remainders=[dict(entry) for entry in plan.remainders],
                         crafting_table=tuple(workspace["table_pos"]) if isinstance(workspace, dict) else None,
-                        timeout_s=craft_timeout_s,
+                        timeout_s=batch_timeout_s,
                     )
                     craft_attempts.append(craft.to_payload())
                     craft_reconciliation = {
@@ -752,12 +758,13 @@ class InventoryTransactions:
 
         equip = None
         if craft.success and auto_equip:
-            equip = self.equip_item(item=plan.item, target="auto", timeout_s=craft_timeout_s)
+            equip = self.equip_item(item=plan.item, target="auto", timeout_s=batch_timeout_s)
 
         metrics = {
             "item": item,
             "requested_count": count,
             "cleanup_before": cleanup_before.to_payload(),
+            "crafted_count": plan.crafted_count if craft.success else int((craft.metrics or {}).get("crafted_count", 0)),
             "craft_plan": _craft_plan_metrics(plan),
             "craft": craft.to_payload(),
             "craft_attempts": craft_attempts,
@@ -1897,23 +1904,25 @@ def _equip_terminal_failure(
 
 def _dispatch(body: Body, name: str, params: dict[str, object], *, timeout_s: float) -> ToolResult:
     action = Action.create(name, params)
+    action = action_with_timeout(action, timeout_s)
     accepted = body.execute(action)
     rejected = _body_rejected(accepted, {"action": name, "params": params})
     if rejected is not None:
         return rejected
-    terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+    terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
     return terminal_event_to_tool_result(terminal)
 
 
 def _dispatch_select_item(body: Body, item: str, *, timeout_s: float) -> ToolResult:
     action = Action.create("selectItem", {"item": item})
+    action = action_with_timeout(action, timeout_s)
     accepted = body.execute(action)
     if accepted.ok and accepted.accepted:
-        terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+        terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
         return terminal_event_to_tool_result(terminal)
     if accepted.ok and not accepted.accepted and (accepted.data or {}).get("action") == "selectItem":
         try:
-            terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+            terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
         except TimeoutError:
             pass
         else:

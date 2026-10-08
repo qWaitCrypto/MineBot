@@ -9,6 +9,7 @@ from math import ceil
 from math import dist
 from typing import Callable
 
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.body.block_work import BlockWork
 from minebot.body.inventory_read import preferred_inventory_page_size
 from minebot.body.inventory import _ScarpetValueParser
@@ -371,6 +372,7 @@ class FurnaceTransactions:
         if count is not None:
             params["count"] = count
         action = Action.create("furnaceTransfer", params)
+        action = action_with_timeout(action, timeout_s)
         accepted = self.body.execute(action)
         rejected = _acceptance_failure(
             accepted,
@@ -393,7 +395,7 @@ class FurnaceTransactions:
                 },
             )
 
-        terminal = self.body.await_action_terminal(action.id, timeout_s=timeout_s)
+        terminal = self.body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
         result = terminal_event_to_tool_result(terminal)
         moved_count = int((result.metrics or {}).get("count") or 0)
         metrics = {
@@ -1305,13 +1307,14 @@ def _retry_temporary_furnace_candidate(result: ToolResult) -> bool:
 
 def _dispatch(body: Body, action_name: str, params: dict[str, object], *, timeout_s: float) -> ToolResult:
     action = Action.create(action_name, params)
+    action = action_with_timeout(action, timeout_s)
     accepted = body.execute(action)
     if not (accepted.ok and accepted.accepted):
         return body_rejection_to_tool_result(
             accepted,
             {"action": action_name, "action_id": action.id},
         )
-    terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+    terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
     result = terminal_event_to_tool_result(terminal)
     return ToolResult(
         success=result.success,

@@ -7,6 +7,7 @@ from dataclasses import asdict
 from dataclasses import dataclass
 from math import dist, floor
 
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.body.interaction_support import (
     INTERACTION_RANGE,
     InteractionNavigator,
@@ -1746,11 +1747,12 @@ class InteractionTransactions:
 
     def _look_at_pos(self, target: tuple[float, float, float], *, timeout_s: float) -> ToolResult:
         action = Action.create("lookAt", {"target": list(target)})
+        action = action_with_timeout(action, timeout_s)
         accepted = self.body.execute(action)
         rejected = _acceptance_failure(accepted)
         if rejected is not None:
             return rejected
-        terminal = self.body.await_action_terminal(action.id, timeout_s=timeout_s)
+        terminal = self.body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
         result = terminal_event_to_tool_result(terminal)
         if result.success:
             return ToolResult(
@@ -1777,11 +1779,12 @@ class InteractionTransactions:
 
     def _use_empty_hand(self, *, timeout_s: float) -> ToolResult:
         action = Action.create("useItem", {"mode": "once", "ticks": 1})
+        action = action_with_timeout(action, timeout_s)
         accepted = self.body.execute(action)
         rejected = _acceptance_failure(accepted)
         if rejected is not None:
             return rejected
-        terminal = self.body.await_action_terminal(action.id, timeout_s=timeout_s)
+        terminal = self.body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
         return terminal_event_to_tool_result(terminal)
 
     def _handoff_item(
@@ -1801,11 +1804,12 @@ class InteractionTransactions:
                 "timeout_ticks": max(1, min(200, int(timeout_s * 20.0 + 0.999))),
             },
         )
+        action = action_with_timeout(action, timeout_s)
         accepted = self.body.execute(action)
         rejected = _acceptance_failure(accepted)
         if rejected is not None:
             return rejected
-        terminal = self.body.await_action_terminal(action.id, timeout_s=timeout_s + 5.0)
+        terminal = self.body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
         return terminal_event_to_tool_result(terminal)
 
     def _await_pickup(self, receiver_name: str, item: str, *, timeout_s: float) -> HandoffReceipt | None:
@@ -2221,6 +2225,7 @@ def _move_to_bed_use_stance(
             "max_deviation": 1.5,
         },
     )
+    action = action_with_timeout(action, timeout_s)
     accepted = body.execute(action)
     if not (accepted.ok and accepted.accepted):
         return body_rejection_to_tool_result(
@@ -2232,7 +2237,7 @@ def _move_to_bed_use_stance(
                 "center_radius": precise_radius,
             },
         )
-    terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+    terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
     result = terminal_event_to_tool_result(terminal)
     metrics = {
         "action_id": action.id,

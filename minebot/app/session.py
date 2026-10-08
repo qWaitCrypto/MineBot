@@ -168,6 +168,7 @@ class AgentSession:
     principals: PrincipalRegistry | None = None
     max_recovery_attempts: int = 3
     max_model_recovery_attempts: int = 3
+    model_recovery_cooldown_s: float = 60.0
     _goal_principal_id: str | None = None
     _recovery_attempts: int = 0
     _goal_active: bool = False
@@ -458,6 +459,14 @@ class AgentSession:
                 checkpoint_before=checkpoint_before,
             )
         try:
+            delay_s = float(intent.payload.get("model_retry_delay_s", 0))
+            if intent.source == "model_transport_recovery" and delay_s > 0:
+                waited = await self._run_supervised(
+                    asyncio.sleep(delay_s), work_kind="model_recovery_wait",
+                    admission_version=admission_version,
+                )
+                if waited is _WORK_PREEMPTED:
+                    return SessionStep("preempted", self.parts.lifecycle.state, "superseded_during_model_wait")
             outcome = await self._run_supervised(
                 self.parts.runtime.run_turn(
                     extra_signals=signals,
@@ -540,19 +549,9 @@ class AgentSession:
         budget = self._continuation_budget(intent)
         attempt = self._model_recovery_attempts + 1
         self._turn_pending = False
-        if attempt > self.max_model_recovery_attempts:
-            self._trace(
-                "model_transport_recovery_exhausted",
-                attempts=self._model_recovery_attempts,
-                error_type=exc.error_type,
-            )
-            self._stand_down()
-            return SessionStep(
-                "failed",
-                self.parts.lifecycle.state,
-                "model_transport_recovery_exhausted",
-            )
-
+        # Bound the retry frequency, not the lifetime of the user's session.
+        # Waiting is supervised by the same cancel/quit/message control path.
+        delay_s = self.model_recovery_cooldown_s if attempt > self.max_model_recovery_attempts else 0.0
         self._model_recovery_attempts = attempt
         task = self.task_workspace.current_task if self.task_workspace is not None else None
         generation = self.parts.authority.current_generation()
@@ -563,6 +562,7 @@ class AgentSession:
                 "decision": "resume",
                 "reason": "transient_model_error",
                 "attempt": attempt,
+                "model_retry_delay_s": delay_s,
                 "error_type": exc.error_type,
                 "budget_checkpoint_id": None if budget is None else budget.checkpoint_id,
                 "evidence_cursor": self.parts.runtime.current_run_evidence_cursor(),
@@ -582,6 +582,7 @@ class AgentSession:
             "model_transport_recovery_queued",
             attempt=attempt,
             max_attempts=self.max_model_recovery_attempts,
+            retry_delay_s=delay_s,
             error_type=exc.error_type,
             intent_id=recovery.intent_id,
             task_id=None if task is None else task.task_id,

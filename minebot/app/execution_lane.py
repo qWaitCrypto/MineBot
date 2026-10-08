@@ -57,6 +57,8 @@ class SerialExecutionLane:
 
         def invoke() -> Any:
             started_at.append(time.monotonic())
+            if timeout_s is not None:
+                cancellation.deadline = started_at[0] + timeout_s
             started.set()
             with execution_cancellation_scope(cancellation):
                 return callback(*args)
@@ -84,7 +86,15 @@ class SerialExecutionLane:
                 raise asyncio.CancelledError
             try:
                 return future.result()
-            except (FutureCancelledError, ExecutionCancelled) as exc:
+            except ExecutionCancelled as exc:
+                if exc.reason == "execution_timeout" and timeout_s is not None:
+                    raise ToolExecutionTimeout(
+                        timeout_s=timeout_s,
+                        execution_elapsed_s=time.monotonic() - started_at[0],
+                        queue_wait_s=started_at[0] - submitted_at,
+                    ) from exc
+                raise asyncio.CancelledError from exc
+            except FutureCancelledError as exc:
                 raise asyncio.CancelledError from exc
         except asyncio.CancelledError:
             cancellation.cancel("asyncio_cancelled")

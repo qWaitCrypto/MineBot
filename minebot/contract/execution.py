@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+
+from .messages import Action
 
 
 class ExecutionCancelled(BaseException):
@@ -19,10 +22,11 @@ class ExecutionCancelled(BaseException):
 class ExecutionCancellation:
     """Thread-safe cancellation state shared with one execution-lane callback."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, deadline: float | None = None) -> None:
         self._cancelled = threading.Event()
         self._lock = threading.Lock()
         self._reason = "execution_cancelled"
+        self.deadline = deadline
 
     @property
     def cancelled(self) -> bool:
@@ -73,9 +77,42 @@ def execution_checkpoint() -> None:
         cancellation.checkpoint()
 
 
+def action_with_timeout(action: Action, timeout_s: float) -> Action:
+    """Give the executor and terminal waiter the same finite action budget.
+
+    A transaction's child action cannot outlive its owning tool invocation.
+    The extra wait allowance is for receipt delivery and stopping controls,
+    not additional physical work.
+    """
+    execution_checkpoint()
+    params = dict(action.params)
+    if "timeout_ms" in params:
+        budget = float(params["timeout_ms"]) / 1000
+    elif "timeout_ticks" in params:
+        budget = float(params["timeout_ticks"]) / 20
+    elif "timeout_s" in params:
+        budget = float(params["timeout_s"])
+    else:
+        budget = float(timeout_s)
+    budget = min(budget, float(timeout_s), 300.0)
+    cancellation = _CURRENT_EXECUTION_CANCELLATION.get()
+    if cancellation is not None and cancellation.deadline is not None:
+        budget = min(budget, cancellation.deadline - time.monotonic())
+    if budget <= 0:
+        raise ExecutionCancelled("execution_timeout")
+    params.update(timeout_ms=max(1, int(budget * 1000)), timeout_ticks=max(1, int(budget * 20)))
+    return Action(id=action.id, name=action.name, params=params)
+
+
+def action_wait_timeout_s(action: Action) -> float:
+    return float(action.params["timeout_ms"]) / 1000 + 5.0
+
+
 __all__ = [
     "ExecutionCancellation",
     "ExecutionCancelled",
     "execution_cancellation_scope",
     "execution_checkpoint",
+    "action_with_timeout",
+    "action_wait_timeout_s",
 ]

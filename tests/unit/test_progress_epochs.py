@@ -837,7 +837,7 @@ def test_duplicate_same_name_calls_claim_predeclared_ids_in_fifo_order():
     ]
 
 
-def test_read_only_model_batch_counts_as_one_stall_epoch():
+def test_read_only_model_batch_does_not_count_as_physical_stall():
     body = EpochBody()
     authority = ProgressAuthority()
     fingerprint = authority.fingerprint(body.get_state())
@@ -865,10 +865,10 @@ def test_read_only_model_batch_counts_as_one_stall_epoch():
     runtime.close()
 
     assert all(result["reason"] == "recipe_read" for result in results)
-    assert authority.stalled_steps == 1
+    assert authority.stalled_steps == 0
     assert authority.failure_steps == 0
-    assert archive.records[0]["captured_progress_step_count"] == 9
-    assert archive.records[0]["committed_progress_step_count"] == 1
+    assert archive.records[0]["captured_progress_step_count"] == 0
+    assert archive.records[0]["committed_progress_step_count"] == 0
     assert archive.records[0]["progress_aborted"] is False
 
 

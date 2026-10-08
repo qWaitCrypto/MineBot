@@ -7,6 +7,7 @@ from math import ceil, dist, floor
 import time
 from typing import Callable, Protocol
 
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.body.interaction_support import (
     find_nearby_block_search,
     find_block_target,
@@ -215,12 +216,13 @@ class BlockWork:
                 "legality": _decision_payload(decision),
             },
         )
+        action = action_with_timeout(action, timeout_s)
         accepted = self.body.execute(action)
         rejected = _acceptance_failure(accepted, "mineBlock", pos)
         if rejected is not None:
             return rejected
 
-        terminal = self.body.await_action_terminal(action.id, timeout_s=_server_terminal_timeout(timeout_s))
+        terminal = self.body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
         result = terminal_event_to_tool_result(terminal)
         metrics = dict(result.metrics or {})
         metrics.setdefault("target", list(pos))
@@ -1254,6 +1256,7 @@ class BlockWork:
 
         before = self.body.get_state()
         jump_action = Action.create("jump", {})
+        jump_action = action_with_timeout(jump_action, timeout_s)
         accepted = self.body.execute(jump_action)
         rejected = _acceptance_failure(accepted, "jump", origin)
         if rejected is not None:
@@ -1263,7 +1266,7 @@ class BlockWork:
                 {"origin": list(origin), "cleared": cleared, "scaffold_candidates": list(candidates)},
             )
 
-        jump_terminal = self.body.await_action_terminal(jump_action.id, timeout_s=timeout_s)
+        jump_terminal = self.body.await_action_terminal(jump_action.id, timeout_s=action_wait_timeout_s(jump_action))
         jump_result = terminal_event_to_tool_result(jump_terminal)
         if not jump_result.success:
             return _with_metric(
@@ -2747,12 +2750,13 @@ class BlockWork:
                 "legality": _decision_payload(decision),
             },
         )
+        action = action_with_timeout(action, timeout_s)
         accepted = self.body.execute(action)
         rejected = _acceptance_failure(accepted, "placeBlock", pos)
         if rejected is not None:
             return rejected
 
-        terminal = self.body.await_action_terminal(action.id, timeout_s=_server_terminal_timeout(timeout_s))
+        terminal = self.body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
         result = terminal_event_to_tool_result(terminal)
         if result.success:
             self.governance.record_bot_placement(pos, block_type, purpose, self.body.bot_name)
@@ -3564,13 +3568,14 @@ def _decision_payload(decision) -> dict[str, object]:
 
 def _dispatch_select_item(body: Body, item: str, *, timeout_s: float) -> ToolResult:
     action = Action.create("selectItem", {"item": item})
+    action = action_with_timeout(action, timeout_s)
     accepted = body.execute(action)
     if accepted.ok and accepted.accepted:
-        terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+        terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
         return terminal_event_to_tool_result(terminal)
     if accepted.ok and not accepted.accepted and (accepted.data or {}).get("action") == "selectItem":
         try:
-            terminal = body.await_action_terminal(action.id, timeout_s=timeout_s)
+            terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
         except TimeoutError:
             pass
         else:

@@ -955,7 +955,7 @@ def _timeout_ms(action: Action) -> int:
             raw = None
     if raw is None and action.params.get("timeout_s") is not None:
         raw = float(action.params["timeout_s"]) * 1000
-    if raw is not None and action.name == "handoffItem":
+    if raw is not None and action.name == "handoffItem" and "timeout_ms" not in action.params:
         # Pickup timeout starts at the drop; leave time for approach/rotation
         # and for the stopped terminal to settle before the Python wait ends.
         raw = int(raw) + 4_000

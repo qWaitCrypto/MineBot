@@ -157,39 +157,21 @@ def test_v16_migration_does_not_invent_causes_for_historical_aborts(tmp_path):
         assert rows[1]["progress_stop_reason"] == "unknown"
 
 
-def test_inner_body_stop_survives_tool_result_and_weld():
-    from minebot.body.combat import CombatTransactions
+@pytest.mark.parametrize("mutating", [False, True])
+def test_progress_counters_cannot_hide_real_tool_receipts_or_block_the_next_call(mutating):
     from minebot.brain.registry import WeldContext, execute_tool
-    from minebot.contract import LocalProgressController, ProgressStopReason
-    from tests.unit.test_engage_runtime import FakeBody
-    from tests.unit.test_progress_epochs import make_tool
-
-    class StoppedProgress(LocalProgressController):
-        def require_can_continue(self, goal_text):
-            raise ProgressAbort("not a policy input", stop_reason=ProgressStopReason.BODY_TRANSPORT)
-
-    body = FakeBody()
-    combat = CombatTransactions(body, progress=StoppedProgress())
-    result = combat.engage_entity("nearest_hostile")
-    assert result.metrics["progress_stop_reason"] == "body_transport"
-    assert body.actions == []
-    tool = make_tool("engage_entity", lambda _: result, mutating=True)
-    weld = WeldContext(body=body, authority=ProgressAuthority(), goal_text="survive")
-    with pytest.raises(ProgressAbort) as stopped:
-        execute_tool(tool, {}, weld)
-    assert stopped.value.stop_reason is ProgressStopReason.BODY_TRANSPORT
-
-
-@pytest.mark.parametrize("reason", [None, "unrecognized", {}, "unknown"])
-def test_legacy_or_invalid_inner_stop_is_unknown_even_with_stagnant_counters(reason):
-    from minebot.brain.registry import WeldContext, execute_tool
-    from minebot.contract import ProgressStopReason, ToolResult
+    from minebot.contract import ToolResult
     from tests.unit.test_progress_epochs import EpochBody, make_tool
 
-    tool = make_tool("work", lambda _: ToolResult(False, "progress_yielded", False,
-        metrics={"progress_stop_reason": reason}), mutating=True)
-    authority = ProgressAuthority(stagnant_steps=3)
-    weld = WeldContext(body=EpochBody(), authority=authority, goal_text="continue")
-    with pytest.raises(ProgressAbort) as stopped:
-        execute_tool(tool, {}, weld)
-    assert stopped.value.stop_reason is ProgressStopReason.UNKNOWN
+    authority = ProgressAuthority(failure_steps=5, stagnant_steps=5, stalled_steps=5)
+    body = EpochBody()
+    weld = WeldContext(body=body, authority=authority, goal_text="continue")
+    receipt = ToolResult(False, "world_result_mismatch", True, metrics={"matched": 9, "missing": 1})
+    tool = make_tool("work", lambda _: receipt, mutating=mutating)
+    for _ in range(12):
+        assert execute_tool(tool, {}, weld) == receipt.to_payload()
+    if not mutating:
+        assert (authority.failure_steps, authority.stagnant_steps, authority.stalled_steps) == (5, 5, 5)
+    next_receipt = ToolResult(True, "structure_verified", False, metrics={"matched": 10})
+    next_tool = make_tool("work", lambda _: next_receipt, mutating=mutating)
+    assert execute_tool(next_tool, {}, weld) == next_receipt.to_payload()

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from dataclasses import dataclass
 
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.body.interaction_support import (
     InteractionNavigator,
     ensure_interaction_range,
@@ -134,12 +135,13 @@ class ContainerTransactions:
                     "item": item,
                 },
             )
+            action = action_with_timeout(action, timeout_s)
             accepted = self.body.execute(action)
             rejected = _acceptance_failure(accepted, pos, plan, executed)
             if rejected is not None:
                 return rejected
 
-            terminal = self.body.await_action_terminal(action.id, timeout_s=timeout_s)
+            terminal = self.body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
             result = terminal_event_to_tool_result(terminal)
             moved = int((result.metrics or {}).get("count") or 0)
             moved_total += moved

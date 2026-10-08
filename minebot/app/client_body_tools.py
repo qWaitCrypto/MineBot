@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 
 import nbtlib
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.app.projection import bounded_summary_value
 
 from minebot.brain.registry import RegisteredTool, ToolSidecar
@@ -22,11 +23,12 @@ def _execute(body: Body, name: str, params: dict) -> ToolResult:
         if state.data.get("disposable_world") is not True:
             return ToolResult(False, "native_mutation_requires_disposable_world", can_retry=False)
     action = Action.create(name, params)
+    action = action_with_timeout(action, float(params.get("timeout_s", 120)))
     result = body.execute(action)
     if not result.ok or not result.accepted:
         return ToolResult(False, result.error or "body_rejected", can_retry=True, metrics=dict(result.data or {}))
     terminal = terminal_event_to_tool_result(body.await_action_terminal(
-        action.id, timeout_s=float(params.get("timeout_s", 120)) + 5))
+        action.id, timeout_s=action_wait_timeout_s(action)))
     if terminal.success and name in {"buildStructure", "clearArea"}:
         if name == "buildStructure":
             low = params["anchor"]

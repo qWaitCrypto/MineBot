@@ -960,9 +960,15 @@ public final class MineBotClientBody implements ClientModInitializer {
                         && client.player.position().distanceToSqr(Vec3.atBottomCenterOf(current.anchor)) <= 64;
                     requestStop(arrived ? "completed" : "failed", arrived ? "elytra_destination_reached"
                         : current.seenFlying ? "elytra_stopped_outside_destination" : "elytra_stopped_without_flight");
+                } else if (current.kind.equals("build") || current.kind.equals("clear")) {
+                    // An already-satisfied schematic can finish before our
+                    // first tick observes an active process. Verify the cells;
+                    // seenActive is diagnostic, not the completion condition.
+                    boolean verified = cuboidMatches(client, current);
+                    requestStop(verified ? "completed" : "failed",
+                        verified ? "world_result_verified" : "world_result_mismatch");
                 } else {
-                    boolean finite = current.seenActive && (current.kind.equals("build") || current.kind.equals("clear")
-                        || current.kind.equals("get") || current.kind.equals("farm"));
+                    boolean finite = current.seenActive && (current.kind.equals("get") || current.kind.equals("farm"));
                     requestStop(finite ? "completed" : "failed", finite ? "process_finished_verify_world" : "baritone_stopped_without_result");
                 }
             }
@@ -987,6 +993,16 @@ public final class MineBotClientBody implements ClientModInitializer {
                 terminal(client, current.stopStatus, current.stopReason);
             }
         }
+    }
+
+    private boolean cuboidMatches(Minecraft client, Run current) {
+        BlockPos end = current.kind.equals("build")
+            ? current.anchor.offset(current.sx - 1, current.sy - 1, current.sz - 1) : current.end;
+        var wanted = new BlockOptionalMeta(current.kind.equals("clear") ? "air" : current.target);
+        for (BlockPos pos : BlockPos.betweenClosed(current.anchor, end)) {
+            if (!client.level.hasChunkAt(pos) || !wanted.matches(client.level.getBlockState(pos))) return false;
+        }
+        return true;
     }
 
     private void tickFollow(Minecraft client, Run current) {

@@ -7,6 +7,7 @@ import math
 import time
 from typing import TYPE_CHECKING
 
+from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.body.world_read import read_block_facts
 from minebot.contract import Action, Body, Position, ToolResult, execution_checkpoint, terminal_event_to_tool_result
 
@@ -125,10 +126,11 @@ def collect_native_cluster(
                 native_blocks = [item]
             action = Action.create("mineResource", {"blocks": native_blocks, "item": item,
                 "quantity": needed, "timeout_s": timeout})
+        action = action_with_timeout(action, timeout)
         accepted = body.execute(action)
         if not accepted.ok or not accepted.accepted:
             return result(False, accepted.error or "body_rejected")
-        terminal = terminal_event_to_tool_result(body.await_action_terminal(action.id, timeout_s=timeout + 5))
+        terminal = terminal_event_to_tool_result(body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action)))
         attempts.append({"target": list(anchor) if anchor is not None else None,
                          "targets": [list(pos) for pos in cluster], "action": action.name,
                          "mine": terminal.to_payload()})
