@@ -332,6 +332,51 @@ def model_input_chars(items: list[Any]) -> int:
     return sum(_model_item_chars(item) for item in items)
 
 
+def responses_working_input(
+    items: list[dict[str, Any]],
+    *,
+    max_chars: int = MODEL_INPUT_MAX_CHARS,
+    keep_recent_results: int = 12,
+) -> list[dict[str, Any]]:
+    """Offload large old observations without breaking native call history.
+
+    Keep user text, reasoning, calls, failures and recent results intact. Only
+    shrink successful observations whose full details are already queryable.
+    This is a soft request budget, not permission to drop player requirements.
+    """
+    working = list(items)
+    size = model_input_chars(working)
+    results = [i for i, item in enumerate(items) if item.get("type") == "function_call_output"]
+    for index in results[: max(0, len(results) - keep_recent_results)]:
+        if size <= max_chars:
+            break
+        item = items[index]
+        output = item.get("output")
+        if not isinstance(output, str):
+            continue
+        try:
+            result = json.loads(output)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(result, dict):
+            continue
+        projection = result.get("projection")
+        if (result.get("success") is not True or not result.get("observationHandle")
+                or not isinstance(projection, dict) or not projection.get("queryable")):
+            continue
+        # Small receipts (coordinates, counts, etc.) remain visible. Bulk scan
+        # details can be recovered through the existing observation tools.
+        if len(json.dumps(result.get("summary"), ensure_ascii=False)) <= 2_000:
+            continue
+        compact = {**result, "summary": {}, "projection": {
+            **projection, "complete": False, "historyDetailOffloaded": True,
+        }}
+        replacement = {**item, "output": json.dumps(compact, ensure_ascii=False)}
+        size -= _model_item_chars(item) - _model_item_chars(replacement)
+        working[index] = replacement
+    return working
+
+
 def _complete_turn_item_limit(items: list[Any], limit: int) -> list[Any]:
     if limit <= 0 or not items:
         return []
@@ -523,4 +568,5 @@ __all__ = [
     "bounded_model_input_items",
     "bounded_session_input",
     "model_input_chars",
+    "responses_working_input",
 ]

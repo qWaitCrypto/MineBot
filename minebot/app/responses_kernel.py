@@ -12,6 +12,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from minebot.app.conversation import model_input_chars, responses_working_input
+
 
 class ResponsesProtocolError(RuntimeError):
     """A concrete API/protocol failure, without silently changing kernels."""
@@ -42,6 +44,7 @@ class _HttpResponsesConnection:
         self.history: list[dict[str, Any]] = []
         self.events: asyncio.Queue[dict[str, Any] | Exception] = asyncio.Queue()
         self.request: asyncio.Task | None = None
+        self.context_usage: dict[str, int] = {}
 
     async def __aenter__(self):
         return self
@@ -63,7 +66,11 @@ class _HttpResponsesConnection:
             inputs = [{"role": "user", "content": inputs}]
         returned = {i["call_id"] for i in self.history if i.get("type") == "function_call_output"}
         inputs = [i for i in inputs if i.get("type") != "function_call_output" or i["call_id"] not in returned]
-        payload.update(input=self.history + inputs, store=False, stream=True)
+        full_input = self.history + inputs
+        working_input = responses_working_input(full_input)
+        self.context_usage = {"history_chars": model_input_chars(full_input),
+                              "input_chars": model_input_chars(working_input)}
+        payload.update(input=working_input, store=False, stream=True)
         payload["include"] = list(dict.fromkeys(payload.get("include", []) + ["reasoning.encrypted_content"]))
         self.history.extend(inputs)
         self.request = asyncio.create_task(self._stream(payload))
@@ -185,7 +192,8 @@ class ResponsesKernel:
         self._active = True
         self._active_response_id = None
         self.emit("responses_request", transport=self.transport, previous_response_id=self.previous_response_id,
-                  pending_calls=[c.call_id for c in self.pending], instruction_chars=len(instructions))
+                  pending_calls=[c.call_id for c in self.pending], instruction_chars=len(instructions),
+                  **getattr(self._connection, "context_usage", {}))
 
     async def _invoke(self, name: str, arguments: str, call_id: str) -> dict[str, Any]:
         try:

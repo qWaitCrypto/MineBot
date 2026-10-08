@@ -1386,7 +1386,7 @@ class AgentRuntime:
             definitions.append(definition)
         if self.agent_context.goal_text.strip():
             definitions.extend([
-                {"type": "function", "name": "update_plan", "description": "Keep a short current plan; change it when evidence or player requests change.",
+                {"type": "function", "name": "update_plan", "description": "Keep a short current plan, including player additions, relevant coordinates, concrete blockers and why you changed strategy. Update it when evidence or player requests change.",
                  "parameters": {"type": "object", "properties": {"summary": {"type": "string"}, "steps": {"type": "array", "items": {"type": "string"}}}, "required": ["summary", "steps"], "additionalProperties": False}, "strict": True},
                 {"type": "function", "name": "finish_task", "description": "Close this goal after checking real results, or report the concrete reason it failed. Running body actions must settle first.",
                  "parameters": {"type": "object", "properties": {"status": {"type": "string", "enum": ["complete", "blocked"]}, "summary": {"type": "string"}, "evidence": {"type": "array", "items": {"type": "string"}}}, "required": ["status", "summary", "evidence"], "additionalProperties": False}, "strict": True},
@@ -1402,7 +1402,9 @@ class AgentRuntime:
         if self.native_task_workspace is not None:
             self.native_task_workspace.sync_context(self.agent_context)
         self.weld_context.goal_text = self.agent_context.goal_text
-        preamble = self.agent_context.compile(include_session_messages=True, continuous_tools=True).text
+        # Native input already contains the conversation; do not repeat the
+        # last eight messages in every request's instructions.
+        preamble = self.agent_context.compile(include_session_messages=False, continuous_tools=True).text
         recent = json.dumps(self.last_tool_results, ensure_ascii=False)
         return "\n\n".join(filter(None, [
             self.agent_context.system_prompt, preamble, self.agent_context.skill_preamble(),
@@ -1410,6 +1412,8 @@ class AgentRuntime:
             "Tool results automatically resume the conversation when ready. Do not issue a competing body write. "
             "Finish actionable goals by executing and checking real results, not by only describing the next steps. "
             "Only report success supported by tool/state evidence; report a concrete blocker on failure.",
+            "The Body state in these instructions is freshly read for this request. Earlier tool observations describe the state when observed; do not treat old inventory or position as current. "
+            "Large old observation details may be offloaded; use their observationHandle with the observation tools when those details matter.",
             "RECENT_TOOL_RESULTS: " + recent,
             "CURRENT_PLAN: " + json.dumps(self.native_plan, ensure_ascii=False) if self.native_plan else "",
             "TASK_OUTCOME: " + json.dumps(self.native_task_outcome, ensure_ascii=False) if self.native_task_outcome else "",

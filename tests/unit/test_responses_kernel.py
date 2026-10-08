@@ -52,6 +52,56 @@ async def until(predicate):
 
 
 class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
+    def test_working_context_keeps_requirements_failures_and_native_calls(self):
+        from minebot.app.conversation import model_input_chars, responses_working_input
+
+        def result(success, handle):
+            return {"success": success, "reason": "scan_done" if success else "unreachable",
+                    "observationHandle": handle, "projection": {"queryable": True},
+                    "summary": {"blocks": "details " * 10_000}}
+        old = {"type": "function_call_output", "call_id": "old", "output": json.dumps(result(True, "scan-1"))}
+        failure = {"type": "function_call_output", "call_id": "failed", "output": json.dumps(result(False, "failure-1"))}
+        pending = call("pending")["item"]
+        items = [{"role": "user", "content": "Return to 10,70,20 after handoff"},
+                 {"type": "reasoning", "encrypted_content": "opaque"}, call("old")["item"], old,
+                 call("failed")["item"], failure, pending,
+                 {"role": "user", "content": "Do not change the destination"}]
+        working = responses_working_input(items, max_chars=100_000, keep_recent_results=0)
+        self.assertLess(model_input_chars(working), model_input_chars(items))
+        self.assertEqual([i for i in working if i.get("type") != "function_call_output"],
+                         [i for i in items if i.get("type") != "function_call_output"])
+        self.assertEqual(working[5], failure)
+        receipt = json.loads(working[3]["output"])
+        self.assertEqual((receipt["success"], receipt["reason"], receipt["observationHandle"]), (True, "scan_done", "scan-1"))
+        self.assertEqual(json.loads(old["output"])["summary"], result(True, "scan-1")["summary"])
+        self.assertEqual(responses_working_input(items, max_chars=1, keep_recent_results=2), items)
+
+    async def test_http_offloads_old_details_in_request_but_retains_original(self):
+        from minebot.app.responses_kernel import _HttpResponsesConnection
+
+        requests = []
+        class Stream:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def __aiter__(self):
+                event = terminal("r1")
+                yield SimpleNamespace(model_dump=lambda **kw: event)
+        async def create(**params):
+            requests.append(params)
+            return Stream()
+        connection = _HttpResponsesConnection(SimpleNamespace(responses=SimpleNamespace(create=create)))
+        large = json.dumps({"success": True, "reason": "scan_done", "observationHandle": "scan-1",
+                            "projection": {"queryable": True}, "summary": {"cells": "blocks " * 12_000}})
+        connection.history = [call("old")["item"], {"type": "function_call_output", "call_id": "old", "output": large}]
+        for n in range(12):
+            connection.history.extend([call(str(n))["item"], {"type": "function_call_output", "call_id": str(n), "output": '{"success":true}'}])
+        async with connection:
+            await connection.send_raw(json.dumps({"type": "response.create", "model": "test", "input": "Continue"}))
+            await connection.recv_bytes()
+        self.assertEqual(connection.history[1]["output"], large)
+        self.assertEqual(json.loads(requests[0]["input"][1]["output"])["observationHandle"], "scan-1")
+        self.assertLess(connection.context_usage["input_chars"], connection.context_usage["history_chars"])
+
     def kernel(self, wire, invoke, instructions=None):
         async def default_instructions():
             return "Current goal"
