@@ -1,11 +1,11 @@
 # Responses Agent 内核（2026-10-07）
 
-## 2026-10-08：官方 ChatGPT 登录适配，真实授权待完成
+## 2026-10-08：官方 ChatGPT 登录与原生异步实测通过
 
-现有 Python Responses HTTP 内核新增官方 ChatGPT 套餐登录方式，使用
-[官方本地开源应用 OAuth 流程](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)，
-直接请求 `https://api.openai.com/v1/responses`，不读取 Codex 登录凭证，
-不经过原第三方模型映射端点。原 API key 和显式 legacy SDK 路径保留。
+现有 Python Responses HTTP 内核已接通官方 ChatGPT 套餐接口，直接请求
+`https://api.openai.com/v1/responses`，模型为 `gpt-6.1-sol`。真实登录、
+模型发现、普通推理和现有内核的原生异步往返均已通过。
+原 API key 和显式 legacy SDK 路径保留。
 
 ```bash
 python -m pip install -e '.[test]'
@@ -18,70 +18,58 @@ unset MINEBOT_LLM_BASE_URL OPENAI_BASE_URL
 ```
 
 也可用 `python -m minebot.app.chatgpt_auth` 代替 `minebot-auth`。
-`login --no-browser --port 14650` 只打印授权链接并等待本人浏览器授权。
+`login --no-browser --port 14650` 打印授权链接并等待本人浏览器授权。
+本机外部浏览器此前持续显示 `Operation timed out`；同一机器改用 Codex
+内置浏览器后，新接口和 Codex 备选都登录成功。Windows 本机回调监听
+此前也已确认可达，因此没有证据认定是沙盒隔离。具体浏览器会话或网络
+差异尚未定位；移除 host ID 单独在外部浏览器重试仍失败。
+
+首次成功登录使用原样官方 [DevKit](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt)
+`@siwc/local`，源码固定为 `0a36fefeb913055c8c7a1a29b63d82b96b2e841a`，
+在 Windows / Node 24.19.0 运行，使用默认 `sendHostId=false` 与 DPAPI
+CurrentUser 存储。SDK 完成授权、身份验证、模型发现和普通推理后，
+凭证通过进程 stdin 转入 MineBot 私有存储，删除 SDK 对照的凭证副本；
+现由 Python 单独负责续期。Python 授权链接也与该 SDK 默认保持一致，
+保留本地安装 ID，返回登录使用已签发 client ID。
+
 默认凭证文件为 `~/.config/minebot/chatgpt.json`，可用
 `MINEBOT_CHATGPT_AUTH_FILE` 指定仓库外路径；Unix 原子写入且权限为 0600。
-保存稳定 host ID、已签发 client ID 与验证后的身份；请求前自动续期，
-跨进程串行处理 refresh token 轮换。`logout` 尝试远程撤销并清理本地凭证，
-远程失败明确报告未确认撤销。模型和工具看不到这些凭证。
+请求前自动续期，跨进程串行处理 refresh token 轮换。`logout` 尝试远程
+撤销并清理本地凭证，远程失败明确报告未确认撤销。模型和工具看不到凭证。
+续期已有行为回归，本次短实验尚未跨过真实令牌到期。
 
-适配只改变官方请求格式：工具放进 `minebot` namespace，仍使用原
-ToolRegistry/Body，保留原生 `async: true` 与原始 `call_id`。HTTP 使用
-完整 input、`store=false`、`stream=true` 和加密 reasoning；不发送套餐通道
-不支持的采样参数/输出上限，不允许向自定义地址发送 OAuth 凭证。
+生产适配继续使用原 ToolRegistry/Body：工具放进 `minebot` namespace，
+保留原生 `async: true` 和原始 `call_id`。HTTP 发送完整 input、
+`store=false`、`stream=true` 和加密 reasoning；不发送套餐通道不支持的
+采样参数/输出上限，不允许向自定义地址发送 OAuth 凭证。
 
-对持续任务有用的功能：
+真实异步实验首次失败：服务端通过 `response.output_item.done` 发出完整
+工具调用，但 `response.completed.output` 为空。内核用末尾空列表覆盖了
+已接收历史，迟到结果被拒绝为 `No tool call found for function call output`。
+修复为保留流式完成项、按 ID 合并终态版本；已有回归增加该真实事件形状。
+修复后官方 API 的完整实验约 18 秒通过：工具只启动一次、原生异步为真、
+等待时回答聊天、真实迟到 receipt 在原 `call_id` 上交付一次。相关
+17 项测试通过（15.83 秒），没有重跑全仓库。
 
-- 官方模式默认请求 64,000 token 阈值的服务端内联 compaction；通过
-  `MINEBOT_RESPONSES_COMPACT_THRESHOLD=0` 关闭或设另一阈值。旧端点默认关闭。
-  只按内联压缩规则保留最新加密 compaction 项及之后历史；未返回结果的
-  native call 保留。上一动作尚运行时不请求压缩。该阈值和已有的
-  64,000 **字符**观察详情软预算是两件事。
-- 使用官方自动 prompt caching，不增加凑缓存的提示。终态日志保留实际
-  usage（含服务端返回的 cached tokens）、响应模型与请求时间。
-- 订阅通道不支持的后台模式、托管工具和 tool_search 不加入本轮。
+复现实验：
 
-当前证据：32 项相关行为测试和 3 个 subtests 通过，覆盖本地 PKCE
-回调、真实签名 ID token 验证/nonce/audience、并发续期只轮换一次、
-namespace 异步结果以及内联压缩后的历史；没有用这些替代真实 API 验收。
-另跑旧入口测试 74 项通过、6 项失败；相同 6 项在未修改 HEAD 的独立
-副本同样失败，均为旧 doubles 缺少 `native_responses`/`parts`/`aclose`。
-它们不属于本轮登录实现，不修改生产行为去迎合旧 doubles。
+```bash
+python -m tests.probes.official_chatgpt_async --output logs/chatgpt-native-async.jsonl
+```
 
-首次人工打开授权页报告 `Operation timed out`；本地回调及官方 discovery
-可达，但尚未收到 client ID/token。因此官方原生异步、实际 compaction、
-缓存命中和建房续跑均未验收。已有第三方实验与失败不改写为官方成功。
-后续重新授权仍报告同样错误；用户确认报错地址为
-`https://auth.openai.com/choose-an-account`，之后按干净会话重试的要求再次
-报告 `Operation timed out`。未收到注册 ID 或令牌，问题发生在官方账户选择
-阶段，尚未进入本地回调。公开状态接口显示正常，不能据此排除局部故障。
-脚本无浏览器会话的 HTTP 403 带 Cloudflare challenge，不能当成浏览器
-失败的状态码。用户浏览器随后确认该页面 HTTP 200，request ID 为
-`3775ada0-a1aa-4ef0-bd16-f670e67002c3`；200 表示错误页面已返回，
-不表示 OAuth 成功。期间操作员过早关闭监听，另造成一次本地
-`ERR_CONNECTION_REFUSED`；这是独立的操作失误，不作为上游超时证据。
+本轮证据在 `logs/chatgpt-login-20261008/`：`native-async-first-failed.jsonl`
+保留首次失败，`stream-shapes.jsonl` 记录实际事件形状，
+`native-async-fixed.jsonl` 记录修复后成功；之前的授权失败另保留在
+`authorization-failure.json`。Codex OAuth 备选仅完成独立依赖实验，
+生产使用上述新官方接口。
 
-改用官方 [Sign in with ChatGPT DevKit](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt)
-做最小对照：固定源码 `0a36fefeb913055c8c7a1a29b63d82b96b2e841a`，只构建
-未修改的 `@siwc/local`；直接运行于 Windows / Node 24.19.0，同一个本地
-代理，凭证适配 Windows DPAPI CurrentUser（加解密往返已通过）。
-SDK discovery 为 200，Windows 本机 `127.0.0.1:14651` 回调监听可达；
-官方 SDK 生成链接后，用户仍报告 `Operation timed out`，尚未收到回调。
-该对照排除了必须依赖自写 OAuth 才出现错误、必须经过 WSL 回调转发才
-出现错误的说法；未定位到账号、网络或服务端中的具体根因。对照脚本与
-原样 SDK 位于仓库外 `C:/Users/qwait/AppData/Local/MineBot/siwc-control/`，
-日志为 `logs/chatgpt-login-20261008/authorization-failure.json`。
-
-用户说明 Codex 与 Pi 登录可用。源码对照发现 Pi 同时提供 Codex OAuth
-与新的 ChatGPT 套餐 OAuth：前者使用 `/oauth/authorize`、预注册客户端与
-`chatgpt.com/backend-api`；后者使用 `/api/accounts/authorize`、动态注册和
-`api.openai.com/v1`。Pi 源码固定为 `7f9e1198f2f7a8cf5ea18d5010ba081d4d60c333`。
-尚未确认用户成功的是哪一个 Pi 入口，不能将其直接当作新接口成功的证据，
-也不能据当前失败笼统判断代理不通。
-
-不再在条件未改变时反复授权或修改 Body/异步内核；官方登录、模型列表、
-真实异步调用、compaction 和建房续跑仍未验收。需先解决浏览器授权失败，
-再执行短异步往返；成功后独立重启原建房会话。
+官方模式默认请求 64,000 token 阈值的服务端内联 compaction；通过
+`MINEBOT_RESPONSES_COMPACT_THRESHOLD=0` 关闭或设另一阈值。只按内联
+压缩规则保留最新加密 compaction 项及之后历史，未返回结果的 native call
+保留，上一动作运行时不请求压缩。它与 64,000 **字符**观察详情软预算不同。
+使用官方自动 prompt caching，终态记录实际 usage、模型与请求时间。
+本次短实验未触发 compaction，cached tokens 为 0；实现和接口接通不能
+当作这两项的真实效果验证。建房状态单独记录在下一节。
 
 ## 2026-10-08：不限时双层小屋实验启动失败
 

@@ -57,12 +57,19 @@ def test_login_validates_callback_and_identity_then_serializes_rotating_refresh(
         client_id=client_id, token_endpoint_auth_method="none", transport=transport, **kw))
     callback_results = []
     callback_threads = []
+    authorization_clients = []
 
     def authorize(url, **kw):
         attempts.update(parse_qs(urlsplit(url).query))
-        assert attempts["client_id"] == ["dynamic_agent_client"]
+        authorization_clients.append(attempts["client_id"][0])
+        if len(authorization_clients) == 1:
+            assert attempts["client_id"] == ["dynamic_agent_client"]
+            assert attempts["agent_name_hint"] == ["MineBot"]
+        else:
+            assert attempts["client_id"] == ["oaiapp_test"]
+            assert "agent_name_hint" not in attempts
         assert attempts["code_challenge_method"] == ["S256"]
-        assert attempts["ext_agent_host_id"][0].startswith("urn:uuid:")
+        assert "ext_agent_host_id" not in attempts
         redirect = attempts["redirect_uri"][0]
         assert urlsplit(redirect).hostname == "127.0.0.1"
 
@@ -81,6 +88,7 @@ def test_login_validates_callback_and_identity_then_serializes_rotating_refresh(
     assert callback_results == [400, 200]
     record = auth._read()
     assert record["subject"] == "account"
+    assert record["ext_agent_host_id"].startswith("urn:uuid:")
     assert auth.path.stat().st_mode & 0o777 == 0o600
     record["session"]["expires_at"] = 0
     auth._save(record)
@@ -93,6 +101,11 @@ def test_login_validates_callback_and_identity_then_serializes_rotating_refresh(
         auth._verify_identity(record["session"]["id_token"], "oaiapp_test", metadata, "other-nonce")
     with pytest.raises(jwt.InvalidAudienceError):
         auth._verify_identity(record["session"]["id_token"], "other-client", metadata, attempts["nonce"][0])
+    attempts.clear()
+    assert auth.login(open_browser=False, announce=authorize)["connected"]
+    callback_threads[-1].join(timeout=2)
+    assert authorization_clients == ["dynamic_agent_client", "oaiapp_test"]
+    assert auth._read()["ext_agent_host_id"] == record["ext_agent_host_id"]
 
 
 def test_logout_clears_local_session_when_remote_revocation_fails(tmp_path, monkeypatch):

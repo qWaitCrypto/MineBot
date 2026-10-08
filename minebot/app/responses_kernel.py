@@ -90,7 +90,19 @@ class _HttpResponsesConnection:
                         # stream fails. Keep its original call_id for recovery.
                         self.history.append(event["item"])
                     if terminal:
-                        self.history[output_start:] = event["response"].get("output", [])
+                        # Some streams omit completed items from the terminal
+                        # response. Keep calls already dispatched on their SSE
+                        # events; merge final versions without duplicating them.
+                        output = self.history[output_start:]
+                        for item in event["response"].get("output", []):
+                            key = item.get("call_id") or item.get("id")
+                            index = next((i for i, old in enumerate(output)
+                                          if key and key == (old.get("call_id") or old.get("id"))), None)
+                            if index is not None:
+                                output[index] = item
+                            elif item not in output:
+                                output.append(item)
+                        self.history[output_start:] = output
                         if event["type"] == "response.completed":
                             self._prune_compacted_history()
                     self.events.put_nowait(event)

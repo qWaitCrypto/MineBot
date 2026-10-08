@@ -212,7 +212,8 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
                 output = []
                 if self.number == 1:
                     event = call("http-original")
-                    output = [{"type": "reasoning", "encrypted_content": "opaque"}, event["item"]]
+                    reasoning = {"type": "reasoning", "encrypted_content": "opaque"}
+                    yield SimpleNamespace(model_dump=lambda **kw: {"type": "response.output_item.done", "item": reasoning})
                     yield SimpleNamespace(model_dump=lambda **kw: event)
                     await finish_response.wait()
                 else:
@@ -251,6 +252,7 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
             last = requests[-1]
             self.assertEqual(sum(i.get("type") == "function_call_output" for i in last["input"]), 1)
             self.assertEqual(last["input"][-1]["call_id"], "http-original")
+            self.assertEqual(sum(i.get("type") == "function_call" for i in last["input"]), 1)
             self.assertTrue(any(i.get("encrypted_content") == "opaque" for i in last["input"]))
             self.assertIn("inventory=3", last["instructions"])
             self.assertNotIn("inventory=0", last["instructions"])

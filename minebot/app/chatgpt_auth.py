@@ -172,10 +172,12 @@ class ChatGPTAuth:
                 redirect = f"http://127.0.0.1:{server.server_port}/auth/callback"
                 with self._oauth(record.get("client_id", "dynamic_agent_client"), scope=SCOPES,
                                  redirect_uri=redirect, code_challenge_method="S256") as oauth:
+                    # Match the official DevKit's sendHostId=false default;
+                    # retain the installation ID locally. Name only new clients.
+                    registration = {} if record.get("client_id") else {"agent_name_hint": "MineBot"}
                     url, pending_state = oauth.create_authorization_url(
                         metadata["authorization_endpoint"], code_verifier=verifier, nonce=nonce,
-                        resource=RESOURCE, agent_name_hint="MineBot",
-                        ext_agent_host_id=record["ext_agent_host_id"])
+                        resource=RESOURCE, **registration)
                 # No id_token_hint in this printable URL. Returning registration
                 # still uses the issued client ID and persistent host identity.
                 announce(url, flush=True)

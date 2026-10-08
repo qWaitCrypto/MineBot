@@ -44,7 +44,8 @@ The current runtime uses a base-SDK Responses HTTP kernel for asynchronous
 physical work and fresh task context. An `openai_responses` provider selects it
 by default; `MINEBOT_AGENT_KERNEL=sdk` selects the legacy SDK path. Official
 ChatGPT sign-in is available through `minebot-auth login` and
-`MINEBOT_LLM_AUTH=chatgpt`; actual account access still requires authorization. See
+`MINEBOT_LLM_AUTH=chatgpt`; official login and native asynchronous tools have
+passed a live experiment with `gpt-6.1-sol`. See
 [RUNTIME.md](RUNTIME.md) for the implementation, setup, and actual experiment
 result. Success requires observed world state, not command acceptance.
 
