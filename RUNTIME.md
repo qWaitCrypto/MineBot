@@ -1,5 +1,21 @@
 # Responses Agent 内核（2026-10-07）
 
+## 2026-10-08：观察窗口固定入口
+
+Windows 固定入口为 `tools/watch-client.ps1`，窗口名 `MineBot LIVE`；抓取端
+为 `python -m minebot.camera.live_view`。此前捕获整个 1280×720 虚拟桌面，
+其中游戏仅 854×480，因而带入四周黑边。现在按 Minecraft 窗口 ID 抓取，
+等比缩放并裁齐比例差，统一输出 1280×720、15 FPS。
+按帧序号生成递增时间戳，避免 X11 停顿后重复 PTS 导致编码退出。
+
+抓取和 Windows 窗口均为单实例；播放器设读取超时并自动重连，抓取退出后
+重新发现游戏窗口。真实复验：黑边前后抓帧已核对；杀掉抓取子进程后，
+同一播放器 PID 恢复播放，随后持续输出 15 FPS；重复打开固定入口没有
+新增窗口。没有重启 Minecraft 或 Agent；客户端实际重启场景未在施工中验证。
+证据位于 `logs/house-20261008-145412/attempt-3-official/` 的
+`observer-before.png`、`observer-after.png` 和 `observer-reconnect-proof.json`。
+旧临时 TCP 推流已停止，后续均使用上述入口。
+
 ## 2026-10-08：官方 ChatGPT 登录与原生异步实测通过
 
 现有 Python Responses HTTP 内核已接通官方 ChatGPT 套餐接口，直接请求

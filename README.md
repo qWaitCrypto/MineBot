@@ -49,6 +49,20 @@ passed a live experiment with `gpt-6.1-sol`. See
 [RUNTIME.md](RUNTIME.md) for the implementation, setup, and actual experiment
 result. Success requires observed world state, not command acceptance.
 
+To watch the existing client from Windows, use the same entrypoint each time:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\watch-client.ps1
+```
+
+`MineBot LIVE` captures only the game window and fills a 1280×720 view. It reuses
+one viewer, reconnects after capture failure, and can be closed independently
+of the Agent. Defaults: WSL `Ubuntu-24.04`, repo `/home/qwait/MineBot`, display
+`:99`; override with `-Distro`, `-Repo`, `-Display`, or `-Port`. Requires Windows
+`ffplay` and WSL `ffmpeg`/`xwininfo`. Capture state and logs live under
+`~/.local/state/minebot/live-view-18990/`; Windows viewer logs are under
+`%LOCALAPPDATA%\MineBot\live-view`.
+
 ## Built To Finish
 
 **Navigate. Gather. Craft. Smelt. Equip. Fight. Recover. Continue.**
