@@ -263,6 +263,7 @@ def run_case(args, case):
         save()
         print(f"START {case} pid={process.pid} limit={limit}s report={out / 'result.json'}", flush=True)
         cursor, outcome, latest, last_sample = 0, None, [], -60
+        fatal = None
         sent_chat = sent_append = False
         while time.monotonic()-started < limit:
             elapsed = time.monotonic()-started
@@ -278,11 +279,15 @@ def run_case(args, case):
                             break
                         event = json.loads(line)
                         if event.get("event") in {"tool_invoke", "tool_result", "responses_failed", "session_step_failed"}:
-                            latest.append(event)
+                            latest.append({k: event[k] for k in (
+                                "seq", "ts", "event", "tool", "tool_call_id", "arguments_summary",
+                                "success", "reason", "error_type", "error_message", "message") if k in event})
                             latest = latest[-8:]
                         if event.get("event") == "task_outcome":
                             outcome = event
-            if outcome is not None or process.poll() is not None:
+                        if event.get("event") == "model_transport_recovery_exhausted":
+                            fatal = event
+            if outcome is not None or fatal is not None or process.poll() is not None:
                 break
             if elapsed >= 180 and not sent_chat:
                 send("现在做到哪了？简单说一下就好，继续做原来的任务。")
@@ -309,6 +314,9 @@ def run_case(args, case):
         report["success"] = bool(outcome and outcome.get("status") == "complete" and actual)
         if report["success"]:
             report["reason"] = "model completion and actual task results agree"
+        elif fatal:
+            report["failure_event"] = fatal
+            report["reason"] = f"model connection recovery exhausted: {fatal}"
         elif outcome:
             report["reason"] = f"model outcome={outcome.get('status')}: {outcome.get('summary')}; actual checks={actual}"
         elif process.poll() is not None:
@@ -363,14 +371,14 @@ def run_case(args, case):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--disposable-local-server", required=True, action="store_true")
-    parser.add_argument("--case", choices=("all", *LIMITS), default="all")
+    parser.add_argument("--case", choices=("all", *LIMITS), action="append", help="Repeat to select a sequence; default: all three")
     parser.add_argument("--env-file", type=Path, required=True)
     parser.add_argument("--model", default="gpt-6.1-sol")
     parser.add_argument("--timeout", type=float, help="Override a case time limit, for an explicitly directed replay")
     parser.add_argument("--output-dir", type=Path, default=Path("logs") / f"visible-agent-{time.time_ns()}")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt("operator stop")))
-    cases = list(LIMITS) if args.case == "all" else [args.case]
+    cases = list(LIMITS) if not args.case or "all" in args.case else args.case
     results = []
     for case in cases:
         results.append(run_case(args, case))
