@@ -87,6 +87,20 @@ MineBot 为新 SIWC Auth 的 `https://api.openai.com/v1/responses` HTTP/SSE。
 本组对照全部完成，未复现这些故障，不能称已修好，也未通过调大超时掩盖它们。
 证据：`logs/provider-latency-20261009/result.json` 及同目录逐事件时间记录。
 
+随后只读核对 Mihomo 运行时：TUN 已启用，gVisor / auto-route，规则模式；
+Windows 系统代理也启用，WSL mirrored / autoProxy，Agent 继承 HTTP/HTTPS_PROXY
+指向 `127.0.0.1:7897`。控制器实际连接采样中，api.openai.com 的 HTTPS 代理入口
+与 chatgpt.com 连接使用相同代理链；TUN 开启不能证明所有应用使用相同入口。
+
+不带凭据的 `/v1/models` 握手对照抓到新的间歇性连接故障：WSL Python 3.13.13 /
+OpenSSL 3.5.6 / httpx 0.28.1 多次 TCP 毫秒级接通后 TLS 握手达到本次 8 秒诊断上限；
+同期 Windows httpx 1.595 秒收到预期的 401，WSL curl 另一次为 1.504 秒。
+但 Windows curl 也有连接超时，后续 WSL 默认 TLS 请求自行恢复至 1.539 秒。
+仅在独立探针限制 TLS 1.2 的三次请求为 1.848 / 1.903 / 1.790 秒；单独限制
+X25519 的请求仍超时。这些样本不能证明 TLS 版本或 WSL 是根因，更不解释已收流后的故障。
+证据：`logs/provider-latency-20261009/tls-proxy-controls.json` 保存最后一组交错对照。
+没有修改代理、TLS、运行中 Agent 或执行代码；原 SSE 超时仍未精确复现或修复。
+
 ## 2026-10-08：模型选择探索目的地，Baritone 执行
 
 新增 `observe_environment`，真实客户端的 `explore_for` 改为接受模型选定的坐标、方向或区域。
