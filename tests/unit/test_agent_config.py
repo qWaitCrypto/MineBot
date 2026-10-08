@@ -89,7 +89,8 @@ class AgentConfigTests(unittest.TestCase):
         provider.resolve("primary")
         client = provider._clients[0]
         self.assertEqual(client.max_retries, 0)
-        self.assertEqual(client.timeout, 45.0)
+        self.assertEqual((client.timeout.connect, client.timeout.read,
+                          client.timeout.write, client.timeout.pool), (10.0, 45.0, 30.0, 10.0))
         asyncio.run(provider.aclose())
 
     def test_provider_rejects_invalid_request_timeout(self):

@@ -13,6 +13,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from httpx import TransportError
+
 from minebot.app.conversation import model_input_chars, responses_working_input
 
 
@@ -45,8 +47,9 @@ class ResponsesResult:
 class _HttpResponsesConnection:
     """Read native SSE events; retain full history for stateless continuation."""
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, emit: Callable[..., None] = lambda *a, **kw: None) -> None:
         self.client = client
+        self.emit = emit
         self.history: list[dict[str, Any]] = []
         self.events: asyncio.Queue[dict[str, Any] | Exception] = asyncio.Queue()
         self.request: asyncio.Task | None = None
@@ -88,17 +91,26 @@ class _HttpResponsesConnection:
 
     async def _stream(self, payload: dict[str, Any]) -> None:
         output_start = len(self.history)
+        started, last_event = time.monotonic(), "none"
+        terminal = False
         try:
-            terminal = False
             async with await self.client.responses.create(**payload) as stream:
+                response = getattr(stream, "response", None)
+                if response is not None:
+                    self.emit("responses_http_open", http_version=response.http_version,
+                              status_code=response.status_code,
+                              latency_s=round(time.monotonic() - started, 3))
                 async for item in stream:
+                    if terminal:
+                        continue
                     event = item.model_dump(mode="json", by_alias=True, exclude_none=True)
-                    terminal = event.get("type") in {"response.completed", "response.incomplete", "response.failed"}
+                    last_event = event.get("type", "unknown")
+                    is_terminal = event.get("type") in {"response.completed", "response.incomplete", "response.failed"}
                     if event.get("type") == "response.output_item.done":
                         # A complete call may already be executing when the
                         # stream fails. Keep its original call_id for recovery.
                         self.history.append(event["item"])
-                    if terminal:
+                    if is_terminal:
                         # Some streams omit completed items from the terminal
                         # response. Keep calls already dispatched on their SSE
                         # events; merge final versions without duplicating them.
@@ -115,18 +127,24 @@ class _HttpResponsesConnection:
                         if event["type"] == "response.completed":
                             self._prune_compacted_history()
                     self.events.put_nowait(event)
-                    if terminal:
-                        break
+                    terminal = is_terminal
+                    # Let the SDK consume EOF and return the connection to
+                    # HTTPX's pool. Breaking on the terminal event abandons the
+                    # body and forces another proxy/TLS handshake next time.
             if not terminal:
                 raise ResponsesTransportError("HTTP Responses stream ended without a terminal event")
         except asyncio.CancelledError:
             raise
-        except OSError as exc:
-            error = ResponsesTransportError(f"HTTP Responses stream interrupted: {exc}")
+        except (OSError, TransportError) as exc:
+            if terminal:
+                return  # A failed tail cleanup cannot revoke a received terminal.
+            error = ResponsesTransportError(
+                f"HTTP Responses stream interrupted ({type(exc).__name__}, last_event={last_event}): {exc}")
             error.__cause__ = exc
             self.events.put_nowait(error)
         except Exception as exc:
-            self.events.put_nowait(exc)
+            if not terminal:
+                self.events.put_nowait(exc)
 
     def _prune_compacted_history(self) -> None:
         # Only inline compaction output has this pruning rule. Do not apply it
@@ -210,7 +228,7 @@ class ResponsesKernel:
         if self._connection is None:
             # Reconnecting would lose accepted steering held by the server.
             if self.transport == "http":
-                self._manager = _HttpResponsesConnection(self.client)
+                self._manager = _HttpResponsesConnection(self.client, self.emit)
             else:
                 options = {"proxy": self.proxy} if self.proxy else {}
                 self._manager = self.client.responses.connect(max_retries=0, websocket_connection_options=options)
@@ -312,6 +330,7 @@ class ResponsesKernel:
         self._running = True
         reader = message = None
         final_text, response_count = "", 0
+        compactions = 0
         queued = self._queued_inputs
         if text:
             queued.append(text)
@@ -344,8 +363,12 @@ class ResponsesKernel:
                             continue
                         return ResponsesResult(final_text, self.previous_response_id)
                 futures = {reader, message, *(c.task for c in self.pending if not c.task.done())}
+                # HTTPX measures actual read inactivity, including SSE comments
+                # filtered by the SDK. An event deadline would kill a healthy
+                # stream while the server is reasoning or compacting history.
                 done, _ = await asyncio.wait(futures, return_when=asyncio.FIRST_COMPLETED,
-                                            timeout=self.request_timeout_s if self._active or self._auto_successor else None)
+                                            timeout=self.request_timeout_s if self.transport == "websocket"
+                                            and (self._active or self._auto_successor) else None)
                 if not done:
                     raise ResponsesTransportError(f"Timed out waiting for a Responses {self.transport} event")
                 if reader in done:
@@ -353,6 +376,7 @@ class ResponsesKernel:
                     reader = asyncio.create_task(self._connection.recv_bytes())
                     kind = event.get("type")
                     if kind == "response.created":
+                        compactions = 0
                         self.emit("responses_created", response_model=event["response"].get("model"),
                                   latency_s=round(time.monotonic() - self._request_started_at, 3))
                         for call_id in self._submitted_calls:
@@ -369,6 +393,7 @@ class ResponsesKernel:
                                 self._steering.append(value)
                             queued.clear()
                     elif kind == "response.output_item.done":
+                        compactions += event["item"].get("type") == "compaction"
                         final_text = self._observe_item(event["item"]) or final_text
                     elif kind == "response.steer.accepted":
                         self._auto_successor = True
@@ -394,7 +419,7 @@ class ResponsesKernel:
                         self.emit("responses_terminal", response_id=self.previous_response_id, reason=reason,
                                   status=response.get("status"), response_model=response.get("model"),
                                   usage=response.get("usage"),
-                                  compactions=sum(item.get("type") == "compaction" for item in response.get("output", [])),
+                                  compactions=max(compactions, sum(item.get("type") == "compaction" for item in response.get("output", []))),
                                   elapsed_s=round(time.monotonic() - self._request_started_at, 3))
                     elif kind == "error":
                         error = event.get("error", event)

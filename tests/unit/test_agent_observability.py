@@ -94,6 +94,10 @@ class AgentObservabilityTests(unittest.TestCase):
                 "event": "tool_result",
                 "password": "pw",
                 "metrics": [{"token": "abc", "count": 3}],
+                "usage": {"input_tokens": 72_858, "output_tokens": 38,
+                          "input_tokens_details": {"cached_tokens": 100, "access_token": "secret"},
+                          "output_tokens_details": {"reasoning_tokens": 12},
+                          "total_tokens": "credential-shaped-value"},
             }
         )
 
@@ -101,6 +105,9 @@ class AgentObservabilityTests(unittest.TestCase):
         self.assertEqual(safe["password"], "<redacted>")
         self.assertEqual(safe["metrics"][0]["token"], "<redacted>")
         self.assertEqual(safe["metrics"][0]["count"], 3)
+        self.assertEqual(safe["usage"], {"input_tokens": 72_858, "output_tokens": 38,
+                         "input_tokens_details": {"cached_tokens": 100, "access_token": "<redacted>"},
+                         "output_tokens_details": {"reasoning_tokens": 12}, "total_tokens": "<redacted>"})
 
     def test_sanitize_observation_redacts_secret_values_embedded_in_text(self):
         raw_key = "sk-exampletokenvalue1234567890"

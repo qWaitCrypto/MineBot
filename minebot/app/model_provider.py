@@ -26,7 +26,7 @@ from agents import (
     retry_policies,
     set_tracing_disabled,
 )
-from httpx import AsyncClient, TransportError
+from httpx import AsyncClient, Timeout, TransportError
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from minebot.brain.provider import ApiShape, Capabilities, ProviderConfig, ProviderKind
@@ -308,11 +308,15 @@ class ModelProviderRegistry(ModelProvider):
             credential = ChatGPTAuth(Path(path) if path else None, proxy=self.responses_proxy)
         else:
             credential = self._api_key(cfg)
+        read_timeout = _request_timeout_s(cfg)
         client = AsyncOpenAI(
             api_key=credential,
             base_url="https://api.openai.com/v1" if cfg.auth == "chatgpt" else cfg.base_url,
             max_retries=0,
-            timeout=_request_timeout_s(cfg),
+            # A stalled TLS handshake must not consume the entire SSE idle
+            # budget before the SDK can retry opening the request.
+            timeout=Timeout(read_timeout, connect=min(10.0, read_timeout),
+                            write=min(30.0, read_timeout), pool=min(10.0, read_timeout)),
             http_client=AsyncClient(proxy=self.responses_proxy) if self.responses_proxy else None,
         )
         self._clients.append(client)

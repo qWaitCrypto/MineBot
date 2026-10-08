@@ -3,6 +3,9 @@ import json
 from types import SimpleNamespace
 import unittest
 
+import httpx
+from openai import AsyncOpenAI
+
 from minebot.app.responses_kernel import ResponsesKernel, ResponsesProtocolError, ResponsesTransportError
 
 
@@ -52,6 +55,119 @@ async def until(predicate):
 
 
 class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_http_tail_failure_cannot_revoke_received_terminal(self):
+        from minebot.app.responses_kernel import _HttpResponsesConnection
+        class Stream:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def __aiter__(self):
+                for event in (created("done"), terminal("done")):
+                    yield SimpleNamespace(model_dump=lambda event=event, **kw: event)
+                raise httpx.RemoteProtocolError("peer closed the chunked tail")
+        async def create(**params): return Stream()
+        conn = _HttpResponsesConnection(SimpleNamespace(responses=SimpleNamespace(create=create)))
+        await conn._stream({})
+        self.assertEqual([conn.events.get_nowait()["type"] for _ in range(conn.events.qsize())],
+                         ["response.created", "response.completed"])
+
+    async def test_http_finished_stream_reuses_connection(self):
+        handlers = []
+        async def serve(reader, writer):
+            handlers.append(asyncio.current_task())
+            try:
+                for _ in range(2):
+                    headers = await reader.readuntil(b"\r\n\r\n")
+                    length = next(int(line.split(b":", 1)[1]) for line in headers.split(b"\r\n")
+                                  if line.lower().startswith(b"content-length:"))
+                    await reader.readexactly(length)
+                    data = b"".join(("data: " + json.dumps(event) + "\n\n").encode()
+                                    for event in (created("reuse"), terminal("reuse")))
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+                    writer.write(f"{len(data):x}\r\n".encode() + data + b"\r\n0\r\n\r\n")
+                    await writer.drain()
+            except (ConnectionError, asyncio.IncompleteReadError):
+                pass
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        client = AsyncOpenAI(api_key="local-test", base_url=f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1",
+                             max_retries=0, http_client=httpx.AsyncClient(trust_env=False))
+        async def instructions(): return "Local reuse test"
+        kernel = ResponsesKernel(client=client, model="test", tools=lambda: [], instructions=instructions,
+                                 invoke=None, emit=lambda *a, **kw: None, speak=lambda text: None, transport="http")
+        try:
+            await asyncio.wait_for(kernel.run("first"), 3)
+            await asyncio.wait_for(kernel.run("second"), 3)
+            self.assertEqual(len(handlers), 1)
+        finally:
+            await kernel.close()
+            await client.close()
+            server.close()
+            await server.wait_closed()
+            for handler in handlers:
+                handler.cancel()
+            await asyncio.gather(*handlers, return_exceptions=True)
+
+    async def test_http_keepalive_survives_event_gap_but_idle_and_eof_fail(self):
+        # Real SDK and loopback SSE: MockTransport cannot enforce socket read
+        # timeouts, and its event iterator cannot represent filtered comments.
+        for mode in ("keepalive", "silent", "eof"):
+            with self.subTest(mode=mode):
+                handlers, heartbeats = [], []
+                async def serve(reader, writer):
+                    handlers.append(asyncio.current_task())
+                    try:
+                        headers = await reader.readuntil(b"\r\n\r\n")
+                        length = next(int(line.split(b":", 1)[1]) for line in headers.split(b"\r\n")
+                                      if line.lower().startswith(b"content-length:"))
+                        await reader.readexactly(length)
+                        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                        async def send(event):
+                            writer.write(("data: " + json.dumps(event) + "\n\n").encode())
+                            await writer.drain()
+                        await send(created("loopback"))
+                        if mode == "eof":
+                            return
+                        for _ in range(10):
+                            await asyncio.sleep(0.025)
+                            if mode == "keepalive":
+                                writer.write(b": keepalive\n\n")
+                                await writer.drain()
+                                heartbeats.append(True)
+                        await send(terminal("loopback"))
+                    except ConnectionError:
+                        pass
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+                server = await asyncio.start_server(serve, "127.0.0.1", 0)
+                port = server.sockets[0].getsockname()[1]
+                client = AsyncOpenAI(api_key="local-test", base_url=f"http://127.0.0.1:{port}/v1",
+                                     max_retries=0, timeout=httpx.Timeout(0.1, connect=1),
+                                     http_client=httpx.AsyncClient(trust_env=False))
+                async def instructions(): return "Local stream test"
+                kernel = ResponsesKernel(client=client, model="test", tools=lambda: [],
+                    instructions=instructions, invoke=None, emit=lambda *a, **kw: None,
+                    speak=lambda text: None, transport="http", request_timeout_s=0.1)
+                try:
+                    if mode == "keepalive":
+                        result = await asyncio.wait_for(kernel.run("hello"), 3)
+                        self.assertEqual(result.response_id, "loopback")
+                        self.assertEqual(len(heartbeats), 10)
+                    else:
+                        with self.assertRaisesRegex(ResponsesTransportError,
+                                "ReadTimeout.*last_event=response.created" if mode == "silent" else "without a terminal"):
+                            await asyncio.wait_for(kernel.run("hello"), 3)
+                finally:
+                    await kernel.close()
+                    await client.close()
+                    server.close()
+                    await server.wait_closed()
+                    for handler in handlers:
+                        handler.cancel()
+                    await asyncio.gather(*handlers, return_exceptions=True)
+
     async def test_namespaced_async_calls_and_compaction_keep_native_results(self):
         from minebot.app.responses_kernel import _HttpResponsesConnection
 
@@ -64,15 +180,19 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(event["tools"][0]["name"], "minebot")
             if len(wire.sent) == 1:
                 item = {**call("native")["item"], "namespace": "minebot"}
-                wire.feed(created("r1"), {"type": "response.output_item.done", "item": item}, terminal("r1"))
+                wire.feed(created("r1"), {"type": "response.output_item.done", "item": item},
+                          {"type": "response.output_item.done", "item": {"type": "compaction", "encrypted_content": "opaque"}}, terminal("r1"))
             else:
                 self.assertEqual(event["input"][0]["call_id"], "native")
                 wire.feed(created("r2"), terminal("r2"))
         wire = Wire(on_send)
         kernel = self.kernel(wire, invoke)
+        observed = []
+        kernel.emit = lambda name, **kw: observed.append((name, kw))
         kernel.tool_namespace = "minebot"
         await kernel.run("work")
         self.assertEqual(invokes, [("work", "native")])
+        self.assertEqual([kw["compactions"] for name, kw in observed if name == "responses_terminal"], [1, 0])
         await kernel.close()
 
         compact = {"type": "compaction", "encrypted_content": "opaque"}
@@ -314,7 +434,7 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
                     if failure == "interrupted":
                         raise OSError("stream interrupted")
                     if failure == "timeout":
-                        await asyncio.Event().wait()
+                        raise httpx.ReadTimeout("No network bytes within the SDK read timeout")
                     if failure == "api_error":
                         yield SimpleNamespace(model_dump=lambda **kw: {"type": "error", "code": "server_error", "message": "unavailable"})
                     return

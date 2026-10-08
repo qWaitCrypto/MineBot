@@ -21,6 +21,8 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     re.IGNORECASE,
 )
 _BEARER_TOKEN_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~-]{16,}\b", re.IGNORECASE)
+_TOKEN_COUNTS = frozenset({"input_tokens", "output_tokens", "total_tokens", "cached_tokens",
+                           "cache_write_tokens", "reasoning_tokens"})
 
 
 class ObservationSink(Protocol):
@@ -51,7 +53,11 @@ def sanitize_observation(value: Any) -> Any:
         out: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key)
-            if _secret_key(key_text):
+            if key_text in _TOKEN_COUNTS and type(item) is int and item >= 0:
+                out[key_text] = item
+            elif key_text in {"input_tokens_details", "output_tokens_details"} and isinstance(item, dict):
+                out[key_text] = sanitize_observation(item)
+            elif _secret_key(key_text):
                 out[key_text] = "<redacted>"
             else:
                 out[key_text] = sanitize_observation(item)
