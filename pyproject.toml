@@ -17,6 +17,10 @@ dependencies = [
     "jsonschema>=4.23,<5",
     "nbtlib>=2.0.4,<3",
     "tiktoken>=0.12,<1",
+    # The `minebot` launcher and panel (minebot.shell, minebot.panel).
+    "textual>=8.2,<9",
+    "rich>=14,<16",
+    "httpx>=0.28,<1",
 ]
 
 [project.scripts]
@@ -37,8 +41,8 @@ test = ["pytest>=8,<10"]
 # kind="litellm" providers (Anthropic, Gemini, …) need this beta extra.
 litellm = ["openai-agents[litellm]==0.17.6"]
 camera = ["websockets==16.0"]
-# Read-only terminal panel over a session trace (minebot-panel).
-panel = ["textual>=8.2,<9"]
+# Kept so `pip install minebot[panel]` still works; the panel is now a default dependency.
+panel = []
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

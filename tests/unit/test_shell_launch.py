@@ -913,3 +913,26 @@ def test_title_row_keeps_the_world_mode_visible_at_every_width(width):
         assert label in row and "♥5" in row and "MineBotCombat" in row, row
         if width >= 200:
             assert "26.1.2" in row and "@127.0.0.1:25566" in row
+
+
+
+def test_home_is_found_from_the_environment_or_the_checkout(tmp_path):
+    from minebot.shell.launch import find_home
+
+    checkout = tmp_path / "MineBot"
+    (checkout / "tools").mkdir(parents=True)
+    (checkout / "minecraft").mkdir()
+    (checkout / "tools" / "open-client.sh").write_text("#!/bin/sh\n")
+    assert find_home({}, checkout / "logs" / "sessions") == checkout.resolve()
+    assert find_home({"MINEBOT_HOME": str(tmp_path / "elsewhere")}, checkout) == (tmp_path / "elsewhere").resolve()
+    source_tree = Path(__file__).resolve().parents[2]
+    assert find_home({}, tmp_path) == source_tree, "outside a checkout, fall back to the source tree"
+
+
+def test_missing_client_script_fails_the_environment_step_with_a_fix(tmp_path, fake_server):
+    launcher = _launcher(tmp_path, fake_server, _free_port())
+    launcher._launch_client_command = None
+    launcher.root = tmp_path / "not-a-checkout"
+    assert not launcher.run(stop=1)
+    step = launcher.steps[0]
+    assert step.status == "fail" and "open-client.sh" in step.error and "MINEBOT_HOME" in step.hint

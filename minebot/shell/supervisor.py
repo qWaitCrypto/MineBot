@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from minebot.shell.control import ControlError, ControlServer, socket_path
-from minebot.shell.launch import LaunchOptions, Launcher
+from minebot.shell.launch import HOME_VAR, ROOT, LaunchOptions, Launcher
 
 ORPHAN_S = 60.0
 LINGER_S = 3.0  # keep answering after stopping so front ends see the final messages
@@ -112,7 +112,7 @@ def spawn(options: LaunchOptions, *, client_command: list[str] | None = None,
     with open(run_dir / "launcher.log", "ab") as log:
         process = subprocess.Popen([sys.executable, "-m", "minebot.shell.supervisor", str(run_dir)],
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                   start_new_session=True, cwd=Path(__file__).resolve().parents[2])
+                                   start_new_session=True, cwd=ROOT, env={**os.environ, HOME_VAR: str(ROOT)})
     deadline = time.monotonic() + timeout_s
     while not socket_path(run_dir).exists():
         if process.poll() is not None:

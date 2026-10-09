@@ -40,7 +40,31 @@ from minebot.shell.accounts import AccountError, AccountStore
 from minebot.shell.profiles import ProfileError, ServerBook
 from minebot.shell.slp import PingError, ping, split_address
 
-ROOT = Path(__file__).resolve().parents[2]
+HOME_VAR = "MINEBOT_HOME"
+
+
+def find_home(environ: Mapping[str, str] | None = None, cwd: Path | None = None) -> Path:
+    """The MineBot checkout that holds tools/, minecraft/ and logs/.
+
+    ``MINEBOT_HOME`` wins; then the current directory or a parent that looks like a checkout;
+    then the source tree this module came from (an editable install or running from source).
+    An installed package's own directory is never used: it has no client and no logs/.
+    """
+    environment = os.environ if environ is None else environ
+    if environment.get(HOME_VAR):
+        return Path(environment[HOME_VAR]).expanduser().resolve()
+    here = (cwd or Path.cwd()).resolve()
+    for candidate in (here, *here.parents):
+        if _is_checkout(candidate):
+            return candidate
+    return Path(__file__).resolve().parents[2]
+
+
+def _is_checkout(path: Path) -> bool:
+    return (path / "tools" / "open-client.sh").is_file() and (path / "minecraft").is_dir()
+
+
+ROOT = find_home()
 STEPS = (
     ("env", "环境"),
     ("account", "账号"),
@@ -381,6 +405,9 @@ class Launcher:
         step.note("muted", f"状态库 {state_db}")
         if self.options.launch_client:
             command = self.client_command()
+            if command[:1] == ["bash"] and not Path(command[1]).is_file():
+                raise StepFailed(f"找不到客户端启动脚本 {command[1]}",
+                                 f"在 MineBot 仓库目录里运行，或设置 {HOME_VAR}=仓库路径，或用 MINEBOT_CLIENT_LAUNCH 指定")
             step.note("ok", f"客户端启动 {shlex.join(command)}")
             java = os.environ.get("JAVA_HOME") or shutil.which("java")
             if java is None and not Path("/usr/lib/jvm").is_dir():
@@ -751,4 +778,4 @@ def _signal_group(process: subprocess.Popen[bytes], signum: int) -> None:
             pass
 
 
-__all__ = ["LaunchOptions", "Launcher", "STEPS", "Step", "StepFailed", "default_run_dir", "shell_environment"]
+__all__ = ["HOME_VAR", "find_home", "LaunchOptions", "Launcher", "STEPS", "Step", "StepFailed", "default_run_dir", "shell_environment"]
