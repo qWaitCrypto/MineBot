@@ -6,8 +6,10 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+from rich.cells import cell_len
+
 from minebot.panel import theme
-from minebot.panel.canvas import Canvas, wrap
+from minebot.panel.canvas import Canvas, fit, wrap
 from minebot.panel.views import actions, baritone, body, decision, events, overview, reflex
 from minebot.panel.views.common import PAGES, Frame
 
@@ -27,7 +29,19 @@ def render(frame: Frame, width: int, height: int, detail: Any = None, detail_scr
     DRAW[PAGES[frame.page][0]](canvas, frame)
     if detail is not None:
         draw_detail(canvas, detail, detail_scroll)
+    if frame.flash is not None:
+        draw_flash(canvas, *frame.flash)
     return canvas
+
+
+def draw_flash(canvas: Canvas, tone: str, text: str) -> None:
+    """A one-line toast above the status line, right-aligned."""
+    label = fit(f" {text} ", max(10, canvas.width - 8))
+    width = cell_len(label) + 2
+    x = max(1, canvas.width - width - 2)
+    y = max(0, canvas.height - 4)
+    canvas.box(x, y, width, 3, theme.tone(tone, bold=True))
+    canvas.text(x + 1, y + 1, label, theme.tone(tone, bold=True))
 
 
 def detail_lines(detail: Any, width: int) -> list[str]:
@@ -56,4 +70,4 @@ def draw_detail(canvas: Canvas, detail: Any, scroll: int) -> None:
         canvas.text(x + width - 12, y + height - 1, f" {scroll + 1}/{len(lines)} ", theme.MUTED)
 
 
-__all__ = ["DRAW", "PAGES", "detail_lines", "render"]
+__all__ = ["DRAW", "PAGES", "detail_lines", "draw_flash", "render"]

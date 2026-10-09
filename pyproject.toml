@@ -24,6 +24,7 @@ minebot-camera = "minebot.camera.cli.main:main"
 minebot-local = "minebot.app.local_launcher:main"
 minebot-auth = "minebot.app.chatgpt_auth:main"
 minebot-panel = "minebot.panel.app:main"
+minebot = "minebot.shell.app:main"
 
 [tool.setuptools.package-data]
 "minebot.skills" = ["catalog/*/SKILL.md"]

@@ -50,6 +50,8 @@ class Frame:
     selection: dict[str, int] = field(default_factory=dict)
     raw: list[dict[str, Any]] = field(default_factory=list)
     alerts: list[Alert] = field(default_factory=list)
+    control: str | None = None  # None: read-only; otherwise the control state label
+    flash: tuple[str, str] | None = None  # (tone, text)
 
     def __post_init__(self) -> None:
         if not self.alerts:
@@ -142,6 +144,8 @@ def draw_chrome(canvas: Canvas, frame: Frame) -> tuple[int, int, int, int]:
         alert_text = "  ".join(f"▲ {alert.text}" for alert in frame.alerts)
         tone = frame.alerts[0].level
         canvas.text(x + 2, 3, fit(alert_text, max(0, width - x - 4)), theme.tone(tone, bold=True))
+    elif frame.control is not None:
+        canvas.text(x + 2, 3, ": 说话  p 暂停/继续  !! 取消动作  q 退出  ←→ 翻页  enter 展开", theme.DIM, width - x - 4)
     else:
         canvas.text(x + 2, 3, "q 退出  ←→ 翻页  ↑↓ 选择  enter 展开  space 暂停  f 跟随", theme.DIM, width - x - 4)
     _status_line(canvas, frame, height - 1)
@@ -173,8 +177,13 @@ def _status_line(canvas: Canvas, frame: Frame, y: int) -> None:
         used += canvas.text(1 + used, y, f"{position}/{total}  ", theme.MUTED)
         canvas.runs(1 + used, y, stats)
     else:
-        prompt = [("~/minebot ", theme.layer("agent")), ("$ ", theme.TEXT), ("panel ", theme.layer("operator")),
-                  ("--follow  ", theme.MUTED)]
+        if frame.control is not None:
+            prompt = [("~/minebot ", theme.layer("agent")), ("$ ", theme.TEXT), ("minebot ", theme.layer("operator")),
+                      (("❚❚ 已暂停  " if frame.control == "已暂停" else "● 可控制  "),
+                       theme.WARN if frame.control == "已暂停" else theme.OK)]
+        else:
+            prompt = [("~/minebot ", theme.layer("agent")), ("$ ", theme.TEXT), ("panel ", theme.layer("operator")),
+                      ("--follow  ", theme.MUTED)]
         used = canvas.runs(1, y, prompt)
         canvas.runs(1 + used, y, stats)
 

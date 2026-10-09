@@ -1,6 +1,8 @@
 """``minebot-panel``: the live terminal panel over a session trace.
 
-Read-only: it tails trace.jsonl and never talks to the Body, the model or IPC.
+The panel only ever reads trace.jsonl; it never talks to the Body, the model or IPC.
+When a launcher hands it a ``controller``, operator lines (messages, /pause, /cancel)
+go to the session through that controller, the same path as typing into the session.
 """
 
 from __future__ import annotations
@@ -14,14 +16,16 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widget import Widget
+from textual.widgets import Input
 
 from minebot.panel.model import PanelState, Timeline, apply
 from minebot.panel.source import TraceFollower, latest_trace, load_records, resolve_trace
+from minebot.panel import theme
 from minebot.panel.theme import BACKGROUND
 from minebot.panel.views import PAGES, render
 from minebot.panel.views import actions as actions_view
@@ -32,6 +36,12 @@ FPS = 15
 POLL_S = 0.1
 RAW_LIMIT = 20000
 SPEEDS = (1, 4, 16, 64)
+FLASH_S = 4.0
+CANCEL_ARM_S = 1.5
+
+
+class Controller(Protocol):
+    def send(self, line: str) -> bool: ...
 
 
 class PanelView(Widget):
@@ -47,9 +57,13 @@ class PanelView(Widget):
 
 
 class PanelApp(App):
+    AUTO_FOCUS = None  # the hidden command bar must not swallow panel keys
     CSS = f"""
     Screen {{ background: {BACKGROUND}; }}
-    PanelView {{ width: 100%; height: 100%; background: {BACKGROUND}; }}
+    PanelView {{ width: 100%; height: 1fr; background: {BACKGROUND}; }}
+    #command {{ dock: bottom; height: 3; display: none; background: {BACKGROUND};
+               border: round {theme.LAYER["operator"]}; color: {theme.TONE["bright"]}; }}
+    #command:focus {{ border: round {theme.LAYER["operator"]}; }}
     """
     BINDINGS = [
         Binding("q", "quit", "退出"),
@@ -74,10 +88,14 @@ class PanelApp(App):
         Binding("full_stop", "step(50)", show=False),
         Binding("slash", "filter", show=False),
         Binding("n", "newest", show=False),
+        Binding("colon,t", "command", show=False),
+        Binding("p", "toggle_pause", show=False),
+        Binding("exclamation_mark", "cancel_action", show=False),
         *[Binding(str(index + 1), f"goto({index})", show=False) for index in range(len(PAGES))],
     ]
 
-    def __init__(self, trace: Path, *, replay: bool, root: Path | None) -> None:
+    def __init__(self, trace: Path | None, *, replay: bool, root: Path | None,
+                 controller: Controller | None = None) -> None:
         super().__init__()
         self.trace = trace
         self.root = root
@@ -86,7 +104,22 @@ class PanelApp(App):
         self.detail: Any = None
         self.detail_scroll = 0
         self.newer: Path | None = None
-        self._load(trace, replay=replay)
+        self.controller = controller
+        self.flash: tuple[str, str, float] | None = None  # (tone, text, until)
+        self.history: list[str] = []
+        self.history_index = 0
+        self.agent_paused = False
+        self._cancel_armed = 0.0
+        self.replay = replay
+        self.follower = None
+        self.timeline = None
+        self.state = PanelState()
+        self.raw: deque[dict[str, Any]] | list[dict[str, Any]] = deque(maxlen=RAW_LIMIT)
+        self.title_text = ""
+        self.playing = False
+        self.speed = 1
+        if trace is not None:
+            self._load(trace, replay=replay)
 
     # ------------------------------------------------------------ sources
     def _load(self, trace: Path, *, replay: bool) -> None:
@@ -128,6 +161,9 @@ class PanelApp(App):
     def compose(self) -> ComposeResult:
         self.view = PanelView(self)
         yield self.view
+        self.command = Input(placeholder="对机器人说话 · /goal 新目标 · /pause · /continue · /cancel   (enter 发送  esc 取消)",
+                             id="command")
+        yield self.command
 
     def on_mount(self) -> None:
         self.set_interval(1 / FPS, self._tick)
@@ -194,8 +230,13 @@ class PanelApp(App):
         title = self.title_text
         if self.newer is not None:
             title = f"新实验 {self.newer.parent.name} · n 切换  |  {title}"
+        flash = self.flash if self.flash is not None and self.flash[2] > time.monotonic() else None
+        control = None
+        if self.controller is not None and not self.replay:
+            control = "已暂停" if self.agent_paused else "可控制"
         return Frame(state=self.state, now=now, anim=time.monotonic(), live=live, title=title, mode=mode,
-                     page=self.page, replay=replay, selection=dict(self.selection), raw=raw)
+                     page=self.page, replay=replay, selection=dict(self.selection), raw=raw,
+                     control=control, flash=flash[:2] if flash else None)
 
     def draw(self, width: int, height: int) -> Any:
         frame = self.frame()
@@ -223,6 +264,9 @@ class PanelApp(App):
         return 0
 
     def action_move(self, step: int) -> None:
+        if self.command_open:
+            self._history(step)
+            return
         if self.detail is not None:
             self.detail_scroll = max(0, self.detail_scroll + step)
             return
@@ -251,6 +295,9 @@ class PanelApp(App):
         self.detail_scroll = 0
 
     def action_close(self) -> None:
+        if self.command_open:
+            self._close_command()
+            return
         if self.detail is not None:
             self.detail = None
         else:
@@ -315,6 +362,87 @@ class PanelApp(App):
             self._load(self.newer, replay=False)
             self.newer = None
 
+    # ------------------------------------------------------------ control
+    @property
+    def command_open(self) -> bool:
+        command = getattr(self, "command", None)
+        return command is not None and bool(command.display)
+
+    def notify_flash(self, text: str, tone: str = "ok", duration: float = FLASH_S) -> None:
+        self.flash = (tone, text, time.monotonic() + duration)
+
+    def _can_control(self) -> bool:
+        if self.controller is None:
+            self.notify_flash("只读面板：用 minebot 启动的会话才能在这里控制", "warn")
+            return False
+        if self.replay:
+            self.notify_flash("回放中，不能控制", "warn")
+            return False
+        return True
+
+    def send_line(self, line: str) -> bool:
+        if not self._can_control():
+            return False
+        ok = self.controller.send(line)
+        if not ok:
+            self.notify_flash("发送失败：Agent 会话已退出", "fail")
+        return ok
+
+    def action_command(self) -> None:
+        if not self._can_control():
+            return
+        self.history_index = len(self.history)
+        self.command.value = ""
+        self.command.display = True
+        self.command.focus()
+
+    def _close_command(self) -> None:
+        self.command.display = False
+        self.command.value = ""
+        self.set_focus(None)
+
+    def _history(self, step: int) -> None:
+        if not self.history:
+            return
+        self.history_index = max(0, min(len(self.history), self.history_index + step))
+        self.command.value = self.history[self.history_index] if self.history_index < len(self.history) else ""
+        self.command.cursor_position = len(self.command.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        line = event.value.strip()
+        self._close_command()
+        if not line:
+            return
+        if not self.history or self.history[-1] != line:
+            self.history.append(line)
+        if self.send_line(line):
+            lowered = line.lower()
+            if lowered.startswith("/pause"):
+                self.agent_paused = True
+            elif lowered.startswith("/continue"):
+                self.agent_paused = False
+            self.notify_flash(f"已发送 {line[:60]}", "ok")
+
+    def action_toggle_pause(self) -> None:
+        if self.command_open:
+            return
+        command = "/continue" if self.agent_paused else "/pause"
+        if self.send_line(command):
+            self.agent_paused = not self.agent_paused
+            self.notify_flash("已暂停 Agent：不再发起新的请求和动作 · p 继续" if self.agent_paused else "已继续", "warn" if self.agent_paused else "ok")
+
+    def action_cancel_action(self) -> None:
+        if self.command_open or not self._can_control():
+            return
+        now = time.monotonic()
+        if now - self._cancel_armed > CANCEL_ARM_S:
+            self._cancel_armed = now
+            self.notify_flash("再按一次 ! 取消当前动作", "warn", CANCEL_ARM_S)
+            return
+        self._cancel_armed = 0.0
+        if self.send_line("/cancel panel_cancel"):
+            self.notify_flash("已取消当前动作", "fail")
+
 
 # ------------------------------------------------------------------ CLI
 
@@ -377,4 +505,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["PanelApp", "main"]
+__all__ = ["Controller", "PanelApp", "main"]
