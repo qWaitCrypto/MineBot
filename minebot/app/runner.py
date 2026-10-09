@@ -1344,6 +1344,8 @@ class AgentRuntime:
         self.direct_call_handoffs = {}
         self._body_control_unknown = False
         from minebot.app.direct_call_supervision import DirectBuildSupervisor
+        from minebot.app.panel_telemetry import PanelTelemetry
+        self.panel_telemetry = PanelTelemetry(self.trace)
         self.direct_build_supervisor = DirectBuildSupervisor(self)
         self._body_event_trace_lock = threading.Lock()
         self.consecutive_transport_errors = 0
@@ -1550,6 +1552,9 @@ class AgentRuntime:
             return await self.direct_build_supervisor.run(tool, callback, args,
                 call_id=tool_call_id or str(uuid4()), timeout_s=timeout_s)
         lane = self._read_lane if self.native_responses and not tool.sidecar.can_mutate_body else self.execution_lane
+        telemetry = getattr(self, "panel_telemetry", None)
+        if telemetry is not None and tool.sidecar.can_mutate_body:
+            callback = telemetry.scoped(callback, tool_call_id)
         return await lane.run(callback, *args, timeout_s=timeout_s)
 
     async def _drain_responses_calls(self, reason: str) -> None:

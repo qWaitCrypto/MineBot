@@ -9,7 +9,8 @@
     "MenuSyncMixin",
     "AttentionMixin",
     "ObserverMouseMixin",
-    "MiningProgressAccessor"
+    "MiningProgressAccessor",
+    "WorldEditMixin"
   ],
   "injectors": {
     "defaultRequire": 1
