@@ -1,5 +1,32 @@
 # Responses Agent 内核（2026-10-07）
 
+## 2026-10-09：用户授权第三方 API 恢复同一建房实验
+
+用户明确先不处理官方套餐，应用 610c14b 后使用第三方 API 继续原任务。
+当前 attempt-4-api-context，gpt-6.1-sol / medium / Responses HTTP，summary
+预算 128000 tokens，稳定 prompt_cache_key。只启动 Agent，客户端和服务器
+没有重启，世界、背包、原建筑保留；原 SQLite 任务、短计划和完整观测归档
+一致备份，发送一次用户授权的 /continue。HTTP wire 历史本来不持久化，
+此次没有跨 provider 移植加密 reasoning；启动后从原目标/计划和新读取的
+身体状态继续，不能将这种续跑称为新世界空库存单次成功。
+
+启动观察的前 17 次真实 Agent 完成请求平均 4.032 秒，HTTP 头等待
+2.358–4.436 秒。第 7–9 次缓存读比例 90.22%、91.40%、91.17%，没有压缩；
+这与推理回放分开记录。Agent 实际回到房屋附近，首次剪羊目标未找到后
+自行重选、成功剪毛并拾取；新的真实身体状态已含 4 white_wool。尝试
+合成床返回 crafting_table_select_failed:not_in_inventory，随后模型自行
+调用 get_to_block 寻找现有工作台，没有开发者代处理游戏动作。
+
+启动时修正了私有 API 配置中重复的 override 行，发生在任何 Agent 请求
+之前；不打印配置值或密钥。开发者只读新 IPC state 连接曾 10 秒超时，
+同期 Agent 调用继续成功；记录为观察连接失败，未据此重启或改 Body。
+监控重新 ACTIVE，启动后只读观察，关注实际延迟、缓存、压缩和游戏进展。
+实验仍在运行，房屋尚未完成验收。
+
+启动、用户授权、状态备份和各次介入见 run.json / restart.json；
+早期请求与状态见 attempt-4-api-context/startup-real-request-observation.json，
+随后以同目录 trace.jsonl 的实际时间线为准。没有新补给、代建或传送。
+
 ## 2026-10-09：Auth/API 的 128k 上下文与请求可观测性
 
 本轮修正长历史在每次请求中重复压缩、动态 instructions 破坏缓存前缀，
