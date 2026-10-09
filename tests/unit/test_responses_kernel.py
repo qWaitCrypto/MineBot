@@ -619,6 +619,44 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum("weather" in json.dumps(e) for e in wire.sent), 1)
         await kernel.close()
 
+    async def test_execution_fact_respects_actual_async_and_does_not_duplicate_output(self):
+        for asynchronous in (False, True):
+            with self.subTest(asynchronous=asynchronous):
+                release, started = asyncio.Event(), asyncio.Event()
+                async def invoke(*args):
+                    started.set()
+                    await release.wait()
+                    return {"success": False, "reason": "cancel_requested", "metrics": {"matched_cells": 8}}
+                async def on_send(event, wire):
+                    rid = "r" + str(len(wire.sent))
+                    if not event.get("previous_response_id"):
+                        item = call("original")
+                        item["item"]["async"] = asynchronous
+                        wire.feed(created(rid), item, terminal(rid))
+                    else:
+                        wire.feed(created(rid), terminal(rid))
+                wire = Wire(on_send)
+                kernel = self.kernel(wire, invoke)
+                run = asyncio.create_task(kernel.run("Build"))
+                await started.wait()
+                await until(lambda: not kernel._active)
+                kernel.notify_fact({"call_id": "original", "status": "handoff_requested"})
+                if asynchronous:
+                    await until(lambda: len(wire.sent) == 2)
+                    self.assertEqual(wire.sent[1]["input"][0]["role"], "developer")
+                    self.assertNotIn("function_call_output", json.dumps(wire.sent[1]["input"]))
+                else:
+                    await asyncio.sleep(.02)
+                    self.assertEqual(len(wire.sent), 1)
+                release.set()
+                await asyncio.wait_for(run, 2)
+                outputs = [i for event in wire.sent for i in event.get("input", [])
+                           if i.get("type") == "function_call_output"]
+                self.assertEqual(len(outputs), 1)
+                self.assertEqual(outputs[0]["call_id"], "original")
+                self.assertEqual(sum("EXECUTION_FACT" in json.dumps(event) for event in wire.sent), 1)
+                await kernel.close()
+
     async def test_production_session_steers_chat_and_cancel_stops_execution_worker(self):
         import threading
         import time

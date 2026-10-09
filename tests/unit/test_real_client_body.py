@@ -76,7 +76,7 @@ class FakeClientIpc:
             if scope == "blockAt" else {"cells": []},
         }
 
-    def command(self, objective: str, *, action_id: str, timeout_ms: int, cancel_after_s=None) -> RealClientTerminal:
+    def command(self, objective: str, *, action_id: str, timeout_ms: int, cancel_after_s=None, on_progress=None) -> RealClientTerminal:
         del cancel_after_s
         self.commands.append((objective, action_id, timeout_ms))
         if self._cancel.wait(0.02):
@@ -358,7 +358,7 @@ def test_real_client_body_maps_extended_baritone_controls(
 @pytest.mark.parametrize("action_name", ("builderBuildFile", "baritoneBuilderBuildFile"))
 def test_schematic_build_owns_body_until_native_terminal_and_can_be_canceled(action_name) -> None:
     class BuildingIpc(FakeClientIpc):
-        def action(self, name, params, *, action_id, timeout_ms):
+        def action(self, name, params, *, action_id, timeout_ms, on_progress=None):
             self.actions.append((name, params, action_id, timeout_ms))
             assert self._cancel.wait(2)
             return RealClientTerminal(action_id, "canceled", "cancel_requested", self.state())

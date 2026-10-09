@@ -220,6 +220,7 @@ class WeldContext:
     goal_text: str
     writer: SingleWriterGuard = field(default_factory=SingleWriterGuard)
     body_state_observer: Callable[[BodyState, str], None] | None = None
+    raw_result_observer: Callable[[str, JsonObject, ToolResult], None] | None = None
 
 
 def _action_key(progress_key: str, tool_input: JsonObject) -> tuple[Any, ...]:
@@ -253,18 +254,35 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
         ctx.authority.fingerprint(ctx.body.get_state())   # step 1: pre fingerprint (validated)
         result = tool.callable(tool_input)                # steps 3-4: execute + await terminal
 
+        if ctx.raw_result_observer is not None:
+            try:
+                ctx.raw_result_observer(tool.name, tool_input, result)
+            except Exception:
+                # Telemetry failure cannot erase the received physical result.
+                pass
+
         # Record current server truth immediately after every physical leaf.
         # Composition tools call this same weld, so inventory/world progress is
         # visible at the moment it happens instead of at a later model turn.
-        post_state = ctx.body.get_state()
-        if ctx.body_state_observer is not None:
-            ctx.body_state_observer(post_state, f"mutation:{tool.name}")
+        post_state_error = None
+        try:
+            post_state = ctx.body.get_state()
+            if ctx.body_state_observer is not None:
+                ctx.body_state_observer(post_state, f"mutation:{tool.name}")
+        except Exception as exc:
+            post_state = None
+            post_state_error = type(exc).__name__
 
         # step 5 (stale-generation): a higher-priority owner superseded us mid
         # call. Neutral preempted — not noted as fresh world truth (schema §8).
         if not ctx.authority.generation_current(generation):
-            return PREEMPTED_PAYLOAD
+            return {**PREEMPTED_PAYLOAD, "metrics": {
+                "original_result": result.to_payload(), "preempted": True,
+                "post_state_unknown": post_state_error,
+            }}
 
+        if post_state is None:
+            return {**result.to_payload(), "post_state_unknown": post_state_error}
         post_fingerprint = ctx.authority.fingerprint(post_state)  # step 5: post fp
         action_key = _action_key(sidecar.progress_key, tool_input)
         # A candidate-skip ("this target is unsuitable, pick another") is neutral:

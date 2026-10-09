@@ -6,6 +6,7 @@ import time
 import nbtlib
 from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.app.projection import bounded_summary_value
+from minebot.app.construction_facts import read_construction, construction_delta
 
 from minebot.brain.registry import RegisteredTool, ToolSidecar
 from minebot.contract import Action, Body, ToolResult, execution_checkpoint, terminal_event_to_tool_result
@@ -15,6 +16,31 @@ _POS = {"type": "array", "items": {"type": "integer"}, "minItems": 3, "maxItems"
 _TIMEOUT = {"type": "number", "exclusiveMinimum": 0, "maximum": 300, "default": 120}
 
 
+def _build_observation(reason, metrics):
+    original = metrics.get("original_result", {})
+    native = original.get("metrics", metrics)
+    construction = native.get("construction", {})
+    handoff = metrics.get("direct_call_handoff", {})
+    facts = handoff.get("facts", {})
+    summary = {
+        "action_id": native.get("action_id"),
+        "native_reason": original.get("reason", reason),
+        "terminal_source": native.get("terminal_source"),
+        "native_stopped": native.get("native_stopped"),
+        "construction": {
+            key: value for key, value in construction.items()
+            if key not in {"matched_positions", "remaining_cells", "unknown_cells"}
+        },
+        "remaining_cell_count": len(construction.get("remaining_cells", [])),
+        "remaining_sample": construction.get("remaining_cells", [])[:8],
+        "unknown_cell_count": len(construction.get("unknown_cells", [])),
+        "blocker": {key: value for key, value in facts.items() if key != "construction"},
+        "settlement": handoff.get("settlement"),
+    }
+    summary["omitted_remaining_cell_count"] = max(0, summary["remaining_cell_count"] - 8)
+    return summary
+
+
 def _execute(body: Body, name: str, params: dict) -> ToolResult:
     if name in {"mineResource", "buildStructure", "clearArea", "farmArea", "builderBuildFile"}:
         state = body.perceive("baritoneState", {})
@@ -22,6 +48,7 @@ def _execute(body: Body, name: str, params: dict) -> ToolResult:
             return ToolResult(False, state.error or "state_read_failed", can_retry=True)
         if state.data.get("disposable_world") is not True:
             return ToolResult(False, "native_mutation_requires_disposable_world", can_retry=False)
+    before = read_construction(body, params) if name == "buildStructure" else None
     action = Action.create(name, params)
     action = action_with_timeout(action, float(params.get("timeout_s", 120)))
     result = body.execute(action)
@@ -29,6 +56,17 @@ def _execute(body: Body, name: str, params: dict) -> ToolResult:
         return ToolResult(False, result.error or "body_rejected", can_retry=True, metrics=dict(result.data or {}))
     terminal = terminal_event_to_tool_result(body.await_action_terminal(
         action.id, timeout_s=action_wait_timeout_s(action)))
+    if name == "buildStructure" and terminal.metrics.get("terminal_source") == "native":
+        after = read_construction(body, params)
+        partial = construction_delta(before or {}, after)
+        verified = terminal.success and after["complete"] and after["matched_cells"] == after["expected_cells"]
+        return ToolResult(
+            verified,
+            "structure_verified" if verified else terminal.reason if not terminal.success
+            else "world_verification_unavailable" if not after["complete"] else "world_mismatch",
+            can_retry=not verified,
+            metrics={**terminal.metrics, "construction": partial},
+        )
     if terminal.success and name in {"buildStructure", "clearArea"}:
         if name == "buildStructure":
             low = params["anchor"]
@@ -71,7 +109,8 @@ def client_body_tools(body: Body) -> tuple[RegisteredTool, ...]:
             {"type": "object", "properties": {**fields, "timeout_s": _TIMEOUT}, "required": required, "additionalProperties": False},
             lambda params, action=action: _execute(body, action, {"timeout_s": 120, **params}),
             ToolSidecar(name, True, source="body.client", body_scope=(action,), timeout_s=310),
-            projector=lambda reason, metrics: {key: bounded_summary_value(value) for key, value in metrics.items()},
+            projector=_build_observation if name == "build_structure" else
+                lambda reason, metrics: {key: bounded_summary_value(value) for key, value in metrics.items()},
         ))
     tools.extend((
         RegisteredTool("read_body_processes", "Read native running processes, paused builder, and current path state.",

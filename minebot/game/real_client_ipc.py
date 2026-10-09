@@ -245,12 +245,25 @@ class RealClientIpc:
                     payload=payload,
                 )
             if message.get("type") == "progress" and on_progress is not None:
-                on_progress(message)
+                try:
+                    on_progress(message)
+                except Exception:
+                    # Progress observers never own action settlement.
+                    pass
             if time.monotonic() >= deadline:
                 raise RealClientIpcError(f"action timed out: {action_id}")
 
     def cancel(self, action_id: str) -> None:
         self.send({"type": "cancel", "action_id": action_id})
+
+    def take_late_terminal(self, action_id: str) -> dict[str, Any] | None:
+        """Nonblocking archive pickup, only after the original waiter has ended."""
+        with self._incoming:
+            for index, message in enumerate(self._messages):
+                if message.get("type") == "terminal" and message.get("action_id") == action_id:
+                    del self._messages[index]
+                    return dict(message)
+        return None
 
     def send(self, message: Mapping[str, object]) -> None:
         raw = json.dumps(dict(message), ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")

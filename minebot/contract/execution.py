@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-from .messages import Action
+from .messages import Action, JsonObject
 
 
 class ExecutionCancelled(BaseException):
@@ -116,3 +116,23 @@ __all__ = [
     "action_with_timeout",
     "action_wait_timeout_s",
 ]
+
+
+# Captured when a Body action is admitted, before its IPC worker starts.
+# This scope labels observations; it does not own or consume terminals.
+_TOOL_OBSERVATION: ContextVar[tuple[str, Callable[[JsonObject], None]] | None] = ContextVar(
+    "minebot_tool_observation", default=None,
+)
+
+
+@contextmanager
+def tool_observation_scope(call_id: str, notify: Callable[[JsonObject], None]) -> Iterator[None]:
+    token = _TOOL_OBSERVATION.set((call_id, notify))
+    try:
+        yield
+    finally:
+        _TOOL_OBSERVATION.reset(token)
+
+
+def current_tool_observation() -> tuple[str, Callable[[JsonObject], None]] | None:
+    return _TOOL_OBSERVATION.get()

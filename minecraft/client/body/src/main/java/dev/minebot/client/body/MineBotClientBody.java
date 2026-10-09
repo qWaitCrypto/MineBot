@@ -671,14 +671,28 @@ public final class MineBotClientBody implements ClientModInitializer {
             data.addProperty("interaction_ready", RotationUtils.reachable(baritone.getPlayerContext(), pos, Math.min(reach, 4.5)).isPresent());
         } else if (scope.equals("blockCells")) {
             JsonArray cells = new JsonArray();
+            boolean loaded = true;
             JsonArray raw = params.has("cells") && params.get("cells").isJsonArray() ? params.getAsJsonArray("cells") : new JsonArray();
             for (var item : raw) {
                 JsonArray xyz = item.getAsJsonArray();
                 BlockPos pos = new BlockPos(xyz.get(0).getAsInt(), xyz.get(1).getAsInt(), xyz.get(2).getAsInt());
-                cells.add(blockFact(client.level.getBlockState(pos), pos));
+                if (clientChunkLoaded(client, pos)) {
+                    cells.add(blockFact(client.level.getBlockState(pos), pos));
+                } else {
+                    loaded = false;
+                    JsonObject unknown = new JsonObject();
+                    unknown.addProperty("x", pos.getX());
+                    unknown.addProperty("y", pos.getY());
+                    unknown.addProperty("z", pos.getZ());
+                    unknown.addProperty("state", "UNKNOWN");
+                    unknown.addProperty("observed", false);
+                    unknown.addProperty("reason", "chunk_not_loaded");
+                    cells.add(unknown);
+                }
             }
             data.add("cells", cells);
             data.addProperty("count", cells.size());
+            response.addProperty("complete", loaded);
         } else if (scope.equals("nearbyBlocks") || scope.equals("findBlocks")) {
             java.util.Set<String> targets = new java.util.HashSet<>();
             if (params.has("block_types")) for (var target : params.getAsJsonArray("block_types")) {
@@ -1086,6 +1100,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
         if (current.ticks % 20 == 0) {
             JsonObject response = state(client);
+            if (current.kind.equals("build")) response.add("construction_progress", cuboidProgress(client, current));
             response.addProperty("type", "progress");
             response.addProperty("action_id", current.id);
             emit(current, response);
@@ -1224,9 +1239,37 @@ public final class MineBotClientBody implements ClientModInitializer {
             ? current.anchor.offset(current.sx - 1, current.sy - 1, current.sz - 1) : current.end;
         var wanted = new BlockOptionalMeta(current.kind.equals("clear") ? "air" : current.target);
         for (BlockPos pos : BlockPos.betweenClosed(current.anchor, end)) {
-            if (!client.level.hasChunkAt(pos) || !wanted.matches(client.level.getBlockState(pos))) return false;
+            if (!clientChunkLoaded(client, pos) || !wanted.matches(client.level.getBlockState(pos))) return false;
         }
         return true;
+    }
+
+    private JsonObject cuboidProgress(Minecraft client, Run current) {
+        long expected = (long) current.sx * current.sy * current.sz;
+        int sampled = 0, observed = 0, matched = 0;
+        var wanted = new BlockOptionalMeta(current.target);
+        BlockPos end = current.anchor.offset(current.sx - 1, current.sy - 1, current.sz - 1);
+        for (BlockPos pos : BlockPos.betweenClosed(current.anchor, end)) {
+            if (sampled++ >= 4096) break;
+            if (clientChunkLoaded(client, pos)) {
+                observed++;
+                if (wanted.matches(client.level.getBlockState(pos))) matched++;
+            }
+        }
+        JsonObject facts = new JsonObject();
+        facts.addProperty("expected_cells", expected);
+        facts.addProperty("observed_cells", observed);
+        facts.addProperty("matching_cells", matched);
+        facts.addProperty("complete", observed == expected);
+        var material = wanted.getBlock().asItem();
+        facts.addProperty("material_item", material == net.minecraft.world.item.Items.AIR
+            ? (String) null : BuiltInRegistries.ITEM.getKey(material).getPath());
+        return facts;
+    }
+
+    private static boolean clientChunkLoaded(Minecraft client, BlockPos pos) {
+        return client.level.getChunkSource().getChunk(pos.getX() >> 4, pos.getZ() >> 4,
+            net.minecraft.world.level.chunk.status.ChunkStatus.FULL, false) != null;
     }
 
     private void tickFollow(Minecraft client, Run current) {
@@ -2628,6 +2671,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         response.addProperty("type", "terminal");
         response.addProperty("action_id", current.id);
         response.addProperty("status", status);
+        response.addProperty("native_stopped", !processActive() && !baritone.getPathingBehavior().isPathing());
         response.addProperty("reason", reason);
         response.addProperty("objective", current.objective);
         response.addProperty("elapsed_ms", current.elapsed());
@@ -2708,6 +2752,9 @@ public final class MineBotClientBody implements ClientModInitializer {
         state.addProperty("disposable_world", Boolean.getBoolean("minebot.client.disposable_world"));
         state.addProperty("protocol", "minebot-client-spike/1");
         state.addProperty("ready", ready);
+        state.addProperty("active_action_known", true);
+        state.addProperty("active_action_id", run == null ? null : run.id);
+        state.addProperty("sampled_at_ms", System.currentTimeMillis());
         state.addProperty("disposable_world", Boolean.getBoolean("minebot.client.disposable_world"));
         state.addProperty("pid", ProcessHandle.current().pid());
         state.addProperty("heap_used_bytes", Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory());
@@ -2744,6 +2791,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             state.addProperty("pitch", client.player.getXRot());
             state.addProperty("selected_slot", client.player.getInventory().getSelectedSlot());
             state.addProperty("selected_item", itemPath(client.player.getMainHandItem()));
+            state.addProperty("selected_item_known", true);
             state.addProperty("offhand_item", itemPath(client.player.getOffhandItem()));
             state.addProperty("fall_flying", client.player.isFallFlying());
             state.addProperty("menu", client.player.containerMenu.getClass().getSimpleName());
@@ -2758,6 +2806,9 @@ public final class MineBotClientBody implements ClientModInitializer {
                 }
             }
             state.add("inventory", inventory);
+            state.addProperty("inventory_complete", true);
+            state.addProperty("inventory_includes_selected", true);
+            state.addProperty("inventory_count_scope", "all_player_inventory_slots_including_selected_hotbar");
             state.add("inventory_slots", inventorySlots(client));
             JsonArray entities = new JsonArray();
             var nearby = client.level.getEntities(

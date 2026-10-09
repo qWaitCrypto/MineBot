@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 from minebot.contract import BodyState, Event, PerceptionResult, Result
 from minebot.contract import Action
+from minebot.contract.execution import current_tool_observation
 from minebot.game.errors import BodyActionTimeoutError
 from minebot.game.real_client_ipc import RealClientIpc, RealClientIpcError, RealClientRejected, RealClientTerminal
 
@@ -79,6 +80,9 @@ class _PendingAction:
     action: Action
     done: threading.Event
     terminal: Event | None = None
+    observation: Any = None
+    observer_errors: int = 0
+    late_terminal: Event | None = None
 
 
 class RealClientBody:
@@ -97,6 +101,7 @@ class RealClientBody:
         self.event_log: list[Event] = []
         self._lock = threading.RLock()
         self._active: _PendingAction | None = None
+        self._control_unknown = False
         self._pending: dict[str, _PendingAction] = {}
         self._event_queue: list[Event] = []
         self._last_state_payload: dict[str, Any] | None = None
@@ -181,7 +186,10 @@ class RealClientBody:
                 data={
                     key: state[key]
                     for key in (
-                        "pathing", "any_process_active", "disposable_world", "mine_active", "goal_active",
+                        "position", "creative", "inventory", "inventory_slots", "inventory_complete",
+                        "inventory_includes_selected", "inventory_count_scope", "selected_slot",
+                        "selected_item", "selected_item_known", "sampled_at_ms", "active_action_id",
+                        "active_action_known", "pathing", "any_process_active", "disposable_world", "mine_active", "goal_active",
                         "get_active", "explore_active", "follow_active", "farm_active",
                         "builder_active", "builder_paused", "elytra_active", "elytra_loaded",
                         "elytra_safe_to_cancel", "elytra_destination", "elytra_path_size",
@@ -275,7 +283,9 @@ class RealClientBody:
                 allowed_controls.add("get_to_block_blacklist")
             if self._active is not None and (control is None or control[0] not in allowed_controls):
                 return _gap_result(action, self.bot_name, "body_busy")
-            pending = _PendingAction(action=action, done=threading.Event())
+            if control is None and self._control_unknown:
+                return _gap_result(action, self.bot_name, "control_unknown")
+            pending = _PendingAction(action=action, done=threading.Event(), observation=current_tool_observation())
             if control is None:
                 self._active = pending
             self._pending[action.id] = pending
@@ -331,12 +341,14 @@ class RealClientBody:
                     dict(wire_action.get("params") or {}),
                     action_id=pending.action.id,
                     timeout_ms=timeout_ms,
+                    on_progress=lambda payload: self._on_progress(pending, payload),
                 )
                 event = _terminal_event(self.bot_name, pending.action, terminal)
                 self._merge_state_payload(terminal.payload)
             else:
                 assert objective is not None
-                terminal = self.ipc.command(objective, action_id=pending.action.id, timeout_ms=timeout_ms)
+                terminal = self.ipc.command(objective, action_id=pending.action.id, timeout_ms=timeout_ms,
+                                            on_progress=lambda payload: self._on_progress(pending, payload))
                 event = _terminal_event(self.bot_name, pending.action, terminal)
                 self._merge_state_payload(terminal.payload)
         except Exception as error:
@@ -353,6 +365,8 @@ class RealClientBody:
                     "reason": reason,
                     "stopped_reason": reason,
                     "message": str(error),
+                    "terminal_source": "native_rejection" if isinstance(error, RealClientRejected) else "python_transport",
+                    "control_unknown": not isinstance(error, RealClientRejected) and control is None,
                 },
             )
         if event.seq == 0:
@@ -363,13 +377,71 @@ class RealClientBody:
                 name=event.name,
                 data=dict(event.data),
             )
+        if pending.observer_errors:
+            event = Event(seq=event.seq, tick=event.tick, bot=event.bot, name=event.name,
+                          data={**event.data, "progress_observer_errors": pending.observer_errors})
         with self._lock:
             pending.terminal = event
             pending.done.set()
             self._event_queue.append(event)
             self.event_log.append(event)
             if self._active is pending:
-                self._active = None
+                if event.data.get("control_unknown"):
+                    self._control_unknown = True
+                else:
+                    self._active = None
+        self._notify(pending, {"type": "terminal", **event.data})
+
+    def _notify(self, pending: _PendingAction, payload: dict[str, Any]) -> None:
+        if pending.observation is not None:
+            call_id, notify = pending.observation
+            try:
+                notify({**payload, "action_id": pending.action.id, "call_id": call_id,
+                        "received_at_monotonic": time.monotonic()})
+            except Exception:
+                # Observation failure cannot replace a native terminal.
+                pending.observer_errors += 1
+
+    def _on_progress(self, pending: _PendingAction, payload: dict[str, Any]) -> None:
+        with self._lock:
+            if self._active is not pending or payload.get("action_id") != pending.action.id:
+                return
+            self._merge_state_payload(payload)
+        self._notify(pending, payload)
+
+    def confirm_control_idle(self) -> dict[str, Any]:
+        """Fresh native evidence, independent of Python worker/lane occupancy."""
+        state = self._state_payload()
+        late_facts = None
+        take_late = getattr(self.ipc, "take_late_terminal", None)
+        with self._lock:
+            candidates = [p for p in self._pending.values() if p.done.is_set() and p.terminal is not None
+                          and p.terminal.data.get("terminal_source") == "python_transport"
+                          and p.late_terminal is None]
+        for pending in candidates if callable(take_late) else []:
+            payload = take_late(pending.action.id)
+            if payload is not None:
+                native = RealClientTerminal(pending.action.id, str(payload.get("status")),
+                                            str(payload.get("reason")), payload)
+                event = _terminal_event(self.bot_name, pending.action, native)
+                late_facts = {**event.data, "late_native_terminal": True, "advice_superseded": True}
+                archived = Event(seq=self._next_seq(), tick=event.tick, bot=event.bot,
+                                 name=event.name, data=late_facts)
+                with self._lock:
+                    pending.late_terminal = archived
+                    self.event_log.append(archived)
+        stopped = (state.get("active_action_known") is True
+                   and state.get("active_action_id") is None
+                   and state.get("any_process_active") is False
+                   and state.get("pathing") is False)
+        with self._lock:
+            if stopped:
+                self._control_unknown = False
+                if self._active is not None and self._active.done.is_set():
+                    self._active = None
+        return {"native_stopped": stopped, "control_unknown": not stopped,
+                "active_action_id": state.get("active_action_id"),
+                "sampled_at_ms": state.get("sampled_at_ms"), "late_native_terminal": late_facts}
 
     def _merge_state_payload(self, payload: Mapping[str, object]) -> None:
         if "position" in payload:
@@ -594,7 +666,7 @@ def _body_state(bot_name: str, payload: Mapping[str, Any], *, pending: bool) -> 
         _unnamespace(str(item)): int(count or 0)
         for item, count in dict(payload.get("inventory") or {}).items()
     }
-    raw_inventory = json.dumps(inventory, sort_keys=True, separators=(",", ":"))
+    raw_inventory = json.dumps(inventory, sort_keys=True, separators=(",", ":")) if isinstance(payload.get("inventory"), Mapping) else ""
     return BodyState(
         bot=bot_name,
         pos=(float(position[0]), float(position[1]), float(position[2])),
@@ -612,7 +684,10 @@ def _body_state(bot_name: str, payload: Mapping[str, Any], *, pending: bool) -> 
         dimension=str(payload.get("dimension") or "minecraft:overworld"),
         complete=True,
         missing=False,
-        inventory_counts=inventory,
+        inventory_counts=inventory if isinstance(payload.get("inventory"), Mapping) else None,
+        inventory_complete=payload.get("inventory_complete") if isinstance(payload.get("inventory_complete"), bool) and isinstance(payload.get("inventory"), Mapping) else None,
+        inventory_includes_selected=payload.get("inventory_includes_selected") if isinstance(payload.get("inventory_includes_selected"), bool) else None,
+        selected_item_known=payload.get("selected_item_known") if isinstance(payload.get("selected_item_known"), bool) else None,
         selected_slot=_optional_int(payload.get("selected_slot")),
         selected_item=_optional_item(payload.get("selected_item")),
         offhand_item=_optional_item(payload.get("offhand_item")),
@@ -963,6 +1038,7 @@ def _timeout_seconds(action: Action) -> float:
 
 def _terminal_event(bot_name: str, action: Action, terminal: RealClientTerminal) -> Event:
     payload = dict(terminal.payload)
+    payload["terminal_source"] = "native"
     payload.setdefault("stopped_reason", terminal.reason)
     position = payload.get("position")
     if isinstance(position, (list, tuple)) and len(position) == 3:

@@ -502,6 +502,7 @@ def tool_invoker_for(tool: RegisteredTool):
                     params,
                     ctx.context,
                     timeout_s=tool.sidecar.timeout_s,
+                    tool_call_id=tool_call_id,
                 )
                 progress_steps = captured.progress_steps
                 post_state = captured.post_state
@@ -518,6 +519,7 @@ def tool_invoker_for(tool: RegisteredTool):
                     params,
                     ctx.context.weld_context,
                     timeout_s=tool.sidecar.timeout_s,
+                    tool_call_id=tool_call_id,
                 )
         except asyncio.CancelledError:
             if runtime is not None and (not getattr(runtime, "native_responses", False) or tool.sidecar.can_mutate_body):
@@ -1318,6 +1320,7 @@ class AgentRuntime:
             authority=authority,
             goal_text=agent_context.goal_text,
             body_state_observer=self._trace_mutation_body_state,
+            raw_result_observer=self._save_raw_tool_result,
         )
         self.agent = Agent[RuntimeRunContext](
             name=agent_name,
@@ -1338,6 +1341,10 @@ class AgentRuntime:
         self._pending_mobility_terminal: dict[str, object] | None = None
         self.last_known_body_state: dict[str, object] | None = None
         self._last_traced_body_event_seq = 0
+        self.direct_call_handoffs = {}
+        self._body_control_unknown = False
+        from minebot.app.direct_call_supervision import DirectBuildSupervisor
+        self.direct_build_supervisor = DirectBuildSupervisor(self)
         self._body_event_trace_lock = threading.Lock()
         self.consecutive_transport_errors = 0
         # A single Body dispatch can surface through several composition
@@ -1366,6 +1373,7 @@ class AgentRuntime:
                 proxy=getattr(model_provider, "responses_proxy", None),
                 transport=getattr(model_provider, "responses_transport", "websocket"),
                 tool_namespace=getattr(model_provider, "responses_tool_namespace", None),
+                is_mutating=lambda name: name in self.registry and self.registry.get(name).sidecar.can_mutate_body,
             )
 
     def _responses_tools(self) -> list[dict[str, Any]]:
@@ -1386,6 +1394,11 @@ class AgentRuntime:
             if tool.sidecar.can_mutate_body:
                 definition["async"] = True
             definitions.append(definition)
+        definitions.append({
+            "type": "function", "name": "take_control",
+            "description": "Stop this session's current direct Body call now. Waits for real native stop; does not undo completed work.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False}, "strict": True,
+        })
         if self.agent_context.goal_text.strip():
             definitions.extend([
                 {"type": "function", "name": "update_plan", "description": "Keep a short current plan, including player additions, relevant coordinates, concrete blockers and why you changed strategy. Update it when evidence or player requests change.",
@@ -1434,6 +1447,8 @@ class AgentRuntime:
         ctx = self._native_context
         if ctx is None:
             raise RuntimeError("Native tool called outside its session")
+        if name == "take_control":
+            return await self.cancel_active_execution_with_facts("agent_take_control")
         if name in {"finish_task", "update_plan"}:
             params = json.loads(arguments)
             if name == "update_plan":
@@ -1521,7 +1536,19 @@ class AgentRuntime:
         self.trace.emit("turn_completed", kernel="responses", lifecycle=self.lifecycle.state.value)
         return AgentTurnOutcome("completed_turn", self.lifecycle.state, prepared, result=result)
 
-    async def run_tool(self, tool: RegisteredTool, callback: Callable[..., Any], *args, timeout_s=None):
+    def _save_raw_tool_result(self, tool_name, params, result):
+        from minebot.contract.execution import current_tool_observation
+        observation = current_tool_observation()
+        self.trace.emit("tool_raw_result", tool=tool_name, arguments=params,
+                        tool_call_id=observation[0] if observation else None,
+                        raw_result=result.to_payload())
+
+    async def run_tool(self, tool: RegisteredTool, callback: Callable[..., Any], *args, timeout_s=None, tool_call_id=None):
+        if tool.sidecar.can_mutate_body and self._body_control_unknown:
+            raise BodyRecoveryRequired("body_control_unknown", facts={"control_unknown": True})
+        if tool.name == "build_structure" and callable(getattr(self.body, "confirm_control_idle", None)):
+            return await self.direct_build_supervisor.run(tool, callback, args,
+                call_id=tool_call_id or str(uuid4()), timeout_s=timeout_s)
         lane = self._read_lane if self.native_responses and not tool.sidecar.can_mutate_body else self.execution_lane
         return await lane.run(callback, *args, timeout_s=timeout_s)
 
@@ -1847,6 +1874,10 @@ class AgentRuntime:
         invalidate_generation: bool = True,
     ) -> JsonObject:
         cancellation_started = time.monotonic()
+        self._body_control_unknown = True
+        supervisor = self.direct_build_supervisor.current
+        if supervisor is not None:
+            supervisor["cancel_requested"] = True
         if invalidate_generation:
             self.authority.invalidate_generation(reason)
         cancellation_scope_count = self.request_execution_cancel(reason)
@@ -1885,7 +1916,17 @@ class AgentRuntime:
                 "owner_probe_error" not in owner_facts
                 and interrupt_complete is True
             )
+        native_probe = getattr(self.body, "confirm_control_idle", None)
+        native_facts = {}
+        if callable(native_probe):
+            try:
+                native_facts = await self._read_lane.run(native_probe)
+            except Exception as exc:
+                native_facts = {"native_stopped": False, "control_unknown": True,
+                                "probe_error": type(exc).__name__}
+            owner_settled = native_facts.get("native_stopped") is True
         settled = execution_idle and owner_settled
+        self._body_control_unknown = not settled
         facts: JsonObject = {
             "interrupt_requested": True,
             "cancellation_scope_count": cancellation_scope_count,
@@ -1894,6 +1935,7 @@ class AgentRuntime:
             "interrupt_complete": interrupt_complete,
             "execution_idle": execution_idle,
             **owner_facts,
+            **native_facts,
             "settled": settled,
             "reason": reason,
         }
@@ -1952,6 +1994,7 @@ class AgentRuntime:
             await asyncio.sleep(BODY_OWNER_SETTLE_POLL_S)
 
     async def aclose(self) -> None:
+        await self.direct_build_supervisor.close()
         if self.responses_kernel is not None:
             self.responses_kernel.halt()
             if any(c.mutating and not c.task.done() for c in self.responses_kernel.pending):
@@ -2350,6 +2393,9 @@ class AgentRuntime:
             "inventory_counts": getattr(state, "inventory_counts", None),
             "selected_slot": getattr(state, "selected_slot", None),
             "selected_item": getattr(state, "selected_item", None),
+            "selected_item_known": getattr(state, "selected_item_known", None),
+            "inventory_complete": getattr(state, "inventory_complete", None),
+            "inventory_includes_selected": getattr(state, "inventory_includes_selected", None),
             "offhand_item": getattr(state, "offhand_item", None),
             "body_owner": getattr(state, "body_owner", None),
             "pending_action_count": getattr(state, "pending_action_count", None),

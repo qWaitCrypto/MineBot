@@ -80,6 +80,9 @@ class BodyState:
     # reflex could not resolve its hazard; ordinary physical actions must stay
     # blocked until a recovery transaction clears it.
     hazard_unresolved: JsonObject | None = None
+    selected_item_known: bool | None = None
+    inventory_complete: bool | None = None
+    inventory_includes_selected: bool | None = None
 
     @classmethod
     def from_envelope_data(cls, bot: str, complete: bool, data: JsonObject) -> "BodyState":
@@ -108,6 +111,9 @@ class BodyState:
             selected_slot=_maybe_int(data.get("selected_slot")),
             inventory_counts=_inventory_counts(data.get("inventory_counts")),
             selected_item=_maybe_string(data.get("selected_item")),
+            selected_item_known=data.get("selected_item_known") if isinstance(data.get("selected_item_known"), bool) else None,
+            inventory_complete=data.get("inventory_complete") if isinstance(data.get("inventory_complete"), bool) else None,
+            inventory_includes_selected=data.get("inventory_includes_selected") if isinstance(data.get("inventory_includes_selected"), bool) else None,
             offhand_item=_maybe_string(data.get("offhand_item")),
             body_owner=_maybe_string(data.get("body_owner")),
             pending_action_count=_maybe_int(data.get("pending_action_count")),

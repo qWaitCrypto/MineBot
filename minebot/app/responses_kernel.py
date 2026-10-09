@@ -315,6 +315,7 @@ class ResponsesKernel:
         transport: str = "websocket",
         tool_namespace: str | None = None,
         context: Callable[[], Awaitable[str]] | None = None,
+        is_mutating: Callable[[str], bool] | None = None,
     ) -> None:
         self.client, self.model = client, model
         self.tools, self.instructions, self.invoke = tools, instructions, invoke
@@ -323,6 +324,7 @@ class ResponsesKernel:
         self.context_mode = self.settings.pop("_context_mode", "native")
         self.compact_threshold = self.settings.pop("_compact_threshold", 128_000)
         self.context = context
+        self.is_mutating = is_mutating
         self.request_timeout_s = request_timeout_s
         self.needs_work = needs_work
         self.proxy = proxy
@@ -345,6 +347,8 @@ class ResponsesKernel:
         self._halted = False
         self._submitted_calls: list[str] = []
         self._queued_inputs: list[str] = []
+        self._facts: list[dict[str, Any]] = []
+        self._fact_wake = asyncio.Event()
 
     def halt(self) -> None:
         self._halted = True
@@ -358,6 +362,11 @@ class ResponsesKernel:
 
     def steer(self, text: str) -> None:
         self._messages.put_nowait(text)
+
+    def notify_fact(self, fact: dict[str, Any]) -> None:
+        """Execution evidence; distinct from a user command and a tool's final output."""
+        self._facts.append(dict(fact))
+        self._fact_wake.set()
 
     async def _connect(self) -> None:
         if self._connection is None:
@@ -436,7 +445,7 @@ class ResponsesKernel:
                 raise ResponsesProtocolError("Conflicting duplicate function call: " + call_id)
             return
         definitions = {tool["name"]: tool for tool in self.tools()}
-        mutating = bool(definitions.get(name, {}).get("async"))
+        mutating = self.is_mutating(name) if self.is_mutating else bool(definitions.get(name, {}).get("async"))
         writer = next((c for c in self.pending if c.mutating and not c.task.done()), None)
         if self._halted:
             job = self._constant({"success": False, "reason": "cancelled", "canRetry": False})
@@ -475,7 +484,7 @@ class ResponsesKernel:
         if self._running:
             raise RuntimeError("Responses kernel already running")
         self._running = True
-        reader = message = None
+        reader = message = fact_wait = None
         final_text, response_count = "", 0
         compactions = 0
         queued = self._queued_inputs
@@ -488,6 +497,7 @@ class ResponsesKernel:
                     self._dispatch(item)
             reader = asyncio.create_task(self._connection.recv_bytes())
             message = asyncio.create_task(self._messages.get())
+            fact_wait = asyncio.create_task(self._fact_wake.wait())
             while True:
                 # Reader is checked first below: a response.created queued on
                 # the wire must be seen before deciding where to steer input.
@@ -497,6 +507,8 @@ class ResponsesKernel:
                     inputs = [] if sync_waiting else [{"type": "function_call_output", "call_id": c.call_id,
                                "output": json.dumps(c.task.result(), ensure_ascii=False)} for c in ready]
                     if not sync_waiting:
+                        inputs.extend({"role": "developer", "content": "EXECUTION_FACT: " + json.dumps(value, ensure_ascii=False)}
+                                      for value in self._facts)
                         inputs.extend({"role": "user", "content": value} for value in queued)
                     if inputs:
                         if max_responses is not None and response_count >= max_responses:
@@ -504,12 +516,13 @@ class ResponsesKernel:
                         await self._create(inputs)
                         response_count += 1
                         queued.clear()
+                        self._facts.clear()
                     elif not self.pending and self._messages.empty() and not message.done():
                         if self.needs_work():
                             queued.append("The current goal is still active. Continue executing it, or use finish_task with the actual result or concrete blocker.")
                             continue
                         return ResponsesResult(final_text, self.previous_response_id)
-                futures = {reader, message, *(c.task for c in self.pending if not c.task.done())}
+                futures = {reader, message, fact_wait, *(c.task for c in self.pending if not c.task.done())}
                 # HTTPX measures actual read inactivity, including SSE comments
                 # filtered by the SDK. An event deadline would kill a healthy
                 # stream while the server is reasoning or compacting history.
@@ -518,6 +531,9 @@ class ResponsesKernel:
                                             and (self._active or self._auto_successor) else None)
                 if not done:
                     raise ResponsesTransportError(f"Timed out waiting for a Responses {self.transport} event")
+                if fact_wait in done:
+                    self._fact_wake.clear()
+                    fact_wait = asyncio.create_task(self._fact_wake.wait())
                 if reader in done:
                     event = json.loads(reader.result())
                     reader = asyncio.create_task(self._connection.recv_bytes())
@@ -599,7 +615,7 @@ class ResponsesKernel:
         finally:
             self._running = False
             # Tool tasks intentionally survive model cancellation/failure.
-            for future in (reader, message):
+            for future in (reader, message, fact_wait):
                 if future is not None:
                     if future is message and future.done() and not future.cancelled():
                         queued.append(future.result())
