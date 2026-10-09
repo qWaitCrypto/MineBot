@@ -54,6 +54,8 @@ class ShellApp(PanelApp):
         self._ready_at: float | None = None
         self._exit_notified = False
         self._lost_notified = False
+        self._client_down = False
+        self._client_restarting = False
         self._attached_late = launcher.phase == "ready"  # attach to a session that is already running
 
     @property
@@ -84,6 +86,19 @@ class ShellApp(PanelApp):
         if self.stage == "panel" and not self._exit_notified and returncode is not None:
             self._exit_notified = True
             self.notify_flash(f"Agent 会话已退出（代码 {returncode}）· q 退出", "fail", 3600)
+        if self.stage == "panel" and self.launcher.client_started:
+            step = self.launcher.steps[3]
+            if self._client_restarting:
+                if step.status == "ok" and self.launcher.client_alive:
+                    self._client_restarting = False
+                    self.notify_flash("客户端已重新启动", "ok")
+                elif step.status == "fail":
+                    self._client_restarting = False
+                    self._client_down = True
+                    self.notify_flash(f"客户端没能重新启动：{step.error} · r 再试 · l 看日志", "fail", 3600)
+            elif not self.launcher.client_alive and not self._client_down:
+                self._client_down = True
+                self.notify_flash("游戏客户端已退出 · r 重启客户端 · l 看 client.log", "fail", 3600)
         if self.launcher.phase == "lost" and not self._lost_notified:
             self._lost_notified = True
             self.notify_flash("与后台启动器失去连接（它已退出）· q 关闭面板", "fail", 3600)
@@ -199,9 +214,18 @@ class ShellApp(PanelApp):
         super().action_close()
 
     def action_retry(self) -> None:
+        if self.command_open:
+            return
         if self.stage == "launch" and self.launcher.phase == "failed":
             self.log_index = None
             self._start_launch()
+        elif self.stage == "panel" and self._client_down and not self._client_restarting:
+            # Deliberately manual: an automatic restart could loop on a client that crashes at load.
+            self._client_restarting = True
+            self._client_down = False
+            self.launcher.steps[3].status = "running"  # until the worker (or the next snapshot) says otherwise
+            self.notify_flash("正在重新启动游戏客户端…", "warn", 3600)
+            self.run_worker(self.launcher.restart_client, thread=True, exclusive=True, group="client")
 
     def action_log(self) -> None:
         if self.command_open:

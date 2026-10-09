@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 SOCKET_NAME = "control.sock"
-OPS = ("snapshot", "send", "retry", "stop")
+OPS = ("snapshot", "send", "retry", "restart_client", "stop")
 _READ_LIMIT = 1 << 16
 _SUN_PATH_MAX = 100  # sockaddr_un.sun_path is 104 bytes on macOS, 108 on Linux
 
@@ -45,12 +45,14 @@ class ControlServer:
     """Serves one launcher over ``<run_dir>/control.sock``."""
 
     def __init__(self, launcher: Any, *, on_stop: Callable[[bool], None] | None = None,
-                 on_retry: Callable[[], None] | None = None) -> None:
+                 on_retry: Callable[[], None] | None = None,
+                 on_restart_client: Callable[[], None] | None = None) -> None:
         self.launcher = launcher
         self.path = socket_path(launcher.run_dir)
         self.log_path = Path(launcher.run_dir) / "control.log"
         self.on_stop = on_stop
         self.on_retry = on_retry
+        self.on_restart_client = on_restart_client
         self.listening = False
         self._bound: Path | None = None
         self._server: socket.socket | None = None
@@ -177,6 +179,15 @@ class ControlServer:
                 raise ControlError("这个启动器不支持远程重试")
             self.on_retry()
             return {}
+        if op == "restart_client":
+            if self.on_restart_client is None:
+                raise ControlError("这个启动器不支持远程重启客户端")
+            if launcher.client_alive:
+                raise ControlError("客户端还在运行")
+            if launcher.client_reused:
+                raise ControlError("这个客户端不是我启动的，不自动重启它")
+            self.on_restart_client()
+            return {}
         if op == "stop":
             if self.on_stop is None:
                 raise ControlError("这个启动器不支持远程停止")
@@ -275,6 +286,7 @@ class RemoteLauncher:
         self.agent_paused = False
         self.session_returncode: int | None = None
         self.client_started = False
+        self.client_alive = True
         self._alive = False
         self._poll_s = poll_s
         self._client = ControlClient(self.run_dir)
@@ -324,6 +336,7 @@ class RemoteLauncher:
         self.agent_paused = bool(snapshot.get("agent_paused"))
         self.session_returncode = snapshot.get("session_returncode")
         self.client_started = bool(snapshot.get("client_started"))
+        self.client_alive = bool(snapshot.get("client_alive", True))
         self._alive = bool(snapshot.get("session_alive"))
         self.phase = snapshot.get("phase", self.phase)
 
@@ -334,6 +347,13 @@ class RemoteLauncher:
 
     def session_alive(self) -> bool:
         return self._alive
+
+    def restart_client(self) -> bool:
+        """Ask the supervisor to start the game client again after a crash."""
+        try:
+            return bool(self._client.request("restart_client").get("ok"))
+        except ControlError:
+            return False
 
     def send(self, line: str) -> bool:
         text = line.replace("\n", " ").strip()

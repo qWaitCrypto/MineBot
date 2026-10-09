@@ -248,6 +248,14 @@ class Launcher:
     def client_started(self) -> bool:
         return self.client is not None
 
+    @property
+    def client_alive(self) -> bool:
+        """Our client process is running. A reused client is assumed alive: probing its IPC port
+        could take the single connection slot the Agent session needs."""
+        if self.client is not None:
+            return self.client.poll() is None
+        return self.client_reused
+
     def snapshot(self) -> dict[str, Any]:
         """Everything a remote front end needs to draw the launch screen and drive the panel."""
         now = time.monotonic()
@@ -265,6 +273,7 @@ class Launcher:
             "session_alive": self.session_alive(),
             "session_returncode": self.session_returncode,
             "client_started": self.client_started,
+            "client_alive": self.client_alive,
             "client_reused": self.client_reused,
             "agent_paused": self.agent_paused,
         }
@@ -577,6 +586,32 @@ class Launcher:
             if time.monotonic() > deadline:
                 raise StepFailed(f"{self.options.agent_timeout_s:.0f} 秒内 Agent 没有就绪", "按 l 看 agent.log")
             time.sleep(0.2)
+
+    def restart_client(self) -> bool:
+        """Start the game client again after it exited, and let the Agent find the world again."""
+        if self.client_alive or not self.environment:
+            return False
+        if self.client is not None and self.client.poll() is not None:
+            self.client = None
+        self.client_reused = False
+        step = self.steps[3]  # phase stays "ready": the Agent session is still running
+        step.status, step.lines, step.error, step.hint, step.summary = "running", [], "", "", ""
+        step.started, step.ended = time.monotonic(), None
+        self.output.clear()
+        self._cancel.clear()
+        try:
+            self._step_client(step)
+            if step.status == "running":
+                step.status = "ok"
+        except StepFailed as failure:
+            step.status, step.error, step.hint = "fail", failure.error, failure.hint
+            step.ended = time.monotonic()
+            self._write_record()
+            return False
+        step.ended = time.monotonic()
+        self.say("ok", "客户端已重新启动，等待 Agent 重新连接")
+        self._write_record()
+        return True
 
     # ------------------------------------------------------------ control
     def send(self, line: str) -> bool:

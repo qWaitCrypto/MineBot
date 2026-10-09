@@ -48,12 +48,15 @@ FAKE_CLIENT = textwrap.dedent('''
         return json.loads(data)
     while True:
         conn, _ = server.accept()
-        send(conn, {"type": "ready"})
-        while (request := frame(conn)) is not None:
-            if request.get("type") == "state":
-                send(conn, {"type": "state", "request_id": request["request_id"], "pos": [1.5, 64.0, -2.5],
-                            "health": 20.0, "food": 18, "dimension": "minecraft:overworld",
-                            "disposable_world": os.environ.get("MINEBOT_CLIENT_DISPOSABLE_WORLD") == "true"})
+        try:  # like MineBotClientBody.serve: a dropped peer never stops the accept loop
+            send(conn, {"type": "ready"})
+            while (request := frame(conn)) is not None:
+                if request.get("type") == "state":
+                    send(conn, {"type": "state", "request_id": request["request_id"], "pos": [1.5, 64.0, -2.5],
+                                "health": 20.0, "food": 18, "dimension": "minecraft:overworld",
+                                "disposable_world": os.environ.get("MINEBOT_CLIENT_DISPOSABLE_WORLD") == "true"})
+        except OSError:
+            pass
         conn.close()
 ''')
 
@@ -802,3 +805,50 @@ def test_agent_status_reads_the_trace():
     assert status("已暂停") == "已暂停"
     apply(state, {"seq": 3, "ts": now, "event": "session_terminal", "status": "quit"})
     assert status() == "已结束"
+
+
+# ------------------------------------------------------------------ client crash and restart
+
+def test_crashed_client_is_reported_and_restarted_on_request(tmp_path, fake_server):
+    import os as _os
+    import signal as _signal
+
+    launcher = _launcher(tmp_path, fake_server, _free_port())
+
+    async def drive():
+        app = ShellApp(launcher)
+        async with app.run_test(size=(120, 40)) as pilot:
+            deadline = time.monotonic() + 30
+            while app.stage != "panel" and time.monotonic() < deadline:
+                await pilot.pause(0.1)
+            assert app.stage == "panel"
+            first = launcher.client
+            _os.killpg(first.pid, _signal.SIGKILL)
+            first.wait(timeout=5)
+            deadline = time.monotonic() + 5
+            while not app._client_down and time.monotonic() < deadline:
+                await pilot.pause(0.1)
+            assert app.flash is not None and "r 重启客户端" in app.flash[1]
+            assert launcher.session_alive(), "the Agent keeps running without its client"
+            await pilot.press("r")
+            deadline = time.monotonic() + 20
+            while (app._client_restarting or app._client_down) and time.monotonic() < deadline:
+                await pilot.pause(0.1)
+            assert launcher.client is not first and launcher.client_alive
+            assert app.flash is not None and "已重新启动" in app.flash[1]
+            assert launcher.phase == "ready" and launcher.steps[3].status == "ok"
+        launcher.shutdown()
+
+    asyncio.run(drive())
+    assert launcher.client.poll() is not None
+
+
+def test_reused_client_is_never_restarted(tmp_path, fake_server):
+    from minebot.shell.control import ControlError, ControlServer
+
+    launcher = _launcher(tmp_path, fake_server, _free_port())
+    launcher.client_reused = True
+    server = ControlServer(launcher, on_restart_client=lambda: None)
+    with pytest.raises(ControlError, match="客户端还在运行"):
+        server.apply("restart_client")
+    assert not launcher.restart_client()

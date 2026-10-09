@@ -47,14 +47,23 @@ class Supervisor:
     def __init__(self, launcher: Launcher, *, orphan_s: float = ORPHAN_S) -> None:
         self.launcher = launcher
         self.orphan_s = orphan_s
-        self.server = ControlServer(launcher, on_stop=self.request_stop, on_retry=self.retry)
+        self.server = ControlServer(launcher, on_stop=self.request_stop, on_retry=self.retry,
+                                    on_restart_client=self.restart_client)
         self._stop = threading.Event()
         self._keep_client = False
         self._run_thread: threading.Thread | None = None
+        self._client_thread: threading.Thread | None = None
 
     def request_stop(self, keep_client: bool = False) -> None:
         self._keep_client = keep_client
         self._stop.set()
+
+    def restart_client(self) -> None:
+        if self._client_thread is not None and self._client_thread.is_alive():
+            raise ControlError("客户端正在启动中")
+        self._client_thread = threading.Thread(target=self.launcher.restart_client, name="minebot-client-restart",
+                                               daemon=True)
+        self._client_thread.start()
 
     def retry(self) -> None:
         if self._run_thread is not None and self._run_thread.is_alive():
