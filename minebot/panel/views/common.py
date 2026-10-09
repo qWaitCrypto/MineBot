@@ -109,6 +109,44 @@ def wait_tone(seconds_waited: float, warn: float = 15.0, fail: float = 45.0) -> 
     return "fail" if seconds_waited >= fail else "warn" if seconds_waited >= warn else "ok"
 
 
+STATUS_TONE = {"思考中": "agent", "行动中": "body", "已暂停": "warn", "等待指令": "muted", "已结束": "muted",
+               "请求失败": "fail"}
+
+
+def agent_status(frame: Frame) -> tuple[str, str]:
+    """(label, detail) for what the Agent is doing right now, from the trace alone."""
+    state = frame.state
+    if state.terminal is not None:
+        return "已结束", str(state.terminal.get("status") or "")
+    if frame.control == "已暂停":
+        return "已暂停", "p 继续"
+    running = state.running_calls()
+    if running:
+        call = running[-1]
+        return "行动中", f"{call.tool} {seconds(frame.now - (call.invoke_ts or frame.now))}"
+    request = state.request
+    if request is not None and request.status == "running":
+        return "思考中", f"第 {state.request_total} 次请求 {seconds(frame.now - request.started_ts)}"
+    if request is not None and request.status == "failed" and frame.now - (request.ended_ts or 0) < 30:
+        return "请求失败", (request.error or "")[:30]
+    return "等待指令", ""
+
+
+def _status_badge(frame: Frame) -> list[tuple[str, Any]]:
+    label, detail = agent_status(frame)
+    key = STATUS_TONE.get(label, "muted")
+    style = theme.layer(key, bold=True) if key in theme.LAYER else theme.tone(key, bold=True)
+    if label == "思考中" and frame.live:
+        # Slow breathing, the only motion while nothing else happens.
+        phase = (math.sin(frame.anim * math.pi) + 1) / 2
+        style = theme.layer("agent", bold=True) if phase > 0.35 else theme.layer("agent", dim=True)
+    icon = {"思考中": "◐", "行动中": "▶", "已暂停": "❚❚", "已结束": "■", "请求失败": "✗"}.get(label, "○")
+    parts: list[tuple[str, Any]] = [(f"{icon} {label}", style)]
+    if detail:
+        parts.append((f"  {detail}", theme.MUTED))
+    return parts
+
+
 def draw_chrome(canvas: Canvas, frame: Frame) -> tuple[int, int, int, int]:
     """Title, legend, tabs and the shell status line; returns the content rectangle."""
     state, width, height = frame.state, canvas.width, canvas.height
@@ -128,6 +166,17 @@ def draw_chrome(canvas: Canvas, frame: Frame) -> tuple[int, int, int, int]:
              (clock(frame.now - origin), theme.BRIGHT)]
     used = sum(_cells(text) for text, _ in right)
     canvas.runs(max(0, width - used - 2), 0, right)
+    if frame.live:
+        left_used = 2 + sum(_cells(text) for text, _ in left)
+        badge_parts = _status_badge(frame)
+        room = width - used - 2 - left_used - 4
+        badge_width = sum(_cells(text) for text, _ in badge_parts)
+        if badge_width > room:
+            badge_parts = badge_parts[:1]  # keep the state, drop the detail
+            badge_width = _cells(badge_parts[0][0])
+        if room >= badge_width:
+            start = left_used + 2 + max(0, (room - badge_width) // 2)
+            canvas.runs(start, 0, badge_parts)
     canvas.hline(1, width - 2, 1, theme.DIM, "─")
     # legend
     legend = []

@@ -51,7 +51,7 @@ HELP_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
     ("控制", [(": t", "对机器人说话；/goal 换目标"), ("p", "暂停 / 继续"), ("! !", "取消当前动作（1.5 秒内按两次）"),
              ("ctrl+d", "分离面板，机器人继续运行"), ("q", "退出（先确认）")]),
     ("回放", [("space", "播放 / 暂停"), ("+ −", "速度"), (", .", "后退 / 前进 50 条"), ("home end", "开头 / 结尾")]),
-    ("外观", [("T", "切换主题：深色 · 浅色 · 高对比 · 无色"), ("?", "这张帮助")]),
+    ("外观", [("T", "切换主题：深色 · 浅色 · 高对比 · 无色"), ("N", "通知历史"), ("?", "这张帮助")]),
 ]
 SYMBOLS = [("●", "活跃"), ("○", "空闲"), ("◐", "进行中"), ("✓", "成功"), ("✗", "失败"), ("⚠", "越界 / 警告"), ("❚❚", "已暂停")]
 
@@ -107,6 +107,47 @@ def draw_too_small(frame: Frame, width: int, height: int, minimum: tuple[int, in
     return canvas
 
 
+def _notice_style(tone: str, *, bold: bool = False) -> Any:
+    if tone == "agent":
+        return theme.layer("agent", bold=bold)
+    return theme.tone(tone, bold=bold)
+
+
+def draw_notices(canvas: Canvas, notices: list[Any], unread: int) -> None:
+    """Newest notices stacked at the top right, under the tabs."""
+    if not notices:
+        return
+    width = min(56, max(24, canvas.width // 3))
+    x = canvas.width - width - 2
+    y = 5
+    for notice in reversed(notices):
+        canvas.fill(x, y, width, 3, " ")
+        canvas.box(x, y, width, 3, _notice_style(notice.tone))
+        canvas.text(x + 2, y + 1, fit(notice.label(), width - 4), _notice_style(notice.tone, bold=True))
+        y += 3
+    if unread > len(notices):
+        canvas.text(x + width - 16, y, fit(f" N 通知 {unread} 条 ", 16), theme.MUTED)
+
+
+def draw_notice_history(canvas: Canvas, notices: list[Any]) -> None:
+    width = min(canvas.width - 4, 110)
+    height = canvas.height - 6
+    x, y = (canvas.width - width) // 2, 3
+    canvas.fill(x, y, width, height, " ")
+    canvas.box(x, y, width, height, theme.layer("operator", bold=True),
+               title=[("通知", theme.layer("operator", bold=True)), (f"  {len(notices)} 条  esc 关闭", theme.MUTED)])
+    if not notices:
+        canvas.text(x + 2, y + 1, "还没有通知：工具失败、掉血、越界改动、模型报错和 Agent 说的话会出现在这里",
+                    theme.MUTED, width - 4)
+        return
+    origin = notices[0].ts
+    for row, notice in enumerate(reversed(notices[-(height - 2):])):
+        offset = int(notice.ts - origin)
+        stamp = f"+{offset // 3600:02d}:{offset % 3600 // 60:02d}:{offset % 60:02d}"
+        canvas.text(x + 2, y + 1 + row, stamp, theme.MUTED)
+        canvas.text(x + 13, y + 1 + row, fit(notice.label(), width - 15), _notice_style(notice.tone))
+
+
 def detail_lines(detail: Any, width: int) -> list[str]:
     text = json.dumps(detail, ensure_ascii=False, indent=2, default=str)
     lines: list[str] = []
@@ -133,4 +174,4 @@ def draw_detail(canvas: Canvas, detail: Any, scroll: int) -> None:
         canvas.text(x + width - 12, y + height - 1, f" {scroll + 1}/{len(lines)} ", theme.MUTED)
 
 
-__all__ = ["DRAW", "PAGES", "detail_lines", "draw_flash", "draw_help", "draw_too_small", "render"]
+__all__ = ["DRAW", "PAGES", "detail_lines", "draw_flash", "draw_help", "draw_notice_history", "draw_notices", "draw_too_small", "render"]

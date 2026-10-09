@@ -708,3 +708,65 @@ def test_panel_help_theme_and_small_terminal(tmp_path, isolated_config, monkeypa
         assert theme.active_theme() == "light", "the theme is remembered"
     finally:
         theme.set_theme("dark")
+
+
+# ------------------------------------------------------------------ notices and the Agent status
+
+def test_notices_merge_repeats_and_flag_what_needs_attention():
+    from minebot.panel.notices import Notifier
+
+    notifier = Notifier()
+    failed = {"event": "tool_result", "tool": "get_to_block", "full_result": {"success": False, "reason": "no_path"}}
+    for offset in (0, 5, 10):
+        notifier.observe({**failed, "ts": 100.0 + offset})
+    notifier.observe({"event": "tool_result", "ts": 111, "tool": "mine", "full_result": {"success": True}})
+    notifier.observe({"event": "body_state", "ts": 112, "health": 20})
+    notifier.observe({"event": "body_state", "ts": 113, "health": 19})
+    notifier.observe({"event": "body_state", "ts": 114, "health": 12})
+    notifier.observe({"event": "world_edit", "ts": 115, "target": False})
+    notifier.observe({"event": "assistant_message", "ts": 116, "content": "我在砍树"})
+    notifier.observe({"event": "session_terminal", "ts": 117, "status": "quit"})
+    labels = [notice.label() for notice in notifier.history]
+    assert labels == ["✗ get_to_block：no_path ×3", "♥ 掉血 19 → 12", "⚠ 改动了目标范围外的方块", "会话结束：quit"]
+    assert len(notifier.visible()) == 3 and notifier.unread == 6
+
+
+def test_live_panel_shows_new_notices_but_not_old_ones(tmp_path):
+    trace = tmp_path / "trace.jsonl"
+    old = {"seq": 1, "ts": time.time(), "event": "tool_result", "tool": "old_tool", "full_result": {"success": False}}
+    trace.write_text(json.dumps(old) + "\n")
+
+    async def drive():
+        app = PanelApp(trace, replay=False, root=None)
+        async with app.run_test(size=(140, 40)) as pilot:
+            assert app.notifier.visible() == [] and len(app.notifier.history) == 1
+            with open(trace, "a") as handle:
+                handle.write(json.dumps({**old, "seq": 2, "tool": "new_tool", "ts": time.time()}) + "\n")
+            await pilot.pause(0.4)
+            assert [notice.text for notice in app.notifier.visible()] == ["✗ new_tool"]
+            assert "new_tool" in app.draw(140, 40).plain
+            await pilot.press("N")
+            text = app.draw(140, 40).plain
+            assert "old_tool" in text and "new_tool" in text and app.notifier.unread == 0
+
+    asyncio.run(drive())
+
+
+def test_agent_status_reads_the_trace():
+    from minebot.panel.model import PanelState, apply
+    from minebot.panel.views.common import Frame, agent_status
+
+    state = PanelState()
+    now = time.time()
+
+    def status(control=None):
+        return agent_status(Frame(state=state, now=now, anim=0.0, live=True, control=control))[0]
+
+    assert status() == "等待指令"
+    apply(state, {"seq": 1, "ts": now, "event": "responses_http_attempt", "attempt": 1})
+    assert status() == "思考中"
+    apply(state, {"seq": 2, "ts": now, "event": "tool_invoke", "tool": "mine", "tool_call_id": "c1"})
+    assert status() == "行动中"
+    assert status("已暂停") == "已暂停"
+    apply(state, {"seq": 3, "ts": now, "event": "session_terminal", "status": "quit"})
+    assert status() == "已结束"

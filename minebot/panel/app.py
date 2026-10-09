@@ -24,11 +24,12 @@ from textual.widget import Widget
 from textual.widgets import Input
 
 from minebot.panel import prefs
+from minebot.panel.notices import Notifier
 from minebot.panel.model import PanelState, Timeline, apply
 from minebot.panel.source import TraceFollower, latest_trace, load_records, resolve_trace
 from minebot.panel import theme
 from minebot.panel.theme import BACKGROUND
-from minebot.panel.views import PAGES, draw_help, draw_too_small, render
+from minebot.panel.views import PAGES, draw_help, draw_notice_history, draw_notices, draw_too_small, render
 from minebot.panel.views import actions as actions_view
 from minebot.panel.views import events as events_view
 from minebot.panel.views.common import Frame
@@ -98,6 +99,7 @@ class PanelApp(App):
         Binding("p", "toggle_pause", show=False),
         Binding("exclamation_mark", "cancel_action", show=False),
         Binding("question_mark", "help", show=False),
+        Binding("N", "notices", show=False),
         Binding("T", "cycle_theme", show=False),
         *[Binding(str(index + 1), f"goto({index})", show=False) for index in range(len(PAGES))],
     ]
@@ -119,6 +121,8 @@ class PanelApp(App):
         self.agent_paused = False
         self._cancel_armed = 0.0
         self.show_help = False
+        self.show_notices = False
+        self.notifier = Notifier()
         self.prefs = prefs.load()
         if self.prefs.get("theme") and not os.environ.get("NO_COLOR") and not os.environ.get("MINEBOT_THEME"):
             theme.set_theme(self.prefs["theme"])
@@ -155,7 +159,11 @@ class PanelApp(App):
             self.state = PanelState()
             self.raw = deque(maxlen=RAW_LIMIT)
             self.follower = TraceFollower(trace)
+            self.notifier = Notifier()
             self._ingest()
+            for notice in self.notifier.history:  # what happened before we opened is history, not news
+                notice.shown_at = 0.0
+            self.notifier.read_all()
             self.playing = True
             self.speed = 1
 
@@ -169,6 +177,7 @@ class PanelApp(App):
         for record in records:
             apply(self.state, record)
             self.raw.append(record)
+            self.notifier.observe(record)
 
     def compose(self) -> ComposeResult:
         self.view = PanelView(self)
@@ -266,8 +275,12 @@ class PanelApp(App):
         if width < MIN_SIZE[0] or height < MIN_SIZE[1]:
             return draw_too_small(frame, width, height, MIN_SIZE).to_text()
         canvas = render(frame, width, height, self.detail, self.detail_scroll)
-        if self.show_help:
+        if self.show_notices:
+            draw_notice_history(canvas, list(self.notifier.history))
+        elif self.show_help:
             draw_help(canvas, controllable=frame.control is not None, replay=self.replay)
+        elif not self.replay:
+            draw_notices(canvas, self.notifier.visible(), self.notifier.unread)
         return canvas.to_text()
 
     # ------------------------------------------------------------ actions
@@ -326,8 +339,8 @@ class PanelApp(App):
         if self.command_open:
             self._close_command()
             return
-        if self.show_help:
-            self.show_help = False
+        if self.show_help or self.show_notices:
+            self.show_help = self.show_notices = False
             return
         if self.detail is not None:
             self.detail = None
@@ -359,7 +372,12 @@ class PanelApp(App):
     # ------------------------------------------------------------ presentation
     def action_help(self) -> None:
         if not self.command_open:
-            self.show_help = not self.show_help
+            self.show_help, self.show_notices = not self.show_help, False
+
+    def action_notices(self) -> None:
+        if not self.command_open:
+            self.show_notices, self.show_help = not self.show_notices, False
+            self.notifier.read_all()
 
     def action_cycle_theme(self) -> None:
         if self.command_open:
