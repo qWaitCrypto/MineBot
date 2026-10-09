@@ -1,5 +1,15 @@
 # Responses Agent 内核（2026-10-07）
 
+## 2026-10-09：用户停止当前建房测试
+
+用户明确要求先停止测试。实验根 `logs/house-decor-20261008-231202/` 当前
+attempt-7-upstream-stream-recovery 已标 stopped_by_user，minebot 监控 PAUSED，
+不得自动续跑或重启。检查时 Agent 已因摘要响应缺少有效摘要/终态退出；该失败
+保留在 trace 和日志，没有改写为用户主动退出。Agent 不运行后单独 IPC 只读确认
+Body pathing=false、any_process_active=false，无遗留执行动作。客户端、服务器、
+世界、背包、建筑及任务资料保留，未宣称建房验收成功。记录见根 run.json、当前
+user-stop.json 与 user-stop-body-state.json；本次不继续修代码或启动新测试。
+
 ## Baritone 执行修复（2026-10-09）
 
 用户授权范围：修复已复现的下降捷径清障遗漏、识别重复无进展执行、原生
