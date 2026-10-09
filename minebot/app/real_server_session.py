@@ -657,11 +657,13 @@ async def run_real_server_goal(
             )
             terminal_goal = _session_goal(session, goal)
             truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
-            if truth.satisfied and not (session.parts and session.parts.runtime.native_responses):
+            parts = getattr(session, "parts", None)
+            runtime = getattr(parts, "runtime", None)
+            if truth.satisfied and not bool(getattr(runtime, "native_responses", False)):
                 final = session.complete_current_goal("terminal_truth_satisfied")
                 truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
-            if session.parts is not None:
-                session.parts.runtime.trace.emit(
+            if parts is not None:
+                parts.runtime.trace.emit(
                     "session_terminal",
                     status=final.status,
                     lifecycle=final.lifecycle.value,
@@ -676,7 +678,13 @@ async def run_real_server_goal(
             )
             return truth.exit_code
         finally:
-            await session.aclose()
+            close_session = getattr(session, "aclose", None)
+            if callable(close_session):
+                await close_session()
+            else:
+                close_session_sync = getattr(session, "close", None)
+                if callable(close_session_sync):
+                    close_session_sync()
             sink.close()
             await camera.close()
             await provider.aclose()
@@ -919,9 +927,15 @@ async def run_real_server_interactive(
                 await reader
             with contextlib.suppress(asyncio.CancelledError):
                 await chat_reader
-            await session.aclose()
+            close_session = getattr(session, "aclose", None)
+            if callable(close_session):
+                await close_session()
+            else:
+                close_session_sync = getattr(session, "close", None)
+                if callable(close_session_sync):
+                    close_session_sync()
             trace.close()
-            if session.parts is None:
+            if getattr(session, "parts", None) is None:
                 conversation_session.close()
             state_store.close()
             await camera.close()
@@ -1087,7 +1101,10 @@ async def _run_interactive_loop(
                 return last
             truth = safe_evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last, session=session)
             if truth.satisfied:
-                completed = last if (session.parts and session.parts.runtime.native_responses) else session.complete_current_goal("terminal_truth_satisfied")
+                parts = getattr(session, "parts", None)
+                runtime = getattr(parts, "runtime", None)
+                native_responses = bool(getattr(runtime, "native_responses", False))
+                completed = last if native_responses else session.complete_current_goal("terminal_truth_satisfied")
                 completed_truth = safe_evaluate_terminal_truth(body, truth.goal, completed, session=session)
                 _announce_interactive_terminal(body, completed_truth)
                 last = completed

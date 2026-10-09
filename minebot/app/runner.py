@@ -38,6 +38,8 @@ from minebot.app.execution_lane import (
     SerialExecutionLane,
     ToolExecutionTimeout,
 )
+from minebot.app.body_control import BodyControl
+from minebot.app.decision_client import DecisionClient
 from minebot.app.progress_epoch_adapter import (
     ProgressEpochAdapter,
     _collapsed_epoch_progress_steps,
@@ -1342,9 +1344,15 @@ class AgentRuntime:
         self.last_known_body_state: dict[str, object] | None = None
         self._last_traced_body_event_seq = 0
         self.direct_call_handoffs = {}
-        self._body_control_unknown = False
+        # One physical Body claim for direct calls and plans.  This replaces
+        # the old boolean: an unknown stop is a state that must be recovered
+        # by native confirmation, never by elapsed time.
+        self.body_control = BodyControl(authority)
+        self._body_stop_lock = asyncio.Lock()
         from minebot.app.direct_call_supervision import DirectBuildSupervisor
+        self.decision_client = DecisionClient(emit=self.trace.emit)
         self.direct_build_supervisor = DirectBuildSupervisor(self)
+        self.reflex_manager = None
         self._body_event_trace_lock = threading.Lock()
         self.consecutive_transport_errors = 0
         # A single Body dispatch can surface through several composition
@@ -1360,6 +1368,7 @@ class AgentRuntime:
         self.native_task_outcome = None
         self.native_plan = None
         self._read_lane = SerialExecutionLane(thread_name=f"minebot-read-{agent_name}")
+        self.event_wait_mode = False
         self.native_responses = runner_run is None and getattr(model_provider, "kernel", "sdk") == "responses"
         if self.native_responses:
             from minebot.app.responses_kernel import ResponsesKernel
@@ -1369,7 +1378,9 @@ class AgentRuntime:
                 tools=self._responses_tools, instructions=self._responses_instructions,
                 context=self._responses_context,
                 invoke=self._invoke_responses_tool, emit=self.trace.emit, speak=self._responses_speak,
-                needs_work=lambda: bool(self.agent_context.goal_text.strip()) and self.native_task_outcome is None,
+                needs_work=lambda: (not self.event_wait_mode)
+                and bool(self.agent_context.goal_text.strip())
+                and self.native_task_outcome is None,
                 proxy=getattr(model_provider, "responses_proxy", None),
                 transport=getattr(model_provider, "responses_transport", "websocket"),
                 tool_namespace=getattr(model_provider, "responses_tool_namespace", None),
@@ -1411,7 +1422,7 @@ class AgentRuntime:
     async def _responses_instructions(self) -> str:
         # Cacheable rules are independent of position, inventory, plans and
         # observations. Live facts belong at the end of the native input.
-        return "\n\n".join([
+        parts = [
             self.agent_context.system_prompt,
             "CONTINUOUS_EXECUTION: Use asynchronous calls for long Body tools so independent chat can continue. "
             "Ordinary chat and the end of a model response do not stop physical work. "
@@ -1422,7 +1433,15 @@ class AgentRuntime:
             "Historical tool observations describe the state when observed, not the current inventory or position. "
             "Use observationHandle with observation tools to recover omitted details when needed. "
             "When a current snapshot already answers a question, use it to select the next action; reread only when new evidence is needed.",
-        ])
+        ]
+        if self.reflex_manager is not None:
+            parts.append(
+                "REFLEX_PLANS: For multi-step work use delegate_work with one minebot-work/0.2 JSON plan. "
+                "Use only call, sequence, batch, choice and wait; write concrete intent and preserve complex Body "
+                "arguments. Conditions may use requires as AND. Read and revise the annotated tree with read_reflex "
+                "and control_reflex; never claim _runtime results yourself. repeat and interrupt_when are deferred."
+            )
+        return "\n\n".join(parts)
 
     async def _responses_context(self) -> str:
         # Reads have their own worker: a long write must not freeze context.
@@ -1439,6 +1458,7 @@ class AgentRuntime:
         return "\n\n".join(filter(None, [
             preamble, self.agent_context.skill_preamble(),
             "BODY: " + json.dumps(self.last_known_body_state, ensure_ascii=False, sort_keys=True),
+            "BODY_CONTROL: " + json.dumps(self.body_control.snapshot().to_payload(), ensure_ascii=False, sort_keys=True),
             "CURRENT_PLAN: " + json.dumps(self.native_plan, ensure_ascii=False) if self.native_plan else "",
             "TASK_OUTCOME: " + json.dumps(self.native_task_outcome, ensure_ascii=False) if self.native_task_outcome else "",
         ]))
@@ -1543,14 +1563,61 @@ class AgentRuntime:
                         tool_call_id=observation[0] if observation else None,
                         raw_result=result.to_payload())
 
-    async def run_tool(self, tool: RegisteredTool, callback: Callable[..., Any], *args, timeout_s=None, tool_call_id=None):
-        if tool.sidecar.can_mutate_body and self._body_control_unknown:
-            raise BodyRecoveryRequired("body_control_unknown", facts={"control_unknown": True})
-        if tool.name == "build_structure" and callable(getattr(self.body, "confirm_control_idle", None)):
-            return await self.direct_build_supervisor.run(tool, callback, args,
-                call_id=tool_call_id or str(uuid4()), timeout_s=timeout_s)
-        lane = self._read_lane if self.native_responses and not tool.sidecar.can_mutate_body else self.execution_lane
-        return await lane.run(callback, *args, timeout_s=timeout_s)
+    async def run_tool(
+        self,
+        tool: RegisteredTool,
+        callback: Callable[..., Any],
+        *args,
+        timeout_s=None,
+        tool_call_id=None,
+        claim_holder="agent_call",
+        body_claim_id=None,
+        retain_claim=False,
+    ):
+        claim_id = body_claim_id or tool_call_id or str(uuid4())
+        claim_generation: int | None = None
+        if tool.sidecar.can_mutate_body:
+            control = self.body_control
+            if control.unknown:
+                probe = getattr(self.body, "confirm_control_idle", None)
+                native = None
+                if callable(probe):
+                    try:
+                        native = await self._read_lane.run(probe)
+                    except Exception as exc:
+                        self.trace.emit("body_control_probe_failed", error_type=type(exc).__name__)
+                if not isinstance(native, dict) or native.get("native_stopped") is not True:
+                    raise BodyRecoveryRequired("body_control_unknown", facts={
+                        "control_unknown": True,
+                        "native_stopped": False,
+                    })
+                control.confirm_native_stopped(True)
+            try:
+                claim = control.claim(claim_id, holder=claim_holder)
+                claim_generation = claim.generation
+            except RuntimeError as exc:
+                reason = str(exc)
+                if reason == "body_control_unknown":
+                    raise BodyRecoveryRequired(reason, facts={"control_unknown": True}) from exc
+                raise BodyRecoveryRequired("body_busy", facts={"holder": control.snapshot().to_payload()}) from exc
+        def admitted_callback(*values):
+            from minebot.contract.execution import body_claim_scope, execution_checkpoint
+            execution_checkpoint()
+            if claim_generation is None:
+                return callback(*values)
+            if not self.body_control.owns(claim_id, claim_generation):
+                raise ExecutionCancelled("claim_revoked")
+            with body_claim_scope(claim_generation):
+                return callback(*values)
+        try:
+            if tool.name == "build_structure" and callable(getattr(self.body, "confirm_control_idle", None)):
+                return await self.direct_build_supervisor.run(tool, admitted_callback, args,
+                    call_id=tool_call_id or claim_id, timeout_s=timeout_s)
+            lane = self._read_lane if self.native_responses and not tool.sidecar.can_mutate_body else self.execution_lane
+            return await lane.run(admitted_callback, *args, timeout_s=timeout_s)
+        finally:
+            if tool.sidecar.can_mutate_body and not retain_claim and self.body_control.owns(claim_id, claim_generation):
+                self.body_control.settle(claim_id=claim_id)
 
     async def _drain_responses_calls(self, reason: str) -> None:
         # Physical idle precedes the async wrappers observing cancellation.
@@ -1590,6 +1657,8 @@ class AgentRuntime:
         continuation_budget: ContinuationEpochBudget | None = None,
         review_grant_stop_epoch_id: str | None = None,
     ) -> AgentTurnOutcome:
+        if self.reflex_manager is not None:
+            self.reflex_manager.bind_loop(asyncio.get_running_loop())
         if self.native_responses:
             return await self._run_responses_turn(extra_signals, body_actions_allowed=body_actions_allowed)
         self._turn_intent_kind = intent_kind
@@ -1874,7 +1943,7 @@ class AgentRuntime:
         invalidate_generation: bool = True,
     ) -> JsonObject:
         cancellation_started = time.monotonic()
-        self._body_control_unknown = True
+        self.body_control.mark_stopping()
         supervisor = self.direct_build_supervisor.current
         if supervisor is not None:
             supervisor["cancel_requested"] = True
@@ -1926,7 +1995,10 @@ class AgentRuntime:
                                 "probe_error": type(exc).__name__}
             owner_settled = native_facts.get("native_stopped") is True
         settled = execution_idle and owner_settled
-        self._body_control_unknown = not settled
+        if settled:
+            self.body_control.settle()
+        else:
+            self.body_control.mark_unknown()
         facts: JsonObject = {
             "interrupt_requested": True,
             "cancellation_scope_count": cancellation_scope_count,
@@ -1936,6 +2008,7 @@ class AgentRuntime:
             "execution_idle": execution_idle,
             **owner_facts,
             **native_facts,
+            "body_control": self.body_control.snapshot().to_payload(),
             "settled": settled,
             "reason": reason,
         }
@@ -1994,6 +2067,8 @@ class AgentRuntime:
             await asyncio.sleep(BODY_OWNER_SETTLE_POLL_S)
 
     async def aclose(self) -> None:
+        if self.reflex_manager is not None:
+            await self.reflex_manager.close()
         await self.direct_build_supervisor.close()
         if self.responses_kernel is not None:
             self.responses_kernel.halt()
@@ -2103,6 +2178,12 @@ class AgentRuntime:
             parts.append(preamble)
         if skill_preamble:
             parts.append(skill_preamble)
+        if self.reflex_manager is not None:
+            parts.append(
+                "REFLEX_PLANS: Use delegate_work for multi-step tasks with a minebot-work/0.2 tree "
+                "(call/sequence/batch/choice/wait). Runtime owns _runtime status and real results; "
+                "use read_reflex/control_reflex to inspect or revise it."
+            )
         return "\n\n".join(parts)
 
     def _refresh_dynamic_context(self) -> None:

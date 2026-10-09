@@ -250,7 +250,12 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
         ).to_payload()
 
     try:
-        generation = ctx.authority.next_generation()      # step 2: generation
+        from minebot.contract.execution import current_claim_generation
+        claimed_generation = current_claim_generation()
+        generation = (ctx.authority.next_generation() if claimed_generation is None
+                      else claimed_generation)
+        if not ctx.authority.generation_current(generation):
+            return dict(PREEMPTED_PAYLOAD)
         ctx.authority.fingerprint(ctx.body.get_state())   # step 1: pre fingerprint (validated)
         result = tool.callable(tool_input)                # steps 3-4: execute + await terminal
 

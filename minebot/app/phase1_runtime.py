@@ -23,6 +23,7 @@ from minebot.app.memory import MemoryWorkspace, register_memory_tools
 from minebot.app.skills import SkillWorkspace, register_skill_tools
 from minebot.app.wiki import WikiKnowledge, register_wiki_tools
 from minebot.app.runner import AgentRuntime, RecoveryOutcome, RuntimeTrace
+from minebot.app.reflex_tools import ReflexManager, register_reflex_tools
 from minebot.app.runner import sdk_tool_for
 from minebot.app.observation_artifacts import (
     ToolObservationArchive,
@@ -147,6 +148,12 @@ def build_phase1_agent_runtime(
         ),
     )
     parts.runtime.native_task_workspace = config.task_workspace
+    # Stage 2 reflex management is model-visible only after the runtime exists,
+    # because the tools close over the single Body/Decision owner.
+    reflex_manager = ReflexManager(parts.runtime)
+    parts.runtime.reflex_manager = reflex_manager
+    parts.runtime.event_wait_mode = True
+    register_reflex_tools(registry, reflex_manager)
     context = CompositionContext(
         registry=registry,
         weld_context=parts.runtime.weld_context,
@@ -986,7 +993,8 @@ def _move_to_tool(
     return RegisteredTool(
         "move_to",
         "Travel to a coordinate or coordinate radius through the Body navigation transaction. "
-        "You may choose a waypoint as a planning hypothesis, including unobserved terrain. "
+        "never invent a coordinate for a target you have not observed; you may choose a waypoint "
+        "as a planning hypothesis, including unobserved terrain. "
         "Do not claim an unobserved target exists there. Use explore_for for directed search while "
         "walking, observe_environment to choose useful terrain, and go_to_surface for vertical egress. "
         "This is generic spatial travel: arrival does not prove line of sight, interaction readiness, "

@@ -7,9 +7,8 @@ import os
 import time
 from collections import Counter
 
-import httpx
-
 from minebot.app.construction_facts import read_construction
+from minebot.app.decision_client import DecisionClient, DecisionPriority
 from minebot.contract.execution import tool_observation_scope
 
 TOOL_EXPLANATION = (
@@ -40,12 +39,14 @@ class DirectBuildSupervisor:
             "MINEBOT_DECISION_URL", "http://117.176.14.165:10004/v1/systemone")
         self.suspicion_s = suspicion_s
         self.review_interval_s = review_interval_s
-        self._client = None
+        self._client = getattr(runtime, "decision_client", None) or DecisionClient(
+            url=self.decision_url, emit=runtime.trace.emit
+        )
         self.current = None
 
     async def close(self):
         if self._client is not None:
-            await self._client.aclose()
+            await self._client.close()
 
     async def judge(self, call_id, params, state, world, idle_s):
         request = {"state": {
@@ -73,14 +74,10 @@ class DirectBuildSupervisor:
                                 regression_format="minebot-semantic-regression/1", request=request)
         started = time.monotonic()
         try:
-            if self._client is None:
-                self._client = httpx.AsyncClient(trust_env=False, timeout=2.0)
-            response = await self._client.post(self.decision_url, json=request)
-            response.raise_for_status()
-            raw = response.json()
-            answer = raw.get("answers", {}).get("q", {}).get("choice")
-            choice = answer if answer in CRITERIA else "unknown"
-        except (httpx.HTTPError, ValueError, TypeError):
+            answer = await self._client.ask(request, priority=DecisionPriority.SUPERVISION)
+            raw = answer.raw
+            choice = answer.choice if answer.choice in CRITERIA else "unknown"
+        except (ValueError, TypeError):
             raw, choice = None, "unknown"
         self.runtime.trace.emit("direct_supervision_result", tool_call_id=call_id,
                                 response=raw, choice=choice, elapsed_s=time.monotonic() - started)
@@ -115,7 +112,7 @@ class DirectBuildSupervisor:
             if handoff is not None and isinstance(payload, dict):
                 payload.setdefault("metrics", {})["direct_call_handoff"] = handoff
             if isinstance(payload, dict) and payload.get("metrics", {}).get("control_unknown"):
-                self.runtime._body_control_unknown = True
+                self.runtime.body_control.mark_unknown()
             return result
         finally:
             monitor.cancel()

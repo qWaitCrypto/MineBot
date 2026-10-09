@@ -120,6 +120,22 @@ __all__ = [
 
 # Captured when a Body action is admitted, before its IPC worker starts.
 # This scope labels observations; it does not own or consume terminals.
+_BODY_CLAIM_GENERATION: ContextVar[int | None] = ContextVar("body_claim_generation", default=None)
+
+
+@contextmanager
+def body_claim_scope(generation: int) -> Iterator[None]:
+    token = _BODY_CLAIM_GENERATION.set(generation)
+    try:
+        yield
+    finally:
+        _BODY_CLAIM_GENERATION.reset(token)
+
+
+def current_claim_generation() -> int | None:
+    return _BODY_CLAIM_GENERATION.get()
+
+
 _TOOL_OBSERVATION: ContextVar[tuple[str, Callable[[JsonObject], None]] | None] = ContextVar(
     "minebot_tool_observation", default=None,
 )
