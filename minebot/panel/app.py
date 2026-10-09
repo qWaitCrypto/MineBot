@@ -126,6 +126,7 @@ class PanelApp(App):
         self.notifier = Notifier()
         self.connection: dict[str, Any] | None = None  # set by a launcher-backed shell
         self.tweens = Tweens()
+        self.identity: dict[str, Any] | None = None  # set by a launcher-backed shell
         self.prefs = prefs.load()
         if self.prefs.get("theme") and not os.environ.get("NO_COLOR") and not os.environ.get("MINEBOT_THEME"):
             theme.set_theme(self.prefs["theme"])
@@ -272,7 +273,8 @@ class PanelApp(App):
                      page=self.page, replay=replay, selection=dict(self.selection), raw=raw,
                      control=control, flash=flash[:2] if flash else None,
                      connection=None if self.replay else self.connection,
-                     tweens=None if self.replay else self.tweens)
+                     tweens=None if self.replay else self.tweens,
+                     identity=None if self.replay else self.identity)
 
     def draw(self, width: int, height: int) -> Any:
         frame = self.frame()

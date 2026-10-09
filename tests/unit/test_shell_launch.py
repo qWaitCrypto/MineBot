@@ -896,3 +896,20 @@ def test_counters_glide_to_new_values_and_mark_the_direction():
     assert tweens.value("calls", 20, 1.0 + DURATION_S) == (20, 1)
     assert tweens.value("calls", 20, 1.0 + MARK_S + 0.1) == (20, 0)
     assert tweens.value("calls", 15, 5.0)[1] == -1
+
+
+@pytest.mark.parametrize("width", [90, 120, 200])
+def test_title_row_keeps_the_world_mode_visible_at_every_width(width):
+    from minebot.panel.model import PanelState, apply
+    from minebot.panel.views import render
+    from minebot.panel.views.common import Frame
+
+    state = PanelState()
+    apply(state, {"seq": 1, "ts": time.time(), "event": "body_state", "bot": "MineBotCombat", "health": 5, "food": 18})
+    for disposable, label in ((True, "世界:可改动"), (False, "世界:保护")):
+        frame = Frame(state=state, now=time.time(), anim=0.0, live=True,
+                      identity={"server": "127.0.0.1:25566", "version": "26.1.2", "disposable": disposable})
+        row = render(frame, width, 40).plain_rows()[0]
+        assert label in row and "♥5" in row and "MineBotCombat" in row, row
+        if width >= 200:
+            assert "26.1.2" in row and "@127.0.0.1:25566" in row

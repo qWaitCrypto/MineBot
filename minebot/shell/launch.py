@@ -278,6 +278,8 @@ class Launcher:
             "client_started": self.client_started,
             "client_alive": self.client_alive,
             "connection": dict(self.connection),
+            "disposable": self.disposable if self.environment else None,
+            "server_version": self.server_info.get("version"),
             "client_reused": self.client_reused,
             "agent_paused": self.agent_paused,
         }

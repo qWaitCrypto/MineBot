@@ -53,6 +53,7 @@ class Frame:
     control: str | None = None  # None: read-only; otherwise the control state label
     connection: dict[str, Any] | None = None  # launcher's view of the server connection, when it has one
     tweens: Any = None  # minebot.panel.motion.Tweens on a live panel; None draws values as they are
+    identity: dict[str, Any] | None = None  # launcher facts for the title: server, version, disposable
     flash: tuple[str, str] | None = None  # (tone, text)
 
     def __post_init__(self) -> None:
@@ -156,13 +157,32 @@ def _status_badge(frame: Frame) -> list[tuple[str, Any]]:
     return parts
 
 
+def _identity(frame: Frame, width: int) -> list[tuple[str, Any]]:
+    """The left title segment, shortened to fit: the version goes first, then the server;
+    whether the bot may change the world stays visible the whole session."""
+    bot = [("MINEBOT", theme.BRIGHT), ("  ·  ", theme.MUTED), (frame.state.bot or "—", theme.layer("operator", bold=True))]
+    identity = frame.identity
+    if identity is None:
+        return bot + ([("  ·  ", theme.MUTED), ("由意图到世界", theme.layer("baritone", bold=True))] if width >= 160 else [])
+    world: list[tuple[str, Any]] = []
+    if identity.get("disposable") is not None:
+        world = [("  ·  ", theme.MUTED),
+                 ("世界:可改动", theme.WARN) if identity["disposable"] else ("世界:保护", theme.OK)]
+    server = [(f"@{identity['server']}", theme.layer("operator"))] if identity.get("server") else []
+    version = [("  ·  ", theme.MUTED), (str(identity["version"]), theme.MUTED)] if identity.get("version") else []
+    budget = width // 2 - 2
+    for candidate in (bot + server + version + world, bot + server + world, bot + world):
+        if sum(_cells(text) for text, _ in candidate) <= budget:
+            return candidate
+    return bot + world
+
+
 def draw_chrome(canvas: Canvas, frame: Frame) -> tuple[int, int, int, int]:
     """Title, legend, tabs and the shell status line; returns the content rectangle."""
     state, width, height = frame.state, canvas.width, canvas.height
     origin = state.first_ts or frame.now
-    # title
-    left = [("MINEBOT", theme.BRIGHT), ("  ·  ", theme.MUTED), (state.bot or "—", theme.layer("operator", bold=True)),
-            ("  ·  ", theme.MUTED), ("由意图到世界", theme.layer("baritone", bold=True))]
+    # title: identity on the left, what the Agent is doing in the middle, health and time on the right
+    left = _identity(frame, width)
     canvas.runs(2, 0, left, width // 2)
     blink = int(frame.anim * 2) % 2 == 0
     if frame.live and state.terminal is None:
@@ -171,8 +191,16 @@ def draw_chrome(canvas: Canvas, frame: Frame) -> tuple[int, int, int, int]:
         badge = [("■", theme.MUTED), (" 已结束 ", theme.MUTED)]
     else:
         badge = [("▶" if frame.mode != "PAUSED" else "❚❚", theme.WARN), (f" {frame.mode} ", theme.tone("warn", bold=True))]
-    right = [(fit(frame.title, max(10, width // 3)), theme.MUTED), ("   ", None), *badge,
-             (clock(frame.now - origin), theme.BRIGHT)]
+    right: list[tuple[str, Any]] = []
+    if frame.identity is None:
+        right += [(fit(frame.title, max(10, width // 3)), theme.MUTED), ("   ", None)]
+    health, food = state.body.get("health"), state.body.get("food")
+    if isinstance(health, (int, float)):
+        right += [("♥", theme.FAIL), (f"{health:.0f}", theme.tone("fail" if health <= 6 else "text", bold=health <= 6))]
+        if isinstance(food, (int, float)):
+            right += [("  食", theme.MUTED), (f"{food:.0f}", theme.tone("warn" if food <= 6 else "text"))]
+        right.append(("   ", None))
+    right += [*badge, (clock(frame.now - origin), theme.BRIGHT)]
     used = sum(_cells(text) for text, _ in right)
     canvas.runs(max(0, width - used - 2), 0, right)
     if frame.live:

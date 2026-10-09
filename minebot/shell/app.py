@@ -80,6 +80,9 @@ class ShellApp(PanelApp):
             elif time.monotonic() - self._ready_at >= READY_HOLD_S:
                 self._load(self.launcher.trace_path, replay=False)
                 self.title_text = f"{self.launcher.bot}@{self.launcher.server}"
+                self.identity = {"server": self.launcher.server,
+                                 "version": (getattr(self.launcher, "server_info", None) or {}).get("version"),
+                                 "disposable": getattr(self.launcher, "disposable", None)}
                 self.stage = "panel"
                 self.log_index = None
                 self.notify_flash(": 对机器人说话 · p 暂停 · !! 取消动作 · q 退出", "ok", 6.0)

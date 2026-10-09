@@ -288,6 +288,8 @@ class RemoteLauncher:
         self.client_started = False
         self.client_alive = True
         self.connection: dict[str, Any] = {"state": "unknown", "reason": "", "since": 0.0}
+        self.disposable: bool | None = None
+        self.server_info: dict[str, Any] = {}
         self._alive = False
         self._poll_s = poll_s
         self._client = ControlClient(self.run_dir)
@@ -339,6 +341,9 @@ class RemoteLauncher:
         self.client_started = bool(snapshot.get("client_started"))
         self.client_alive = bool(snapshot.get("client_alive", True))
         self.connection = snapshot.get("connection") or self.connection
+        self.disposable = snapshot.get("disposable")
+        if snapshot.get("server_version"):
+            self.server_info = {"version": snapshot["server_version"]}
         self._alive = bool(snapshot.get("session_alive"))
         self.phase = snapshot.get("phase", self.phase)
 
