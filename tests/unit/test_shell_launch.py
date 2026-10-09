@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import socket
 import struct
 import sys
@@ -82,8 +83,10 @@ FAKE_SESSION = textwrap.dedent('''
 
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
-    """Never read the real ~/.config/minebot servers or accounts."""
+    """Never read the real ~/.config/minebot, nor MINEBOT_* exported by the developer's shell."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    for key in [key for key in os.environ if key.startswith(("MINEBOT_", "OPENAI_"))]:
+        monkeypatch.delenv(key)
     return tmp_path / "config" / "minebot"
 
 
@@ -628,6 +631,14 @@ def test_official_login_refreshes_and_only_the_client_gets_the_token(tmp_path, f
     token = client_env["MINEBOT_CLIENT_ACCESS_TOKEN"]
     for name in ("launch.json", "trace.jsonl", "agent.log"):
         assert token not in (launcher.run_dir / name).read_text(), name
+
+
+def test_shell_variables_overriding_the_profile_are_called_out(tmp_path, fake_server, monkeypatch):
+    monkeypatch.setenv("MINEBOT_LLM_MODEL", "from-shell")
+    launcher = _launcher(tmp_path, fake_server, _free_port())
+    assert launcher.run(start=0, stop=1)
+    assert launcher.steps[0].status == "warn" and launcher.model == "from-shell"
+    assert any("MINEBOT_LLM_MODEL" in text for tone, text in launcher.steps[0].lines if tone == "warn")
 
 
 def test_offline_bot_launch_creates_no_account_files(tmp_path, fake_server, isolated_config):
