@@ -191,6 +191,8 @@ class Canvas:
             self.put(start + index, y, SPARK[max(0, min(len(SPARK) - 1, level))], style)
 
     def to_text(self) -> Text:
+        from minebot.panel.theme import themed
+
         text = Text(no_wrap=True, overflow="crop", end="")
         for row_index in range(self.height):
             chars, styles = self.chars[row_index], self.styles[row_index]
@@ -200,11 +202,11 @@ class Canvas:
                     continue
                 if style is not run_style and style != run_style:
                     if run:
-                        text.append("".join(run), run_style)
+                        text.append("".join(run), themed(_style(run_style)))
                     run, run_style = [], style
                 run.append(char)
             if run:
-                text.append("".join(run), run_style)
+                text.append("".join(run), themed(_style(run_style)))
             if row_index + 1 < self.height:
                 text.append("\n")
         return text

@@ -641,3 +641,70 @@ def test_expired_login_fails_the_account_step_with_a_fix(tmp_path, isolated_conf
         launch_module.AccountStore = original
     step = launcher.steps[1]
     assert step.status == "fail" and "invalid_grant" in step.error and "minebot login" in step.hint
+
+
+# ------------------------------------------------------------------ themes, help, small terminals
+
+@pytest.mark.parametrize("name", ["dark", "light", "contrast", "mono"])
+def test_every_theme_restyles_the_whole_canvas(name):
+    from minebot.panel import theme
+
+    canvas = Canvas(40, 3)
+    canvas.box(0, 0, 40, 3, theme.layer("agent", bold=True), title=[("标题", theme.layer("agent", dim=True))])
+    canvas.text(2, 1, "ok", theme.OK)
+    canvas.text(6, 1, "muted", theme.MUTED)
+    canvas.text(14, 1, "row", theme.on("agent"))
+    try:
+        theme.set_theme(name)
+        spans = canvas.to_text().spans
+        colors = {span.style.color.triplet.hex for span in spans if span.style and span.style.color}
+        if name == "mono":
+            assert not colors, "NO_COLOR must not emit colours"
+            assert any(span.style.reverse for span in spans if span.style), "highlights use reverse video"
+        elif name == "light":
+            assert colors and not colors & {"#87d787", "#5fd75f", "#6c7a89"}, colors
+        assert theme.background() == {"dark": "#0b0f14", "light": "#f6f8fa", "contrast": "#000000",
+                                      "mono": "#0b0f14"}[name]
+    finally:
+        theme.set_theme("dark")
+
+
+def test_no_color_selects_mono():
+    from minebot.panel import theme
+
+    assert theme.default_theme({"NO_COLOR": "1", "MINEBOT_THEME": "light"}) == "mono"
+    assert theme.default_theme({"MINEBOT_THEME": "contrast"}) == "contrast"
+    assert theme.default_theme({}) == "dark"
+
+
+def test_panel_help_theme_and_small_terminal(tmp_path, isolated_config, monkeypatch):
+    from minebot.panel import prefs, theme
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("MINEBOT_THEME", raising=False)
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(json.dumps({"seq": 1, "ts": time.time(), "event": "interactive_ready"}) + "\n")
+
+    async def drive():
+        app = PanelApp(trace, replay=False, root=None)
+        async with app.run_test(size=(120, 40)) as pilot:
+            assert app.flash is not None and "?" in app.flash[1], "first opens show the help hint"
+            await pilot.press("question_mark")
+            assert "快捷键" in app.draw(120, 40).plain
+            assert "暂停 / 继续" not in app.draw(120, 40).plain, "read-only panels don't list control keys"
+            await pilot.press("escape")
+            assert not app.show_help
+            await pilot.press("T")
+            assert theme.active_theme() == "light"
+            await pilot.press("3")
+            assert "放大终端" in app.draw(60, 20).plain
+
+    try:
+        asyncio.run(drive())
+        saved = prefs.load()
+        assert saved["theme"] == "light" and saved["page"] == 2 and saved["help_hints"] == 1
+        theme.set_theme("dark")
+        PanelApp(trace, replay=False, root=None)
+        assert theme.active_theme() == "light", "the theme is remembered"
+    finally:
+        theme.set_theme("dark")

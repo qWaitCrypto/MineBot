@@ -23,11 +23,12 @@ from textual.binding import Binding
 from textual.widget import Widget
 from textual.widgets import Input
 
+from minebot.panel import prefs
 from minebot.panel.model import PanelState, Timeline, apply
 from minebot.panel.source import TraceFollower, latest_trace, load_records, resolve_trace
 from minebot.panel import theme
 from minebot.panel.theme import BACKGROUND
-from minebot.panel.views import PAGES, render
+from minebot.panel.views import PAGES, draw_help, draw_too_small, render
 from minebot.panel.views import actions as actions_view
 from minebot.panel.views import events as events_view
 from minebot.panel.views.common import Frame
@@ -38,6 +39,11 @@ RAW_LIMIT = 20000
 SPEEDS = (1, 4, 16, 64)
 FLASH_S = 4.0
 CANCEL_ARM_S = 1.5
+HELP_HINTS = 3  # show the "? 快捷键" hint on the first few opens only
+MIN_SIZE = (80, 24)
+
+
+THEME_LABELS = {"dark": "深色", "light": "浅色", "contrast": "高对比", "mono": "无色"}
 
 
 class Controller(Protocol):
@@ -91,6 +97,8 @@ class PanelApp(App):
         Binding("colon,t", "command", show=False),
         Binding("p", "toggle_pause", show=False),
         Binding("exclamation_mark", "cancel_action", show=False),
+        Binding("question_mark", "help", show=False),
+        Binding("T", "cycle_theme", show=False),
         *[Binding(str(index + 1), f"goto({index})", show=False) for index in range(len(PAGES))],
     ]
 
@@ -110,6 +118,10 @@ class PanelApp(App):
         self.history_index = 0
         self.agent_paused = False
         self._cancel_armed = 0.0
+        self.show_help = False
+        self.prefs = prefs.load()
+        if self.prefs.get("theme") and not os.environ.get("NO_COLOR") and not os.environ.get("MINEBOT_THEME"):
+            theme.set_theme(self.prefs["theme"])
         self.replay = replay
         self.follower = None
         self.timeline = None
@@ -166,6 +178,16 @@ class PanelApp(App):
         yield self.command
 
     def on_mount(self) -> None:
+        self._apply_background()
+        page = int(self.prefs.get("page") or 0)
+        self.page = page if 0 <= page < len(PAGES) else 0
+        if self.prefs.get("speed") in SPEEDS:
+            self.speed = self.prefs["speed"]
+        hints = int(self.prefs.get("help_hints") or 0)
+        if hints < HELP_HINTS:
+            self.prefs["help_hints"] = hints + 1
+            self._save_prefs()
+            self.notify_flash("按 ? 看快捷键", "ok", 5.0)
         self.set_interval(1 / FPS, self._tick)
         self.set_interval(POLL_S, self._poll)
         if self.root is not None:
@@ -241,13 +263,19 @@ class PanelApp(App):
     def draw(self, width: int, height: int) -> Any:
         frame = self.frame()
         self._frame = frame
+        if width < MIN_SIZE[0] or height < MIN_SIZE[1]:
+            return draw_too_small(frame, width, height, MIN_SIZE).to_text()
         canvas = render(frame, width, height, self.detail, self.detail_scroll)
+        if self.show_help:
+            draw_help(canvas, controllable=frame.control is not None, replay=self.replay)
         return canvas.to_text()
 
     # ------------------------------------------------------------ actions
     def action_goto(self, index: int) -> None:
         self.page = index
         self.detail = None
+        self.prefs["page"] = index
+        self._save_prefs()
 
     def action_page(self, step: int) -> None:
         self.action_goto((self.page + step) % len(PAGES))
@@ -298,6 +326,9 @@ class PanelApp(App):
         if self.command_open:
             self._close_command()
             return
+        if self.show_help:
+            self.show_help = False
+            return
         if self.detail is not None:
             self.detail = None
         else:
@@ -322,6 +353,35 @@ class PanelApp(App):
     def action_speed(self, step: int) -> None:
         index = SPEEDS.index(self.speed) if self.speed in SPEEDS else 0
         self.speed = SPEEDS[max(0, min(len(SPEEDS) - 1, index + step))]
+        self.prefs["speed"] = self.speed
+        self._save_prefs()
+
+    # ------------------------------------------------------------ presentation
+    def action_help(self) -> None:
+        if not self.command_open:
+            self.show_help = not self.show_help
+
+    def action_cycle_theme(self) -> None:
+        if self.command_open:
+            return
+        names = theme.THEMES
+        name = theme.set_theme(names[(names.index(theme.active_theme()) + 1) % len(names)])
+        self._apply_background()
+        self.prefs["theme"] = name
+        self._save_prefs()
+        self.notify_flash(f"主题：{THEME_LABELS.get(name, name)}", "ok", 2.0)
+
+    def _apply_background(self) -> None:
+        color = theme.background()
+        try:
+            self.screen.styles.background = color
+            self.view.styles.background = color
+            self.command.styles.background = color
+        except Exception:  # not mounted yet
+            pass
+
+    def _save_prefs(self) -> None:
+        prefs.save(self.prefs)
 
     def action_step(self, count: int) -> None:
         if self.replay:

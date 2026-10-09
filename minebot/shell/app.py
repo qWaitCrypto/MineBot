@@ -23,7 +23,7 @@ from typing import Any
 from textual.binding import Binding
 
 from minebot.panel import theme
-from minebot.panel.app import PanelApp
+from minebot.panel.app import MIN_SIZE, PanelApp
 from minebot.panel.canvas import BOX_HEAVY, Canvas
 from minebot.panel.views import launch as launch_view
 from minebot.shell.control import ControlError, RemoteLauncher, live_runs, resolve_run
@@ -94,17 +94,29 @@ class ShellApp(PanelApp):
     # ------------------------------------------------------------ drawing
     def draw(self, width: int, height: int) -> Any:
         if self.stage == "panel" and self.log_index is None:
-            text = super().draw(width, height)
             if not self.confirm_quit:
-                return text
+                return super().draw(width, height)
             canvas = self._panel_canvas(width, height)
             self._draw_confirm(canvas)
             return canvas.to_text()
+        if width < MIN_SIZE[0] or height < MIN_SIZE[1]:
+            return self._small_launch(width, height).to_text()
         canvas = Canvas(width, height)
         launch_view.draw(canvas, self.launcher, time.monotonic(), log=self._log_view())
         if self.confirm_quit:
             self._draw_confirm(canvas)
         return canvas.to_text()
+
+    def _small_launch(self, width: int, height: int) -> Canvas:
+        canvas = Canvas(width, height)
+        step = self.launcher.current or self.launcher.steps[-1]
+        done = sum(1 for item in self.launcher.steps if item.status in ("ok", "warn"))
+        canvas.text(0, 0, f"MINEBOT 启动 {done}/{len(self.launcher.steps)}", theme.BRIGHT)
+        tone = "fail" if step.status == "fail" else "ok"
+        canvas.text(0, 1, f"{step.label} · {step.error or step.summary or '进行中'}"[:width], theme.tone(tone))
+        if height > 2:
+            canvas.text(0, height - 1, f"放大终端看完整启动界面（至少 {MIN_SIZE[0]}×{MIN_SIZE[1]}）"[:width], theme.MUTED)
+        return canvas
 
     def _panel_canvas(self, width: int, height: int) -> Canvas:
         from minebot.panel.views import render
