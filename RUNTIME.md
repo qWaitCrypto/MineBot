@@ -77,6 +77,14 @@ yielded，Body 无待执行动作。登高寻路失败并拆掉住宅两格东�
 与历史保留，以及最终完成。Responses/session 回归 77 项、11 个子场景通过。
 此问题属于 Agent 生命周期，不是 Baritone 执行故障。
 
+修复提交 `71ef1e1` 后正常 /quit，仅重启 Agent，SQLite 一致备份继承到
+`attempt-6-native-continue`，原客户端和服务器保持运行；一次授权 /continue
+恢复同一建房任务。此时任务/计划及观察归档保留，HTTP wire 历史不跨进程移植。
+实际三次 move_to 均返回 arrived（703 / 1649 / 934 ms），位置从屋外
+[10.535,119,-39.502] 变到一层 [5.501,120,-40.436]，确认不是只发起调用。
+完整启动/介入及观测以 run.json、当前 trace 和 resume-verification.json 为准；
+住宅仍未验收完成。
+
 ## 2026-10-09：用户授权第三方 API 恢复同一建房实验
 
 用户明确先不处理官方套餐，应用 610c14b 后使用第三方 API 继续原任务。
