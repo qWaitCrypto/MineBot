@@ -174,6 +174,8 @@ class AccountStore:
 
     def ensure_fresh(self, name: str) -> Account | None:
         """The stored account with a usable Minecraft token, refreshing it when needed."""
+        if not self._path(name).exists():
+            return None  # offline bot: touch nothing on disk
         with self._lock():
             account = self.load(name)
             if account is None or account.kind != "msa" or account.fresh(self.clock()):

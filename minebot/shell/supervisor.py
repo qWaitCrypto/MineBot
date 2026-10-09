@@ -91,6 +91,11 @@ def spawn(options: LaunchOptions, *, client_command: list[str] | None = None,
           session_command: list[str] | None = None, timeout_s: float = 15.0) -> subprocess.Popen[bytes]:
     """Start a supervisor for ``options.run_dir`` and wait until its control socket answers."""
     assert options.run_dir is not None
+    # The supervisor runs from the repository root; paths typed on the command line are relative to here.
+    for name in ("env_file", "servers_file", "accounts_dir"):
+        value = getattr(options, name)
+        if value is not None:
+            setattr(options, name, Path(value).expanduser().resolve())
     run_dir = options.run_dir
     run_dir.mkdir(parents=True, exist_ok=True)
     write_options(run_dir / OPTIONS_NAME, options, client_command=client_command, session_command=session_command)

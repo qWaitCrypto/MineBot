@@ -169,6 +169,17 @@ def shell_environment(environment: Mapping[str, str], options: LaunchOptions) ->
     return result
 
 
+def _shell_overrides(path: Path | None) -> list[str]:
+    """Keys set in both the profile file and this process's environment with different values."""
+    if path is None:
+        return []
+    try:
+        from_file = load_runtime_environment(path, environ={})
+    except LocalLauncherError:
+        return []
+    return sorted(key for key, value in from_file.items() if key in os.environ and os.environ[key] != value)
+
+
 class Launcher:
     def __init__(self, options: LaunchOptions, *, root: Path = ROOT, launch_client_command: list[str] | None = None,
                  session_command: list[str] | None = None) -> None:
@@ -328,6 +339,10 @@ class Launcher:
             self.profile_name = profile.name
         self.environment = shell_environment(loaded, options)
         step.note("ok" if self.env_path else "warn", f"配置 {self.env_path or '未找到，使用当前环境变量'}")
+        overridden = _shell_overrides(self.env_path)
+        if overridden:
+            step.note("warn", f"当前终端的环境变量覆盖了配置文件：{', '.join(overridden[:4])}"
+                              + (f" 等 {len(overridden)} 项" if len(overridden) > 4 else ""))
         if profile is not None:
             step.note("ok", f"服务器档案 {profile.name}（{book.path}）")
         try:

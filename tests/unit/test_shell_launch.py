@@ -390,6 +390,21 @@ def test_supervisor_survives_its_front_end_and_attach_takes_control(tmp_path, fa
             process.kill()
 
 
+def test_supervisor_resolves_relative_paths_from_the_callers_directory(tmp_path, monkeypatch):
+    from minebot.shell.supervisor import OPTIONS_NAME, read_options, spawn
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rel.env").write_text("MINEBOT_REAL_BOT=Bot1\n")
+    options = LaunchOptions(env_file=Path("rel.env"), run_dir=tmp_path / "run", server="127.0.0.1:1")
+    process = spawn(options)
+    try:
+        saved, _, _ = read_options(tmp_path / "run" / OPTIONS_NAME)
+        assert saved.env_file == tmp_path / "rel.env"
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
 def test_supervisor_reports_launch_failure_remotely(tmp_path):
     from minebot.shell.control import RemoteLauncher
 
@@ -613,6 +628,12 @@ def test_official_login_refreshes_and_only_the_client_gets_the_token(tmp_path, f
     token = client_env["MINEBOT_CLIENT_ACCESS_TOKEN"]
     for name in ("launch.json", "trace.jsonl", "agent.log"):
         assert token not in (launcher.run_dir / name).read_text(), name
+
+
+def test_offline_bot_launch_creates_no_account_files(tmp_path, fake_server, isolated_config):
+    launcher = _launcher(tmp_path, fake_server, _free_port())
+    assert launcher.run(start=0, stop=2)
+    assert launcher.account_kind == "offline" and not (isolated_config / "accounts").exists()
 
 
 def test_official_login_without_the_game_explains_why(tmp_path, isolated_config):
