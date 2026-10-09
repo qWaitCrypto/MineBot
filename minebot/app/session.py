@@ -1068,6 +1068,14 @@ class AgentSession:
             if self.task_workspace is not None and self.task_workspace.current_task is not None:
                 self.task_workspace.resume()
                 self._sync_task_context()
+            runtime = self.parts.runtime
+            outcome = getattr(runtime, "native_task_outcome", None)
+            if (self.has_active_goal and getattr(runtime, "native_responses", False)
+                    and outcome is not None and outcome["status"] == "blocked"):
+                # Explicit continuation reopens the same goal in both durable
+                # task state and native action admission. Keep history/plan.
+                runtime.native_task_outcome = None
+                self._trace("native_task_resumed", previous_status="blocked", reason="user_continue")
             if self._suspended_turn_request is not None:
                 request_text, request_sender = self._suspended_turn_request
                 request_payload = json.dumps(

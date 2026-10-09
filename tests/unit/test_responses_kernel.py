@@ -727,6 +727,78 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.aclose()
 
+    async def test_continue_reopens_blocked_native_task_without_resetting_plan_or_history(self):
+        from minebot.app.session import AgentSession, SessionCommand
+        from minebot.app.wiring import build_agent_runtime
+        from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
+        from minebot.app.tasks import TaskWorkspace
+        from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
+        from minebot.contract import ToolResult
+        from tests.unit.test_agent_runner_spine import FakeBody
+        from pathlib import Path
+        import tempfile
+
+        for guidance in ("", "Continue ground work first"):
+            with self.subTest(guidance=guidance), tempfile.TemporaryDirectory() as directory:
+                store = RuntimeStateStore(Path(directory) / "state.sqlite3")
+                workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot"))
+                body, registry, moves = FakeBody(), ToolRegistry(), []
+                def move(params):
+                    moves.append(params)
+                    body.x = 3.0
+                    return ToolResult(True, "arrived", can_retry=False)
+                registry.register(RegisteredTool("work", "Move", {"type": "object", "properties": {}},
+                    move, ToolSidecar("work", False, body_mutating=True)))
+                async def on_send(event, wire):
+                    n = len(wire.sent)
+                    wire.feed(created(f"r{n}"))
+                    if n in (1, 4):
+                        finish = call(f"finish{n}", "finish_task")
+                        finish["item"]["arguments"] = json.dumps({
+                            "status": "blocked" if n == 1 else "complete",
+                            "summary": "Route obstructed" if n == 1 else "Arrived",
+                            "evidence": ["route failed" if n == 1 else "position checked"]})
+                        wire.feed(finish)
+                    elif n == 3:
+                        wire.feed(call("resumed-move"))
+                    wire.feed(terminal(f"r{n}"))
+                wire = Wire(on_send)
+                provider = SimpleNamespace(kernel="responses", responses_connection_config=lambda: (
+                    SimpleNamespace(responses=SimpleNamespace(connect=lambda **kw: wire)), "test", {}, 2))
+                def make_parts(goal):
+                    parts = build_agent_runtime(body=body, registry=registry, goal_text=goal, model_provider=provider)
+                    parts.runtime.native_task_workspace = workspace
+                    return parts
+                session = AgentSession(make_parts, task_workspace=workspace)
+                session.submit(SessionCommand.start("Move and verify"))
+                try:
+                    await asyncio.wait_for(session.step(), 10)
+                    runtime = session.parts.runtime
+                    task_id = workspace.current_task.task_id
+                    workspace.update_plan(expected_revision=0, summary="Preserve this plan",
+                        steps=[{"title": "Move"}, {"title": "Verify"}])
+                    self.assertEqual(runtime.native_task_outcome["status"], "blocked")
+                    # A read/chat does not remove the terminal action restriction.
+                    rejected = await runtime._invoke_responses_tool("work", "{}", "before-resume")
+                    self.assertEqual(rejected["reason"], "task_finished")
+                    self.assertEqual(moves, [])
+                    session.submit(SessionCommand.continue_(guidance))
+                    await asyncio.wait_for(session.step(), 10)
+                    self.assertIs(session.parts.runtime, runtime)
+                    self.assertEqual(len(moves), 1)
+                    self.assertEqual(body.x, 3.0)
+                    self.assertEqual(store.get_plan(task_id).summary, "Preserve this plan")
+                    self.assertEqual(store.get_task(task_id).status.value, "completed")
+                    history = [item for event in wire.sent for item in event.get("input", [])]
+                    self.assertTrue(any(item.get("call_id") == "finish1" for item in history))
+                    outputs = {item["call_id"]: json.loads(item["output"]) for item in history
+                               if item.get("type") == "function_call_output"}
+                    self.assertTrue(outputs["resumed-move"]["success"])
+                    self.assertTrue(any(e["event"] == "native_task_resumed" for e in runtime.trace.snapshot()))
+                finally:
+                    await session.aclose()
+                    store.close()
+
     async def test_unfinished_goal_continues_after_text_and_finishes_from_tool_evidence(self):
         from minebot.app.session import AgentSession, SessionCommand
         from minebot.app.wiring import build_agent_runtime

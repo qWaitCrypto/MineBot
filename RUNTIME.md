@@ -63,6 +63,20 @@ yielded，Body 无待执行动作。登高寻路失败并拆掉住宅两格东�
 发起异步 dig_up；这只是恢复执行证据，不能称为整轮建房成功。完整介入及
 进程记录以实验根 run.json 和 current_attempt 为准。
 
+## 2026-10-09：同进程续跑的动作准入修复
+
+用户要求继续完善住宅后，旧会话实际没有移动：两次 `move_to` 被 Agent
+入口拒绝为 `task_finished`，位置不变，没有派发到 Body。`/continue` 将 SQLite
+任务恢复为 running，却遗漏 Responses runtime 的上一轮 blocked outcome，导致
+模型看到 running、能读取和更新计划，但身体动作被旧结果拒绝。
+
+修复只在明确 `/continue` 且存在原任务时清除 native blocked outcome；保留任务、
+计划、Responses 历史与已结束调用，不重放物理动作。complete 结果不因这条分支
+清除，普通读取或工具请求不会解除阻塞。新增同一 session 先 finish_task blocked、
+再带/不带指导续跑的集成回归，验证旧动作拒绝、续跑后实际调用和位置变化、原计划
+与历史保留，以及最终完成。Responses/session 回归 77 项、11 个子场景通过。
+此问题属于 Agent 生命周期，不是 Baritone 执行故障。
+
 ## 2026-10-09：用户授权第三方 API 恢复同一建房实验
 
 用户明确先不处理官方套餐，应用 610c14b 后使用第三方 API 继续原任务。
