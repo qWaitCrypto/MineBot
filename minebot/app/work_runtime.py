@@ -13,7 +13,7 @@ import copy
 import inspect
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Protocol
 
@@ -23,6 +23,18 @@ from minebot.app.decision_client import DecisionClient, DecisionPriority
 
 NodeStatus = Literal["pending", "active", "waiting", "blocked", "done", "cancelled"]
 ConditionStatus = Literal["satisfied", "pending", "unknown"]
+
+WORK_FIELD_VOCABULARY: dict[str, str] = {
+    "pos": "current Body position [x,y,z] from the latest complete state read",
+    "food": "survival food level; the provider's native range and current value are authoritative",
+    "health": "survival health level from the latest Body state",
+    "inventory_counts": "complete item counts when inventory_complete is true",
+    "inventory_complete": "true means the count map was read in full; false/null means absence is unknown",
+    "inventory_includes_selected": "whether inventory_counts already includes the selected mainhand stack",
+    "selected_item": "selected mainhand item; null is meaningful only when selected_item_known is true",
+    "selected_item_known": "true means the selected mainhand slot was observed",
+    "pending_action_count": "number of Python-side action handles; not progress or success evidence",
+}
 
 
 class WorkPlanError(ValueError):
@@ -87,6 +99,58 @@ def _node_id(node: dict[str, Any], path: str) -> str:
     return str(value) if isinstance(value, str) and value else path
 
 
+def _state_payload(state: Any) -> dict[str, Any]:
+    if isinstance(state, dict):
+        return copy.deepcopy(state)
+    if is_dataclass(state):
+        return copy.deepcopy(asdict(state))
+    values = getattr(state, "__dict__", None)
+    return copy.deepcopy(values) if isinstance(values, dict) else {}
+
+
+def _condition_facts(state: Any, condition: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Compile complete, binding-owned facts without silently cropping them."""
+    raw = _state_payload(state)
+    bindings = condition.get("bindings") if isinstance(condition.get("bindings"), dict) else {}
+    facts: dict[str, Any] = {}
+    unknown_fields: list[dict[str, str]] = []
+    if not bindings:
+        facts["bot"] = {
+            "observed": bool(raw),
+            "values": raw if raw else None,
+            "source": "latest_body_state" if raw else "no_observation",
+        }
+    else:
+        for name, handle_value in bindings.items():
+            handle = str(handle_value)
+            key = handle or str(name)
+            # The current Body snapshot is the authoritative source for the
+            # bot/body binding. Other handles require an object-specific read.
+            is_body = (
+                str(name) in {"bot", "body"}
+                or handle in {"bot", "body"}
+                or handle == raw.get("bot")
+            )
+            if is_body and raw:
+                facts[key] = {"observed": True, "values": raw, "source": "latest_body_state"}
+            elif is_body:
+                facts[key] = {"observed": False, "values": None, "source": "no_observation"}
+                unknown_fields.append({"object": key, "reason": "no_observation"})
+            else:
+                facts[key] = {"observed": False, "values": None, "source": "object_not_read"}
+                unknown_fields.append({"object": key, "reason": "no_observation"})
+    # Keep the complete raw snapshot available for diagnostics and future
+    # object readers. ``about`` changes ordering/attention, never evidence.
+    if raw:
+        facts["background"] = {"observed": True, "values": raw, "source": "latest_body_state"}
+    return facts, unknown_fields
+
+
+def _node_signature(node: dict[str, Any]) -> str:
+    value = {key: child for key, child in node.items() if key != "_runtime"}
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
 def _resolve_ref(value: Any, *, results: dict[str, Any], item: Any, state: dict[str, Any]) -> Any:
     if not isinstance(value, dict) or set(value) != {"ref"}:
         if isinstance(value, dict):
@@ -124,6 +188,7 @@ class NodeRecord:
     remaining: Any = None
     blocked: dict[str, Any] | None = None
     condition: dict[str, Any] | None = None
+    signature: str | None = None
     started_at: float | None = None
     updated_at: float = field(default_factory=time.time)
 
@@ -141,6 +206,8 @@ class NodeRecord:
             value["blocked"] = copy.deepcopy(self.blocked)
         if self.condition is not None:
             value["condition"] = copy.deepcopy(self.condition)
+        if self.signature is not None:
+            value["signature"] = self.signature
         return value
 
 
@@ -194,8 +261,19 @@ class WorkPlanExecutor:
 
     async def _execute(self, node: dict[str, Any], path: str, intents: list[str], *, item: Any = None) -> str:
         node_key = _node_id(node, path)
-        record = self.records.setdefault(node_key, NodeRecord())
+        signature = _node_signature(node)
+        record = self.records.get(node_key)
+        if record is None:
+            record = NodeRecord(signature=signature)
+            self.records[node_key] = record
+        elif record.signature != signature:
+            # Same id is only an identity hint. A changed obligation, tool or
+            # argument must be executed again and cannot inherit completion.
+            record = NodeRecord(signature=signature)
+            self.records[node_key] = record
         if record.status == "done":
+            if record.result is not None:
+                self.results[node_key] = copy.deepcopy(record.result)
             return "done"
         record.status = "active"
         if record.started_at is None:
@@ -206,6 +284,10 @@ class WorkPlanExecutor:
             condition_status, facts = await self._condition(node["when"], chain, item=item)
             record.condition = facts
             if condition_status != "satisfied":
+                if time.monotonic() >= self._deadline:
+                    record.blocked = {"reason": "condition_timeout", "facts": facts}
+                    record.status = "blocked"
+                    return "blocked"
                 return self._wait_or_block(record, condition_status, facts, node, "when")
         kind = node.get("kind")
         if kind == "call":
@@ -260,6 +342,7 @@ class WorkPlanExecutor:
 
     async def _condition(self, condition: dict[str, Any], intents: list[str], *, item: Any = None) -> tuple[ConditionStatus, dict[str, Any]]:
         state = await self.state()
+        compiled_facts, unknown_fields = _condition_facts(state, condition)
         requirements = condition.get("requires") or [condition]
         statuses: list[str] = []
         evidence: list[Any] = []
@@ -272,7 +355,9 @@ class WorkPlanExecutor:
                     "intent_chain": intents,
                     "condition": text_value,
                     "about": about,
-                    "facts": state,
+                    "facts": compiled_facts,
+                    "unknown_fields": unknown_fields,
+                    "field_vocabulary": WORK_FIELD_VOCABULARY,
                     "evidence_scope": "Only supplied facts are known; omitted facts are unknown.",
                 },
                 "questions": {"q": {"type": "choice", "instructions": "Choose satisfied, pending, or unknown.",
@@ -280,6 +365,14 @@ class WorkPlanExecutor:
                                  "pending": "The condition is not yet true, but the facts are sufficient to say so.",
                                  "unknown": "The supplied facts cannot establish the condition."}}},
             }
+            statements = requirement.get("statements") if isinstance(requirement, dict) else None
+            if statements is None and isinstance(condition, dict):
+                statements = condition.get("statements")
+            if isinstance(statements, dict):
+                payload["questions"]["q"]["criteria"].update({
+                    "satisfied": str(statements.get("satisfied", payload["questions"]["q"]["criteria"]["satisfied"])),
+                    "pending": str(statements.get("pending", payload["questions"]["q"]["criteria"]["pending"])),
+                })
             answer = await self.decision.ask(payload, priority=DecisionPriority.PLAN)
             choice = getattr(answer, "choice", answer if isinstance(answer, str) else "unknown")
             normalized = choice if choice in {"satisfied", "pending", "unknown"} else "unknown"
@@ -299,20 +392,19 @@ class WorkPlanExecutor:
     async def _wait(self, node: dict[str, Any], node_key: str, intents: list[str], *, item: Any = None) -> str:
         record = self.records[node_key]
         deadline = (record.started_at or time.monotonic()) + float(node["timeout_s"])
-        while time.monotonic() <= deadline and time.monotonic() <= self._deadline:
-            status, facts = await self._condition(node["condition"], intents, item=item)
-            record.condition = facts
-            if status == "satisfied":
-                record.status = "done"
-                return "done"
-            if status == "unknown":
-                record.status = "waiting"
-            else:
-                record.status = "waiting"
-            return "waiting"
-        record.status = "blocked"
-        record.blocked = {"reason": "wait_timeout"}
-        return "blocked"
+        if time.monotonic() > min(deadline, self._deadline):
+            record.status = "blocked"
+            record.blocked = {"reason": "wait_timeout", "last_condition": record.condition}
+            return "blocked"
+        status, facts = await self._condition(node["condition"], intents, item=item)
+        record.condition = facts
+        if status == "satisfied":
+            record.status = "done"
+            return "done"
+        # The manager keeps the same executor alive and re-enters this node;
+        # direct callers can inspect the waiting tree without a hidden sleep.
+        record.status = "waiting"
+        return "waiting"
 
     async def _choose(self, node: dict[str, Any], intents: list[str], *, item: Any = None) -> dict[str, Any] | None:
         state = await self.state()

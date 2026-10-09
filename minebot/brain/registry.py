@@ -236,9 +236,24 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
     """Return the tool's receipt, preserving single-writer and cancel semantics."""
     sidecar = tool.sidecar
 
+    def payload(value: Any) -> JsonObject:
+        """Normalize framework callables at the registry boundary.
+
+        Most Body tools return ``ToolResult``.  Management tools are pure
+        runtime controls and naturally return an already serialized mapping;
+        accepting both here keeps every model-visible tool on the same path.
+        """
+        if isinstance(value, ToolResult):
+            return value.to_payload()
+        if isinstance(value, dict):
+            return dict(value)
+        raise TypeError(
+            f"tool {tool.name!r} returned {type(value).__name__}; expected ToolResult or mapping"
+        )
+
     # Reading new world information need not change position or inventory.
     if not sidecar.mutating:
-        return tool.callable(tool_input).to_payload()
+        return payload(tool.callable(tool_input))
 
     # Mutating path — single-writer first (schema §8).
     if not ctx.writer.try_acquire(sidecar.progress_key):

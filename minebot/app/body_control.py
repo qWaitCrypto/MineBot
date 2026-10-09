@@ -51,6 +51,29 @@ class BodyControl:
         self.last_stop: dict[str, object] = {}
         self._stop_state: BodyStopState = "settled"
         self._since = time.monotonic()
+        self.authority.add_generation_listener(self._on_generation_invalidated)
+
+    def _on_generation_invalidated(self, reason: str, generation: int) -> None:
+        """Mirror external authority invalidation into the physical owner.
+
+        Generation invalidation can happen outside the normal cancellation
+        method (goal replacement, transport recovery, or a body recovery
+        path).  Leaving the old holder in ``running`` would make ``owns``
+        false while still rejecting every new claim.  Mark it explicitly
+        unknown so only native confirmation can clear the quarantine.
+        """
+        with self._lock:
+            self._generation = generation
+            if self._holder not in {"none", "unknown"}:
+                self._holder = "unknown"
+                self._stop_state = "unknown"
+                self.last_stop = {
+                    "native_stopped": False,
+                    "reason": reason,
+                    "generation": generation,
+                    "at_monotonic": time.monotonic(),
+                }
+                self._since = time.monotonic()
 
     def snapshot(self) -> BodyControlSnapshot:
         with self._lock:
@@ -109,11 +132,23 @@ class BodyControl:
                 return self.snapshot()
             self._holder = "unknown"
             self._stop_state = "unknown"
+            self.last_stop = {
+                "native_stopped": False,
+                "reason": "confirmation_missing",
+                "generation": self._generation,
+                "at_monotonic": time.monotonic(),
+            }
             self._since = time.monotonic()
             return self.snapshot()
 
     def confirm_native_stopped(self, native_stopped: bool) -> BodyControlSnapshot:
         if native_stopped:
+            with self._lock:
+                self.last_stop = {
+                    "native_stopped": True,
+                    "generation": self._generation,
+                    "at_monotonic": time.monotonic(),
+                }
             return self.settle()
         return self.mark_unknown()
 

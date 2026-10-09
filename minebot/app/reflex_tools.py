@@ -7,7 +7,7 @@ import copy
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -47,10 +47,26 @@ class ReflexManager:
         with self._lock:
             tasks = [activity.task for activity in self._activities.values()
                      if activity.task is not None and not activity.task.done()]
+            for activity in self._activities.values():
+                if activity.task is not None and not activity.task.done():
+                    activity.status = "cancelled"
+                    activity.cancel_reason = "runtime_closed"
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def request_cancel(self, reason: str, *, final_status: str = "cancelled") -> None:
+        """Revoke a plan before an external/native stop begins."""
+        with self._lock:
+            for activity in self._activities.values():
+                if activity.status not in {"accepted", "running", "waiting", "stopping"}:
+                    continue
+                activity.cancel_reason = reason
+                activity.status = final_status
+                if activity.task is not None and not activity.task.done():
+                    activity.task.cancel()
+                break
 
     def delegate(self, spec: dict[str, Any]) -> dict[str, Any]:
         plan = spec.get("plan", spec)
@@ -115,19 +131,34 @@ class ReflexManager:
             records=activity.records,
         )
         try:
-            result = await executor.run()
-            activity.result = result
-            activity.records = executor.records
-            activity.status = result.status
+            while True:
+                result = await executor.run()
+                activity.result = result
+                activity.records = executor.records
+                activity.status = result.status
+                if result.status != "waiting":
+                    break
+                self.runtime.trace.emit("reflex_activity_waiting", activity_id=activity.activity_id,
+                                        tree=result.tree, facts=result.facts)
+                # Keep the claim and the activity alive.  A state/event-aware
+                # scheduler can later replace this short yield with a wake
+                # event; the plan must not disappear after one pending answer.
+                await asyncio.sleep(0.05)
+                if activity.status in {"cancelled", "paused", "stopping"}:
+                    return
             self.runtime.trace.emit("reflex_activity_finished", activity_id=activity.activity_id,
                                     status=result.status, tree=result.tree)
-            if self.runtime.responses_kernel is not None:
-                self.runtime.responses_kernel.notify_fact({
-                    "activity_id": activity.activity_id,
-                    "status": result.status,
-                    "tree": result.tree,
-                    "facts": result.facts,
-                })
+            fact = {
+                "activity_id": activity.activity_id,
+                "status": result.status,
+                "tree": result.tree,
+                "facts": result.facts,
+            }
+            wake = getattr(self.runtime, "notify_reflex_fact", None)
+            if callable(wake):
+                wake(fact)
+            elif self.runtime.responses_kernel is not None:
+                self.runtime.responses_kernel.notify_fact(fact)
         except asyncio.CancelledError:
             if activity.status not in {"paused", "cancelled", "updating"}:
                 activity.status = "cancelled"
@@ -140,7 +171,10 @@ class ReflexManager:
         finally:
             if self._active_activity_id == activity.activity_id:
                 self._active_activity_id = None
-            if self.runtime.body_control.owns(activity.activity_id):
+            if (
+                activity.status not in {"stopping", "cancelled", "paused", "updating"}
+                and self.runtime.body_control.owns(activity.activity_id)
+            ):
                 self.runtime.body_control.settle(claim_id=activity.activity_id)
 
     async def _state(self) -> dict[str, Any]:
@@ -148,7 +182,12 @@ class ReflexManager:
             return copy.deepcopy(self.runtime.last_known_body_state)
         try:
             state = await self.runtime._read_lane.run(self.runtime.body.get_state)
-            return dict(state) if isinstance(state, dict) else {}
+            if isinstance(state, dict):
+                return copy.deepcopy(state)
+            if is_dataclass(state):
+                return copy.deepcopy(asdict(state))
+            values = getattr(state, "__dict__", None)
+            return copy.deepcopy(values) if isinstance(values, dict) else {}
         except Exception:
             return {}
 
@@ -185,42 +224,35 @@ class ReflexManager:
         with self._lock:
             activity = self._select(str(activity_id) if activity_id else None)
             if operation == "take_control":
-                # The actual native stop remains the runtime's sole stop path.
-                loop = self._loop
-                if loop is None:
-                    return ToolResult(False, "event_loop_unavailable", True).to_payload()
-                async def take_control() -> None:
-                    await self.runtime.cancel_active_execution_with_facts("reflex_take_control")
-                    if activity is not None and activity.task is not None and not activity.task.done():
-                        activity.status = "cancelled"
-                        activity.cancel_reason = "take_control"
-                        activity.task.cancel()
-
-                coroutine = take_control()
-                try:
-                    running = asyncio.get_running_loop()
-                except RuntimeError:
-                    running = None
-                if running is loop:
-                    task = loop.create_task(coroutine)
+                if activity is None:
+                    loop = self._loop
+                    stop = getattr(self.runtime, "cancel_active_execution_with_facts", None)
+                    if loop is None or not callable(stop):
+                        return ToolResult(False, "event_loop_unavailable", True).to_payload()
+                    async def stop_direct() -> Any:
+                        try:
+                            return await stop("reflex_take_control", cancel_reflex=False)
+                        except TypeError:
+                            return await stop("reflex_take_control")
+                    coroutine = stop_direct()
+                    try:
+                        running = asyncio.get_running_loop()
+                    except RuntimeError:
+                        running = None
+                    if running is loop:
+                        task = loop.create_task(coroutine)
+                        return ToolResult(True, "take_control_requested", True,
+                                          metrics={"settlement_pending": True, "task": id(task)}).to_payload()
+                    future = asyncio.run_coroutine_threadsafe(coroutine, loop)
                     return ToolResult(True, "take_control_requested", True,
-                                      metrics={"settlement_pending": True, "task": id(task)}).to_payload()
-                future = asyncio.run_coroutine_threadsafe(coroutine, loop)
-                return ToolResult(True, "take_control_requested", True,
-                                  metrics={"settlement": future.result(timeout=35)}).to_payload()
+                                      metrics={"settlement": future.result(timeout=35)}).to_payload()
+                return self._schedule_stop(activity, "reflex_take_control", "cancelled")
             if activity is None:
                 return ToolResult(False, "no_reflex", True).to_payload()
             if operation == "cancel":
-                if activity.task is not None:
-                    activity.task.cancel()
-                activity.status = "cancelled"
-                return ToolResult(True, "cancelled", True, metrics={"activity_id": activity.activity_id}).to_payload()
+                return self._schedule_stop(activity, "reflex_cancel", "cancelled")
             if operation == "pause":
-                activity.status = "paused"
-                activity.cancel_reason = "pause"
-                if activity.task is not None and not activity.task.done():
-                    activity.task.cancel()
-                return ToolResult(True, "paused", True, metrics={"activity_id": activity.activity_id, "tree": self._tree(activity)}).to_payload()
+                return self._schedule_stop(activity, "reflex_pause", "paused")
             if operation == "resume":
                 if activity.status == "paused" and self._loop is not None:
                     activity.cancel_reason = None
@@ -242,8 +274,16 @@ class ReflexManager:
                 async def replace_plan() -> None:
                     old_task = activity.task
                     activity.cancel_reason = "update"
+                    activity.status = "stopping"
                     if old_task is not None and not old_task.done():
                         old_task.cancel()
+                    stop = getattr(self.runtime, "cancel_active_execution_with_facts", None)
+                    if callable(stop):
+                        facts = await stop("reflex_update", cancel_reflex=False)
+                        if not facts.get("settled", False):
+                            activity.status = "blocked"
+                            return
+                    if old_task is not None and old_task is not asyncio.current_task():
                         await asyncio.gather(old_task, return_exceptions=True)
                     activity.plan = copy.deepcopy(spec)
                     activity.revision += 1
@@ -254,6 +294,63 @@ class ReflexManager:
                 self._loop.create_task(replace_plan())
                 return ToolResult(True, "updated", True, metrics={"activity_id": activity.activity_id, "status": "updating"}).to_payload()
             return ToolResult(False, "unknown_control_operation", True).to_payload()
+
+    def _schedule_stop(self, activity: ReflexActivity, reason: str, final_status: str) -> dict[str, Any]:
+        activity.status = "stopping"
+        activity.cancel_reason = reason
+
+        async def stop_activity() -> dict[str, Any]:
+            task = activity.task
+            if task is not None and not task.done():
+                task.cancel()
+            stop = getattr(self.runtime, "cancel_active_execution_with_facts", None)
+            facts = {"settled": True, "native_stopped": True}
+            if callable(stop):
+                try:
+                    facts = await stop(reason, cancel_reflex=False)
+                except TypeError:
+                    facts = await stop(reason)
+            if task is not None and task is not asyncio.current_task():
+                await asyncio.gather(task, return_exceptions=True)
+            if facts.get("settled", False):
+                activity.status = final_status
+            else:
+                activity.status = "blocked"
+            self.runtime.trace.emit(
+                "reflex_activity_stopped",
+                activity_id=activity.activity_id,
+                status=activity.status,
+                reason=reason,
+                settlement=facts,
+            )
+            return facts
+
+        loop = self._loop
+        if loop is None:
+            return ToolResult(False, "event_loop_unavailable", True).to_payload()
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            task = loop.create_task(stop_activity())
+            return ToolResult(True, "stop_requested", True, metrics={
+                "activity_id": activity.activity_id,
+                "status": "stopping",
+                "settlement_pending": True,
+                "task": id(task),
+            }).to_payload()
+        future = asyncio.run_coroutine_threadsafe(stop_activity(), loop)
+        try:
+            facts = future.result(timeout=35)
+        except Exception as exc:
+            return ToolResult(False, "stop_unconfirmed", True, metrics={
+                "activity_id": activity.activity_id,
+                "error_type": type(exc).__name__,
+            }).to_payload()
+        return ToolResult(True, final_status if facts.get("settled") else "stop_unconfirmed", True,
+                          metrics={"activity_id": activity.activity_id, "settlement": facts,
+                                   "tree": self._tree(activity)}).to_payload()
 
     def _select(self, activity_id: str | None) -> ReflexActivity | None:
         if activity_id:

@@ -367,6 +367,11 @@ class ResponsesKernel:
     def pending(self) -> list[PendingCall]:
         return [call for call in self.calls.values() if not call.delivered]
 
+    @property
+    def is_running(self) -> bool:
+        """Whether a reader loop currently owns this kernel."""
+        return self._running
+
     def steer(self, text: str) -> None:
         self._messages.put_nowait(text)
 

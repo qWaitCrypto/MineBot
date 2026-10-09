@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
@@ -112,6 +112,12 @@ class ProgressAuthority:
     epistemic_steps: int = 0
     last_epistemic_keys: tuple[str, ...] = ()
     _generation: int = 0
+    _generation_listeners: list[Callable[[str, int], None]] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     _captures: threading.local = field(
         default_factory=threading.local,
         init=False,
@@ -143,9 +149,20 @@ class ProgressAuthority:
     def generation_current(self, generation: int) -> bool:
         return generation == self._generation
 
+    def add_generation_listener(self, listener: Callable[[str, int], None]) -> None:
+        """Register a local owner that must observe generation invalidation."""
+        if listener not in self._generation_listeners:
+            self._generation_listeners.append(listener)
+
     def invalidate_generation(self, reason: str) -> None:
         self._generation += 1
         self.recent_events.append(f"generation_invalidated:{reason}")
+        for listener in tuple(self._generation_listeners):
+            try:
+                listener(reason, self._generation)
+            except Exception:
+                # A telemetry/owner observer must never hide the invalidation.
+                continue
 
     def fingerprint(self, state: BodyState) -> str:
         if state.food is None:

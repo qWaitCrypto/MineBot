@@ -135,7 +135,10 @@ class DecisionClient:
         raw: dict[str, Any] | None = None
         choice = "unknown"
         try:
-            response = await self._client.post(self.url, json=request.payload)
+            response = await asyncio.wait_for(
+                self._client.post(self.url, json=request.payload),
+                timeout=self.timeout_s,
+            )
             response.raise_for_status()
             decoded = response.json()
             raw = decoded if isinstance(decoded, dict) else None

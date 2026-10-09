@@ -1363,6 +1363,7 @@ class AgentRuntime:
         self.execution_lane = SerialExecutionLane(thread_name=f"minebot-{agent_name}")
         self.context_refreshers: list[Callable[[AgentContext], None]] = []
         self.responses_kernel = None
+        self._reflex_wakeup_task: asyncio.Task[Any] | None = None
         self._native_context = None
         self.native_task_workspace = None
         self.native_task_outcome = None
@@ -1527,6 +1528,47 @@ class AgentRuntime:
             self.native_task_outcome = None
             self.responses_kernel.steer(text)
             self.agent_context.acknowledge_turn_input(count)
+
+    def notify_reflex_fact(self, fact: dict[str, Any]) -> None:
+        """Deliver plan completion and wake an idle Responses Agent once.
+
+        ``notify_fact`` wakes a kernel that is already inside ``run``.  When a
+        session has returned to its event-wait boundary there is no reader
+        task left to observe that event, so start one bounded successor turn.
+        The guard prevents a plan completion from racing an already active
+        user/model turn.
+        """
+        kernel = self.responses_kernel
+        if kernel is None:
+            return
+        kernel.notify_fact(dict(fact))
+        if not self.native_responses or not self.agent_context.goal_text.strip():
+            return
+        if bool(getattr(kernel, "is_running", False)):
+            return
+        wake_task = getattr(self, "_reflex_wakeup_task", None)
+        if wake_task is not None and not wake_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        was_event_wait = self.event_wait_mode
+
+        async def wake() -> None:
+            if was_event_wait:
+                self.event_wait_mode = False
+            try:
+                await self._run_responses_turn([], body_actions_allowed=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.trace.emit("reflex_wakeup_failed", error_type=type(exc).__name__, message=str(exc)[:300])
+            finally:
+                if was_event_wait:
+                    self.event_wait_mode = True
+
+        self._reflex_wakeup_task = loop.create_task(wake())
 
     async def _run_responses_turn(self, extra_signals, *, body_actions_allowed: bool) -> AgentTurnOutcome:
         prepared = await self._read_lane.run(self._prepare_turn, extra_signals)
@@ -1941,8 +1983,13 @@ class AgentRuntime:
         reason: str,
         *,
         invalidate_generation: bool = True,
+        cancel_reflex: bool = True,
     ) -> JsonObject:
         cancellation_started = time.monotonic()
+        if cancel_reflex and self.reflex_manager is not None:
+            # Revoke the plan before touching the native Body.  A late
+            # Decision result must not be able to admit its next write.
+            self.reflex_manager.request_cancel(reason)
         self.body_control.mark_stopping()
         supervisor = self.direct_build_supervisor.current
         if supervisor is not None:

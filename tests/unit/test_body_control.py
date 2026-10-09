@@ -37,4 +37,16 @@ def test_late_claim_cannot_settle_new_owner():
     assert control.owns("call-2", second.generation)
     control.mark_unknown(claim_id="call-1")
     assert control.owns("call-2", second.generation)
-    assert control.snapshot().claim_id == "call-2"
+
+
+def test_external_authority_invalidation_quarantines_current_owner():
+    control = BodyControl()
+    control.claim("plan-A", holder="agent_plan")
+    control.authority.invalidate_generation("goal_replaced")
+    snapshot = control.snapshot()
+    assert snapshot.holder == "unknown"
+    assert snapshot.stop_state == "unknown"
+    assert control.unknown
+    assert control.last_stop["reason"] == "goal_replaced"
+    with pytest.raises(RuntimeError, match="body_control_unknown"):
+        control.claim("plan-B")

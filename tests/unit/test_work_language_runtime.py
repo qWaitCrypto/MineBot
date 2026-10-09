@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from minebot.app.work_runtime import WorkPlanError, WorkPlanExecutor, validate_plan
+from minebot.contract import BodyState
 
 
 class Decision:
@@ -117,6 +118,49 @@ def test_requires_pending_wins_and_does_not_release_body_write():
     assert result.status == "waiting"
     assert calls == []
     assert len(decision.payloads) == 2
+
+
+def test_condition_request_contains_body_state_facts_and_vocabulary():
+    plan = {"language": "minebot-work/0.2", "goal": "observe", "timeout_s": 2,
+            "work": {"kind": "wait", "id": "ready", "intent": "wait", "timeout_s": 1,
+                      "condition": {"text": "the bot is ready", "bindings": {"bot": "bot"}}}}
+    state = BodyState(
+        bot="MineBot", pos=(1.0, 64.0, 2.0), yaw=None, pitch=None, health=20.0,
+        food=20, oxygen=None, inventory_raw="[]", inventory_hash="h", effects=None,
+        time=10, weather=None, dimension="overworld", complete=True,
+        inventory_counts={"minecraft:stone": 4}, inventory_complete=True,
+        selected_item_known=True, selected_item=None,
+    )
+    decision = Decision("unknown")
+    async def state_reader():
+        return state
+    executor = WorkPlanExecutor(plan, call=lambda *args, **kwargs: None,
+                                state=state_reader, decision=decision)
+    result = asyncio.run(executor.run())
+    payload = decision.payloads[0]["state"]
+    assert result.status == "waiting"
+    assert payload["facts"]["bot"]["observed"] is True
+    assert payload["facts"]["bot"]["values"]["inventory_counts"] == {"minecraft:stone": 4}
+    assert "inventory_complete" in payload["field_vocabulary"]
+    assert payload["unknown_fields"] == []
+
+
+def test_changed_obligation_with_same_id_cannot_inherit_done():
+    first_plan = {"language": "minebot-work/0.2", "goal": "give", "timeout_s": 2,
+                  "work": {"kind": "call", "id": "give", "tool": "give",
+                            "arguments": {"count": 2}}}
+    revised_plan = {"language": "minebot-work/0.2", "goal": "give", "timeout_s": 2,
+                    "work": {"kind": "call", "id": "give", "tool": "give",
+                              "arguments": {"count": 10}}}
+    calls = []
+    async def call(tool, arguments, *, call_id, timeout_s):
+        calls.append(dict(arguments))
+        return {"success": True, "reason": "done", "metrics": {}}
+    records = {}
+    first = asyncio.run(WorkPlanExecutor(first_plan, call=call, records=records).run())
+    second = asyncio.run(WorkPlanExecutor(revised_plan, call=call, records=records).run())
+    assert first.status == second.status == "completed"
+    assert calls == [{"count": 2}, {"count": 10}]
 
 
 def test_revision_reuses_caller_owned_records_and_skips_done_nodes():
