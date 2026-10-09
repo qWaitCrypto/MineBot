@@ -24,6 +24,7 @@ from textual.widget import Widget
 from textual.widgets import Input
 
 from minebot.panel import prefs
+from minebot.panel.motion import Tweens
 from minebot.panel.notices import Notifier
 from minebot.panel.model import PanelState, Timeline, apply
 from minebot.panel.source import TraceFollower, latest_trace, load_records, resolve_trace
@@ -124,6 +125,7 @@ class PanelApp(App):
         self.show_notices = False
         self.notifier = Notifier()
         self.connection: dict[str, Any] | None = None  # set by a launcher-backed shell
+        self.tweens = Tweens()
         self.prefs = prefs.load()
         if self.prefs.get("theme") and not os.environ.get("NO_COLOR") and not os.environ.get("MINEBOT_THEME"):
             theme.set_theme(self.prefs["theme"])
@@ -269,7 +271,8 @@ class PanelApp(App):
         return Frame(state=self.state, now=now, anim=time.monotonic(), live=live, title=title, mode=mode,
                      page=self.page, replay=replay, selection=dict(self.selection), raw=raw,
                      control=control, flash=flash[:2] if flash else None,
-                     connection=None if self.replay else self.connection)
+                     connection=None if self.replay else self.connection,
+                     tweens=None if self.replay else self.tweens)
 
     def draw(self, width: int, height: int) -> Any:
         frame = self.frame()

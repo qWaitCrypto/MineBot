@@ -803,7 +803,11 @@ def test_agent_status_reads_the_trace():
     apply(state, {"seq": 2, "ts": now, "event": "tool_invoke", "tool": "mine", "tool_call_id": "c1"})
     assert status() == "行动中"
     assert status("已暂停") == "已暂停"
-    apply(state, {"seq": 3, "ts": now, "event": "session_terminal", "status": "quit"})
+    apply(state, {"seq": 3, "ts": now, "event": "direct_supervision_request", "tool_call_id": "c1"})
+    assert status() == "判断中", "the runtime asking the model about a stuck tool is not waiting on the operator"
+    apply(state, {"seq": 4, "ts": now, "event": "direct_supervision_result", "tool_call_id": "c1", "choice": "continue"})
+    assert status() == "行动中"
+    apply(state, {"seq": 5, "ts": now, "event": "session_terminal", "status": "quit"})
     assert status() == "已结束"
 
 
@@ -877,3 +881,18 @@ def test_client_log_disconnects_and_rejoins_drive_the_connection_state(tmp_path)
     assert launcher.watch_client_log()["state"] == "connected"
     log.write_text("")  # a new client.log after restart starts from the top
     assert launcher.watch_client_log()["state"] == "connected"
+
+
+
+def test_counters_glide_to_new_values_and_mark_the_direction():
+    from minebot.panel.motion import DURATION_S, MARK_S, Tweens
+
+    tweens = Tweens()
+    assert tweens.value("calls", 10, 0.0) == (10, 0), "first sighting shows the value at once"
+    shown, direction = tweens.value("calls", 20, 1.0)
+    assert shown == 10 and direction == 1
+    shown, _ = tweens.value("calls", 20, 1.0 + DURATION_S / 2)
+    assert 10 < shown < 20
+    assert tweens.value("calls", 20, 1.0 + DURATION_S) == (20, 1)
+    assert tweens.value("calls", 20, 1.0 + MARK_S + 0.1) == (20, 0)
+    assert tweens.value("calls", 15, 5.0)[1] == -1

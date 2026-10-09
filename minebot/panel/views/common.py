@@ -52,6 +52,7 @@ class Frame:
     alerts: list[Alert] = field(default_factory=list)
     control: str | None = None  # None: read-only; otherwise the control state label
     connection: dict[str, Any] | None = None  # launcher's view of the server connection, when it has one
+    tweens: Any = None  # minebot.panel.motion.Tweens on a live panel; None draws values as they are
     flash: tuple[str, str] | None = None  # (tone, text)
 
     def __post_init__(self) -> None:
@@ -111,7 +112,7 @@ def wait_tone(seconds_waited: float, warn: float = 15.0, fail: float = 45.0) -> 
 
 
 STATUS_TONE = {"思考中": "agent", "行动中": "body", "已暂停": "warn", "等待指令": "muted", "已结束": "muted",
-               "请求失败": "fail", "已断线": "fail"}
+               "请求失败": "fail", "已断线": "fail", "判断中": "reflex"}
 
 
 def agent_status(frame: Frame) -> tuple[str, str]:
@@ -125,6 +126,10 @@ def agent_status(frame: Frame) -> tuple[str, str]:
     if frame.control == "已暂停":
         return "已暂停", "p 继续"
     running = state.running_calls()
+    supervision = state.supervision
+    if running and supervision.get("status") == "asking":
+        # The runtime asked the model whether the running tool is stuck; nothing waits on the operator.
+        return "判断中", f"{running[-1].tool} 是否卡住 {seconds(frame.now - float(supervision.get('ts') or frame.now))}"
     if running:
         call = running[-1]
         return "行动中", f"{call.tool} {seconds(frame.now - (call.invoke_ts or frame.now))}"
@@ -144,7 +149,7 @@ def _status_badge(frame: Frame) -> list[tuple[str, Any]]:
         # Slow breathing, the only motion while nothing else happens.
         phase = (math.sin(frame.anim * math.pi) + 1) / 2
         style = theme.layer("agent", bold=True) if phase > 0.35 else theme.layer("agent", dim=True)
-    icon = {"思考中": "◐", "行动中": "▶", "已暂停": "❚❚", "已结束": "■", "请求失败": "✗", "已断线": "⚠"}.get(label, "○")
+    icon = {"思考中": "◐", "行动中": "▶", "已暂停": "❚❚", "已结束": "■", "请求失败": "✗", "已断线": "⚠", "判断中": "◐"}.get(label, "○")
     parts: list[tuple[str, Any]] = [(f"{icon} {label}", style)]
     if detail:
         parts.append((f"  {detail}", theme.MUTED))
@@ -205,17 +210,29 @@ def draw_chrome(canvas: Canvas, frame: Frame) -> tuple[int, int, int, int]:
     return 0, 4, width, height - 5
 
 
+def counter(frame: Frame, key: str, value: int, style: Any, *, up_good: bool = True) -> list[tuple[str, Any]]:
+    """A count that glides to its new value on a live panel, with ▲/▼ for a couple of seconds."""
+    if frame.tweens is None:
+        return [(str(value), style)]
+    shown, direction = frame.tweens.value(key, value, frame.anim)
+    parts: list[tuple[str, Any]] = [(str(round(shown)), style)]
+    if direction:
+        good = (direction > 0) == up_good
+        parts.append(("▲" if direction > 0 else "▼", theme.OK if good else theme.FAIL))
+    return parts
+
+
 def _status_line(canvas: Canvas, frame: Frame, y: int) -> None:
     state = frame.state
     calls = state.finished_calls()
     failed = sum(1 for call in calls if call.success is False)
     ttfb = percentile(list(state.ttfbs), 0.5)
     stats = [
-        ("工具 ", theme.MUTED), (str(len(calls)), theme.layer("body", bold=True)),
-        (" · ", theme.DIM), ("✓", theme.OK), (str(len(calls) - failed), theme.TEXT),
-        (" ✗", theme.FAIL), (str(failed), theme.TEXT),
-        (" · 人工 ", theme.MUTED), (str(len(state.operator)), theme.layer("operator")),
-        (" · 请求 ", theme.MUTED), (str(state.request_total), theme.layer("agent")),
+        ("工具 ", theme.MUTED), *counter(frame, "calls", len(calls), theme.layer("body", bold=True)),
+        (" · ", theme.DIM), ("✓", theme.OK), *counter(frame, "ok", len(calls) - failed, theme.TEXT),
+        (" ✗", theme.FAIL), *counter(frame, "failed", failed, theme.TEXT, up_good=False),
+        (" · 人工 ", theme.MUTED), *counter(frame, "operator", len(state.operator), theme.layer("operator")),
+        (" · 请求 ", theme.MUTED), *counter(frame, "requests", state.request_total, theme.layer("agent")),
         (" · 首字节 p50 ", theme.MUTED), (seconds(ttfb), theme.TEXT),
         (" · tokens ", theme.MUTED), (tokens(state.usage["input"] + state.usage["output"]), theme.TEXT),
         (" · 告警 ", theme.MUTED), (str(len(frame.alerts)), theme.WARN if frame.alerts else theme.TEXT),
