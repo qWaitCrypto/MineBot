@@ -19,6 +19,13 @@ from minebot.app.conversation import model_input_chars
 from minebot.app.responses_observation import RequestObservation, context_sizes, current_observation, fingerprint
 
 
+# Relay-reported upstream stream failures are transport incidents, not invalid
+# client protocol. Share classification across SSE error and failed responses.
+_RETRYABLE_RESPONSE_ERROR_CODES = frozenset({
+    "server_error", "rate_limit_exceeded", "request_timeout", "upstream_http2_stream_error",
+})
+
+
 class ResponsesProtocolError(RuntimeError):
     """A concrete API/protocol failure, without silently changing kernels."""
 
@@ -586,12 +593,12 @@ class ResponsesKernel:
                                                     / max(1, (response.get("usage") or {}).get("input_tokens", 0))))
                         if kind == "response.failed" or (kind == "response.incomplete" and reason != "steered"):
                             error = response.get("error") or {}
-                            if error.get("code") in {"server_error", "rate_limit_exceeded", "request_timeout"}:
+                            if error.get("code") in _RETRYABLE_RESPONSE_ERROR_CODES:
                                 raise ResponsesTransportError(f"{kind}: {error}")
                             raise ResponsesProtocolError(f"{kind}: {reason or response.get('error')}")
                     elif kind == "error":
                         error = event.get("error", event)
-                        if error.get("code") in {"server_error", "rate_limit_exceeded", "request_timeout"}:
+                        if error.get("code") in _RETRYABLE_RESPONSE_ERROR_CODES:
                             raise ResponsesTransportError(f"{error.get('code')}: {error.get('message', '')}")
                         raise ResponsesProtocolError(f"{error.get('code', 'api_error')}: {error.get('message', '')}")
                 if message in done:

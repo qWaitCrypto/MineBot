@@ -457,7 +457,8 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         await kernel.close()
 
     async def test_http_failed_stream_preserves_running_call_and_resumes_once(self):
-        for failure in ("interrupted", "timeout", "eof", "api_error"):
+        for failure in ("interrupted", "timeout", "eof", "api_error",
+                        "upstream_error", "nested_upstream_error", "upstream_response_failed"):
             with self.subTest(failure=failure):
                 await self._http_failed_stream_preserves_running_call_and_resumes_once(failure)
 
@@ -478,6 +479,18 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
                         raise httpx.ReadTimeout("No network bytes within the SDK read timeout")
                     if failure == "api_error":
                         yield SimpleNamespace(model_dump=lambda **kw: {"type": "error", "code": "server_error", "message": "unavailable"})
+                    if failure in {"upstream_error", "nested_upstream_error", "upstream_response_failed"}:
+                        error = {"code": "upstream_http2_stream_error", "message": "Upstream HTTP/2 stream failed"}
+                        event = ({"type": "response.failed", "response": {"id": "r1", "status": "failed", "error": error}}
+                                 if failure == "upstream_response_failed" else
+                                 {"type": "error", "error": error} if failure == "nested_upstream_error" else
+                                 {"type": "error", **error})
+                        # A partial next call must never execute during recovery.
+                        yield SimpleNamespace(model_dump=lambda **kw: {"type": "response.output_item.added", "item": {
+                            "type": "function_call", "call_id": "partial", "name": "work", "arguments": "", "async": True}})
+                        yield SimpleNamespace(model_dump=lambda **kw: {"type": "response.function_call_arguments.delta",
+                            "call_id": "partial", "delta": '{"unfinished":'})
+                        yield SimpleNamespace(model_dump=lambda **kw: event)
                     return
                 yield SimpleNamespace(model_dump=lambda **kw: terminal("r2"))
         async def create(**params):
@@ -493,10 +506,10 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
             model="test", tools=lambda: [{"name": "work", "async": True}], instructions=instructions,
             invoke=invoke, emit=lambda *a, **kw: None, speak=lambda text: None, transport="http", request_timeout_s=0.1)
         try:
-            with self.assertRaises(ResponsesTransportError) as failure:
+            with self.assertRaises(ResponsesTransportError) as caught:
                 await kernel.run("Collect 24 logs")
             from minebot.app.model_provider import is_retryable_model_error
-            self.assertTrue(is_retryable_model_error(failure.exception))
+            self.assertTrue(is_retryable_model_error(caught.exception))
             self.assertFalse(kernel.calls["original"].task.done())
             release.set()
             await asyncio.wait_for(kernel.run("Continue from the actual result"), 2)
@@ -507,6 +520,21 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             await kernel.close()
+
+    async def test_permanent_response_errors_remain_nonretryable(self):
+        from minebot.app.model_provider import is_retryable_model_error
+        for code in ("invalid_request_error", "unknown_provider_error"):
+            with self.subTest(code=code):
+                async def on_send(event, wire):
+                    wire.feed(created("r1"), {"type": "error", "code": code, "message": "Rejected"})
+                wire = Wire(on_send)
+                kernel = self.kernel(wire, lambda *args: None)
+                try:
+                    with self.assertRaises(ResponsesProtocolError) as caught:
+                        await kernel.run("Work")
+                    self.assertFalse(is_retryable_model_error(caught.exception))
+                finally:
+                    await kernel.close()
 
     async def test_http_context_failure_keeps_unsubmitted_user_message(self):
         requests, failures = [], [True]
@@ -764,6 +792,78 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await runtime._invoke_responses_tool("finish_task", finish, "finish2"))["success"])
         finally:
             await runtime.aclose()
+
+    async def test_continue_reopens_blocked_native_task_without_resetting_plan_or_history(self):
+        from minebot.app.session import AgentSession, SessionCommand
+        from minebot.app.wiring import build_agent_runtime
+        from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
+        from minebot.app.tasks import TaskWorkspace
+        from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
+        from minebot.contract import ToolResult
+        from tests.unit.test_agent_runner_spine import FakeBody
+        from pathlib import Path
+        import tempfile
+
+        for guidance in ("", "Continue ground work first"):
+            with self.subTest(guidance=guidance), tempfile.TemporaryDirectory() as directory:
+                store = RuntimeStateStore(Path(directory) / "state.sqlite3")
+                workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot"))
+                body, registry, moves = FakeBody(), ToolRegistry(), []
+                def move(params):
+                    moves.append(params)
+                    body.x = 3.0
+                    return ToolResult(True, "arrived", can_retry=False)
+                registry.register(RegisteredTool("work", "Move", {"type": "object", "properties": {}},
+                    move, ToolSidecar("work", False, body_mutating=True)))
+                async def on_send(event, wire):
+                    n = len(wire.sent)
+                    wire.feed(created(f"r{n}"))
+                    if n in (1, 4):
+                        finish = call(f"finish{n}", "finish_task")
+                        finish["item"]["arguments"] = json.dumps({
+                            "status": "blocked" if n == 1 else "complete",
+                            "summary": "Route obstructed" if n == 1 else "Arrived",
+                            "evidence": ["route failed" if n == 1 else "position checked"]})
+                        wire.feed(finish)
+                    elif n == 3:
+                        wire.feed(call("resumed-move"))
+                    wire.feed(terminal(f"r{n}"))
+                wire = Wire(on_send)
+                provider = SimpleNamespace(kernel="responses", responses_connection_config=lambda: (
+                    SimpleNamespace(responses=SimpleNamespace(connect=lambda **kw: wire)), "test", {}, 2))
+                def make_parts(goal):
+                    parts = build_agent_runtime(body=body, registry=registry, goal_text=goal, model_provider=provider)
+                    parts.runtime.native_task_workspace = workspace
+                    return parts
+                session = AgentSession(make_parts, task_workspace=workspace)
+                session.submit(SessionCommand.start("Move and verify"))
+                try:
+                    await asyncio.wait_for(session.step(), 10)
+                    runtime = session.parts.runtime
+                    task_id = workspace.current_task.task_id
+                    workspace.update_plan(expected_revision=0, summary="Preserve this plan",
+                        steps=[{"title": "Move"}, {"title": "Verify"}])
+                    self.assertEqual(runtime.native_task_outcome["status"], "blocked")
+                    # A read/chat does not remove the terminal action restriction.
+                    rejected = await runtime._invoke_responses_tool("work", "{}", "before-resume")
+                    self.assertEqual(rejected["reason"], "task_finished")
+                    self.assertEqual(moves, [])
+                    session.submit(SessionCommand.continue_(guidance))
+                    await asyncio.wait_for(session.step(), 10)
+                    self.assertIs(session.parts.runtime, runtime)
+                    self.assertEqual(len(moves), 1)
+                    self.assertEqual(body.x, 3.0)
+                    self.assertEqual(store.get_plan(task_id).summary, "Preserve this plan")
+                    self.assertEqual(store.get_task(task_id).status.value, "completed")
+                    history = [item for event in wire.sent for item in event.get("input", [])]
+                    self.assertTrue(any(item.get("call_id") == "finish1" for item in history))
+                    outputs = {item["call_id"]: json.loads(item["output"]) for item in history
+                               if item.get("type") == "function_call_output"}
+                    self.assertTrue(outputs["resumed-move"]["success"])
+                    self.assertTrue(any(e["event"] == "native_task_resumed" for e in runtime.trace.snapshot()))
+                finally:
+                    await session.aclose()
+                    store.close()
 
     async def test_unfinished_goal_continues_after_text_and_finishes_from_tool_evidence(self):
         from minebot.app.session import AgentSession, SessionCommand

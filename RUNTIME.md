@@ -1,5 +1,15 @@
 # Responses Agent 内核（2026-10-07）
 
+## 2026-10-09：用户停止当前建房测试
+
+用户明确要求先停止测试。实验根 `logs/house-decor-20261008-231202/` 当前
+attempt-7-upstream-stream-recovery 已标 stopped_by_user，minebot 监控 PAUSED，
+不得自动续跑或重启。检查时 Agent 已因摘要响应缺少有效摘要/终态退出；该失败
+保留在 trace 和日志，没有改写为用户主动退出。Agent 不运行后单独 IPC 只读确认
+Body pathing=false、any_process_active=false，无遗留执行动作。客户端、服务器、
+世界、背包、建筑及任务资料保留，未宣称建房验收成功。记录见根 run.json、当前
+user-stop.json 与 user-stop-body-state.json；本次不继续修代码或启动新测试。
+
 ## Baritone 执行修复（2026-10-09）
 
 用户授权范围：修复已复现的下降捷径清障遗漏、识别重复无进展执行、原生
@@ -62,6 +72,50 @@ yielded，Body 无待执行动作。登高寻路失败并拆掉住宅两格东�
 权限设计本次未修复，已明确交接给模型。新会话确认读取现场、更新原计划并
 发起异步 dig_up；这只是恢复执行证据，不能称为整轮建房成功。完整介入及
 进程记录以实验根 run.json 和 current_attempt 为准。
+
+## 2026-10-09：同进程续跑的动作准入修复
+
+用户要求继续完善住宅后，旧会话实际没有移动：两次 `move_to` 被 Agent
+入口拒绝为 `task_finished`，位置不变，没有派发到 Body。`/continue` 将 SQLite
+任务恢复为 running，却遗漏 Responses runtime 的上一轮 blocked outcome，导致
+模型看到 running、能读取和更新计划，但身体动作被旧结果拒绝。
+
+修复只在明确 `/continue` 且存在原任务时清除 native blocked outcome；保留任务、
+计划、Responses 历史与已结束调用，不重放物理动作。complete 结果不因这条分支
+清除，普通读取或工具请求不会解除阻塞。新增同一 session 先 finish_task blocked、
+再带/不带指导续跑的集成回归，验证旧动作拒绝、续跑后实际调用和位置变化、原计划
+与历史保留，以及最终完成。Responses/session 回归 77 项、11 个子场景通过。
+此问题属于 Agent 生命周期，不是 Baritone 执行故障。
+
+修复提交 `71ef1e1` 后正常 /quit，仅重启 Agent，SQLite 一致备份继承到
+`attempt-6-native-continue`，原客户端和服务器保持运行；一次授权 /continue
+恢复同一建房任务。此时任务/计划及观察归档保留，HTTP wire 历史不跨进程移植。
+实际三次 move_to 均返回 arrived（703 / 1649 / 934 ms），位置从屋外
+[10.535,119,-39.502] 变到一层 [5.501,120,-40.436]，确认不是只发起调用。
+完整启动/介入及观测以 run.json、当前 trace 和 resume-verification.json 为准；
+住宅仍未验收完成。
+
+## 2026-10-09：第三方上游断流恢复分类
+
+attempt-6 实际完成了上下楼、箱子存入苹果及两格室外座椅台阶；随后 11:40:56
+Agent 退出（exit 8），客户端和服务器仍运行。最后 place_block([7,119,-38])
+357 ms 成功、无待执行动作；下一请求 4.319 s 收到 HTTP 200，8.847 s 在
+工具参数部分返回期间收到 SSE error `upstream_http2_stream_error`，并非寻路
+或长时间等待。内核只把 server_error/rate_limit_exceeded/request_timeout 分类为
+可恢复传输错误，误将该中转上游断流码分类为 ResponsesProtocolError，跳过现有
+session 模型恢复而退出。
+
+精准修复：两种 error/response.failed 入口共享可恢复错误码集合，仅增加已观测
+的 upstream_http2_stream_error，不把所有未知错误改成重试，不更改 Body 或重放
+已提交动作。错误仍可见，进入已有会话退避和实际状态续跑流程。回归覆盖顶层、
+嵌套 SSE error 和 response.failed：已发动作保留并仅执行一次，未完成参数的
+下一调用不派发；未知和非法请求仍不可恢复。原断流测试发现 assertRaises 的
+局部变量覆盖了场景名，实际全部走 EOF；现已修正并首先复现三个新场景失败。
+修复后 Responses/session 回归 78 项、16 个子场景通过。
+提交 d412de9 后仅恢复 Agent 到 attempt-7-upstream-stream-recovery，SQLite
+一致备份继承同一目标和计划，客户端、服务器、世界、背包与建筑保持；发送一次
+原任务续跑指示。新会话两次 place_block 505 / 494 ms 返回
+placed_server_confirmed，确认实际恢复施工，整栋尚未完成验收。
 
 ## 2026-10-09：用户授权第三方 API 恢复同一建房实验
 
