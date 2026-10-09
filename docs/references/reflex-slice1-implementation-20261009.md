@@ -67,6 +67,7 @@ Agent 运行的原始记录在 `final/agent-sync/`、`final/agent-async/`；监�
 
 - Fabric/Java 构建：`./gradlew :client:body:build --offline --console=plain` 成功。
 - 相关 Python 测试：178 passed，9 subtests passed；JUnit 结果为 `final/unit-release.xml`。
+- 合并原 `codex/real-client-body-spike` 的后续运行时修复后重新执行相关测试：180 passed，16 subtests passed；结果为 `final/unit-after-merge.xml`。合并内容包括 relay 流恢复、实际 async 判定、执行事实唤醒和显式 continuation 的准入恢复。
 - 正常、缺料、停止、迟到、Decision 不可用/不明、普通失败的 trace 和 JSON 全部保留在 `logs/reflex-slice1-20261009/final/`。
 - 构建和加载 provenance、隔离端口、类与 jar 哈希在 `logs/reflex-slice1-20261009/isolation.json`。
 - 本轮隔离服务器 25568、RCON 25578、IPC 8769、Xvfb :91 已在保存世界后关闭；原住宅 25567/25577/8768 和公共服务未触碰。
