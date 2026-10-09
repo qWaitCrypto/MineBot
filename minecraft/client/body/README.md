@@ -6,8 +6,16 @@ the abstract Body boundary; it does not replace the current Java FakePlayer
 backend until a caller selects the `real_client` provider.
 
 The supported tuple is Minecraft `26.1.2`, Fabric Loader `0.19.3`, Fabric API
-`0.152.1+26.1.2`, Java `25`, and Baritone `v1.18.0`. The Baritone jar is fetched
-from its official release and checked by SHA-1 during the Gradle build.
+`0.152.1+26.1.2`, Java `25`, and Baritone `v1.18.0` with the narrow MineBot
+execution patch (`1.18.0+minebot.1`). Gradle builds the unoptimized Fabric jar
+from upstream commit `016cc210434894f371baf0c327ac94907d12dcd3` using
+[tools/build_baritone.py](../../../tools/build_baritone.py) and the checked-in
+patch. Only `PathExecutor` changes: preserve required clearing before the
+Descend→Ascend sprint shortcut, and expose actual movement failure reasons.
+The generated sidecar records the upstream revision and SHA-256 of patch/jar.
+The first build needs Git, Python 3, Java 25 and upstream Gradle dependencies;
+subsequent unchanged builds reuse the artifact. The script forwards an HTTP
+proxy from `HTTPS_PROXY` to JVM downloads. It does not alter the FakePlayer backend.
 
 ## Run against the disposable local server
 
@@ -121,3 +129,33 @@ planning model. They do not establish a complete autonomous Agent task.
 
 See [the dated verification record](verification-20261007.md) for actual
 results, reproduced failures, and the remaining coverage limits.
+
+## Execution regression (2026-10-09)
+
+Navigation state includes the current movement's type, endpoints, pending
+break/place block states, native calculation count and repeated execution
+failures. Two failures of the same movement without meaningful displacement,
+world work or increasing native mining progress end with `no_progress` after
+normal cancellation. Recalculation and elapsed idle time alone do not fail an
+action. This recognizes repeated physical execution failures, not every
+possible planning loop.
+
+`buildStructure` and the tracked `builderBuildFile` action temporarily enable
+Baritone inventory management and restore the previous setting at terminal or
+disconnect. Model `build_schematic` waits for that action and then independently
+checks the blueprint cells. Raw IPC `builder_file` remains a developer control;
+it is not the model's build path.
+
+On a **separate disposable** local server/client, the focused fixture supplies
+terrain/materials and temporarily freezes movement; it must never target an
+active Agent or shared world:
+
+```bash
+.venv/bin/python -m tests.e2e_client_navigation_execution \
+  --disposable-local-server --ipc-port 8769 --rcon-port 25578 \
+  --player BatchProbe --output logs/client-execution-regression
+```
+
+The fixture uses `MINEBOT_TEST_RCON_PASSWORD` (default `test`). Actual roof
+reproduction and bounded-regression results are recorded in RUNTIME.md; these
+are developer-directed physical checks, not an autonomous house acceptance.

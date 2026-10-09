@@ -8,7 +8,8 @@
     "VerticalInteractionMixin",
     "MenuSyncMixin",
     "AttentionMixin",
-    "ObserverMouseMixin"
+    "ObserverMouseMixin",
+    "MiningProgressAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

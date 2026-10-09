@@ -120,7 +120,9 @@ def _build_schematic(body: Body, params: dict) -> ToolResult:
         cells = _schematic_cells(path, params["origin"])
     except (OSError, ValueError, KeyError, TypeError, EOFError) as exc:
         return ToolResult(False, "schematic_read_failed", can_retry=False, metrics={"error": str(exc)[:400]})
-    started = _execute(body, "builderBuildFile", {"path": str(path), "origin": params["origin"]})
+    started = _execute(body, "builderBuildFile", {
+        "path": str(path), "origin": params["origin"], "timeout_s": float(params.get("timeout_s", 120)),
+    })
     if not started.success:
         return started
     deadline = time.monotonic() + float(params.get("timeout_s", 120))

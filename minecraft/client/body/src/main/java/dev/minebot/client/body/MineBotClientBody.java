@@ -13,6 +13,10 @@ import baritone.api.pathing.goals.GoalNear;
 import baritone.api.pathing.goals.GoalRunAway;
 import baritone.api.pathing.goals.GoalYLevel;
 import baritone.api.schematic.FillSchematic;
+import baritone.pathing.path.PathExecutor;
+import baritone.pathing.movement.Movement;
+import baritone.utils.BlockStateInterface;
+import dev.minebot.client.body.mixin.MiningProgressAccessor;
 import baritone.api.schematic.MaskSchematic;
 import baritone.api.selection.ISelection;
 import baritone.api.utils.BlockOptionalMeta;
@@ -142,6 +146,7 @@ public final class MineBotClientBody implements ClientModInitializer {
                 requestStop("failed", "server_disconnected");
             }
             restoreAttention(run);
+            restoreBuilderInventory(run);
             ready = false;
             joinedTicks = 0;
             if (menuRead != null) finishMenuRead(client, "server_disconnected");
@@ -149,7 +154,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         });
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
         Thread.ofPlatform().daemon().name("minebot-spike-ipc").start(this::serve);
-        LOG.info("MINEBOT_PHASE_A client_body_loaded minecraft=26.1.2 baritone=1.18.0");
+        LOG.info("MINEBOT_PHASE_A client_body_loaded minecraft=26.1.2 baritone=1.18.0+minebot.1");
     }
 
     private void serve() {
@@ -293,9 +298,13 @@ public final class MineBotClientBody implements ClientModInitializer {
                 if (run != null) throw new IllegalArgumentException("body_busy");
                 String filter = string(request, "path", "");
                 if (filter.isBlank()) throw new IllegalArgumentException("missing_filter_path");
-                baritone.getExploreProcess().applyJsonFilter(
-                    Path.of(filter), request.has("invert") && request.get("invert").getAsBoolean()
-                );
+                try {
+                    baritone.getExploreProcess().applyJsonFilter(
+                        Path.of(filter), request.has("invert") && request.get("invert").getAsBoolean()
+                    );
+                } catch (Exception error) {
+                    throw new IllegalArgumentException("explore_filter_failed", error);
+                }
                 JsonObject response = state(client);
                 response.addProperty("type", type);
                 response.addProperty("request_id", string(request, "request_id", ""));
@@ -526,7 +535,10 @@ public final class MineBotClientBody implements ClientModInitializer {
                 }
                 case "pickup" -> baritone.getFollowProcess().pickup(stack -> BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath().equals(candidate.target));
                 case "farm" -> baritone.getFarmProcess().farm(candidate.range, candidate.anchor);
-                case "build" -> baritone.getBuilderProcess().build("minebot-owned-fixture", new FillSchematic(candidate.sx, candidate.sy, candidate.sz, new BlockOptionalMeta(candidate.target)), candidate.anchor);
+                case "build" -> {
+                    enableBuilderInventory(candidate);
+                    baritone.getBuilderProcess().build("minebot-owned-fixture", new FillSchematic(candidate.sx, candidate.sy, candidate.sz, new BlockOptionalMeta(candidate.target)), candidate.anchor);
+                }
                 case "clear" -> baritone.getBuilderProcess().clearArea(candidate.anchor, candidate.end);
                 case "elytra" -> {
                     if (!baritone.getElytraProcess().isLoaded()) throw new IllegalArgumentException("elytra_process_not_loaded");
@@ -1018,6 +1030,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         current.ticks++;
+        if (current.stopStatus == null) observeNavigation(client, current);
         if (current.kind.equals("mine") && current.stopStatus == null
             && baritone.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)) {
             baritone.getPlayerContext().getSelectedBlock().ifPresent(pos -> {
@@ -1093,6 +1106,119 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
     }
 
+    private void tickBuilderFile(Minecraft client, Run current) {
+        if (current.phase == 0) {
+            String file = string(current.params, "path", "");
+            BlockPos origin = positionParam(current.params, "origin");
+            if (file.isBlank() || origin == null) throw new IllegalArgumentException("missing_builder_file");
+            enableBuilderInventory(current);
+            current.phase = 1;
+            current.phaseTick = current.ticks;
+            if (!baritone.getBuilderProcess().build(Path.of(file).getFileName().toString(), Path.of(file).toFile(), origin)) {
+                requestStop("failed", "builder_file_rejected");
+            }
+        } else if (current.ticks > current.phaseTick + 1 && !baritone.getBuilderProcess().isActive()
+            && !baritone.getPathingBehavior().isPathing()) {
+            requestStop("completed", "builder_finished_verify_world");
+        }
+    }
+
+    private static void enableBuilderInventory(Run current) {
+        current.previousAllowInventory = BaritoneAPI.getSettings().allowInventory.value;
+        BaritoneAPI.getSettings().allowInventory.value = true;
+    }
+
+    private static void restoreBuilderInventory(Run current) {
+        if (current == null || current.previousAllowInventory == null) return;
+        BaritoneAPI.getSettings().allowInventory.value = current.previousAllowInventory;
+        current.previousAllowInventory = null;
+    }
+
+    /** Read native execution failures, not CALC_STARTED or generic cancellation. */
+    private void observeNavigation(Minecraft client, Run current) {
+        var progress = current.navigationProgress;
+        progress.observePosition(client.player.getX(), client.player.getY(), client.player.getZ(), current.elapsed());
+        if (client.gameMode instanceof MiningProgressAccessor mining && mining.minebot$isDestroying()) {
+            BlockPos pos = mining.minebot$destroyBlockPos().immutable();
+            float fraction = mining.minebot$destroyProgress();
+            float highest = current.miningHighWater.getOrDefault(pos, 0.0f);
+            // Repeating the same partial break after a reset is not new progress.
+            if (fraction > highest + 0.01f) {
+                current.miningHighWater.put(pos, fraction);
+                progress.progressed(current.elapsed());
+            }
+        }
+        PathExecutor previous = current.observedExecutor;
+        if (previous != null && previous != current.checkedFailedExecutor
+            && previous.movementFailure() != null) {
+            current.checkedFailedExecutor = previous;
+            JsonObject failure = movementFacts(client, previous);
+            String key = movementKey(failure) + failure.get("pending_break") + failure.get("pending_place");
+            current.navigation = failure;
+            failure.addProperty("last_failure", previous.movementFailure().reason());
+            LOG.info("MINEBOT_BODY movement_failed id={} step={}", current.id, failure);
+            if (progress.executionFailed(key)) {
+                requestStop("failed", "no_progress");
+                return;
+            }
+        }
+        var executor = baritone.getPathingBehavior().getCurrent();
+        if (!(executor instanceof PathExecutor active)) return;
+        current.observedExecutor = active;
+        JsonObject facts = movementFacts(client, active);
+        String step = movementKey(facts);
+        String world = "" + facts.get("pending_break") + facts.get("pending_place");
+        if (step.equals(current.navigationStep) && !world.equals(current.navigationWorld)) {
+            progress.progressed(current.elapsed());
+        }
+        current.navigationStep = step;
+        current.navigationWorld = world;
+        current.navigation = facts;
+    }
+
+    private static String movementKey(JsonObject facts) {
+        return "" + facts.get("movement") + facts.get("src") + facts.get("dest");
+    }
+
+    private JsonObject movementFacts(Minecraft client, PathExecutor executor) {
+        JsonObject facts = new JsonObject();
+        var failure = executor.movementFailure();
+        int index = failure == null ? executor.getPosition() : failure.position();
+        facts.addProperty("path_position", index);
+        var movements = executor.getPath().movements();
+        facts.addProperty("path_movements", movements.size());
+        facts.addProperty("feet_block", client.level.getBlockState(client.player.blockPosition()).toString());
+        if (index >= 0 && index < movements.size()) {
+            var movement = failure == null ? movements.get(index) : failure.movement();
+            facts.addProperty("movement", movement.getClass().getSimpleName());
+            facts.add("src", coordinates(movement.getSrc()));
+            facts.add("dest", coordinates(movement.getDest()));
+            if (movement instanceof Movement nativeMovement) {
+                var blocks = new BlockStateInterface(baritone.getPlayerContext());
+                facts.add("pending_break", navigationBlocks(client, nativeMovement.toBreak(blocks)));
+                facts.add("pending_place", navigationBlocks(client, nativeMovement.toPlace(blocks)));
+            }
+        }
+        return facts;
+    }
+
+    private static JsonArray navigationBlocks(Minecraft client, List<BlockPos> positions) {
+        JsonArray blocks = new JsonArray();
+        for (BlockPos pos : positions) {
+            JsonObject block = new JsonObject();
+            block.add("pos", coordinates(pos));
+            block.addProperty("state", client.level.getBlockState(pos).toString());
+            blocks.add(block);
+        }
+        return blocks;
+    }
+
+    private static JsonArray coordinates(BlockPos pos) {
+        JsonArray result = new JsonArray();
+        result.add(pos.getX()); result.add(pos.getY()); result.add(pos.getZ());
+        return result;
+    }
+
     private boolean cuboidMatches(Minecraft client, Run current) {
         BlockPos end = current.kind.equals("build")
             ? current.anchor.offset(current.sx - 1, current.sy - 1, current.sz - 1) : current.end;
@@ -1160,6 +1286,7 @@ public final class MineBotClientBody implements ClientModInitializer {
                 case "collectBlocks" -> tickCollectBlocks(client, current);
                 case "rangedAttack" -> tickRanged(client, current);
                 case "craftItem" -> tickCraft(client, current);
+                case "builderBuildFile" -> tickBuilderFile(client, current);
                 case "containerTransfer", "furnaceTransfer" -> tickMenuTransfer(client, current);
                 case "handoffItem" -> tickHandoff(client, current);
                 case "ascend", "digDown", "digUp" -> tickVertical(client, current);
@@ -2495,6 +2622,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             BaritoneAPI.getSettings().followRadius.value = current.previousFollowRadius;
         }
         restoreAttention(current);
+        restoreBuilderInventory(current);
         JsonObject response = state(client);
         response.addProperty("flight_observed", current.seenFlying);
         response.addProperty("type", "terminal");
@@ -2664,6 +2792,16 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
         if (baritone != null) {
             state.addProperty("pathing", baritone.getPathingBehavior().isPathing());
+            state.addProperty("allow_inventory", BaritoneAPI.getSettings().allowInventory.value);
+            if (run != null) {
+                JsonObject navigation = run.navigation.deepCopy();
+                navigation.addProperty("repeated_failures", run.navigationProgress.repeatedFailures());
+                navigation.addProperty("idle_ms", run.navigationProgress.idleMs(run.elapsed()));
+                navigation.addProperty("path_calculations", run.pathEvents.getOrDefault("CALC_STARTED", 0));
+                navigation.addProperty("calculating", baritone.getPathingBehavior().getInProgress().isPresent());
+                navigation.addProperty("pathing", baritone.getPathingBehavior().isPathing());
+                state.add("navigation", navigation);
+            }
             state.addProperty("mine_active", baritone.getMineProcess().isActive());
             state.addProperty("goal_active", baritone.getCustomGoalProcess().isActive());
             state.addProperty("get_active", baritone.getGetToBlockProcess().isActive());
@@ -2840,6 +2978,14 @@ public final class MineBotClientBody implements ClientModInitializer {
         int sz;
         boolean seenActive;
         boolean seenFlying;
+        Boolean previousAllowInventory;
+        final NavigationProgress navigationProgress = new NavigationProgress();
+        PathExecutor observedExecutor;
+        PathExecutor checkedFailedExecutor;
+        JsonObject navigation = new JsonObject();
+        String navigationStep = "";
+        String navigationWorld = "";
+        final Map<BlockPos, Float> miningHighWater = new LinkedHashMap<>();
         String target;
         String item;
         String[] targets = new String[0];

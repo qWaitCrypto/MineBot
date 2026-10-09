@@ -515,13 +515,16 @@ def main():
             if args.case == "file_house":
                 call("build_schematic", {"path": str(schematic), "origin": origin, "timeout_s": 90})
             else:
-                action("builderBuildFile", {"path":str(schematic),"origin":origin,"name":"body-house"})
+                file_request = Action.create("builderBuildFile", {"path":str(schematic),"origin":origin,"name":"body-house","timeout_s":90})
+                assert body.execute(file_request).accepted
             if args.case == "native_controls":
                 time.sleep(0.8)
                 action("builderPause", {})
                 assert body.ipc.state()["builder_paused"]
                 time.sleep(0.5)
                 action("builderResume", {})
+                file_terminal = body.await_action_terminal(file_request.id, timeout_s=90)
+                assert file_terminal.data.get("success"), file_terminal
             until=time.monotonic()+90
             while body.ipc.state()["builder_active"]:
                 if time.monotonic() >= until:
@@ -571,13 +574,16 @@ def main():
             command("give MineBotCombat minecraft:diamond_pickaxe")
             path=(root/"house.schem").resolve()
             write_house_schematic(path)
-            report["task"]="Cancel a file builder running independently of a pending Python action; confirm process stop and stable server inventory"
-            action("builderBuildFile", {"path":str(path),"origin":[708,150,8],"name":"cancel-house"})
+            report["task"]="Cancel a tracked native file builder; confirm terminal, process stop and stable server inventory"
+            file_request = Action.create("builderBuildFile", {"path":str(path),"origin":[708,150,8],"name":"cancel-house"})
+            assert body.execute(file_request).accepted
             time.sleep(1)
             assert body.ipc.state()["builder_active"]
             began_cancel=time.monotonic()
             stopped=body.interrupt("developer cancels file builder")
-            assert stopped.ok and stopped.data.get("native_process_stop"),stopped
+            assert stopped.ok and stopped.accepted,stopped
+            file_terminal = body.await_action_terminal(file_request.id, timeout_s=3)
+            assert file_terminal.data.get("status") == "canceled", file_terminal
             until=time.monotonic()+3
             while True:
                 settled=body.ipc.state()

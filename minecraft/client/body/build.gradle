@@ -17,10 +17,8 @@ java {
     withSourcesJar()
 }
 
-def baritoneVersion = "1.18.0"
-def baritoneJar = file("${buildDir}/baritone/baritone-api-fabric-${baritoneVersion}.jar")
-def baritoneUrl = "https://github.com/cabaletta/baritone/releases/download/v${baritoneVersion}/baritone-api-fabric-${baritoneVersion}.jar"
-def baritoneSha1 = "3220ff86a50254488bfd86529ba7e4ac8048a36f"
+def baritoneVersion = "1.18.0+minebot.1"
+def baritoneJar = file("${buildDir}/baritone/baritone-fabric-${baritoneVersion}.jar")
 
 dependencies {
     minecraft "com.mojang:minecraft:26.1.2"
@@ -29,24 +27,16 @@ dependencies {
     implementation files(baritoneJar)
 }
 
-tasks.register("downloadBaritone") {
+tasks.register("buildPatchedBaritone", Exec) {
+    inputs.file(rootProject.file("../tools/build_baritone.py"))
+    inputs.file(file("baritone-patches/0001-preserve-descend-preparation.patch"))
     outputs.file(baritoneJar)
-    doLast {
-        if (!baritoneJar.exists() || sha1(baritoneJar) != baritoneSha1) {
-            baritoneJar.parentFile.mkdirs()
-            new URL(baritoneUrl).withInputStream { input ->
-                baritoneJar.withOutputStream { output -> output << input }
-            }
-        }
-        def actualSha1 = sha1(baritoneJar)
-        if (actualSha1 != baritoneSha1) {
-            throw new GradleException("Baritone ${baritoneVersion} SHA-1 mismatch: ${actualSha1}")
-        }
-    }
+    outputs.file(file("${buildDir}/baritone/baritone-fabric-${baritoneVersion}.json"))
+    commandLine "python3", rootProject.file("../tools/build_baritone.py").absolutePath
 }
 
 tasks.withType(JavaCompile).configureEach {
-    dependsOn(tasks.named("downloadBaritone"))
+    dependsOn(tasks.named("buildPatchedBaritone"))
     options.encoding = "UTF-8"
     options.release = 25
 }
@@ -56,7 +46,7 @@ tasks.withType(Test).configureEach {
 }
 
 tasks.named("runClient").configure {
-    dependsOn(tasks.named("downloadBaritone"))
+    dependsOn(tasks.named("buildPatchedBaritone"))
     def address = System.getenv().getOrDefault("MINEBOT_CLIENT_SERVER", "127.0.0.1:25566")
     def addressParts = address.split(":", 2)
     if (addressParts.size() != 2 || addressParts[0].isBlank() || addressParts[1].isBlank()) {
@@ -88,16 +78,4 @@ processResources {
     filesMatching("fabric.mod.json") {
         expand "version": project.version
     }
-}
-
-static String sha1(File file) {
-    def digest = java.security.MessageDigest.getInstance("SHA-1")
-    file.withInputStream { input ->
-        byte[] buffer = new byte[8192]
-        int read
-        while ((read = input.read(buffer)) != -1) {
-            digest.update(buffer, 0, read)
-        }
-    }
-    return digest.digest().collect { String.format("%02x", it) }.join()
 }

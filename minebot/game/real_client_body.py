@@ -188,7 +188,7 @@ class RealClientBody:
                         "baritone_goal", "following", "allow_break", "allow_place",
                         "explore_for_blocks", "replant_crops", "farm_max_scan_size", "build_in_layers",
                         "get_to_block_blacklist", "builder_placeable", "builder_min_layer",
-                        "builder_max_layer", "builder_selections", "path_estimated_ticks",
+                        "builder_max_layer", "builder_selections", "path_estimated_ticks", "navigation", "allow_inventory",
                     )
                     if key in state
                 },
@@ -266,7 +266,7 @@ class RealClientBody:
     def execute(self, action: Action) -> Result:
         objective = _objective_for(action)
         wire_action = _wire_action_for(action)
-        control = None if objective is not None else _control_for(action)
+        control = None if objective is not None or wire_action is not None else _control_for(action)
         if objective is None and control is None and wire_action is None:
             return _gap_result(action, self.bot_name, "unsupported_action")
         with self._lock:
@@ -703,15 +703,16 @@ def _objective_for(action: Action) -> str | None:
 
 
 def _wire_action_for(action: Action) -> dict[str, object] | None:
-    """Return a structured client action for semantics Baritone does not own.
+    """Return typed actions whose execution lifecycle is owned by the client.
 
-    These actions deliberately travel as typed JSON instead of being encoded as
-    an arbitrary Baritone command.  The client owns the tick lifecycle and
-    returns the same terminal event shape as every other Body action.
+    This includes native schematic building: file paths travel as JSON and the
+    action remains pending until the Baritone process finishes or is canceled.
     """
+    if action.name == "baritoneBuilderBuildFile":
+        return {"name": "builderBuildFile", "params": dict(action.params)}
     names = {
         "engageEntity", "rangedAttack", "craftItem", "containerTransfer",
-        "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp", "useItem", "placeBlock", "collectBlocks",
+        "furnaceTransfer", "handoffItem", "ascend", "digDown", "digUp", "useItem", "placeBlock", "collectBlocks", "builderBuildFile",
     }
     if action.name not in names:
         return None
@@ -749,15 +750,6 @@ def _control_for(action: Action) -> tuple[str, dict[str, object]] | None:
         except (TypeError, ValueError):
             return None
         return ("builder_open_litematic", {"index": index})
-    if name in {"builderBuildFile", "baritoneBuilderBuildFile"}:
-        path = params.get("path")
-        origin = params.get("origin") or params.get("anchor")
-        if not isinstance(path, str) or not path.strip() or not isinstance(origin, (list, tuple)):
-            return None
-        name_value = params.get("name") or path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-        if not isinstance(name_value, str) or not name_value.strip():
-            return None
-        return ("builder_file", {"path": path, "name": name_value, "origin": list(origin)})
     if name in {"exploreFilter", "baritoneExploreFilter"}:
         path = params.get("path")
         if not isinstance(path, str) or not path.strip():

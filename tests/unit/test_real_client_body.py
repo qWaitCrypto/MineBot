@@ -330,7 +330,6 @@ def test_real_client_body_maps_baritone_controls_through_the_same_body_boundary(
     ("action_name", "params", "request_type"),
     (
         ("getToBlockBlacklistClosest", {}, "get_to_block_blacklist"),
-        ("builderBuildFile", {"path": "fixture.schem", "origin": [1, 70, 2]}, "builder_file"),
         ("builderSelectionAdd", {"pos1": [1, 70, 2], "pos2": [3, 72, 4]}, "builder_selection"),
         ("builderSelectionClear", {}, "builder_selection"),
         (
@@ -354,6 +353,28 @@ def test_real_client_body_maps_extended_baritone_controls(
     assert accepted.ok and accepted.accepted
     assert terminal.data["success"] is True
     assert ipc.controls[0][0] == request_type
+
+
+@pytest.mark.parametrize("action_name", ("builderBuildFile", "baritoneBuilderBuildFile"))
+def test_schematic_build_owns_body_until_native_terminal_and_can_be_canceled(action_name) -> None:
+    class BuildingIpc(FakeClientIpc):
+        def action(self, name, params, *, action_id, timeout_ms):
+            self.actions.append((name, params, action_id, timeout_ms))
+            assert self._cancel.wait(2)
+            return RealClientTerminal(action_id, "canceled", "cancel_requested", self.state())
+
+    ipc = BuildingIpc()
+    body = RealClientBody("CapProbe2", ipc)
+    action = Action("schematic-1", action_name, {"path": "fixture.schem", "origin": [1, 70, 2]})
+    assert body.execute(action).accepted
+    assert not body.execute(Action("move-2", "navigate", {"goal": {"kind": "xz", "x": 10, "z": 20}})).accepted
+    body.interrupt("user_stop")
+    terminal = body.await_action_terminal(action.id, timeout_s=1)
+    assert terminal.data["status"] == "canceled"
+    assert ipc.actions[0][0] == "builderBuildFile"
+    assert ipc.canceled == [action.id]
+    assert not ipc.controls
+    assert body.execute(Action("move-3", "navigate", {"goal": {"kind": "xz", "x": 10, "z": 20}})).accepted
 
 
 @pytest.mark.parametrize(
