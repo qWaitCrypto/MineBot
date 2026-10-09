@@ -51,6 +51,7 @@ class Frame:
     raw: list[dict[str, Any]] = field(default_factory=list)
     alerts: list[Alert] = field(default_factory=list)
     control: str | None = None  # None: read-only; otherwise the control state label
+    connection: dict[str, Any] | None = None  # launcher's view of the server connection, when it has one
     flash: tuple[str, str] | None = None  # (tone, text)
 
     def __post_init__(self) -> None:
@@ -110,7 +111,7 @@ def wait_tone(seconds_waited: float, warn: float = 15.0, fail: float = 45.0) -> 
 
 
 STATUS_TONE = {"思考中": "agent", "行动中": "body", "已暂停": "warn", "等待指令": "muted", "已结束": "muted",
-               "请求失败": "fail"}
+               "请求失败": "fail", "已断线": "fail"}
 
 
 def agent_status(frame: Frame) -> tuple[str, str]:
@@ -118,6 +119,9 @@ def agent_status(frame: Frame) -> tuple[str, str]:
     state = frame.state
     if state.terminal is not None:
         return "已结束", str(state.terminal.get("status") or "")
+    if frame.connection and frame.connection.get("state") == "lost":
+        lost_for = frame.now - float(frame.connection.get("since") or frame.now)
+        return "已断线", f"{frame.connection.get('reason') or ''} {seconds(lost_for)}".strip()
     if frame.control == "已暂停":
         return "已暂停", "p 继续"
     running = state.running_calls()
@@ -140,7 +144,7 @@ def _status_badge(frame: Frame) -> list[tuple[str, Any]]:
         # Slow breathing, the only motion while nothing else happens.
         phase = (math.sin(frame.anim * math.pi) + 1) / 2
         style = theme.layer("agent", bold=True) if phase > 0.35 else theme.layer("agent", dim=True)
-    icon = {"思考中": "◐", "行动中": "▶", "已暂停": "❚❚", "已结束": "■", "请求失败": "✗"}.get(label, "○")
+    icon = {"思考中": "◐", "行动中": "▶", "已暂停": "❚❚", "已结束": "■", "请求失败": "✗", "已断线": "⚠"}.get(label, "○")
     parts: list[tuple[str, Any]] = [(f"{icon} {label}", style)]
     if detail:
         parts.append((f"  {detail}", theme.MUTED))

@@ -123,6 +123,7 @@ class PanelApp(App):
         self.show_help = False
         self.show_notices = False
         self.notifier = Notifier()
+        self.connection: dict[str, Any] | None = None  # set by a launcher-backed shell
         self.prefs = prefs.load()
         if self.prefs.get("theme") and not os.environ.get("NO_COLOR") and not os.environ.get("MINEBOT_THEME"):
             theme.set_theme(self.prefs["theme"])
@@ -267,7 +268,8 @@ class PanelApp(App):
             control = "已暂停" if self.agent_paused else "可控制"
         return Frame(state=self.state, now=now, anim=time.monotonic(), live=live, title=title, mode=mode,
                      page=self.page, replay=replay, selection=dict(self.selection), raw=raw,
-                     control=control, flash=flash[:2] if flash else None)
+                     control=control, flash=flash[:2] if flash else None,
+                     connection=None if self.replay else self.connection)
 
     def draw(self, width: int, height: int) -> Any:
         frame = self.frame()

@@ -852,3 +852,28 @@ def test_reused_client_is_never_restarted(tmp_path, fake_server):
     with pytest.raises(ControlError, match="客户端还在运行"):
         server.apply("restart_client")
     assert not launcher.restart_client()
+
+
+def test_client_log_disconnects_and_rejoins_drive_the_connection_state(tmp_path):
+    from minebot.panel.model import PanelState
+    from minebot.panel.views.common import Frame, agent_status
+
+    launcher = Launcher(LaunchOptions(run_dir=tmp_path / "run"))
+    launcher.run_dir.mkdir(parents=True)
+    log = launcher.client_log
+    assert launcher.watch_client_log()["state"] == "unknown"
+    log.write_text('[10:56:55] [Render thread/INFO] (minebot-client-body) MINEBOT_PHASE_A ready {"protocol":"x"}\n')
+    assert launcher.watch_client_log()["state"] == "connected"
+    with open(log, "a") as handle:
+        handle.write("[12:30:29] [Render thread/WARN] (Minecraft) Client disconnected with reason: Timed out\n")
+        handle.write("[12:30:30] partial line without newline")
+    connection = launcher.watch_client_log()
+    assert connection["state"] == "lost" and connection["reason"] == "Timed out"
+    assert launcher.snapshot()["connection"]["state"] == "lost"
+    frame = Frame(state=PanelState(), now=time.time(), anim=0.0, live=True, connection=connection)
+    assert agent_status(frame)[0] == "已断线" and "Timed out" in agent_status(frame)[1]
+    with open(log, "a") as handle:
+        handle.write("\n[12:31:02] MINEBOT_PHASE_A ready {}\n")
+    assert launcher.watch_client_log()["state"] == "connected"
+    log.write_text("")  # a new client.log after restart starts from the top
+    assert launcher.watch_client_log()["state"] == "connected"
