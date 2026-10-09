@@ -102,6 +102,10 @@ session 模型恢复而退出。
 下一调用不派发；未知和非法请求仍不可恢复。原断流测试发现 assertRaises 的
 局部变量覆盖了场景名，实际全部走 EOF；现已修正并首先复现三个新场景失败。
 修复后 Responses/session 回归 78 项、16 个子场景通过。
+提交 d412de9 后仅恢复 Agent 到 attempt-7-upstream-stream-recovery，SQLite
+一致备份继承同一目标和计划，客户端、服务器、世界、背包与建筑保持；发送一次
+原任务续跑指示。新会话两次 place_block 505 / 494 ms 返回
+placed_server_confirmed，确认实际恢复施工，整栋尚未完成验收。
 
 ## 2026-10-09：用户授权第三方 API 恢复同一建房实验
 
