@@ -128,6 +128,11 @@ def _settings_from_env(env: Mapping[str, str]) -> dict[str, object]:
         if threshold < 0:
             raise AppConfigError("MINEBOT_RESPONSES_COMPACT_THRESHOLD must be nonnegative (0 disables)")
         settings["compact_threshold"] = threshold
+    if env.get("MINEBOT_RESPONSES_CONTEXT_MODE"):
+        mode = env["MINEBOT_RESPONSES_CONTEXT_MODE"].strip().lower()
+        if mode not in {"native", "summary"}:
+            raise AppConfigError("MINEBOT_RESPONSES_CONTEXT_MODE must be native or summary")
+        settings["context_mode"] = mode
     return settings
 
 

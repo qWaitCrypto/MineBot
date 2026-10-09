@@ -7,6 +7,7 @@ from minebot.app.body_capability_tools import (
     BODY_PRIMITIVE_CLOSURE,
     BODY_TRANSACTION_CLOSURE,
     _read_nearby_blocks_tool,
+    _read_nearby_entities_tool,
 )
 from minebot.app.body_tool_catalog import (
     BODY_OBJECTIVE_PROVIDER_TABLE,
@@ -101,6 +102,21 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         self.assertEqual(result.metrics["data"]["blocks"], blocks)
 
 
+
+    def test_nearby_entities_keeps_each_selected_interaction_target(self):
+        body = _body()
+        entities = [{"id": str(i), "type": "minecraft:sheep", "pos": [i, 70, 12],
+                     "properties": {"sheared": False, "color": "white"}} for i in range(12)]
+        body.perceive.return_value = PerceptionResult(
+            bot="Bot1", scope="nearbyEntities", type="perception", ok=True, complete=False,
+            data={"entities": entities},
+        )
+        tool = _read_nearby_entities_tool(body)
+        result = tool.callable({})
+        payload = _model_tool_payload(tool.name, result.to_payload(), trace_ref="entities", projector=tool.projector)
+        self.assertEqual(payload["summary"]["entities"], entities)
+        self.assertFalse(payload["summary"]["entities_complete"])
+        self.assertEqual(payload["summary"]["detail_path"], ["metrics", "data", "entities"])
 
     def test_java_designated_collect_projects_missing_tool_as_strategy_terminal(self):
         body = Mock()

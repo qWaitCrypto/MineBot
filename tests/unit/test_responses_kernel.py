@@ -40,7 +40,8 @@ def created(rid):
 
 def terminal(rid, *, reason=None):
     return {"type": "response.incomplete" if reason else "response.completed",
-            "response": {"id": rid, "output": [], "incomplete_details": {"reason": reason}}}
+            "response": {"id": rid, "status": "incomplete" if reason else "completed",
+                         "output": [], "incomplete_details": {"reason": reason}}}
 
 
 def call(call_id, name="work"):
@@ -110,6 +111,7 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*handlers, return_exceptions=True)
 
     async def test_http_keepalive_survives_event_gap_but_idle_and_eof_fail(self):
+        from minebot.app.responses_observation import observe_http_request, observe_http_response
         # Real SDK and loopback SSE: MockTransport cannot enforce socket read
         # timeouts, and its event iterator cannot represent filtered comments.
         for mode in ("keepalive", "silent", "eof"):
@@ -143,18 +145,25 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
                         await writer.wait_closed()
                 server = await asyncio.start_server(serve, "127.0.0.1", 0)
                 port = server.sockets[0].getsockname()[1]
+                observations = []
                 client = AsyncOpenAI(api_key="local-test", base_url=f"http://127.0.0.1:{port}/v1",
-                                     max_retries=0, timeout=httpx.Timeout(0.1, connect=1),
-                                     http_client=httpx.AsyncClient(trust_env=False))
+                                      max_retries=0, timeout=httpx.Timeout(0.1, connect=1),
+                                      http_client=httpx.AsyncClient(trust_env=False,
+                                          event_hooks={"request": [observe_http_request], "response": [observe_http_response]}))
                 async def instructions(): return "Local stream test"
                 kernel = ResponsesKernel(client=client, model="test", tools=lambda: [],
-                    instructions=instructions, invoke=None, emit=lambda *a, **kw: None,
+                    instructions=instructions, invoke=None, emit=lambda event, **kw: observations.append((event, kw)),
                     speak=lambda text: None, transport="http", request_timeout_s=0.1)
                 try:
                     if mode == "keepalive":
                         result = await asyncio.wait_for(kernel.run("hello"), 3)
                         self.assertEqual(result.response_id, "loopback")
                         self.assertEqual(len(heartbeats), 10)
+                        await kernel._connection.request
+                        summary = next(f for e, f in observations if e == "responses_stream_summary")
+                        self.assertEqual(summary["comment_count"], 10)
+                        self.assertTrue(any(e == "responses_http_phase" for e, f in observations))
+                        self.assertNotIn("local-test", json.dumps(observations))
                     else:
                         with self.assertRaisesRegex(ResponsesTransportError,
                                 "ReadTimeout.*last_event=response.created" if mode == "silent" else "without a terminal"):
@@ -219,55 +228,87 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(pending, requests[2]["input"])
         self.assertEqual(requests[2]["input"], [compact, output, {"role": "user", "content": "next"}])
 
-    def test_working_context_keeps_requirements_failures_and_native_calls(self):
-        from minebot.app.conversation import model_input_chars, responses_working_input
-
-        def result(success, handle):
-            return {"success": success, "reason": "scan_done" if success else "unreachable",
-                    "observationHandle": handle, "projection": {"queryable": True},
-                    "summary": {"blocks": "details " * 10_000}}
-        old = {"type": "function_call_output", "call_id": "old", "output": json.dumps(result(True, "scan-1"))}
-        failure = {"type": "function_call_output", "call_id": "failed", "output": json.dumps(result(False, "failure-1"))}
-        pending = call("pending")["item"]
-        items = [{"role": "user", "content": "Return to 10,70,20 after handoff"},
-                 {"type": "reasoning", "encrypted_content": "opaque"}, call("old")["item"], old,
-                 call("failed")["item"], failure, pending,
-                 {"role": "user", "content": "Do not change the destination"}]
-        working = responses_working_input(items, max_chars=100_000, keep_recent_results=0)
-        self.assertLess(model_input_chars(working), model_input_chars(items))
-        self.assertEqual([i for i in working if i.get("type") != "function_call_output"],
-                         [i for i in items if i.get("type") != "function_call_output"])
-        self.assertEqual(working[5], failure)
-        receipt = json.loads(working[3]["output"])
-        self.assertEqual((receipt["success"], receipt["reason"], receipt["observationHandle"]), (True, "scan_done", "scan-1"))
-        self.assertEqual(json.loads(old["output"])["summary"], result(True, "scan-1")["summary"])
-        self.assertEqual(responses_working_input(items, max_chars=1, keep_recent_results=2), items)
-
-    async def test_http_offloads_old_details_in_request_but_retains_original(self):
+    async def test_http_snapshot_updates_leave_history_prefix_intact(self):
         from minebot.app.responses_kernel import _HttpResponsesConnection
-
         requests = []
         class Stream:
             async def __aenter__(self): return self
             async def __aexit__(self, *args): pass
             async def __aiter__(self):
-                event = terminal("r1")
-                yield SimpleNamespace(model_dump=lambda **kw: event)
+                yield SimpleNamespace(model_dump=lambda **kw: terminal("r1"))
         async def create(**params):
             requests.append(params)
             return Stream()
         connection = _HttpResponsesConnection(SimpleNamespace(responses=SimpleNamespace(create=create)))
-        large = json.dumps({"success": True, "reason": "scan_done", "observationHandle": "scan-1",
-                            "projection": {"queryable": True}, "summary": {"cells": "blocks " * 12_000}})
-        connection.history = [call("old")["item"], {"type": "function_call_output", "call_id": "old", "output": large}]
-        for n in range(12):
-            connection.history.extend([call(str(n))["item"], {"type": "function_call_output", "call_id": str(n), "output": '{"success":true}'}])
         async with connection:
-            await connection.send_raw(json.dumps({"type": "response.create", "model": "test", "input": "Continue"}))
-            await connection.recv_bytes()
-        self.assertEqual(connection.history[1]["output"], large)
-        self.assertEqual(json.loads(requests[0]["input"][1]["output"])["observationHandle"], "scan-1")
-        self.assertLess(connection.context_usage["input_chars"], connection.context_usage["history_chars"])
+            for text, snapshot in [("Build at 10,70,20", "inventory=3"), ("Continue", "inventory=4")]:
+                await connection.send_raw(json.dumps({"type": "response.create", "model": "test",
+                    "instructions": "Stable rules", "input": text, "_current_context": snapshot}))
+                await connection.recv_bytes()
+        first, second = requests
+        self.assertEqual(second["input"][:len(first["input"])], first["input"])
+        self.assertEqual(second["input"][-1]["content"], "CURRENT_CONTEXT:\ninventory=4")
+        self.assertTrue(connection.context_usage["static_prefix_reused"])
+        self.assertEqual(connection.context_usage["shared_prefix_items"], len(first["input"]))
+        self.assertNotIn("_current_context", second)
+        self.assertEqual(first["prompt_cache_key"], second["prompt_cache_key"])
+        self.assertEqual(connection.context_usage["context_estimates"]["unit"], "tokens")
+
+    async def test_api_summary_preserves_player_requirements_and_latest_state(self):
+        from minebot.app.responses_kernel import _HttpResponsesConnection
+        requests = []
+        class Stream:
+            def __init__(self, summarize): self.summarize = summarize
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def __aiter__(self):
+                if self.summarize:
+                    yield SimpleNamespace(model_dump=lambda **kw: {"type": "response.output_text.delta", "delta": "House unfinished; roof at 10,70,20."})
+                yield SimpleNamespace(model_dump=lambda **kw: terminal("r1"))
+        async def create(**params):
+            requests.append(params)
+            return Stream("tools" not in params)
+        conn = _HttpResponsesConnection(SimpleNamespace(responses=SimpleNamespace(create=create)),
+            context_mode="summary", compact_threshold=400)
+        goal = {"role": "user", "content": "Build a two-storey house; never remove player blocks."}
+        addition = {"role": "user", "content": "Add a peaked roof at 10,70,20."}
+        conn.history = [goal, call("old")["item"], {"type": "function_call_output", "call_id": "old",
+            "output": json.dumps({"success": True, "old_observations": "stone 123,70,89 " * 1000})}, addition]
+        async with conn:
+            await conn.send_raw(json.dumps({"type": "response.create", "model": "test", "instructions": "Rules",
+                "input": "Continue", "_current_context": "inventory=4; next=roof"}))
+            await conn.recv_bytes()
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(requests[0]["stream"])
+        self.assertNotIn("context_management", requests[0])
+        final = requests[1]["input"]
+        self.assertIn(goal, final)
+        self.assertIn(addition, final)
+        self.assertEqual(final[-1]["content"], "CURRENT_CONTEXT:\n" + "inventory=4; next=roof")
+        self.assertFalse(any(i.get("type") == "function_call" for i in final))
+
+    async def test_terminal_without_eof_does_not_hold_next_request_for_model_timeout(self):
+        from minebot.app.responses_kernel import _HttpResponsesConnection
+        requests = []
+        class Stream:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def __aiter__(self):
+                yield SimpleNamespace(model_dump=lambda **kw: terminal("r1"))
+                if len(requests) == 1:
+                    await asyncio.Event().wait()
+        async def create(**params):
+            requests.append(params)
+            return Stream()
+        facts = []
+        conn = _HttpResponsesConnection(SimpleNamespace(responses=SimpleNamespace(create=create)),
+                                       lambda e, **f: facts.append((e, f)))
+        async with conn:
+            for n in range(2):
+                await asyncio.wait_for(conn.send_raw(json.dumps({"type": "response.create", "input": str(n)})), 3)
+                await conn.recv_bytes()
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(any(f.get("status") == "closed_after_terminal" for e, f in facts))
 
     def kernel(self, wire, invoke, instructions=None):
         async def default_instructions():
@@ -752,7 +793,7 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(outputs["retry-move"]["success"], outputs)
             continuation = next(event for event in wire.sent if any(
                 item.get("call_id") == "retry-move" for item in event.get("input", [])))
-            self.assertIn("pos=(3.0, 64.0, 0.0)", continuation["instructions"])
+            self.assertIn("pos=(3.0, 64.0, 0.0)", json.dumps(continuation["input"]))
         finally:
             await session.aclose()
             store.close()

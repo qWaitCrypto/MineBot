@@ -128,7 +128,7 @@ def test_chatgpt_provider_needs_no_key_and_never_sends_oauth_to_custom_endpoint(
     assert str(client.base_url) == RESOURCE + "/"
     assert model == "gpt-6.1-sol" and provider.responses_tool_namespace == "minebot"
     assert "temperature" not in settings and "max_output_tokens" not in settings
-    assert settings["context_management"][0]["compact_threshold"] == 64_000
+    assert settings["context_management"][0]["compact_threshold"] == 128_000
     assert provider.trace_configs()[0]["auth"] == "chatgpt"
     asyncio.run(provider.aclose())
     for patch in ({"MINEBOT_LLM_BASE_URL": "https://proxy.example/v1"}, {"MINEBOT_AGENT_KERNEL": "sdk"}):

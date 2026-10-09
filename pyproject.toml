@@ -16,6 +16,7 @@ dependencies = [
     "PyYAML>=6.0.2,<7",
     "jsonschema>=4.23,<5",
     "nbtlib>=2.0.4,<3",
+    "tiktoken>=0.12,<1",
 ]
 
 [project.scripts]

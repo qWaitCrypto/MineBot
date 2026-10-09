@@ -1676,7 +1676,21 @@ def _read_nearby_entities_tool(body: Body) -> RegisteredTool:
         body_scope=("nearby_entities",),
         terminal_truth=("nearbyEntities",),
         timeout_s=20.0,
+        projector=nearby_entities_observation_projector,
     )
+
+
+def nearby_entities_observation_projector(reason: str, metrics: dict[str, object]) -> JsonObject:
+    data = metrics.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("entities"), list):
+        return {}
+    entities = data["entities"]
+    # The bounded read itself already selects nearest entities. Preserve all
+    # selected IDs, positions and interaction properties; do not replace them
+    # with only a count or a generic three-item sample.
+    return {"entities": [bounded_summary_value(entity) for entity in entities],
+            "entity_count": len(entities), "entities_complete": metrics.get("complete") is True,
+            "detail_path": ["metrics", "data", "entities"]}
 
 
 def _read_recipe_tool(body: Body) -> RegisteredTool:

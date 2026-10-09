@@ -1,5 +1,123 @@
 # Responses Agent 内核（2026-10-07）
 
+## 2026-10-09：Auth/API 的 128k 上下文与请求可观测性
+
+本轮修正长历史在每次请求中重复压缩、动态 instructions 破坏缓存前缀，
+以及实体投影遗漏行动目标的问题。建房实验保持停止，没有执行回放中模型
+生成的游戏工具。此次实现和推理回放不是建房成功，也不是官方链路延迟已解决。
+
+固定规则和工具保持稳定；每次读到的目标、短计划、Body 全状态、动态技能和
+未完成调用放在 input 尾部的 CURRENT_CONTEXT。历史只追加，直到压缩；
+移除 HTTP 的字符预算旧观测裁剪。实体读取的专用投影保留此次有界读取选中的
+全部实体 ID、位置、交互属性和完整性，不再仅返回数量或通用三项样本。
+
+Auth 默认 native，在 128,000 rendered tokens 使用原生 inline compaction。
+第三方 API 默认 summary：使用 o200k token 估算规则、工具和可见历史，结合
+最近实际 input_tokens 校准，在 128,000 预算触发普通流式 Responses 摘要，
+不要求 context_management、/compact 或 previous_response_id。估算不是未知
+provider tokenizer 或加密项的精确计数；日志分别标记估算、opaque_chars 和
+实际 usage。未配对的调用/结果先保留，结算后再压缩；摘要保留玩家原文和
+最新状态。原生压缩后清理历史并在下一轮重新注入新状态。
+
+两个入口均默认 128k，可显式选择：
+
+```dotenv
+MINEBOT_RESPONSES_COMPACT_THRESHOLD=128000
+# 第三方默认 summary；支持原生压缩的 API 可明确设 native。
+MINEBOT_RESPONSES_CONTEXT_MODE=summary
+```
+
+默认用固定前缀指纹生成 prompt_cache_key；已有配置键优先。当前 Auth 和
+第三方均实测拒绝新 prompt_cache_options / 显式 breakpoint，不默认发送。
+缓存由实际 cached_tokens / input_tokens 判断，前缀一致不冒充命中；压缩、
+更换模型或 provider 后允许重新预热。Tokenizer 首次公开资产下载有 10 秒
+socket timeout、SHA256 校验和磁盘缓存，计数在独立线程进行。
+
+请求观测复用 trace.jsonl：关联 request_key，记录准备/计数、凭据查询时间、
+SDK 每次尝试、TCP/代理 CONNECT/TLS、发送、HTTP 响应头、首字节、字节间隔、
+SSE comment 心跳、首 reasoning/text/tool-arguments/compaction、终态和
+usage/cache。只记录阶段、数量和时间，不记录凭据、请求头或 delta 内容。
+已收到终态后缺失 EOF 的清理最多等 2 秒，正常 EOF 仍归还连接池；HTTP 连接
+keepalive 为 120 秒，明确配置代理时不再叠加环境代理。
+
+真实 API 回放，gpt-6.1-sol / medium / 同一 HTTP adapter：
+
+| 样本 | input tokens | cached tokens | 缓存率 | HTTP 头 / 完成秒 |
+| --- | ---: | ---: | ---: | ---: |
+| 默认稳定键冷请求 | 84,363 | 0 | 0% | 4.395 / 6.049 |
+| 同前缀追加结果 | 91,692 | 84,096 | 91.72% | 4.579 / 8.189 |
+| 再次追加结果 | 99,112 | 91,392 | 92.21% | 3.178 / 3.485 |
+
+这些缓存样本使用保存的真实 73 个工具定义、重构历史和冻结状态，强制选择
+read_state；没有执行它。另一个自由工具选择样本也选 read_state，响应头
+5.028 秒、19 reasoning tokens；不代表复杂游戏规划均在几秒内结束。
+无稳定键的对照缓存为零。同一链路的实际长历史（200 对完整调用/结果、
+149 条 assistant 消息；不含原加密 reasoning）在 128k 预算触发摘要：摘要
+实际输入 135,568 tokens，HTTP 头 6.374 秒，首文字 6.523 秒，45.972 秒完成；
+552 项变成 4 项。随后主请求实际输入 11,939 tokens，HTTP 头 3.512 秒、
+4.251 秒完成，没有在约 15k 重复压缩。再下一次请求 36.092 秒后 incomplete，
+旧版探针未保留 incomplete reason，不能计为成功；现已保存该字段和失败终态。
+
+官方 Auth 对照有一次在 proxy.start_tls 连续三次 ConnectTimeout，TCP 和
+CONNECT 已成功，但未发送 Responses POST body：31.568 秒，无模型事件，
+凭据读取约 1 毫秒。这是已定位的连接等待，不是模型思考。另一次官方长历史
+HTTP 头 5.677 秒后返回 Subscription Sharing quota exhausted。
+Clash 域名规则使 api.openai.com / chatgpt.com 走 ChatGPT 中继，而第三方域名
+走香港 IEPL；同一本地代理不是同一远端路由。不过后续 HTTP1、HTTP2 和
+TLS1.2 GET 对照全部可连通（约 1.5–1.7 秒），没有证据强改全局路由或协议。
+历史 119.723 秒 HTTP 头等待的具体原因仍未被复现锁定，不能宣称已解决。
+官方额度恢复后需用相同完整 Agent 输入继续对照，不能用裸 API 短请求代验。
+
+证据根目录 logs/context-latency-20261009/：api-default-cache-key.json、
+api-auto-planning.json、api-summary-128k.json、auth-quota-control.json、
+auth-current-long.json、proxy-routing.json 和 api-official-tls-comparison.json。
+复现工具 tools/probe_responses_context.py 不执行游戏工具，不打印私有配置。
+可用的第三方 medium 配置已保存在本机私有目录，未选择、重启或续跑 Agent。
+
+验证：当前默认回归及 Auth/API 配置、实体投影扩展集合 135 项和 126 subtests
+通过；扩展集合另有一条已有提示词形状断言失败，要求 move_to 包含
+“never invent a coordinate”，而 HEAD 的探索功能已允许模型选择未观察 waypoint。
+本轮未修改该导航行为，也未将这条失败隐藏为通过。默认集合内无失败。
+最终定向复验：Responses 内核、Auth/API 配置和新增实体投影 38 项及
+10 subtests / 31.20 秒通过；包括异步生命周期、缓存前缀、摘要状态保留、
+长流心跳、连接复用和缺失 EOF 清理。
+
+## 2026-10-09：用户停止新世界实验；上下文与延迟诊断
+
+用户要求停止实验，Agent 在此之前已于 06:52:04 +08:00 因官方
+`Subscription Sharing usage limit` APIError 退出。监控已设为 PAUSED，
+`run.json` 为 `stopped_by_user`；客户端、服务器、世界、背包和建筑保留。
+房屋尚未完成验收，不恢复、重启或自动注入继续。
+
+当前 attempt 的 493 个完成请求平均 28.557 秒，P50 14.288、P90 54.626、
+P95 81.637、最长 164.910 秒，另有 16 次失败。03:59 后的 180 个完成请求
+平均 50.308 秒，其中 176 次含 inline compaction，输入平均 69,737.822 token，
+累计记录 reasoning 353,555 token。默认压缩阈值为 64,000；本地 working input
+仍按字符软预算缩减旧的大型观测，不能据此证明 token 预算有效。
+压缩后的输入为什么仍约 70k，现有日志未保存完整 wire history 和不透明
+compaction 内容，尚不能判定为历史裁剪失败。
+
+长请求不能一律算推理：seq412 总耗时 134.098 秒，其中 HTTP 响应头到达前
+119.723 秒；seq2085 总耗时 164.910 秒，其中约 86.536 秒与异步建造执行
+重叠；seq4451 总耗时 135.039 秒，响应头等待 90.768 秒，随后有压缩。
+流日志缺少 delta/heartbeat 到达时间，reasoning token 总数不能证明每秒在思考。
+16 次失败为 7 次明确 provider overloaded、7 次流提前结束、1 次 ReadTimeout、
+1 次套餐共享额度耗尽。先前 SSE 修复不能据此宣称已解决真实 Agent 延迟。
+
+最后一次移动于 06:31:10 发起，此后约 21 分钟只调用 35 次只读工具，
+没有后续身体动作。03:59 后仍有四次移动，不能称整段完全原地不动；但没有
+继续羊毛获取或施工。任务和计划仍在 SQLite，不能称目标被删除。
+另确认 Agent 结果投影问题：后期 16 次 `read_nearby_entities` 中 12 次发给
+模型的 summary 不含 `metrics.data` 的实体信息。该工具没有专用 projector，
+通用小字段过滤会省掉包含实体 ID、位置和属性的嵌套 data；Body 实际已读到羊。
+五次 `read_tool_observation` 又曾给模型部分羊的信息，所以这一缺陷不是全部
+空转的已证明单一原因。空转属于 Agent 上下文/决策推进问题，不能归为 Body
+一直占用执行控制。此轮只停止、诊断和记录，没有修改执行实现。
+
+证据：`logs/house-decor-20261008-231202/stopped-context-latency-analysis.json`
+及 current attempt 的 trace.jsonl，按上述 seq 可复查。
+
+
 ## 2026-10-08 23:14：全新世界的尖顶双层住宅实验
 
 用户授权新建世界，从空库存重新做一次建房实验，并增加尖顶、内饰、外摆和装饰。

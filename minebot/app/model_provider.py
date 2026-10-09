@@ -26,7 +26,7 @@ from agents import (
     retry_policies,
     set_tracing_disabled,
 )
-from httpx import AsyncClient, Timeout, TransportError
+from httpx import AsyncClient, Limits, Timeout, TransportError
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from minebot.brain.provider import ApiShape, Capabilities, ProviderConfig, ProviderKind
@@ -202,9 +202,20 @@ class ModelProviderRegistry(ModelProvider):
             # Subscription route excludes sampling and explicit output caps.
             for key in ("temperature", "top_p", "max_output_tokens"):
                 settings.pop(key, None)
-        threshold = cfg.settings.get("compact_threshold", 64_000 if cfg.auth == "chatgpt" else 0)
-        if threshold:
+        threshold = cfg.settings.get("compact_threshold", 128_000)
+        mode = cfg.settings.get("context_mode", "native" if cfg.auth == "chatgpt" else "summary")
+        settings["_context_mode"], settings["_compact_threshold"] = mode, threshold
+        if threshold and mode == "native":
             settings["context_management"] = [{"type": "compaction", "compact_threshold": threshold}]
+        # Cache hints are opt-in: the current official plan endpoint and the
+        # user's third-party endpoint reject newer prompt_cache_options /
+        # prompt_cache_breakpoint controls even for response.model=6.1-sol.
+        for key in ("prompt_cache_key", "prompt_cache_retention", "extra_body"):
+            if key in cfg.settings:
+                if key == "extra_body":
+                    settings[key] = {**settings.get(key, {}), **cfg.settings[key]}
+                else:
+                    settings[key] = cfg.settings[key]
         return self._responses_clients[logical_name], cfg.model, settings, _request_timeout_s(cfg)
 
     def capabilities_for(self, logical_name: str) -> Capabilities:
@@ -304,11 +315,21 @@ class ModelProviderRegistry(ModelProvider):
         # prevents nested retries from multiplying model wait time.
         if cfg.auth == "chatgpt":
             from minebot.app.chatgpt_auth import ChatGPTAuth
+            from minebot.app.responses_observation import current_observation
             path = self._env.get("MINEBOT_CHATGPT_AUTH_FILE")
-            credential = ChatGPTAuth(Path(path) if path else None, proxy=self.responses_proxy)
+            auth = ChatGPTAuth(Path(path) if path else None, proxy=self.responses_proxy)
+            async def credential():
+                import time
+                started = time.monotonic()
+                value = await auth()
+                obs = current_observation.get()
+                if obs:
+                    obs.record("responses_credential_ready", lookup_s=round(time.monotonic() - started, 3))
+                return value
         else:
             credential = self._api_key(cfg)
         read_timeout = _request_timeout_s(cfg)
+        from minebot.app.responses_observation import observe_http_request, observe_http_response
         client = AsyncOpenAI(
             api_key=credential,
             base_url="https://api.openai.com/v1" if cfg.auth == "chatgpt" else cfg.base_url,
@@ -317,7 +338,9 @@ class ModelProviderRegistry(ModelProvider):
             # budget before the SDK can retry opening the request.
             timeout=Timeout(read_timeout, connect=min(10.0, read_timeout),
                             write=min(30.0, read_timeout), pool=min(10.0, read_timeout)),
-            http_client=AsyncClient(proxy=self.responses_proxy) if self.responses_proxy else None,
+            http_client=AsyncClient(proxy=self.responses_proxy, trust_env=not bool(self.responses_proxy),
+                limits=Limits(keepalive_expiry=120.0),
+                event_hooks={"request": [observe_http_request], "response": [observe_http_response]}),
         )
         self._clients.append(client)
         return client

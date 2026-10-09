@@ -1360,6 +1360,7 @@ class AgentRuntime:
             self.responses_kernel = ResponsesKernel(
                 client=client, model=model, settings=settings, request_timeout_s=timeout,
                 tools=self._responses_tools, instructions=self._responses_instructions,
+                context=self._responses_context,
                 invoke=self._invoke_responses_tool, emit=self.trace.emit, speak=self._responses_speak,
                 needs_work=lambda: bool(self.agent_context.goal_text.strip()) and self.native_task_outcome is None,
                 proxy=getattr(model_provider, "responses_proxy", None),
@@ -1395,6 +1396,22 @@ class AgentRuntime:
         return definitions
 
     async def _responses_instructions(self) -> str:
+        # Cacheable rules are independent of position, inventory, plans and
+        # observations. Live facts belong at the end of the native input.
+        return "\n\n".join([
+            self.agent_context.system_prompt,
+            "CONTINUOUS_EXECUTION: Use asynchronous calls for long Body tools so independent chat can continue. "
+            "Ordinary chat and the end of a model response do not stop physical work. "
+            "Tool results automatically resume the conversation when ready. Do not issue a competing body write. "
+            "Finish actionable goals by executing and checking real results, not by only describing the next steps. "
+            "Only report success supported by tool/state evidence; report a concrete blocker on failure.",
+            "CURRENT_CONTEXT snapshots are read before requests; the latest snapshot supersedes older current-state facts. "
+            "Historical tool observations describe the state when observed, not the current inventory or position. "
+            "Use observationHandle with observation tools to recover omitted details when needed. "
+            "When a current snapshot already answers a question, use it to select the next action; reread only when new evidence is needed.",
+        ])
+
+    async def _responses_context(self) -> str:
         # Reads have their own worker: a long write must not freeze context.
         state = await self._read_lane.run(self.body.get_state)
         self._remember_body_state(state)
@@ -1406,16 +1423,9 @@ class AgentRuntime:
         # Native input already contains the conversation; do not repeat the
         # last eight messages in every request's instructions.
         preamble = self.agent_context.compile(include_session_messages=False, continuous_tools=True).text
-        recent = json.dumps(self.last_tool_results, ensure_ascii=False)
         return "\n\n".join(filter(None, [
-            self.agent_context.system_prompt, preamble, self.agent_context.skill_preamble(),
-            "CONTINUOUS_EXECUTION: Use asynchronous calls for long Body tools so independent chat can continue. Ordinary chat and the end of a model response do not stop physical work. "
-            "Tool results automatically resume the conversation when ready. Do not issue a competing body write. "
-            "Finish actionable goals by executing and checking real results, not by only describing the next steps. "
-            "Only report success supported by tool/state evidence; report a concrete blocker on failure.",
-            "The Body state in these instructions is freshly read for this request. Earlier tool observations describe the state when observed; do not treat old inventory or position as current. "
-            "Large old observation details may be offloaded; use their observationHandle with the observation tools when those details matter.",
-            "RECENT_TOOL_RESULTS: " + recent,
+            preamble, self.agent_context.skill_preamble(),
+            "BODY: " + json.dumps(self.last_known_body_state, ensure_ascii=False, sort_keys=True),
             "CURRENT_PLAN: " + json.dumps(self.native_plan, ensure_ascii=False) if self.native_plan else "",
             "TASK_OUTCOME: " + json.dumps(self.native_task_outcome, ensure_ascii=False) if self.native_task_outcome else "",
         ]))

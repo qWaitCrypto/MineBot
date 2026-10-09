@@ -16,11 +16,26 @@ class AgentConfigTests(unittest.TestCase):
                "MINEBOT_LLM_API_KEY": "provider-key"}
         provider = provider_registry_from_env(env)
         self.assertEqual((provider.kernel, provider.responses_transport), ("responses", "http"))
-        client, model, _, _ = provider.responses_connection_config()
+        client, model, settings, _ = provider.responses_connection_config()
         self.assertEqual((client.max_retries, model), (2, "gpt-6.1-sol"))
+        self.assertEqual((settings["_context_mode"], settings["_compact_threshold"]), ("summary", 128_000))
+        self.assertNotIn("context_management", settings)
+        self.assertNotIn("prompt_cache_options", settings)
+        self.assertNotIn("extra_body", settings)
         asyncio.run(provider.aclose())
         legacy = provider_registry_from_env({**env, "MINEBOT_AGENT_KERNEL": "sdk"})
         self.assertEqual(legacy.kernel, "sdk")
+
+    def test_api_can_explicitly_enable_supported_native_compaction(self):
+        env = {"MINEBOT_LLM_MODEL": "gpt-6.1-sol", "MINEBOT_LLM_KIND": "openai_responses",
+               "MINEBOT_LLM_API_KEY": "provider-key", "MINEBOT_RESPONSES_CONTEXT_MODE": "native",
+               "MINEBOT_RESPONSES_COMPACT_THRESHOLD": "128000"}
+        provider = provider_registry_from_env(env)
+        _, _, settings, _ = provider.responses_connection_config()
+        self.assertEqual(settings["context_management"], [{"type": "compaction", "compact_threshold": 128_000}])
+        asyncio.run(provider.aclose())
+        with self.assertRaises(AppConfigError):
+            provider_registry_from_env({**env, "MINEBOT_RESPONSES_CONTEXT_MODE": "unknown"})
 
     def test_provider_config_prefers_minebot_env(self):
         provider = provider_registry_from_env(
