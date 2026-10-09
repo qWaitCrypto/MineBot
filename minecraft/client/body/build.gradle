@@ -55,6 +55,11 @@ tasks.named("runClient").configure {
     def username = System.getenv().getOrDefault("MINEBOT_CLIENT_USERNAME", "MineBotPhaseA")
     // Minecraft 26.1 uses quickPlayMultiplayer for a direct server launch.
     args("--username", username, "--quickPlayMultiplayer", address)
+    // Official (Microsoft) bot account: `minebot` hands the Minecraft token to this process only.
+    def accessToken = System.getenv().get("MINEBOT_CLIENT_ACCESS_TOKEN")
+    if (accessToken != null && !accessToken.isBlank()) {
+        args("--uuid", System.getenv().getOrDefault("MINEBOT_CLIENT_UUID", ""), "--accessToken", accessToken, "--userType", "msa")
+    }
     def goal = System.getenv().get("MINEBOT_CLIENT_OBJECTIVE")
     if (goal != null && !goal.isBlank()) {
         systemProperty("minebot.client.objective", goal)

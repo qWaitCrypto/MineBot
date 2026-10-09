@@ -37,7 +37,7 @@ def write_options(path: Path, options: LaunchOptions, *, client_command: list[st
 
 def read_options(path: Path) -> tuple[LaunchOptions, list[str] | None, list[str] | None]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    paths = {"env_file", "run_dir"}
+    paths = {"env_file", "run_dir", "servers_file", "accounts_dir"}
     kwargs = {item.name: (Path(data[item.name]) if item.name in paths and data.get(item.name) else data.get(item.name))
               for item in fields(LaunchOptions) if item.name in data}
     return LaunchOptions(**kwargs), data.get("client_command"), data.get("session_command")

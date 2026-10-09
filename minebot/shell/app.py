@@ -281,13 +281,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="minebot",
         description="Start the MineBot client, Agent and live panel with one command.",
-        epilog="minebot doctor: environment, account and server checks only.  "
-               "minebot attach [run]: reopen the panel of a running session.  "
-               "minebot panel <run>: replay a finished session.",
+        epilog="other commands: doctor | attach [run] | panel <run> | login | logout NAME | accounts | "
+               "servers [add|rm|default]",
     )
     parser.add_argument("goal", nargs="?", help="optional first goal; the session stays open for more")
     parser.add_argument("--env-file", type=Path, help="runtime KEY=VALUE profile (default: discovered like minebot-local)")
-    parser.add_argument("--server", help="server HOST:PORT (MINEBOT_CLIENT_SERVER)")
+    parser.add_argument("--server", help="server profile name from servers.toml, or HOST:PORT")
+    parser.add_argument("--profile", help="server profile name (default: the one marked default)")
     parser.add_argument("--bot", help="bot account name (MINEBOT_REAL_BOT)")
     parser.add_argument("--port", type=int, help="client IPC port (MINEBOT_REAL_CLIENT_PORT)")
     parser.add_argument("--disposable", action=argparse.BooleanOptionalAction, default=None,
@@ -304,7 +304,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def options_from(args: argparse.Namespace) -> LaunchOptions:
     return LaunchOptions(goal=args.goal, env_file=args.env_file, run_dir=args.run_dir, server=args.server, bot=args.bot,
-                         port=args.port, disposable=args.disposable, launch_client=args.client, max_steps=args.max_steps)
+                         port=args.port, disposable=args.disposable, launch_client=args.client, max_steps=args.max_steps,
+                         profile=args.profile)
 
 
 DOCTOR_STEPS = 3  # environment, account, server: everything checkable without starting anything
@@ -424,6 +425,10 @@ def main(argv: list[str] | None = None) -> int:
         return doctor(argv[1:])
     if argv[:1] == ["attach"]:
         return attach(argv[1:])
+    if argv[:1] in (["login"], ["logout"], ["accounts"], ["servers"]):
+        from minebot.shell import manage
+
+        return manage.main(argv)
     if argv[:1] == ["panel"]:
         from minebot.panel.app import main as panel_main
 

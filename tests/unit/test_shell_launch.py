@@ -80,6 +80,13 @@ FAKE_SESSION = textwrap.dedent('''
 ''')
 
 
+@pytest.fixture(autouse=True)
+def isolated_config(tmp_path, monkeypatch):
+    """Never read the real ~/.config/minebot servers or accounts."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    return tmp_path / "config" / "minebot"
+
+
 def _varint(value):
     out = bytearray()
     while True:
@@ -495,3 +502,142 @@ def test_foreground_panel_cannot_detach(tmp_path, fake_server):
         launcher.shutdown()
 
     asyncio.run(drive())
+
+
+# ------------------------------------------------------------------ server profiles and bot accounts
+
+def test_server_profile_supplies_address_account_and_world(tmp_path, fake_server, isolated_config):
+    from minebot.shell.profiles import ServerBook, ServerProfile
+
+    book = ServerBook()
+    book.put(ServerProfile("home", fake_server, account="ProfileBot", world="disposable", goal="砍树"))
+    book.save()
+    assert ServerBook().get(None).account == "ProfileBot"
+    launcher = _launcher(tmp_path, "127.0.0.1:1", _free_port())
+    launcher.options.server = "home"  # `minebot --server home` names a profile
+    assert launcher.run(start=0, stop=3), [(s.label, s.error) for s in launcher.steps]
+    assert launcher.server == fake_server and launcher.bot == "ProfileBot" and launcher.disposable
+    assert launcher.options.goal == "砍树" and launcher.profile_name == "home"
+    flagged = _launcher(tmp_path, "127.0.0.1:1", _free_port(), profile="home", bot="FlagBot", disposable=False)
+    assert flagged.run(start=0, stop=3), [(s.label, s.error) for s in flagged.steps]
+    assert flagged.bot == "FlagBot" and not flagged.disposable
+
+
+@pytest.mark.parametrize("table, message", [
+    ('[x]\naddress = "example.com:25565"\nworld = "disposable"\n', "本地"),
+    ('[x]\naddress = "127.0.0.1:1"\nworld = "shared"\n', "shared"),
+    ('[x]\naddress = "127.0.0.1:1"\nwrold = "protected"\n', "wrold"),
+    ('default = "y"\n[x]\naddress = "127.0.0.1:1"\n', "default"),
+])
+def test_bad_server_profiles_fail_the_environment_step(tmp_path, isolated_config, table, message):
+    isolated_config.mkdir(parents=True)
+    (isolated_config / "servers.toml").write_text(table)
+    launcher = _launcher(tmp_path, "127.0.0.1:1", _free_port())
+    assert not launcher.run(stop=1)
+    assert launcher.steps[0].status == "fail" and message in launcher.steps[0].error
+
+
+def _xbox_transport(calls, *, pending=1, has_game=True):
+    import httpx
+
+    state = {"pending": pending}
+
+    def handle(request):
+        url = str(request.url)
+        calls.append(url)
+        form = dict(httpx.QueryParams(request.content.decode())) if request.method == "POST" and \
+            request.headers.get("content-type", "").startswith("application/x-www-form") else {}
+        if url.endswith("/devicecode"):
+            return httpx.Response(200, json={"device_code": "dc", "user_code": "ABCD-1234", "interval": 1,
+                                             "expires_in": 900, "verification_uri": "https://microsoft.com/link"})
+        if url.endswith("/token"):
+            if form.get("grant_type") == "refresh_token":
+                assert form["refresh_token"].startswith("msa-refresh-")
+                rotated = int(form["refresh_token"].rsplit("-", 1)[1]) + 1
+                return httpx.Response(200, json={"access_token": f"msa-access-{rotated}", "refresh_token": f"msa-refresh-{rotated}"})
+            if state["pending"]:
+                state["pending"] -= 1
+                return httpx.Response(400, json={"error": "authorization_pending"})
+            return httpx.Response(200, json={"access_token": "msa-access-1", "refresh_token": "msa-refresh-1"})
+        if "user.auth.xboxlive.com" in url:
+            return httpx.Response(200, json={"Token": "xbl", "DisplayClaims": {"xui": [{"uhs": "hash"}]}})
+        if "xsts.auth.xboxlive.com" in url:
+            return httpx.Response(200, json={"Token": "xsts"})
+        if url.endswith("/login_with_xbox"):
+            assert json.loads(request.content)["identityToken"] == "XBL3.0 x=hash;xsts"
+            return httpx.Response(200, json={"access_token": f"mc-token-{len(calls)}", "expires_in": 86400})
+        if url.endswith("/minecraft/profile"):
+            if not has_game:
+                return httpx.Response(404, json={})
+            return httpx.Response(200, json={"id": "0123456789abcdef0123456789abcdef", "name": "OfficialBot"})
+        return httpx.Response(500)
+
+    return httpx.MockTransport(handle)
+
+
+def test_official_login_refreshes_and_only_the_client_gets_the_token(tmp_path, fake_server, isolated_config):
+    from minebot.shell.accounts import AccountStore
+
+    calls, shown = [], []
+    clock = [1000.0]
+    store = AccountStore(transport=_xbox_transport(calls), clock=lambda: clock[0], sleep=lambda s: clock.__setitem__(0, clock[0] + s))
+    account = store.login("client-id", announce=lambda url, code, ttl: shown.append(code))
+    assert shown == ["ABCD-1234"] and account.name == "OfficialBot" and account.kind == "msa"
+    path = isolated_config / "accounts" / "OfficialBot.json"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert store.ensure_fresh("OfficialBot").access_token == account.access_token, "fresh tokens are reused"
+    clock[0] += 86400
+    refreshed = store.ensure_fresh("OfficialBot")
+    assert refreshed.access_token != account.access_token and refreshed.refresh_token == "msa-refresh-2"
+
+    env_dump = tmp_path / "client-env.json"
+    dump = tmp_path / "dump_client.py"
+    dump.write_text(f"import json, os\njson.dump(dict(os.environ), open({str(env_dump)!r}, 'w'))\n" + FAKE_CLIENT)
+    launcher = _launcher(tmp_path, fake_server, _free_port(), bot="OfficialBot")
+    launcher._launch_client_command = [sys.executable, str(dump)]
+    import minebot.shell.launch as launch_module
+    original = launch_module.AccountStore
+    launch_module.AccountStore = lambda directory=None: AccountStore(directory, transport=_xbox_transport([]))
+    try:
+        assert launcher.run(), [(s.label, s.error) for s in launcher.steps]
+    finally:
+        launch_module.AccountStore = original
+    try:
+        assert launcher.account_kind == "msa" and "正版" in launcher.steps[1].summary
+        client_env = json.loads(env_dump.read_text())
+        assert client_env["MINEBOT_CLIENT_ACCESS_TOKEN"].startswith("mc-token")
+        assert client_env["MINEBOT_CLIENT_UUID"] == "0123456789abcdef0123456789abcdef"
+        assert "MINEBOT_CLIENT_ACCESS_TOKEN" not in launcher.environment, "the Agent session must not see the token"
+    finally:
+        launcher.shutdown()
+    token = client_env["MINEBOT_CLIENT_ACCESS_TOKEN"]
+    for name in ("launch.json", "trace.jsonl", "agent.log"):
+        assert token not in (launcher.run_dir / name).read_text(), name
+
+
+def test_official_login_without_the_game_explains_why(tmp_path, isolated_config):
+    from minebot.shell.accounts import AccountError, AccountStore
+
+    store = AccountStore(transport=_xbox_transport([], pending=0, has_game=False), sleep=lambda s: None)
+    with pytest.raises(AccountError, match="没有购买"):
+        store.login("client-id", announce=lambda *args: None)
+    assert store.names() == []
+
+
+def test_expired_login_fails_the_account_step_with_a_fix(tmp_path, isolated_config):
+    import httpx
+
+    from minebot.shell.accounts import Account, AccountStore
+
+    AccountStore().save(Account("OfficialBot", "u" * 32, client_id="c", refresh_token="r"))
+    launcher = _launcher(tmp_path, "127.0.0.1:1", _free_port(), bot="OfficialBot")
+    import minebot.shell.launch as launch_module
+    original = launch_module.AccountStore
+    expired = httpx.MockTransport(lambda request: httpx.Response(400, json={"error": "invalid_grant"}))
+    launch_module.AccountStore = lambda directory=None: AccountStore(directory, transport=expired)
+    try:
+        assert not launcher.run(stop=2)
+    finally:
+        launch_module.AccountStore = original
+    step = launcher.steps[1]
+    assert step.status == "fail" and "invalid_grant" in step.error and "minebot login" in step.hint

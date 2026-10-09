@@ -36,6 +36,8 @@ from minebot.app.model_provider import ProviderConfigError
 from minebot.app.real_server_session import RealServerConfigError, real_server_config_from_env
 from minebot.game.real_client_ipc import RealClientIpc, RealClientIpcError
 from minebot.panel.source import TraceFollower
+from minebot.shell.accounts import AccountError, AccountStore
+from minebot.shell.profiles import ProfileError, ServerBook
 from minebot.shell.slp import PingError, ping, split_address
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -61,6 +63,7 @@ _CLIENT_MILESTONES = (
     ("Connecting to", "正在连接服务器"),
     ("MINEBOT_PHASE_A ready", "角色已进入世界"),
 )
+_CLIENT_SECRETS = ("MINEBOT_CLIENT_ACCESS_TOKEN", "MINEBOT_CLIENT_UUID")
 _ERROR_MARKERS = ("ERROR", "Exception", "FAILURE", "Error:", "Caused by")
 
 
@@ -100,6 +103,9 @@ class LaunchOptions:
     world_timeout_s: float = 180.0
     agent_timeout_s: float = 120.0
     create_run_dir: bool = True
+    profile: str | None = None  # servers.toml entry; None = the default one, if any
+    servers_file: Path | None = None
+    accounts_dir: Path | None = None
 
 
 class StepFailed(Exception):
@@ -157,7 +163,8 @@ def shell_environment(environment: Mapping[str, str], options: LaunchOptions) ->
     port = result.get("MINEBOT_REAL_CLIENT_PORT") or result.get("MINEBOT_CLIENT_IPC_PORT") or "8768"
     result["MINEBOT_REAL_CLIENT_PORT"] = result["MINEBOT_CLIENT_IPC_PORT"] = port
     # The production session never constructs RCON; keep test-server credentials out of it.
-    for key in [key for key in result if "RCON" in key.upper()]:
+    # Account tokens are added for the game client alone, never from a profile file.
+    for key in [key for key in result if "RCON" in key.upper() or key in _CLIENT_SECRETS]:
         result.pop(key)
     return result
 
@@ -179,6 +186,9 @@ class Launcher:
         self.agent_log = self.run_dir / "agent.log"
         self.client: subprocess.Popen[bytes] | None = None
         self.client_reused = False
+        self.profile_name = ""
+        self.account_kind = "offline"
+        self._client_secrets: dict[str, str] = {}  # only the game client gets these
         self.session: subprocess.Popen[bytes] | None = None
         self.server_info: dict[str, Any] = {}
         self.body: dict[str, Any] = {}
@@ -294,8 +304,32 @@ class Launcher:
             loaded = load_runtime_environment(self.env_path)
         except LocalLauncherError as exc:
             raise StepFailed(str(exc), "用 --env-file 指定配置，或运行 minebot-local --init 生成模板") from exc
-        self.environment = shell_environment(loaded, self.options)
+        options = self.options
+        try:
+            book = ServerBook(options.servers_file)
+            if options.server and not options.profile and options.server in book.profiles:
+                options = LaunchOptions(**{**vars(options), "profile": options.server, "server": None})  # --server home
+            profile = book.get(options.profile)
+        except ProfileError as exc:
+            raise StepFailed(str(exc), "修好 servers.toml，或用 minebot servers 重新添加") from exc
+        if options.profile and profile is None:
+            raise StepFailed(f"没有服务器档案 {options.profile!r}",
+                             f"已有：{', '.join(book.profiles) or '无'}；用 minebot servers add 添加")
+        if profile is not None:
+            # Command-line flags win over the profile, which wins over the runtime profile.
+            options = LaunchOptions(**{**vars(options),
+                                       "server": options.server or profile.address,
+                                       "bot": options.bot or profile.account or None,
+                                       "port": options.port or profile.port,
+                                       "goal": options.goal or profile.goal or None,
+                                       "disposable": options.disposable if options.disposable is not None
+                                       else profile.disposable})
+            self.options = options
+            self.profile_name = profile.name
+        self.environment = shell_environment(loaded, options)
         step.note("ok" if self.env_path else "warn", f"配置 {self.env_path or '未找到，使用当前环境变量'}")
+        if profile is not None:
+            step.note("ok", f"服务器档案 {profile.name}（{book.path}）")
         try:
             config = real_server_config_from_env(self.environment)
         except (RealServerConfigError, ValueError) as exc:
@@ -337,8 +371,22 @@ class Launcher:
         if not _NAME.fullmatch(bot):
             raise StepFailed(f"机器人名字 {bot!r} 不合法（1–16 位字母、数字、下划线）", "用 --bot 指定，或设置 MINEBOT_REAL_BOT")
         step.summary = bot
-        step.note("ok", f"机器人账号 {bot} · 离线登录")
-        step.note("muted", "正版（微软）登录尚未接入；在线模式服务器暂不可用")
+        try:
+            account = AccountStore(self.options.accounts_dir).ensure_fresh(bot)
+        except AccountError as exc:
+            raise StepFailed(str(exc), f"运行 minebot login 重新登录，或用离线名字 --bot") from exc
+        if account is None or account.kind != "msa":
+            self.account_kind = "offline"
+            self._client_secrets = {}
+            step.note("ok", f"机器人账号 {bot} · 离线登录")
+            step.note("muted", "在线模式（正版验证）的服务器需要先 minebot login")
+            return
+        self.account_kind = "msa"
+        self._client_secrets = {"MINEBOT_CLIENT_ACCESS_TOKEN": account.access_token, "MINEBOT_CLIENT_UUID": account.uuid}
+        left = max(0.0, account.expires_at - time.time()) / 3600
+        step.summary = f"{bot} · 正版"
+        step.note("ok", f"机器人账号 {bot} · 正版（微软）· uuid {account.uuid[:8]}…")
+        step.note("ok", f"登录有效，{left:.0f} 小时后自动刷新")
 
     def _step_server(self, step: Step) -> None:
         address = self.server
@@ -384,7 +432,7 @@ class Launcher:
             return
         if not self.options.launch_client:
             raise StepFailed(f"IPC {host}:{port} 没有客户端在监听", "先手动打开客户端，或去掉 --no-client")
-        environment = dict(self.environment)
+        environment = {**self.environment, **self._client_secrets}
         # A single-use Gradle JVM keeps the game inside our process group, so stopping it stops the game.
         environment["GRADLE_OPTS"] = (environment.get("GRADLE_OPTS", "") + " -Dorg.gradle.daemon=false").strip()
         handle = open(self.client_log, "ab")
@@ -584,6 +632,8 @@ class Launcher:
             "phase": self.phase,
             "started_at": datetime.fromtimestamp(self.started_at, timezone.utc).isoformat(),
             "bot": self.bot,
+            "account": self.account_kind,
+            "profile": self.profile_name or None,
             "server": self.server,
             "server_info": self.server_info,
             "model": self.model,
