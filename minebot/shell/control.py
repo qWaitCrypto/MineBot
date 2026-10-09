@@ -287,6 +287,7 @@ class RemoteLauncher:
         self.session_returncode: int | None = None
         self.client_started = False
         self.client_alive = True
+        self.connection: dict[str, Any] = {"state": "unknown", "reason": "", "since": 0.0}
         self._alive = False
         self._poll_s = poll_s
         self._client = ControlClient(self.run_dir)
@@ -337,6 +338,7 @@ class RemoteLauncher:
         self.session_returncode = snapshot.get("session_returncode")
         self.client_started = bool(snapshot.get("client_started"))
         self.client_alive = bool(snapshot.get("client_alive", True))
+        self.connection = snapshot.get("connection") or self.connection
         self._alive = bool(snapshot.get("session_alive"))
         self.phase = snapshot.get("phase", self.phase)
 
@@ -347,6 +349,9 @@ class RemoteLauncher:
 
     def session_alive(self) -> bool:
         return self._alive
+
+    def watch_client_log(self) -> dict[str, Any]:
+        return self.connection  # the supervisor watches the log; snapshots carry the result
 
     def restart_client(self) -> bool:
         """Ask the supervisor to start the game client again after a crash."""

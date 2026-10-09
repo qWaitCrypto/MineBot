@@ -63,6 +63,7 @@ _CLIENT_MILESTONES = (
     ("Connecting to", "正在连接服务器"),
     ("MINEBOT_PHASE_A ready", "角色已进入世界"),
 )
+_DISCONNECT = re.compile(r"Client disconnected with reason: (.*)$")
 _CLIENT_SECRETS = ("MINEBOT_CLIENT_ACCESS_TOKEN", "MINEBOT_CLIENT_UUID")
 _ERROR_MARKERS = ("ERROR", "Exception", "FAILURE", "Error:", "Caused by")
 
@@ -198,6 +199,8 @@ class Launcher:
         self.client: subprocess.Popen[bytes] | None = None
         self.client_reused = False
         self.profile_name = ""
+        self.connection = {"state": "unknown", "reason": "", "since": 0.0}  # from client.log; see watch_client_log
+        self._log_offset = 0
         self.account_kind = "offline"
         self._client_secrets: dict[str, str] = {}  # only the game client gets these
         self.session: subprocess.Popen[bytes] | None = None
@@ -274,6 +277,7 @@ class Launcher:
             "session_returncode": self.session_returncode,
             "client_started": self.client_started,
             "client_alive": self.client_alive,
+            "connection": dict(self.connection),
             "client_reused": self.client_reused,
             "agent_paused": self.agent_paused,
         }
@@ -586,6 +590,28 @@ class Launcher:
             if time.monotonic() > deadline:
                 raise StepFailed(f"{self.options.agent_timeout_s:.0f} 秒内 Agent 没有就绪", "按 l 看 agent.log")
             time.sleep(0.2)
+
+    def watch_client_log(self) -> dict[str, Any]:
+        """Server connection as the game client logs it: Minecraft's own disconnect line and the
+        mod's ``MINEBOT_PHASE_A ready`` after (re)joining. The trace has no connection events."""
+        try:
+            with open(self.client_log, "rb") as handle:
+                size = handle.seek(0, os.SEEK_END)
+                if size < self._log_offset:  # truncated or replaced
+                    self._log_offset = 0
+                handle.seek(self._log_offset)
+                data = handle.read(1 << 20)
+        except OSError:
+            return self.connection
+        cut = data.rfind(b"\n") + 1
+        self._log_offset += cut
+        for line in data[:cut].decode("utf-8", "replace").splitlines():
+            match = _DISCONNECT.search(line)
+            if match:
+                self.connection = {"state": "lost", "reason": match.group(1).strip(), "since": time.time()}
+            elif "MINEBOT_PHASE_A ready" in line:
+                self.connection = {"state": "connected", "reason": "", "since": time.time()}
+        return self.connection
 
     def restart_client(self) -> bool:
         """Start the game client again after it exited, and let the Agent find the world again."""

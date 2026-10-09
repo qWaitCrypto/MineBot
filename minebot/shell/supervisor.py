@@ -80,6 +80,7 @@ class Supervisor:
         alone_since: float | None = None
         while not self._stop.wait(0.25):
             launcher = self.launcher
+            launcher.watch_client_log()
             finished = launcher.phase == "failed" or (launcher.session is not None and not launcher.session_alive())
             if self.server.peers or not finished:
                 alone_since = None

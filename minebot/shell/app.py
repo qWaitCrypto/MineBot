@@ -56,6 +56,8 @@ class ShellApp(PanelApp):
         self._lost_notified = False
         self._client_down = False
         self._client_restarting = False
+        self._connection_state = "unknown"
+        self._last_log_watch = 0.0
         self._attached_late = launcher.phase == "ready"  # attach to a session that is already running
 
     @property
@@ -86,6 +88,8 @@ class ShellApp(PanelApp):
         if self.stage == "panel" and not self._exit_notified and returncode is not None:
             self._exit_notified = True
             self.notify_flash(f"Agent 会话已退出（代码 {returncode}）· q 退出", "fail", 3600)
+        if self.stage == "panel":
+            self._watch_connection()
         if self.stage == "panel" and self.launcher.client_started:
             step = self.launcher.steps[3]
             if self._client_restarting:
@@ -105,6 +109,23 @@ class ShellApp(PanelApp):
         if self.stage == "stopping" and self.launcher.phase in ("stopped", "lost"):
             self.exit()
         super()._tick()
+
+    def _watch_connection(self) -> None:
+        now = time.monotonic()
+        if now - self._last_log_watch < 0.5:
+            return
+        self._last_log_watch = now
+        connection = self.launcher.watch_client_log()
+        state = connection.get("state", "unknown")
+        if state == self._connection_state:
+            return
+        previous, self._connection_state = self._connection_state, state
+        self.connection = connection
+        if state == "lost":
+            reason = connection.get("reason") or "原因未知"
+            self.notify_flash(f"和服务器断开了：{reason} · 机器人停在原地，客户端会回到菜单", "fail", 3600)
+        elif state == "connected" and previous == "lost":
+            self.notify_flash("已重新进入世界", "ok")
 
     # ------------------------------------------------------------ drawing
     def draw(self, width: int, height: int) -> Any:
