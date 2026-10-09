@@ -31,7 +31,7 @@
 - 条件请求把 `BodyState` 编译为完整事实、绑定对象、显式 `unknown_fields` 和共享字段词汇；`about` 不再裁剪事实。
 - Responses 空闲时收到计划终态会启动一次受控唤醒轮次；已有运行中的轮次仍只走事实唤醒。
 
-当前离线定向回归为 `256 passed, 33 subtests passed`，仓库默认测试为 `103 passed, 16 subtests passed`。这些结果只证明离线代码路径，尚未替代真实 Agent、真实写动作、用户停止和同步/异步交接的隔离世界验收。
+当前离线定向回归为 `257 passed, 33 subtests passed`，仓库默认测试为 `103 passed, 16 subtests passed`。这些结果只证明离线代码路径，尚未替代真实 Agent、真实写动作、用户停止和同步/异步交接的隔离世界验收。
 
 ### 离线与单元验证
 

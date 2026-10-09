@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import inspect
 import json
 import time
@@ -151,6 +152,11 @@ def _node_signature(node: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _legacy_node_key(signature: str, occurrence: int) -> str:
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16]
+    return f"legacy:{digest}:{occurrence}"
+
+
 def _resolve_ref(value: Any, *, results: dict[str, Any], item: Any, state: dict[str, Any]) -> Any:
     if not isinstance(value, dict) or set(value) != {"ref"}:
         if isinstance(value, dict):
@@ -245,8 +251,12 @@ class WorkPlanExecutor:
         self.results: dict[str, Any] = {}
         self._cancelled = False
         self._deadline = time.monotonic() + float(plan["timeout_s"])
+        self._legacy_occurrences: dict[str, int] = {}
+        self._path_keys: dict[str, str] = {}
 
     async def run(self) -> WorkRunResult:
+        self._legacy_occurrences.clear()
+        self._path_keys.clear()
         try:
             status = await self._execute(self.plan["work"], "work", [])
         except asyncio.CancelledError:
@@ -260,8 +270,15 @@ class WorkPlanExecutor:
         return WorkRunResult(public_status, tree, copy.deepcopy(self.results), facts)
 
     async def _execute(self, node: dict[str, Any], path: str, intents: list[str], *, item: Any = None) -> str:
-        node_key = _node_id(node, path)
         signature = _node_signature(node)
+        explicit_id = node.get("id")
+        if isinstance(explicit_id, str) and explicit_id:
+            node_key = explicit_id
+        else:
+            occurrence = self._legacy_occurrences.get(signature, 0)
+            self._legacy_occurrences[signature] = occurrence + 1
+            node_key = _legacy_node_key(signature, occurrence)
+        self._path_keys[path] = node_key
         record = self.records.get(node_key)
         if record is None:
             record = NodeRecord(signature=signature)
@@ -457,7 +474,14 @@ class WorkPlanExecutor:
     def annotated_tree(self) -> dict[str, Any]:
         tree = copy.deepcopy(self.plan)
         def annotate(node: dict[str, Any], path: str) -> None:
-            key = _node_id(node, path)
+            key = self._path_keys.get(path)
+            if key is None:
+                signature = _node_signature(node)
+                explicit_id = node.get("id")
+                if isinstance(explicit_id, str) and explicit_id:
+                    key = explicit_id
+                else:
+                    key = _node_id(node, path)
             node["_runtime"] = self.records.get(key, NodeRecord()).payload()
             if node.get("kind") == "sequence":
                 for index, child in enumerate(node.get("steps", [])):

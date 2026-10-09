@@ -163,6 +163,28 @@ def test_changed_obligation_with_same_id_cannot_inherit_done():
     assert calls == [{"count": 2}, {"count": 10}]
 
 
+def test_inserting_unnamed_node_does_not_replay_unchanged_siblings():
+    def plan(steps):
+        return {"language": "minebot-work/0.2", "goal": "sequence", "timeout_s": 2,
+                "work": {"kind": "sequence", "intent": "run", "steps": steps}}
+    first_steps = [
+        {"kind": "call", "tool": "a", "arguments": {}},
+        {"kind": "call", "tool": "b", "arguments": {}},
+    ]
+    revised_steps = [
+        {"kind": "call", "tool": "new", "arguments": {}},
+        *first_steps,
+    ]
+    calls = []
+    async def call(tool, arguments, *, call_id, timeout_s):
+        calls.append(tool)
+        return {"success": True, "reason": "done", "metrics": {}}
+    records = {}
+    asyncio.run(WorkPlanExecutor(plan(first_steps), call=call, records=records).run())
+    asyncio.run(WorkPlanExecutor(plan(revised_steps), call=call, records=records).run())
+    assert calls == ["a", "b", "new"]
+
+
 def test_revision_reuses_caller_owned_records_and_skips_done_nodes():
     first_plan = {
         "language": "minebot-work/0.2", "goal": "build", "timeout_s": 10,
