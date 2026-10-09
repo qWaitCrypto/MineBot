@@ -85,6 +85,24 @@ yielded，Body 无待执行动作。登高寻路失败并拆掉住宅两格东�
 完整启动/介入及观测以 run.json、当前 trace 和 resume-verification.json 为准；
 住宅仍未验收完成。
 
+## 2026-10-09：第三方上游断流恢复分类
+
+attempt-6 实际完成了上下楼、箱子存入苹果及两格室外座椅台阶；随后 11:40:56
+Agent 退出（exit 8），客户端和服务器仍运行。最后 place_block([7,119,-38])
+357 ms 成功、无待执行动作；下一请求 4.319 s 收到 HTTP 200，8.847 s 在
+工具参数部分返回期间收到 SSE error `upstream_http2_stream_error`，并非寻路
+或长时间等待。内核只把 server_error/rate_limit_exceeded/request_timeout 分类为
+可恢复传输错误，误将该中转上游断流码分类为 ResponsesProtocolError，跳过现有
+session 模型恢复而退出。
+
+精准修复：两种 error/response.failed 入口共享可恢复错误码集合，仅增加已观测
+的 upstream_http2_stream_error，不把所有未知错误改成重试，不更改 Body 或重放
+已提交动作。错误仍可见，进入已有会话退避和实际状态续跑流程。回归覆盖顶层、
+嵌套 SSE error 和 response.failed：已发动作保留并仅执行一次，未完成参数的
+下一调用不派发；未知和非法请求仍不可恢复。原断流测试发现 assertRaises 的
+局部变量覆盖了场景名，实际全部走 EOF；现已修正并首先复现三个新场景失败。
+修复后 Responses/session 回归 78 项、16 个子场景通过。
+
 ## 2026-10-09：用户授权第三方 API 恢复同一建房实验
 
 用户明确先不处理官方套餐，应用 610c14b 后使用第三方 API 继续原任务。
