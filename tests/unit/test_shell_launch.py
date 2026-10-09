@@ -317,3 +317,181 @@ def test_read_only_panel_refuses_control(tmp_path):
             assert app.flash is not None and "只读" in app.flash[1]
 
     asyncio.run(drive())
+
+
+# ------------------------------------------------------------------ control channel, supervisor, attach
+
+def _supervised(tmp_path, server, port, **options):
+    from minebot.shell.supervisor import spawn
+
+    client = tmp_path / "fake_client.py"
+    session = tmp_path / "fake_session.py"
+    client.write_text(FAKE_CLIENT)
+    session.write_text(FAKE_SESSION)
+    launch = LaunchOptions(env_file=_profile(tmp_path, server, port), run_dir=tmp_path / "run",
+                           client_timeout_s=20, world_timeout_s=10, agent_timeout_s=20, **options)
+    process = spawn(launch, client_command=[sys.executable, str(client)],
+                    session_command=[sys.executable, str(session)])
+    return process, launch.run_dir
+
+
+def _wait_phase(remote, phases, timeout_s=30):
+    deadline = time.monotonic() + timeout_s
+    while remote.phase not in phases and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return remote.phase
+
+
+def test_supervisor_survives_its_front_end_and_attach_takes_control(tmp_path, fake_server):
+    from minebot.shell.control import RemoteLauncher, live_runs
+
+    process, run_dir = _supervised(tmp_path, fake_server, _free_port())
+    try:
+        first = RemoteLauncher(run_dir)
+        first.connect()
+        assert _wait_phase(first, ("ready", "failed")) == "ready", [(s.label, s.error) for s in first.steps]
+        assert first.bot == "MineBotCombat" and first.client_started
+        assert first.send("第一句")
+        first.close()  # the panel goes away: the bot must keep running
+        time.sleep(0.5)
+        assert process.poll() is None
+        second = RemoteLauncher(run_dir)
+        second.connect()
+        assert second.phase == "ready" and second.session_alive()
+        assert second.send("/pause") and second.agent_paused
+        second.refresh()
+        assert second.agent_paused, "pause state lives in the supervisor"
+        assert second.send("第二句")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and sum(r["event"] == "user_message" for r in _records(run_dir / "trace.jsonl")) < 3:
+            time.sleep(0.05)
+        second.shutdown()
+        assert second.phase == "stopped"
+        assert any("客户端已关闭" in text for _, _, text in second.messages)
+        second.close()
+        assert process.wait(timeout=15) == 0
+        contents = [r.get("content") for r in _records(run_dir / "trace.jsonl") if r["event"] == "user_message"]
+        assert contents == ["第一句", "/pause", "第二句", "/quit"]
+        log = [json.loads(line) for line in (run_dir / "control.log").read_text().splitlines()]
+        assert [entry["op"] for entry in log] == ["send", "send", "send", "stop"]
+        assert not (run_dir / "control.sock").exists()
+        assert live_runs(tmp_path) == []
+        record = json.loads((run_dir / "launch.json").read_text())
+        assert record["phase"] == "stopped" and "sk-test" not in json.dumps(record)
+    finally:
+        if process.poll() is None:
+            process.kill()
+
+
+def test_supervisor_reports_launch_failure_remotely(tmp_path):
+    from minebot.shell.control import RemoteLauncher
+
+    process, run_dir = _supervised(tmp_path, f"127.0.0.1:{_free_port()}", _free_port())
+    try:
+        remote = RemoteLauncher(run_dir)
+        remote.connect()
+        assert _wait_phase(remote, ("failed",)) == "failed"
+        assert remote.current.key == "server" and remote.current.hint
+        assert not remote.send("hi"), "no session to talk to yet"
+        assert remote.run(), "retry is accepted after a failure"
+        assert _wait_phase(remote, ("failed",)) == "failed"
+        remote.shutdown()
+        assert remote.phase == "stopped"
+        remote.close()
+        assert process.wait(timeout=10) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+
+
+def test_supervisor_without_front_end_stops_after_launch_failure(tmp_path):
+    from minebot.shell.supervisor import Supervisor
+
+    launcher = _launcher(tmp_path, "example.com:25565", _free_port())
+    supervisor = Supervisor(launcher, orphan_s=0.3)
+    started = time.monotonic()
+    assert supervisor.serve() == 0
+    assert launcher.phase == "stopped" and time.monotonic() - started < 10
+    assert not (launcher.run_dir / "control.sock").exists()
+
+
+def test_control_socket_survives_long_run_dirs(tmp_path):
+    from minebot.shell.control import ControlClient, ControlServer
+
+    class Stub:
+        run_dir = tmp_path / ("x" * 90) / "run"
+        phase = "ready"
+
+        def snapshot(self):
+            return {"phase": self.phase}
+
+        def send(self, line):
+            return line == "ok"
+
+    Stub.run_dir.mkdir(parents=True)
+    server = ControlServer(Stub())
+    server.start()
+    try:
+        client = ControlClient(Stub.run_dir)
+        client.connect()
+        assert client.request("snapshot")["snapshot"] == {"phase": "ready"}
+        assert client.request("send", "ok")["ok"]
+        reply = client.request("send", "nope")
+        assert not reply["ok"] and reply["error"]
+        assert not client.request("bogus")["ok"]
+        client.close()
+    finally:
+        server.close()
+    assert not (Stub.run_dir / "control.sock").exists()
+
+
+def test_shell_app_detaches_and_reattaches(tmp_path, fake_server):
+    from minebot.shell.control import RemoteLauncher
+
+    process, run_dir = _supervised(tmp_path, fake_server, _free_port())
+
+    async def drive(remote, keys):
+        app = ShellApp(remote)
+        async with app.run_test(size=(120, 40)) as pilot:
+            deadline = time.monotonic() + 30
+            while app.stage != "panel" and time.monotonic() < deadline:
+                await pilot.pause(0.1)
+            assert app.stage == "panel", [(s.label, s.status, s.error) for s in remote.steps]
+            for key in keys:
+                await pilot.press(key)
+                await pilot.pause(0.05)
+            deadline = time.monotonic() + 20
+            while app.is_running and time.monotonic() < deadline:
+                await pilot.pause(0.1)
+        return app
+
+    try:
+        first = RemoteLauncher(run_dir)
+        first.connect()
+        app = asyncio.run(drive(first, ["colon", "h", "i", "enter", "ctrl+d"]))
+        first.close()
+        assert app.detached and process.poll() is None
+        second = RemoteLauncher(run_dir)
+        second.connect()
+        app = asyncio.run(drive(second, ["p", "q", "q"]))
+        second.close()
+        assert not app.detached and second.phase == "stopped"
+        assert process.wait(timeout=15) == 0
+        contents = [r.get("content") for r in _records(run_dir / "trace.jsonl") if r["event"] == "user_message"]
+        assert contents == ["hi", "/pause", "/quit"]
+    finally:
+        if process.poll() is None:
+            process.kill()
+
+
+def test_foreground_panel_cannot_detach(tmp_path, fake_server):
+    launcher = _launcher(tmp_path, fake_server, _free_port())
+
+    async def drive():
+        app = ShellApp(launcher)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("ctrl+d")
+            assert not app.detached and app.flash is not None and "不能分离" in app.flash[1]
+        launcher.shutdown()
+
+    asyncio.run(drive())

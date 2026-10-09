@@ -4,6 +4,9 @@ Blocking code; the shell app runs :meth:`Launcher.run` in a worker thread and re
 :attr:`Launcher.steps` every frame. The Agent session is the unchanged
 ``minebot.app.real_server_session --interactive`` process; operator input reaches it
 through its stdin, the same channel as typing into that process directly.
+
+:mod:`minebot.shell.supervisor` runs one launcher in a background process and serves it
+over :mod:`minebot.shell.control`, so the panel can detach and ``minebot attach`` back.
 """
 
 from __future__ import annotations
@@ -181,6 +184,7 @@ class Launcher:
         self.body: dict[str, Any] = {}
         self.model = ""
         self.started_at = time.time()
+        self.agent_paused = False
         self._launch_client_command = launch_client_command
         self._session_command = session_command
         self._stdin_lock = threading.Lock()
@@ -214,6 +218,35 @@ class Launcher:
 
     def session_alive(self) -> bool:
         return self.session is not None and self.session.poll() is None
+
+    @property
+    def session_returncode(self) -> int | None:
+        return self.session.poll() if self.session is not None else None
+
+    @property
+    def client_started(self) -> bool:
+        return self.client is not None
+
+    def snapshot(self) -> dict[str, Any]:
+        """Everything a remote front end needs to draw the launch screen and drive the panel."""
+        now = time.monotonic()
+        return {
+            "phase": self.phase,
+            "bot": self.bot,
+            "server": self.server,
+            "run_dir": str(self.run_dir),
+            "started_at": self.started_at,
+            "steps": [{"key": step.key, "label": step.label, "status": step.status, "summary": step.summary,
+                       "lines": [list(line) for line in step.lines], "error": step.error, "hint": step.hint,
+                       "elapsed_s": step.elapsed(now)} for step in self.steps],
+            "output": list(self.output),
+            "messages": [list(message) for message in self.messages],
+            "session_alive": self.session_alive(),
+            "session_returncode": self.session_returncode,
+            "client_started": self.client_started,
+            "client_reused": self.client_reused,
+            "agent_paused": self.agent_paused,
+        }
 
     # ------------------------------------------------------------ run
     def run(self, start: int | None = None, stop: int | None = None) -> bool:
@@ -494,6 +527,11 @@ class Launcher:
                 self.session.stdin.flush()
             except (BrokenPipeError, OSError, ValueError):
                 return False
+        lowered = text.lower()
+        if lowered.startswith("/pause"):
+            self.agent_paused = True
+        elif lowered.startswith(("/continue", "/cancel", "/stop")):
+            self.agent_paused = False
         return True
 
     def say(self, tone: str, text: str) -> None:
@@ -555,6 +593,7 @@ class Launcher:
             "client_reused": self.client_reused,
             "session_pid": self.session.pid if self.session else None,
             "session_exit": self.session.returncode if self.session else None,
+            "launcher_pid": os.getpid(),
             "steps": [{**asdict(step), "elapsed_s": step.elapsed()} for step in self.steps],
         }
         for item in record["steps"]:
