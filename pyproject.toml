@@ -23,6 +23,7 @@ dependencies = [
 minebot-camera = "minebot.camera.cli.main:main"
 minebot-local = "minebot.app.local_launcher:main"
 minebot-auth = "minebot.app.chatgpt_auth:main"
+minebot-panel = "minebot.panel.app:main"
 
 [tool.setuptools.package-data]
 "minebot.skills" = ["catalog/*/SKILL.md"]
@@ -35,6 +36,8 @@ test = ["pytest>=8,<10"]
 # kind="litellm" providers (Anthropic, Gemini, …) need this beta extra.
 litellm = ["openai-agents[litellm]==0.17.6"]
 camera = ["websockets==16.0"]
+# Read-only terminal panel over a session trace (minebot-panel).
+panel = ["textual>=8.2,<9"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
