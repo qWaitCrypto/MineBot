@@ -547,11 +547,18 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     confirmation = governance_confirmation_from(body_process)
     if confirmation is not None:
         metrics["governance_confirmation"] = confirmation
+    # Why the Body stopped is small and decisive; keep it where the Agent reads
+    # it instead of only inside the nested process record.
+    process_metrics = body_process.get("metrics") if isinstance(body_process, dict) else None
+    stalled = process_metrics.get("stalled") if isinstance(process_metrics, dict) else None
+    process_suggestion = body_process.get("nextSuggestion") if isinstance(body_process, dict) else None
+    if isinstance(stalled, dict):
+        metrics["stalled"] = stalled
     return ToolResult(
         result.success,
         result.reason,
         result.can_retry,
-        result.next_suggestion,
+        result.next_suggestion or (process_suggestion if isinstance(stalled, dict) else None),
         metrics=metrics,
     )
 def ensure_tool_for(params: JsonObject, context: CompositionContext, recipe_lookup: RecipeLookup) -> ToolResult:

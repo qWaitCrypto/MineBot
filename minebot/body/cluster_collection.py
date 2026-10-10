@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,9 @@ if TYPE_CHECKING:
 # travelled, is reported instead of being left to run out its deadline.
 NO_PROGRESS_WINDOW_S = 90.0
 NO_PROGRESS_TRAVEL_BLOCKS = 24.0
+# Baritone keeps recalculating a path it cannot find. This many failures in a
+# row with nothing gained is its own evidence that the target is out of reach.
+PATH_FAILURE_LIMIT = 5
 _PROGRESS_POLL_S = 2.0
 
 
@@ -59,6 +63,38 @@ def resource_cluster(
     return found
 
 
+def _path_state(body: Body) -> tuple[int, str, str]:
+    """Baritone's failed path calculations, its goal, and its own failure name."""
+    try:
+        read = body.perceive("baritoneState", {})
+    except Exception:
+        return 0, "", ""
+    data = read.data if read.ok and isinstance(read.data, dict) else {}
+    events = data.get("path_events")
+    failed = events.get("CALC_FAILED") if isinstance(events, dict) else 0
+    navigation = data.get("navigation") if isinstance(data.get("navigation"), dict) else {}
+    return ((failed if isinstance(failed, int) else 0), str(data.get("baritone_goal") or "")[:200],
+            str(navigation.get("last_failure") or ""))
+
+
+_GOAL_POSITION = re.compile(r"x=(-?\d+),\s*y=(-?\d+),\s*z=(-?\d+)")
+
+
+def _unreachable_facts(goal: str, feet: Position | tuple[float, ...], native_failure: str) -> dict:
+    """Where the target is relative to the Body. Measurements, not a diagnosis."""
+    facts: dict = {"goal": goal}
+    if native_failure:
+        facts["native_failure"] = native_failure
+    match = _GOAL_POSITION.search(goal)
+    if match is not None:
+        target = tuple(int(value) for value in match.groups())
+        facts["target"] = list(target)
+        facts["target_above_feet"] = target[1] - math.floor(feet[1])
+        facts["target_horizontal_distance"] = round(
+            math.dist((target[0] + 0.5, target[2] + 0.5), (feet[0], feet[2])), 1)
+    return facts
+
+
 def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[ToolResult, dict | None]:
     """Wait for a native mining action, stopping it when it stops producing.
 
@@ -68,6 +104,8 @@ def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[T
     """
     deadline = time.monotonic() + action_wait_timeout_s(action)
     best, mark_at, mark_pos = inventory_total(), time.monotonic(), body.get_state().pos
+    failed_mark = _path_state(body)[0]
+    native_failure = ""
     while True:
         execution_checkpoint()
         remaining = deadline - time.monotonic()
@@ -79,19 +117,28 @@ def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[T
                 raise
         state = body.get_state()
         total = inventory_total()
+        failed, goal, last_failure = _path_state(body)
+        native_failure = last_failure or native_failure
         if total > best or math.dist(state.pos, mark_pos) >= NO_PROGRESS_TRAVEL_BLOCKS:
-            best, mark_at, mark_pos = max(best, total), time.monotonic(), state.pos
+            best, mark_at, mark_pos, failed_mark = max(best, total), time.monotonic(), state.pos, failed
             continue
         stalled_s = time.monotonic() - mark_at
-        if stalled_s < NO_PROGRESS_WINDOW_S:
+        unreachable = failed - failed_mark >= PATH_FAILURE_LIMIT
+        if not unreachable and stalled_s < NO_PROGRESS_WINDOW_S:
             continue
-        body.interrupt("no_progress")
+        reason = "path_unreachable" if unreachable else "no_progress"
+        body.interrupt(reason)
         event = body.await_action_terminal(action.id, timeout_s=30.0)
-        return terminal_event_to_tool_result(event), {
+        facts = {
+            "reason": reason,
             "stalled_s": round(stalled_s, 1), "inventory_total": total,
             "position": [round(float(value), 1) for value in state.pos],
             "selected_item": state.selected_item,
         }
+        if unreachable:
+            facts.update(failed_path_calculations=failed - failed_mark,
+                         **_unreachable_facts(goal, state.pos, native_failure))
+        return terminal_event_to_tool_result(event), facts
 
 
 def collect_native_cluster(
@@ -116,12 +163,28 @@ def collect_native_cluster(
     attempts, excluded, actions_used = [], set(), 0
     finish_target: Position | None = None
 
-    def result(success: bool, reason: str) -> ToolResult:
+    def result(success: bool, reason: str, stalled: dict | None = None) -> ToolResult:
         current = inventory_total()
-        return ToolResult(success, reason, can_retry=not success, metrics={
+        metrics = {
             "collected": current - before, "requested_count": remaining_count,
             "remaining_count": max(0, remaining_count - (current - before)),
-            "attempts": attempts, "collection_strategy": "native_resource_collection"})
+            "attempts": attempts, "collection_strategy": "native_resource_collection"}
+        suggestion = None
+        if stalled is not None:
+            # Top level, so it survives the bounded projection the Agent reads.
+            metrics["stalled"] = stalled
+            if stalled.get("reason") == "path_unreachable":
+                where = ""
+                if "target_above_feet" in stalled:
+                    where = (f" The target {stalled['target']} is {stalled['target_above_feet']} blocks above the "
+                             f"Body's feet and {stalled['target_horizontal_distance']} blocks away horizontally; "
+                             f"the Body holds {stalled.get('selected_item') or 'nothing'}.")
+                suggestion = (
+                    f"Baritone failed {stalled.get('failed_path_calculations')} path calculations in a row and "
+                    f"found no way to this target.{where} Repeating the same collection picks the same target; "
+                    "decide how to reach it or collect somewhere else."
+                )
+        return ToolResult(success, reason, can_retry=not success, next_suggestion=suggestion, metrics=metrics)
 
     while time.monotonic() < deadline and actions_used < config.mutation_budget:
         execution_checkpoint()
@@ -201,7 +264,7 @@ def collect_native_cluster(
                          "mine": terminal.to_payload(), **({"no_progress": stalled} if stalled else {})})
         actions_used += 1
         if stalled:
-            return result(False, "no_progress")
+            return result(False, str(stalled["reason"]), stalled)
         if not terminal.success:
             return result(False, terminal.reason)
         if action.name == "mineResource":

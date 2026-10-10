@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from jsonschema import Draft202012Validator
 from agents import Agent, RunConfig, RunContextWrapper, Runner, RunHooks, Session
 from agents.run_config import ModelInputData
+from openai.types.shared import Reasoning
 from agents.exceptions import MaxTurnsExceeded, UserError
 from agents.items import ItemHelpers, MessageOutputItem, ToolCallItem, ToolCallOutputItem
 from agents.tool import FunctionTool
@@ -151,7 +152,10 @@ def _execution_outcome(result: Any) -> tuple[str, str | None]:
 # A direct Body call that has not settled after this many seconds stops holding
 # the model turn; unset/empty keeps the default, "off" keeps calls synchronous.
 DIRECT_CALL_WINDOW_ENV = "MINEBOT_DIRECT_CALL_WINDOW_S"
-DEFAULT_DIRECT_CALL_WINDOW_S = 10.0
+DEFAULT_DIRECT_CALL_WINDOW_S = 30.0
+SUMMARY_MAX_OUTPUT_TOKENS = 8_000
+# How long a finished background call stays in CURRENT_CONTEXT for the turn that was running.
+RECENT_BACKGROUND_RESULT_S = 120.0
 
 
 def direct_call_window_from_env(env: Mapping[str, str] | None = None) -> float | None:
@@ -1545,6 +1549,7 @@ class AgentRuntime:
         self.reflex_manager = None
         self.background_call: BackgroundCall | None = None
         self.execution_snapshots = ExecutionSnapshots()
+        self._recent_background_result: tuple[float, JsonObject] | None = None
         threshold = getattr(model_provider, "compact_threshold_for", None)
         self.conversation_compactor = ConversationCompactor(
             summarize=self._summarize_conversation,
@@ -1996,6 +2001,8 @@ class AgentRuntime:
         if self.native_responses:
             async with self._responses_turn_lock:
                 return await self._run_responses_turn(extra_signals, body_actions_allowed=body_actions_allowed)
+        # A new turn receives finished background work as its input.
+        self._recent_background_result = None
         self._turn_intent_kind = intent_kind
         self._turn_has_durable_goal = has_durable_goal
         self._turn_review_grant = review_grant_stop_epoch_id
@@ -2318,6 +2325,10 @@ class AgentRuntime:
         self.trace.emit("background_call_finished", tool_call_id=call.tool_call_id, tool=call.tool,
                         status=status, reason=reason,
                         elapsed_s=round(time.monotonic() - call.started_at, 3))
+        self._recent_background_result = (time.monotonic(), {
+            "tool": call.tool, "tool_call_id": call.tool_call_id, "status": status, "reason": reason,
+            "note": "The full result arrives as a REFLEX_RESULT message after this turn.",
+        })
         self.notify_reflex_fact({
             "kind": "direct_call",
             "activity_id": call.tool_call_id,
@@ -2341,6 +2352,9 @@ class AgentRuntime:
             execution = self.execution_snapshots.current()
             if execution is not None:
                 work["execution"] = execution
+        recent = self._recent_background_result
+        if recent is not None and time.monotonic() - recent[0] <= RECENT_BACKGROUND_RESULT_S:
+            work["finished"] = recent[1]
         return work or None
 
     def latest_progress_evidence_cursor(self) -> int:
@@ -2770,6 +2784,7 @@ class AgentRuntime:
         moving start turns every request into a full prompt-cache write.
         """
         run_context = data.context
+        await self._refresh_live_context(run_context)
         live_context = getattr(run_context, "instruction_preamble", "") or ""
         work = self.background_work()
         if work is not None:
@@ -2788,14 +2803,39 @@ class AgentRuntime:
             return data.model_data
         return ModelInputData(input=view, instructions=instructions)
 
+    async def _refresh_live_context(self, run_context: Any) -> None:
+        """Read the Body before each request so CURRENT_CONTEXT is current.
+
+        The preamble is presented to the model as the latest state. A snapshot
+        taken when the turn began contradicts every tool result after it.
+        """
+        if not isinstance(run_context, RuntimeRunContext) or run_context.runtime is not self:
+            return
+        try:
+            state = await self.run_read(self.body.get_state)
+        except Exception as exc:
+            self.trace.emit("live_context_refresh_failed", error_type=type(exc).__name__)
+            return
+        if getattr(state, "missing", False):
+            return  # the tool path owns Body recovery; do not publish a missing Body as state
+        self.agent_context.observe_state(state)
+        run_context.instruction_preamble = self.agent_context.compile(
+            self._current_route.context_profile if self._current_route is not None else "full",
+            include_session_messages=False,
+        ).text
+
     async def _summarize_conversation(self, previous: str, transcript: str) -> str:
         """One plain text request to the primary model; no tools, no cache write."""
         from agents.models.interface import ModelTracing
 
         logical = self.model_provider.default
         model = self.model_provider.resolve(logical)
+        base = self.model_provider.model_settings_for(logical)
         settings = dataclasses.replace(
-            self.model_provider.model_settings_for(logical), tool_choice=None, parallel_tool_calls=None,
+            base, tool_choice=None, parallel_tool_calls=None,
+            # Reasoning shares the output budget; a summary needs the room for text.
+            max_tokens=max(base.max_tokens or 0, SUMMARY_MAX_OUTPUT_TOKENS),
+            reasoning=None if base.reasoning is None else Reasoning(effort="low"),
         )
         if hasattr(model, "without_prompt_cache"):
             # A one-off request that large must not be written to the cache.

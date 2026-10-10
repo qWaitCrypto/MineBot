@@ -213,7 +213,7 @@ def test_reflex_tools_show_and_stop_the_direct_call():
 
 
 def test_window_setting():
-    assert direct_call_window_from_env({}) == 10.0
+    assert direct_call_window_from_env({}) == 30.0
     assert direct_call_window_from_env({DIRECT_CALL_WINDOW_ENV: "off"}) is None
     assert direct_call_window_from_env({DIRECT_CALL_WINDOW_ENV: "2.5"}) == 2.5
     with pytest.raises(ValueError):
@@ -237,3 +237,35 @@ def test_result_without_a_goal_waits_for_the_next_turn_instead_of_vanishing():
     asyncio.run(session.step())
     session.close()
     assert "REFLEX_RESULT" in calls[-1] and "call-9" in calls[-1]
+
+
+def test_current_context_is_read_again_before_every_request():
+    from agents.run_config import CallModelData, ModelInputData
+
+    body = FakeBody()
+    runtime, wrapper, _facts = _runtime(body)
+
+    def request():
+        data = CallModelData(model_data=ModelInputData(input=[{"role": "user", "content": "go"}], instructions="sys"),
+                             agent=None, context=wrapper.context)
+        return asyncio.run(runtime._bounded_model_input(data)).input[-1]["content"]
+
+    try:
+        first = request()
+        body.x = 42.0  # the Body moved during the turn
+        second = request()
+    finally:
+        runtime.close()
+    assert first.startswith("CURRENT_CONTEXT:") and "42" not in first
+    assert "42" in second
+
+
+def test_an_execution_fact_waits_for_the_running_turn():
+    from minebot.app.session import _queued_preemption
+    from minebot.app.work_queue import MemoryWorkIntentQueue, WorkIntentKind
+
+    queue = MemoryWorkIntentQueue()
+    queue.enqueue(WorkIntentKind.REFLEX_FACT, source="reflex_activity", payload={"fact": {}})
+    assert _queued_preemption(queue, "agent_turn") is None
+    queue.enqueue(WorkIntentKind.MESSAGE, source="player", payload={"text": "stop that"})
+    assert _queued_preemption(queue, "agent_turn") is not None

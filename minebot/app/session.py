@@ -2129,6 +2129,9 @@ def _queued_preemption(queue: WorkIntentQueue, work_kind: str) -> tuple[str, boo
     queued = queue.queued_intents()
     if work_kind == "recovery":
         queued = [intent for intent in queued if intent.kind in CONTROL_INTENT_KINDS]
+    # An execution fact is not a command. Cancelling the request in flight to
+    # deliver it throws that request away; it is read when the turn ends.
+    queued = [intent for intent in queued if intent.kind is not WorkIntentKind.REFLEX_FACT]
     if not queued:
         return None
     intent = max(

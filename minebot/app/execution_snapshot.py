@@ -67,6 +67,8 @@ class _Operation:
         self.max_matching: int | None = None
         self.path_highwater: dict[str, int] = {}
         self.world_edits = 0
+        self.path_failed = 0
+        self.path_failed_at_progress = 0
 
 
 class ExecutionSnapshots:
@@ -105,11 +107,18 @@ class ExecutionSnapshots:
             if isinstance(action_id, str) and action_id:
                 op.action_id = action_id
             op.observed_at = _utc_now()
+            events = payload.get("path_events")
+            failed = events.get("CALC_FAILED") if isinstance(events, Mapping) else None
+            if isinstance(failed, int):
+                if failed < op.path_failed:  # a new native action restarted the counter
+                    op.path_failed_at_progress = 0
+                op.path_failed = failed
             signal = self._progress_signal(op, payload)
             if signal is not None:
                 op.last_progress = time.monotonic()
                 op.last_progress_at = op.observed_at
                 op.progress_signal = signal
+                op.path_failed_at_progress = op.path_failed
             self._merge_facts(op, payload)
 
     def finish(self, operation_id: str, *, state: str, reason: str | None, control: str) -> None:
@@ -211,7 +220,17 @@ class ExecutionSnapshots:
             facts["inventory_delta"] = dict(ordered[:FACT_DELTA_LIMIT])
             if len(ordered) > FACT_DELTA_LIMIT:
                 facts["inventory_delta_omitted"] = len(ordered) - FACT_DELTA_LIMIT
+        goal = payload.get("baritone_goal")
+        if isinstance(goal, str):
+            facts["goal"] = goal[:200]
+        failing = op.path_failed - op.path_failed_at_progress
+        if failing > 0:
+            facts["failed_path_calculations"] = failing
+        else:
+            facts.pop("failed_path_calculations", None)
         op.phase = ExecutionSnapshots._phase(payload, navigation or {}, active, op.phase)
+        if failing >= 2 and op.phase in {None, "calculating_path"}:
+            op.phase = "path_calculation_failing"
 
     @staticmethod
     def _phase(payload: Mapping[str, Any], navigation: Mapping[str, Any], active: list[str],

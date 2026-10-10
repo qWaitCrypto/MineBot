@@ -86,3 +86,17 @@ def test_incomplete_inventory_is_not_a_baseline():
     current = snapshots.current()
     assert current["last_progress_at"] is None and "inventory_delta" in current["facts"]
     assert current["facts"]["inventory_delta"] == {}
+
+
+def test_repeated_path_failures_are_reported_until_something_advances():
+    snapshots = ExecutionSnapshots()
+    snapshots.begin("call-1", "collect_resource")
+    base = {"action_id": "a1", "navigation": {"calculating": True}, "baritone_goal": "GoalBreak{x=137,y=76,z=109}"}
+    snapshots.observe("call-1", {**base, "path_events": {"CALC_FAILED": 1}})
+    assert snapshots.current()["phase"] == "calculating_path"
+    snapshots.observe("call-1", {**base, "path_events": {"CALC_FAILED": 7}})
+    current = snapshots.current()
+    assert current["phase"] == "path_calculation_failing"
+    assert current["facts"]["failed_path_calculations"] == 7 and "y=76" in current["facts"]["goal"]
+    snapshots.observe("call-1", {**base, "path_events": {"CALC_FAILED": 7}, "world_edits": [{"index": 0}]})
+    assert "failed_path_calculations" not in snapshots.current()["facts"]

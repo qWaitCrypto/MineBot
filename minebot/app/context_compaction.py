@@ -159,12 +159,12 @@ class ConversationCompactor:
         tail = self._tail_start(items, first)
         if tail is None:
             self.emit("conversation_compaction_deferred", reason="nothing_older_than_tail",
-                      estimated_tokens=estimate)
+                      estimated_size=estimate)
             return None
         older = items[first:tail]
         previous = self._compaction.summary if self._compaction is not None else ""
-        self.emit("conversation_compaction_started", estimated_tokens=estimate,
-                  threshold_tokens=self.threshold_tokens, summarized_items=len(older),
+        self.emit("conversation_compaction_started", estimated_size=estimate,
+                  threshold=self.threshold_tokens, summarized_items=len(older),
                   kept_items=len(items) - tail)
         try:
             summary = (await self.summarize(previous, _transcript(older))).strip()
@@ -181,7 +181,7 @@ class ConversationCompactor:
         self._compaction = _Compaction(item_fingerprint(items[tail]), summary)
         view = self._render(items, tail)
         self.emit("conversation_compaction_finished", before_items=len(items), after_items=len(view),
-                  before_estimated_tokens=estimate, after_chars=_chars(view), summary_chars=len(summary))
+                  before_estimated_size=estimate, after_chars=_chars(view), summary_chars=len(summary))
         return view
 
     def _tail_start(self, items: list[Any], first: int) -> int | None:

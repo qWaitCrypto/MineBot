@@ -121,6 +121,32 @@ def test_native_collection_stops_a_process_that_gains_nothing(monkeypatch: pytes
     assert result.metrics["attempts"][0]["no_progress"]["selected_item"] == "oak_log"
 
 
+def test_native_collection_stops_when_the_path_keeps_failing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cluster_collection, "_PROGRESS_POLL_S", 0.01)
+    body = NativeBody({"wooden_pickaxe": 1}, finishes=False)
+    failed = iter(range(0, 1000, 2))
+    plain = body.perceive
+
+    def perceive(scope, params):
+        read = plain(scope, params)
+        if scope == "baritoneState":
+            read.data.update(path_events={"CALC_FAILED": next(failed)}, baritone_goal="GoalBreak{x=1,y=76,z=1}",
+                             navigation={"last_failure": "movement_unreachable"})
+        return read
+
+    body.perceive = perceive
+
+    result = _collect(body)
+
+    assert result.reason == "path_unreachable"
+    assert body.interrupted == ["path_unreachable"]
+    stalled = result.metrics["stalled"]
+    assert stalled["failed_path_calculations"] >= 5 and "y=76" in stalled["goal"]
+    assert stalled["target"] == [1, 76, 1] and stalled["target_above_feet"] == 12
+    assert stalled["native_failure"] == "movement_unreachable"
+    assert "12 blocks above" in result.next_suggestion and "same target" in result.next_suggestion
+
+
 def test_native_collection_still_completes_when_it_produces() -> None:
     body = NativeBody({"wooden_pickaxe": 1}, gain_per_action=8)
 
