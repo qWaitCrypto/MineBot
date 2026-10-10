@@ -200,8 +200,8 @@ def main():
                 assert time.monotonic()<until, observed
                 time.sleep(0.1)
             report["fixture_ore_observation"] = observed.data
-            report["task"] = "One mineResource call must collect 24 logs from three separated three-high clusters"
-            data = call("mine_resource", {"block": "oak_log", "quantity": 24, "timeout_s": 120}).metrics
+            report["task"] = "One governed collect_block_domain call (native mineResource underneath) must collect 24 logs from three separated three-high clusters"
+            data = call("collect_block_domain", {"block_types":["oak_log"],"expected_drops":["oak_log"],"remaining_count":24,"search_radius":40,"candidate_budget":40,"mutation_budget":40,"max_wall_s":120}).metrics
             observed = command("clear MineBotCombat minecraft:oak_log 0")
             report["server_inventory_count"] = observed
             assert body.get_state().inventory_counts.get("oak_log",0)>=29, observed

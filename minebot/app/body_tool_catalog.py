@@ -9,7 +9,7 @@ from minebot.brain.registry import RegisteredTool, ToolRegistry
 from minebot.contract import Body
 
 
-BodyToolStage = Literal["base", "composition"]
+BodyToolStage = Literal["base", "composition", "client"]
 
 
 @dataclass(frozen=True)
@@ -68,12 +68,26 @@ _BASE_TOOL_NAMES = (
 
 _COMPOSITION_TOOL_NAMES = ("collect_resource", "ensure_tool_for")
 
+# Native client processes with no counterpart on other providers.
+_CLIENT_TOOL_NAMES = (
+    "observe_environment",
+    "build_structure",
+    "clear_area",
+    "farm_area",
+    "elytra_travel",
+    "read_body_processes",
+    "build_schematic",
+)
+
 CANONICAL_BODY_TOOL_SPECS = tuple(
     CanonicalBodyToolSpec(intent=name, name=name, stage="base")
     for name in _BASE_TOOL_NAMES
 ) + tuple(
     CanonicalBodyToolSpec(intent=name, name=name, stage="composition")
     for name in _COMPOSITION_TOOL_NAMES
+) + tuple(
+    CanonicalBodyToolSpec(intent=name, name=name, stage="client")
+    for name in _CLIENT_TOOL_NAMES
 )
 
 _SPEC_BY_NAME = {spec.name: spec for spec in CANONICAL_BODY_TOOL_SPECS}
@@ -134,10 +148,13 @@ class CanonicalBodyToolCatalog:
             spec = _SPEC_BY_NAME[tool.name]
         except KeyError:
             raise ValueError(f"uncatalogued model-visible Body tool: {tool.name!r}") from None
+        if spec.stage == "client" and self.provider != "real_client":
+            raise ValueError(f"client Body tool {tool.name!r} requires the real_client provider")
         provider = BODY_OBJECTIVE_PROVIDER_TABLE[self.provider].get(tool.name)
-        implementation = provider or (
-            "agent-composition" if spec.stage == "composition" else "python-body-contract"
-        )
+        implementation = provider or {
+            "composition": "agent-composition",
+            "client": "real_client",
+        }.get(spec.stage, "python-body-contract")
         return self.registry.register(
             tool,
             intent=f"body:{spec.intent}",

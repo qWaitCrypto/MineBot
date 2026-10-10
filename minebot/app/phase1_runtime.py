@@ -746,9 +746,9 @@ def build_phase1_registry(
     )
     catalog.assert_stage_complete("base")
     if config.body_provider == "real_client":
-        registry.register(spatial_tools[0])
-        for tool in client_body_tools(body):
-            registry.register(tool)
+        catalog.register(spatial_tools[0])
+        catalog.register_many(client_body_tools(body))
+        catalog.assert_stage_complete("client")
     return registry
 
 

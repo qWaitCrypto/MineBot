@@ -1,4 +1,10 @@
-"""Thin Agent bindings for the native tasks already validated on ClientBody."""
+"""Thin Agent bindings for the native tasks already validated on ClientBody.
+
+Native resource mining is deliberately not bound here: ``collect_resource`` /
+``collect_block_domain`` already run the client's ``mineResource`` behind the
+harvest-tier gate and governance, so a raw entry would only be the same
+process without them.
+"""
 
 from pathlib import Path
 import time
@@ -42,7 +48,7 @@ def _build_observation(reason, metrics):
 
 
 def _execute(body: Body, name: str, params: dict) -> ToolResult:
-    if name in {"mineResource", "buildStructure", "clearArea", "farmArea", "builderBuildFile"}:
+    if name in {"buildStructure", "clearArea", "farmArea", "builderBuildFile"}:
         state = body.perceive("baritoneState", {})
         if not state.ok:
             return ToolResult(False, state.error or "state_read_failed", can_retry=True)
@@ -91,8 +97,6 @@ def _process_state(body: Body) -> ToolResult:
 
 def client_body_tools(body: Body) -> tuple[RegisteredTool, ...]:
     specs = (
-        ("mine_resource", "mineResource", "Collect the requested additional quantity using native resource mining.",
-         {"block": {"type": "string"}, "quantity": {"type": "integer", "minimum": 1}}, ["block", "quantity"]),
         ("build_structure", "buildStructure", "Fill a cuboid with one block type; requires the material in inventory.",
          {"anchor": _POS, "size": {**_POS, "items": {"type": "integer", "minimum": 1}}, "block": {"type": "string"}}, ["anchor", "size", "block"]),
         ("clear_area", "clearArea", "Clear the inclusive cuboid between start and end.",

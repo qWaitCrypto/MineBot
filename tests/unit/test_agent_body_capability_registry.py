@@ -177,10 +177,37 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
             self.assertEqual(len(body_bindings), 46)
             self.assertEqual(
                 {binding.tool_name for binding in body_bindings},
-                set(canonical_body_tool_names()),
+                set(canonical_body_tool_names(stage="base"))
+                | set(canonical_body_tool_names(stage="composition")),
             )
         finally:
             parts.runtime.close()
+
+    def test_real_client_tools_are_catalogued_and_raw_mining_is_not_a_tool(self):
+        registry = build_phase1_registry(
+            _body(),
+            Phase1RuntimeConfig(
+                natural_region=Region("test", (-64, -64, -64), (64, 320, 64)),
+                body_provider="real_client",
+            ),
+        )
+
+        client_names = set(canonical_body_tool_names(stage="client"))
+        self.assertLessEqual(client_names, set(registry.names()))
+        bound = {binding.tool_name: binding for binding in registry.canonical_bindings()}
+        # Every model-visible Body tool has exactly one catalogued intent.
+        self.assertEqual(set(bound), set(registry.names()))
+        self.assertTrue(all(bound[name].implementation == "real_client" for name in client_names))
+        # Native mining stays reachable only behind the governed collection tools.
+        self.assertNotIn("mine_resource", registry)
+        self.assertIn("collect_block_domain", registry)
+
+    def test_client_tools_cannot_be_registered_for_another_provider(self):
+        catalog = CanonicalBodyToolCatalog(Mock(), "java")
+        tool = Mock()
+        tool.name = "build_structure"
+        with self.assertRaises(ValueError):
+            catalog.register(tool)
 
     def test_governance_confirmation_is_support_tool_not_a_duplicate_player_intent(self):
         class AmbiguousRisk:
