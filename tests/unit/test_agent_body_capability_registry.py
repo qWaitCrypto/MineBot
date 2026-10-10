@@ -151,7 +151,7 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
 
         self.assertEqual(tuple(registry.names()), canonical_body_tool_names(stage="base"))
         bindings = registry.canonical_bindings()
-        self.assertEqual(len(bindings), 44)
+        self.assertEqual(len(bindings), 41)
         self.assertEqual(
             {binding.intent for binding in bindings},
             {f"body:{name}" for name in canonical_body_tool_names(stage="base")},
@@ -174,7 +174,7 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
                 for binding in parts.registry.canonical_bindings()
                 if binding.intent.startswith("body:")
             ]
-            self.assertEqual(len(body_bindings), 46)
+            self.assertEqual(len(body_bindings), 43)
             self.assertEqual(
                 {binding.tool_name for binding in body_bindings},
                 set(canonical_body_tool_names(stage="base"))
@@ -201,6 +201,28 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         # Native mining stays reachable only behind the governed collection tools.
         self.assertNotIn("mine_resource", registry)
         self.assertIn("collect_block_domain", registry)
+
+    def test_each_entity_intent_has_one_model_entry(self):
+        registry = _registry()
+
+        # A player is an entity: one approach tool, one follow tool, one read.
+        for retired in ("go_to_player", "follow_player", "find_hostiles"):
+            self.assertNotIn(retired, registry)
+        for kept in ("search_for_entity", "follow_entity", "read_nearby_entities"):
+            self.assertIn(kept, registry)
+
+    def test_nearby_entity_read_can_be_narrowed_to_hostiles(self):
+        body = _body()
+        body.perceive.return_value = PerceptionResult(
+            bot="Bot1", scope="nearbyHostiles", type="perception", ok=True, complete=True,
+            data={"entities": [{"type": "zombie"}]},
+        )
+        tool = _read_nearby_entities_tool(body)
+
+        tool.callable({"hostile_only": True, "radius": 64})
+        body.perceive.assert_called_with("nearbyHostiles", {"radius": 32, "limit": 32})
+        tool.callable({"radius": 64})
+        body.perceive.assert_called_with("nearbyEntities", {"radius": 64, "limit": 32})
 
     def test_client_tools_cannot_be_registered_for_another_provider(self):
         catalog = CanonicalBodyToolCatalog(Mock(), "java")
@@ -434,8 +456,6 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         expected = {
             "explore_for",
             "move_away",
-            "go_to_player",
-            "follow_player",
             "search_for_entity",
             "give_player",
             "consume_item",

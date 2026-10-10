@@ -52,7 +52,7 @@ from minebot.body import (
     VoxelStructureRiskAssessor,
 )
 from minebot.body.cluster_collection import collect_native_cluster
-from minebot.body.combat import CombatTransactions, find_hostiles
+from minebot.body.combat import CombatTransactions
 from minebot.body.furnace import DEFAULT_SMELT_SECONDS_PER_ITEM, resolve_smelt_output, select_fuel
 from minebot.body.inventory import _parse_recipe_variants
 from minebot.body.world_read import read_block_facts
@@ -721,7 +721,6 @@ def build_phase1_registry(
             _follow_tool(navigator),
             _engage_tool(combat),
             _ranged_tool(combat),
-            _find_hostiles_tool(body),
             _search_tool(work),
             _mine_collect_tool(work, collect_objective_body),
             _craft_tool(inventory_txn),
@@ -1346,34 +1345,6 @@ def _ranged_tool(combat: CombatTransactions) -> RegisteredTool:
         ),
     )
 
-
-def _find_hostiles_tool(body: Body) -> RegisteredTool:
-    return RegisteredTool(
-        "find_hostiles",
-        "Find nearby hostile mobs via the nearbyHostiles perception, sorted nearest-first. Returns type/name/pos/health for each.",
-        {
-            "type": "object",
-            "properties": {
-                "radius": {"type": "integer", "minimum": 1, "maximum": 32},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 128},
-            },
-            "additionalProperties": False,
-        },
-        lambda params: find_hostiles(
-            body,
-            radius=int(params.get("radius") or 16),
-            limit=int(params.get("limit") or 16),
-        ),
-        ToolSidecar(
-            "find_hostiles",
-            mutating=False,
-            source="body.perception",
-            tool_type="perception",
-            permission="read_world",
-            body_scope=("nearby_entities",),
-            timeout_s=15.0,
-        ),
-    )
 
 
 def _craft_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:

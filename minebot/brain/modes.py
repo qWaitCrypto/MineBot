@@ -337,7 +337,7 @@ def _context_frame(situational: SituationalState) -> str:
             "continue the resource chain only when safe, otherwise yield a typed blocker."
         )
     if situational == "engage":
-        return "Hostile nearby or under attack; consider find_hostiles + engage_entity or disengage/heal."
+        return "Hostile nearby or under attack; consider read_nearby_entities(hostile_only=true) + engage_entity or disengage/heal."
     if situational == "mobility":
         return "Mobility/reachability issue; use fresh position, route, and candidate facts."
     if situational == "death":

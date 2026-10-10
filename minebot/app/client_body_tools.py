@@ -122,7 +122,7 @@ def client_body_tools(body: Body, natural_regions: Sequence[object] = ()) -> tup
          {"anchor": _POS, "size": {**_POS, "items": {"type": "integer", "minimum": 1}}, "block": {"type": "string"}}, ["anchor", "size", "block"]),
         ("clear_area", "clearArea", "Clear the inclusive cuboid between start and end.",
          {"start": _POS, "end": _POS}, ["start", "end"]),
-        ("farm_area", "farmArea", "Harvest and replant mature crops around anchor; requires seeds and suitable tools.",
+        ("farm_area", "farmArea", "Harvest and replant every mature crop within range of anchor in one native pass; requires seeds and suitable tools. For one exact crop use harvest_and_resow; tilling and first sowing are till_farmland and sow_crop.",
          {"anchor": _POS, "range": {"type": "integer", "minimum": 1, "maximum": 64}}, ["anchor", "range"]),
         ("elytra_travel", "elytraTravel", "Fly to a landing target using equipped Elytra and rockets. Verified start is a drop from height.",
          {"target": _POS}, ["target"]),

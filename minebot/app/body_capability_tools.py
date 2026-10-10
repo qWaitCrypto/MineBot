@@ -150,10 +150,12 @@ BODY_TRANSACTION_CLOSURE: dict[str, CapabilityClosure] = {
         "tool", "give_player", note="Pickup-receipt-verified player handoff."
     ),
     "InteractionTransactions.follow_player": _closure(
-        "tool", "follow_player", note="Bounded player distance-band maintenance."
+        "owned", "search_for_entity", "follow_entity",
+        note="Player distance band; the model reaches it through entity approach or native following.",
     ),
     "InteractionTransactions.go_to_player": _closure(
-        "tool", "go_to_player", note="One-shot named-player approach."
+        "owned", "search_for_entity", "give_player",
+        note="Named-player approach; a player is an entity, so search_for_entity is the model entry.",
     ),
     "InteractionTransactions.search_for_entity": _closure(
         "tool", "search_for_entity", note="Entity search plus authoritative approach."
@@ -351,8 +353,6 @@ def body_capability_tools(
     tools = (
         _move_away_tool(navigator),
         _get_to_block_tool(block_approach),
-        _go_to_player_tool(interaction),
-        _follow_player_tool(interaction),
         _search_for_entity_tool(interaction),
         _give_player_tool(interaction),
         _consume_item_tool(use),
@@ -578,58 +578,14 @@ def _player_band_properties() -> dict[str, object]:
     }
 
 
-def _go_to_player_tool(interaction: InteractionTransactions) -> RegisteredTool:
-    return _tool(
-        "go_to_player",
-        "Approach a named player and verify the requested distance band from fresh entity facts.",
-        _object_schema(_player_band_properties(), required=("player_name",)),
-        lambda params: interaction.go_to_player(
-            player_name=str(params["player_name"]),
-            search_radius=int(params.get("search_radius") or 24),
-            min_distance=float(_param(params, "min_distance", 1.0)),
-            max_distance=float(params.get("max_distance") or 4.5),
-            vertical_tolerance=float(params.get("vertical_tolerance") or 1.5),
-            timeout_s=float(params.get("timeout_s") or 15.0),
-            maintenance_checks=int(params.get("maintenance_checks") or 1),
-        ),
-        mutating=True,
-        source="body.interaction",
-        tool_type="navigation",
-        permission="move",
-        body_scope=("navigation", "nearby_entities"),
-        terminal_truth=("position", "nearbyEntities", "ToolResult"),
-        timeout_s=120.0,
-    )
-
-
-def _follow_player_tool(interaction: InteractionTransactions) -> RegisteredTool:
-    return _tool(
-        "follow_player",
-        "Follow a named player for bounded maintenance checks while preserving a min/max distance band.",
-        _object_schema(_player_band_properties(), required=("player_name",)),
-        lambda params: interaction.follow_player(
-            player_name=str(params["player_name"]),
-            search_radius=int(params.get("search_radius") or 24),
-            min_distance=float(_param(params, "min_distance", 2.0)),
-            max_distance=float(params.get("max_distance") or 4.5),
-            vertical_tolerance=float(params.get("vertical_tolerance") or 1.5),
-            timeout_s=float(params.get("timeout_s") or 15.0),
-            maintenance_checks=int(params.get("maintenance_checks") or 1),
-        ),
-        mutating=True,
-        source="body.interaction",
-        tool_type="navigation",
-        permission="move",
-        body_scope=("navigation", "nearby_entities"),
-        terminal_truth=("position", "nearbyEntities", "ToolResult"),
-        timeout_s=120.0,
-    )
 
 
 def _search_for_entity_tool(interaction: InteractionTransactions) -> RegisteredTool:
     return _tool(
         "search_for_entity",
-        "Find a named or typed entity, approach it, and verify stable identity and interaction range.",
+        "Find one entity and approach it: a player by entity_name, a named mob, or the nearest of entity_types. "
+        "Verifies stable identity and the requested distance band. This is the one tool for walking up to "
+        "someone or something; use follow_entity to keep following a moving target.",
         _object_schema(
             {
                 "entity_types": STRING_LIST_SCHEMA,
@@ -959,7 +915,8 @@ def _sow_crop_tool(interaction: InteractionTransactions) -> RegisteredTool:
 def _harvest_and_resow_tool(interaction: InteractionTransactions) -> RegisteredTool:
     return _tool(
         "harvest_and_resow",
-        "Harvest one mature crop, verify pickup, and immediately resow the same farmland position.",
+        "Harvest one mature crop at an exact farmland position, verify pickup, and immediately resow it. "
+        "For a whole field use farm_area where it is available; this is the precise single-crop tool.",
         _object_schema(
             {
                 "farmland_pos": POSITION_SCHEMA,
@@ -1655,15 +1612,22 @@ def _read_nearby_blocks_tool(body: Body) -> RegisteredTool:
 def _read_nearby_entities_tool(body: Body) -> RegisteredTool:
     return _tool(
         "read_nearby_entities",
-        "Read a bounded nearest-first list of nearby players, mobs, and item entities with stable IDs where available.",
+        "Read a bounded nearest-first list of nearby players, mobs, and item entities with stable IDs where available. "
+        "Set hostile_only=true to list only hostile mobs (radius is then capped at 32).",
         _object_schema(
             {
                 "radius": {"type": "integer", "minimum": 1, "maximum": 64},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 128},
+                "hostile_only": {"type": "boolean"},
             }
         ),
         lambda params: _perception_tool_result(
             body.perceive(
+                "nearbyHostiles",
+                {"radius": min(32, int(params.get("radius") or 16)), "limit": int(params.get("limit") or 32)},
+            )
+            if params.get("hostile_only")
+            else body.perceive(
                 "nearbyEntities",
                 {"radius": int(params.get("radius") or 16), "limit": int(params.get("limit") or 32)},
             ),
