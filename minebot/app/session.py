@@ -333,6 +333,7 @@ class AgentSession:
         """Admit one queued intent, then advance at most one SDK run."""
         assert self.work_queue is not None
         if self.parts is not None:
+            self._bind_runtime_callbacks()
             quarantine = await self._guard_execution_quarantine()
             if quarantine is not None:
                 return quarantine
@@ -910,6 +911,7 @@ class AgentSession:
             had_parts = self.parts is not None
             if self.parts is None:
                 self.parts = self.parts_factory(command.text)
+                self._bind_runtime_callbacks()
             else:
                 self.parts.context.set_goal(command.text)
                 self.parts.runtime.weld_context.goal_text = command.text
@@ -959,6 +961,7 @@ class AgentSession:
                 task = self.task_workspace.current_task if self.task_workspace is not None else None
                 if task is None:
                     self.parts = self.parts_factory("")
+                    self._bind_runtime_callbacks()
                 else:
                     self._ensure_parts_for_runtime_intent()
                     self._goal_active = True
@@ -988,6 +991,7 @@ class AgentSession:
             had_parts = self.parts is not None
             if self.parts is None:
                 self.parts = self.parts_factory(command.text)
+                self._bind_runtime_callbacks()
             else:
                 self.parts.context.set_goal(command.text)
                 self.parts.runtime.weld_context.goal_text = command.text
@@ -1127,6 +1131,25 @@ class AgentSession:
         return []
 
     async def _apply_runtime_intent(self, intent: WorkIntent) -> list[AgentSignal]:
+        if intent.kind is WorkIntentKind.REFLEX_FACT:
+            self._ensure_parts_for_runtime_intent()
+            assert self.parts is not None
+            fact = intent.payload.get("fact")
+            if not isinstance(fact, dict):
+                self._turn_pending = False
+                self._trace("reflex_fact_dropped", reason="invalid_payload")
+                return []
+            self.parts.context.observe_system_message(
+                "REFLEX_RESULT: " + json.dumps(fact, ensure_ascii=False, sort_keys=True)
+            )
+            self._turn_pending = True
+            self._resume_if_waiting()
+            self._trace(
+                "reflex_fact_wake",
+                activity_id=fact.get("activity_id"),
+                status=fact.get("status"),
+            )
+            return []
         if intent.kind is WorkIntentKind.BODY_EVENT:
             task = self.task_workspace.current_task if self.task_workspace is not None else None
             if task is not None and task.status in {TaskStatus.PAUSED, TaskStatus.YIELDED}:
@@ -1432,15 +1455,45 @@ class AgentSession:
 
     def _ensure_parts_for_runtime_intent(self) -> None:
         if self.parts is not None:
+            self._bind_runtime_callbacks()
             return
         task = self.task_workspace.current_task if self.task_workspace is not None else None
         goal = "" if task is None else task.goal_text
         self.parts = self.parts_factory(goal)
+        self._bind_runtime_callbacks()
         if task is not None:
             self._goal_active = True
             self.parts.context.set_goal(task.goal_text)
             self.parts.runtime.weld_context.goal_text = task.goal_text
         self._sync_task_context()
+
+    def _bind_runtime_callbacks(self) -> None:
+        """Connect runtime-originated facts to this SDK session's queue."""
+        if self.parts is None:
+            return
+        setter = getattr(self.parts.runtime, "set_sdk_reflex_fact_listener", None)
+        if callable(setter):
+            setter(self._on_reflex_fact)
+
+    def _on_reflex_fact(self, fact: dict[str, object]) -> None:
+        """Queue one model turn when a reflex activity reaches a terminal state."""
+        assert self.work_queue is not None
+        activity_id = str(fact.get("activity_id") or "unknown")
+        status = str(fact.get("status") or "unknown")
+        task = self.task_workspace.current_task if self.task_workspace is not None else None
+        if not self._goal_active and task is None:
+            self._trace("reflex_fact_dropped", reason="no_active_goal", activity_id=activity_id)
+            return
+        self.work_queue.enqueue(
+            WorkIntentKind.REFLEX_FACT,
+            source="reflex_activity",
+            payload={"fact": dict(fact)},
+            dedupe_key=f"reflex-fact:{activity_id}:{status}",
+            task_id=None if task is None else task.task_id,
+            generation=(None if self.parts is None else self.parts.authority.current_generation()),
+        )
+        self._turn_pending = True
+        self._trace("reflex_fact_queued", activity_id=activity_id, status=status)
 
     def _queue_recovery_if_required(self) -> None:
         if self.parts is None or self.parts.lifecycle.state is not LifecycleState.RECOVERING:

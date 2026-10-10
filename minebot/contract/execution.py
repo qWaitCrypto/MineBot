@@ -115,6 +115,8 @@ __all__ = [
     "execution_checkpoint",
     "action_with_timeout",
     "action_wait_timeout_s",
+    "execution_receipt_scope",
+    "current_execution_receipt",
 ]
 
 
@@ -140,6 +142,13 @@ _TOOL_OBSERVATION: ContextVar[tuple[str, Callable[[JsonObject], None]] | None] =
     "minebot_tool_observation", default=None,
 )
 
+# Internal receipt owned by the execution channel. Body tools must not add
+# delivery fields to their public ToolResult; the serialized lane records the
+# fact after the tool has returned a successful terminal.
+_EXECUTION_RECEIPT: ContextVar[dict[str, object] | None] = ContextVar(
+    "minebot_execution_receipt", default=None,
+)
+
 
 @contextmanager
 def tool_observation_scope(call_id: str, notify: Callable[[JsonObject], None]) -> Iterator[None]:
@@ -152,3 +161,16 @@ def tool_observation_scope(call_id: str, notify: Callable[[JsonObject], None]) -
 
 def current_tool_observation() -> tuple[str, Callable[[JsonObject], None]] | None:
     return _TOOL_OBSERVATION.get()
+
+
+@contextmanager
+def execution_receipt_scope(receipt: dict[str, object]) -> Iterator[None]:
+    token = _EXECUTION_RECEIPT.set(receipt)
+    try:
+        yield
+    finally:
+        _EXECUTION_RECEIPT.reset(token)
+
+
+def current_execution_receipt() -> dict[str, object] | None:
+    return _EXECUTION_RECEIPT.get()

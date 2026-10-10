@@ -19,6 +19,7 @@ from minebot.brain.provider import ProviderConfig
 
 DEFAULT_API_KEY_ENV = "MINEBOT_LLM_API_KEY"
 DEFAULT_OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+DEFAULT_ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
 DEFAULT_AGENT_LANGUAGE = "English"
 REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
@@ -36,21 +37,34 @@ def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelPro
     if not model:
         raise AppConfigError("MINEBOT_LLM_MODEL or OPENAI_MODEL is unset")
 
-    api_key_env = env.get("MINEBOT_LLM_API_KEY_ENV")
-    if not api_key_env:
-        api_key_env = DEFAULT_API_KEY_ENV if env.get(DEFAULT_API_KEY_ENV) else DEFAULT_OPENAI_API_KEY_ENV
-    if auth == "api_key" and not env.get(api_key_env):
-        raise AppConfigError(f"{api_key_env} is unset or empty")
-
     default_kernel = "responses" if auth == "chatgpt" or env.get("MINEBOT_LLM_KIND") == "openai_responses" else "sdk"
     kernel = env.get("MINEBOT_AGENT_KERNEL", default_kernel)
     if kernel not in {"sdk", "responses"}:
         raise AppConfigError("MINEBOT_AGENT_KERNEL must be responses or sdk")
     kind = env.get("MINEBOT_LLM_KIND", "openai_responses" if kernel == "responses" else "openai_chat")
-    if kind not in {"openai_chat", "openai_responses", "litellm"}:
-        raise AppConfigError("MINEBOT_LLM_KIND must be openai_chat, openai_responses, or litellm")
+    if kind not in {"openai_chat", "openai_responses", "anthropic_messages", "litellm"}:
+        raise AppConfigError(
+            "MINEBOT_LLM_KIND must be openai_chat, openai_responses, anthropic_messages, or litellm"
+        )
+    if kernel == "responses" and kind != "openai_responses":
+        raise AppConfigError("The Responses kernel requires MINEBOT_LLM_KIND=openai_responses")
 
-    base_url = env.get("MINEBOT_LLM_BASE_URL") or env.get("OPENAI_BASE_URL") or None
+    api_key_env = env.get("MINEBOT_LLM_API_KEY_ENV")
+    if not api_key_env:
+        if env.get(DEFAULT_API_KEY_ENV):
+            api_key_env = DEFAULT_API_KEY_ENV
+        elif kind == "anthropic_messages" and env.get(DEFAULT_ANTHROPIC_API_KEY_ENV):
+            api_key_env = DEFAULT_ANTHROPIC_API_KEY_ENV
+        else:
+            api_key_env = DEFAULT_OPENAI_API_KEY_ENV
+    if auth == "api_key" and not env.get(api_key_env):
+        raise AppConfigError(f"{api_key_env} is unset or empty")
+
+    # Keep the two provider families independent: a process-wide
+    # OPENAI_BASE_URL must not silently redirect Anthropic Messages traffic.
+    base_url = env.get("MINEBOT_LLM_BASE_URL") or (
+        None if kind == "anthropic_messages" else env.get("OPENAI_BASE_URL")
+    ) or None
     if auth == "chatgpt":
         if kernel != "responses" or kind != "openai_responses":
             raise AppConfigError("ChatGPT login requires the Responses kernel and openai_responses")
@@ -133,6 +147,16 @@ def _settings_from_env(env: Mapping[str, str]) -> dict[str, object]:
         if mode not in {"native", "summary"}:
             raise AppConfigError("MINEBOT_RESPONSES_CONTEXT_MODE must be native or summary")
         settings["context_mode"] = mode
+    if env.get("MINEBOT_LLM_PROMPT_CACHE"):
+        value = env["MINEBOT_LLM_PROMPT_CACHE"].strip().lower()
+        if value not in {"1", "true", "yes", "0", "false", "no"}:
+            raise AppConfigError("MINEBOT_LLM_PROMPT_CACHE must be a boolean")
+        settings["prompt_cache"] = value in {"1", "true", "yes"}
+    if env.get("MINEBOT_LLM_PROMPT_CACHE_TTL"):
+        ttl = env["MINEBOT_LLM_PROMPT_CACHE_TTL"].strip().lower()
+        if ttl not in {"5m", "1h"}:
+            raise AppConfigError("MINEBOT_LLM_PROMPT_CACHE_TTL must be 5m or 1h")
+        settings["prompt_cache_ttl"] = ttl
     return settings
 
 
@@ -141,6 +165,7 @@ __all__ = [
     "DEFAULT_AGENT_LANGUAGE",
     "DEFAULT_API_KEY_ENV",
     "DEFAULT_OPENAI_API_KEY_ENV",
+    "DEFAULT_ANTHROPIC_API_KEY_ENV",
     "agent_language_from_env",
     "provider_registry_from_env",
 ]

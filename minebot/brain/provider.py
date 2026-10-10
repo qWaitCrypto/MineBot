@@ -24,8 +24,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-ProviderKind = Literal["openai_responses", "openai_chat", "litellm", "custom"]
-ApiShape = Literal["responses", "chat_completions"]
+ProviderKind = Literal[
+    "openai_responses",
+    "openai_chat",
+    "anthropic_messages",
+    "litellm",
+    "custom",
+]
+ApiShape = Literal["responses", "chat_completions", "messages"]
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,8 @@ class ProviderConfig:
             derived: ApiShape = (
                 "responses" if self.kind == "openai_responses" else "chat_completions"
             )
+            if self.kind == "anthropic_messages":
+                derived = "messages"
             object.__setattr__(self, "api_shape", derived)
         if self.kind == "openai_responses" and self.api_shape != "responses":
             raise ValueError(
@@ -80,6 +88,10 @@ class ProviderConfig:
         if self.kind == "openai_chat" and self.api_shape != "chat_completions":
             raise ValueError(
                 f"ProviderConfig[{self.name}]: kind=openai_chat requires api_shape=chat_completions"
+            )
+        if self.kind == "anthropic_messages" and self.api_shape != "messages":
+            raise ValueError(
+                f"ProviderConfig[{self.name}]: kind=anthropic_messages requires api_shape=messages"
             )
 
 

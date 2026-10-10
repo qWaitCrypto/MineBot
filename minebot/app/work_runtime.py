@@ -35,6 +35,11 @@ WORK_FIELD_VOCABULARY: dict[str, str] = {
     "selected_item": "selected mainhand item; null is meaningful only when selected_item_known is true",
     "selected_item_known": "true means the selected mainhand slot was observed",
     "pending_action_count": "number of Python-side action handles; not progress or success evidence",
+    "nearby_entities": "bounded nearest-first entity observation; absence is scoped to the sampled radius",
+    "entity_id": "stable entity/player identifier when the Body provider supplies one",
+    "entity_type": "provider entity type; player and mob types are distinct",
+    "sampled_at_ms": "provider timestamp for the observation",
+    "sample_age_s": "seconds since the observation was sampled",
 }
 
 
@@ -67,6 +72,28 @@ def validate_plan(plan: dict[str, Any]) -> None:
 
     if not isinstance(plan, dict):
         raise WorkPlanError("plan must be an object")
+
+    def require_composite_intent(node: Any, path: str) -> None:
+        if not isinstance(node, dict):
+            return
+        kind = node.get("kind")
+        if kind in {"sequence", "batch", "choice"}:
+            intent = node.get("intent")
+            if not isinstance(intent, str) or not intent.strip():
+                raise WorkPlanError(f"'intent' is a required property at {path}")
+        if kind == "sequence":
+            for index, child in enumerate(node.get("steps", [])):
+                require_composite_intent(child, f"{path}.steps[{index}]")
+        elif kind == "batch":
+            require_composite_intent(node.get("body"), f"{path}.body")
+        elif kind == "choice":
+            for option in node.get("options", []):
+                if isinstance(option, dict):
+                    require_composite_intent(
+                        option.get("work"), f"{path}.options.{option.get('id', '?')}"
+                    )
+
+    require_composite_intent(plan.get("work"), "work")
     path = _schema_path()
     if path.exists():
         schema = json.loads(path.read_text(encoding="utf-8"))
@@ -109,12 +136,17 @@ def _state_payload(state: Any) -> dict[str, Any]:
     return copy.deepcopy(values) if isinstance(values, dict) else {}
 
 
-def _condition_facts(state: Any, condition: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
+def _condition_facts(
+    state: Any,
+    condition: dict[str, Any],
+    observations: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Compile complete, binding-owned facts without silently cropping them."""
     raw = _state_payload(state)
     bindings = condition.get("bindings") if isinstance(condition.get("bindings"), dict) else {}
     facts: dict[str, Any] = {}
     unknown_fields: list[dict[str, str]] = []
+    observations = observations or {}
     if not bindings:
         facts["bot"] = {
             "observed": bool(raw),
@@ -138,17 +170,63 @@ def _condition_facts(state: Any, condition: dict[str, Any]) -> tuple[dict[str, A
                 facts[key] = {"observed": False, "values": None, "source": "no_observation"}
                 unknown_fields.append({"object": key, "reason": "no_observation"})
             else:
-                facts[key] = {"observed": False, "values": None, "source": "object_not_read"}
-                unknown_fields.append({"object": key, "reason": "no_observation"})
-    # Keep the complete raw snapshot available for diagnostics and future
-    # object readers. ``about`` changes ordering/attention, never evidence.
-    if raw:
-        facts["background"] = {"observed": True, "values": raw, "source": "latest_body_state"}
+                entity_read = observations.get("nearby_entities")
+                entities = entity_read.get("entities") if isinstance(entity_read, dict) else None
+                complete = bool(entity_read.get("complete")) if isinstance(entity_read, dict) else False
+                if isinstance(entities, list):
+                    matched = None
+                    for entity in entities:
+                        if not isinstance(entity, dict):
+                            continue
+                        identifiers = {str(value) for value in (
+                            entity.get("id"), entity.get("uuid"), entity.get("name")
+                        ) if value is not None}
+                        if handle in identifiers or str(name) in identifiers:
+                            matched = entity
+                            break
+                    sampled_at = entity_read.get("sampled_at_ms")
+                    values = {
+                        "present": matched is not None,
+                        "entity": copy.deepcopy(matched),
+                        "entities_complete": complete,
+                        "radius": entity_read.get("radius"),
+                    }
+                    fact = {
+                        "observed": complete or matched is not None,
+                        "values": values,
+                        "source": "read_nearby_entities",
+                    }
+                    if sampled_at is not None:
+                        fact["sampled_at_ms"] = sampled_at
+                        try:
+                            fact["sample_age_s"] = max(0.0, time.time() - float(sampled_at) / 1000.0)
+                        except (TypeError, ValueError):
+                            pass
+                    facts[key] = fact
+                    if not fact["observed"]:
+                        unknown_fields.append({"object": key, "reason": "object_not_read"})
+                else:
+                    facts[key] = {"observed": False, "values": None, "source": "object_not_read"}
+                    unknown_fields.append({"object": key, "reason": "no_observation"})
+    # Each bound object owns its complete facts. Do not duplicate the same
+    # body snapshot under a generic ``background`` key.
     return facts, unknown_fields
 
 
+def _obligation_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _obligation_value(child)
+            for key, child in value.items()
+            if key not in {"intent", "_runtime"}
+        }
+    if isinstance(value, list):
+        return [_obligation_value(child) for child in value]
+    return value
+
+
 def _node_signature(node: dict[str, Any]) -> str:
-    value = {key: child for key, child in node.items() if key != "_runtime"}
+    value = _obligation_value(node)
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
@@ -234,6 +312,7 @@ class WorkPlanExecutor:
         state: WorkState | None = None,
         decision: WorkDecision | None = None,
         choice_provider: WorkChoiceProvider | None = None,
+        observe: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
         emit: Callable[..., None] | None = None,
         records: dict[str, NodeRecord] | None = None,
     ) -> None:
@@ -243,6 +322,7 @@ class WorkPlanExecutor:
         self.state = state or (lambda: _async_empty_state())
         self.decision = decision or DecisionClient()
         self.choice_provider = choice_provider
+        self.observe = observe
         self.emit = emit or (lambda *_args, **_kwargs: None)
         # An empty mapping is a meaningful caller-owned revision store.  Do
         # not replace it with a new mapping or completed nodes would be lost
@@ -284,10 +364,31 @@ class WorkPlanExecutor:
             record = NodeRecord(signature=signature)
             self.records[node_key] = record
         elif record.signature != signature:
-            # Same id is only an identity hint. A changed obligation, tool or
-            # argument must be executed again and cannot inherit completion.
-            record = NodeRecord(signature=signature)
+            previous = record
+            # A completed physical call is evidence of an already delivered
+            # obligation. Rewording it is harmless, but changing its tool or
+            # arguments must never replay the write. The Agent must submit a
+            # new node for the remaining obligation.
+            if (
+                previous.status == "done"
+                and node.get("kind") == "call"
+                # A physical write records the delivered effect. Pure reads
+                # and legacy test doubles may have no such marker and remain
+                # safe to re-evaluate under the same id.
+                and previous.delivered is not None
+            ):
+                record = NodeRecord(
+                    status="blocked", signature=signature,
+                    blocked={
+                        "reason": "completed_obligation_changed",
+                        "previous_result": copy.deepcopy(previous.result),
+                    },
+                )
+            else:
+                record = NodeRecord(signature=signature)
             self.records[node_key] = record
+            if record.status == "blocked":
+                return "blocked"
         if record.status == "done":
             if record.result is not None:
                 self.results[node_key] = copy.deepcopy(record.result)
@@ -305,6 +406,11 @@ class WorkPlanExecutor:
                     record.blocked = {"reason": "condition_timeout", "facts": facts}
                     record.status = "blocked"
                     return "blocked"
+                if node.get("timeout_s") is not None and record.started_at is not None:
+                    if time.monotonic() >= record.started_at + float(node["timeout_s"]):
+                        record.blocked = {"reason": "node_timeout", "facts": facts}
+                        record.status = "blocked"
+                        return "blocked"
                 return self._wait_or_block(record, condition_status, facts, node, "when")
         kind = node.get("kind")
         if kind == "call":
@@ -314,13 +420,20 @@ class WorkPlanExecutor:
                 call_id=node_key,
                 timeout_s=node.get("timeout_s"),
             )
-            record.result = copy.deepcopy(result)
-            self.results[node_key] = copy.deepcopy(result)
+            execution = result.get("_execution") if isinstance(result, dict) else None
+            public_result = dict(result)
+            public_result.pop("_execution", None)
+            record.result = copy.deepcopy(public_result)
+            self.results[node_key] = copy.deepcopy(public_result)
             if result.get("success") is True:
                 record.status = "done"
-                record.delivered = result.get("metrics", {}).get("delivered") if isinstance(result.get("metrics"), dict) else None
+                if isinstance(execution, dict) and execution.get("delivered") is True:
+                    record.delivered = {
+                        "tool": execution.get("tool", node.get("tool")),
+                        "execution_channel": True,
+                    }
                 return "done"
-            blocked = {"reason": result.get("reason", "call_failed"), "result": copy.deepcopy(result)}
+            blocked = {"reason": result.get("reason", "call_failed"), "result": copy.deepcopy(public_result)}
             record.blocked = blocked
             record.status = "blocked"
             return "blocked"
@@ -359,7 +472,8 @@ class WorkPlanExecutor:
 
     async def _condition(self, condition: dict[str, Any], intents: list[str], *, item: Any = None) -> tuple[ConditionStatus, dict[str, Any]]:
         state = await self.state()
-        compiled_facts, unknown_fields = _condition_facts(state, condition)
+        observations = await self.observe(condition) if self.observe is not None else {}
+        compiled_facts, unknown_fields = _condition_facts(state, condition, observations)
         requirements = condition.get("requires") or [condition]
         statuses: list[str] = []
         evidence: list[Any] = []

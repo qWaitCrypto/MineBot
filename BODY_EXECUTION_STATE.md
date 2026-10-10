@@ -161,7 +161,7 @@
 | `build_structure` | preparing → building → paused/awaiting_block → verifying_cells | anchor/size/block、builder_active/paused、相关库存/快捷栏/可放置材料、已检查/匹配/总单元、当前层（可读时）。只有部分检查就注明部分；暂停合法 waiting。材料/放置准备问题不能靠 active 掩盖，完整匹配才 structure_verified。 |
 | `clear_area` | preparing → clearing → verifying_cells | inclusive start/end、当前可读目标、已检查/air/总单元、目标块挖掘证据、清除范围；重启挖掘/换块不算累计成果。完整区域核验才 area_cleared。 |
 | `farm_area` | scanning → approaching → harvesting/replanting → terminal | anchor/range、farm_active、成熟作物/种子/库存差值以及实际可读收获/补种证据；未全域扫描就不宣称“全部农田已完成”。当前原生停止证据与整片补种验证明确区分，状态接线不会自动增加全田验收能力。 |
-| `elytra_travel` | preparing → taking_off → flying → approaching_destination → landing/verifying | 目标、实际位置/高度/速度（可读时）、on_ground/飞行状态、火箭余量、elytra_active/safe_to_cancel、到达距离；启动/加载/取消不等于真实抵达。现有真实飞行结果尚未验证；只有距离及落地条件实测满足才能报告到达。 |
+| `elytra_travel` | preparing → taking_off → flying → approaching_destination → landing/verifying | 目标、实际位置/高度/速度（可读时）、on_ground/飞行状态、火箭余量、elytra_active/safe_to_cancel、到达距离；启动/加载/取消不等于真实抵达。BODY_VALIDATION.md 已记录已装备鞘翅/烟花、高处掉落起飞、250 格飞行并落在升高平台的限定成功；地面自动起飞等扩展未验，本轮未复核原始日志。每次仍须距离及落地事实满足才报告到达。 |
 | `read_body_processes` | sampling → terminal | 保留原生各进程、paused、pathing 等字段，增加同一 execution 摘要及采样时间；读的是当前/最近操作，不覆盖它，不把 all flags=false 单独当作 Python 事务结束。 |
 | `build_schematic` | reading_blueprint → starting_builder → building → paused → verifying_cells | 文件/格式/原点、总单元、已检查/匹配数、少量不匹配、所需材料/当前可放置材料（可读时）；当前支持的 Sponge v2、零 offset 限制保留。builderBuildFile 只是启动控制回执，外层继续跟踪 native builder 及包含 air 的整图核验。 |
 

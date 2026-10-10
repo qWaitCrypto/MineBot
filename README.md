@@ -152,6 +152,30 @@ export MINEBOT_JAVA_BODY_URL=ws://127.0.0.1:8767
 python3 -m minebot.app.real_server_session --interactive
 ```
 
+Anthropic Messages is a first-class provider and uses the same Agents SDK
+runtime through a native Messages adapter. It does not use ChatGPT OAuth or an
+OpenAI-compatible shim:
+
+```bash
+export MINEBOT_LLM_KIND=anthropic_messages
+export MINEBOT_LLM_MODEL=claude-sonnet-4-5
+export ANTHROPIC_API_KEY=<key>
+# Optional reasoning depth: none, minimal, low, medium, high, or xhigh.
+# Anthropic receives this as output_config.effort (minimal is mapped to low).
+# export MINEBOT_LLM_REASONING_EFFORT=medium
+# Optional custom Anthropic-compatible gateway:
+# export MINEBOT_LLM_BASE_URL=https://host/v1
+# Enable Anthropic prompt-cache breakpoints on the stable system/tool prefix:
+# export MINEBOT_LLM_PROMPT_CACHE=true
+# export MINEBOT_LLM_PROMPT_CACHE_TTL=5m   # 5m or 1h
+```
+
+`anthropic_messages` selects the legacy Agents SDK kernel because the native
+Responses kernel speaks OpenAI's Responses wire protocol. The adapter converts
+the shared Responses input/tool representation to Anthropic Messages, including
+text, data/URL images, tool use/results, streaming events, and prompt-cache
+breakpoints; Body execution and tool ownership remain in the existing runtime.
+
 For the managed local golden-world environment, start the server reset, provider
 preflight, Camera, trace/state directory, and production interactive session with
 one command:

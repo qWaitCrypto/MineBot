@@ -128,6 +128,26 @@ def build_skill_parts(
 
 
 class AgentSessionTests(unittest.TestCase):
+    def test_sdk_reflex_fact_queues_a_follow_up_turn(self):
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+        session.submit(SessionCommand.start("finish the physical goal"))
+        first = asyncio.run(session.step())
+        self.assertEqual(first.status, "completed_turn")
+
+        assert session.parts is not None
+        session.parts.runtime.notify_reflex_fact({
+            "activity_id": "activity-sdk",
+            "status": "blocked",
+            "facts": {"reason": "deadline_exceeded"},
+        })
+        self.assertTrue(session.has_pending_work)
+        follow_up = asyncio.run(session.step())
+        self.assertEqual(follow_up.status, "completed_turn")
+        self.assertIn("REFLEX_RESULT", calls[-1])
+        session.close()
+
     def test_skill_activation_lifetime_is_owned_by_turn_or_durable_task(self):
         store = RuntimeStateStore(":memory:")
         scope = RuntimeScope("server", "world", "Bot1")

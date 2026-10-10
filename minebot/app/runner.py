@@ -1349,6 +1349,7 @@ class AgentRuntime:
         # by native confirmation, never by elapsed time.
         self.body_control = BodyControl(authority)
         self._body_stop_lock = asyncio.Lock()
+        self._responses_turn_lock = asyncio.Lock()
         from minebot.app.direct_call_supervision import DirectBuildSupervisor
         self.decision_client = DecisionClient(emit=self.trace.emit)
         self.direct_build_supervisor = DirectBuildSupervisor(self)
@@ -1364,6 +1365,7 @@ class AgentRuntime:
         self.context_refreshers: list[Callable[[AgentContext], None]] = []
         self.responses_kernel = None
         self._reflex_wakeup_task: asyncio.Task[Any] | None = None
+        self._sdk_reflex_fact_listener: Callable[[dict[str, Any]], None] | None = None
         self._native_context = None
         self.native_task_workspace = None
         self.native_task_outcome = None
@@ -1437,7 +1439,17 @@ class AgentRuntime:
         ]
         if self.reflex_manager is not None:
             parts.append(
-                "REFLEX_PLANS: For multi-step work use delegate_work with one minebot-work/0.2 JSON plan. "
+                "REFLEX_PLANS: When a goal has multiple dependent physical steps, a long-running physical "
+                "action followed by later actions, a condition that may remain pending, or work that may need "
+                "pause, resume, cancellation, or revision, delegate one minebot-work/0.2 JSON plan so the "
+                "runtime owns sequencing, waiting, control, and authoritative terminal state. For one short "
+                "independent observation or physical action, a direct tool is appropriate. Choose the plan "
+                "structure from the goal and evidence; do not delegate merely to follow a template or assume "
+                "a fixed tool order. Use delegate_work with one minebot-work/0.2 JSON plan. "
+                "Put every step you have already decided on into that one plan instead of delegating one step "
+                "at a time. After delegating, keep thinking: you need not poll or wait for the plan, since the "
+                "runtime runs it and its terminal result reaches you as a later message; use the turn for other "
+                "reasoning rather than asking for progress. "
                 "Use only call, sequence, batch, choice and wait; write concrete intent and preserve complex Body "
                 "arguments. Conditions may use requires as AND. Read and revise the annotated tree with read_reflex "
                 "and control_reflex; never claim _runtime results yourself. repeat and interrupt_when are deferred."
@@ -1530,7 +1542,11 @@ class AgentRuntime:
             self.agent_context.acknowledge_turn_input(count)
 
     def notify_reflex_fact(self, fact: dict[str, Any]) -> None:
-        """Deliver plan completion and wake an idle Responses Agent once.
+        """Deliver plan completion to the active Agent channel.
+
+        SDK sessions do not have a Responses kernel.  They install a listener
+        owned by ``AgentSession`` so the fact becomes a queued outer-session
+        turn instead of being silently discarded.
 
         ``notify_fact`` wakes a kernel that is already inside ``run``.  When a
         session has returned to its event-wait boundary there is no reader
@@ -1540,6 +1556,9 @@ class AgentRuntime:
         """
         kernel = self.responses_kernel
         if kernel is None:
+            listener = getattr(self, "_sdk_reflex_fact_listener", None)
+            if callable(listener):
+                listener(dict(fact))
             return
         kernel.notify_fact(dict(fact))
         if not self.native_responses or not self.agent_context.goal_text.strip():
@@ -1553,22 +1572,35 @@ class AgentRuntime:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        was_event_wait = self.event_wait_mode
-
         async def wake() -> None:
-            if was_event_wait:
-                self.event_wait_mode = False
             try:
-                await self._run_responses_turn([], body_actions_allowed=True)
+                # A plan fact is an execution event, not a user command. Keep
+                # event-wait mode enabled so the kernel cannot manufacture a
+                # mechanical "continue" turn after delivering it. The lock
+                # also serializes this wake with a user turn that arrived at
+                # the same time.
+                lock = getattr(self, "_responses_turn_lock", None)
+                if lock is None:
+                    if not getattr(kernel, "has_facts", True) and not kernel.is_running:
+                        return
+                    await self._run_responses_turn([], body_actions_allowed=True)
+                else:
+                    async with lock:
+                        if not getattr(kernel, "has_facts", True) and not kernel.is_running:
+                            return
+                        await self._run_responses_turn([], body_actions_allowed=True)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self.trace.emit("reflex_wakeup_failed", error_type=type(exc).__name__, message=str(exc)[:300])
-            finally:
-                if was_event_wait:
-                    self.event_wait_mode = True
 
         self._reflex_wakeup_task = loop.create_task(wake())
+
+    def set_sdk_reflex_fact_listener(
+        self, listener: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        """Attach the outer SDK session's reflex-result wake callback."""
+        self._sdk_reflex_fact_listener = listener
 
     async def _run_responses_turn(self, extra_signals, *, body_actions_allowed: bool) -> AgentTurnOutcome:
         prepared = await self._read_lane.run(self._prepare_turn, extra_signals)
@@ -1579,8 +1611,11 @@ class AgentRuntime:
             profile=prepared, tool_facts=self.tool_facts, trace=self.trace, runtime=self,
             body_actions_allowed=body_actions_allowed,
         )
+        fact_pending = bool(getattr(self.responses_kernel, "has_facts", False))
         text, count = self.agent_context.pending_turn_input(
-            fallback="Continue the current goal from real results." if self.agent_context.goal_text else "Respond to the latest message.")
+            fallback=("" if fact_pending else
+                      ("Respond to the latest message." if not self.agent_context.goal_text else
+                       "Continue the current goal from real results.")))
         # The kernel queues input before any await; a transport error is visible
         # rather than invoking the same tool again through an SDK fallback.
         self.agent_context.acknowledge_turn_input(count)
@@ -1615,6 +1650,7 @@ class AgentRuntime:
         claim_holder="agent_call",
         body_claim_id=None,
         retain_claim=False,
+        return_execution_receipt=False,
     ):
         claim_id = body_claim_id or tool_call_id or str(uuid4())
         claim_generation: int | None = None
@@ -1642,21 +1678,40 @@ class AgentRuntime:
                 if reason == "body_control_unknown":
                     raise BodyRecoveryRequired(reason, facts={"control_unknown": True}) from exc
                 raise BodyRecoveryRequired("body_busy", facts={"holder": control.snapshot().to_payload()}) from exc
+        receipt: dict[str, object] = {}
+
         def admitted_callback(*values):
-            from minebot.contract.execution import body_claim_scope, execution_checkpoint
+            from minebot.contract.execution import body_claim_scope, execution_checkpoint, execution_receipt_scope
             execution_checkpoint()
-            if claim_generation is None:
-                return callback(*values)
-            if not self.body_control.owns(claim_id, claim_generation):
-                raise ExecutionCancelled("claim_revoked")
-            with body_claim_scope(claim_generation):
-                return callback(*values)
+            with execution_receipt_scope(receipt):
+                if claim_generation is None:
+                    return callback(*values)
+                if not self.body_control.owns(claim_id, claim_generation):
+                    raise ExecutionCancelled("claim_revoked")
+                with body_claim_scope(claim_generation):
+                    return callback(*values)
+
+        def with_execution_receipt(result):
+            """Attach execution truth only for internal plan consumers."""
+            if not return_execution_receipt or receipt.get("delivered") is not True:
+                return result
+            if not isinstance(result, dict):
+                return result
+            enriched = dict(result)
+            enriched["_execution"] = {
+                "delivered": True,
+                "tool": receipt.get("tool", tool.name),
+            }
+            return enriched
+
         try:
             if tool.name == "build_structure" and callable(getattr(self.body, "confirm_control_idle", None)):
-                return await self.direct_build_supervisor.run(tool, admitted_callback, args,
+                result = await self.direct_build_supervisor.run(tool, admitted_callback, args,
                     call_id=tool_call_id or claim_id, timeout_s=timeout_s)
+                return with_execution_receipt(result)
             lane = self._read_lane if self.native_responses and not tool.sidecar.can_mutate_body else self.execution_lane
-            return await lane.run(admitted_callback, *args, timeout_s=timeout_s)
+            result = await lane.run(admitted_callback, *args, timeout_s=timeout_s)
+            return with_execution_receipt(result)
         finally:
             if tool.sidecar.can_mutate_body and not retain_claim and self.body_control.owns(claim_id, claim_generation):
                 self.body_control.settle(claim_id=claim_id)
@@ -1702,7 +1757,8 @@ class AgentRuntime:
         if self.reflex_manager is not None:
             self.reflex_manager.bind_loop(asyncio.get_running_loop())
         if self.native_responses:
-            return await self._run_responses_turn(extra_signals, body_actions_allowed=body_actions_allowed)
+            async with self._responses_turn_lock:
+                return await self._run_responses_turn(extra_signals, body_actions_allowed=body_actions_allowed)
         self._turn_intent_kind = intent_kind
         self._turn_has_durable_goal = has_durable_goal
         self._turn_review_grant = review_grant_stop_epoch_id
@@ -2227,8 +2283,17 @@ class AgentRuntime:
             parts.append(skill_preamble)
         if self.reflex_manager is not None:
             parts.append(
-                "REFLEX_PLANS: Use delegate_work for multi-step tasks with a minebot-work/0.2 tree "
-                "(call/sequence/batch/choice/wait). Runtime owns _runtime status and real results; "
+                "REFLEX_PLANS: Use a minebot-work/0.2 plan when the goal has multiple dependent physical steps, "
+                "a long-running physical action followed by later actions, a condition that may remain pending, "
+                "or work that may need pause, resume, cancellation, or revision; the runtime then owns sequencing, "
+                "waiting, control, and authoritative terminal state. Use direct tools for one short independent "
+                "observation or physical action. Choose the plan structure from the goal and evidence rather than "
+                "assuming a fixed tool order. Use delegate_work for the plan with a minebot-work/0.2 tree "
+                "(call/sequence/batch/choice/wait). Put every step you have already decided on into that one "
+                "plan — one multi-node plan is better than several single-node delegate_work calls. After "
+                "delegating, keep thinking: the runtime runs the plan and its terminal result reaches you as a "
+                "later message, so you do not need to poll for progress in the meantime. "
+                "Runtime owns _runtime status and real results; "
                 "use read_reflex/control_reflex to inspect or revise it."
             )
         return "\n\n".join(parts)

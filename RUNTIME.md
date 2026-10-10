@@ -909,6 +909,23 @@ MINEBOT_RESPONSES_TRANSPORT=http
 
 沿用现有端点和密钥配置；需要指定网络代理时使用 `MINEBOT_LLM_PROXY`。新内核默认选 HTTP/SSE，可显式设置 MINEBOT_RESPONSES_TRANSPORT=websocket；使用基础 SDK 的两种原生接口，不升级整套 Agents SDK，也不在失败后自动切换传输。模型实际返回的调用 `async` 标志决定是否允许在该结果未返回时继续响应，不能把工具声明支持异步当作调用已经异步。
 
+Anthropic Messages 通过 `MINEBOT_LLM_KIND=anthropic_messages` 接入旧
+Agents SDK 的 `Model` seam，不伪装成 OpenAI endpoint。它使用
+`ANTHROPIC_API_KEY`（或显式 `MINEBOT_LLM_API_KEY_ENV`），默认地址为
+`https://api.anthropic.com/v1/messages`；`MINEBOT_LLM_BASE_URL` 可指向兼容
+网关。适配器把共享的 Responses 输入/工具表示转换为 Messages 的
+`system`、`user`、`assistant`、`tool_result`、`tool_use` 和 `tools`，并把
+data/URL 图片与 SSE 流转回 Agents SDK 的输出事件。启用
+`MINEBOT_LLM_PROMPT_CACHE=true` 后，会在稳定的 system/tool 前缀设置
+Anthropic `cache_control`；可用 `MINEBOT_LLM_PROMPT_CACHE_TTL=5m|1h` 选择
+TTL。该 provider 必须使用 `MINEBOT_AGENT_KERNEL=sdk`，不能走当前只懂
+OpenAI Responses wire protocol 的原生内核。
+
+`MINEBOT_LLM_REASONING_EFFORT` 也会沿同一条 SDK seam 传入 Anthropic
+Messages 的 `output_config.effort`。`none` 保持 Anthropic 默认，Agents SDK
+的 `minimal` 映射为 Anthropic 的 `low`；其余 `low|medium|high|xhigh` 原值
+传递。这样 effort 不会在 OpenAI Responses 转换层被静默丢弃。
+
 ```bash
 python -m pytest -q
 python tools/probe_responses_protocol.py --env-file /private/provider.env --model gpt-6.1-sol

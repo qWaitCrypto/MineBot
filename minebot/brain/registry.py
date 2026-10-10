@@ -281,6 +281,12 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
                 # Telemetry failure cannot erase the received physical result.
                 pass
 
+        # Capture delivery after the authoritative generation check and before
+        # the optional post-state read. A successful physical terminal remains
+        # delivered even when the follow-up state sample is unavailable.
+        from minebot.contract.execution import current_execution_receipt
+        receipt = current_execution_receipt()
+
         # Record current server truth immediately after every physical leaf.
         # Composition tools call this same weld, so inventory/world progress is
         # visible at the moment it happens instead of at a later model turn.
@@ -300,6 +306,10 @@ def execute_tool(tool: RegisteredTool, tool_input: JsonObject, ctx: WeldContext)
                 "original_result": result.to_payload(), "preempted": True,
                 "post_state_unknown": post_state_error,
             }}
+
+        if receipt is not None and result.success and result.reason != "preempted":
+            receipt["delivered"] = True
+            receipt["tool"] = tool.name
 
         if post_state is None:
             return {**result.to_payload(), "post_state_unknown": post_state_error}

@@ -283,6 +283,9 @@ class ModelProviderRegistry(ModelProvider):
         set_tracing_disabled(not any_tracing)
 
     async def aclose(self) -> None:
+        for model in self._models.values():
+            await model.close()
+        self._models.clear()
         for client in self._clients:
             await client.close()
         self._clients.clear()
@@ -303,6 +306,18 @@ class ModelProviderRegistry(ModelProvider):
             return OpenAIChatCompletionsModel(model=cfg.model, openai_client=self._client(cfg))
         if cfg.kind == "openai_responses":
             return OpenAIResponsesModel(model=cfg.model, openai_client=self._client(cfg))
+        if cfg.kind == "anthropic_messages":
+            from minebot.app.anthropic_model import AnthropicMessagesModel
+
+            return AnthropicMessagesModel(
+                model=cfg.model,
+                api_key=self._api_key(cfg),
+                base_url=cfg.base_url,
+                proxy=self.responses_proxy,
+                timeout_s=_request_timeout_s(cfg),
+                prompt_cache=bool(cfg.settings.get("prompt_cache", False)),
+                prompt_cache_ttl=cfg.settings.get("prompt_cache_ttl"),
+            )
         if cfg.kind == "litellm":
             return self._build_litellm(cfg)
         raise ProviderConfigError(

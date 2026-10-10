@@ -372,6 +372,11 @@ class ResponsesKernel:
         """Whether a reader loop currently owns this kernel."""
         return self._running
 
+    @property
+    def has_facts(self) -> bool:
+        """Whether an execution fact is waiting for the next request."""
+        return bool(self._facts)
+
     def steer(self, text: str) -> None:
         self._messages.put_nowait(text)
 
