@@ -6,6 +6,7 @@ harvest-tier gate and governance, so a raw entry would only be the same
 process without them.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 import time
 
@@ -15,6 +16,7 @@ from minebot.app.projection import bounded_summary_value
 from minebot.app.construction_facts import read_construction, construction_delta
 
 from minebot.brain.registry import RegisteredTool, ToolSidecar
+from minebot.body.native_admission import work_volume_denial
 from minebot.contract import Action, Body, ToolResult, execution_checkpoint, terminal_event_to_tool_result
 
 
@@ -47,7 +49,26 @@ def _build_observation(reason, metrics):
     return summary
 
 
-def _execute(body: Body, name: str, params: dict) -> ToolResult:
+def _work_volume(name: str, params: dict) -> tuple[tuple[int, int, int], tuple[int, int, int]] | None:
+    """The cuboid a native process is asked to change, when it declares one."""
+    if name == "buildStructure":
+        low = tuple(int(v) for v in params["anchor"])
+        return low, tuple(low[i] + int(params["size"][i]) - 1 for i in range(3))
+    if name == "clearArea":
+        return tuple(int(v) for v in params["start"]), tuple(int(v) for v in params["end"])
+    if name == "farmArea":
+        x, y, z = (int(v) for v in params["anchor"])
+        reach = int(params["range"])
+        return (x - reach, y, z - reach), (x + reach, y, z + reach)
+    return None
+
+
+def _execute(body: Body, name: str, params: dict, natural_regions: Sequence[object] = ()) -> ToolResult:
+    volume = _work_volume(name, params)
+    if volume is not None:
+        denied = work_volume_denial(natural_regions, *volume)
+        if denied is not None:
+            return denied
     if name in {"buildStructure", "clearArea", "farmArea", "builderBuildFile"}:
         state = body.perceive("baritoneState", {})
         if not state.ok:
@@ -95,7 +116,7 @@ def _process_state(body: Body) -> ToolResult:
                       can_retry=not state.ok, metrics=dict(state.data))
 
 
-def client_body_tools(body: Body) -> tuple[RegisteredTool, ...]:
+def client_body_tools(body: Body, natural_regions: Sequence[object] = ()) -> tuple[RegisteredTool, ...]:
     specs = (
         ("build_structure", "buildStructure", "Fill a cuboid with one block type; requires the material in inventory.",
          {"anchor": _POS, "size": {**_POS, "items": {"type": "integer", "minimum": 1}}, "block": {"type": "string"}}, ["anchor", "size", "block"]),
@@ -111,7 +132,7 @@ def client_body_tools(body: Body) -> tuple[RegisteredTool, ...]:
         tools.append(RegisteredTool(
             name, description,
             {"type": "object", "properties": {**fields, "timeout_s": _TIMEOUT}, "required": required, "additionalProperties": False},
-            lambda params, action=action: _execute(body, action, {"timeout_s": 120, **params}),
+            lambda params, action=action: _execute(body, action, {"timeout_s": 120, **params}, natural_regions),
             ToolSidecar(name, True, source="body.client", body_scope=(action,), timeout_s=310),
             projector=_build_observation if name == "build_structure" else
                 lambda reason, metrics: {key: bounded_summary_value(value) for key, value in metrics.items()},
@@ -124,7 +145,7 @@ def client_body_tools(body: Body) -> tuple[RegisteredTool, ...]:
         RegisteredTool("build_schematic", "Build a local Sponge v2 .schem blueprint at origin and verify every solid/air cell. File must be accessible to both Python and the Minecraft client.",
                        {"type": "object", "properties": {"path": {"type": "string"}, "origin": _POS, "timeout_s": _TIMEOUT},
                         "required": ["path", "origin"], "additionalProperties": False},
-                       lambda params: _build_schematic(body, params),
+                       lambda params: _build_schematic(body, params, natural_regions),
                        ToolSidecar("build_schematic", True, source="body.client", body_scope=("builderBuildFile",), timeout_s=310),
                        projector=lambda reason, metrics: dict(metrics)),
     ))
@@ -157,12 +178,21 @@ def _schematic_cells(path: Path, origin: list[int]) -> list[tuple[list[int], str
               origin[2] + i // width % length], palette[index]) for i, index in enumerate(indices)]
 
 
-def _build_schematic(body: Body, params: dict) -> ToolResult:
+def _build_schematic(body: Body, params: dict, natural_regions: Sequence[object] = ()) -> ToolResult:
     path = Path(params["path"]).expanduser().resolve()
     try:
         cells = _schematic_cells(path, params["origin"])
     except (OSError, ValueError, KeyError, TypeError, EOFError) as exc:
         return ToolResult(False, "schematic_read_failed", can_retry=False, metrics={"error": str(exc)[:400]})
+    if cells:
+        positions = [pos for pos, _block in cells]
+        denied = work_volume_denial(
+            natural_regions,
+            tuple(min(pos[i] for pos in positions) for i in range(3)),
+            tuple(max(pos[i] for pos in positions) for i in range(3)),
+        )
+        if denied is not None:
+            return denied
     started = _execute(body, "builderBuildFile", {
         "path": str(path), "origin": params["origin"], "timeout_s": float(params.get("timeout_s", 120)),
     })

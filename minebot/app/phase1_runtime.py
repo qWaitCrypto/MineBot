@@ -747,7 +747,7 @@ def build_phase1_registry(
     catalog.assert_stage_complete("base")
     if config.body_provider == "real_client":
         catalog.register(spatial_tools[0])
-        catalog.register_many(client_body_tools(body))
+        catalog.register_many(client_body_tools(body, policy.natural_regions))
         catalog.assert_stage_complete("client")
     return registry
 
@@ -757,6 +757,8 @@ def _recipe_lookup(body: Body):
         perception = body.perceive("recipeData", {"item": item})
         if not perception.ok:
             return None
+        # Lets the planner tell "no recipe" from "not unlocked on this Body".
+        lookup.recipe_source = perception.data.get("recipe_source")
         parsed = _parse_recipe_variants(item, perception)
         if isinstance(parsed, ToolResult):
             return None

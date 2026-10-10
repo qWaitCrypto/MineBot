@@ -185,7 +185,11 @@ class _Planner:
 
         variants = self.recipe_lookup(item)
         if not variants:
-            return self._error("unplannable", item, count, chain, {"missing_recipe": item})
+            detail: dict[str, object] = {"missing_recipe": item}
+            source = getattr(self.recipe_lookup, "recipe_source", None)
+            if source:
+                detail["recipe_source"] = source
+            return self._error("unplannable", item, count, chain, detail)
         return self._resolve_craft(item, count, variants, chain)
 
     def _resolve_collect(

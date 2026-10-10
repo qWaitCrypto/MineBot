@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import ceil
 
+from minebot.contract.results import RECIPE_SOURCE_UNLOCKED_BOOK
 from minebot.contract import action_with_timeout, action_wait_timeout_s
 from minebot.body.block_work import BlockWork
 from minebot.body.inventory_read import preferred_inventory_page_size
@@ -1338,6 +1339,13 @@ def _read_recipe_data(body: Body, item: str) -> PerceptionResult:
     return body.perceive("recipeData", {"item": item})
 
 
+RECIPE_NOT_UNLOCKED_SUGGESTION = (
+    "This Body only sees recipes the player has unlocked, and a recipe unlocks once one of its "
+    "ingredients has been obtained. The item may well be craftable: look the recipe up in the wiki, "
+    "obtain its ingredients, then craft."
+)
+
+
 def _parse_recipe_variants(item: str, perception: PerceptionResult) -> list[CraftRecipeVariant] | ToolResult:
     structured = perception.data.get("variants")
     recipe_raw = str(perception.data.get("recipe_raw") or "")
@@ -1451,6 +1459,14 @@ def _parse_recipe_variants(item: str, perception: PerceptionResult) -> list[Craf
         )
 
     if not variants:
+        if perception.data.get("recipe_source") == RECIPE_SOURCE_UNLOCKED_BOOK:
+            return ToolResult(
+                success=False,
+                reason="recipe_not_unlocked",
+                can_retry=True,
+                next_suggestion=RECIPE_NOT_UNLOCKED_SUGGESTION,
+                metrics={"item": item, "recipe_source": RECIPE_SOURCE_UNLOCKED_BOOK, "variant_count": 0},
+            )
         return ToolResult(
             success=False,
             reason="recipe_not_found",

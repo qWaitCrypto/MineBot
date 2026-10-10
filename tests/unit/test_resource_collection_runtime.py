@@ -145,7 +145,8 @@ def test_large_tree_returns_bounded_work_instead_of_requiring_the_whole_tree():
 class NativeResourceBody(ResourceBody):
     def __init__(self, targets, *, finish_success=True):
         super().__init__(targets)
-        self.counts, self.actions, self.finish_success = {}, [], finish_success
+        # Native mining is admitted only with a pickaxe of the tier the ore needs.
+        self.counts, self.actions, self.finish_success = {"stone_pickaxe": 1}, [], finish_success
 
     def get_state(self):
         return replace(super().get_state(), inventory_counts=dict(self.counts))

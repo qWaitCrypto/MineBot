@@ -13,6 +13,7 @@ from typing import Any, Callable
 from minebot.brain.acquisition import AcquisitionError, AcquisitionStep, RecipeLookup, RecipeVariant, resolve_acquisition
 from minebot.brain.modes import RuntimeProfile
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
+from minebot.contract.results import RECIPE_SOURCE_UNLOCKED_BOOK
 from minebot.contract import (
     Body,
     InventorySlot,
@@ -607,7 +608,13 @@ def ensure_item(
                 False,
                 plan.reason,
                 False,
-                next_suggestion="choose a reachable item/resource or add a recipe/acquisition route",
+                next_suggestion=(
+                    "The recipe for the missing item is not unlocked on this Body yet, so the chain cannot "
+                    "be expanded from here. Look the recipe up in the wiki, obtain its ingredients (which "
+                    "unlocks it), then retry."
+                    if plan.detail.get("recipe_source") == RECIPE_SOURCE_UNLOCKED_BOOK
+                    else "choose a reachable item/resource or add a recipe/acquisition route"
+                ),
                 metrics={
                     "item": item,
                     "target_count": count,

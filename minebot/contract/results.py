@@ -56,3 +56,8 @@ def body_rejection_to_tool_result(
             metrics=merged,
         )
     return ToolResult(success=False, reason="body_rejected", can_retry=True, metrics=merged)
+
+
+# A Body whose recipe lookup reads the player's recipe book reports this as the
+# ``recipe_source``: an empty answer then means "not unlocked yet", not "no recipe".
+RECIPE_SOURCE_UNLOCKED_BOOK = "unlocked_recipe_book"

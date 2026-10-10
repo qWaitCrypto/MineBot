@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Any, Mapping
 
+from minebot.contract.results import RECIPE_SOURCE_UNLOCKED_BOOK
 from minebot.contract import BodyState, Event, PerceptionResult, Result
 from minebot.contract import Action
 from minebot.contract.execution import current_tool_observation
@@ -262,6 +263,11 @@ class RealClientBody:
         data = response.get("data")
         if not isinstance(data, dict):
             data = {key: value for key, value in response.items() if key not in {"type", "request_id"}}
+        if scope == "recipeData":
+            # The client can only see the player's recipe book, which holds the
+            # recipes unlocked so far. An empty answer is "not unlocked yet",
+            # not "this item has no recipe".
+            data = {**data, "recipe_source": RECIPE_SOURCE_UNLOCKED_BOOK}
         return PerceptionResult(
             bot=self.bot_name,
             scope=scope,

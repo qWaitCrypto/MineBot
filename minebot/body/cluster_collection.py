@@ -8,11 +8,19 @@ import time
 from typing import TYPE_CHECKING
 
 from minebot.contract import action_with_timeout, action_wait_timeout_s
+from minebot.body.native_admission import harvest_tool_denial
 from minebot.body.world_read import read_block_facts
+from minebot.game.errors import BodyActionTimeoutError
 from minebot.contract import Action, Body, Position, ToolResult, execution_checkpoint, terminal_event_to_tool_result
 
 if TYPE_CHECKING:
     from minebot.body.resource_collection import ResourceCollectionConfig
+
+# A native mining process that gains nothing for this long, without having
+# travelled, is reported instead of being left to run out its deadline.
+NO_PROGRESS_WINDOW_S = 90.0
+NO_PROGRESS_TRAVEL_BLOCKS = 24.0
+_PROGRESS_POLL_S = 2.0
 
 
 def resource_cluster(
@@ -51,6 +59,41 @@ def resource_cluster(
     return found
 
 
+def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[ToolResult, dict | None]:
+    """Wait for a native mining action, stopping it when it stops producing.
+
+    Returns the terminal and, when the action was stopped for lack of
+    progress, the observed facts. Progress is an inventory gain; travelling
+    resets the window so a long walk to a distant resource is not a stall.
+    """
+    deadline = time.monotonic() + action_wait_timeout_s(action)
+    best, mark_at, mark_pos = inventory_total(), time.monotonic(), body.get_state().pos
+    while True:
+        execution_checkpoint()
+        remaining = deadline - time.monotonic()
+        try:
+            event = body.await_action_terminal(action.id, timeout_s=max(0.01, min(_PROGRESS_POLL_S, remaining)))
+            return terminal_event_to_tool_result(event), None
+        except BodyActionTimeoutError:
+            if remaining <= _PROGRESS_POLL_S:
+                raise
+        state = body.get_state()
+        total = inventory_total()
+        if total > best or math.dist(state.pos, mark_pos) >= NO_PROGRESS_TRAVEL_BLOCKS:
+            best, mark_at, mark_pos = max(best, total), time.monotonic(), state.pos
+            continue
+        stalled_s = time.monotonic() - mark_at
+        if stalled_s < NO_PROGRESS_WINDOW_S:
+            continue
+        body.interrupt("no_progress")
+        event = body.await_action_terminal(action.id, timeout_s=30.0)
+        return terminal_event_to_tool_result(event), {
+            "stalled_s": round(stalled_s, 1), "inventory_total": total,
+            "position": [round(float(value), 1) for value in state.pos],
+            "selected_item": state.selected_item,
+        }
+
+
 def collect_native_cluster(
     body: Body, *, block_types: tuple[str, ...], expected_drops: tuple[str, ...],
     remaining_count: int, dry: bool, config: ResourceCollectionConfig,
@@ -82,6 +125,15 @@ def collect_native_cluster(
 
     while time.monotonic() < deadline and actions_used < config.mutation_budget:
         execution_checkpoint()
+        # Checked before every native action: a pickaxe that broke during the
+        # previous one is noticed here rather than mined past bare-handed.
+        denied = harvest_tool_denial(body, blocks)
+        if denied is not None:
+            current = inventory_total()
+            return ToolResult(False, denied.reason, can_retry=False, next_suggestion=denied.next_suggestion,
+                metrics={**denied.metrics, "collected": current - before, "requested_count": remaining_count,
+                         "remaining_count": max(0, remaining_count - (current - before)), "attempts": attempts,
+                         "collection_strategy": "native_resource_collection"})
         current = inventory_total()
         finishing = current - before >= remaining_count
         if finishing and finish_target is None:
@@ -143,11 +195,13 @@ def collect_native_cluster(
         accepted = body.execute(action)
         if not accepted.ok or not accepted.accepted:
             return result(False, accepted.error or "body_rejected")
-        terminal = terminal_event_to_tool_result(body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action)))
+        terminal, stalled = _await_with_progress(body, action, inventory_total)
         attempts.append({"target": list(anchor) if anchor is not None else None,
                          "targets": [list(pos) for pos in cluster], "action": action.name,
-                         "mine": terminal.to_payload()})
+                         "mine": terminal.to_payload(), **({"no_progress": stalled} if stalled else {})})
         actions_used += 1
+        if stalled:
+            return result(False, "no_progress")
         if not terminal.success:
             return result(False, terminal.reason)
         if action.name == "mineResource":
