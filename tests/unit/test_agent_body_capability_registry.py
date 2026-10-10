@@ -749,7 +749,7 @@ class JavaBodyProviderRegistryTests(unittest.TestCase):
             self.assertIn("collect_resource", sdk_tools)
             self.assertEqual(
                 set(parts.registry.get("collect_resource").input_schema["properties"]),
-                {"item", "count"},
+                {"item", "count", "avoid", "retry_unreachable"},
             )
             manifest = {row["name"]: row for row in tool_manifest(parts.registry)}
             self.assertFalse(manifest["collect_block_domain"]["model_visible"])

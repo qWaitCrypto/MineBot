@@ -687,6 +687,8 @@ def build_phase1_registry(
             dig_timeout_s=min(30.0, timeout_s),
         )
 
+    # Targets no path reached, remembered for the life of this goal's runtime.
+    unreachable_targets: set[tuple[int, int, int]] = set()
     resource_collection = ResourceCollectionTransactions(
         body,
         navigator,
@@ -695,7 +697,7 @@ def build_phase1_registry(
         bounded_mobility_egress=bounded_resource_egress,
         bounded_vertical_descent=bounded_resource_descent,
         designated_collector=designated_collector,
-        batch_collector=(lambda **kwargs: collect_native_cluster(body, **kwargs))
+        batch_collector=(lambda **kwargs: collect_native_cluster(body, unreachable=unreachable_targets, **kwargs))
             if config.body_provider == "real_client" else None,
     )
     inventory_txn = InventoryTransactions(body, navigator=approach_navigator, governance=policy, work=work)

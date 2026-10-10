@@ -1463,7 +1463,7 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertIn("exact species", tool.description)
         self.assertIn("logs", tool.input_schema["properties"]["item"]["description"])
         self.assertIn("inventory total", tool.input_schema["properties"]["count"]["description"])
-        self.assertEqual(set(tool.input_schema["properties"]), {"item", "count"})
+        self.assertEqual(set(tool.input_schema["properties"]), {"item", "count", "avoid", "retry_unreachable"})
         self.assertNotIn("constraints", tool.input_schema["properties"])
         self.assertEqual(tool.framework_view()["description"], tool.description)
 

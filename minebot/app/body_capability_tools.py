@@ -1475,6 +1475,8 @@ def _collect_block_domain_tool(
                 find_limit=int(params.get("find_limit") or 12),
                 max_pages=int(params.get("max_pages") or 1),
                 segment_timeout_s=float(params.get("segment_timeout_s") or 15.0),
+                avoid=tuple(tuple(int(value) for value in pos) for pos in params.get("avoid") or ()),
+                retry_unreachable=bool(params.get("retry_unreachable", False)),
             ),
         )
 
@@ -1494,6 +1496,8 @@ def _collect_block_domain_tool(
                 "max_pages": {"type": "integer", "minimum": 1, "maximum": 8},
                 "segment_timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 60},
                 "dry": {"type": "boolean"},
+                "avoid": {"type": "array", "maxItems": 64, "items": {"type": "array", "items": {"type": "integer"}, "minItems": 3, "maxItems": 3}},
+                "retry_unreachable": {"type": "boolean"},
             },
             required=("block_types", "expected_drops", "remaining_count"),
         ),

@@ -63,18 +63,19 @@ def resource_cluster(
     return found
 
 
-def _path_state(body: Body) -> tuple[int, str, str]:
-    """Baritone's failed path calculations, its goal, and its own failure name."""
+def _path_state(body: Body) -> tuple[int, str, str, int | None]:
+    """Baritone's failed path calculations, goal, failure name and carried scaffold blocks."""
     try:
         read = body.perceive("baritoneState", {})
     except Exception:
-        return 0, "", ""
+        return 0, "", "", None
     data = read.data if read.ok and isinstance(read.data, dict) else {}
     events = data.get("path_events")
     failed = events.get("CALC_FAILED") if isinstance(events, dict) else 0
     navigation = data.get("navigation") if isinstance(data.get("navigation"), dict) else {}
+    scaffold = data.get("scaffold_blocks")
     return ((failed if isinstance(failed, int) else 0), str(data.get("baritone_goal") or "")[:200],
-            str(navigation.get("last_failure") or ""))
+            str(navigation.get("last_failure") or ""), scaffold if type(scaffold) is int else None)
 
 
 _GOAL_POSITION = re.compile(r"x=(-?\d+),\s*y=(-?\d+),\s*z=(-?\d+)")
@@ -117,7 +118,7 @@ def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[T
                 raise
         state = body.get_state()
         total = inventory_total()
-        failed, goal, last_failure = _path_state(body)
+        failed, goal, last_failure, scaffold = _path_state(body)
         native_failure = last_failure or native_failure
         if total > best or math.dist(state.pos, mark_pos) >= NO_PROGRESS_TRAVEL_BLOCKS:
             best, mark_at, mark_pos, failed_mark = max(best, total), time.monotonic(), state.pos, failed
@@ -138,14 +139,23 @@ def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[T
         if unreachable:
             facts.update(failed_path_calculations=failed - failed_mark,
                          **_unreachable_facts(goal, state.pos, native_failure))
+            if scaffold is not None:
+                # Counted by the client from Baritone's own list of placeable blocks.
+                facts["scaffold_blocks"] = scaffold
         return terminal_event_to_tool_result(event), facts
 
 
 def collect_native_cluster(
     body: Body, *, block_types: tuple[str, ...], expected_drops: tuple[str, ...],
     remaining_count: int, dry: bool, config: ResourceCollectionConfig,
+    unreachable: set[Position] | None = None,
 ) -> ToolResult | None:
-    """Return None to retain the governed legacy path outside disposable worlds."""
+    """Return None to retain the governed legacy path outside disposable worlds.
+
+    ``unreachable`` is the task's memory of targets no path reached. They are
+    skipped until the caller asks to retry them, so one such block cannot be
+    selected again by every later call.
+    """
     if dry:
         return None
     process = body.perceive("baritoneState", {})
@@ -160,7 +170,10 @@ def collect_native_cluster(
 
     before = inventory_total()
     deadline = time.monotonic() + config.max_wall_s
-    attempts, excluded, actions_used = [], set(), 0
+    if unreachable is not None and config.retry_unreachable:
+        unreachable.clear()
+    avoided = {tuple(int(value) for value in pos) for pos in config.avoid} | set(unreachable or ())
+    attempts, excluded, actions_used = [], set(avoided), 0
     finish_target: Position | None = None
 
     def result(success: bool, reason: str, stalled: dict | None = None) -> ToolResult:
@@ -169,6 +182,10 @@ def collect_native_cluster(
             "collected": current - before, "requested_count": remaining_count,
             "remaining_count": max(0, remaining_count - (current - before)),
             "attempts": attempts, "collection_strategy": "native_resource_collection"}
+        if avoided:
+            # Said every time, so a missing resource is not mistaken for an absent one.
+            metrics["avoided_targets"] = [list(pos) for pos in sorted(avoided)[:16]]
+            metrics["avoided_target_count"] = len(avoided)
         suggestion = None
         if stalled is not None:
             # Top level, so it survives the bounded projection the Agent reads.
@@ -179,10 +196,13 @@ def collect_native_cluster(
                     where = (f" The target {stalled['target']} is {stalled['target_above_feet']} blocks above the "
                              f"Body's feet and {stalled['target_horizontal_distance']} blocks away horizontally; "
                              f"the Body holds {stalled.get('selected_item') or 'nothing'}.")
+                    if "scaffold_blocks" in stalled:
+                        where += (f" It carries {stalled['scaffold_blocks']} blocks that Baritone may place "
+                                  "to climb or bridge.")
                 suggestion = (
                     f"Baritone failed {stalled.get('failed_path_calculations')} path calculations in a row and "
-                    f"found no way to this target.{where} Repeating the same collection picks the same target; "
-                    "decide how to reach it or collect somewhere else."
+                    f"found no way to this target.{where} Later collections in this task skip it; pass "
+                    "retry_unreachable=true once the Body has a way to reach it."
                 )
         return ToolResult(success, reason, can_retry=not success, next_suggestion=suggestion, metrics=metrics)
 
@@ -229,6 +249,7 @@ def collect_native_cluster(
             probe_limit = min(257, needed + finish_allowance + 1)
             cluster = resource_cluster(body, anchor, blocks, probe_limit,
                 tree=tree or all(b.endswith("_ore") for b in blocks), include_neighbors=finishing)
+            cluster = [pos for pos in cluster if tuple(pos) not in avoided]
             if not cluster:
                 if finishing:
                     return result(True, "resource_collected")
@@ -264,6 +285,10 @@ def collect_native_cluster(
                          "mine": terminal.to_payload(), **({"no_progress": stalled} if stalled else {})})
         actions_used += 1
         if stalled:
+            target = stalled.get("target")
+            if unreachable is not None and stalled.get("reason") == "path_unreachable" and target:
+                unreachable.add(tuple(target))
+                avoided.add(tuple(target))
             return result(False, str(stalled["reason"]), stalled)
         if not terminal.success:
             return result(False, terminal.reason)

@@ -377,11 +377,22 @@ def _update_plan_tool(workspace: TaskWorkspace) -> RegisteredTool:
                 steps=list(params.get("steps") or []),
             )
         except (RuntimeStateConflict, ValueError) as exc:
+            # A stale revision is the usual cause; say the number instead of
+            # leaving the caller to guess it from the nested task payload.
+            task = workspace.current_task
+            current_plan = None if task is None else workspace.store.get_plan(task.task_id)
+            current_revision = 0 if current_plan is None else current_plan.revision
+            conflict = isinstance(exc, RuntimeStateConflict)
             return ToolResult(
                 success=False,
                 reason="task_plan_update_rejected",
                 can_retry=True,
-                metrics={"error": str(exc), "current": workspace.payload()},
+                next_suggestion=(
+                    f"Retry with expected_revision={current_revision}; it is the plan's revision, "
+                    "0 while the task has no plan yet." if conflict else None
+                ),
+                metrics={"error": str(exc), "current_plan_revision": current_revision,
+                         "current": workspace.payload()},
             )
         return ToolResult(
             success=True,
@@ -399,7 +410,7 @@ def _update_plan_tool(workspace: TaskWorkspace) -> RegisteredTool:
         {
             "type": "object",
             "properties": {
-                "expected_revision": {"type": "integer", "minimum": 0},
+                "expected_revision": {"type": "integer", "minimum": 0, "description": "The plan revision you last read; 0 when the task has no plan yet. It is not the task revision."},
                 "summary": {"type": "string", "maxLength": 4000},
                 "steps": {
                     "type": "array",

@@ -201,7 +201,7 @@ class ExecutionSnapshots:
         navigation = payload.get("navigation") if isinstance(payload.get("navigation"), Mapping) else None
         if navigation is not None:
             facts["navigation"] = {key: navigation[key] for key in _NAVIGATION_FACTS if key in navigation}
-        for key in ("pathing", "builder_paused", "selected_item"):
+        for key in ("pathing", "builder_paused", "selected_item", "scaffold_blocks"):
             if key in payload:
                 facts[key] = payload[key]
         active = [name for name, field in PROCESS_FIELDS.items() if payload.get(field) is True]

@@ -269,3 +269,18 @@ def test_an_execution_fact_waits_for_the_running_turn():
     assert _queued_preemption(queue, "agent_turn") is None
     queue.enqueue(WorkIntentKind.MESSAGE, source="player", payload={"text": "stop that"})
     assert _queued_preemption(queue, "agent_turn") is not None
+
+
+def test_rejected_plan_update_names_the_revision_to_use():
+    from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
+    from minebot.app.tasks import TaskWorkspace, register_task_tools
+
+    workspace = TaskWorkspace(RuntimeStateStore(":memory:"), RuntimeScope("server", "world", "Bot1"))
+    workspace.start("build a house", source="test")
+    registry = ToolRegistry()
+    register_task_tools(registry, workspace)
+    result = registry.get("update_plan").callable(
+        {"expected_revision": 1, "summary": "s", "steps": [{"title": "collect logs", "status": "in_progress"}]})
+    assert result.reason == "task_plan_update_rejected"
+    assert result.metrics["current_plan_revision"] == 0
+    assert "expected_revision=0" in result.next_suggestion

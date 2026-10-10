@@ -2926,14 +2926,19 @@ public final class MineBotClientBody implements ClientModInitializer {
             state.addProperty("chest_item", BuiltInRegistries.ITEM.getKey(client.player.getItemBySlot(EquipmentSlot.CHEST).getItem()).getPath());
             state.addProperty("feet_chunk_loaded", client.level.hasChunkAt(client.player.blockPosition()));
             JsonObject inventory = new JsonObject();
+            // Blocks Baritone may place to climb or bridge: its own accepted list, as carried now.
+            var scaffoldItems = BaritoneAPI.getSettings().acceptableThrowawayItems.value;
+            int scaffoldBlocks = 0;
             for (int slot = 0; slot < client.player.getInventory().getContainerSize(); slot++) {
                 ItemStack stack = client.player.getInventory().getItem(slot);
                 if (!stack.isEmpty()) {
                     String item = BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath();
                     inventory.addProperty(item, (inventory.has(item) ? inventory.get(item).getAsInt() : 0) + stack.getCount());
+                    if (scaffoldItems.contains(stack.getItem())) scaffoldBlocks += stack.getCount();
                 }
             }
             state.add("inventory", inventory);
+            state.addProperty("scaffold_blocks", scaffoldBlocks);
             state.addProperty("inventory_complete", true);
             state.addProperty("inventory_includes_selected", true);
             state.addProperty("inventory_count_scope", "all_player_inventory_slots_including_selected_hotbar");

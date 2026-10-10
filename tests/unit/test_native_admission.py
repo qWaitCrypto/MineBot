@@ -131,7 +131,7 @@ def test_native_collection_stops_when_the_path_keeps_failing(monkeypatch: pytest
         read = plain(scope, params)
         if scope == "baritoneState":
             read.data.update(path_events={"CALC_FAILED": next(failed)}, baritone_goal="GoalBreak{x=1,y=76,z=1}",
-                             navigation={"last_failure": "movement_unreachable"})
+                             navigation={"last_failure": "movement_unreachable"}, scaffold_blocks=0)
         return read
 
     body.perceive = perceive
@@ -144,7 +144,9 @@ def test_native_collection_stops_when_the_path_keeps_failing(monkeypatch: pytest
     assert stalled["failed_path_calculations"] >= 5 and "y=76" in stalled["goal"]
     assert stalled["target"] == [1, 76, 1] and stalled["target_above_feet"] == 12
     assert stalled["native_failure"] == "movement_unreachable"
-    assert "12 blocks above" in result.next_suggestion and "same target" in result.next_suggestion
+    assert stalled["scaffold_blocks"] == 0
+    assert "12 blocks above" in result.next_suggestion and "carries 0 blocks" in result.next_suggestion
+    assert "retry_unreachable" in result.next_suggestion
 
 
 def test_native_collection_still_completes_when_it_produces() -> None:
@@ -201,3 +203,53 @@ def test_planner_reports_that_the_missing_recipe_is_only_locked() -> None:
     assert isinstance(plan, AcquisitionError)
     assert plan.reason == "unplannable"
     assert plan.detail == {"missing_recipe": "stone_pickaxe", "recipe_source": RECIPE_SOURCE_UNLOCKED_BOOK}
+
+
+def test_unreachable_target_is_remembered_and_can_be_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cluster_collection, "_PROGRESS_POLL_S", 0.01)
+    body = NativeBody({"wooden_pickaxe": 1}, finishes=False)
+    failed = iter(range(0, 1000, 2))
+    plain = body.perceive
+
+    def perceive(scope, params):
+        read = plain(scope, params)
+        if scope == "baritoneState":
+            read.data.update(path_events={"CALC_FAILED": next(failed)}, baritone_goal="GoalBreak{x=1,y=76,z=1}")
+        return read
+
+    body.perceive = perceive
+    memory: set = set()
+    config = ResourceCollectionConfig(max_wall_s=30.0, mutation_budget=4)
+
+    def collect(**overrides):
+        return collect_native_cluster(
+            body, block_types=("stone",), expected_drops=("cobblestone",), remaining_count=8, dry=False,
+            config=ResourceCollectionConfig(max_wall_s=30.0, mutation_budget=4, **overrides), unreachable=memory)
+
+    first = collect()
+    assert first.reason == "path_unreachable" and memory == {(1, 76, 1)}
+    assert first.metrics["avoided_targets"] == [[1, 76, 1]]
+
+    body.interrupted.clear()
+    retried = collect(retry_unreachable=True)
+    assert retried.reason == "path_unreachable" and memory == {(1, 76, 1)}  # tried again, failed again
+    assert config.avoid == ()
+
+
+def test_avoided_log_is_never_selected() -> None:
+    body = NativeBody({})
+    plain = body.perceive
+
+    def perceive(scope, params):
+        read = plain(scope, params)
+        if scope == "findBlocks":
+            read.data["blocks"] = [{"x": 137, "y": 76, "z": 109}]
+        return read
+
+    body.perceive = perceive
+    result = collect_native_cluster(
+        body, block_types=("spruce_log",), expected_drops=("spruce_log",), remaining_count=8, dry=False,
+        config=ResourceCollectionConfig(max_wall_s=30.0, mutation_budget=4, avoid=((137, 76, 109),)))
+
+    assert result.reason == "resource_candidates_not_found" and body.actions == []
+    assert result.metrics["avoided_targets"] == [[137, 76, 109]]

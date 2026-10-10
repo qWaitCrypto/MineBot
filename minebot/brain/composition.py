@@ -283,6 +283,18 @@ def collect_resource_tool(context: CompositionContext) -> RegisteredTool:
                     "minimum": 1,
                     "description": "Desired inventory total for this stage, not the number of additional items to collect.",
                 },
+                "avoid": {
+                    "type": "array", "maxItems": 64,
+                    "items": {"type": "array", "items": {"type": "integer"}, "minItems": 3, "maxItems": 3},
+                    "description": "Block positions [x, y, z] you do not want collected, e.g. a block you judged out of reach.",
+                },
+                "retry_unreachable": {
+                    "type": "boolean",
+                    "description": (
+                        "Targets that no path reached are skipped for the rest of the task and listed as "
+                        "avoided_targets. Set true to try them again after changing how the Body can reach them."
+                    ),
+                },
             },
             "required": ["item", "count"],
             "additionalProperties": False,
@@ -461,6 +473,8 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
             "max_pages": max_pages,
             "segment_timeout_s": float(constraints.get("segment_timeout_s") or 15.0),
             "dry": allow_dry,
+            "avoid": [list(pos) for pos in params.get("avoid") or ()],
+            "retry_unreachable": bool(params.get("retry_unreachable", False)),
         },
     )
     _emit_trace(
@@ -554,6 +568,10 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     process_suggestion = body_process.get("nextSuggestion") if isinstance(body_process, dict) else None
     if isinstance(stalled, dict):
         metrics["stalled"] = stalled
+    if isinstance(process_metrics, dict):
+        for key in ("avoided_targets", "avoided_target_count"):
+            if key in process_metrics:
+                metrics[key] = process_metrics[key]
     return ToolResult(
         result.success,
         result.reason,

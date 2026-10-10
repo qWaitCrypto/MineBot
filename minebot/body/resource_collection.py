@@ -68,6 +68,10 @@ class ResourceCollectionConfig:
     tree_domain_search_radius: int = 6
     tree_domain_target_limit: int = 24
     tree_domain_max_retargets: int = 4
+    # Block positions the caller does not want selected as targets.
+    avoid: tuple[Position, ...] = ()
+    # Try again the targets that proved unreachable earlier in this task.
+    retry_unreachable: bool = False
 
 
 @dataclass(frozen=True)
