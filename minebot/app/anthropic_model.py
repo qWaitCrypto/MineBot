@@ -136,6 +136,10 @@ class AnthropicMessagesModel(Model):
         async with self._client.stream(
             "POST", self._messages_url, headers=self._headers(model_settings), json=payload
         ) as response:
+            if not response.is_success:
+                # A streamed body is unread until asked for; the error detail
+                # lives in it, and reading .json() first raises ResponseNotRead.
+                await response.aread()
             self._raise_for_status(response)
             initial = Response.model_construct(
                 id="anthropic-pending",

@@ -10,7 +10,7 @@ from agents import Agent, Runner, function_tool
 from agents.model_settings import ModelSettings, Reasoning
 from agents.tool import FunctionTool
 
-from minebot.app.anthropic_model import AnthropicMessagesModel
+from minebot.app.anthropic_model import AnthropicAPIError, AnthropicMessagesModel
 from minebot.app.config import AppConfigError, provider_registry_from_env
 
 
@@ -464,3 +464,28 @@ async def _test_anthropic_cache_counts_survive_a_runner_loop() -> None:
     request = run.raw_responses[-1].usage
     assert request.input_tokens_details.cached_tokens == 900
     assert request.input_tokens_details.model_dump().get("cache_write_tokens") == 100
+
+
+def test_anthropic_stream_error_status_reports_the_api_error() -> None:
+    asyncio.run(_test_anthropic_stream_error_status_reports_the_api_error())
+
+
+async def _test_anthropic_stream_error_status_reports_the_api_error() -> None:
+    class Unread(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield json.dumps({"type": "error", "error": {"type": "overloaded_error", "message": "busy"}}).encode()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        # A real streamed response: the body is not loaded until it is read.
+        return httpx.Response(529, request=request, stream=Unread())
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    model = AnthropicMessagesModel(model="claude", api_key="test-key", client=client)
+    try:
+        with pytest.raises(AnthropicAPIError, match="overloaded_error: busy"):
+            async for _event in model.stream_response(
+                None, "hello", ModelSettings(max_tokens=20), [], None, [], _tracing()
+            ):
+                pass
+    finally:
+        await client.aclose()
