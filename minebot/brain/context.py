@@ -31,6 +31,9 @@ from minebot.contract import BodyState
 # Re-inject the goal every N model turns so it never scrolls out of the window.
 DEFAULT_GOAL_REINJECT_EVERY = 5
 
+# Marks a harness fact inside turn input, which the model receives as user-role text.
+HARNESS_FACT_PREFIX = "HARNESS_FACT: "
+
 
 @dataclass
 class AgentContext:
@@ -251,7 +254,7 @@ class AgentContext:
             role, text, sender = pending[0]
             return self._user_input_line(text, sender=sender, prefixed=False), 1
         lines = [
-            f"HARNESS_FACT: {text}"
+            f"{HARNESS_FACT_PREFIX}{text}"
             if role == "system"
             else self._user_input_line(text, sender=sender, prefixed=True)
             for role, text, sender in pending

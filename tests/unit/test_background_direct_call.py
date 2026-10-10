@@ -284,3 +284,38 @@ def test_rejected_plan_update_names_the_revision_to_use():
     assert result.reason == "task_plan_update_rejected"
     assert result.metrics["current_plan_revision"] == 0
     assert "expected_revision=0" in result.next_suggestion
+
+
+def test_plan_update_accepts_the_null_blocker_the_tools_themselves_report():
+    import jsonschema
+
+    from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
+    from minebot.app.tasks import TaskWorkspace, register_task_tools
+
+    workspace = TaskWorkspace(RuntimeStateStore(":memory:"), RuntimeScope("server", "world", "Bot1"))
+    workspace.start("build a house", source="test")
+    registry = ToolRegistry()
+    register_task_tools(registry, workspace)
+    tool = registry.get("update_plan")
+    arguments = {"expected_revision": 0, "summary": "s",
+                 "steps": [{"title": "collect logs", "status": "completed", "blocker": None}]}
+    jsonschema.validate(arguments, tool.input_schema)
+    assert tool.callable(arguments).success is True
+
+
+def test_a_result_that_ended_mid_turn_stays_visible_until_it_is_delivered():
+    runtime, _wrapper, facts = _runtime(FakeBody())
+    runtime.notify_reflex_fact({"kind": "direct_call", "activity_id": "call-7", "tool": "collect_resource",
+                                "status": "blocked", "result": {"success": False, "reason": "no_progress"}})
+    runtime.notify_reflex_fact({"activity_id": "activity-1", "status": "blocked", "tree": {}, "facts": {}})
+
+    finished = runtime.background_work()["finished"]
+    assert [(item["activity_id"], item["kind"], item["status"]) for item in finished["results"]] == [
+        ("call-7", "direct_call", "blocked"), ("activity-1", "plan", "blocked")]
+    assert finished["results"][0]["reason"] == "no_progress" and "ended_s_ago" in finished["results"][0]
+    assert len(facts) == 2
+
+    runtime.reflex_fact_delivered("call-7")
+    assert [item["activity_id"] for item in runtime.background_work()["finished"]["results"]] == ["activity-1"]
+    runtime.reflex_fact_delivered("activity-1")
+    assert runtime.background_work() is None

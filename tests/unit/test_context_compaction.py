@@ -141,3 +141,41 @@ def test_zero_threshold_never_summarizes():
     compactor = _compactor(0, calls)
     view = asyncio.run(compactor.view(_history(300)))
     assert calls == [] and len(view) == 901
+
+
+def test_harness_facts_are_summarized_not_carried_forward_as_player_messages():
+    calls = []
+    compactor = _compactor(20_000, calls, tail_chars=2_000)
+    fact = "HARNESS_FACT: REFLEX_RESULT: " + "y" * 30_000
+    items = [{"role": "user", "content": "build a house"}, *_turn(0),
+             {"role": "user", "content": fact}, *_turn(1),
+             {"role": "user", "content": "Alex: use oak please\n" + fact}]
+    for index in range(2, 40):
+        items.extend(_turn(index))
+
+    view = asyncio.run(compactor.view(items))
+    head = [item["content"] for item in view if item.get("role") == "user"]
+    assert head[0] == "build a house" and head[1] == "Alex: use oak please"
+    assert head[2].startswith(SUMMARY_HEADER)
+    assert "y" * 100 not in "".join(head)
+    assert "REFLEX_RESULT" in calls[0][1]  # the fact went to the summarizer instead
+
+
+def test_no_compaction_when_what_is_large_is_the_part_that_stays():
+    calls, events = [], []
+    compactor = _compactor(20_000, calls, tail_chars=2_000)
+    compactor.emit = lambda event, **payload: events.append((event, payload))
+    huge = {"type": "function_call_output", "call_id": "call-0", "output": "z" * 90_000}
+    last = [{"type": "function_call", "call_id": "call-0", "name": "read", "arguments": "{}"}, huge]
+
+    async def scenario():
+        views = []
+        for turns in (1, 2, 3):
+            small = [item for index in range(1, turns + 1) for item in _turn(index)]
+            views.append(await compactor.view([{"role": "user", "content": "build a house"}, *small, *last]))
+        return views
+
+    views = asyncio.run(scenario())
+    assert calls == []  # summarizing a few small items would not make the request fit
+    assert all(view[-1] == huge and view[0]["content"] == "build a house" for view in views)
+    assert {payload["reason"] for event, payload in events} == {"little_to_summarize"}

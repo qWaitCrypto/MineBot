@@ -22,7 +22,13 @@ from minebot.body import (
     ResourceCollectionTransactions,
     UseTransactions,
 )
-from minebot.app.projection import bounded_summary_value, top_reasons
+from minebot.app.projection import (
+    answer_value,
+    blocks_by_kind,
+    bounded_summary_value,
+    encoded_chars,
+    top_reasons,
+)
 from minebot.brain.registry import ObservationProjector, RegisteredTool, ToolSidecar
 from minebot.contract import (
     Action,
@@ -1569,6 +1575,11 @@ def _read_block_tool(body: Body) -> RegisteredTool:
     )
 
 
+# A read tool's answer is shown whole up to this size; past it the result says
+# how much was left out and the handle recovers the rest.
+READ_ANSWER_CHARS = 12_000
+
+
 def nearby_blocks_observation_projector(reason: str, metrics: dict[str, object]) -> JsonObject:
     data = metrics.get("data")
     if not isinstance(data, dict):
@@ -1579,10 +1590,27 @@ def nearby_blocks_observation_projector(reason: str, metrics: dict[str, object])
             summary[key] = bounded_summary_value(data[key])
     blocks = data.get("blocks")
     if isinstance(blocks, list):
+        # The blocks are what was asked for. Grouped by kind they all fit;
+        # only an unusually varied neighbourhood is cut, nearest first as read.
+        shown = len(blocks)
+        grouped = blocks_by_kind(blocks)
+        while shown > 8 and encoded_chars(grouped) > READ_ANSWER_CHARS:
+            shown = max(8, shown // 2)
+            grouped = blocks_by_kind(blocks[:shown])
         summary["block_count"] = len(blocks)
-        summary["blocks"] = [bounded_summary_value(block) for block in blocks[:8]]
-        summary["blocks_complete"] = len(blocks) <= 8 and metrics.get("complete") is True
+        summary["blocks"] = grouped
+        summary["blocks_shown"] = shown
+        summary["blocks_complete"] = shown == len(blocks) and metrics.get("complete") is True
     return summary
+
+
+def recipe_observation_projector(reason: str, metrics: dict[str, object]) -> JsonObject:
+    data = metrics.get("data")
+    if data is None:
+        return {}
+    shown, whole = answer_value(data, budget=READ_ANSWER_CHARS)
+    return {"data": shown, "data_complete": whole and metrics.get("complete") is not False,
+            "detail_path": ["metrics", "data"]}
 
 
 def _read_nearby_blocks_tool(body: Body) -> RegisteredTool:
@@ -1691,6 +1719,7 @@ def _read_recipe_tool(body: Body) -> RegisteredTool:
         body_scope=("inventory", "recipes"),
         terminal_truth=("recipeData",),
         timeout_s=20.0,
+        projector=recipe_observation_projector,
     )
 
 

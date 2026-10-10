@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
+from .real_client_frame import learn_client_state_fields
 from .real_client_protocol import MAX_FRAME_BYTES, RealClientProtocolError
 
 
@@ -107,6 +108,7 @@ class RealClientIpc:
             if message.get("type") == "rejected":
                 raise RealClientIpcError(str(message.get("reason", "state rejected")))
             if message.get("type") == "state" and message.get("request_id") == request_id:
+                learn_client_state_fields(message)
                 return message
 
     def scan(self, target: str) -> dict[str, Any]:

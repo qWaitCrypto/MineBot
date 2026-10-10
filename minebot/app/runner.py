@@ -58,6 +58,9 @@ from minebot.app.context_compaction import (
     DEFAULT_COMPACT_THRESHOLD_TOKENS,
     SUMMARY_INSTRUCTIONS,
     ConversationCompactor,
+    MAX_ITEM_CHARS,
+    bound_item,
+    item_fingerprint,
 )
 from minebot.app.execution_snapshot import ExecutionSnapshots
 from minebot.app.runtime_trace import RuntimeTrace
@@ -68,6 +71,7 @@ from minebot.app.skills import SkillOperationError
 from minebot.app.observability import ObservationSink, sanitize_observation
 from minebot.app.projection import (
     bounded_summary_value as _bounded_summary_value,
+    without_ambient_state,
     projection_values_equal as _projection_values_equal,
     shorten as _shorten,
     top_reasons as _top_reasons,
@@ -153,9 +157,9 @@ def _execution_outcome(result: Any) -> tuple[str, str | None]:
 # the model turn; unset/empty keeps the default, "off" keeps calls synchronous.
 DIRECT_CALL_WINDOW_ENV = "MINEBOT_DIRECT_CALL_WINDOW_S"
 DEFAULT_DIRECT_CALL_WINDOW_S = 30.0
+UNDELIVERED_RESULT_MAX_AGE_S = 900.0
 SUMMARY_MAX_OUTPUT_TOKENS = 8_000
 # How long a finished background call stays in CURRENT_CONTEXT for the turn that was running.
-RECENT_BACKGROUND_RESULT_S = 120.0
 
 
 def direct_call_window_from_env(env: Mapping[str, str] | None = None) -> float | None:
@@ -1201,13 +1205,16 @@ def _model_tool_payload(
         payload["outcome"] = "decision_required"
     elif partial:
         payload["outcome"] = "partial"
-    summary = _metrics_summary(tool_name, reason, metrics, projector=projector)
+    # The stored result keeps everything. What the model reads leaves out the
+    # client's state frame wherever an action reply carried a copy of it.
+    shown = without_ambient_state(metrics)
+    summary = _metrics_summary(tool_name, reason, shown, projector=projector)
     if summary:
         payload["summary"] = summary
     if observation_handle is not None:
         payload["observationHandle"] = observation_handle
     payload["projection"] = _projection_metadata(
-        metrics,
+        shown,
         summary,
         observation_handle=observation_handle,
     )
@@ -1337,17 +1344,23 @@ def _metrics_summary(
     for key in allowed_keys:
         if key in metrics:
             summary[key] = _bounded_summary_value(metrics[key])
-    if isinstance(metrics.get("counts"), dict):
-        count_items = sorted(metrics["counts"].items(), key=lambda item: str(item[0]))
+    # An item-count map is the answer of an inventory or state read. The
+    # generic bound keeps twelve entries, which would drop most of a real
+    # inventory, so these maps have their own limit and say when it applies.
+    for counts_key in ("counts", "inventory_counts"):
+        if not isinstance(metrics.get(counts_key), dict):
+            continue
+        count_items = sorted(metrics[counts_key].items(), key=lambda item: str(item[0]))
         visible_items = count_items[:MODEL_COUNT_MAP_LIMIT]
-        summary["counts"] = {
+        summary[counts_key] = {
             str(key): _bounded_summary_value(value)
             for key, value in visible_items
         }
-        summary["distinct_item_count"] = len(count_items)
-        summary["counts_complete"] = len(visible_items) == len(count_items)
+        prefix = "" if counts_key == "counts" else f"{counts_key}_"
+        summary[f"{prefix}distinct_item_count"] = len(count_items)
+        summary[f"{prefix}counts_complete"] = len(visible_items) == len(count_items)
         if len(visible_items) < len(count_items):
-            summary["omitted_item_count"] = len(count_items) - len(visible_items)
+            summary[f"{prefix}omitted_item_count"] = len(count_items) - len(visible_items)
     if "skipped" in metrics and isinstance(metrics["skipped"], list):
         skipped = metrics["skipped"]
         summary["skipped_count"] = len(skipped)
@@ -1414,12 +1427,15 @@ def _include_generic_small_metric_facts(
         safe_value = safe_mapping.get(key)
         if safe_value == "<redacted>":
             continue
-        projected = _bounded_summary_value(safe_value)
-        if not _projection_values_equal(safe_value, projected):
+        # A small map is a fact and is shown as it is; bounding it first used
+        # to drop any map with more than a dozen entries entirely. A list of
+        # records is per-step detail and stays behind the handle.
+        if isinstance(safe_value, (list, tuple)) and not _projection_values_equal(
+                safe_value, _bounded_summary_value(safe_value)):
             continue
-        encoded = json.dumps(projected, ensure_ascii=False, sort_keys=True, default=str)
+        encoded = json.dumps(safe_value, ensure_ascii=False, sort_keys=True, default=str)
         if len(encoded) <= 1200:
-            summary[key] = projected
+            summary[key] = safe_value
 
 
 def _tool_result_summary(result: JsonObject) -> JsonObject:
@@ -1549,7 +1565,8 @@ class AgentRuntime:
         self.reflex_manager = None
         self.background_call: BackgroundCall | None = None
         self.execution_snapshots = ExecutionSnapshots()
-        self._recent_background_result: tuple[float, JsonObject] | None = None
+        # Finished work whose result has not reached the conversation yet.
+        self._undelivered_results: dict[str, JsonObject] = {}
         threshold = getattr(model_provider, "compact_threshold_for", None)
         self.conversation_compactor = ConversationCompactor(
             summarize=self._summarize_conversation,
@@ -1761,6 +1778,18 @@ class AgentRuntime:
         if kernel is None:
             listener = getattr(self, "_sdk_reflex_fact_listener", None)
             if callable(listener):
+                activity_id = str(fact.get("activity_id") or "unknown")
+                result = fact.get("result") if isinstance(fact.get("result"), dict) else {}
+                self.__dict__.setdefault("_undelivered_results", {})[activity_id] = {
+                    key: value for key, value in {
+                        "ended_monotonic": time.monotonic(),
+                        "activity_id": activity_id,
+                        "kind": fact.get("kind") or "plan",
+                        "tool": fact.get("tool"),
+                        "status": fact.get("status"),
+                        "reason": result.get("reason"),
+                    }.items() if value is not None
+                }
                 listener(dict(fact))
             return
         kernel.notify_fact(dict(fact))
@@ -2001,8 +2030,6 @@ class AgentRuntime:
         if self.native_responses:
             async with self._responses_turn_lock:
                 return await self._run_responses_turn(extra_signals, body_actions_allowed=body_actions_allowed)
-        # A new turn receives finished background work as its input.
-        self._recent_background_result = None
         self._turn_intent_kind = intent_kind
         self._turn_has_durable_goal = has_durable_goal
         self._turn_review_grant = review_grant_stop_epoch_id
@@ -2317,6 +2344,18 @@ class AgentRuntime:
             self.trace.emit("background_progress_stop", tool_call_id=tool_call_id,
                             stop_reason=exc.stop_reason.value)
 
+    def shown_plan_result(self, tool_name: str, result: JsonObject, trace_ref: str) -> JsonObject:
+        """A plan call's result as the Agent reads it: same projection as a direct call.
+
+        The original is stored first and the projection carries its handle.
+        """
+        try:
+            tool = self.registry.get(tool_name)
+        except Exception:
+            return _model_tool_payload(tool_name, result, trace_ref=trace_ref)
+        return _finalize_tool_payload(tool=tool, result=result, trace=None,
+                                      tool_call_id=trace_ref, runtime=self)
+
     def deliver_background_result(self, call: BackgroundCall, model_result: JsonObject) -> None:
         """The one final receipt of a detached call, sent as an execution fact."""
         reason = str(model_result.get("reason") or "")
@@ -2325,10 +2364,6 @@ class AgentRuntime:
         self.trace.emit("background_call_finished", tool_call_id=call.tool_call_id, tool=call.tool,
                         status=status, reason=reason,
                         elapsed_s=round(time.monotonic() - call.started_at, 3))
-        self._recent_background_result = (time.monotonic(), {
-            "tool": call.tool, "tool_call_id": call.tool_call_id, "status": status, "reason": reason,
-            "note": "The full result arrives as a REFLEX_RESULT message after this turn.",
-        })
         self.notify_reflex_fact({
             "kind": "direct_call",
             "activity_id": call.tool_call_id,
@@ -2352,10 +2387,29 @@ class AgentRuntime:
             execution = self.execution_snapshots.current()
             if execution is not None:
                 work["execution"] = execution
-        recent = self._recent_background_result
-        if recent is not None and time.monotonic() - recent[0] <= RECENT_BACKGROUND_RESULT_S:
-            work["finished"] = recent[1]
+        now = time.monotonic()
+        # A fact whose intent was discarded with its task never gets delivered.
+        self._undelivered_results = {
+            key: value for key, value in self.__dict__.get("_undelivered_results", {}).items()
+            if now - float(value["ended_monotonic"]) <= UNDELIVERED_RESULT_MAX_AGE_S
+        }
+        if self._undelivered_results:
+            # A result that ends while a turn is running reaches the
+            # conversation only after that turn. Until then the turn must not
+            # go on believing the work is still running.
+            work["finished"] = {
+                "results": [
+                    {**{key: item for key, item in value.items() if key != "ended_monotonic"},
+                     "ended_s_ago": round(now - float(value["ended_monotonic"]), 1)}
+                    for value in self._undelivered_results.values()
+                ],
+                "note": "This work has ended. Its full result arrives as a REFLEX_RESULT message after this turn.",
+            }
         return work or None
+
+    def reflex_fact_delivered(self, activity_id: str) -> None:
+        """The fact is now in the conversation, or was dropped for good."""
+        self.__dict__.get("_undelivered_results", {}).pop(activity_id, None)
 
     def latest_progress_evidence_cursor(self) -> int:
         if self.progress_epoch_archive is None:
@@ -2795,13 +2849,35 @@ class AgentRuntime:
         original = data.model_data.input
         items = [{"role": "user", "content": original}] if isinstance(original, str) else list(original)
         instructions = data.model_data.instructions
+        received = items
+        items = self._bounded_items(items)
         view = await self.conversation_compactor.view(items, static_chars=len(instructions or ""))
         context_item = current_context_item(live_context)
         if context_item is not None:
             view = [*view, context_item]
-        elif len(view) == len(items) and not isinstance(original, str):
+        elif len(view) == len(items) and not isinstance(original, str) and all(
+                shown is given for shown, given in zip(items, received)):
             return data.model_data
         return ModelInputData(input=view, instructions=instructions)
+
+    def _bounded_items(self, items: list[Any]) -> list[Any]:
+        """Cut any single item that no projection bounded, and say so once."""
+        reported = self.__dict__.setdefault("_oversized_items_reported", set())
+        out: list[Any] = []
+        for item in items:
+            bounded, removed = bound_item(item)
+            if removed:
+                key = item_fingerprint(item)
+                if key not in reported:
+                    reported.add(key)
+                    self.trace.emit(
+                        "model_input_item_bounded",
+                        item_type=str(item.get("type") or item.get("role") or "unknown"),
+                        removed_chars=removed, limit_chars=MAX_ITEM_CHARS,
+                        head=_shorten(json.dumps(item, ensure_ascii=False, default=str), limit=200),
+                    )
+            out.append(bounded)
+        return out
 
     async def _refresh_live_context(self, run_context: Any) -> None:
         """Read the Body before each request so CURRENT_CONTEXT is current.

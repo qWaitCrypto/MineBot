@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from minebot.app.decision_client import DecisionClient
+from minebot.app.projection import answer_value
 from minebot.app.work_runtime import NodeRecord, WorkPlanError, WorkPlanExecutor, WorkRunResult, validate_plan
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, execute_tool
 from minebot.contract import ToolResult
@@ -30,6 +31,9 @@ class ReflexActivity:
     revision: int = 1
     created_at: float = field(default_factory=time.time)
     cancel_reason: str | None = None
+    # Projected call results already shown to the Agent, so repeated reads of
+    # one tree do not store the same original again.
+    shown: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class ReflexManager:
@@ -95,8 +99,8 @@ class ReflexManager:
         fact = {
             "activity_id": activity.activity_id,
             "status": activity.status,
-            "tree": self._tree(activity),
-            "facts": {} if result is None else copy.deepcopy(result.facts),
+            "tree": self._shown_tree(activity),
+            "facts": self._shown_facts(activity),
         }
         wake = getattr(self.runtime, "notify_reflex_fact", None)
         if callable(wake):
@@ -144,7 +148,7 @@ class ReflexManager:
         return ToolResult(True, "accepted", True, metrics={
             "activity_id": activity.activity_id,
             "status": activity.status,
-            "tree": self._tree(activity),
+            "tree": self._shown_tree(activity),
         }).to_payload()
 
     async def _run(self, activity: ReflexActivity) -> None:
@@ -383,8 +387,8 @@ class ReflexManager:
                 "activity_id": activity.activity_id,
                 "status": activity.status,
                 "revision": activity.revision,
-                "tree": self._tree(activity),
-                "facts": copy.deepcopy(activity.result.facts) if activity.result is not None else {},
+                "tree": self._shown_tree(activity),
+                "facts": self._shown_facts(activity),
                 "execution": self._execution(),
                 "body_control": self.runtime.body_control.snapshot().to_payload(),
             }).to_payload()
@@ -452,7 +456,7 @@ class ReflexManager:
                     activity.plan = copy.deepcopy(spec)
                     activity.revision += 1
                     activity.status = "accepted"
-                    return ToolResult(True, "updated", True, metrics={"activity_id": activity.activity_id, "tree": self._tree(activity)}).to_payload()
+                    return ToolResult(True, "updated", True, metrics={"activity_id": activity.activity_id, "tree": self._shown_tree(activity)}).to_payload()
 
                 # Publish the new revision synchronously. Native stop and the
                 # replacement run remain asynchronous, but an immediate read
@@ -594,6 +598,64 @@ class ReflexManager:
             return self._activities.get(activity_id)
         return next(reversed(self._activities.values()), None) if self._activities else None
 
+    @staticmethod
+    def _shown_facts(activity: ReflexActivity) -> dict[str, Any]:
+        """Run facts without the call results, which the tree already shows per node."""
+        if activity.result is None:
+            return {}
+        return {key: copy.deepcopy(value) for key, value in activity.result.facts.items() if key != "results"}
+
+    def _shown_tree(self, activity: ReflexActivity) -> dict[str, Any]:
+        """The plan tree as the Agent reads it.
+
+        The executor keeps every call's original result, because later nodes
+        and conditions refer to it. The Agent reads each of them the way it
+        reads a direct call: projected, with a handle to the stored original.
+        """
+        tree = copy.deepcopy(self._tree(activity))
+        project = getattr(self.runtime, "shown_plan_result", None)
+        if not callable(project):
+            return tree
+
+        def show(runtime: Any, tool: Any, ref: str) -> None:
+            if not isinstance(runtime, dict):
+                return
+            result = runtime.get("result")
+            if isinstance(result, dict) and isinstance(tool, str):
+                key = f"{ref}:{runtime.get('updated_at')}"
+                if key not in activity.shown:
+                    activity.shown[key] = project(tool, result, f"plan-{ref}")
+                runtime["result"] = copy.deepcopy(activity.shown[key])
+            blocked = runtime.get("blocked")
+            if isinstance(blocked, dict) and "result" in blocked and "result" in runtime:
+                # The same result twice; the reason is what the block adds.
+                blocked.pop("result")
+
+        def walk(node: Any, path: str) -> None:
+            if not isinstance(node, dict):
+                return
+            ref = node.get("id") if isinstance(node.get("id"), str) and node.get("id") else path
+            runtime = node.get("_runtime")
+            show(runtime, node.get("tool"), ref)
+            kind = node.get("kind")
+            if kind == "sequence":
+                for index, child in enumerate(node.get("steps", [])):
+                    walk(child, f"{path}.steps[{index}]")
+            elif kind == "batch":
+                body = node.get("body")
+                walk(body, f"{path}.body")
+                instances = runtime.get("instances") if isinstance(runtime, dict) else None
+                if isinstance(instances, dict) and isinstance(body, dict):
+                    for index, instance in instances.items():
+                        show(instance, body.get("tool"), f"{ref}[{index}]")
+            elif kind == "choice":
+                for option in node.get("options", []):
+                    if isinstance(option, dict):
+                        walk(option.get("work"), f"{path}.options.{option.get('id')}")
+
+        walk(tree.get("work"), "work")
+        return tree
+
     def _tree(self, activity: ReflexActivity) -> dict[str, Any]:
         if activity.result is not None:
             return activity.result.tree
@@ -606,6 +668,18 @@ class ReflexManager:
             return executor.annotated_tree()
         except Exception:
             return copy.deepcopy(activity.plan)
+
+
+# The tree with projected results is what read_reflex is asked for.
+REFLEX_TREE_CHARS = 12_000
+
+
+def reflex_observation_projector(reason: str, metrics: dict[str, object]) -> dict[str, Any]:
+    tree = metrics.get("tree")
+    if not isinstance(tree, dict):
+        return {}
+    shown, whole = answer_value(tree, budget=REFLEX_TREE_CHARS)
+    return {"tree": shown, "tree_complete": whole}
 
 
 def register_reflex_tools(registry: ToolRegistry, manager: ReflexManager) -> None:
@@ -624,12 +698,14 @@ def register_reflex_tools(registry: ToolRegistry, manager: ReflexManager) -> Non
         }, "required": ["operation"], "additionalProperties": False},
         manager.control,
         ToolSidecar("reflex_control", mutating=False, source="agent.reflex", tool_type="plan", permission="manage_reflex"),
+        projector=reflex_observation_projector,
     ))
     registry.register(RegisteredTool(
         "read_reflex", "Read the annotated plan tree, real results, and current Body control.",
         {"type": "object", "properties": {"activity_id": {"type": "string"}}, "additionalProperties": False},
         lambda params: manager.read(params.get("activity_id")),
         ToolSidecar("reflex_read", mutating=False, source="agent.reflex", tool_type="plan", permission="observe_reflex"),
+        projector=reflex_observation_projector,
     ))
 
 

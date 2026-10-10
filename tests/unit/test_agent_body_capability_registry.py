@@ -95,8 +95,12 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         result = tool.callable({})
         payload = _model_tool_payload(tool.name, result.to_payload(), trace_ref="nearby", projector=tool.projector)
         summary = payload["summary"]
-        self.assertEqual(summary["blocks"], blocks[:8])
+        # Every block read is shown, grouped by kind; the read itself was partial.
+        self.assertEqual(summary["blocks"], [
+            {"type": "minecraft:stone", "positions": [[i, 64, 0] for i in range(12)]},
+        ])
         self.assertEqual(summary["block_count"], 12)
+        self.assertEqual(summary["blocks_shown"], 12)
         self.assertFalse(summary["blocks_complete"])
         self.assertEqual(summary["detail_path"], ["metrics", "data", "blocks"])
         self.assertEqual(result.metrics["data"]["blocks"], blocks)

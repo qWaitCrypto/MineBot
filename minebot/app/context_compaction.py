@@ -19,6 +19,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from minebot.brain.context import HARNESS_FACT_PREFIX
+
 DEFAULT_COMPACT_THRESHOLD_TOKENS = 128_000
 # Recent items kept verbatim so the model continues from real tool results.
 DEFAULT_TAIL_CHARS = 24_000
@@ -27,6 +29,9 @@ CHARS_PER_TOKEN = 3.0
 # Tool definitions are not visible to the estimator before the first usage.
 UNSEEN_STATIC_TOKENS = 16_000
 TRANSCRIPT_FIELD_CHARS = 4_000
+# Largest single item sent to the model. Projected tool results stay well under
+# it; only a producer that skipped projection reaches it.
+MAX_ITEM_CHARS = 32_000
 SUMMARY_HEADER = "CONVERSATION_SUMMARY (historical, not a new request):"
 
 SUMMARY_INSTRUCTIONS = (
@@ -79,6 +84,36 @@ def _transcript(items: list[Any]) -> str:
     return json.dumps([shorten(item) for item in items], ensure_ascii=False, default=str)
 
 
+def bound_item(item: Any, limit_chars: int = MAX_ITEM_CHARS) -> tuple[Any, int]:
+    """One conversation item with any oversized text cut; returns it and the chars removed.
+
+    Every producer is expected to hand the model a projected result. This is
+    the last line behind them: one item that slipped through must not become
+    the whole request. The cut is a pure function of the item, so the same
+    item is cut the same way on every request and the prefix stays stable.
+    """
+    if limit_chars <= 0 or not isinstance(item, dict) or _chars([item]) <= limit_chars:
+        return item, 0
+    removed = 0
+
+    def cut(value: Any) -> Any:
+        nonlocal removed
+        if isinstance(value, str) and len(value) > limit_chars:
+            removed += len(value) - limit_chars
+            return value[:limit_chars] + (
+                f"\n...[{len(value) - limit_chars} characters omitted: this message was larger than one "
+                "message may be. Read the source again with a narrower request if the rest is needed.]"
+            )
+        if isinstance(value, dict):
+            return {key: cut(inner) for key, inner in value.items()}
+        if isinstance(value, list):
+            return [cut(inner) for inner in value]
+        return value
+
+    bounded = cut(item)
+    return (bounded, removed) if removed else (item, 0)
+
+
 @dataclass(frozen=True)
 class _Compaction:
     anchor: str  # fingerprint of the first item kept verbatim
@@ -101,6 +136,8 @@ class ConversationCompactor:
         # Zero keeps the whole conversation and never summarizes.
         self.threshold_tokens = max(0, int(threshold_tokens))
         self.tail_chars = max(1, int(tail_chars))
+        # A compaction has to remove at least this much to be worth a request.
+        self.min_gain_chars = min(self.tail_chars, int(self.threshold_tokens * CHARS_PER_TOKEN / 8))
         self._compaction: _Compaction | None = None
         self._last_view_chars: int | None = None
         self._last_input_tokens: int | None = None
@@ -162,6 +199,12 @@ class ConversationCompactor:
                       estimated_size=estimate)
             return None
         older = items[first:tail]
+        if _chars(older) < self.min_gain_chars:
+            # What is large is the part that stays. Summarizing the little
+            # that is older would cost a request and the cache, every request.
+            self.emit("conversation_compaction_deferred", reason="little_to_summarize",
+                      estimated_size=estimate, older_chars=_chars(older))
+            return None
         previous = self._compaction.summary if self._compaction is not None else ""
         self.emit("conversation_compaction_started", estimated_size=estimate,
                   threshold=self.threshold_tokens, summarized_items=len(older),
@@ -213,11 +256,30 @@ class ConversationCompactor:
         return index
 
 
+def _player_part(item: Any) -> Any | None:
+    """The item reduced to what the player said, or None if it is all harness facts.
+
+    Harness facts enter the conversation as user-role input too. They are
+    history like any tool result and belong in the summary; kept verbatim they
+    would make every compaction carry all of them forward.
+    """
+    content = _field(item, "content")
+    if not isinstance(content, str) or HARNESS_FACT_PREFIX not in content:
+        return item
+    spoken = "\n".join(line for line in content.split("\n") if not line.startswith(HARNESS_FACT_PREFIX))
+    if not spoken.strip():
+        return None
+    return {**item, "content": spoken} if isinstance(item, dict) else item
+
+
 def _player_messages(items: list[Any]) -> list[Any]:
     """What the player actually said, in order, without repeats or old summaries."""
     kept: list[Any] = []
     for item in items:
         if not _is_user(item) or _is_summary(item):
+            continue
+        item = _player_part(item)
+        if item is None:
             continue
         if kept and _field(kept[-1], "content") == _field(item, "content"):
             continue
@@ -227,6 +289,8 @@ def _player_messages(items: list[Any]) -> list[Any]:
 
 __all__ = [
     "ConversationCompactor",
+    "MAX_ITEM_CHARS",
+    "bound_item",
     "DEFAULT_COMPACT_THRESHOLD_TOKENS",
     "SUMMARY_HEADER",
     "SUMMARY_INSTRUCTIONS",

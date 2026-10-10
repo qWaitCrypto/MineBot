@@ -10,8 +10,11 @@ runner, registry-construction, and Body imports.
 
 from __future__ import annotations
 
+import json
+
 from minebot.app.observability import sanitize_observation
 from minebot.contract import JsonObject
+from minebot.game.real_client_frame import without_ambient_state
 
 
 def shorten(text: str, *, limit: int = 500) -> str:
@@ -41,6 +44,40 @@ def bounded_summary_value(value: object) -> object:
     return value
 
 
+def encoded_chars(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def answer_value(value: object, *, budget: int) -> tuple[object, bool]:
+    """The answer a read tool was asked for: whole when it fits, bounded otherwise.
+
+    Returns the value to show and whether it is complete.
+    """
+    if encoded_chars(value) <= budget:
+        return value, True
+    return bounded_summary_value(value), False
+
+
+def blocks_by_kind(blocks: list[object]) -> list[JsonObject]:
+    """Block facts grouped by what they are, so the positions carry the detail.
+
+    A flat list repeats type, state and properties for every block; in a
+    neighbourhood most blocks are a few kinds, so grouping keeps every block.
+    """
+    groups: dict[str, JsonObject] = {}
+    loose: list[JsonObject] = []
+    for block in blocks:
+        if not isinstance(block, dict) or not all(isinstance(block.get(axis), int) for axis in ("x", "y", "z")):
+            if isinstance(block, dict):
+                loose.append(block)
+            continue
+        described = {key: item for key, item in block.items() if key not in {"x", "y", "z"}}
+        kind = json.dumps(described, ensure_ascii=False, sort_keys=True, default=str)
+        group = groups.setdefault(kind, {**described, "positions": []})
+        group["positions"].append([block["x"], block["y"], block["z"]])
+    return [*groups.values(), *loose]
+
+
 def top_reasons(items: list[object]) -> list[str]:
     counts: dict[str, int] = {}
     for item in items:
@@ -60,8 +97,12 @@ def projection_values_equal(source: object, projected: object) -> bool:
 
 
 __all__ = [
+    "answer_value",
+    "blocks_by_kind",
     "bounded_summary_value",
+    "encoded_chars",
     "projection_values_equal",
     "shorten",
     "top_reasons",
+    "without_ambient_state",
 ]

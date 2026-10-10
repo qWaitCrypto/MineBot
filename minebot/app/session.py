@@ -1142,6 +1142,7 @@ class AgentSession:
             self.parts.context.observe_system_message(
                 "REFLEX_RESULT: " + json.dumps(fact, ensure_ascii=False, sort_keys=True)
             )
+            self._reflex_fact_delivered(fact)
             self._turn_pending = True
             self._resume_if_waiting()
             self._trace(
@@ -1475,6 +1476,11 @@ class AgentSession:
         if callable(setter):
             setter(self._on_reflex_fact)
 
+    def _reflex_fact_delivered(self, fact: dict[str, object]) -> None:
+        delivered = getattr(self.parts.runtime, "reflex_fact_delivered", None) if self.parts is not None else None
+        if callable(delivered):
+            delivered(str(fact.get("activity_id") or "unknown"))
+
     def _on_reflex_fact(self, fact: dict[str, object]) -> None:
         """Queue one model turn when a reflex activity reaches a terminal state."""
         assert self.work_queue is not None
@@ -1488,8 +1494,10 @@ class AgentSession:
                 self.parts.context.observe_system_message(
                     "REFLEX_RESULT: " + json.dumps(fact, ensure_ascii=False, sort_keys=True)
                 )
+                self._reflex_fact_delivered(fact)
                 self._trace("reflex_fact_recorded", reason="no_active_goal", activity_id=activity_id)
                 return
+            self._reflex_fact_delivered(fact)
             self._trace("reflex_fact_dropped", reason="no_active_goal", activity_id=activity_id)
             return
         self.work_queue.enqueue(

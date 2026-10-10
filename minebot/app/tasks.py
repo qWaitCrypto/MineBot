@@ -428,7 +428,9 @@ def _update_plan_tool(workspace: TaskWorkspace) -> RegisteredTool:
                                 "maxItems": 16,
                                 "items": {"type": "string", "maxLength": 1000},
                             },
-                            "blocker": {"type": "string", "maxLength": 1000},
+                            # read_task and this tool's own result report an absent
+                            # blocker as null, so a plan echoed back must be accepted.
+                            "blocker": {"type": ["string", "null"], "maxLength": 1000},
                         },
                         "required": ["title", "status"],
                         "additionalProperties": False,
