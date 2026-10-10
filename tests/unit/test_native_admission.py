@@ -253,3 +253,82 @@ def test_avoided_log_is_never_selected() -> None:
 
     assert result.reason == "resource_candidates_not_found" and body.actions == []
     assert result.metrics["avoided_targets"] == [[137, 76, 109]]
+
+
+def test_a_pickaxe_that_breaks_mid_action_stops_it_at_once_and_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cluster_collection, "_PROGRESS_POLL_S", 0.01)  # the 90 s stall window is left as it is
+    body = NativeBody({"wooden_pickaxe": 1, "cobblestone": 0}, finishes=False)
+    waiting = body.await_action_terminal
+    polls = []
+
+    def mine_then_break(action_id, **kwargs):
+        polls.append(action_id)
+        if len(polls) == 2 and not body.interrupted:
+            body.inventory["cobblestone"] = 57
+            body.inventory.pop("wooden_pickaxe")
+        return waiting(action_id, **kwargs)
+
+    body.await_action_terminal = mine_then_break
+
+    result = _collect(body, count=64)
+
+    assert body.interrupted == ["tool_lost"]
+    assert result.reason == "missing_required_tool" and result.can_retry is False
+    assert "pickaxe" in result.next_suggestion
+    assert result.metrics["collected"] == 57 and result.metrics["remaining_count"] == 7
+
+
+def _tree_body(outcomes):
+    """Three single-log trees; each collect action ends as the next outcome says."""
+    body = NativeBody({"oak_log": 0})
+    logs = [(10, 64, 0), (20, 64, 0), (30, 64, 0)]
+    plain = body.perceive
+
+    def perceive(scope, params):
+        read = plain(scope, params)
+        if scope == "findBlocks":
+            read.data["blocks"] = [{"x": x, "y": y, "z": z} for x, y, z in logs]
+        return read
+
+    def terminal(action_id, **_):
+        reason, gain = outcomes.pop(0)
+        body.inventory["oak_log"] += gain
+        done = reason == "resource_cluster_collected"
+        return Event(seq=1, tick=0, bot=body.bot_name, name="completed" if done else "failed",
+                     data={"completed": done, "stopped_reason": reason})
+
+    body.perceive, body.await_action_terminal = perceive, terminal
+    return body
+
+
+def _collect_logs(body, count):
+    return collect_native_cluster(
+        body, block_types=("oak_log",), expected_drops=("oak_log",), remaining_count=count, dry=False,
+        config=ResourceCollectionConfig(max_wall_s=30.0, mutation_budget=8))
+
+
+def test_one_cluster_whose_drops_were_not_all_picked_up_does_not_end_the_collection(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cluster_collection, "resource_cluster", lambda body, anchor, *args, **kwargs: [anchor])
+    body = _tree_body([("resource_cluster_collected", 5), ("cluster_pickup_not_observed", 4),
+                       ("resource_cluster_collected", 6)])
+
+    result = _collect_logs(body, 15)
+
+    assert result.success and result.reason == "resource_collected"
+    assert len(body.actions) == 3 and result.metrics["collected"] == 15
+    (unfinished,) = result.metrics["unfinished_clusters"]
+    assert (unfinished["reason"], unfinished["cells"], unfinished["gained"]) == ("cluster_pickup_not_observed", 1, 4)
+    # The cluster that was left is not chosen again.
+    assert tuple(unfinished["target"]) not in {tuple(action.params["targets"][0]) for action in body.actions[2:]}
+
+
+def test_clusters_that_keep_yielding_nothing_still_end_the_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cluster_collection, "resource_cluster", lambda body, anchor, *args, **kwargs: [anchor])
+    body = _tree_body([("cluster_pickup_not_observed", 0), ("cluster_pickup_not_observed", 0),
+                       ("resource_cluster_collected", 6)])
+
+    result = _collect_logs(body, 15)
+
+    assert not result.success and result.reason == "cluster_pickup_not_observed"
+    assert len(body.actions) == 2 and result.metrics["unfinished_cluster_count"] == 1

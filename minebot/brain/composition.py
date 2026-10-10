@@ -569,7 +569,7 @@ def collect_resource(params: JsonObject, context: CompositionContext) -> ToolRes
     if isinstance(stalled, dict):
         metrics["stalled"] = stalled
     if isinstance(process_metrics, dict):
-        for key in ("avoided_targets", "avoided_target_count"):
+        for key in ("avoided_targets", "avoided_target_count", "unfinished_clusters", "unfinished_cluster_count"):
             if key in process_metrics:
                 metrics[key] = process_metrics[key]
     return ToolResult(
