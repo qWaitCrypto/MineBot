@@ -166,7 +166,7 @@ export ANTHROPIC_API_KEY=<key>
 # Optional custom Anthropic-compatible gateway:
 # export MINEBOT_LLM_BASE_URL=https://host/v1
 # Enable Anthropic prompt-cache breakpoints on the stable system/tool prefix:
-# export MINEBOT_LLM_PROMPT_CACHE=true
+# export MINEBOT_LLM_PROMPT_CACHE=true   # Anthropic Messages: on by default, false disables
 # export MINEBOT_LLM_PROMPT_CACHE_TTL=5m   # 5m or 1h
 ```
 

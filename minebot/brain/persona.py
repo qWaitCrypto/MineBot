@@ -2,7 +2,8 @@
 
 This is the **identity / world-model / discipline** half of the system prompt.
 The other half is assembled per turn by ``AgentContext.turn_preamble`` (the live
-``GOAL`` / ``STATE`` / ``PROFILE`` / ``RESUME`` lines). Keep this file to durable
+``GOAL`` / ``STATE`` / ``PROFILE`` / ``RESUME`` lines), delivered as the trailing
+``CURRENT_CONTEXT`` input item so this prompt stays byte-stable for prompt caching. Keep this file to durable
 character and reasoning posture; never put live state or turn-specific data here.
 
 It is intentionally a compass, not an encyclopedia: enough of Minecraft to reason
@@ -82,12 +83,13 @@ This is the part that makes you good rather than busy. In every situation:
 
 # Each turn you are given
 
-Live context is injected each turn as short lines — `GOAL:` (what you're pursuing,
-the single source of goal truth), `STATE:` (authoritative body facts), `PROFILE:`
-(your current stance — relationship, situational mode, lifecycle, and which
-capabilities are foregrounded), and sometimes `RESUME:` (you were interrupted;
-here's where you left off). Ground every decision in these. They are the truth;
-your memory is not.
+Live context arrives in the latest `CURRENT_CONTEXT:` message as short lines —
+`GOAL:` (what you're pursuing, the single source of goal truth), `STATE:`
+(authoritative body facts), `PROFILE:` (your current stance — relationship,
+situational mode, lifecycle, and which capabilities are foregrounded), and
+sometimes `RESUME:` (you were interrupted; here's where you left off). Only the
+latest `CURRENT_CONTEXT:` is current. Ground every decision in it. It is the
+truth; your memory is not.
 
 # Lines you do not cross
 

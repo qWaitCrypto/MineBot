@@ -131,6 +131,8 @@ async def _test_anthropic_messages_maps_images_tools_and_cache() -> None:
     assert captured["messages"][0]["content"][1] == {
         "type": "image",
         "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
+        # last block of the history: the third breakpoint
+        "cache_control": {"type": "ephemeral", "ttl": "5m"},
     }
     assert captured["tools"][0]["input_schema"]["properties"]["x"]["type"] == "integer"
     assert captured["output_config"] == {"effort": "high"}
@@ -305,3 +307,160 @@ async def _test_anthropic_model_runs_an_agents_tool_loop_over_streaming_messages
     assert run.final_output == "done"
     assert len(requests) == 2
     assert requests[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+
+
+def _history_with_context(context_text: str) -> list[dict]:
+    return [
+        {"role": "user", "content": "Go there."},
+        {"type": "function_call", "call_id": "c1", "name": "move_to", "arguments": '{"x": 1}'},
+        {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+        {"role": "user", "content": f"CURRENT_CONTEXT:\n{context_text}"},
+    ]
+
+
+def test_anthropic_history_breakpoint_sits_in_front_of_the_volatile_context() -> None:
+    model = AnthropicMessagesModel(
+        model="claude", api_key="test-key", prompt_cache=True, prompt_cache_ttl="5m"
+    )
+    try:
+        first = model._payload("sys", _history_with_context("STATE: pos=(1, 2, 3)"), ModelSettings(), [_tool()], [], stream=False)
+        second = model._payload("sys", _history_with_context("STATE: pos=(9, 9, 9)"), ModelSettings(), [_tool()], [], stream=False)
+    finally:
+        asyncio.run(model.close())
+
+    for payload in (first, second):
+        blocks = [block for message in payload["messages"] for block in message["content"]]
+        marked = [block for block in blocks if "cache_control" in block]
+        assert len(marked) == 1
+        assert marked[0]["type"] == "tool_result"  # last block before CURRENT_CONTEXT
+        assert blocks[-1]["text"].startswith("CURRENT_CONTEXT:")
+        assert "cache_control" not in blocks[-1]
+        # tools + system + history: within Anthropic's four-breakpoint limit
+        assert "cache_control" in payload["system"][-1] and "cache_control" in payload["tools"][-1]
+    # Only the tail differs, so everything up to the breakpoint is a cache hit.
+    assert first["system"] == second["system"] and first["tools"] == second["tools"]
+    assert first["messages"][:-1] == second["messages"][:-1]
+    assert first["messages"][-1]["content"][:-1] == second["messages"][-1]["content"][:-1]
+
+
+def test_anthropic_history_breakpoint_without_context_marks_the_last_block() -> None:
+    model = AnthropicMessagesModel(model="claude", api_key="test-key", prompt_cache=True)
+    try:
+        payload = model._payload("sys", [{"role": "user", "content": "hello"}], ModelSettings(), [], [], stream=False)
+    finally:
+        asyncio.run(model.close())
+    assert payload["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_anthropic_without_prompt_cache_sends_no_breakpoints() -> None:
+    model = AnthropicMessagesModel(model="claude", api_key="test-key", prompt_cache=False)
+    try:
+        payload = model._payload("sys", _history_with_context("STATE: x"), ModelSettings(), [_tool()], [], stream=False)
+    finally:
+        asyncio.run(model.close())
+    assert "cache_control" not in json.dumps(payload)
+
+
+def test_anthropic_cache_is_on_by_default_and_can_be_disabled() -> None:
+    env = {
+        "MINEBOT_LLM_KIND": "anthropic_messages",
+        "MINEBOT_LLM_MODEL": "claude-sonnet-4-5",
+        "ANTHROPIC_API_KEY": "test-key",
+    }
+    default = provider_registry_from_env(env)
+    disabled = provider_registry_from_env({**env, "MINEBOT_LLM_PROMPT_CACHE": "false"})
+    try:
+        assert default.resolve("primary")._prompt_cache is True
+        assert disabled.resolve("primary")._prompt_cache is False
+    finally:
+        asyncio.run(default.aclose())
+        asyncio.run(disabled.aclose())
+
+
+def test_anthropic_usage_counts_cached_and_written_tokens_as_input() -> None:
+    asyncio.run(_test_anthropic_usage_counts_cached_and_written_tokens_as_input())
+
+
+async def _test_anthropic_usage_counts_cached_and_written_tokens_as_input() -> None:
+    usage = {
+        "input_tokens": 16,
+        "cache_read_input_tokens": 14415,
+        "cache_creation_input_tokens": 37,
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads((await request.aread()).decode())
+        if payload["stream"]:
+            events = [
+                ("message_start", {"message": {"id": "u1", "model": "claude", "usage": usage}}),
+                ("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}}),
+                ("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": "ok"}}),
+                ("content_block_stop", {"index": 0}),
+                # a gateway may zero the counters it does not forward on message_delta
+                ("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 0, "output_tokens": 5}}),
+                ("message_stop", {}),
+            ]
+            body = "".join(f"event: {n}\ndata: {json.dumps(p)}\n\n" for n, p in events).encode()
+            return httpx.Response(200, request=request, headers={"content-type": "text/event-stream"}, content=body)
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "u2", "type": "message", "role": "assistant", "model": "claude",
+                "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+                "usage": {**usage, "output_tokens": 5},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    model = AnthropicMessagesModel(model="claude", api_key="test-key", client=client)
+    try:
+        blocking = await model.get_response("sys", "hi", ModelSettings(max_tokens=20), [], None, [], _tracing())
+        streamed = [e async for e in model.stream_response("sys", "hi", ModelSettings(max_tokens=20), [], None, [], _tracing())]
+    finally:
+        await client.aclose()
+
+    streamed_usage = streamed[-1].response.usage
+    for counted in (blocking.usage, streamed_usage):
+        assert counted.input_tokens == 16 + 14415 + 37
+        assert counted.output_tokens == 5
+        assert counted.total_tokens == 16 + 14415 + 37 + 5
+        assert counted.input_tokens_details.cached_tokens == 14415
+        assert counted.input_tokens_details.model_dump()["cache_write_tokens"] == 37
+
+
+def test_anthropic_cache_counts_survive_a_runner_loop() -> None:
+    asyncio.run(_test_anthropic_cache_counts_survive_a_runner_loop())
+
+
+async def _test_anthropic_cache_counts_survive_a_runner_loop() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        events = [
+            ("message_start", {"message": {"id": "r1", "model": "claude", "usage": {
+                "input_tokens": 4, "cache_read_input_tokens": 900, "cache_creation_input_tokens": 100}}}),
+            ("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}}),
+            ("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": "done"}}),
+            ("content_block_stop", {"index": 0}),
+            ("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}}),
+            ("message_stop", {}),
+        ]
+        body = "".join(f"event: {n}\ndata: {json.dumps(p)}\n\n" for n, p in events).encode()
+        return httpx.Response(200, request=request, headers={"content-type": "text/event-stream"}, content=body)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    model = AnthropicMessagesModel(model="claude", api_key="test-key", client=client)
+    try:
+        run = Runner.run_streamed(Agent(name="usage", instructions="x", model=model), "hi")
+        async for _event in run.stream_events():
+            pass
+    finally:
+        await client.aclose()
+
+    # The SDK's running total keeps only cached_tokens; the per-request response
+    # (what the on_llm_end hook reports to the trace) must also carry the writes.
+    total = run.context_wrapper.usage
+    assert total.input_tokens == 1004
+    assert total.input_tokens_details.cached_tokens == 900
+    request = run.raw_responses[-1].usage
+    assert request.input_tokens_details.cached_tokens == 900
+    assert request.input_tokens_details.model_dump().get("cache_write_tokens") == 100

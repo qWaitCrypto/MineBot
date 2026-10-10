@@ -19,7 +19,6 @@ from agents import (
     ModelRetryBackoffSettings,
     ModelRetrySettings,
     ModelSettings,
-    OpenAIChatCompletionsModel,
     OpenAIResponsesModel,
     RetryDecision,
     RetryPolicyContext,
@@ -29,6 +28,7 @@ from agents import (
 from httpx import AsyncClient, Limits, Timeout, TransportError
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, AsyncOpenAI
 
+from minebot.app.chat_usage import CacheUsageChatCompletionsModel
 from minebot.brain.provider import ApiShape, Capabilities, ProviderConfig, ProviderKind
 
 __all__ = [
@@ -303,7 +303,7 @@ class ModelProviderRegistry(ModelProvider):
 
     def _build(self, cfg: ProviderConfig) -> Model:
         if cfg.kind == "openai_chat":
-            return OpenAIChatCompletionsModel(model=cfg.model, openai_client=self._client(cfg))
+            return CacheUsageChatCompletionsModel(model=cfg.model, openai_client=self._client(cfg))
         if cfg.kind == "openai_responses":
             return OpenAIResponsesModel(model=cfg.model, openai_client=self._client(cfg))
         if cfg.kind == "anthropic_messages":
@@ -315,7 +315,9 @@ class ModelProviderRegistry(ModelProvider):
                 base_url=cfg.base_url,
                 proxy=self.responses_proxy,
                 timeout_s=_request_timeout_s(cfg),
-                prompt_cache=bool(cfg.settings.get("prompt_cache", False)),
+                # Anthropic caches only behind explicit breakpoints; an agent loop
+                # re-sends a long prefix every few seconds, so opt out, not in.
+                prompt_cache=bool(cfg.settings.get("prompt_cache", True)),
                 prompt_cache_ttl=cfg.settings.get("prompt_cache_ttl"),
             )
         if cfg.kind == "litellm":

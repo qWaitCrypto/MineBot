@@ -440,6 +440,22 @@ def _on_responses(state: PanelState, record: dict[str, Any], ts: float) -> None:
         _log(state, ts, "agent", "请求失败", request.error, "fail")
 
 
+def _on_model_usage(state: PanelState, record: dict[str, Any], ts: float) -> None:
+    """Token usage of one SDK-kernel model call (the Responses kernel reports it on its terminal)."""
+    usage = record.get("usage")
+    if not isinstance(usage, dict):
+        return
+    input_tokens = int(usage.get("input_tokens") or 0)
+    state.usage["input"] += input_tokens
+    state.usage["cached"] += int((usage.get("input_tokens_details") or {}).get("cached_tokens") or 0)
+    state.usage["output"] += int(usage.get("output_tokens") or 0)
+    state.usage["reasoning"] += int((usage.get("output_tokens_details") or {}).get("reasoning_tokens") or 0)
+    if input_tokens:
+        state.context_tokens = input_tokens
+    if isinstance(record.get("cache_read_ratio"), (int, float)):
+        state.cache_ratio = float(record["cache_read_ratio"])
+
+
 def _on_tool(state: PanelState, record: dict[str, Any], ts: float) -> None:
     event = record["event"]
     call_id = str(record.get("tool_call_id") or f"seq-{record.get('seq')}")
@@ -629,6 +645,7 @@ for _name in ("responses_prepare", "responses_request", "responses_context_count
               "responses_stream_summary", "responses_terminal", "responses_failed", "responses_eof_cleanup",
               "responses_compaction_started", "responses_compaction_finished", "responses_compaction_failed"):
     HANDLERS[_name] = _on_responses
+HANDLERS["model_usage"] = _on_model_usage
 for _name in ("responses_tool_started", "responses_tool_output", "tool_decision_context", "tool_invoke",
               "tool_result"):
     HANDLERS[_name] = _on_tool

@@ -13,12 +13,14 @@ import base64
 import json
 import time
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.responses import Response
+from openai.types.responses.response_usage import InputTokensDetails
 
 from agents.agent_output import AgentOutputSchemaBase
 from agents.handoffs import Handoff
@@ -29,6 +31,8 @@ from agents.models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from agents.models.interface import Model, ModelTracing
 from agents.tool import Tool
 from agents.usage import Usage
+
+from minebot.app.prompt_cache import is_current_context_text
 
 
 class AnthropicAPIError(RuntimeError):
@@ -144,11 +148,14 @@ class AnthropicMessagesModel(Model):
                 tools=[],
                 parallel_tool_calls=False,
             )
+            usage = _AnthropicUsage()
             async for event in ChatCmplStreamHandler.handle_stream(
                 initial,
-                self._chat_stream(response),
+                self._chat_stream(response, usage),
                 model=self.model,
             ):
+                if event.type == "response.completed":
+                    _attach_cache_write(event.response, usage.cache_write)
                 yield event
 
     def _headers(self, settings: ModelSettings) -> dict[str, str]:
@@ -195,6 +202,7 @@ class AnthropicMessagesModel(Model):
         if self._prompt_cache:
             _mark_cache_breakpoint(system_parts, self._prompt_cache_ttl)
             _mark_cache_breakpoint(anthropic_tools, self._prompt_cache_ttl)
+            _mark_history_breakpoint(messages, self._prompt_cache_ttl)
 
         payload: dict[str, Any] = {
             "model": self.model,
@@ -291,9 +299,8 @@ class AnthropicMessagesModel(Model):
         }
         if tool_calls:
             message["tool_calls"] = tool_calls
-        usage = raw.get("usage") if isinstance(raw.get("usage"), Mapping) else {}
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
+        usage = _AnthropicUsage()
+        usage.update(raw.get("usage"))
         return ChatCompletion.model_validate(
             {
                 "id": str(raw.get("id") or "anthropic-response"),
@@ -307,18 +314,15 @@ class AnthropicMessagesModel(Model):
                         "finish_reason": _finish_reason(raw.get("stop_reason")),
                     }
                 ],
-                "usage": {
-                    "prompt_tokens": input_tokens,
-                    "completion_tokens": output_tokens,
-                    "total_tokens": input_tokens + output_tokens,
-                },
+                "usage": _completion_usage(usage),
             }
         )
 
-    async def _chat_stream(self, response: httpx.Response) -> AsyncIterator[ChatCompletionChunk]:
+    async def _chat_stream(
+        self, response: httpx.Response, usage: _AnthropicUsage
+    ) -> AsyncIterator[ChatCompletionChunk]:
         message_id = "anthropic-response"
         model = self.model
-        input_tokens = output_tokens = 0
         tool_indexes: dict[int, int] = {}
         next_tool_index = 0
         finished = False
@@ -332,9 +336,7 @@ class AnthropicMessagesModel(Model):
                 if isinstance(message, Mapping):
                     message_id = str(message.get("id") or message_id)
                     model = str(message.get("model") or model)
-                    usage = message.get("usage")
-                    if isinstance(usage, Mapping):
-                        input_tokens = int(usage.get("input_tokens") or 0)
+                    usage.update(message.get("usage"))
                 yield _chunk(message_id, model, {"role": "assistant"})
                 continue
             if event_name == "content_block_start":
@@ -382,9 +384,7 @@ class AnthropicMessagesModel(Model):
                 continue
             if event_name == "message_delta":
                 delta = event.get("delta") if isinstance(event, Mapping) else {}
-                usage = event.get("usage") if isinstance(event, Mapping) else {}
-                if isinstance(usage, Mapping):
-                    output_tokens = int(usage.get("output_tokens") or output_tokens)
+                usage.update(event.get("usage") if isinstance(event, Mapping) else None)
                 stop_reason = delta.get("stop_reason") if isinstance(delta, Mapping) else None
                 finish = _finish_reason(stop_reason)
                 if finish is not None:
@@ -394,7 +394,7 @@ class AnthropicMessagesModel(Model):
                         model,
                         {},
                         finish_reason=finish,
-                        usage=_completion_usage(input_tokens, output_tokens),
+                        usage=_completion_usage(usage),
                     )
                 continue
             if event_name == "message_stop" and not finished:
@@ -404,7 +404,7 @@ class AnthropicMessagesModel(Model):
                     model,
                     {},
                     finish_reason="stop",
-                    usage=_completion_usage(input_tokens, output_tokens),
+                    usage=_completion_usage(usage),
                 )
 
 
@@ -522,13 +522,54 @@ def _merge_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return merged
 
 
-def _mark_cache_breakpoint(items: list[dict[str, Any]], ttl: str | None) -> None:
-    if not items:
-        return
+def _cache_control(ttl: str | None) -> dict[str, Any]:
     cache_control: dict[str, Any] = {"type": "ephemeral"}
     if ttl:
         cache_control["ttl"] = ttl
-    items[-1]["cache_control"] = cache_control
+    return cache_control
+
+
+def _mark_cache_breakpoint(items: list[dict[str, Any]], ttl: str | None) -> None:
+    if not items:
+        return
+    items[-1]["cache_control"] = _cache_control(ttl)
+
+
+def _mark_history_breakpoint(messages: list[dict[str, Any]], ttl: str | None) -> None:
+    """Cache the conversation up to the volatile tail.
+
+    The prefix order is tools -> system -> messages, so the system/tool
+    breakpoints alone never cache history. The runner ends every request with
+    one CURRENT_CONTEXT block that changes on each call; the breakpoint goes on
+    the last block in front of it, so the next call (which only appends) finds
+    this call's cache entry inside Anthropic's 20-block lookback. Without that
+    tail the last block of the last message is the natural breakpoint.
+    """
+    if not messages:
+        return
+    for index in range(len(messages) - 1, -1, -1):
+        content = messages[index].get("content")
+        if not isinstance(content, list):
+            continue
+        end = len(content)
+        if index == len(messages) - 1:
+            while end and _is_volatile_block(content[end - 1]):
+                end -= 1
+        for block_index in range(end - 1, -1, -1):
+            if _can_carry_cache_control(content[block_index]):
+                content[block_index]["cache_control"] = _cache_control(ttl)
+                return
+
+
+def _is_volatile_block(block: Mapping[str, Any]) -> bool:
+    return block.get("type") == "text" and is_current_context_text(block.get("text"))
+
+
+def _can_carry_cache_control(block: Mapping[str, Any]) -> bool:
+    # Anthropic rejects cache_control on empty text blocks.
+    if block.get("type") == "text":
+        return bool(block.get("text"))
+    return block.get("type") in {"image", "document", "tool_use", "tool_result"}
 
 
 def _tool_choice(value: Any, parallel: bool | None) -> dict[str, Any]:
@@ -579,25 +620,81 @@ def _finish_reason(value: Any) -> str | None:
     }.get(str(value), None)
 
 
+@dataclass
+class _AnthropicUsage:
+    """Anthropic's four token counters, merged across message_start/message_delta.
+
+    Anthropic's ``input_tokens`` excludes cached tokens (the cache read and the
+    cache write are reported beside it), unlike OpenAI's ``prompt_tokens``.
+    ``prompt_tokens`` here is the OpenAI-convention total, so downstream hit
+    ratios and context sizes are not under-reported by the cached part.
+    """
+
+    input: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    output: int = 0
+
+    def update(self, raw: Any) -> None:
+        if not isinstance(raw, Mapping):
+            return
+        # message_delta repeats cumulative counters; a gateway that zeroes the
+        # ones it does not know must not erase what message_start reported.
+        self.input = max(self.input, _count(raw.get("input_tokens")))
+        self.cache_read = max(self.cache_read, _count(raw.get("cache_read_input_tokens")))
+        self.cache_write = max(self.cache_write, self._cache_write(raw))
+        self.output = max(self.output, _count(raw.get("output_tokens")))
+
+    @staticmethod
+    def _cache_write(raw: Mapping[str, Any]) -> int:
+        if raw.get("cache_creation_input_tokens") is not None:
+            return _count(raw["cache_creation_input_tokens"])
+        breakdown = raw.get("cache_creation")
+        if isinstance(breakdown, Mapping):
+            return sum(_count(value) for value in breakdown.values())
+        return 0
+
+    @property
+    def prompt_tokens(self) -> int:
+        return self.input + self.cache_read + self.cache_write
+
+
+def _count(value: Any) -> int:
+    return value if type(value) is int and value > 0 else 0
+
+
 def _usage_from_anthropic(raw: Any) -> Usage:
-    usage = raw if isinstance(raw, Mapping) else {}
-    input_tokens = int(usage.get("input_tokens") or 0)
-    output_tokens = int(usage.get("output_tokens") or 0)
+    counted = _AnthropicUsage()
+    counted.update(raw)
     return Usage(
         requests=1,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        total_tokens=input_tokens + output_tokens,
-        input_tokens_details={"cached_tokens": int(usage.get("cache_read_input_tokens") or 0)},
+        input_tokens=counted.prompt_tokens,
+        output_tokens=counted.output,
+        total_tokens=counted.prompt_tokens + counted.output,
+        input_tokens_details=InputTokensDetails(
+            cached_tokens=counted.cache_read, cache_write_tokens=counted.cache_write
+        ),
         output_tokens_details={"reasoning_tokens": 0},
     )
 
 
-def _completion_usage(input_tokens: int, output_tokens: int) -> dict[str, Any]:
+def _attach_cache_write(response: Any, cache_write: int) -> None:
+    """Carry the cache-write count through the chat-completions detour.
+
+    The chat-completions shape has no field for it, so the stream handler drops
+    it; the response model accepts extra detail fields, which the trace keeps.
+    """
+    details = getattr(getattr(response, "usage", None), "input_tokens_details", None)
+    if cache_write and details is not None:
+        details.cache_write_tokens = cache_write
+
+
+def _completion_usage(usage: _AnthropicUsage) -> dict[str, Any]:
     return {
-        "prompt_tokens": input_tokens,
-        "completion_tokens": output_tokens,
-        "total_tokens": input_tokens + output_tokens,
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.output,
+        "total_tokens": usage.prompt_tokens + usage.output,
+        "prompt_tokens_details": {"cached_tokens": usage.cache_read},
     }
 
 

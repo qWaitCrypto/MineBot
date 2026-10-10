@@ -28,6 +28,7 @@ from minebot.app.conversation import (
     bounded_session_input,
     model_input_chars,
 )
+from minebot.app.prompt_cache import is_current_context_item
 # Spine modules extracted from this file (framework §12 H1/B). They are
 # re-exported here so every existing consumer keeps importing one runtime
 # surface; the split is about auditability, not a new public boundary.
@@ -198,6 +199,9 @@ class RuntimeHooks(RunHooks[RuntimeRunContext]):
         trace = _trace_from_context(context)
         if trace is not None:
             trace.emit("llm_end", agent=getattr(agent, "name", None), response_type=type(response).__name__)
+            usage = model_usage_observation(getattr(response, "usage", None))
+            if usage is not None:
+                trace.emit("model_usage", **usage)
             for event in extract_model_response_observations(response):
                 trace.emit(**event)
         progress_epochs = getattr(getattr(context, "context", None), "progress_epochs", None)
@@ -2277,15 +2281,14 @@ class AgentRuntime:
         ctx: RunContextWrapper[RuntimeRunContext],
         agent: Agent[RuntimeRunContext],
     ) -> str:
+        # Cache layout (prompt_cache.py): this text is the stable head of every
+        # request, so it carries nothing that moves between model calls. The
+        # live preamble (goal, state, stance) is delivered as the trailing
+        # CURRENT_CONTEXT input item by _bounded_model_input. Skills change
+        # only on load/unload, so they sit last and invalidate the least.
         context = ctx.context.agent_context
         self._refresh_dynamic_context()
-        preamble = ctx.context.instruction_preamble
-        skill_preamble = context.skill_preamble()
         parts = [context.system_prompt]
-        if preamble:
-            parts.append(preamble)
-        if skill_preamble:
-            parts.append(skill_preamble)
         if self.reflex_manager is not None:
             parts.append(
                 "REFLEX_PLANS: Use a minebot-work/0.2 plan when the goal has multiple dependent physical steps, "
@@ -2301,6 +2304,9 @@ class AgentRuntime:
                 "Runtime owns _runtime status and real results; "
                 "use read_reflex/control_reflex to inspect or revise it."
             )
+        skill_preamble = context.skill_preamble()
+        if skill_preamble:
+            parts.append(skill_preamble)
         return "\n\n".join(parts)
 
     def _refresh_dynamic_context(self) -> None:
@@ -2389,8 +2395,13 @@ class AgentRuntime:
     def _bounded_model_input(self, data: Any) -> Any:
         before_count = len(data.model_data.input)
         before_chars = model_input_chars(data.model_data.input)
-        filtered = bounded_model_input(data)
-        after_count = len(filtered.input)
+        run_context = data.context
+        filtered = bounded_model_input(
+            data, live_context=getattr(run_context, "instruction_preamble", "") or ""
+        )
+        # The trailing CURRENT_CONTEXT item is not history; keep it out of the counts.
+        after_items = [item for item in filtered.input if not is_current_context_item(item)]
+        after_count = len(after_items)
         if after_count < before_count:
             self.trace.emit(
                 "model_input_compacted",
@@ -2398,7 +2409,7 @@ class AgentRuntime:
                 after_count=after_count,
                 omitted_count=before_count - after_count,
                 before_chars=before_chars,
-                after_chars=model_input_chars(filtered.input),
+                after_chars=model_input_chars(after_items),
                 complete=True,
             )
         return filtered
@@ -3147,6 +3158,46 @@ def _final_assistant_text(result: Any, extracted: list[dict[str, object]]) -> st
         if isinstance(content, str) and content.strip():
             return content.strip()
     return None
+
+
+def model_usage_observation(usage: Any) -> dict[str, object] | None:
+    """Provider-neutral per-request token usage for the trace and live panel.
+
+    ``input_tokens`` follows the OpenAI convention (cached + cache-written
+    tokens included), so ``cached / input`` is a real hit ratio for every
+    provider; adapters normalise their wire format before it reaches here.
+    """
+    if usage is None:
+        return None
+
+    def count(owner: Any, name: str) -> int:
+        value = owner.get(name) if isinstance(owner, dict) else getattr(owner, name, None)
+        return value if type(value) is int and value >= 0 else 0
+
+    def details(name: str) -> Any:
+        value = getattr(usage, name, None)
+        return value[-1] if isinstance(value, list) and value else value
+
+    input_tokens = count(usage, "input_tokens")
+    output_tokens = count(usage, "output_tokens")
+    if not (input_tokens or output_tokens):
+        return None
+    input_details, output_details = details("input_tokens_details"), details("output_tokens_details")
+    cached = count(input_details, "cached_tokens")
+    written = count(input_details, "cache_write_tokens")
+    input_detail_row = {"cached_tokens": cached}
+    if written:
+        input_detail_row["cache_write_tokens"] = written
+    return {
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": count(usage, "total_tokens") or input_tokens + output_tokens,
+            "input_tokens_details": input_detail_row,
+            "output_tokens_details": {"reasoning_tokens": count(output_details, "reasoning_tokens")},
+        },
+        "cache_read_ratio": round(cached / input_tokens, 4) if input_tokens else 0.0,
+    }
 
 
 def extract_model_response_observations(response: Any) -> list[dict[str, object]]:

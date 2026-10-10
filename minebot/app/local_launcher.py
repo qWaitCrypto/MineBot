@@ -61,6 +61,7 @@ MINEBOT_LLM_REASONING_EFFORT=xhigh
 MINEBOT_LLM_PARALLEL_TOOL_CALLS=false
 # For Anthropic Messages, set MINEBOT_LLM_KIND=anthropic_messages and provide
 # ANTHROPIC_API_KEY (or set MINEBOT_LLM_API_KEY_ENV explicitly).
+# Anthropic prompt caching is on by default; set false to disable.
 # MINEBOT_LLM_PROMPT_CACHE=true
 # MINEBOT_LLM_PROMPT_CACHE_TTL=5m
 """

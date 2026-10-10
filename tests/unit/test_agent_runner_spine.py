@@ -6,6 +6,7 @@ import unittest
 
 from agents.exceptions import MaxTurnsExceeded, UserError
 from agents.items import MessageOutputItem, ToolCallItem, ToolCallOutputItem
+from agents.run_config import CallModelData, ModelInputData
 
 from minebot.app.config import agent_language_from_env
 from minebot.app.console import parse_collect_goal
@@ -1762,7 +1763,20 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(runtime_context.profile.situational, "mobility")
         self.assertIn("situational=mobility", runtime_context.instruction_preamble)
         instructions = runtime._instructions(Wrapper(), runtime.agent)
-        self.assertIn("Mobility/reachability issue", instructions)
+        self.assertNotIn("Mobility/reachability issue", instructions)
+        filtered = runtime._bounded_model_input(
+            CallModelData(
+                model_data=ModelInputData(
+                    input=[{"role": "user", "content": "go"}], instructions=instructions
+                ),
+                agent=None,
+                context=runtime_context,
+            )
+        )
+        self.assertEqual(filtered.instructions, instructions)
+        self.assertEqual(filtered.input[0], {"role": "user", "content": "go"})
+        self.assertTrue(filtered.input[-1]["content"].startswith("CURRENT_CONTEXT:\n"))
+        self.assertIn("Mobility/reachability issue", filtered.input[-1]["content"])
         self.assertEqual(runtime._pending_mobility_terminal["reason"], "mobility_blocked")
         self.assertTrue(
             any(event["event"] == "mobility_terminal_live_handoff" for event in runtime.trace.snapshot())
@@ -1805,6 +1819,46 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertEqual(runtime_context.profile.situational, "mobility")
         self.assertIn("situational=mobility", runtime_context.instruction_preamble)
         self.assertEqual(runtime._pending_mobility_terminal["reason"], "resource_navigation_no_path")
+
+    def test_instructions_stay_byte_stable_while_live_context_changes(self):
+        # Prompt-cache invariant: nothing that moves between model calls (turn
+        # counter, goal, body state, stance) may reach the instructions.
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect logs"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+        )
+        self.addCleanup(runtime.close)
+        profile = ModeRuntime().profile_for(LifecycleState.ACTIVE)
+        runtime.agent_context.observe_profile(profile)
+
+        def instructions_and_context(goal: str) -> tuple[str, str]:
+            runtime.agent_context.goal_text = goal
+            runtime.agent_context.begin_turn()
+            runtime_context = RuntimeRunContext(
+                agent_context=runtime.agent_context,
+                weld_context=runtime.weld_context,
+                profile=profile,
+                trace=runtime.trace,
+                runtime=runtime,
+                instruction_preamble=runtime.agent_context.turn_preamble(include_session_messages=False),
+            )
+
+            class Wrapper:
+                context = runtime_context
+
+            return runtime._instructions(Wrapper(), runtime.agent), runtime_context.instruction_preamble
+
+        first_instructions, first_context = instructions_and_context("collect logs")
+        second_instructions, second_context = instructions_and_context("collect stone")
+
+        self.assertNotEqual(first_context, second_context)
+        self.assertEqual(first_instructions, second_instructions)
+        self.assertNotIn("SESSION: turn=", first_instructions)
+        self.assertNotIn("GOAL:", first_instructions)
 
     def test_resource_survival_terminal_refreshes_live_run_context_without_recovery(self):
         runtime = AgentRuntime(

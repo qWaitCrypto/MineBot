@@ -318,11 +318,38 @@ class AgentContextTests(unittest.TestCase):
             context=None,
         )
 
-        filtered = bounded_model_input(data)
+        filtered = bounded_model_input(data, live_context="GOAL: reach the surface")
 
         self.assertEqual(filtered.input[0]["content"], "reach the surface")
-        self.assertIn("MODEL_INPUT_WINDOW complete=true", filtered.instructions)
-        self.assertIn("CURRENT_TASK: reach the surface", filtered.instructions)
+        # Instructions are the cached head of the request: never touched.
+        self.assertEqual(filtered.instructions, "CURRENT_TASK: reach the surface")
+        context = filtered.input[-1]
+        self.assertEqual(context["role"], "user")
+        self.assertTrue(context["content"].startswith("CURRENT_CONTEXT:\n"))
+        self.assertIn("GOAL: reach the surface", context["content"])
+        self.assertIn("MODEL_INPUT_WINDOW complete=true", context["content"])
+
+    def test_model_input_filter_leaves_unbounded_input_without_live_context_alone(self):
+        data = CallModelData(
+            model_data=ModelInputData(input=[{"role": "user", "content": "hi"}], instructions="sys"),
+            agent=None,
+            context=None,
+        )
+
+        self.assertIs(bounded_model_input(data), data.model_data)
+
+    def test_model_input_filter_appends_one_volatile_item_after_history(self):
+        history = [{"role": "user", "content": "hi"}]
+        data = CallModelData(
+            model_data=ModelInputData(input=history, instructions="sys"), agent=None, context=None
+        )
+
+        first = bounded_model_input(data, live_context="STATE: pos=(1, 2, 3)")
+        second = bounded_model_input(data, live_context="STATE: pos=(9, 9, 9)")
+
+        self.assertEqual(history, [{"role": "user", "content": "hi"}])  # caller's list untouched
+        self.assertEqual(first.input[:-1], second.input[:-1])  # the cacheable prefix is identical
+        self.assertNotEqual(first.input[-1], second.input[-1])
 
 
 def build_parts(goal: str, calls: list[str]) -> AgentRuntimeParts:

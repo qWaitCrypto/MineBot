@@ -14,6 +14,7 @@ from agents import SQLiteSession, SessionSettings
 from agents.run_config import CallModelData, ModelInputData
 
 from minebot.app.observability import sanitize_observation
+from minebot.app.prompt_cache import current_context_item
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
 
 CONVERSATION_WINDOW_TURNS = 12
@@ -253,25 +254,31 @@ def bounded_session_input(
     return combined[user_turn_starts[-max_turns] :]
 
 
-def bounded_model_input(data: CallModelData[Any]) -> ModelInputData:
-    """Bound one long SDK run while retaining the current request and closed tool pairs."""
+def bounded_model_input(data: CallModelData[Any], *, live_context: str = "") -> ModelInputData:
+    """Bound one long SDK run while retaining the current request and closed tool pairs.
+
+    Instructions are returned untouched: they are the cached head of the request
+    (``prompt_cache.py``). ``live_context`` and the window notice, which both move
+    between calls, ride together as the one trailing CURRENT_CONTEXT item.
+    """
 
     original = data.model_data.input
     bounded = bounded_model_input_items(original)
-    if len(bounded) == len(original):
+    notice = None
+    if len(bounded) != len(original):
+        notice = (
+            "MODEL_INPUT_WINDOW complete=true "
+            f"omitted_items={len(original) - len(bounded)} retained_items={len(bounded)}. "
+            "Current task, Body state, active Skills, and recent complete tool results in this "
+            "request are authoritative. Use conversation archive tools only when an older exact "
+            "exchange is materially needed."
+        )
+    context_item = current_context_item(live_context, notice or "")
+    if context_item is None:
         return data.model_data
-    omitted = len(original) - len(bounded)
-    notice = (
-        "MODEL_INPUT_WINDOW complete=true "
-        f"omitted_items={omitted} retained_items={len(bounded)}. "
-        "Current task, Body state, active Skills, and recent complete tool results in this "
-        "request are authoritative. Use conversation archive tools only when an older exact "
-        "exchange is materially needed."
-    )
-    instructions = data.model_data.instructions or ""
     return ModelInputData(
-        input=bounded,
-        instructions=f"{instructions}\n\n{notice}" if instructions else notice,
+        input=[*bounded, context_item],
+        instructions=data.model_data.instructions,
     )
 
 
