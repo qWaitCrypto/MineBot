@@ -10,6 +10,8 @@ runtime.
 from __future__ import annotations
 
 import base64
+import copy
+import hashlib
 import json
 import time
 from collections.abc import AsyncIterator, Mapping
@@ -162,6 +164,13 @@ class AnthropicMessagesModel(Model):
                     _attach_cache_write(event.response, usage.cache_write)
                 yield event
 
+    def without_prompt_cache(self) -> "AnthropicMessagesModel":
+        """Same connection for a one-off request that should not be cached."""
+        clone = copy.copy(self)
+        clone._prompt_cache = False
+        clone._owns_client = False
+        return clone
+
     def _headers(self, settings: ModelSettings) -> dict[str, str]:
         headers = {
             "x-api-key": self._api_key,
@@ -203,6 +212,8 @@ class AnthropicMessagesModel(Model):
         messages = _merge_messages(messages)
 
         anthropic_tools = self._tools(tools, handoffs)
+        # Before the markers go in: where a breakpoint sits is not content.
+        self._record_layout(anthropic_tools, system_parts, messages)
         if self._prompt_cache:
             _mark_cache_breakpoint(system_parts, self._prompt_cache_ttl)
             _mark_cache_breakpoint(anthropic_tools, self._prompt_cache_ttl)
@@ -236,6 +247,31 @@ class AnthropicMessagesModel(Model):
         if settings.extra_body:
             payload.update(settings.extra_body)
         return payload
+
+    def _record_layout(self, tools: list[dict[str, Any]], system: list[dict[str, Any]],
+                       messages: list[dict[str, Any]]) -> None:
+        """Fingerprint the cache prefix so a miss can be traced to its segment.
+
+        Anthropic matches tools, then system, then messages. A segment whose
+        fingerprint changed between two requests explains a cache write there.
+        """
+        def digest(value: Any) -> str:
+            return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
+
+        signatures = [digest(message) for message in messages]
+        previous = getattr(self, "_previous_message_signatures", [])
+        shared = 0
+        for old, new in zip(previous, signatures):
+            if old != new:
+                break
+            shared += 1
+        self._previous_message_signatures = signatures
+        self.last_request_layout = {
+            "tools_hash": digest(tools), "tool_count": len(tools),
+            "system_hash": digest(system), "system_parts": len(system),
+            "message_count": len(signatures), "shared_prefix_messages": shared,
+            "previous_message_count": len(previous),
+        }
 
     def _tools(self, tools: list[Tool], handoffs: list[Handoff]) -> list[dict[str, Any]]:
         converted = [Converter.tool_to_openai(tool) for tool in tools]

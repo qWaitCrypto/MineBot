@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 import contextlib
 import json
@@ -19,6 +20,7 @@ from types import SimpleNamespace
 
 from jsonschema import Draft202012Validator
 from agents import Agent, RunConfig, RunContextWrapper, Runner, RunHooks, Session
+from agents.run_config import ModelInputData
 from agents.exceptions import MaxTurnsExceeded, UserError
 from agents.items import ItemHelpers, MessageOutputItem, ToolCallItem, ToolCallOutputItem
 from agents.tool import FunctionTool
@@ -29,7 +31,7 @@ from minebot.app.conversation import (
     bounded_session_input,
     model_input_chars,
 )
-from minebot.app.prompt_cache import is_current_context_item
+from minebot.app.prompt_cache import current_context_item, is_current_context_item
 # Spine modules extracted from this file (framework §12 H1/B). They are
 # re-exported here so every existing consumer keeps importing one runtime
 # surface; the split is about auditability, not a new public boundary.
@@ -50,6 +52,11 @@ from minebot.app.progress_epoch_adapter import (
     _ModelFunctionCall,
     _ProgressEpoch,
     _ProgressEpochMember,
+)
+from minebot.app.context_compaction import (
+    DEFAULT_COMPACT_THRESHOLD_TOKENS,
+    SUMMARY_INSTRUCTIONS,
+    ConversationCompactor,
 )
 from minebot.app.execution_snapshot import ExecutionSnapshots
 from minebot.app.runtime_trace import RuntimeTrace
@@ -275,6 +282,20 @@ class RuntimeHooks(RunHooks[RuntimeRunContext]):
             usage = model_usage_observation(getattr(response, "usage", None))
             if usage is not None:
                 trace.emit("model_usage", **usage)
+                runtime = getattr(getattr(context, "context", None), "runtime", None)
+                compactor = getattr(runtime, "conversation_compactor", None)
+                if compactor is not None:
+                    compactor.note_usage(int(usage["usage"]["input_tokens"]))
+                layout = getattr(getattr(agent, "model", None), "last_request_layout", None)
+                if layout is None and runtime is not None and getattr(runtime, "model_provider", None) is not None:
+                    try:
+                        layout = getattr(runtime.model_provider.resolve(runtime.model_provider.default),
+                                         "last_request_layout", None)
+                    except Exception:
+                        layout = None
+                if layout:
+                    # Which part of the request repeated the previous one.
+                    trace.emit("prompt_cache_layout", **layout)
             for event in extract_model_response_observations(response):
                 trace.emit(**event)
         progress_epochs = getattr(getattr(context, "context", None), "progress_epochs", None)
@@ -1524,6 +1545,12 @@ class AgentRuntime:
         self.reflex_manager = None
         self.background_call: BackgroundCall | None = None
         self.execution_snapshots = ExecutionSnapshots()
+        threshold = getattr(model_provider, "compact_threshold_for", None)
+        self.conversation_compactor = ConversationCompactor(
+            summarize=self._summarize_conversation,
+            emit=self.trace.emit,
+            threshold_tokens=threshold() if callable(threshold) else DEFAULT_COMPACT_THRESHOLD_TOKENS,
+        )
         self.direct_call_window = direct_call_window_from_env()
         self._body_event_trace_lock = threading.Lock()
         self.consecutive_transport_errors = 0
@@ -2735,9 +2762,13 @@ class AgentRuntime:
             call_model_input_filter=self._bounded_model_input,
         )
 
-    def _bounded_model_input(self, data: Any) -> Any:
-        before_count = len(data.model_data.input)
-        before_chars = model_input_chars(data.model_data.input)
+    async def _bounded_model_input(self, data: Any) -> Any:
+        """Whole conversation behind a stable prefix, then the live context.
+
+        History is compacted once when the request reaches the threshold
+        (context_compaction.py); it is never windowed per request, because a
+        moving start turns every request into a full prompt-cache write.
+        """
         run_context = data.context
         live_context = getattr(run_context, "instruction_preamble", "") or ""
         work = self.background_work()
@@ -2746,21 +2777,44 @@ class AgentRuntime:
             live_context = "\n".join(part for part in (
                 live_context, "BACKGROUND_WORK: " + json.dumps(work, ensure_ascii=False, sort_keys=True),
             ) if part)
-        filtered = bounded_model_input(data, live_context=live_context)
-        # The trailing CURRENT_CONTEXT item is not history; keep it out of the counts.
-        after_items = [item for item in filtered.input if not is_current_context_item(item)]
-        after_count = len(after_items)
-        if after_count < before_count:
-            self.trace.emit(
-                "model_input_compacted",
-                before_count=before_count,
-                after_count=after_count,
-                omitted_count=before_count - after_count,
-                before_chars=before_chars,
-                after_chars=model_input_chars(after_items),
-                complete=True,
-            )
-        return filtered
+        original = data.model_data.input
+        items = [{"role": "user", "content": original}] if isinstance(original, str) else list(original)
+        instructions = data.model_data.instructions
+        view = await self.conversation_compactor.view(items, static_chars=len(instructions or ""))
+        context_item = current_context_item(live_context)
+        if context_item is not None:
+            view = [*view, context_item]
+        elif len(view) == len(items) and not isinstance(original, str):
+            return data.model_data
+        return ModelInputData(input=view, instructions=instructions)
+
+    async def _summarize_conversation(self, previous: str, transcript: str) -> str:
+        """One plain text request to the primary model; no tools, no cache write."""
+        from agents.models.interface import ModelTracing
+
+        logical = self.model_provider.default
+        model = self.model_provider.resolve(logical)
+        settings = dataclasses.replace(
+            self.model_provider.model_settings_for(logical), tool_choice=None, parallel_tool_calls=None,
+        )
+        if hasattr(model, "without_prompt_cache"):
+            # A one-off request that large must not be written to the cache.
+            model = model.without_prompt_cache()
+        text = (f"PREVIOUS_SUMMARY:\n{previous}\n\n" if previous else "") + "CONVERSATION_ITEMS_JSON:\n" + transcript
+        response = await model.get_response(
+            SUMMARY_INSTRUCTIONS, [{"role": "user", "content": text}], settings, [], None, [],
+            ModelTracing.DISABLED, previous_response_id=None, conversation_id=None, prompt=None,
+        )
+        usage = model_usage_observation(getattr(response, "usage", None))
+        if usage is not None:
+            self.trace.emit("model_usage", purpose="conversation_summary", **usage)
+        parts: list[str] = []
+        for output in getattr(response, "output", None) or []:
+            for part in getattr(output, "content", None) or []:
+                value = getattr(part, "text", None)
+                if isinstance(value, str):
+                    parts.append(value)
+        return "\n".join(parts)
 
     def _inject_resume_context(self) -> None:
         slot = self.mode_runtime.consume_suspend_slot()

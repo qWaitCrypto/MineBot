@@ -134,14 +134,18 @@ def _settings_from_env(env: Mapping[str, str]) -> dict[str, object]:
                 f"{MIN_MODEL_REQUEST_TIMEOUT_S:g} and {MAX_MODEL_REQUEST_TIMEOUT_S:g} seconds"
             )
         settings["request_timeout_s"] = request_timeout_s
-    if env.get("MINEBOT_RESPONSES_COMPACT_THRESHOLD"):
+    # One threshold for every kernel; the RESPONSES name predates the SDK kernel using it.
+    for name in ("MINEBOT_LLM_COMPACT_THRESHOLD", "MINEBOT_RESPONSES_COMPACT_THRESHOLD"):
+        if not env.get(name):
+            continue
         try:
-            threshold = int(env["MINEBOT_RESPONSES_COMPACT_THRESHOLD"])
+            threshold = int(env[name])
         except ValueError:
-            raise AppConfigError("MINEBOT_RESPONSES_COMPACT_THRESHOLD must be an integer") from None
+            raise AppConfigError(f"{name} must be an integer") from None
         if threshold < 0:
-            raise AppConfigError("MINEBOT_RESPONSES_COMPACT_THRESHOLD must be nonnegative (0 disables)")
+            raise AppConfigError(f"{name} must be nonnegative (0 disables)")
         settings["compact_threshold"] = threshold
+        break
     if env.get("MINEBOT_RESPONSES_CONTEXT_MODE"):
         mode = env["MINEBOT_RESPONSES_CONTEXT_MODE"].strip().lower()
         if mode not in {"native", "summary"}:

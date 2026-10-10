@@ -1764,7 +1764,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertIn("situational=mobility", runtime_context.instruction_preamble)
         instructions = runtime._instructions(Wrapper(), runtime.agent)
         self.assertNotIn("Mobility/reachability issue", instructions)
-        filtered = runtime._bounded_model_input(
+        filtered = asyncio.run(runtime._bounded_model_input(
             CallModelData(
                 model_data=ModelInputData(
                     input=[{"role": "user", "content": "go"}], instructions=instructions
@@ -1772,7 +1772,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
                 agent=None,
                 context=runtime_context,
             )
-        )
+        ))
         self.assertEqual(filtered.instructions, instructions)
         self.assertEqual(filtered.input[0], {"role": "user", "content": "go"})
         self.assertTrue(filtered.input[-1]["content"].startswith("CURRENT_CONTEXT:\n"))

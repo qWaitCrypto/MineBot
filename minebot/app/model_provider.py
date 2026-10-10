@@ -218,6 +218,11 @@ class ModelProviderRegistry(ModelProvider):
                     settings[key] = cfg.settings[key]
         return self._responses_clients[logical_name], cfg.model, settings, _request_timeout_s(cfg)
 
+    def compact_threshold_for(self, logical_name: str | None = None) -> int:
+        """Request size, in tokens, at which the conversation is summarized once."""
+        value = self._require(logical_name or self._default).settings.get("compact_threshold", 128_000)
+        return max(0, int(value))
+
     def capabilities_for(self, logical_name: str) -> Capabilities:
         return self._require(logical_name).capabilities
 
