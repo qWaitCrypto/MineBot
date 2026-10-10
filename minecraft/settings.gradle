@@ -20,7 +20,6 @@ rootProject.name = "minebot-minecraft"
 
 include("server:bridge")
 include("server:common")
-include("server:body")
 include("camera:client")
 include("camera:protocol")
 include("client:body")
