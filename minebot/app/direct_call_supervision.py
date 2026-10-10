@@ -100,7 +100,10 @@ class DirectBuildSupervisor:
             latest.update(payload)
             wake.set()
         telemetry = getattr(self.runtime, "panel_telemetry", None)
+        snapshots = getattr(self.runtime, "execution_snapshots", None)
         def notify(payload):
+            if snapshots is not None:
+                snapshots.observe(call_id, payload)
             if telemetry is not None:
                 telemetry.observe(call_id, payload)
             loop.call_soon_threadsafe(receive, dict(payload))

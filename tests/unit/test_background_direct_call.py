@@ -104,6 +104,11 @@ def test_long_call_leaves_the_turn_and_delivers_its_one_result_later():
     assert state.pos[0] == 0.0
     assert busy["success"] is False and busy["reason"] == "body_busy"
     assert work["direct_call"]["tool"] == "long_work"
+    assert work["execution"]["tool"] == "long_work" and work["execution"]["state"] == "running"
+    assert work["execution"]["operation_id"] == owner["tool_call_id"]
+    finished = runtime.execution_snapshots.last()
+    assert finished["state"] == "succeeded" and finished["control"] == "released"
+    assert runtime.execution_snapshots.current() is None
     assert idle == (True, False)
 
     assert len(facts) == 1

@@ -373,6 +373,7 @@ class ReflexManager:
                     "activity_id": direct["tool_call_id"],
                     "status": "running",
                     "direct_call": direct,
+                    "execution": self._execution(),
                     "body_control": self.runtime.body_control.snapshot().to_payload(),
                 }).to_payload()
             activity = self._select(activity_id)
@@ -384,8 +385,14 @@ class ReflexManager:
                 "revision": activity.revision,
                 "tree": self._tree(activity),
                 "facts": copy.deepcopy(activity.result.facts) if activity.result is not None else {},
+                "execution": self._execution(),
                 "body_control": self.runtime.body_control.snapshot().to_payload(),
             }).to_payload()
+
+    def _execution(self) -> dict[str, Any] | None:
+        """What the Body operation in flight is doing right now, if any."""
+        snapshots = getattr(self.runtime, "execution_snapshots", None)
+        return None if snapshots is None else snapshots.current()
 
     def control(self, params: dict[str, Any]) -> dict[str, Any]:
         operation = str(params.get("operation", ""))

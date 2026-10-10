@@ -24,6 +24,14 @@ class Trace:
         self.events.append((event, payload))
 
 
+def _bind_execution_observation(runtime):
+    """What ``AgentRuntime.run_tool`` needs from a stand-in runtime."""
+    from minebot.app.execution_snapshot import ExecutionSnapshots
+
+    runtime.execution_snapshots = ExecutionSnapshots()
+    runtime._observed = lambda callback, operation_id: AgentRuntime._observed(runtime, callback, operation_id)
+
+
 def test_delegate_and_same_tree_read_revision():
     async def scenario():
         trace = Trace()
@@ -215,6 +223,7 @@ def test_build_structure_run_tool_keeps_receipt_on_direct_supervisor_path():
             native_responses=False, direct_build_supervisor=Supervisor(),
         )
         weld = WeldContext(body=runtime.body, authority=authority, goal_text="build")
+        _bind_execution_observation(runtime)
         result = await AgentRuntime.run_tool(
             runtime, tool, execute_tool, tool, {}, weld,
             return_execution_receipt=True,
@@ -263,6 +272,7 @@ def test_run_tool_to_plan_executor_records_delivery_and_blocks_changed_write():
             last_known_body_state={}, decision_client=Decision(),
         )
         runtime.run_tool = lambda *args, **kwargs: AgentRuntime.run_tool(runtime, *args, **kwargs)
+        _bind_execution_observation(runtime)
 
         manager = ReflexManager(runtime)
         manager.bind_loop(asyncio.get_running_loop())

@@ -51,6 +51,7 @@ from minebot.app.progress_epoch_adapter import (
     _ProgressEpoch,
     _ProgressEpochMember,
 )
+from minebot.app.execution_snapshot import ExecutionSnapshots
 from minebot.app.runtime_trace import RuntimeTrace
 from minebot.app.model_provider import ModelProviderRegistry, is_retryable_model_error
 from minebot.app.observation_artifacts import ToolObservationArchive
@@ -126,6 +127,18 @@ BODY_OWNER_SETTLE_POLL_S = 0.10
 BODY_WATCH_POLL_S = 0.25
 STREAM_CANCEL_DRAIN_TIMEOUT_S = EXECUTION_LANE_CANCEL_TIMEOUT_S + 5.0
 MODEL_COUNT_MAP_LIMIT = 48
+
+
+def _execution_outcome(result: Any) -> tuple[str, str | None]:
+    """Snapshot terminal state and reason of one finished Body operation."""
+    payload = result if isinstance(result, dict) else getattr(result, "result", None)
+    if not isinstance(payload, dict):
+        error = getattr(result, "error", None)
+        return ("failed", type(error).__name__) if error is not None else ("unknown", None)
+    reason = str(payload.get("reason") or "") or None
+    if payload.get("success"):
+        return "succeeded", reason
+    return ("cancelled" if reason in {"cancelled", "preempted"} else "failed"), reason
 
 
 # A direct Body call that has not settled after this many seconds stops holding
@@ -1510,6 +1523,7 @@ class AgentRuntime:
         self.direct_build_supervisor = DirectBuildSupervisor(self)
         self.reflex_manager = None
         self.background_call: BackgroundCall | None = None
+        self.execution_snapshots = ExecutionSnapshots()
         self.direct_call_window = direct_call_window_from_env()
         self._body_event_trace_lock = threading.Lock()
         self.consecutive_transport_errors = 0
@@ -1861,20 +1875,56 @@ class AgentRuntime:
             }
             return enriched
 
+        operation_id = tool_call_id or claim_id
+        outcome: tuple[str, str | None] = ("unknown", None)
+        if tool.sidecar.can_mutate_body:
+            arguments = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
+            self.execution_snapshots.begin(operation_id, tool.name, arguments)
         try:
             if tool.name == "build_structure" and callable(getattr(self.body, "confirm_control_idle", None)):
                 result = await self.direct_build_supervisor.run(tool, admitted_callback, args,
-                    call_id=tool_call_id or claim_id, timeout_s=timeout_s)
+                    call_id=operation_id, timeout_s=timeout_s)
+                outcome = _execution_outcome(result)
                 return with_execution_receipt(result)
             lane = self.execution_lane if tool.sidecar.can_mutate_body else self._off_writer_lane()
-            telemetry = getattr(self, "panel_telemetry", None)
-            if telemetry is not None and tool.sidecar.can_mutate_body:
-                admitted_callback = telemetry.scoped(admitted_callback, tool_call_id)
+            if tool.sidecar.can_mutate_body:
+                admitted_callback = self._observed(admitted_callback, operation_id)
             result = await lane.run(admitted_callback, *args, timeout_s=timeout_s)
+            outcome = _execution_outcome(result)
             return with_execution_receipt(result)
+        except asyncio.CancelledError:
+            outcome = ("cancelled", "cancelled")
+            raise
+        except Exception as exc:
+            # A timeout or a Python failure does not prove the client stopped.
+            outcome = ("unknown" if self.body_control.unknown else "failed", type(exc).__name__)
+            raise
         finally:
             if tool.sidecar.can_mutate_body and not retain_claim and self.body_control.owns(claim_id, claim_generation):
                 self.body_control.settle(claim_id=claim_id)
+            if tool.sidecar.can_mutate_body:
+                self.execution_snapshots.finish(
+                    operation_id, state=outcome[0], reason=outcome[1],
+                    control="unknown" if self.body_control.unknown else "released",
+                )
+
+    def _observed(self, callback: Callable[..., Any], operation_id: str) -> Callable[..., Any]:
+        """Route this call's native progress to its snapshot and to the panel."""
+        from minebot.contract.execution import tool_observation_scope
+        telemetry = getattr(self, "panel_telemetry", None)
+        snapshots = self.execution_snapshots
+
+        def notify(payload: JsonObject) -> None:
+            snapshots.observe(operation_id, payload)
+            if telemetry is not None:
+                telemetry.observe(operation_id, payload)
+
+        def observed(*args: Any, **kwargs: Any) -> Any:
+            snapshots.running(operation_id)
+            with tool_observation_scope(operation_id, notify):
+                return callback(*args, **kwargs)
+
+        return observed
 
     async def _drain_responses_calls(self, reason: str) -> None:
         # Physical idle precedes the async wrappers observing cancellation.
@@ -2260,6 +2310,10 @@ class AgentRuntime:
         plan = summary() if callable(summary) else None
         if plan is not None:
             work["plan"] = plan
+        if work:
+            execution = self.execution_snapshots.current()
+            if execution is not None:
+                work["execution"] = execution
         return work or None
 
     def latest_progress_evidence_cursor(self) -> int:
@@ -2330,6 +2384,7 @@ class AgentRuntime:
             # Decision result must not be able to admit its next write.
             self.reflex_manager.request_cancel(reason)
         self.body_control.mark_stopping()
+        self.execution_snapshots.stopping()
         supervisor = self.direct_build_supervisor.current
         if supervisor is not None:
             supervisor["cancel_requested"] = True
