@@ -34,14 +34,64 @@ TRANSCRIPT_FIELD_CHARS = 4_000
 MAX_ITEM_CHARS = 32_000
 SUMMARY_HEADER = "CONVERSATION_SUMMARY (historical, not a new request):"
 
-SUMMARY_INSTRUCTIONS = (
-    "Summarize this ongoing Minecraft Agent conversation for its next turn. Do not act or call tools. "
-    "Preserve player goals, additions and constraints, the current short plan, exact useful coordinates "
-    "and entity IDs, verified work, materials, unresolved blockers, failed approaches and why they failed. "
-    "Keep historical observations distinct from current facts. Preserve any player cancellation. "
-    "The latest CURRENT_CONTEXT is authoritative for the current goal, plan and Body state. "
-    "Omit repetitive polling, superseded state and internal bookkeeping. Return only a concise continuation summary."
-)
+# Written for an agent that lives in a Minecraft world, not one that edits a
+# repository. What it loses when history is cut is where things are, what the
+# world already taught it, and what it has really built: none of that can be
+# read back from a file. What it does not need is a copy of anything it is
+# handed fresh with every request.
+SUMMARY_INSTRUCTIONS = """\
+You are writing the memory an agent playing Minecraft through a body will continue from. The older part of \
+its conversation is about to be removed and replaced by what you write. Do not act, do not call tools, do not \
+address the player. Write the notes; nothing else.
+
+The next request also contains a live context block: the current goal and task/checkpoint state, position, \
+health, hunger, inventory, plan, and any work still running. Do not copy those live values. A number from the \
+old conversation that the agent will see live (an item count, a position, a health value) is stale the moment \
+you write it and must be left out. Keep player goals and constraints only when they are not represented by \
+that live context.
+
+Keep what cannot be looked up again without redoing work. Use these headings, in this order, and leave a \
+heading out when there is nothing true to put under it.
+
+PLACES
+Coordinates worth returning to, each with what is there and how it was learned: the chosen build site and \
+its bounds, crafting table, furnace, chests and beds that were placed, resource spots (trees, stone, sand, \
+ore, water, animals) with the kind found, cave or mine entrances, the spawn point, a death spot with what \
+was dropped. Exact integers as they appeared. A place the agent only guessed at is marked guessed.
+
+STORED AND PLACED
+What was put in a chest or furnace or left on the ground and where. What has been built so far, as observed \
+facts: which parts stand, of what material, from which corner to which corner, and which parts were \
+verified by reading the world rather than assumed from a successful tool call. What is known to be missing \
+from the build.
+
+HOW THIS WORLD AND BODY BEHAVE
+What the agent found out by trying: an approach that failed and the reason given, a target that could not \
+be reached and why, a recipe that was locked and what unlocked it, a tool that broke, a tool call whose \
+arguments had to be a particular way, a kind of request that works better in one call than in several. \
+One line each. These keep the agent from paying for the same lesson twice, so prefer them over narrative.
+
+DECISIONS
+Choices already made and the reason, so they are not reopened: the design chosen for the build, materials \
+decided on, an order of work, something the player agreed to or ruled out beyond their literal messages, \
+a promise the agent made to the player and has not kept yet.
+
+WHERE THINGS STAND
+In a few lines: what was being worked on when these notes were written, what the last finished step really \
+achieved, and the next step the agent intended. If the conversation ends with work the agent started and \
+whose result had not arrived, say so with its id.
+
+Rules.
+Facts are dated by order, not by clock: when two observations disagree, the later one wins and the earlier \
+is dropped, not listed beside it.
+State how each fact is known when it matters: seen in a tool result, told by the player, or assumed.
+Animals, monsters and dropped items move or vanish; mention one only if it mattered and say it may be gone.
+Leave out polling, repeated status reads, pathfinding detail, tool output that only confirmed what was \
+expected, and the agent's own commentary.
+If PREVIOUS_SUMMARY is given, these notes replace it: carry forward what is still true, correct what the \
+newer conversation overturned, and drop what no longer matters. Do not append a second set of notes.
+Write in the language the player uses. Be brief: a line per fact, no introduction, no closing remark.\
+"""
 
 Summarize = Callable[[str, str], Awaitable[str]]
 

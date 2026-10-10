@@ -2,7 +2,7 @@
 
 import asyncio
 
-from minebot.app.context_compaction import SUMMARY_HEADER, ConversationCompactor
+from minebot.app.context_compaction import SUMMARY_HEADER, SUMMARY_INSTRUCTIONS, ConversationCompactor
 
 
 def _turn(index, size=400):
@@ -179,3 +179,14 @@ def test_no_compaction_when_what_is_large_is_the_part_that_stays():
     assert calls == []  # summarizing a few small items would not make the request fit
     assert all(view[-1] == huge and view[0]["content"] == "build a house" for view in views)
     assert {payload["reason"] for event, payload in events} == {"little_to_summarize"}
+
+
+def test_summary_instructions_preserve_world_facts_without_copying_live_state():
+    assert "PLACES" in SUMMARY_INSTRUCTIONS
+    assert "STORED AND PLACED" in SUMMARY_INSTRUCTIONS
+    assert "HOW THIS WORLD AND BODY BEHAVE" in SUMMARY_INSTRUCTIONS
+    assert "DECISIONS" in SUMMARY_INSTRUCTIONS
+    assert "WHERE THINGS STAND" in SUMMARY_INSTRUCTIONS
+    assert "Do not copy those live values" in SUMMARY_INSTRUCTIONS
+    assert "tool that broke" in SUMMARY_INSTRUCTIONS
+    assert "Write in the language the player uses" in SUMMARY_INSTRUCTIONS

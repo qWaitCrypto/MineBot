@@ -1022,6 +1022,26 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
     }
 
+    /**
+     * A tool that wears out in the hand ends the action, as it would stop a
+     * player. What to do next is decided by whoever asked for the action.
+     */
+    private void observeHeldTool(Minecraft client, Run current) {
+        ItemStack held = client.player.getMainHandItem();
+        int slot = client.player.getInventory().getSelectedSlot();
+        if (current.heldToolLastUse && current.heldToolSlot == slot && held.isEmpty()) {
+            current.brokenItem = current.heldTool;
+            current.heldToolLastUse = false;
+            requestStop("failed", "tool_broke");
+            return;
+        }
+        current.heldToolSlot = slot;
+        current.heldTool = itemPath(held);
+        // Only a stack on its last use that then vanishes from the same slot broke;
+        // a moved, dropped or swapped item did not.
+        current.heldToolLastUse = held.isDamageableItem() && held.getDamageValue() >= held.getMaxDamage() - 1;
+    }
+
     private void tick(Minecraft client) {
         if (client.player == null || client.level == null || baritone == null) {
             return;
@@ -1044,6 +1064,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         current.ticks++;
+        if (current.stopStatus == null) observeHeldTool(client, current);
         if (current.stopStatus == null) observeNavigation(client, current);
         if (current.kind.equals("mine") && current.stopStatus == null
             && baritone.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)) {
@@ -1423,7 +1444,10 @@ public final class MineBotClientBody implements ClientModInitializer {
             current.phaseTick = current.ticks;
         } else if (current.phase == 2 && current.ticks - current.phaseTick > 20
             && !baritone.getFollowProcess().isActive()) {
-            requestStop("failed", "cluster_pickup_not_observed");
+            // Every target is mined and no drop is left in reach. A drop that
+            // rolled away or fell out of sight is a shortfall the inventory
+            // delta already states, not a failure of the work.
+            requestStop("completed", "resource_cluster_collected");
         } else if (current.phase == 1 && current.ticks - current.phaseTick > 20
             && !baritone.getBuilderProcess().isActive() && !baritone.getCustomGoalProcess().isActive()
             && !baritone.getPathingBehavior().isPathing()) {
@@ -2755,6 +2779,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             response.addProperty("inventory_delta", collectionCount(client, current) - current.before);
             response.addProperty("target_count", current.collectionTargets.size());
         }
+        if (current.brokenItem != null) response.addProperty("broken_item", current.brokenItem);
         response.addProperty("process_kind", current.kind);
         response.addProperty("seen_active", current.seenActive);
         response.addProperty("last_path_event", current.lastPathEvent);
@@ -3230,6 +3255,10 @@ public final class MineBotClientBody implements ClientModInitializer {
         double followKeepDistance = 3.0;
         String stopStatus;
         String stopReason;
+        String heldTool = "";
+        String brokenItem;
+        int heldToolSlot = -1;
+        boolean heldToolLastUse;
         String lastPathEvent = "";
         int before;
         int ticks;

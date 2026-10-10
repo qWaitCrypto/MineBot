@@ -148,15 +148,29 @@ def _render_conversation_summary(facts: ContextFacts) -> str | None:
     return None
 
 
+# A full player inventory holds at most 41 stacks.
+INVENTORY_KINDS_SHOWN = 48
+
+
 def _render_body_state(facts: ContextFacts) -> str | None:
     state = facts.body_state
     if state is None:
         return None
     pos = ", ".join(f"{value:.1f}" for value in state.pos)
-    return (
+    line = (
         f"STATE: pos=({pos}) health={state.health:.1f} food={state.food} "
         f"dim={state.dimension or 'overworld'}"
     )
+    # A player always knows what they carry. Read with the rest of the state
+    # before each request, so it is never an older count than the tool results.
+    counts = getattr(state, "inventory_counts", None)
+    if isinstance(counts, dict):
+        held = sorted((str(item), count) for item, count in counts.items() if isinstance(count, int) and count > 0)
+        shown = ", ".join(f"{item} {count}" for item, count in held[:INVENTORY_KINDS_SHOWN]) or "empty"
+        if len(held) > INVENTORY_KINDS_SHOWN:
+            shown += f", and {len(held) - INVENTORY_KINDS_SHOWN} more kinds (read_inventory lists all)"
+        line += f" inventory=[{shown}]"
+    return line
 
 
 def _render_profile(facts: ContextFacts) -> str | None:

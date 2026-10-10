@@ -24,9 +24,6 @@ NO_PROGRESS_TRAVEL_BLOCKS = 24.0
 # Baritone keeps recalculating a path it cannot find. This many failures in a
 # row with nothing gained is its own evidence that the target is out of reach.
 PATH_FAILURE_LIMIT = 5
-# Unfinished clusters in a row that added nothing before the collection gives up.
-FRUITLESS_CLUSTER_LIMIT = 2
-TOOL_LOST = "tool_lost"
 _PROGRESS_POLL_S = 2.0
 
 
@@ -99,15 +96,12 @@ def _unreachable_facts(goal: str, feet: Position | tuple[float, ...], native_fai
     return facts
 
 
-def _await_with_progress(body: Body, action: Action, inventory_total,
-                         tool_lost=lambda: False) -> tuple[ToolResult, dict | None]:
+def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[ToolResult, dict | None]:
     """Wait for a native mining action, stopping it when it stops producing.
 
     Returns the terminal and, when the action was stopped for lack of
     progress, the observed facts. Progress is an inventory gain; travelling
     resets the window so a long walk to a distant resource is not a stall.
-    ``tool_lost`` says the Body no longer owns a tool that can harvest the
-    target: the action is stopped at once instead of after a stall window.
     """
     deadline = time.monotonic() + action_wait_timeout_s(action)
     best, mark_at, mark_pos = inventory_total(), time.monotonic(), body.get_state().pos
@@ -131,10 +125,9 @@ def _await_with_progress(body: Body, action: Action, inventory_total,
             continue
         stalled_s = time.monotonic() - mark_at
         unreachable = failed - failed_mark >= PATH_FAILURE_LIMIT
-        broke = tool_lost()
-        if not broke and not unreachable and stalled_s < NO_PROGRESS_WINDOW_S:
+        if not unreachable and stalled_s < NO_PROGRESS_WINDOW_S:
             continue
-        reason = TOOL_LOST if broke else "path_unreachable" if unreachable else "no_progress"
+        reason = "path_unreachable" if unreachable else "no_progress"
         body.interrupt(reason)
         event = body.await_action_terminal(action.id, timeout_s=30.0)
         facts = {
@@ -181,8 +174,6 @@ def collect_native_cluster(
         unreachable.clear()
     avoided = {tuple(int(value) for value in pos) for pos in config.avoid} | set(unreachable or ())
     attempts, excluded, actions_used = [], set(avoided), 0
-    unfinished: list[dict] = []
-    fruitless = 0
     finish_target: Position | None = None
 
     def result(success: bool, reason: str, stalled: dict | None = None) -> ToolResult:
@@ -191,10 +182,6 @@ def collect_native_cluster(
             "collected": current - before, "requested_count": remaining_count,
             "remaining_count": max(0, remaining_count - (current - before)),
             "attempts": attempts, "collection_strategy": "native_resource_collection"}
-        if unfinished:
-            # Mined but not fully picked up, or abandoned part-way: drops may still lie there.
-            metrics["unfinished_clusters"] = unfinished[-8:]
-            metrics["unfinished_cluster_count"] = len(unfinished)
         if avoided:
             # Said every time, so a missing resource is not mistaken for an absent one.
             metrics["avoided_targets"] = [list(pos) for pos in sorted(avoided)[:16]]
@@ -292,38 +279,19 @@ def collect_native_cluster(
         accepted = body.execute(action)
         if not accepted.ok or not accepted.accepted:
             return result(False, accepted.error or "body_rejected")
-        held = inventory_total()
-        terminal, stalled = _await_with_progress(
-            body, action, inventory_total, lambda: harvest_tool_denial(body, blocks) is not None)
+        terminal, stalled = _await_with_progress(body, action, inventory_total)
         attempts.append({"target": list(anchor) if anchor is not None else None,
                          "targets": [list(pos) for pos in cluster], "action": action.name,
                          "mine": terminal.to_payload(), **({"no_progress": stalled} if stalled else {})})
         actions_used += 1
         if stalled:
-            if stalled.get("reason") == TOOL_LOST:
-                continue  # the check at the top of the loop reports which tool is missing
             target = stalled.get("target")
             if unreachable is not None and stalled.get("reason") == "path_unreachable" and target:
                 unreachable.add(tuple(target))
                 avoided.add(tuple(target))
             return result(False, str(stalled["reason"]), stalled)
         if not terminal.success:
-            # One cluster that did not finish is not the end of a collection
-            # that is still producing: note it, leave it, take the next one.
-            # The inventory decides when the request is met, not each cluster.
-            gained = inventory_total() - held
-            fruitless = 0 if gained > 0 else fruitless + 1
-            # While only finishing a vein after the request is met there is no
-            # next cluster to move on to, so that failure is the result.
-            if not cluster or finishing or fruitless >= FRUITLESS_CLUSTER_LIMIT:
-                return result(False, terminal.reason)
-            unfinished.append({"target": list(anchor) if anchor is not None else None,
-                               "reason": terminal.reason, "cells": len(cluster), "gained": gained})
-            excluded.update(tuple(pos) for pos in cluster)
-            if anchor is not None:
-                excluded.add(anchor)
-            continue
-        fruitless = 0
+            return result(False, terminal.reason)
         if action.name == "mineResource":
             selected = (terminal.metrics or {}).get("last_resource_target")
             if isinstance(selected, list) and len(selected) == 3:

@@ -237,3 +237,18 @@ class BudgetDropTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_state_line_shows_what_the_body_carries():
+    import dataclasses
+    from types import SimpleNamespace
+
+    from minebot.brain.context_compiler import _render_body_state
+
+    carrying = dataclasses.replace(_state(), inventory_counts={"oak_log": 46, "cobblestone": 48, "stick": 0})
+    line = _render_body_state(SimpleNamespace(body_state=carrying))
+    assert line.endswith("dim=overworld inventory=[cobblestone 48, oak_log 46]")
+    empty = dataclasses.replace(_state(), inventory_counts={})
+    assert _render_body_state(SimpleNamespace(body_state=empty)).endswith("inventory=[empty]")
+    unknown = _render_body_state(SimpleNamespace(body_state=_state()))
+    assert unknown == "STATE: pos=(12.5, 70.0, -8.2) health=17.0 food=18 dim=overworld"
