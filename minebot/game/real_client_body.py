@@ -24,6 +24,8 @@ from minebot.game.real_client_ipc import RealClientIpc, RealClientIpcError, Real
 
 
 _CAPABILITY_GAP = "capability_unavailable"
+# Native progress keys sent for observers (the live panel); never Body state.
+_OBSERVER_ONLY_FIELDS = frozenset({"lite", "world_edits", "path_events", "last_path_event"})
 
 
 @dataclass(frozen=True)
@@ -406,8 +408,20 @@ class RealClientBody:
         with self._lock:
             if self._active is not pending or payload.get("action_id") != pending.action.id:
                 return
-            self._merge_state_payload(payload)
+            if not payload.get("lite"):
+                # Lite frames and observer keys feed the panel only, never the state cache.
+                self._merge_state_payload(
+                    {key: value for key, value in payload.items() if key not in _OBSERVER_ONLY_FIELDS})
         self._notify(pending, payload)
+
+    def sample_native_state(self) -> dict[str, Any] | None:
+        """Observer read while idle; leaves the state cache untouched."""
+        with self._lock:
+            if self._active is not None:
+                return None
+        if not self._ready:
+            return None
+        return self.ipc.state()
 
     def confirm_control_idle(self) -> dict[str, Any]:
         """Fresh native evidence, independent of Python worker/lane occupancy."""

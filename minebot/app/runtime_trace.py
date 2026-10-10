@@ -25,6 +25,13 @@ class RuntimeTrace:
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def emit(self, event: str, **fields: object) -> None:
+        self._emit(event, fields, retain=True)
+
+    def emit_transient(self, event: str, **fields: object) -> None:
+        """Sink-only record for high-rate observer telemetry; never kept in ``events``."""
+        self._emit(event, fields, retain=False)
+
+    def _emit(self, event: str, fields: dict[str, object], *, retain: bool) -> None:
         with self._lock:
             self._seq += 1
             record = sanitize_observation(
@@ -36,7 +43,8 @@ class RuntimeTrace:
                     **fields,
                 }
             )
-            self.events.append(record)
+            if retain:
+                self.events.append(record)
             if self.sink is not None:
                 self.sink.write(record)
 

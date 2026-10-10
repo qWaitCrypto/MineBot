@@ -1103,7 +1103,9 @@ public final class MineBotClientBody implements ClientModInitializer {
             if (current.kind.equals("build")) response.add("construction_progress", cuboidProgress(client, current));
             response.addProperty("type", "progress");
             response.addProperty("action_id", current.id);
-            emit(current, response);
+            emit(current, withTelemetry(current, response));
+        } else if (current.ticks % 5 == 0) {
+            emit(current, liteProgress(client, current));
         }
         if (current.stopStatus != null) {
             // The action terminal means that Baritone no longer owns a process
@@ -2557,9 +2559,68 @@ public final class MineBotClientBody implements ClientModInitializer {
         return current.kind.equals("ascend") || current.kind.equals("digUp") || current.kind.equals("digDown");
     }
 
+    private static final Set<String> NAVIGATION_KINDS = Set.of(
+        "any", "away", "y", "block", "goto", "navigate", "xz", "near", "get", "explore", "follow", "pickup", "elytra");
+
+    /** Pre-change state of every cell this client tries to break or place in during a run. */
+    public static void touchWorld(BlockPos pos) {
+        if (instance == null || instance.run == null) return;
+        Minecraft client = Minecraft.getInstance();
+        if (client.level == null || instance.run.worldTouched.size() >= 4096) return;
+        instance.run.worldTouched.putIfAbsent(pos.immutable(), client.level.getBlockState(pos));
+    }
+
+    private static JsonObject worldEdit(Run current, BlockPos pos, BlockState before, BlockState after) {
+        JsonObject edit = new JsonObject();
+        edit.addProperty("index", current.worldEdits.size());
+        JsonArray at = new JsonArray();
+        at.add(pos.getX());
+        at.add(pos.getY());
+        at.add(pos.getZ());
+        edit.add("pos", at);
+        edit.addProperty("before", BuiltInRegistries.BLOCK.getKey(before.getBlock()).getPath());
+        edit.addProperty("after", BuiltInRegistries.BLOCK.getKey(after.getBlock()).getPath());
+        edit.addProperty("op", after.canBeReplaced() && !before.canBeReplaced() ? "break"
+            : before.canBeReplaced() && !after.canBeReplaced() ? "place" : "change");
+        edit.addProperty("action_kind", current.kind);
+        Boolean target = editTarget(current, pos, before);
+        if (target == null) edit.add("target", com.google.gson.JsonNull.INSTANCE);
+        else edit.addProperty("target", target);
+        edit.addProperty("tick", current.ticks);
+        return edit;
+    }
+
+    /** Whether a confirmed edit lies inside the action's declared target; null when the action declares none. */
+    private static Boolean editTarget(Run current, BlockPos pos, BlockState before) {
+        return switch (current.kind) {
+            case "build" -> inBox(pos, current.anchor, current.anchor.offset(current.sx - 1, current.sy - 1, current.sz - 1));
+            case "clear" -> inBox(pos, current.anchor, current.end);
+            case "mine" -> {
+                String block = BuiltInRegistries.BLOCK.getKey(before.getBlock()).getPath();
+                boolean matched = false;
+                for (String target : current.targets) matched |= target.replace("minecraft:", "").equals(block);
+                yield matched;
+            }
+            case "collectBlocks" -> current.collectionTargets.contains(pos);
+            case "placeBlock" -> pos.equals(current.anchor);
+            default -> NAVIGATION_KINDS.contains(current.kind) ? Boolean.FALSE : null;
+        };
+    }
+
+    private static boolean inBox(BlockPos pos, BlockPos a, BlockPos b) {
+        return pos.getX() >= Math.min(a.getX(), b.getX()) && pos.getX() <= Math.max(a.getX(), b.getX())
+            && pos.getY() >= Math.min(a.getY(), b.getY()) && pos.getY() <= Math.max(a.getY(), b.getY())
+            && pos.getZ() >= Math.min(a.getZ(), b.getZ()) && pos.getZ() <= Math.max(a.getZ(), b.getZ());
+    }
+
     public static void observeBlockUpdate(BlockPos pos, BlockState state) {
         if (instance == null || instance.run == null) return;
         Run current = instance.run;
+        BlockState last = current.worldTouched.get(pos);
+        if (last != null && !last.equals(state)) {
+            current.worldTouched.put(pos.immutable(), state);
+            current.worldEdits.add(worldEdit(current, pos, last, state));
+        }
         if (current.kind.equals("placeBlock") && current.phase == 3 && pos.equals(current.anchor)) {
             current.placementConfirmed = BuiltInRegistries.BLOCK.getKey(state.getBlock()).getPath().equals(current.item);
         }
@@ -2666,6 +2727,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
         restoreAttention(current);
         restoreBuilderInventory(current);
+        if (current.worldEditsSent < current.worldEdits.size()) emit(current, liteProgress(client, current));
         JsonObject response = state(client);
         response.addProperty("flight_observed", current.seenFlying);
         response.addProperty("type", "terminal");
@@ -2745,6 +2807,72 @@ public final class MineBotClientBody implements ClientModInitializer {
         run = null;
         emit(current, response);
         LOG.info("MINEBOT_PHASE_A terminal {}", response);
+    }
+
+    private JsonObject navigationFacts(Run current) {
+        JsonObject navigation = current.navigation.deepCopy();
+        navigation.addProperty("repeated_failures", current.navigationProgress.repeatedFailures());
+        navigation.addProperty("idle_ms", current.navigationProgress.idleMs(current.elapsed()));
+        navigation.addProperty("path_calculations", current.pathEvents.getOrDefault("CALC_STARTED", 0));
+        navigation.addProperty("calculating", baritone.getPathingBehavior().getInProgress().isPresent());
+        navigation.addProperty("pathing", baritone.getPathingBehavior().isPathing());
+        return navigation;
+    }
+
+    /** Observer telemetry between full samples: pose, vitals and navigation only. */
+    private JsonObject liteProgress(Minecraft client, Run current) {
+        JsonObject frame = new JsonObject();
+        frame.addProperty("type", "progress");
+        frame.addProperty("lite", true);
+        frame.addProperty("action_id", current.id);
+        frame.addProperty("sampled_at_ms", System.currentTimeMillis());
+        if (client.player != null) {
+            JsonArray pos = new JsonArray();
+            pos.add(client.player.getX());
+            pos.add(client.player.getY());
+            pos.add(client.player.getZ());
+            frame.add("position", pos);
+            frame.addProperty("yaw", client.player.getYRot());
+            frame.addProperty("pitch", client.player.getXRot());
+            frame.addProperty("on_ground", client.player.onGround());
+            frame.addProperty("health", client.player.getHealth());
+            frame.addProperty("food", client.player.getFoodData().getFoodLevel());
+            frame.addProperty("oxygen", client.player.getAirSupply());
+            frame.addProperty("fall_flying", client.player.isFallFlying());
+            frame.addProperty("selected_item", itemPath(client.player.getMainHandItem()));
+        }
+        frame.add("navigation", navigationFacts(current));
+        frame.addProperty("pathing", baritone.getPathingBehavior().isPathing());
+        frame.addProperty("mine_active", baritone.getMineProcess().isActive());
+        frame.addProperty("goal_active", baritone.getCustomGoalProcess().isActive());
+        frame.addProperty("get_active", baritone.getGetToBlockProcess().isActive());
+        frame.addProperty("explore_active", baritone.getExploreProcess().isActive());
+        frame.addProperty("follow_active", baritone.getFollowProcess().isActive());
+        frame.addProperty("farm_active", baritone.getFarmProcess().isActive());
+        frame.addProperty("builder_active", baritone.getBuilderProcess().isActive());
+        frame.addProperty("builder_paused", baritone.getBuilderProcess().isPaused());
+        frame.addProperty("elytra_active", baritone.getElytraProcess().isActive());
+        frame.addProperty("any_process_active", processActive());
+        var goal = baritone.getPathingBehavior().getGoal();
+        frame.addProperty("baritone_goal", goal == null ? "" : goal.toString());
+        return withTelemetry(current, frame);
+    }
+
+    /** Path events and the world edits not yet sent; observers only, never action settlement. */
+    private static JsonObject withTelemetry(Run current, JsonObject frame) {
+        JsonObject events = new JsonObject();
+        current.pathEvents.forEach(events::addProperty);
+        frame.add("path_events", events);
+        frame.addProperty("last_path_event", current.lastPathEvent);
+        if (current.worldEditsSent < current.worldEdits.size()) {
+            JsonArray edits = new JsonArray();
+            for (int index = current.worldEditsSent; index < current.worldEdits.size(); index++) {
+                edits.add(current.worldEdits.get(index));
+            }
+            current.worldEditsSent = current.worldEdits.size();
+            frame.add("world_edits", edits);
+        }
+        return frame;
     }
 
     private JsonObject state(Minecraft client) {
@@ -2845,13 +2973,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             state.addProperty("pathing", baritone.getPathingBehavior().isPathing());
             state.addProperty("allow_inventory", BaritoneAPI.getSettings().allowInventory.value);
             if (run != null) {
-                JsonObject navigation = run.navigation.deepCopy();
-                navigation.addProperty("repeated_failures", run.navigationProgress.repeatedFailures());
-                navigation.addProperty("idle_ms", run.navigationProgress.idleMs(run.elapsed()));
-                navigation.addProperty("path_calculations", run.pathEvents.getOrDefault("CALC_STARTED", 0));
-                navigation.addProperty("calculating", baritone.getPathingBehavior().getInProgress().isPresent());
-                navigation.addProperty("pathing", baritone.getPathingBehavior().isPathing());
-                state.add("navigation", navigation);
+                state.add("navigation", navigationFacts(run));
             }
             state.addProperty("mine_active", baritone.getMineProcess().isActive());
             state.addProperty("goal_active", baritone.getCustomGoalProcess().isActive());
@@ -3092,6 +3214,9 @@ public final class MineBotClientBody implements ClientModInitializer {
         List<net.minecraft.world.item.Item> previousThrowawayItems;
         Integer previousFollowRadius;
         final Set<BlockPos> collectionTargets = new HashSet<>();
+        final Map<BlockPos, BlockState> worldTouched = new LinkedHashMap<>();
+        final JsonArray worldEdits = new JsonArray();
+        int worldEditsSent;
         final Set<String> collectionBlocks = new HashSet<>();
         final Set<String> collectionItems = new HashSet<>();
         boolean collectionTree;

@@ -1042,6 +1042,7 @@ async def _run_interactive_loop(
     remaining = max_steps
     body_event_poll_failures = 0
     state_sampler = asyncio.create_task(_trace_active_body_state_loop(session, body))
+    panel_sampler = asyncio.create_task(_panel_idle_sample_loop(session, body))
     try:
         while remaining is None or remaining > 0:
             if iteration_hook is not None:
@@ -1134,8 +1135,31 @@ async def _run_interactive_loop(
         return last
     finally:
         state_sampler.cancel()
+        panel_sampler.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await state_sampler
+        with contextlib.suppress(asyncio.CancelledError):
+            await panel_sampler
+
+
+async def _panel_idle_sample_loop(session: AgentSession, body: Body, *, interval_s: float = 1.0) -> None:
+    """Observer-only 1 Hz Body sample for the live panel; never touches Agent state."""
+
+    sample = getattr(body, "sample_native_state", None)
+    if not callable(sample):
+        return
+    while True:
+        await asyncio.sleep(interval_s)
+        runtime = getattr(getattr(session, "parts", None), "runtime", None)
+        telemetry = getattr(runtime, "panel_telemetry", None)
+        if telemetry is None or not telemetry.enabled:
+            continue
+        try:
+            native = await asyncio.to_thread(sample)
+        except Exception:
+            continue
+        if native:
+            telemetry.sample_idle(native)
 
 
 async def _trace_active_body_state_loop(

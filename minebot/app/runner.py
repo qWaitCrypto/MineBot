@@ -1352,6 +1352,8 @@ class AgentRuntime:
         self._responses_turn_lock = asyncio.Lock()
         from minebot.app.direct_call_supervision import DirectBuildSupervisor
         self.decision_client = DecisionClient(emit=self.trace.emit)
+        from minebot.app.panel_telemetry import PanelTelemetry
+        self.panel_telemetry = PanelTelemetry(self.trace)
         self.direct_build_supervisor = DirectBuildSupervisor(self)
         self.reflex_manager = None
         self._body_event_trace_lock = threading.Lock()
@@ -1710,6 +1712,9 @@ class AgentRuntime:
                     call_id=tool_call_id or claim_id, timeout_s=timeout_s)
                 return with_execution_receipt(result)
             lane = self._read_lane if self.native_responses and not tool.sidecar.can_mutate_body else self.execution_lane
+            telemetry = getattr(self, "panel_telemetry", None)
+            if telemetry is not None and tool.sidecar.can_mutate_body:
+                admitted_callback = telemetry.scoped(admitted_callback, tool_call_id)
             result = await lane.run(admitted_callback, *args, timeout_s=timeout_s)
             return with_execution_receipt(result)
         finally:

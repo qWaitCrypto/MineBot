@@ -93,10 +93,16 @@ class DirectBuildSupervisor:
             if self.current is not record or payload.get("call_id") != call_id:
                 return
             record["action_id"] = payload.get("action_id")
+            if payload.get("lite"):
+                # Observer-only frames carry no inventory or site facts; keep the last full sample.
+                return
             latest.clear()
             latest.update(payload)
             wake.set()
+        telemetry = getattr(self.runtime, "panel_telemetry", None)
         def notify(payload):
+            if telemetry is not None:
+                telemetry.observe(call_id, payload)
             loop.call_soon_threadsafe(receive, dict(payload))
         def invoke():
             with tool_observation_scope(call_id, notify):
