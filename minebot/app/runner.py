@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import contextlib
 import json
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -81,7 +82,7 @@ from minebot.brain.modes import (
     signalize_events,
     survival_reason_from_tool_results,
 )
-from minebot.brain.progress import ProgressAuthority, ProgressStep, progress_snapshot
+from minebot.brain.progress import ProgressAuthority, ProgressStep, material_progress_evidence, progress_snapshot
 from minebot.brain.registry import (
     ObservationProjector,
     RegisteredTool,
@@ -125,6 +126,65 @@ BODY_OWNER_SETTLE_POLL_S = 0.10
 BODY_WATCH_POLL_S = 0.25
 STREAM_CANCEL_DRAIN_TIMEOUT_S = EXECUTION_LANE_CANCEL_TIMEOUT_S + 5.0
 MODEL_COUNT_MAP_LIMIT = 48
+
+
+# A direct Body call that has not settled after this many seconds stops holding
+# the model turn; unset/empty keeps the default, "off" keeps calls synchronous.
+DIRECT_CALL_WINDOW_ENV = "MINEBOT_DIRECT_CALL_WINDOW_S"
+DEFAULT_DIRECT_CALL_WINDOW_S = 10.0
+
+
+def direct_call_window_from_env(env: Mapping[str, str] | None = None) -> float | None:
+    raw = (os.environ if env is None else env).get(DIRECT_CALL_WINDOW_ENV, "").strip().lower()
+    if not raw:
+        return DEFAULT_DIRECT_CALL_WINDOW_S
+    if raw in {"off", "none", "false", "0"}:
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{DIRECT_CALL_WINDOW_ENV} must be a number of seconds or 'off'") from exc
+    if value <= 0:
+        raise ValueError(f"{DIRECT_CALL_WINDOW_ENV} must be positive or 'off'")
+    return value
+
+
+@dataclass
+class BackgroundCall:
+    """A direct Body call whose claim and work outlived the turn that issued it.
+
+    It is still the same ``agent_call`` claim under the same ``tool_call_id``;
+    only the model turn stopped waiting. The Body allows one such call at a time.
+    """
+
+    tool_call_id: str
+    tool: str
+    arguments: JsonObject
+    task: "asyncio.Future[JsonObject]"
+    started_at: float = field(default_factory=time.monotonic)
+
+    def payload(self) -> JsonObject:
+        return {
+            "kind": "direct_call",
+            "tool_call_id": self.tool_call_id,
+            "tool": self.tool,
+            "arguments": _bounded_summary_value(self.arguments),
+            "status": "running",
+            "elapsed_s": round(time.monotonic() - self.started_at, 1),
+        }
+
+    def receipt(self) -> JsonObject:
+        return {
+            "success": True,
+            "reason": "running_in_background",
+            "canRetry": False,
+            "nextSuggestion": (
+                "This is not the result. The Body keeps working on this call and its real result "
+                "arrives later as a REFLEX_RESULT message for the same tool_call_id. Do not assume "
+                "it succeeded and do not repeat the call."
+            ),
+            "metrics": {"background": self.payload()},
+        }
 
 
 @dataclass
@@ -288,6 +348,9 @@ def tool_invoker_for(tool: RegisteredTool):
         )
 
         post_state: BodyState | None = None
+        # True once this call's epoch member has been settled with a background
+        # receipt; the real result then arrives outside the model turn.
+        epoch_closed = False
 
         def finalize(
             result: JsonObject,
@@ -297,16 +360,24 @@ def tool_invoker_for(tool: RegisteredTool):
             pending_abort: ProgressAbort | None = None,
             raise_progress_abort: bool = True,
         ) -> JsonObject:
-            model_result = _finalize_tool_payload(
-                tool=tool,
-                result=result,
-                trace=trace,
-                tool_call_id=tool_call_id,
-                runtime=runtime,
-                args_hash=args_hash,
-                tactic_signature=tactic_signature,
-            )
-            if epoch_adapter is not None and epoch_member is not None:
+            if status == "background":
+                # Not the call's final receipt: keep the archive slot and the
+                # tool_result event for the result that arrives later.
+                model_result = _model_tool_payload(tool.name, result, trace_ref=tool_call_id)
+                if trace is not None:
+                    trace.emit("tool_background", tool_call_id=tool_call_id, tool=tool.name,
+                               args_hash=args_hash, model_result=model_result)
+            else:
+                model_result = _finalize_tool_payload(
+                    tool=tool,
+                    result=result,
+                    trace=trace,
+                    tool_call_id=tool_call_id,
+                    runtime=runtime,
+                    args_hash=args_hash,
+                    tactic_signature=tactic_signature,
+                )
+            if epoch_adapter is not None and epoch_member is not None and not epoch_closed:
                 abort = epoch_adapter.settle(
                     epoch_member,
                     result=result,
@@ -500,170 +571,248 @@ def tool_invoker_for(tool: RegisteredTool):
         progress_steps: tuple[ProgressStep, ...] = ()
         pending_abort: ProgressAbort | None = None
         settlement_status: str | None = None
-        try:
-            if runtime is not None and epoch_member is not None:
-                captured = await runtime.run_tool(tool,
-                    _capture_tool_execution,
-                    tool,
-                    params,
-                    ctx.context,
-                    timeout_s=tool.sidecar.timeout_s,
-                    tool_call_id=tool_call_id,
-                )
-                progress_steps = captured.progress_steps
-                post_state = captured.post_state
-                if captured.error is not None:
-                    raise captured.error
-                assert captured.result is not None
-                result = captured.result
-            elif runtime is None:
-                result = execute_tool(tool, params, ctx.context.weld_context)
-            else:
-                result = await runtime.run_tool(tool,
-                    execute_tool,
-                    tool,
-                    params,
-                    ctx.context.weld_context,
-                    timeout_s=tool.sidecar.timeout_s,
-                    tool_call_id=tool_call_id,
-                )
-        except asyncio.CancelledError:
-            if runtime is not None and (not getattr(runtime, "native_responses", False) or tool.sidecar.can_mutate_body):
-                await runtime.cancel_active_execution(f"tool_cancelled:{tool.name}")
-            if epoch_adapter is not None and epoch_member is not None:
-                epoch_adapter.cancel_member(epoch_member, "tool_cancelled")
-            raise
-        except ProgressAbort as exc:
-            if epoch_adapter is None or epoch_member is None:
+
+        async def execute() -> JsonObject:
+            nonlocal progress_steps, pending_abort, settlement_status, post_state
+            try:
+                if runtime is not None and epoch_member is not None:
+                    captured = await runtime.run_tool(tool,
+                        _capture_tool_execution,
+                        tool,
+                        params,
+                        ctx.context,
+                        timeout_s=tool.sidecar.timeout_s,
+                        tool_call_id=tool_call_id,
+                    )
+                    progress_steps = captured.progress_steps
+                    post_state = captured.post_state
+                    if captured.error is not None:
+                        raise captured.error
+                    assert captured.result is not None
+                    result = captured.result
+                elif runtime is None:
+                    result = execute_tool(tool, params, ctx.context.weld_context)
+                else:
+                    result = await runtime.run_tool(tool,
+                        execute_tool,
+                        tool,
+                        params,
+                        ctx.context.weld_context,
+                        timeout_s=tool.sidecar.timeout_s,
+                        tool_call_id=tool_call_id,
+                    )
+            except asyncio.CancelledError:
+                if epoch_closed:
+                    # Detached: the stop entry that cancelled us owns settlement.
+                    raise
+                if runtime is not None and (not getattr(runtime, "native_responses", False) or tool.sidecar.can_mutate_body):
+                    await runtime.cancel_active_execution(f"tool_cancelled:{tool.name}")
+                if epoch_adapter is not None and epoch_member is not None:
+                    epoch_adapter.cancel_member(epoch_member, "tool_cancelled")
                 raise
-            pending_abort = exc
-            result = {
-                "success": False,
-                "reason": "progress_yielded",
-                "canRetry": True,
-                "nextSuggestion": None,
-                "metrics": _progress_abort_metrics(exc),
-            }
-        except BodyRecoveryRequired as exc:
-            if epoch_adapter is not None and epoch_member is not None:
+            except ProgressAbort as exc:
+                if epoch_adapter is None or epoch_member is None:
+                    raise
+                pending_abort = exc
                 result = {
                     "success": False,
-                    "reason": exc.reason,
+                    "reason": "progress_yielded",
                     "canRetry": True,
                     "nextSuggestion": None,
-                    "metrics": dict(exc.facts),
+                    "metrics": _progress_abort_metrics(exc),
                 }
+            except BodyRecoveryRequired as exc:
+                owner = runtime.live_body_owner() if runtime is not None and exc.reason == "body_busy" else None
+                if owner is not None:
+                    # A live plan or background call holds the Body. That is an
+                    # ordinary refusal the Agent can act on, not a fault to recover.
+                    return {
+                        "success": False,
+                        "reason": "body_busy",
+                        "canRetry": True,
+                        "nextSuggestion": (
+                            "The Body is still doing earlier work. Its result arrives as a later "
+                            "message; use read_reflex to inspect it, or control_reflex to stop it "
+                            "before issuing another Body action."
+                        ),
+                        "metrics": {"owner": owner},
+                    }
+                if epoch_adapter is not None and epoch_member is not None:
+                    result = {
+                        "success": False,
+                        "reason": exc.reason,
+                        "canRetry": True,
+                        "nextSuggestion": None,
+                        "metrics": dict(exc.facts),
+                    }
+                    finalize(
+                        result,
+                        progress_steps=progress_steps,
+                        status="body_recovery",
+                        raise_progress_abort=False,
+                    )
+                raise
+            except Exception as exc:
+                cancellation_reason: str | None = None
+                cancellation_facts: JsonObject | None = None
+                if isinstance(exc, (ToolExecutionTimeout, BodyActionTimeoutError)):
+                    settlement_status = "timeout"
+                    if runtime is not None and (not getattr(runtime, "native_responses", False) or tool.sidecar.can_mutate_body):
+                        cancellation_reason = _tool_timeout_cancellation_reason(tool.name, exc)
+                        cancellation_facts = await runtime.cancel_active_execution_with_facts(
+                            cancellation_reason
+                        )
+                result = _tool_exception_payload(exc)
+                if cancellation_facts is not None:
+                    metrics = result.get("metrics")
+                    if isinstance(metrics, dict):
+                        metrics["orphan_cleanup"] = cancellation_facts
+                    if cancellation_facts.get("owner_observed") and not cancellation_facts.get("settled"):
+                        result["canRetry"] = False
+                        result["nextSuggestion"] = (
+                            "Body owner cleanup did not settle; do not start another Body action "
+                            "until lifecycle recovery clears the owner."
+                        )
+                if trace is not None:
+                    trace.emit(
+                        "tool_exception",
+                        tool_call_id=tool_call_id,
+                        tool=tool.name,
+                        error_type=type(exc).__name__,
+                        reason=result["reason"],
+                        message=str(exc),
+                        await_diagnostics=result.get("metrics", {}).get("await_diagnostics"),
+                    )
+                # An action-level reconciliation unknown is still caused by a
+                # transport boundary, so it must invalidate the generation and
+                # participate in the existing bounded transport recovery. Keep a
+                # distinct public reason so the Agent can observe that the socket
+                # recovered without proving whether the mutation landed.
+                if result.get("reason") in {"transport_error", "action_reconciliation_unknown"}:
+                    ctx.context.weld_context.authority.invalidate_generation(
+                        f"{result['reason']}:{tool.name}"
+                    )
+                    ctx.context.trace and ctx.context.trace.emit(
+                        "tool_transport_recovery_candidate",
+                        tool_call_id=tool_call_id,
+                        tool=tool.name,
+                        reason=result["reason"],
+                        error_type=type(exc).__name__,
+                        await_diagnostics=result.get("metrics", {}).get("await_diagnostics"),
+                    )
+                    if runtime is not None:
+                        pending_abort = runtime.record_transport_error(
+                            tool.name,
+                            result,
+                            tool_call_id=tool_call_id,
+                            raise_on_limit=epoch_member is None,
+                        )
+            if _requires_body_recovery(result):
+                if trace is not None:
+                    trace.emit(
+                        "tool_body_recovery_preempt",
+                        tool_call_id=tool_call_id,
+                        tool=tool.name,
+                        reason=str(result.get("reason") or "body_recovery_required"),
+                        full_result=result,
+                    )
+                facts = _recovery_facts_from_tool(tool.name, result)
                 finalize(
                     result,
                     progress_steps=progress_steps,
                     status="body_recovery",
+                    pending_abort=pending_abort,
                     raise_progress_abort=False,
                 )
-            raise
-        except Exception as exc:
-            cancellation_reason: str | None = None
-            cancellation_facts: JsonObject | None = None
-            if isinstance(exc, (ToolExecutionTimeout, BodyActionTimeoutError)):
-                settlement_status = "timeout"
-                if runtime is not None and (not getattr(runtime, "native_responses", False) or tool.sidecar.can_mutate_body):
-                    cancellation_reason = _tool_timeout_cancellation_reason(tool.name, exc)
-                    cancellation_facts = await runtime.cancel_active_execution_with_facts(
-                        cancellation_reason
-                    )
-            result = _tool_exception_payload(exc)
-            if cancellation_facts is not None:
-                metrics = result.get("metrics")
-                if isinstance(metrics, dict):
-                    metrics["orphan_cleanup"] = cancellation_facts
-                if cancellation_facts.get("owner_observed") and not cancellation_facts.get("settled"):
-                    result["canRetry"] = False
-                    result["nextSuggestion"] = (
-                        "Body owner cleanup did not settle; do not start another Body action "
-                        "until lifecycle recovery clears the owner."
-                    )
-            if trace is not None:
-                trace.emit(
-                    "tool_exception",
-                    tool_call_id=tool_call_id,
-                    tool=tool.name,
-                    error_type=type(exc).__name__,
-                    reason=result["reason"],
-                    message=str(exc),
-                    await_diagnostics=result.get("metrics", {}).get("await_diagnostics"),
-                )
-            # An action-level reconciliation unknown is still caused by a
-            # transport boundary, so it must invalidate the generation and
-            # participate in the existing bounded transport recovery. Keep a
-            # distinct public reason so the Agent can observe that the socket
-            # recovered without proving whether the mutation landed.
-            if result.get("reason") in {"transport_error", "action_reconciliation_unknown"}:
-                ctx.context.weld_context.authority.invalidate_generation(
-                    f"{result['reason']}:{tool.name}"
-                )
-                ctx.context.trace and ctx.context.trace.emit(
-                    "tool_transport_recovery_candidate",
-                    tool_call_id=tool_call_id,
-                    tool=tool.name,
-                    reason=result["reason"],
-                    error_type=type(exc).__name__,
-                    await_diagnostics=result.get("metrics", {}).get("await_diagnostics"),
-                )
-                runtime = getattr(ctx.context, "runtime", None)
-                if runtime is not None:
-                    pending_abort = runtime.record_transport_error(
-                        tool.name,
-                        result,
-                        tool_call_id=tool_call_id,
-                        raise_on_limit=epoch_member is None,
-                    )
-        if _requires_body_recovery(result):
-            if trace is not None:
-                trace.emit(
-                    "tool_body_recovery_preempt",
-                    tool_call_id=tool_call_id,
-                    tool=tool.name,
-                    reason=str(result.get("reason") or "body_recovery_required"),
-                    full_result=result,
-                )
-            facts = _recovery_facts_from_tool(tool.name, result)
-            finalize(
+                raise BodyRecoveryRequired(_recovery_reason_from_tool_result(result, facts), facts=facts)
+            return result
+
+        def settle(result: JsonObject) -> JsonObject:
+            """Record one real result and build what the model reads."""
+            status = settlement_status
+            if status is None and is_governance_decision_required(
+                str(result.get("reason") or ""),
+                result.get("metrics") if isinstance(result.get("metrics"), dict) else None,
+            ):
+                status = "decision_required"
+            if status is None and is_partial_progress(
+                str(result.get("reason") or ""),
+                result.get("metrics") if isinstance(result.get("metrics"), dict) else None,
+            ):
+                status = "partial"
+            if runtime is not None:
+                runtime.remember_tool_result(tool.name, result, run_context=ctx.context)
+                runtime.remember_tool_body_facts(result, trace=trace)
+                if tool.sidecar.body_scope and result.get("reason") not in {
+                    "transport_error",
+                    "action_reconciliation_unknown",
+                }:
+                    # The recovery limit is a consecutive-failure guard, not a
+                    # lifetime error budget.  A successful authoritative Body
+                    # boundary proves the transport recovered and lets a later,
+                    # unrelated socket fault start a fresh bounded streak.
+                    runtime.note_transport_success()
+            return finalize(
                 result,
                 progress_steps=progress_steps,
-                status="body_recovery",
+                status=status,
                 pending_abort=pending_abort,
-                raise_progress_abort=False,
             )
-            raise BodyRecoveryRequired(_recovery_reason_from_tool_result(result, facts), facts=facts)
 
-        if settlement_status is None and is_governance_decision_required(
-            str(result.get("reason") or ""),
-            result.get("metrics") if isinstance(result.get("metrics"), dict) else None,
-        ):
-            settlement_status = "decision_required"
-        if settlement_status is None and is_partial_progress(
-            str(result.get("reason") or ""),
-            result.get("metrics") if isinstance(result.get("metrics"), dict) else None,
-        ):
-            settlement_status = "partial"
+        window_s = runtime.direct_call_window_s(tool) if runtime is not None else None
+        if window_s is None:
+            return settle(await execute())
 
-        if runtime is not None:
-            runtime.remember_tool_result(tool.name, result, run_context=ctx.context)
-            runtime.remember_tool_body_facts(result, trace=trace)
-            if tool.sidecar.body_scope and result.get("reason") not in {
-                "transport_error",
-                "action_reconciliation_unknown",
-            }:
-                # The recovery limit is a consecutive-failure guard, not a
-                # lifetime error budget.  A successful authoritative Body
-                # boundary proves the transport recovered and lets a later,
-                # unrelated socket fault start a fresh bounded streak.
-                runtime.note_transport_success()
-        return finalize(
-            result,
-            progress_steps=progress_steps,
-            status=settlement_status,
-            pending_abort=pending_abort,
-        )
+        # The Body claim outlives the model turn (decision-layer §8.4): a call
+        # that settles inside the window is answered synchronously; a longer
+        # one keeps its claim and running work, and this turn gets a receipt.
+        task = asyncio.ensure_future(execute())
+        try:
+            finished, _ = await asyncio.wait({task}, timeout=window_s)
+        except asyncio.CancelledError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        if finished:
+            return settle(task.result())
+
+        pre_state = epoch_adapter.pre_body_state if epoch_adapter is not None and epoch_member is not None else None
+        call = runtime.adopt_background_call(tool_call_id, tool.name, params, task)
+
+        def deliver(done: "asyncio.Future[JsonObject]") -> None:
+            runtime.release_background_call(call)
+            if done.cancelled():
+                return
+            try:
+                error = done.exception()
+                if error is None:
+                    result = done.result()
+                    runtime.commit_background_progress(
+                        progress_steps, pre_state, post_state, success=bool(result.get("success")),
+                        tool_call_id=tool_call_id,
+                    )
+                    model_result = settle(result)
+                    if pending_abort is not None:
+                        model_result["progressStop"] = pending_abort.stop_reason.value
+                elif isinstance(error, BodyRecoveryRequired):
+                    model_result = {"success": False, "reason": error.reason, "canRetry": True,
+                                    "metrics": dict(error.facts)}
+                else:
+                    model_result = _tool_exception_payload(error) if isinstance(error, Exception) else {
+                        "success": False, "reason": "cancelled", "canRetry": True}
+                    if trace is not None:
+                        trace.emit("tool_exception", tool_call_id=tool_call_id, tool=tool.name,
+                                   error_type=type(error).__name__, reason=model_result["reason"])
+                runtime.deliver_background_result(call, model_result)
+            except Exception as exc:
+                runtime.trace.emit("background_call_delivery_failed", tool_call_id=tool_call_id,
+                                   tool=tool.name, error_type=type(exc).__name__, message=str(exc)[:300])
+
+        task.add_done_callback(deliver)
+        try:
+            return finalize(call.receipt(), status="background")
+        finally:
+            epoch_closed = True
 
     return on_invoke_tool
 
@@ -1360,6 +1509,8 @@ class AgentRuntime:
         self.panel_telemetry = PanelTelemetry(self.trace)
         self.direct_build_supervisor = DirectBuildSupervisor(self)
         self.reflex_manager = None
+        self.background_call: BackgroundCall | None = None
+        self.direct_call_window = direct_call_window_from_env()
         self._body_event_trace_lock = threading.Lock()
         self.consecutive_transport_errors = 0
         # A single Body dispatch can surface through several composition
@@ -1715,7 +1866,7 @@ class AgentRuntime:
                 result = await self.direct_build_supervisor.run(tool, admitted_callback, args,
                     call_id=tool_call_id or claim_id, timeout_s=timeout_s)
                 return with_execution_receipt(result)
-            lane = self._read_lane if self.native_responses and not tool.sidecar.can_mutate_body else self.execution_lane
+            lane = self.execution_lane if tool.sidecar.can_mutate_body else self._off_writer_lane()
             telemetry = getattr(self, "panel_telemetry", None)
             if telemetry is not None and tool.sidecar.can_mutate_body:
                 admitted_callback = telemetry.scoped(admitted_callback, tool_call_id)
@@ -1771,11 +1922,11 @@ class AgentRuntime:
         self._turn_intent_kind = intent_kind
         self._turn_has_durable_goal = has_durable_goal
         self._turn_review_grant = review_grant_stop_epoch_id
-        prepared = await self.run_sync(self._prepare_turn, extra_signals)
+        prepared = await self.run_read(self._prepare_turn, extra_signals)
         if isinstance(prepared, AgentTurnOutcome):
             return prepared
         profile = prepared
-        restore_abort = await self.run_sync(self.restore_task_progress)
+        restore_abort = await self.run_read(self.restore_task_progress)
         if restore_abort is not None:
             return self._yield_from_progress_abort(restore_abort)
         try:
@@ -1997,6 +2148,120 @@ class AgentRuntime:
     ) -> Any:
         return await self.execution_lane.run(callback, *args, timeout_s=timeout_s)
 
+    def _off_writer_lane(self) -> SerialExecutionLane:
+        """Lane for work that reads but never writes the Body.
+
+        The writer lane is one thread. While a plan or a background call owns
+        the Body across turns, anything queued there waits for that work to
+        end, which would freeze the Agent it was meant to free.
+        """
+        if self.native_responses or self.live_body_owner() is not None:
+            return self._read_lane
+        return self.execution_lane
+
+    async def run_read(
+        self,
+        callback: Callable[..., Any],
+        *args: object,
+        timeout_s: float | None = None,
+    ) -> Any:
+        """Run read-only work off the loop without queueing behind a Body owner."""
+        return await self._off_writer_lane().run(callback, *args, timeout_s=timeout_s)
+
+    def live_body_owner(self) -> JsonObject | None:
+        """The plan or background call that holds the Body across model turns."""
+        call = self.background_call
+        if call is not None and not call.task.done():
+            return call.payload()
+        snapshot = self.body_control.snapshot()
+        if snapshot.holder == "agent_plan" and snapshot.stop_state == "running":
+            return {"kind": "plan", "activity_id": snapshot.claim_id, "status": "running"}
+        return None
+
+    def direct_call_window_s(self, tool: RegisteredTool) -> float | None:
+        """Seconds a direct Body call may hold the model turn, or None for all of it.
+
+        Only the SDK kernel needs this: its wire protocols answer a tool call
+        before the next model request. A result can leave the turn only when
+        the session is listening for its later delivery.
+        """
+        if (
+            self.native_responses
+            or not tool.sidecar.can_mutate_body
+            or self.direct_call_window is None
+            or self._sdk_reflex_fact_listener is None
+        ):
+            return None
+        return self.direct_call_window
+
+    def adopt_background_call(
+        self, tool_call_id: str, tool_name: str, arguments: JsonObject, task: "asyncio.Future[JsonObject]",
+    ) -> BackgroundCall:
+        call = BackgroundCall(tool_call_id, tool_name, dict(arguments), task)
+        self.background_call = call
+        self.trace.emit("background_call_started", tool_call_id=tool_call_id, tool=tool_name,
+                        body_control=self.body_control.snapshot().to_payload())
+        return call
+
+    def release_background_call(self, call: BackgroundCall) -> None:
+        if self.background_call is call:
+            self.background_call = None
+
+    def commit_background_progress(
+        self,
+        steps: tuple[ProgressStep, ...],
+        pre_state: BodyState | None,
+        post_state: BodyState | None,
+        *,
+        success: bool,
+        tool_call_id: str,
+    ) -> None:
+        """Give the progress authority what a detached call really did.
+
+        Its epoch closed on the receipt, before any of this existed. A stop
+        this raises is not lost: the counters persist and the next epoch of
+        the woken turn meets the same limit.
+        """
+        material = material_progress_evidence(pre_state, post_state, successful_body_action=success)
+        try:
+            self.authority.commit_steps(
+                _collapsed_epoch_progress_steps([SimpleNamespace(progress_steps=steps)]),
+                self.agent_context.goal_text,
+                material_changed=bool(material),
+            )
+        except ProgressAbort as exc:
+            self.trace.emit("background_progress_stop", tool_call_id=tool_call_id,
+                            stop_reason=exc.stop_reason.value)
+
+    def deliver_background_result(self, call: BackgroundCall, model_result: JsonObject) -> None:
+        """The one final receipt of a detached call, sent as an execution fact."""
+        reason = str(model_result.get("reason") or "")
+        status = ("completed" if model_result.get("success")
+                  else "cancelled" if reason in {"cancelled", "preempted"} else "blocked")
+        self.trace.emit("background_call_finished", tool_call_id=call.tool_call_id, tool=call.tool,
+                        status=status, reason=reason,
+                        elapsed_s=round(time.monotonic() - call.started_at, 3))
+        self.notify_reflex_fact({
+            "kind": "direct_call",
+            "activity_id": call.tool_call_id,
+            "tool_call_id": call.tool_call_id,
+            "tool": call.tool,
+            "status": status,
+            "result": model_result,
+        })
+
+    def background_work(self) -> JsonObject | None:
+        """Turn-independent Body work, for CURRENT_CONTEXT and read_reflex."""
+        work: JsonObject = {}
+        call = self.background_call
+        if call is not None and not call.task.done():
+            work["direct_call"] = call.payload()
+        summary = getattr(self.reflex_manager, "active_summary", None)
+        plan = summary() if callable(summary) else None
+        if plan is not None:
+            work["plan"] = plan
+        return work or None
+
     def latest_progress_evidence_cursor(self) -> int:
         if self.progress_epoch_archive is None:
             return 0
@@ -2021,8 +2286,7 @@ class AgentRuntime:
 
     async def read_progress_state(self) -> BodyState | None:
         try:
-            lane = self._read_lane if self.native_responses else self.execution_lane
-            return await lane.run(self._read_progress_state)
+            return await self.run_read(self._read_progress_state)
         except Exception as exc:
             self.trace.emit(
                 "progress_epoch_fingerprint_failed",
@@ -2035,6 +2299,16 @@ class AgentRuntime:
 
     async def wait_for_execution_idle(self, *, timeout_s: float = EXECUTION_LANE_CANCEL_TIMEOUT_S) -> bool:
         return await self.execution_lane.wait_idle(timeout_s=timeout_s)
+
+    async def wait_for_turn_execution_idle(self, *, timeout_s: float = EXECUTION_LANE_CANCEL_TIMEOUT_S) -> bool:
+        """Whether the work a model turn owned has left the writer lane.
+
+        A plan or background call keeps running there after the turn is
+        cancelled or ends; that is its claim, not an orphan of the turn.
+        """
+        if self.live_body_owner() is not None:
+            return True
+        return await self.wait_for_execution_idle(timeout_s=timeout_s)
 
     def request_execution_cancel(self, reason: str) -> int:
         return self.execution_lane.request_cancel(reason)
@@ -2155,7 +2429,7 @@ class AgentRuntime:
                 # writer. Once that writer is idle, owner reconciliation goes
                 # back through the one serialized Body lane like every other
                 # read; a second executor would violate Body call ordering.
-                head = await self.run_sync(read_head, proposed_epoch)
+                head = await self.run_read(read_head, proposed_epoch)
             except Exception as exc:
                 return {
                     "owner_observed": False,
@@ -2179,6 +2453,11 @@ class AgentRuntime:
             await asyncio.sleep(BODY_OWNER_SETTLE_POLL_S)
 
     async def aclose(self) -> None:
+        call = self.background_call
+        if call is not None and not call.task.done():
+            await self.cancel_active_execution("runtime_closed")
+            call.task.cancel()
+            await asyncio.gather(call.task, return_exceptions=True)
         if self.reflex_manager is not None:
             await self.reflex_manager.close()
         await self.direct_build_supervisor.close()
@@ -2222,7 +2501,7 @@ class AgentRuntime:
         except asyncio.CancelledError:
             streamed.cancel(mode="immediate")
             await self._finish_stream_cancellation(stream_task)
-            idle = await self.wait_for_execution_idle()
+            idle = await self.wait_for_turn_execution_idle()
             self.trace.emit("stream_cancelled", execution_idle=idle, active_count=self.execution_lane.active_count)
             raise
         finally:
@@ -2254,7 +2533,7 @@ class AgentRuntime:
         while True:
             await asyncio.sleep(BODY_WATCH_POLL_S)
             try:
-                state = await self.run_sync(self.body.get_state)
+                state = await self.run_read(self.body.get_state)
             except Exception as exc:
                 failures += 1
                 self.trace.emit(
@@ -2303,6 +2582,15 @@ class AgentRuntime:
                 "later message, so you do not need to poll for progress in the meantime. "
                 "Runtime owns _runtime status and real results; "
                 "use read_reflex/control_reflex to inspect or revise it."
+            )
+            parts.append(
+                "BACKGROUND_WORK: The Body does one piece of work at a time and that work does not stop when "
+                "your turn ends. A direct Body tool that is still running after a short window returns "
+                "reason=running_in_background: that is a receipt, not a result. The real result of that same "
+                "call arrives later as a REFLEX_RESULT message with kind=direct_call. Meanwhile CURRENT_CONTEXT "
+                "lists running work under BACKGROUND_WORK; you can talk, observe and plan, read it with "
+                "read_reflex, or stop it with control_reflex (cancel or take_control). Another Body action "
+                "returns body_busy until the running work has settled."
             )
         skill_preamble = context.skill_preamble()
         if skill_preamble:
@@ -2396,9 +2684,14 @@ class AgentRuntime:
         before_count = len(data.model_data.input)
         before_chars = model_input_chars(data.model_data.input)
         run_context = data.context
-        filtered = bounded_model_input(
-            data, live_context=getattr(run_context, "instruction_preamble", "") or ""
-        )
+        live_context = getattr(run_context, "instruction_preamble", "") or ""
+        work = self.background_work()
+        if work is not None:
+            # Read at request time, so each model call sees where the Body is now.
+            live_context = "\n".join(part for part in (
+                live_context, "BACKGROUND_WORK: " + json.dumps(work, ensure_ascii=False, sort_keys=True),
+            ) if part)
+        filtered = bounded_model_input(data, live_context=live_context)
         # The trailing CURRENT_CONTEXT item is not history; keep it out of the counts.
         after_items = [item for item in filtered.input if not is_current_context_item(item)]
         after_count = len(after_items)

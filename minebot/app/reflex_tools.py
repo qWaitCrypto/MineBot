@@ -346,8 +346,35 @@ class ReflexManager:
             return_execution_receipt=True,
         )
 
+    def _direct_call(self) -> dict[str, Any] | None:
+        """The direct Body call still running after its turn stopped waiting."""
+        call = getattr(self.runtime, "background_call", None)
+        if call is None or call.task.done():
+            return None
+        return call.payload()
+
+    def active_summary(self) -> dict[str, Any] | None:
+        """One line of the live plan for the Agent's current-context snapshot."""
+        with self._lock:
+            activity = next((item for item in self._activities.values()
+                             if item.status in {"accepted", "running", "waiting", "stopping", "updating"}), None)
+            if activity is None:
+                return None
+            return {"activity_id": activity.activity_id, "status": activity.status,
+                    "goal": str(activity.plan.get("goal", ""))[:200],
+                    "elapsed_s": round(time.time() - activity.created_at, 1)}
+
     def read(self, activity_id: str | None = None) -> dict[str, Any]:
         with self._lock:
+            direct = self._direct_call()
+            if direct is not None and activity_id in {None, direct["tool_call_id"]}:
+                # A direct call is one call node without a plan around it.
+                return ToolResult(True, "ok", True, metrics={
+                    "activity_id": direct["tool_call_id"],
+                    "status": "running",
+                    "direct_call": direct,
+                    "body_control": self.runtime.body_control.snapshot().to_payload(),
+                }).to_payload()
             activity = self._select(activity_id)
             if activity is None:
                 return ToolResult(False, "no_reflex", True).to_payload()
@@ -365,6 +392,13 @@ class ReflexManager:
         activity_id = params.get("activity_id")
         with self._lock:
             activity = self._select(str(activity_id) if activity_id else None)
+            direct = self._direct_call()
+            if direct is not None and operation in {"cancel", "take_control"} and (
+                    not activity_id or activity_id == direct["tool_call_id"]):
+                # Stopping a direct call uses the one stop entry; its own
+                # final result then reports what the stop left behind.
+                activity = None
+                operation = "take_control"
             if operation == "take_control":
                 if activity is None:
                     loop = self._loop

@@ -173,13 +173,13 @@ class ProgressEpochAdapter:
         epoch_id = f"epoch-{uuid4().hex}"
         task_identity_bound = self.runtime.progress_task_id is not None
         task_id = (
-            await self.runtime.run_sync(self.runtime.progress_task_id)
+            await self.runtime.run_read(self.runtime.progress_task_id)
             if task_identity_bound else None
         )
         work_calls = [call for call in calls if not _task_closure_tool(self.runtime, call.tool_name)]
         budget_denied = (
             self.work_stop is None and self.budget is not None and bool(work_calls)
-            and not await self.runtime.run_sync(self.budget.reserve, epoch_id)
+            and not await self.runtime.run_read(self.budget.reserve, epoch_id)
         )
         pre_state = await self.runtime.read_progress_state()
         pre_fingerprint = None if pre_state is None else self.runtime.authority.fingerprint(pre_state)
@@ -235,6 +235,11 @@ class ProgressEpochAdapter:
             budget_checkpoint_id=epoch.budget_checkpoint_id,
             budget_denied=budget_denied,
         )
+
+    @property
+    def pre_body_state(self) -> BodyState | None:
+        """Body state read when the open epoch began."""
+        return None if self._active is None else self._active.pre_body_state
 
     def claim_member(
         self,

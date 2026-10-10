@@ -1482,6 +1482,14 @@ class AgentSession:
         status = str(fact.get("status") or "unknown")
         task = self.task_workspace.current_task if self.task_workspace is not None else None
         if not self._goal_active and task is None:
+            if fact.get("kind") == "direct_call" and self.parts is not None:
+                # The Agent was promised this call's result. With no goal to
+                # wake, it still has to be there the next time the Agent looks.
+                self.parts.context.observe_system_message(
+                    "REFLEX_RESULT: " + json.dumps(fact, ensure_ascii=False, sort_keys=True)
+                )
+                self._trace("reflex_fact_recorded", reason="no_active_goal", activity_id=activity_id)
+                return
             self._trace("reflex_fact_dropped", reason="no_active_goal", activity_id=activity_id)
             return
         self.work_queue.enqueue(
@@ -1999,7 +2007,7 @@ class AgentSession:
             settled = True
             if self.parts is not None:
                 if cancellation_task is None:
-                    idle = await self.parts.runtime.wait_for_execution_idle()
+                    idle = await self.parts.runtime.wait_for_turn_execution_idle()
                     settled = idle
                 else:
                     cancellation_facts = await cancellation_task
@@ -2074,7 +2082,7 @@ class AgentSession:
             self.parts.runtime.request_execution_cancel(
                 f"quarantine_control:{queued_control.kind.value}"
             )
-        idle = await self.parts.runtime.wait_for_execution_idle(
+        idle = await self.parts.runtime.wait_for_turn_execution_idle(
             timeout_s=EXECUTION_QUARANTINE_POLL_S
         )
         if idle:
