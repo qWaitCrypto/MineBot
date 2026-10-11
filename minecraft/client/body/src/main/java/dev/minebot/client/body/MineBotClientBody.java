@@ -1423,6 +1423,16 @@ public final class MineBotClientBody implements ClientModInitializer {
                         || current.collectionBlocks.contains(BuiltInRegistries.BLOCK.getKey(state.getBlock()).getPath()));
                 }
             };
+            // A player without dirt to stand on uses the wood just cut. The usual
+            // footing blocks stay first; what is being gathered is the last resort.
+            List<net.minecraft.world.item.Item> footing =
+                new ArrayList<>(BaritoneAPI.getSettings().acceptableThrowawayItems.value);
+            for (String id : current.collectionBlocks) {
+                var item = new BlockOptionalMeta(id).getBlock().asItem();
+                if (!footing.contains(item)) footing.add(item);
+            }
+            current.previousThrowawayItems = BaritoneAPI.getSettings().acceptableThrowawayItems.value;
+            BaritoneAPI.getSettings().acceptableThrowawayItems.value = footing;
             baritone.getBuilderProcess().build("minebot-resource-cluster", mask, origin);
             current.phase = 1;
             current.phaseTick = current.ticks;

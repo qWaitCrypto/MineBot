@@ -113,6 +113,7 @@ from minebot.contract import (
     ProgressFacts,
     ProgressStopReason,
     REVIEWABLE_STOP_REASONS,
+    ToolResult,
     dominant_progress_abort,
     execution_cancellation_scope,
     is_governance_decision_required,
@@ -139,6 +140,13 @@ BODY_OWNER_SETTLE_POLL_S = 0.10
 BODY_WATCH_POLL_S = 0.25
 STREAM_CANCEL_DRAIN_TIMEOUT_S = EXECUTION_LANE_CANCEL_TIMEOUT_S + 5.0
 MODEL_COUNT_MAP_LIMIT = 48
+
+
+def _being_cancelled() -> bool:
+    """Whether the running task itself was asked to stop, as opposed to
+    something it awaited having been cancelled underneath it."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 def _execution_outcome(result: Any) -> tuple[str, str | None]:
@@ -1947,10 +1955,22 @@ class AgentRuntime:
                     call_id=operation_id, timeout_s=timeout_s)
                 outcome = _execution_outcome(result)
                 return with_execution_receipt(result)
-            lane = self.execution_lane if tool.sidecar.can_mutate_body else self._off_writer_lane()
             if tool.sidecar.can_mutate_body:
                 admitted_callback = self._observed(admitted_callback, operation_id)
-            result = await lane.run(admitted_callback, *args, timeout_s=timeout_s)
+                result = await self.execution_lane.run(admitted_callback, *args, timeout_s=timeout_s)
+            else:
+                try:
+                    result = await self._off_writer_lane().run(admitted_callback, *args, timeout_s=timeout_s)
+                except asyncio.CancelledError:
+                    if _being_cancelled():
+                        raise
+                    # Swept off the writer lane by a stop aimed at Body work.
+                    # It may have run in part, so it is reported, not repeated.
+                    self.trace.emit("tool_swept_by_body_stop", tool=tool.name, tool_call_id=tool_call_id)
+                    result = ToolResult(
+                        False, "interrupted_by_body_stop", True,
+                        next_suggestion="A stop of running Body work interrupted this call. Call it again if still needed.",
+                    ).to_payload()
             outcome = _execution_outcome(result)
             return with_execution_receipt(result)
         except asyncio.CancelledError:
@@ -2277,7 +2297,16 @@ class AgentRuntime:
         timeout_s: float | None = None,
     ) -> Any:
         """Run read-only work off the loop without queueing behind a Body owner."""
-        return await self._off_writer_lane().run(callback, *args, timeout_s=timeout_s)
+        try:
+            return await self._off_writer_lane().run(callback, *args, timeout_s=timeout_s)
+        except asyncio.CancelledError:
+            if _being_cancelled():
+                raise
+            # A stop aimed at Body work cancels everything queued on the writer
+            # lane, and a read is routed there while nothing owns the Body.
+            # Nobody asked to cancel this read or the task that waits for it.
+            self.trace.emit("read_swept_by_body_stop")
+            return await self._read_lane.run(callback, *args, timeout_s=timeout_s)
 
     def live_body_owner(self) -> JsonObject | None:
         """The plan or background call that holds the Body across model turns."""
@@ -2635,6 +2664,12 @@ class AgentRuntime:
         body_task = asyncio.create_task(self._wait_for_critical_body_fact())
         try:
             done, _ = await asyncio.wait({stream_task, body_task}, return_when=asyncio.FIRST_COMPLETED)
+            if body_task in done and body_task.cancelled():
+                # The watcher is an observer. Losing it is not a Body fact and
+                # must never be read as this turn being cancelled.
+                self.trace.emit("body_watch_lost")
+                await asyncio.wait({stream_task})
+                return stream_task.result()
             if body_task in done:
                 reason, facts = body_task.result()
                 self.authority.invalidate_generation(f"body_critical:{reason}")
@@ -2658,6 +2693,7 @@ class AgentRuntime:
             body_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await body_task
+
 
     @staticmethod
     async def _drain_stream(streamed: Any) -> Any:

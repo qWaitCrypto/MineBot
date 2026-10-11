@@ -319,3 +319,49 @@ def test_a_result_that_ended_mid_turn_stays_visible_until_it_is_delivered():
     assert [item["activity_id"] for item in runtime.background_work()["finished"]["results"]] == ["activity-1"]
     runtime.reflex_fact_delivered("activity-1")
     assert runtime.background_work() is None
+
+
+def test_a_read_swept_by_a_stop_of_body_work_is_still_answered():
+    import threading
+
+    runtime, _wrapper, _facts = _runtime(FakeBody())
+    gate = threading.Event()
+
+    async def scenario():
+        writer = asyncio.create_task(runtime.execution_lane.run(gate.wait))
+        await asyncio.sleep(0.02)
+        read = asyncio.create_task(runtime.run_read(lambda: "state"))  # no owner: queued behind the writer
+        await asyncio.sleep(0.02)
+        runtime.request_execution_cancel("reflex_take_control")
+        answer = await asyncio.wait_for(read, timeout=1)
+        gate.set()
+        await writer
+        return answer
+
+    try:
+        assert asyncio.run(scenario()) == "state"
+    finally:
+        gate.set()
+
+
+def test_losing_the_body_watcher_does_not_cancel_the_turn():
+    runtime, _wrapper, _facts = _runtime(FakeBody())
+
+    class Streamed:
+        cancelled = False
+
+        async def stream_events(self):
+            await asyncio.sleep(0.05)
+            return
+            yield
+
+        def cancel(self, mode="immediate"):
+            self.cancelled = True
+
+    async def lost_watcher():
+        raise asyncio.CancelledError
+
+    runtime._wait_for_critical_body_fact = lost_watcher
+    streamed = Streamed()
+    assert asyncio.run(runtime._supervise_streamed_run(streamed)) is streamed
+    assert streamed.cancelled is False

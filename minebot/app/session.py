@@ -2066,6 +2066,12 @@ class AgentSession:
                         return await preempt_work(reason, interrupt_body=interrupt_body)
                     admission_version = self.work_queue.notification_version
                 await asyncio.sleep(0.01)
+            if task.cancelled():
+                # Nothing here asked for it. A turn that was cancelled from
+                # underneath must end as an interrupted turn, so whatever is
+                # queued behind it still runs, and not as the end of the process.
+                self._trace("turn_cancelled_unrequested", work_kind=work_kind)
+                return await settle_preempted_work(None)
             return task.result()
         except asyncio.CancelledError:
             task.cancel()

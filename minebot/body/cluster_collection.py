@@ -17,9 +17,11 @@ from minebot.contract import Action, Body, Position, ToolResult, execution_check
 if TYPE_CHECKING:
     from minebot.body.resource_collection import ResourceCollectionConfig
 
-# A native mining process that gains nothing for this long, without having
-# travelled, is reported instead of being left to run out its deadline.
-NO_PROGRESS_WINDOW_S = 90.0
+# A native mining process that shows nothing for this long is reported instead
+# of being left to run out its deadline. Anything picked up or used up and any
+# real travel counts, so tunnelling toward ore or walking to a far tree does
+# not; a Body standing in front of something it cannot get at does.
+NO_PROGRESS_WINDOW_S = 45.0
 NO_PROGRESS_TRAVEL_BLOCKS = 24.0
 # Baritone keeps recalculating a path it cannot find. This many failures in a
 # row with nothing gained is its own evidence that the target is out of reach.
@@ -104,7 +106,9 @@ def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[T
     resets the window so a long walk to a distant resource is not a stall.
     """
     deadline = time.monotonic() + action_wait_timeout_s(action)
-    best, mark_at, mark_pos = inventory_total(), time.monotonic(), body.get_state().pos
+    first = body.get_state()
+    best, mark_at, mark_pos = inventory_total(), time.monotonic(), first.pos
+    carried = dict(first.inventory_counts or {})
     failed_mark = _path_state(body)[0]
     native_failure = ""
     while True:
@@ -120,8 +124,11 @@ def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[T
         total = inventory_total()
         failed, goal, last_failure, scaffold = _path_state(body)
         native_failure = last_failure or native_failure
-        if total > best or math.dist(state.pos, mark_pos) >= NO_PROGRESS_TRAVEL_BLOCKS:
+        now_carried = dict(state.inventory_counts or {})
+        if (total > best or now_carried != carried
+                or math.dist(state.pos, mark_pos) >= NO_PROGRESS_TRAVEL_BLOCKS):
             best, mark_at, mark_pos, failed_mark = max(best, total), time.monotonic(), state.pos, failed
+            carried = now_carried
             continue
         stalled_s = time.monotonic() - mark_at
         unreachable = failed - failed_mark >= PATH_FAILURE_LIMIT
