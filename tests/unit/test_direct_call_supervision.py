@@ -802,3 +802,33 @@ def test_idle_unknown_limit_calls_agent_without_stopping_body():
         finally:
             await runtime.aclose()
     asyncio.run(run())
+
+
+def test_plan_idle_question_uses_work_result_and_body_fact_shape():
+    async def run():
+        runtime, tool = make_runtime(GenericCallIpc())
+        runtime.execution_snapshots.begin("plan-idle", tool.name, {})
+        runtime.execution_snapshots.observe("plan-idle", {"position": [0, 5, 0], "pathing": False})
+        runtime.execution_snapshots.finish("plan-idle", state="succeeded", reason="done", control="released")
+        decision = StubDecision(("step_done",))
+        runtime.call_supervisor._client = decision
+        try:
+            await runtime.call_supervisor.supervise_idle(
+                tool, call_id="plan-idle", frame_interval_s=.001,
+                plan_context={"goal": "collect", "current_step": "collect ore", "node_description": "collect ore", "is_plan": True},
+                options={"step_done": "done", "repeat": "repeat", "inspect": "inspect", "call_agent": "agent"},
+                decision_context={
+                    "tool_arguments": {"target": [1, 5, 0]},
+                    "tool_result": {"success": False, "reason": "cancelled"},
+                    "body_state": {"position": [0, 5, 0]}, "reads": [],
+                },
+                stop_on_choice=True,
+            )
+            payload = decision.requests[0][0]
+            assert payload["state"]["protocol"] == "minebot-work-decision/0.2"
+            assert payload["state"]["result"]["reason"] == "cancelled"
+            assert payload["state"]["facts"]["body_state"]["position"] == [0, 5, 0]
+            assert "execution" not in payload["state"]
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())

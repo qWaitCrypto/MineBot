@@ -382,7 +382,7 @@ class ReflexManager:
 
     async def _supervise_idle(
         self, tool_name: str, *, call_id: str, plan_context: dict[str, Any],
-        options: dict[str, str],
+        options: dict[str, str], facts: dict[str, Any],
     ) -> dict[str, Any]:
         """Keep the shared Decision loop online while a plan has no call running."""
         try:
@@ -395,6 +395,7 @@ class ReflexManager:
         return await supervisor.supervise_idle(
             tool, call_id=f"plan-{call_id}", plan_context={**plan_context, "is_plan": True},
             options=options, stop_on_choice=True, notify_agent=False,
+            decision_context=facts,
         )
 
     async def _call(self, tool_name: str, arguments: dict[str, Any], *, call_id: str, timeout_s: float | None) -> dict[str, Any]:

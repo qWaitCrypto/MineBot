@@ -194,8 +194,53 @@ class CallSupervisor:
         execution: Mapping[str, Any], *, idle_s: float, purpose: str,
         supervision_context: Mapping[str, Any] | None,
         options: Mapping[str, str] | None = None,
+        decision_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         plan = self._plan_context(supervision_context=supervision_context, tool=tool, params=params)
+        if isinstance(decision_context, Mapping):
+            facts = dict(decision_context)
+            request = {
+                "state": {
+                    "protocol": "minebot-work-decision/0.2",
+                    "plan": self._bounded(plan),
+                    "tool": {
+                        "name": getattr(tool, "name", "unknown"),
+                        "arguments": self._bounded(facts.get("tool_arguments", params)),
+                        "normal_work": self._explanation(tool),
+                    },
+                    "result": self._bounded(facts.get("tool_result", {})),
+                    "facts": {
+                        "body_state": self._bounded(facts.get("body_state", execution.get("facts", {}))),
+                        "reads": self._bounded(facts.get("reads", [])),
+                    },
+                    "evidence_scope": (
+                        "Only the supplied tool result, latest Body state and bounded reads are known; "
+                        "omitted facts are unknown."
+                    ),
+                },
+                "questions": {"q": {
+                    "type": "choice",
+                    "instructions": "Choose exactly one finite option using only the supplied facts.",
+                    "criteria": self._criteria(plan, options),
+                }},
+            }
+            encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)
+            request_chars_before = len(encoded)
+            if request_chars_before > MAX_QUESTION_CHARS:
+                reads = request["state"]["facts"].get("reads")
+                while isinstance(reads, list) and reads and len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)) > MAX_QUESTION_CHARS - 512:
+                    reads.pop(0)
+                if len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)) > MAX_QUESTION_CHARS - 512:
+                    body = request["state"]["facts"].get("body_state")
+                    if isinstance(body, dict):
+                        for key in ("inventory_counts", "inventory", "inventory_delta"):
+                            body.pop(key, None)
+                            if len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)) <= MAX_QUESTION_CHARS - 512:
+                                break
+                encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)
+            request["_request_chars_before"] = request_chars_before
+            request["state"]["request_chars"] = len(encoded)
+            return request
         request: dict[str, Any] = {
             "state": {
                 "protocol": "minebot-call-supervision/3",
@@ -260,10 +305,12 @@ class CallSupervisor:
         purpose: str = "running_frame",
         supervision_context: Mapping[str, Any] | None = None,
         options: Mapping[str, str] | None = None,
+        decision_context: Mapping[str, Any] | None = None,
     ) -> str:
         request = self._question(
             call_id, tool, params, execution, idle_s=idle_s,
             purpose=purpose, supervision_context=supervision_context, options=options,
+            decision_context=decision_context,
         )
         tool_name = getattr(tool, "name", "unknown")
         request_chars_before = int(request.pop("_request_chars_before", request["state"].get("request_chars", 0)))
@@ -297,6 +344,7 @@ class CallSupervisor:
         execution: Mapping[str, Any], idle_s: float, *, purpose: str,
         supervision_context: Mapping[str, Any] | None,
         options: Mapping[str, str] | None = None,
+        decision_context: Mapping[str, Any] | None = None,
     ) -> str:
         """Call the overridable judge while accepting slice-1 test seams."""
         signature = inspect.signature(self.judge)
@@ -304,12 +352,14 @@ class CallSupervisor:
             "purpose" in signature.parameters
             or "supervision_context" in signature.parameters
             or "options" in signature.parameters
+            or "decision_context" in signature.parameters
             or any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
         )
         if accepts_context:
             return await self.judge(
                 call_id, tool, params, execution, idle_s,
                 purpose=purpose, supervision_context=supervision_context, options=options,
+                decision_context=decision_context,
             )
         return await self.judge(call_id, tool, params, execution, idle_s)
 
@@ -609,9 +659,10 @@ class CallSupervisor:
 
     async def supervise_idle(
         self, tool: Any, *, call_id: str, plan_context: Mapping[str, Any] | None = None,
-        duration_s: float = 2.0, frame_interval_s: float = 0.2,
+        duration_s: float | None = None, frame_interval_s: float = 0.2,
         options: Mapping[str, str] | None = None, stop_on_choice: bool = False,
         notify_agent: bool = True,
+        decision_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Ask at a bounded cadence while an unfinished tree is idle.
 
@@ -623,7 +674,7 @@ class CallSupervisor:
         previous_position: Any = object()
         unknown_same_position = 0
         counts = {"questions": 0, "unknown": 0, "agent": 0}
-        while time.monotonic() - started < duration_s:
+        while duration_s is None or time.monotonic() - started < duration_s:
             execution = self._snapshot(call_id)
             if not execution:
                 break
@@ -635,6 +686,7 @@ class CallSupervisor:
                 call_id, tool, {}, execution,
                 float(execution.get("since_progress_s") or 0.0),
                 purpose="idle_frame", supervision_context=plan_context, options=options,
+                decision_context=decision_context,
             )
             counts["questions"] += 1
             if choice == "unknown":

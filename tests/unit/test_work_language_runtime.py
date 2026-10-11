@@ -256,8 +256,8 @@ def test_changed_obligation_with_same_id_cannot_inherit_done():
         calls.append(dict(arguments))
         return {"success": True, "reason": "done", "metrics": {}}
     records = {}
-    first = asyncio.run(WorkPlanExecutor(first_plan, call=call, records=records).run())
-    second = asyncio.run(WorkPlanExecutor(revised_plan, call=call, records=records).run())
+    first = asyncio.run(WorkPlanExecutor(first_plan, call=call, decision=Decision("step_done"), records=records).run())
+    second = asyncio.run(WorkPlanExecutor(revised_plan, call=call, decision=Decision("step_done"), records=records).run())
     assert first.status == second.status == "completed"
     assert calls == [{"count": 2}, {"count": 10}]
 
@@ -306,9 +306,84 @@ def test_revision_reuses_caller_owned_records_and_skips_done_nodes():
         calls.append(tool)
         return {"success": tool != "blocked", "reason": "blocked" if tool == "blocked" else "done", "metrics": {}}
 
-    first = asyncio.run(WorkPlanExecutor(first_plan, call=call, records=records).run())
-    second = asyncio.run(WorkPlanExecutor(revised_plan, call=call, records=records).run())
+    decision = Decision("step_done", "call_agent", "step_done")
+    first = asyncio.run(WorkPlanExecutor(first_plan, call=call, decision=decision, records=records).run())
+    second = asyncio.run(WorkPlanExecutor(revised_plan, call=call, decision=decision, records=records).run())
     assert first.status == "blocked"
     assert second.status == "completed"
     assert calls == ["place", "blocked", "place"]
     assert records["done"].status == "done"
+
+
+def test_choice_keeps_selected_branch_while_a_child_is_waiting():
+    plan = {"language": "minebot-work/0.2", "goal": "choose", "timeout_s": 10,
+            "work": {"kind": "choice", "id": "route", "intent": "choose a route", "options": [
+                {"id": "a", "intent": "route a", "work": {"kind": "call", "id": "a_call", "tool": "a", "arguments": {}}},
+                {"id": "b", "intent": "route b", "work": {"kind": "call", "id": "b_call", "tool": "b", "arguments": {}}},
+            ]}}
+    calls = []
+
+    async def call(tool, arguments, *, call_id, timeout_s):
+        calls.append(tool)
+        return {"success": True, "reason": "done", "metrics": {}}
+
+    class Answers(Decision):
+        pass
+
+    decision = Decision("a", "unknown", "unknown")
+    executor = WorkPlanExecutor(plan, call=call, state=lambda: _state(), decision=decision)
+    first = asyncio.run(executor.run())
+    second = asyncio.run(executor.run())
+    assert first.status == second.status == "waiting"
+    assert calls == ["a"]
+    assert len([p for p in decision.payloads if p["questions"]["q"].get("criteria", {}).get("a")]) == 1
+    assert second.tree["work"]["_runtime"]["choice_id"] == "a"
+
+
+def test_repeat_is_iterative_and_retains_only_recent_invocations():
+    plan = {"language": "minebot-work/0.2", "goal": "collect", "timeout_s": 30,
+            "work": {"kind": "call", "id": "collect", "tool": "collect", "arguments": {}}}
+    calls = []
+    decision = Decision(*(["repeat"] * 500 + ["step_done"]))
+
+    async def call(tool, arguments, *, call_id, timeout_s):
+        calls.append(call_id)
+        return {"success": True, "reason": "ok", "metrics": {}}
+
+    executor = WorkPlanExecutor(plan, call=call, state=lambda: _state(), decision=decision)
+    result = asyncio.run(executor.run())
+    assert result.status == "completed"
+    assert len(calls) == 501 and len(set(calls)) == 501
+    assert executor.records["collect"].repeat_count == 500
+    assert len([key for key in executor.records if key.startswith("collect__repeat_")]) == 3
+
+
+def test_unknown_streak_calls_agent_without_a_permanent_question_silence():
+    plan = {"language": "minebot-work/0.2", "goal": "collect", "timeout_s": 10,
+            "work": {"kind": "call", "id": "collect", "tool": "collect", "arguments": {}}}
+    decision = Decision("unknown", "unknown", "unknown")
+    executor = WorkPlanExecutor(
+        plan, call=lambda *args, **kwargs: _cancelled_call([], "collect"),
+        state=lambda: _state(), decision=decision,
+    )
+    assert asyncio.run(executor.run()).status == "waiting"
+    assert asyncio.run(executor.run()).status == "waiting"
+    result = asyncio.run(executor.run())
+    assert result.status == "blocked"
+    assert result.tree["work"]["_runtime"]["blocked"]["reason"] == "decision_unknown_limit"
+
+
+def test_repeat_is_available_as_a_base_call_option_without_agent_repeat_metadata():
+    plan = {"language": "minebot-work/0.2", "goal": "collect", "timeout_s": 10,
+            "work": {"kind": "call", "id": "collect", "tool": "collect", "arguments": {}}}
+    decision = Decision("repeat", "step_done")
+    calls = []
+
+    async def call(tool, arguments, *, call_id, timeout_s):
+        calls.append(call_id)
+        return {"success": True, "reason": "ok", "metrics": {}}
+
+    result = asyncio.run(WorkPlanExecutor(plan, call=call, state=lambda: _state(), decision=decision).run())
+    assert result.status == "completed"
+    assert calls == ["collect", "collect__repeat_1"]
+    assert "same state.tool call" in decision.payloads[0]["questions"]["q"]["criteria"]["repeat"]
