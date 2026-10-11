@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import inspect
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -150,6 +151,11 @@ def _denied_command_text(command: SessionCommand) -> str:
 PartsFactory = Callable[[str], AgentRuntimeParts]
 ShouldStop = Callable[[SessionStep], bool]
 _WORK_PREEMPTED = object()
+# An Agent with a goal is checked on after this long without anything to act
+# on, then at doubling intervals up to the cap while only heartbeats arrive.
+HEARTBEAT_BASE_S = 120.0
+HEARTBEAT_MAX_S = 900.0
+HEARTBEAT_SOURCE = "heartbeat"
 
 
 @dataclass
@@ -173,6 +179,10 @@ class AgentSession:
     _recovery_attempts: int = 0
     _goal_active: bool = False
     _turn_pending: bool = False
+    # When the Agent last had something to act on, and how many heartbeats
+    # have woken it since without anything else arriving.
+    _last_work_monotonic: float = field(default_factory=time.monotonic)
+    _heartbeat_streak: int = 0
     _active_turn_request: tuple[str, str] | None = None
     _suspended_turn_request: tuple[str, str] | None = None
     _work_in_flight: bool = False
@@ -347,6 +357,8 @@ class AgentSession:
                 return SessionStep(status, self.parts.lifecycle.state, "no pending intent")
             admission_version = self.work_queue.notification_version
             self._work_in_flight = True
+            if intent.source != HEARTBEAT_SOURCE:
+                self._heartbeat_streak = 0
             try:
                 result = await self._execute_intent(
                     intent,
@@ -354,6 +366,7 @@ class AgentSession:
                 )
             finally:
                 self._work_in_flight = False
+                self._last_work_monotonic = time.monotonic()
                 self._end_transient_skill_owner(intent)
         except Exception as exc:
             self.work_queue.fail(
@@ -1139,8 +1152,9 @@ class AgentSession:
                 self._turn_pending = False
                 self._trace("reflex_fact_dropped", reason="invalid_payload")
                 return []
+            label = "HEARTBEAT" if fact.get("kind") == "heartbeat" else "REFLEX_RESULT"
             self.parts.context.observe_system_message(
-                "REFLEX_RESULT: " + json.dumps(fact, ensure_ascii=False, sort_keys=True)
+                f"{label}: " + json.dumps(fact, ensure_ascii=False, sort_keys=True)
             )
             self._reflex_fact_delivered(fact)
             self._turn_pending = True
@@ -1480,6 +1494,53 @@ class AgentSession:
         delivered = getattr(self.parts.runtime, "reflex_fact_delivered", None) if self.parts is not None else None
         if callable(delivered):
             delivered(str(fact.get("activity_id") or "unknown"))
+
+    def heartbeat_interval_s(self) -> float:
+        return min(HEARTBEAT_MAX_S, HEARTBEAT_BASE_S * (2 ** self._heartbeat_streak))
+
+    def queue_heartbeat_if_due(self) -> bool:
+        """Wake an Agent that has a goal and has heard nothing for a while.
+
+        The Agent ends its turn to wait for a result. If that result never
+        comes, nothing else would ever wake it. The interval doubles while
+        heartbeats are all that arrives, so waiting stays cheap.
+        """
+        if self.parts is None or self.work_queue is None or not self.has_active_goal:
+            return False
+        if self.parts.lifecycle.state is not LifecycleState.ACTIVE:
+            return False
+        task = self.task_workspace.current_task if self.task_workspace is not None else None
+        if task is not None and task.status not in {TaskStatus.RUNNING, TaskStatus.WAITING_EVENT}:
+            return False
+        interval = self.heartbeat_interval_s()
+        idle_s = time.monotonic() - self._last_work_monotonic
+        if idle_s < interval:
+            return False
+        self._heartbeat_streak += 1
+        self._last_work_monotonic = time.monotonic()
+        fact = {
+            "kind": "heartbeat",
+            "activity_id": f"heartbeat-{uuid4().hex[:8]}",
+            "status": "idle_check",
+            "idle_s": round(idle_s),
+            "next_check_s": round(self.heartbeat_interval_s()),
+            "note": (
+                "Nothing has reached you for this long. Look at CURRENT_CONTEXT: if the work you are waiting "
+                "for is still advancing, end your turn again; its result wakes you, and otherwise you are "
+                "checked on again after next_check_s. If nothing is running or it is not advancing, act."
+            ),
+        }
+        self.work_queue.enqueue(
+            WorkIntentKind.REFLEX_FACT,
+            source=HEARTBEAT_SOURCE,
+            payload={"fact": fact},
+            task_id=None if task is None else task.task_id,
+            generation=self.parts.authority.current_generation(),
+        )
+        self._turn_pending = True
+        self._trace("heartbeat_queued", idle_s=fact["idle_s"], next_check_s=fact["next_check_s"],
+                    streak=self._heartbeat_streak)
+        return True
 
     def _on_reflex_fact(self, fact: dict[str, object]) -> None:
         """Queue one model turn when a reflex activity reaches a terminal state."""

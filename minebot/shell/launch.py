@@ -238,6 +238,8 @@ class Launcher:
         self._stdin_lock = threading.Lock()
         self._cancel = threading.Event()
         self._failed_index = 0
+        self.session_restarts = 0
+        self._resuming = False
 
     # ------------------------------------------------------------ properties
     @property
@@ -576,7 +578,9 @@ class Launcher:
         if self._session_command is not None:
             return list(self._session_command)
         command = [sys.executable, "-m", "minebot.app.real_server_session", "--interactive"]
-        if self.options.goal:
+        # A restarted Agent picks its task up from the state store. Handing it
+        # the goal again would start that goal a second time.
+        if self.options.goal and not self._resuming:
             command.append(self.options.goal)
         if self.options.max_steps is not None:
             command += ["--max-steps", str(self.options.max_steps)]
@@ -668,6 +672,37 @@ class Launcher:
         self._write_record()
         return True
 
+    def restart_session(self) -> bool:
+        """Start the Agent again after its process ended on its own.
+
+        The world, the client and the stored task are as they were; only the
+        process that thinks is new.
+        """
+        if self.phase != "ready" or self.session is None or self.session_alive() or not self.environment:
+            return False
+        code = self.session.returncode
+        self.session_restarts += 1
+        step = self.steps[5]
+        step.status, step.lines, step.error, step.hint, step.summary = "running", [], "", "", ""
+        step.started, step.ended = time.monotonic(), None
+        self.output.clear()
+        self._cancel.clear()
+        self._resuming = True
+        self.say("fail", f"Agent 进程意外退出（代码 {code}），正在第 {self.session_restarts} 次重新拉起")
+        try:
+            self._step_agent(step)
+            if step.status == "running":
+                step.status = "ok"
+        except StepFailed as failure:
+            step.status, step.error, step.hint = "fail", failure.error, failure.hint
+            step.ended = time.monotonic()
+            self._write_record()
+            return False
+        step.ended = time.monotonic()
+        self.say("ok", "Agent 已重新就绪，从保存的任务继续")
+        self._write_record()
+        return True
+
     # ------------------------------------------------------------ control
     def send(self, line: str) -> bool:
         """Deliver one operator line to the session, exactly as if typed into its terminal."""
@@ -748,6 +783,7 @@ class Launcher:
             "client_reused": self.client_reused,
             "session_pid": self.session.pid if self.session else None,
             "session_exit": self.session.returncode if self.session else None,
+            "session_restarts": self.session_restarts,
             "launcher_pid": os.getpid(),
             "steps": [{**asdict(step), "elapsed_s": step.elapsed()} for step in self.steps],
         }

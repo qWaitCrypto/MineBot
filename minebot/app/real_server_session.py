@@ -1028,6 +1028,27 @@ def _terminal_announcement(truth: TerminalTruth) -> str | None:
     return None
 
 
+STEP_RETRY_BASE_DELAY_S = 1.0
+STEP_RETRY_MAX_DELAY_S = 60.0
+
+
+def _step_retry_delay(failures: int) -> float:
+    return min(STEP_RETRY_MAX_DELAY_S, STEP_RETRY_BASE_DELAY_S * (2 ** max(0, failures - 1)))
+
+
+def _trace_step_failure(session: object, error_type: str, message: str, failures: int) -> None:
+    import traceback
+
+    parts = getattr(session, "parts", None)
+    runtime = getattr(parts, "runtime", None)
+    if runtime is not None:
+        runtime.trace.emit("session_step_failed", error_type=error_type, message=message[:300],
+                           consecutive_failures=failures, retry_in_s=_step_retry_delay(failures))
+    # agent.log is where a person looks first.
+    print(f"session step failed ({failures} in a row): {error_type}: {message[:300]}", flush=True)
+    traceback.print_exc()
+
+
 async def _run_interactive_loop(
     session: AgentSession,
     *,
@@ -1041,6 +1062,7 @@ async def _run_interactive_loop(
     last = None
     remaining = max_steps
     body_event_poll_failures = 0
+    step_failures = 0
     state_sampler = asyncio.create_task(_trace_active_body_state_loop(session, body))
     panel_sampler = asyncio.create_task(_panel_idle_sample_loop(session, body))
     try:
@@ -1049,6 +1071,9 @@ async def _run_interactive_loop(
                 iteration_hook()
             _poll_chat_commands(session, chat_source)
             if not getattr(session, "has_pending_work", True):
+                heartbeat = getattr(session, "queue_heartbeat_if_due", None)
+                if callable(heartbeat) and heartbeat():
+                    continue
                 if body_event_pump is not None:
                     try:
                         task_workspace = getattr(session, "task_workspace", None)
@@ -1097,7 +1122,31 @@ async def _run_interactive_loop(
                     poll_delay_s if body_event_pump is not None else 0.05
                 )
                 continue
-            last = await session.step()
+            try:
+                last = await session.step()
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
+                # Something a turn awaited was cancelled underneath it. The
+                # Agent stays up; what is queued is taken on the next pass.
+                step_failures += 1
+                _trace_step_failure(session, "CancelledError", "cancelled underneath the turn", step_failures)
+                if remaining is not None:
+                    remaining -= 1  # a bounded run must still end
+                await asyncio.sleep(_step_retry_delay(step_failures))
+                continue
+            except Exception as exc:
+                # One turn failing is not the end of the Agent. The intent is
+                # already marked failed; wait a little longer each time so a
+                # repeating failure cannot spin.
+                step_failures += 1
+                _trace_step_failure(session, type(exc).__name__, str(exc), step_failures)
+                if remaining is not None:
+                    remaining -= 1  # a bounded run must still end
+                await asyncio.sleep(_step_retry_delay(step_failures))
+                continue
+            step_failures = 0
             if last.status in {"quit", "failed"}:
                 return last
             truth = safe_evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last, session=session)

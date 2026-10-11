@@ -253,3 +253,34 @@ def test_avoided_log_is_never_selected() -> None:
 
     assert result.reason == "resource_candidates_not_found" and body.actions == []
     assert result.metrics["avoided_targets"] == [[137, 76, 109]]
+
+
+def test_planning_without_moving_is_reported_as_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the client showed with a log five blocks overhead and nothing to stand on:
+    twelve finished path plans a second, none failed, and the Body never moved."""
+    monkeypatch.setattr(cluster_collection, "_PROGRESS_POLL_S", 0.01)  # the stall window stays at its real length
+    body = NativeBody({"oak_log": 27, "wooden_pickaxe": 1}, finishes=False)
+    planned = iter(range(0, 100000, 24))
+    plain = body.perceive
+
+    def perceive(scope, params):
+        read = plain(scope, params)
+        if scope == "baritoneState":
+            count = next(planned)
+            read.data.update(path_events={"CALC_STARTED": count, "CALC_FINISHED_NOW_EXECUTING": count},
+                             baritone_goal="GoalComposite[GoalBreak{x=-33,y=69,z=61}]", scaffold_blocks=0)
+        return read
+
+    body.perceive = perceive
+    body.pos = (-31.29, 64.0, 61.23)
+
+    result = collect_native_cluster(
+        body, block_types=("stone",), expected_drops=("cobblestone",), remaining_count=8, dry=False,
+        config=ResourceCollectionConfig(max_wall_s=30.0, mutation_budget=4))
+
+    assert result is not None and result.reason == "path_unreachable"
+    assert body.interrupted == ["path_unreachable"]
+    stalled = result.metrics["stalled"]
+    assert stalled["failed_path_calculations"] == 0 and stalled["path_calculations_without_moving"] >= 10
+    assert stalled["target"] == [-33, 69, 61] and stalled["target_above_feet"] == 5
+    assert "paths without moving" in result.next_suggestion and "5 blocks above" in result.next_suggestion

@@ -936,3 +936,41 @@ def test_missing_client_script_fails_the_environment_step_with_a_fix(tmp_path, f
     assert not launcher.run(stop=1)
     step = launcher.steps[0]
     assert step.status == "fail" and "open-client.sh" in step.error and "MINEBOT_HOME" in step.hint
+
+
+def test_agent_that_dies_on_its_own_is_started_again(tmp_path, fake_server):
+    import signal
+
+    from minebot.shell import supervisor as supervisor_module
+    from minebot.shell.supervisor import Supervisor
+
+    launcher = _launcher(tmp_path, fake_server, _free_port())
+    try:
+        assert launcher.run(), [(step.label, step.error) for step in launcher.steps]
+        supervisor = Supervisor(launcher)
+        first = launcher.session.pid
+        supervisor._keep_agent_alive()
+        assert launcher.session.pid == first and launcher.session_restarts == 0  # alive: left alone
+
+        os.kill(first, signal.SIGKILL)
+        launcher.session.wait(timeout=5)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not (launcher.session_alive() and launcher.session.pid != first):
+            supervisor._agent_next_restart = 0.0
+            supervisor._keep_agent_alive()
+            time.sleep(0.1)
+        if supervisor._agent_thread is not None:
+            supervisor._agent_thread.join(timeout=30)
+        assert launcher.session_alive() and launcher.session.pid != first
+        assert launcher.session_restarts == 1 and launcher.steps[5].status == "ok"
+        assert any("重新拉起" in text for _, _, text in launcher.messages)
+
+        # A process that keeps dying is left down, and the launcher says so.
+        supervisor._agent_restarts = [time.monotonic()] * supervisor_module.AGENT_RESTART_LIMIT
+        os.kill(launcher.session.pid, signal.SIGKILL)
+        launcher.session.wait(timeout=5)
+        supervisor._keep_agent_alive()
+        assert not launcher.session_alive() and supervisor._agent_gave_up
+        assert any("不再自动拉起" in text for _, _, text in launcher.messages)
+    finally:
+        launcher.shutdown()

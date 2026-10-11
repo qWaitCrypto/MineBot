@@ -26,6 +26,10 @@ NO_PROGRESS_TRAVEL_BLOCKS = 24.0
 # Baritone keeps recalculating a path it cannot find. This many failures in a
 # row with nothing gained is its own evidence that the target is out of reach.
 PATH_FAILURE_LIMIT = 5
+# Path plans made while the Body stays within STILL_BLOCKS of one spot and
+# carries the same things. A working process plans once and then moves.
+PLANS_WITHOUT_MOVING_LIMIT = 10
+STILL_BLOCKS = 1.0
 _PROGRESS_POLL_S = 2.0
 
 
@@ -65,18 +69,19 @@ def resource_cluster(
     return found
 
 
-def _path_state(body: Body) -> tuple[int, str, str, int | None]:
-    """Baritone's failed path calculations, goal, failure name and carried scaffold blocks."""
+def _path_state(body: Body) -> tuple[int, int, str, str, int | None]:
+    """Baritone's failed and started path calculations, goal, failure name and carried scaffold blocks."""
     try:
         read = body.perceive("baritoneState", {})
     except Exception:
-        return 0, "", "", None
+        return 0, 0, "", "", None
     data = read.data if read.ok and isinstance(read.data, dict) else {}
-    events = data.get("path_events")
-    failed = events.get("CALC_FAILED") if isinstance(events, dict) else 0
+    events = data.get("path_events") if isinstance(data.get("path_events"), dict) else {}
+    failed, started = events.get("CALC_FAILED"), events.get("CALC_STARTED")
     navigation = data.get("navigation") if isinstance(data.get("navigation"), dict) else {}
     scaffold = data.get("scaffold_blocks")
-    return ((failed if isinstance(failed, int) else 0), str(data.get("baritone_goal") or "")[:200],
+    return ((failed if isinstance(failed, int) else 0), (started if isinstance(started, int) else 0),
+            str(data.get("baritone_goal") or "")[:200],
             str(navigation.get("last_failure") or ""), scaffold if type(scaffold) is int else None)
 
 
@@ -109,7 +114,8 @@ def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[T
     first = body.get_state()
     best, mark_at, mark_pos = inventory_total(), time.monotonic(), first.pos
     carried = dict(first.inventory_counts or {})
-    failed_mark = _path_state(body)[0]
+    failed_mark, planned_mark = _path_state(body)[:2]
+    still_pos = first.pos
     native_failure = ""
     while True:
         execution_checkpoint()
@@ -122,16 +128,22 @@ def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[T
                 raise
         state = body.get_state()
         total = inventory_total()
-        failed, goal, last_failure, scaffold = _path_state(body)
+        failed, planned, goal, last_failure, scaffold = _path_state(body)
         native_failure = last_failure or native_failure
         now_carried = dict(state.inventory_counts or {})
         if (total > best or now_carried != carried
                 or math.dist(state.pos, mark_pos) >= NO_PROGRESS_TRAVEL_BLOCKS):
             best, mark_at, mark_pos, failed_mark = max(best, total), time.monotonic(), state.pos, failed
-            carried = now_carried
+            carried, still_pos, planned_mark = now_carried, state.pos, planned
             continue
+        if math.dist(state.pos, still_pos) >= STILL_BLOCKS:
+            still_pos, planned_mark = state.pos, planned
         stalled_s = time.monotonic() - mark_at
-        unreachable = failed - failed_mark >= PATH_FAILURE_LIMIT
+        # Planning a path over and over while standing in one place with
+        # nothing changing is the same evidence as a calculation that fails:
+        # Baritone has no move that gets it closer.
+        going_nowhere = planned - planned_mark >= PLANS_WITHOUT_MOVING_LIMIT
+        unreachable = failed - failed_mark >= PATH_FAILURE_LIMIT or going_nowhere
         if not unreachable and stalled_s < NO_PROGRESS_WINDOW_S:
             continue
         reason = "path_unreachable" if unreachable else "no_progress"
@@ -145,6 +157,7 @@ def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[T
         }
         if unreachable:
             facts.update(failed_path_calculations=failed - failed_mark,
+                         path_calculations_without_moving=planned - planned_mark,
                          **_unreachable_facts(goal, state.pos, native_failure))
             if scaffold is not None:
                 # Counted by the client from Baritone's own list of placeable blocks.
@@ -206,10 +219,12 @@ def collect_native_cluster(
                     if "scaffold_blocks" in stalled:
                         where += (f" It carries {stalled['scaffold_blocks']} blocks that Baritone may place "
                                   "to climb or bridge.")
+                failed_count = stalled.get("failed_path_calculations") or 0
+                tried = (f"failed {failed_count} path calculations in a row" if failed_count else
+                         f"planned {stalled.get('path_calculations_without_moving')} paths without moving")
                 suggestion = (
-                    f"Baritone failed {stalled.get('failed_path_calculations')} path calculations in a row and "
-                    f"found no way to this target.{where} Later collections in this task skip it; pass "
-                    "retry_unreachable=true once the Body has a way to reach it."
+                    f"Baritone {tried} and found no way to this target.{where} Later collections in this "
+                    "task skip it; pass retry_unreachable=true once the Body has a way to reach it."
                 )
         return ToolResult(success, reason, can_retry=not success, next_suggestion=suggestion, metrics=metrics)
 

@@ -24,6 +24,11 @@ from minebot.shell.control import ControlError, ControlServer, socket_path
 from minebot.shell.launch import HOME_VAR, ROOT, LaunchOptions, Launcher
 
 ORPHAN_S = 60.0
+# An Agent process that dies is started again after a short, growing delay,
+# at most this many times within the window.
+AGENT_RESTART_DELAY_S = 2.0
+AGENT_RESTART_LIMIT = 4
+AGENT_RESTART_WINDOW_S = 1800.0
 LINGER_S = 3.0  # keep answering after stopping so front ends see the final messages
 OPTIONS_NAME = "launcher-options.json"
 
@@ -53,6 +58,10 @@ class Supervisor:
         self._keep_client = False
         self._run_thread: threading.Thread | None = None
         self._client_thread: threading.Thread | None = None
+        self._agent_thread: threading.Thread | None = None
+        self._agent_restarts: list[float] = []
+        self._agent_next_restart = 0.0
+        self._agent_gave_up = False
 
     def request_stop(self, keep_client: bool = False) -> None:
         self._keep_client = keep_client
@@ -64,6 +73,36 @@ class Supervisor:
         self._client_thread = threading.Thread(target=self.launcher.restart_client, name="minebot-client-restart",
                                                daemon=True)
         self._client_thread.start()
+
+    def _keep_agent_alive(self) -> None:
+        """An Agent that ended without being asked to is started again.
+
+        Exit code 0 is the Agent quitting on request. Anything else is a
+        crash: the Body would stand in the world with nobody behind it. A
+        process that keeps dying is left down after a few tries, and says so.
+        """
+        launcher = self.launcher
+        session = launcher.session
+        if (launcher.phase != "ready" or session is None or launcher.session_alive()
+                or session.returncode == 0 or self._stop.is_set()):
+            return
+        if self._agent_thread is not None and self._agent_thread.is_alive():
+            return
+        now = time.monotonic()
+        self._agent_restarts = [at for at in self._agent_restarts if now - at < AGENT_RESTART_WINDOW_S]
+        if len(self._agent_restarts) >= AGENT_RESTART_LIMIT:
+            if not self._agent_gave_up:
+                self._agent_gave_up = True
+                launcher.say("fail", f"Agent 在 {AGENT_RESTART_WINDOW_S / 60:.0f} 分钟内退出了 "
+                                     f"{AGENT_RESTART_LIMIT} 次，不再自动拉起，看 agent.log")
+            return
+        if now < self._agent_next_restart:
+            return
+        self._agent_restarts.append(now)
+        self._agent_next_restart = now + AGENT_RESTART_DELAY_S * (2 ** len(self._agent_restarts))
+        self._agent_thread = threading.Thread(target=launcher.restart_session, name="minebot-agent-restart",
+                                              daemon=True)
+        self._agent_thread.start()
 
     def retry(self) -> None:
         if self._run_thread is not None and self._run_thread.is_alive():
@@ -81,6 +120,7 @@ class Supervisor:
         while not self._stop.wait(0.25):
             launcher = self.launcher
             launcher.watch_client_log()
+            self._keep_agent_alive()
             finished = launcher.phase == "failed" or (launcher.session is not None and not launcher.session_alive())
             if self.server.peers or not finished:
                 alone_since = None

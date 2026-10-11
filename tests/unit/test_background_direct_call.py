@@ -365,3 +365,28 @@ def test_losing_the_body_watcher_does_not_cancel_the_turn():
     streamed = Streamed()
     assert asyncio.run(runtime._supervise_streamed_run(streamed)) is streamed
     assert streamed.cancelled is False
+
+
+def test_an_idle_agent_with_a_goal_is_woken_at_growing_intervals():
+    from minebot.app import session as session_module
+    from minebot.app.session import AgentSession, SessionCommand
+    from tests.unit.test_agent_session import build_parts
+
+    calls, bodies = [], []
+    session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+    session.submit(SessionCommand.start("build a house"))
+    asyncio.run(session.step())
+    assert session.has_active_goal and not session.queue_heartbeat_if_due()  # just worked
+
+    session._last_work_monotonic -= session_module.HEARTBEAT_BASE_S + 1
+    assert session.queue_heartbeat_if_due() and session.has_pending_work
+    asyncio.run(session.step())
+    assert "HEARTBEAT" in calls[-1] and "idle_check" in calls[-1]
+    assert session.heartbeat_interval_s() == 2 * session_module.HEARTBEAT_BASE_S
+
+    session._last_work_monotonic -= session_module.HEARTBEAT_BASE_S + 1
+    assert not session.queue_heartbeat_if_due()  # the second one waits twice as long
+    session.submit(SessionCommand.message("how is it going?"))
+    asyncio.run(session.step())
+    assert session.heartbeat_interval_s() == session_module.HEARTBEAT_BASE_S  # real work resets the backoff
+    session.close()
