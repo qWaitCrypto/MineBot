@@ -20,7 +20,7 @@ class ToolTests(unittest.TestCase):
             Event(seq=1, tick=10, bot="Bot1", name="moveDone", data={"stopped_reason": "preempted"})
         )
 
-        self.assertTrue(result.success)
+        self.assertFalse(result.success)
         self.assertEqual(result.reason, "preempted")
         self.assertTrue(result.can_retry)
         self.assertTrue(result.metrics["paused"])

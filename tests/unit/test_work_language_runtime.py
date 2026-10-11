@@ -386,4 +386,4 @@ def test_repeat_is_available_as_a_base_call_option_without_agent_repeat_metadata
     result = asyncio.run(WorkPlanExecutor(plan, call=call, state=lambda: _state(), decision=decision).run())
     assert result.status == "completed"
     assert calls == ["collect", "collect__repeat_1"]
-    assert "same state.tool call" in decision.payloads[0]["questions"]["q"]["criteria"]["repeat"]
+    assert "same call once more" in decision.payloads[0]["questions"]["q"]["criteria"]["repeat"]

@@ -698,7 +698,11 @@ class WorkPlanExecutor:
                     "instructions": "Choose exactly one finite option using only the supplied facts.",
                     "criteria": self._call_options(
                         node,
-                        include_inspect=bool(facts.get("reader_new_fact")),
+                        # The plan's state callback is its bounded fact reader.
+                        # Keep one inspect choice available for the first
+                        # result question; the loop bounds reads and does not
+                        # repeat an unchanged sample implicitly.
+                        include_inspect=True,
                         plan=plan,
                         normal_work=str(facts.get("execution", {}).get("normal_work") or ""),
                     ),
@@ -733,7 +737,10 @@ class WorkPlanExecutor:
         facts = record.decision_facts or {}
         options = self._call_options(
             node,
-            include_inspect=bool(facts.get("reader_new_fact")),
+            # WorkPlan always has a state callback that can provide a bounded
+            # fact read.  Direct-call supervision applies its stricter
+            # registered-reader gate in its own option compiler.
+            include_inspect=True,
             plan=self._call_plan(node, intents),
             normal_work=str(facts.get("execution", {}).get("normal_work") or ""),
         )
