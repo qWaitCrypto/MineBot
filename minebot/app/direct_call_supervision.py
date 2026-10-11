@@ -845,6 +845,12 @@ class CallSupervisor:
                 # another invocation, or handoff to the Agent.
                 if record["cancel_requested"]:
                     break
+                # Lightweight SDK runtimes used for read-only model tests do
+                # not install the reflex manager or its Decision channel.
+                # Their direct tool result is already terminal; production
+                # wiring always installs the manager before this loop runs.
+                if getattr(self.runtime, "reflex_manager", None) is None:
+                    break
                 result_choice = await self._decide_result(
                     record, tool, params, result,
                 )
@@ -906,12 +912,17 @@ class CallSupervisor:
             "execution": execution,
             "reads": [],
         }
-        choice = await self._judge_frame(
-            record["call_id"], tool, params, execution,
-            float(execution.get("since_progress_s") or 0.0),
-            purpose="result_frame", supervision_context=record["supervision_context"],
-            options=options, decision_context=context,
-        )
+        try:
+            # A terminal result must never hold the Body or an Agent turn
+            # indefinitely when the Decision endpoint is unavailable.
+            choice = await asyncio.wait_for(self._judge_frame(
+                record["call_id"], tool, params, execution,
+                float(execution.get("since_progress_s") or 0.0),
+                purpose="result_frame", supervision_context=record["supervision_context"],
+                options=options, decision_context=context,
+            ), timeout=2.2)
+        except asyncio.TimeoutError:
+            choice = "unknown"
         record["questions"] += 1
         if choice == "unknown":
             record["unknown_answers"] += 1
