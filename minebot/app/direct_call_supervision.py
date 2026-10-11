@@ -13,6 +13,7 @@ import inspect
 import json
 import os
 import time
+from uuid import uuid4
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from typing import Any
@@ -35,6 +36,16 @@ DEFAULT_TOOL_EXPLANATION = (
     "world edits and inventory changes are facts; process liveness and a "
     "repeated sample are not."
 )
+
+# These are semantic escape hatches, not scene detectors.  Their availability
+# comes only from generic facts already present in the execution snapshot.
+_DEFAULT_ACTION_TEXT = {
+    "go_to_surface": "Move to a verified natural surface and leave the current water or below-grade position.",
+    "retreat_safe": "Return to the most recent safe standing position recorded by the Body.",
+    "eat": "Consume one available food item and restore the Body's hunger state.",
+    "move_away": "Move away from the nearest hostile presence using the recorded hazard position.",
+    "stay": "Hold the current position without starting another physical objective.",
+}
 
 
 class CallSupervisor:
@@ -204,23 +215,25 @@ class CallSupervisor:
         plan: Mapping[str, Any], options: Mapping[str, str] | None = None,
         *, tool_name: str = "the current tool", normal_work: str = "",
     ) -> dict[str, str]:
-        intent = str(
-            plan.get("intent") or plan.get("node_description")
-            or plan.get("current_step") or plan.get("goal") or "the current goal"
-        )[:260]
-        # normal_work is supplied once under state.tool. Repeating it in every
-        # criterion made the choices look identical and wasted the context.
-        context = f"Agent intent: “{intent}”."
+        # Intent and the healthy work sequence live once in state.plan and
+        # state.tool.normal_work.  Criteria describe only what that option
+        # means; repeating the context in every option made a small model
+        # anchor on a template instead of comparing the facts.
         criteria = {
-            "continue": f"{context} Keep the Body doing this work while the current facts show ordinary progress.",
+            "continue": "Keep the current Body work running toward the stated intent.",
             "inspect": "Read one new registered fact only when the current evidence cannot distinguish progress from completion.",
-            "step_done": f"{context} Mark this outcome complete only when facts positively show it is achieved.",
-            "call_agent": f"{context} Return control when facts show blockage, failure, unsafe conditions, or work outside this intent.",
+            "step_done": "End this step only when supplied facts positively show the intended outcome is present.",
+            "call_agent": "Return control when supplied facts show the work is blocked, failed, unsafe, or off-intent.",
+            "go_to_surface": _DEFAULT_ACTION_TEXT["go_to_surface"],
+            "retreat_safe": _DEFAULT_ACTION_TEXT["retreat_safe"],
+            "eat": _DEFAULT_ACTION_TEXT["eat"],
+            "move_away": _DEFAULT_ACTION_TEXT["move_away"],
+            "stay": _DEFAULT_ACTION_TEXT["stay"],
         }
         if options is None:
             return criteria
         return {
-            str(key): criteria.get(str(key), str(value))
+            str(key): str(value).strip() or criteria.get(str(key), f"Choose the declared {key} option.")
             for key, value in options.items()
         }
 
@@ -232,6 +245,10 @@ class CallSupervisor:
             "start_position", "position", "navigation", "pathing", "processes",
             "inventory_delta", "inventory", "construction", "goal", "failed_path_calculations",
             "builder_paused", "selected_item", "health", "food", "oxygen",
+            "in_water", "submerged", "water", "safe_standing_position",
+            "last_safe_position", "food_available", "food_item",
+            "nearest_hostile_position", "nearby_entities", "nearby_hostiles",
+            "entities", "hostiles",
         )
         compact_facts = {key: facts[key] for key in keep if key in facts}
         reads = facts.get("bounded_reads")
@@ -296,6 +313,38 @@ class CallSupervisor:
             vitals.append(f"hunger level is {compact_facts['food']}")
         if vitals:
             facts["vitals"] = "; ".join(vitals) + "."
+        water = next((compact_facts.get(key) for key in ("in_water", "submerged", "water")
+                      if key in compact_facts), None)
+        if water is not None:
+            facts["water"] = "The Body is in water." if bool(water) else "The Body is not in water."
+        safe_position = compact_facts.get("safe_standing_position", compact_facts.get("last_safe_position"))
+        if safe_position is not None:
+            facts["safe_standing_position"] = f"A previous safe standing position is recorded at {safe_position}."
+        if compact_facts.get("food_available") is True:
+            facts["food"] = "An edible item is available in the inventory."
+        hostile_items = compact_facts.get("nearby_hostiles", compact_facts.get("hostiles"))
+        if hostile_items is None:
+            hostile_items = compact_facts.get("nearby_entities", compact_facts.get("entities"))
+        if isinstance(hostile_items, Mapping):
+            hostile_items = hostile_items.get("entities", hostile_items.get("items"))
+        if isinstance(hostile_items, list):
+            hostile = [item for item in hostile_items if isinstance(item, Mapping)
+                       and item.get("hostile") is not False]
+            distances = []
+            for item in hostile:
+                distance = item.get("distance", item.get("dist"))
+                if distance is None and isinstance(item.get("dist2"), (int, float)):
+                    distance = round(float(item["dist2"]) ** 0.5, 1)
+                if isinstance(distance, (int, float)):
+                    distances.append(float(distance))
+            if hostile:
+                nearest = min(distances) if distances else None
+                facts["hostiles"] = (
+                    f"Nearby hostile entities: {len(hostile)} in the supplied observation"
+                    + (f", nearest about {nearest:g} blocks away." if nearest is not None else ".")
+                )
+            else:
+                facts["hostiles"] = "No hostile entities are present in the supplied observation."
         facts["phase"] = phase
         compact = {
             "tool": execution.get("tool"),
@@ -364,7 +413,6 @@ class CallSupervisor:
                         "arguments": self._bounded(facts.get("tool_arguments", params)),
                         "normal_work": self._explanation(tool),
                     },
-                    "intent_summary": self._intent_summary(plan),
                     "result": self._compact_result(facts.get("tool_result", {})),
                     "facts": {
                         "body_state": self._bounded(body_state),
@@ -594,13 +642,89 @@ class CallSupervisor:
         return facts
 
     @staticmethod
-    def _options_for(tool: Any, record: Mapping[str, Any], supplied: Mapping[str, str] | None = None) -> dict[str, str] | None:
+    def _facts_for_options(execution: Mapping[str, Any]) -> Mapping[str, Any]:
+        facts = execution.get("facts")
+        return facts if isinstance(facts, Mapping) else {}
+
+    @classmethod
+    def _options_for(
+        cls, tool: Any, record: Mapping[str, Any], supplied: Mapping[str, str] | None = None,
+        execution: Mapping[str, Any] | None = None,
+    ) -> dict[str, str]:
+        """Compile tree children and generic runtime choices for one frame.
+
+        The predicates below only consume generic evidence fields.  They do
+        not identify blocks, mobs or tool-specific failure patterns.
+        """
+        options: dict[str, str] = {}
         if supplied is not None:
-            return dict(supplied)
-        options = {"continue": "", "step_done": "", "call_agent": ""}
+            options.update({str(key): str(value) for key, value in supplied.items()})
+        options.setdefault("continue", "Keep the current Body work running toward the stated intent.")
+        options.setdefault("step_done", "End this step only when supplied facts positively show the intended outcome is present.")
+        options.setdefault("call_agent", "Return control when supplied facts show the work is blocked, failed, unsafe, or off-intent.")
+        facts = cls._facts_for_options(execution or {})
+        water = any(facts.get(key) is True for key in ("in_water", "submerged", "water"))
+        if water:
+            options.setdefault("go_to_surface", _DEFAULT_ACTION_TEXT["go_to_surface"])
+        if facts.get("safe_standing_position") is not None or facts.get("last_safe_position") is not None:
+            options.setdefault("retreat_safe", _DEFAULT_ACTION_TEXT["retreat_safe"])
+        if facts.get("food_available") is True:
+            options.setdefault("eat", _DEFAULT_ACTION_TEXT["eat"])
+        hostile = facts.get("nearby_hostiles", facts.get("hostiles"))
+        if hostile is None:
+            hostile = facts.get("nearby_entities", facts.get("entities"))
+        if isinstance(hostile, Mapping):
+            hostile = hostile.get("entities", hostile.get("items"))
+        if isinstance(hostile, list) and any(
+            isinstance(item, Mapping) and item.get("hostile") is not False for item in hostile
+        ):
+            options.setdefault("move_away", _DEFAULT_ACTION_TEXT["move_away"])
+        # Staying is always safe to offer; its body binding is a reversible
+        # move-to-current-position request and does not invent coordinates.
+        options.setdefault("stay", _DEFAULT_ACTION_TEXT["stay"])
         if callable(getattr(tool, "supervision_reader", None)) and record.get("reader_new_fact"):
-            options["inspect"] = ""
+            options["inspect"] = "Read one new registered fact only when the current evidence cannot distinguish progress from completion."
         return options
+
+    @staticmethod
+    def _tree_options(context: Mapping[str, Any] | None) -> Mapping[str, str] | None:
+        if not isinstance(context, Mapping):
+            return None
+        for key in ("node_options", "tree_options", "options"):
+            value = context.get(key)
+            if isinstance(value, Mapping):
+                return {str(option): str(description) for option, description in value.items()}
+            if isinstance(value, list):
+                compiled: dict[str, str] = {}
+                for item in value:
+                    if isinstance(item, Mapping) and item.get("id"):
+                        compiled[str(item["id"])] = str(item.get("intent") or item.get("description") or "")
+                if compiled:
+                    return compiled
+        return None
+
+    @classmethod
+    def _default_action(cls, choice: str, execution: Mapping[str, Any]) -> tuple[str, dict[str, Any]] | None:
+        facts = cls._facts_for_options(execution)
+        if choice == "go_to_surface":
+            return "go_to_surface", {"timeout_s": 120.0}
+        if choice == "retreat_safe":
+            pos = facts.get("safe_standing_position", facts.get("last_safe_position"))
+            if isinstance(pos, (list, tuple)) and len(pos) == 3:
+                return "move_to", {"pos": [int(float(value)) for value in pos], "radius": 1, "timeout_s": 30.0}
+        if choice == "eat":
+            item = facts.get("food_item")
+            if isinstance(item, str) and item.strip():
+                return "consume_item", {"item": item.strip()}
+        if choice == "move_away":
+            pos = facts.get("nearest_hostile_position")
+            if isinstance(pos, (list, tuple)) and len(pos) == 3:
+                return "move_away", {"danger_pos": [float(value) for value in pos], "min_distance": 8.0}
+        if choice == "stay":
+            pos = facts.get("position")
+            if isinstance(pos, (list, tuple)) and len(pos) == 3:
+                return "move_to", {"pos": [int(float(value)) for value in pos], "radius": 0, "timeout_s": 8.0}
+        return None
 
     @staticmethod
     def _deterministic_terminal(execution: Mapping[str, Any], read: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -786,7 +910,11 @@ class CallSupervisor:
                             record["initial_reader_done"] = True
                             await self._bounded_read(record, tool, params)
                             execution = self._snapshot(record["call_id"]) or execution
-                        frame_options = self._options_for(tool, record)
+                        frame_options = self._options_for(
+                            tool, record,
+                            supplied=self._tree_options(record["supervision_context"]),
+                            execution=execution,
+                        )
                         if decision_task is not None and not decision_task.done():
                             # There is no queue: only the latest frame survives.
                             pending = frame
@@ -846,6 +974,18 @@ class CallSupervisor:
                         decision=choice, plan=plan,
                     )
                     return
+                elif choice in {"go_to_surface", "retreat_safe", "eat", "move_away", "stay"}:
+                    action = self._default_action(choice, execution)
+                    if action is not None:
+                        await self._run_default_action(record, execution, choice, action)
+                        return
+                    # A stale or incomplete frame cannot supply safe action
+                    # parameters.  Treat it as unknown and leave the Body
+                    # untouched.
+                    self.runtime.trace.emit(
+                        "call_supervision_default_unknown", tool_call_id=record["call_id"],
+                        choice=choice,
+                    )
                 if pending is not None:
                     frame = pending
                     pending = None
@@ -854,7 +994,11 @@ class CallSupervisor:
                         decision_task = asyncio.create_task(self._judge_frame(
                             record["call_id"], tool, params, frame[0], frame[1],
                             purpose=frame[2], supervision_context=record["supervision_context"],
-                            options=self._options_for(tool, record),
+                            options=self._options_for(
+                                tool, record,
+                                supplied=self._tree_options(record["supervision_context"]),
+                                execution=frame[0],
+                            ),
                         ))
                         record["decision_task"] = decision_task
             if worker in done and decision_task is None:
@@ -993,6 +1137,70 @@ class CallSupervisor:
             notify_fact = getattr(self.runtime, "notify_reflex_fact", None)
             if callable(notify_fact):
                 notify_fact({"call_id": call_id, "status": "handoff_requested", **safe})
+
+    async def _run_default_action(
+        self, record: dict[str, Any], execution: Mapping[str, Any], choice: str,
+        action: tuple[str, dict[str, Any]],
+    ) -> None:
+        """Stop and settle the current call, then run one generic escape tool."""
+        if self.current is not record or record["cancel_requested"]:
+            return
+        record["cancel_requested"] = record["settling"] = True
+        call_id = record["call_id"]
+        safe = self._handoff_facts(
+            self._snapshot(call_id) or execution,
+            reason="decision_default_tool", confirmed=False, decision=choice,
+            plan=self._plan_context(
+                supervision_context=record["supervision_context"],
+                tool=type("Tool", (), {"name": execution.get("tool")})(), params={},
+            ),
+            extra={"default_choice": choice},
+        )
+        self.runtime.trace.emit(
+            "call_supervision_default_requested", tool_call_id=call_id,
+            choice=choice, tool=action[0], arguments=action[1], facts=safe,
+        )
+        settled = await self.runtime.cancel_active_execution_with_facts(
+            "direct_call:decision_default_tool", cancel_reflex=False,
+            invalidate_generation=not bool(record["supervision_context"].get("is_plan")),
+        )
+        default_result: Any = None
+        registry = getattr(self.runtime, "registry", None)
+        try:
+            default_tool = registry.get(action[0]) if registry is not None else None
+            if default_tool is None:
+                raise LookupError(action[0])
+            from minebot.brain.registry import execute_tool
+            default_id = f"reflex-default-{uuid4()}"
+            default_result = await self.runtime.run_tool(
+                default_tool, execute_tool, default_tool, action[1],
+                getattr(self.runtime, "weld_context", None),
+                tool_call_id=default_id,
+                claim_holder="agent_call",
+                supervision_context={
+                    "is_reflex_action": True,
+                    "_skip_supervision": True,
+                    "intent": _DEFAULT_ACTION_TEXT.get(choice, choice),
+                },
+            )
+        except Exception as exc:
+            self.runtime.trace.emit(
+                "call_supervision_default_failed", tool_call_id=call_id,
+                choice=choice, error_type=type(exc).__name__,
+            )
+            default_result = {"success": False, "reason": type(exc).__name__}
+        handoff = {**safe, "default_action": {
+            "choice": choice, "tool": action[0], "result": self._compact_result(default_result),
+        }, "settlement": settled}
+        self.runtime.direct_call_handoffs[call_id] = {"facts": handoff, "settlement": settled}
+        self.runtime.trace.emit(
+            "call_supervision_default_finished", tool_call_id=call_id,
+            choice=choice, facts=handoff,
+        )
+        if not bool(record["supervision_context"].get("is_plan")):
+            notify_fact = getattr(self.runtime, "notify_reflex_fact", None)
+            if callable(notify_fact):
+                notify_fact({"call_id": call_id, "status": "default_action_completed", **handoff})
 
 
 # Compatibility name for slice-1 callers.

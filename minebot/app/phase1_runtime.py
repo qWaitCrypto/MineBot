@@ -1221,6 +1221,10 @@ def _go_to_surface_tool(
             terminal_truth=("position", "ToolResult"),
             timeout_s=120.0,
         ),
+        supervision_explanation=(
+            "The Body normally finds a nearby safe surface, ascends or swims toward it, "
+            "and verifies the resulting position."
+        ),
     )
 
 

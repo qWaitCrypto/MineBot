@@ -2001,7 +2001,8 @@ class AgentRuntime:
             # kernel has its own pending-call protocol and is explicitly out
             # of this slice; keep its existing timing/settlement semantics.
             if (tool.sidecar.can_mutate_body and supervisor is not None
-                    and not getattr(self, "native_responses", False)):
+                    and not getattr(self, "native_responses", False)
+                    and not bool((supervision_context or {}).get("_skip_supervision"))):
                 result = await supervisor.run(tool, admitted_callback, call_args,
                     call_id=operation_id, timeout_s=timeout_s,
                     supervision_context=supervision_context)

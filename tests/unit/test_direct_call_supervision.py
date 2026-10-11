@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 from minebot.app.client_body_tools import client_body_tools
 from minebot.app.construction_facts import read_construction
@@ -626,15 +627,15 @@ def test_question_contains_goal_step_node_intent_and_fact_criteria():
             assert state["plan"]["goal"] == "collect stone"
             assert state["plan"]["current_step"] == "travel to vein"
             criteria = request["questions"]["q"]["criteria"]
-            assert set(criteria) == {"continue", "inspect", "step_done", "call_agent"}
+            assert {"continue", "inspect", "step_done", "call_agent"} <= set(criteria)
             assert all("state.plan." not in text for text in criteria.values())
-            assert all("reach the selected vein" in text for text in criteria.values() if text != criteria["inspect"])
-            assert "Agent intent:" in criteria["continue"]
+            assert "reach the selected vein" in json.dumps(state["plan"], ensure_ascii=False)
+            assert "Agent intent:" not in criteria["continue"]
             assert "normal process:" not in criteria["continue"]
-            assert "ordinary progress" in criteria["continue"]
+            assert "current Body work" in criteria["continue"]
             assert "cannot distinguish progress from completion" in criteria["inspect"]
             assert "positively show" in criteria["step_done"]
-            assert "blockage, failure, unsafe conditions" in criteria["call_agent"]
+            assert "blocked, failed, unsafe, or off-intent" in criteria["call_agent"]
             assert "normal process:" not in json.dumps(criteria, ensure_ascii=False)
             assert "returns a verified world result" in state["tool"]["normal_work"]
             assert state["request_chars"] <= 16_000
@@ -642,6 +643,44 @@ def test_question_contains_goal_step_node_intent_and_fact_criteria():
         finally:
             await runtime.aclose()
     asyncio.run(run())
+
+
+def test_frame_options_are_concrete_and_filtered_by_generic_facts():
+    tool = SimpleNamespace(name="move_to", supervision_reader=None)
+    record = {"reader_new_fact": False}
+    execution = {"facts": {
+        "in_water": True,
+        "safe_standing_position": [1, 2, 3],
+        "food_available": True,
+        "food_item": "bread",
+        "nearby_hostiles": [{"hostile": True, "dist2": 16}],
+        "position": [4, 5, 6],
+    }}
+    options = supervision_module.CallSupervisor._options_for(tool, record, execution=execution)
+    assert {"continue", "step_done", "call_agent", "go_to_surface", "retreat_safe", "eat", "move_away", "stay"} <= set(options)
+    assert "go_to_surface" in options and "move_away" in options
+    dry = supervision_module.CallSupervisor._options_for(
+        tool, record, execution={"facts": {"in_water": False, "food_available": False}}
+    )
+    assert "go_to_surface" not in dry and "retreat_safe" not in dry and "eat" not in dry and "move_away" not in dry
+
+
+def test_concrete_option_criteria_do_not_repeat_intent_or_normal_work():
+    supervisor = supervision_module.CallSupervisor(SimpleNamespace(
+        agent_context=None, native_task_workspace=None, native_plan=None,
+        trace=SimpleNamespace(emit=lambda *args, **kwargs: None), decision_client=None,
+    ))
+    request = supervisor._question(
+        "frame", SimpleNamespace(name="move_to", supervision_explanation="Approach, travel, verify."),
+        {}, {"tool": "move_to", "state": "running", "phase": "moving", "facts": {"in_water": True}},
+        idle_s=0.0, purpose="running_frame",
+        supervision_context={"intent": "reach the shelter", "goal": "survive", "current_step": "reach the shelter"},
+        options={"continue": "Keep working toward the shelter.", "go_to_surface": "Leave the water."},
+    )
+    criteria = request["questions"]["q"]["criteria"]
+    assert criteria == {"continue": "Keep working toward the shelter.", "go_to_surface": "Leave the water."}
+    assert "reach the shelter" not in criteria["continue"]
+    assert request["state"]["tool"]["normal_work"] == "Approach, travel, verify."
 
 
 def test_ambiguous_decision_is_unknown_and_does_not_stop():

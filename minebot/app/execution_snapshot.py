@@ -284,9 +284,17 @@ class ExecutionSnapshots:
             "pathing", "builder_paused", "selected_item", "selected_item_known",
             "inventory_complete", "inventory_includes_selected", "creative",
             "any_process_active", "scaffold_blocks", "health", "food", "oxygen",
+            # These are ambient survival and safety facts.  They are copied
+            # from the Body frame; the snapshot does not infer them.
+            "in_water", "submerged", "water", "safe_standing_position",
+            "last_safe_position", "food_available", "food_item",
+            "nearest_hostile_position",
         ):
             if key in payload:
                 facts[key] = payload[key]
+        for key in ("nearby_entities", "nearby_hostiles", "entities", "hostiles"):
+            if key in payload and isinstance(payload[key], (list, tuple)):
+                facts[key] = list(payload[key])[:32]
         active = [name for name, field in PROCESS_FIELDS.items() if payload.get(field) is True]
         if any(field in payload for field in PROCESS_FIELDS.values()):
             facts["processes"] = active
