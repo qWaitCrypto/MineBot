@@ -642,7 +642,7 @@ class WorkPlanExecutor:
         options = {
             # The plan and tool state carry the node intent and normal work
             # once.  Each criterion describes only its own choice.
-            "step_done": "Mark this call complete only when the result and body facts positively show its intended outcome.",
+            "step_done": "Mark this call complete when the result and body facts positively show the intended amount, destination, or outcome.",
             "call_agent": "Return control when facts show blockage, failure, unsafe work, or off-intent work that another call cannot resolve.",
             "repeat": "Run the same call once more when facts show the intended outcome is still missing and another invocation can make progress.",
         }

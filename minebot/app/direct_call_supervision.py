@@ -40,7 +40,7 @@ DEFAULT_TOOL_EXPLANATION = (
 # These are semantic escape hatches, not scene detectors.  Their availability
 # comes only from generic facts already present in the execution snapshot.
 _DEFAULT_ACTION_TEXT = {
-    "go_to_surface": "Move to a verified natural surface and leave the current water or below-grade position.",
+    "go_to_surface": "Move upward to a verified natural surface now, leaving the current underwater or below-grade state.",
     "retreat_safe": "Return to the most recent safe standing position recorded by the Body.",
     "eat": "Consume one available food item and restore the Body's hunger state.",
     "move_away": "Move away from the nearest hostile presence using the recorded hazard position.",
@@ -222,7 +222,7 @@ class CallSupervisor:
         criteria = {
             "continue": "Keep the current Body work running toward the stated intent.",
             "inspect": "Read one new registered fact only when the current evidence cannot distinguish progress from completion.",
-            "step_done": "End this step only when supplied facts positively show the intended outcome is present.",
+            "step_done": "End this step when supplied facts positively show the intended amount, destination, or result is already present.",
             "call_agent": "Return control when supplied facts show the work is blocked, failed, unsafe, or off-intent.",
             "go_to_surface": _DEFAULT_ACTION_TEXT["go_to_surface"],
             "retreat_safe": _DEFAULT_ACTION_TEXT["retreat_safe"],
@@ -660,7 +660,7 @@ class CallSupervisor:
         if supplied is not None:
             options.update({str(key): str(value) for key, value in supplied.items()})
         options.setdefault("continue", "Keep the current Body work running toward the stated intent.")
-        options.setdefault("step_done", "End this step only when supplied facts positively show the intended outcome is present.")
+        options.setdefault("step_done", "End this step when supplied facts positively show the intended amount, destination, or result is already present.")
         options.setdefault("call_agent", "Return control when supplied facts show the work is blocked, failed, unsafe, or off-intent.")
         facts = cls._facts_for_options(execution or {})
         water = any(facts.get(key) is True for key in ("in_water", "submerged", "water"))
@@ -895,7 +895,7 @@ class CallSupervisor:
         if not isinstance(payload, Mapping):
             payload = {"result": str(payload)[:500]}
         options = {
-            "step_done": "Mark this call complete only when the result and body facts positively show its intended outcome.",
+            "step_done": "Mark this call complete when the result and body facts positively show the intended amount, destination, or outcome.",
             "repeat": "Run the same call once more when facts show the intended outcome is still missing and another invocation can make progress.",
             "call_agent": "Return control when facts show blockage, failure, unsafe work, or off-intent work that another call cannot resolve.",
         }
