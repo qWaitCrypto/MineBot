@@ -1,18 +1,18 @@
 diff --git a/src/main/java/baritone/pathing/path/PathExecutor.java b/src/main/java/baritone/pathing/path/PathExecutor.java
-index 8a5359b..7b571a3 100644
+index 8a5359b..ddbffd1 100644
 --- a/src/main/java/baritone/pathing/path/PathExecutor.java
 +++ b/src/main/java/baritone/pathing/path/PathExecutor.java
 @@ -68,0 +69 @@ public class PathExecutor implements IPathExecutor, Helper {
 +    private MovementFailure movementFailure;
 @@ -225,0 +227 @@ public class PathExecutor implements IPathExecutor, Helper {
 +            movementFailure = new MovementFailure(movementStatus == UNREACHABLE ? "movement_unreachable" : "movement_failed", pathPosition, movement);
-@@ -246,0 +249 @@ public class PathExecutor implements IPathExecutor, Helper {
+@@ -247,0 +250 @@ public class PathExecutor implements IPathExecutor, Helper {
 +                movementFailure = new MovementFailure("movement_timeout", pathPosition, movement);
 @@ -408 +411,2 @@ public class PathExecutor implements IPathExecutor, Helper {
 -                if (next instanceof MovementAscend && current.getDirection().above().equals(next.getDirection().below())) {
 +                if (next instanceof MovementAscend && current.getDirection().above().equals(next.getDirection().below())
 +                        && ((Movement) current).toBreak(new BlockStateInterface(ctx)).isEmpty()) {
-@@ -647,0 +652,7 @@ public class PathExecutor implements IPathExecutor, Helper {
+@@ -651,0 +656,7 @@ public class PathExecutor implements IPathExecutor, Helper {
 +    /** Distinguishes execution failure from normal path replacement/cancellation. */
 +    public record MovementFailure(String reason, int position, IMovement movement) {}
 +
