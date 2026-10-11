@@ -601,7 +601,8 @@ def test_throttled_body_change_is_seen_on_the_next_clock_frame(monkeypatch):
         try:
             await runtime.run_tool(tool, execute_tool, tool, {}, runtime.weld_context,
                                    tool_call_id="moving-stuck", timeout_s=2)
-            locations = [payload["state"]["execution"]["facts"].get("where", "") for payload in seen]
+            locations = [payload["state"]["execution"]["facts"].get("where", "")
+                         for payload in seen if "execution" in payload["state"]]
             assert any("[3.0, 5.0, 0.0]" in location for location in locations)
         finally:
             await runtime.aclose()
@@ -888,8 +889,9 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
             assert len(decision.payloads) == 1
             decision.release.set()
             await asyncio.wait_for(job, 2)
-            assert len(decision.payloads) == 2
-            assert decision.payloads[1]["state"]["execution"]["phase"] == "builder_paused"
+            running = [payload for payload in decision.payloads if "execution" in payload["state"]]
+            assert len(running) == 2
+            assert running[1]["state"]["execution"]["phase"] == "builder_paused"
         finally:
             await runtime.aclose()
     asyncio.run(run())

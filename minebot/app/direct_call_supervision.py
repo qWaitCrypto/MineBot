@@ -835,9 +835,28 @@ class CallSupervisor:
             else:
                 monitor = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
                 record["monitor_task"] = monitor
-            result = await worker
-            if record["settling"] and monitor is not None:
-                await monitor
+            while True:
+                result = await worker
+                if monitor is not None:
+                    await monitor
+                    monitor = None
+                # A direct call is a one-node work tree.  Its terminal result
+                # is a fact; the same finite Decision loop chooses completion,
+                # another invocation, or handoff to the Agent.
+                if record["cancel_requested"]:
+                    break
+                result_choice = await self._decide_result(
+                    record, tool, params, result,
+                )
+                if result_choice != "repeat":
+                    break
+                record["decision"] = "repeat"
+                record["initial_reader_done"] = False
+                record["reader_new_fact"] = False
+                wake = asyncio.Event()
+                worker = asyncio.create_task(self.runtime.execution_lane.run(invoke, timeout_s=timeout_s))
+                monitor = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
+                record["monitor_task"] = monitor
             handoff = self.runtime.direct_call_handoffs.get(call_id)
             payload = result if isinstance(result, dict) else getattr(result, "result", None)
             if handoff is not None and isinstance(payload, dict):
@@ -865,6 +884,50 @@ class CallSupervisor:
             )
             if self.current is record:
                 self.current = None
+
+    async def _decide_result(
+        self, record: dict[str, Any], tool: Any, params: Mapping[str, Any], result: Any,
+    ) -> str:
+        execution = self._snapshot(record["call_id"])
+        if not execution:
+            execution = {"tool": getattr(tool, "name", "unknown"), "facts": {}}
+        payload = result if isinstance(result, Mapping) else getattr(result, "result", result)
+        if not isinstance(payload, Mapping):
+            payload = {"result": str(payload)[:500]}
+        options = {
+            "step_done": "Mark this call complete only when the result and body facts positively show its intended outcome.",
+            "repeat": "Run the same call once more when facts show the intended outcome is still missing and another invocation can make progress.",
+            "call_agent": "Return control when facts show blockage, failure, unsafe work, or off-intent work that another call cannot resolve.",
+        }
+        context = {
+            "tool_result": dict(payload),
+            "tool_arguments": dict(params),
+            "body_state": dict(execution.get("facts") or {}),
+            "execution": execution,
+            "reads": [],
+        }
+        choice = await self._judge_frame(
+            record["call_id"], tool, params, execution,
+            float(execution.get("since_progress_s") or 0.0),
+            purpose="result_frame", supervision_context=record["supervision_context"],
+            options=options, decision_context=context,
+        )
+        record["questions"] += 1
+        if choice == "unknown":
+            record["unknown_answers"] += 1
+            return "unknown"
+        if choice == "call_agent":
+            record["decision"] = choice
+            await self._handoff(
+                record, execution,
+                {"reason": "decision_call_agent", "confirmed": False},
+                decision=choice,
+                plan=self._plan_context(
+                    supervision_context=record["supervision_context"],
+                    tool=tool, params=params,
+                ),
+            )
+        return choice
 
     async def _monitor(
         self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],

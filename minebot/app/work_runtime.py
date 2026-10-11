@@ -639,24 +639,16 @@ class WorkPlanExecutor:
         self, node: dict[str, Any], *, include_inspect: bool = False,
         plan: dict[str, Any] | None = None, normal_work: str = "",
     ) -> dict[str, str]:
-        plan = plan or self._call_plan(node, [])
-        intent = str(plan.get("intent") or plan.get("node_description") or plan.get("current_step") or "this step")[:220]
-        normal = str(normal_work or "the Body's normal physical process")[:220]
         options = {
-            "step_done": (
-                f"Choose this only when the supplied facts show that the amount or outcome stated in “{intent}” is already reached."
-            ),
-            "call_agent": (
-                f"Return control to Agent when the facts show the Body cannot carry out “{intent}” through {normal}, "
-                "or the actual work conflicts with that purpose while the outcome is not already reached."
-            ),
-            "repeat": (
-                f"Try the same call again when facts show “{intent}” is not achieved and repeating {normal} can add real progress."
-            ),
+            # The plan and tool state carry the node intent and normal work
+            # once.  Each criterion describes only its own choice.
+            "step_done": "Mark this call complete only when the result and body facts positively show its intended outcome.",
+            "call_agent": "Return control when facts show blockage, failure, unsafe work, or off-intent work that another call cannot resolve.",
+            "repeat": "Run the same call once more when facts show the intended outcome is still missing and another invocation can make progress.",
         }
         if include_inspect:
             options["inspect"] = (
-                f"Read one new fact only when it can resolve whether “{intent}” is being served; do not repeat an unchanged read."
+                "Read one new registered fact only when it can distinguish completion, progress, or blockage; do not repeat an unchanged read."
             )
         repeat = node.get("repeat")
         if isinstance(repeat, dict):
