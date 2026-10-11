@@ -29,6 +29,12 @@ MineBot puts deterministic machinery where language models are weak: physics,
 precise state, long-running execution, ownership, and reflexes. It leaves goals,
 trade-offs, and adaptation to the model.
 
+Between the model and the Body sits a reflex layer: a fast semantic model that
+judges each step of the model's plan against live facts, keeps the Body working
+between the model's turns, and calls the model when a new direction is needed.
+The plan is a range of options, so it does not have to be perfect. This layer
+is under active development.
+
 The model chooses from one shared capability pool. The harness preserves task
 continuity. The Body handles the grind inside one physical objective. Every
 result comes back as structured world truth.
