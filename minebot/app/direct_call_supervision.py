@@ -166,28 +166,58 @@ class CallSupervisor:
     def _criteria(plan: Mapping[str, Any], options: Mapping[str, str] | None = None) -> dict[str, str]:
         criteria = {
             "continue": (
-                "Choose continue when the facts show real Body progress or a phase change consistent with "
-                "state.plan.node_description and state.plan.intent_chain toward state.plan.current_step "
-                "and state.plan.goal."
+                "Choose continue by default while the supplied facts do not positively show that the work "
+                "is off state.plan.node_description or state.plan.intent_chain, has already met the intended "
+                "result, or has reached a terminal failure. real Body progress, a normal phase change, or "
+                "an initial frame with no contrary evidence all support continuing."
             ),
             "inspect": (
-                "Choose inspect when the supplied facts are insufficient to tell whether the requested amount "
-                "is enough, the node is achieved, or the work still matches state.plan.node_description and "
-                "state.plan.intent_chain."
+                "Choose inspect only when a newly returned registered reader fact is present and that fact is "
+                "the missing evidence and the supplied evidence is insufficient to judge "
+                "state.plan.node_description and state.plan.intent_chain."
             ),
             "step_done": (
-                "Choose step_done only when the supplied facts establish that state.plan.node_description is "
-                "achieved or the requested amount is already enough for state.plan.current_step and "
+                "Choose step_done only when positive supplied facts establish that state.plan.node_description "
+                "is achieved or the requested amount is already enough for state.plan.current_step and "
                 "state.plan.goal."
             ),
             "call_agent": (
-                "Choose call_agent when the facts show the work is off the intent in state.plan.intent_chain or cannot be "
-                "resolved by continue, inspect, or step_done for state.plan.node_description."
+                "Choose call_agent only when positive supplied facts show the work is off the intent in state.plan.intent_chain, "
+                "the Body cannot make the requested progress, or a terminal failure requires a new plan for "
+                "state.plan.node_description. Do not choose it merely because evidence is incomplete."
             ),
         }
         if options is None:
             return criteria
-        return {str(key): str(value) for key, value in options.items()}
+        return {
+            str(key): criteria.get(str(key), str(value))
+            for key, value in options.items()
+        }
+
+    @staticmethod
+    def _compact_execution(execution: Mapping[str, Any]) -> dict[str, Any]:
+        """Compile the small set of Body facts Decision needs each frame."""
+        facts = execution.get("facts") if isinstance(execution.get("facts"), Mapping) else {}
+        keep = (
+            "start_position", "position", "navigation", "pathing", "processes",
+            "inventory_delta", "inventory", "construction", "goal", "failed_path_calculations",
+            "builder_paused", "selected_item", "health", "food", "oxygen",
+        )
+        compact_facts = {key: facts[key] for key in keep if key in facts}
+        reads = facts.get("bounded_reads")
+        if isinstance(reads, list) and reads:
+            compact_facts["bounded_reads"] = reads[-4:]
+        return {
+            "tool": execution.get("tool"),
+            "state": execution.get("state"),
+            "phase": execution.get("phase"),
+            "elapsed_s": execution.get("elapsed_s"),
+            "since_progress_s": execution.get("since_progress_s"),
+            "last_progress_at": execution.get("last_progress_at"),
+            "progress_signal": execution.get("progress_signal"),
+            "fact_revision": execution.get("fact_revision"),
+            "facts": compact_facts,
+        }
 
     def _question(
         self, call_id: str, tool: Any, params: Mapping[str, Any],
@@ -199,6 +229,9 @@ class CallSupervisor:
         plan = self._plan_context(supervision_context=supervision_context, tool=tool, params=params)
         if isinstance(decision_context, Mapping):
             facts = dict(decision_context)
+            body_state = facts.get("body_state", execution.get("facts", {}))
+            if isinstance(body_state, Mapping):
+                body_state = self._compact_execution({"facts": body_state})["facts"]
             request = {
                 "state": {
                     "protocol": "minebot-work-decision/0.2",
@@ -210,8 +243,9 @@ class CallSupervisor:
                     },
                     "result": self._bounded(facts.get("tool_result", {})),
                     "facts": {
-                        "body_state": self._bounded(facts.get("body_state", execution.get("facts", {}))),
+                        "body_state": self._bounded(body_state),
                         "reads": self._bounded(facts.get("reads", [])),
+                        "execution": self._compact_execution(execution),
                     },
                     "evidence_scope": (
                         "Only the supplied tool result, latest Body state and bounded reads are known; "
@@ -250,7 +284,7 @@ class CallSupervisor:
                     "normal_work": self._explanation(tool),
                 },
                 "plan": plan,
-                "execution": self._bounded(execution),
+                "execution": self._compact_execution(execution),
                 "no_explainable_progress_s": round(max(0.0, idle_s), 2),
                 "evidence_scope": (
                     "Only the bounded execution snapshot, plan facts, and registered normal-work explanation "
@@ -366,6 +400,11 @@ class CallSupervisor:
     async def _bounded_read(self, record: dict[str, Any], tool: Any,
                             params: Mapping[str, Any]) -> dict[str, Any]:
         reader = getattr(tool, "supervision_reader", None)
+        if not callable(reader):
+            # Generic body reads repeat the same broad state and are not a
+            # Decision option.  The execution snapshot already carries the
+            # bounded state facts for every cadence frame.
+            return {}
         try:
             if callable(reader):
                 value = await self.runtime._read_lane.run(reader, dict(params))
@@ -391,15 +430,29 @@ class CallSupervisor:
             raw = getattr(value, "__dict__", None)
             facts = dict(raw) if isinstance(raw, dict) else {}
         snapshots = getattr(self.runtime, "execution_snapshots", None)
+        before = record.get("last_read_facts")
+        if before == self._bounded(facts):
+            return {}
+        record["last_read_facts"] = self._bounded(facts)
         if snapshots is not None:
             snapshots.enrich(record["call_id"], facts, source=source)
         record["reads"] += 1
+        record["reader_new_fact"] = True
         self.runtime.trace.emit(
             "call_supervision_read", tool_call_id=record["call_id"],
             tool=getattr(tool, "name", "unknown"), read_number=record["reads"],
             facts=self._bounded(facts),
         )
         return facts
+
+    @staticmethod
+    def _options_for(tool: Any, record: Mapping[str, Any], supplied: Mapping[str, str] | None = None) -> dict[str, str] | None:
+        if supplied is not None:
+            return dict(supplied)
+        options = {"continue": "", "step_done": "", "call_agent": ""}
+        if callable(getattr(tool, "supervision_reader", None)) and record.get("reader_new_fact"):
+            options["inspect"] = ""
+        return options
 
     @staticmethod
     def _deterministic_terminal(execution: Mapping[str, Any], read: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -471,6 +524,8 @@ class CallSupervisor:
             "settling": False, "reads": 0, "questions": 0, "unknown_answers": 0,
             "supervision_context": dict(supervision_context or {}),
             "started_at": time.monotonic(),
+            "initial_reader_done": False,
+            "reader_new_fact": False,
         }
         self.current = record
 
@@ -574,6 +629,16 @@ class CallSupervisor:
                         last_revision = revision
                         idle_s = float(execution.get("since_progress_s") or 0.0)
                         frame = (execution, idle_s, "running_frame")
+                        if (not record["initial_reader_done"]
+                                and callable(getattr(tool, "supervision_reader", None))):
+                            # Establish one bounded reader fact before the
+                            # first question.  The reader option is therefore
+                            # present only after a real, dedicated read has
+                            # returned new evidence.
+                            record["initial_reader_done"] = True
+                            await self._bounded_read(record, tool, params)
+                            execution = self._snapshot(record["call_id"]) or execution
+                        frame_options = self._options_for(tool, record)
                         if decision_task is not None and not decision_task.done():
                             # There is no queue: only the latest frame survives.
                             pending = frame
@@ -582,7 +647,7 @@ class CallSupervisor:
                             decision_task = asyncio.create_task(self._judge_frame(
                                 record["call_id"], tool, params, execution, idle_s,
                                 purpose="running_frame",
-                                supervision_context=record["supervision_context"],
+                                supervision_context=record["supervision_context"], options=frame_options,
                             ))
                             record["decision_task"] = decision_task
             if finished_decision is not None:
@@ -597,6 +662,7 @@ class CallSupervisor:
                     record["unknown_answers"] += 1
                 execution = self._snapshot(record["call_id"]) or (pending[0] if pending else {})
                 if choice == "inspect" and record["reads"] < self.max_reads:
+                    record["reader_new_fact"] = False
                     read = await self._bounded_read(record, tool, params)
                     blocker = self._deterministic_terminal(
                         self._snapshot(record["call_id"]) or execution, read,
@@ -611,7 +677,9 @@ class CallSupervisor:
                             ),
                         )
                         return
-                    wake.set()
+                    # The read is consumed by the next cadence frame.  It must
+                    # not create a burst of questions faster than the frame
+                    # clock, especially when a reader returns the same sample.
                 elif choice == "inspect":
                     self.runtime.trace.emit(
                         "call_supervision_limit", tool_call_id=record["call_id"],
@@ -638,6 +706,7 @@ class CallSupervisor:
                         decision_task = asyncio.create_task(self._judge_frame(
                             record["call_id"], tool, params, frame[0], frame[1],
                             purpose=frame[2], supervision_context=record["supervision_context"],
+                            options=self._options_for(tool, record),
                         ))
                         record["decision_task"] = decision_task
             if worker in done and decision_task is None:

@@ -1024,6 +1024,7 @@ def _move_to_tool(
             terminal_truth=("navigateDone", "position"),
             timeout_s=120.0,
         ),
+        supervision_explanation="The Body normally plans a route, walks toward the requested coordinate, and returns an authoritative arrival or failure result.",
     )
 
 
@@ -1389,6 +1390,7 @@ def _craft_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:
             # wrapper deadline otherwise cancels valid large requests midway.
             timeout_s=None,
         ),
+        supervision_explanation="The Body normally finds or creates the crafting context, performs complete recipe batches, and verifies the inventory result.",
     )
 
 
@@ -1454,6 +1456,7 @@ def _smelt_tool(body: Body, furnace_txn: FurnaceTransactions) -> RegisteredTool:
             terminal_truth=("inventory", "furnace", "ToolResult"),
             timeout_s=190.0,
         ),
+        supervision_explanation="The Body normally approaches or selects a furnace, supplies input and fuel, waits for the furnace transaction, and verifies the output.",
     )
 
 

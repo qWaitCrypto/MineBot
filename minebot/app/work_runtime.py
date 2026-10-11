@@ -151,6 +151,19 @@ def _state_payload(state: Any) -> dict[str, Any]:
     return copy.deepcopy(values) if isinstance(values, dict) else {}
 
 
+def _decision_body_facts(state: Any) -> dict[str, Any]:
+    """Keep result decisions focused on the facts that distinguish outcomes."""
+    raw = _state_payload(state)
+    if not raw:
+        return {}
+    keys = (
+        "position", "start_position", "navigation", "pathing", "processes",
+        "inventory_delta", "inventory_complete", "selected_item",
+        "health", "food", "oxygen", "phase", "last_progress_at",
+    )
+    return {key: copy.deepcopy(raw[key]) for key in keys if key in raw}
+
+
 def _condition_facts(
     state: Any,
     condition: dict[str, Any],
@@ -486,9 +499,9 @@ class WorkPlanExecutor:
                     record.decision_facts = {
                         "tool_result": copy.deepcopy(public_result),
                         "tool_arguments": copy.deepcopy(arguments),
-                        "body_state": _state_payload(decision_state),
+                        "body_state": _decision_body_facts(decision_state),
                         "execution": {key: copy.deepcopy(value) for key, value in execution.items()
-                                       if key in {"tool", "phase", "delivered", "reason"}}
+                                       if key in {"tool", "phase", "delivered", "reason", "normal_work"}}
                                        if isinstance(execution, dict) else {},
                         "reads": [],
                     }
@@ -569,25 +582,27 @@ class WorkPlanExecutor:
                 return text[:800]
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)[:800]
 
-    def _call_options(self, node: dict[str, Any]) -> dict[str, str]:
+    def _call_options(self, node: dict[str, Any], *, include_inspect: bool = False) -> dict[str, str]:
         options = {
             "step_done": (
-                "Choose step_done when the supplied state.result and state.facts establish that "
-                "state.plan.node_description is achieved for state.plan.current_step and state.plan.goal."
-            ),
-            "inspect": (
-                "Choose inspect when state.result and state.facts do not provide enough evidence to decide "
-                "whether state.plan.node_description is achieved or still matches state.plan.intent_chain."
+                "Choose step_done only when positive supplied facts establish that state.plan.node_description "
+                "is achieved or the requested amount is already enough for state.plan.current_step and state.plan.goal."
             ),
             "call_agent": (
-                "Choose call_agent when the supplied facts show work outside state.plan.intent_chain, or "
-                "the available choices cannot resolve the node described by state.plan.node_description."
+                "Choose call_agent only when positive supplied facts show work outside state.plan.intent_chain, "
+                "the Body cannot make the requested progress, or a terminal failure needs a new plan for "
+                "state.plan.node_description. Incomplete evidence alone is not enough."
             ),
             "repeat": (
-                "Choose repeat when state.result and state.facts show state.plan.node_description is not achieved "
-                "and the same state.tool call is likely to add real progress."
+                "Choose repeat when positive facts show state.plan.node_description is not achieved and the "
+                "same state.tool call is likely to add real progress."
             ),
         }
+        if include_inspect:
+            options["inspect"] = (
+                "Choose inspect only when a registered reader has just returned a new fact and that fact is "
+                "needed to judge state.plan.node_description and state.plan.intent_chain."
+            )
         repeat = node.get("repeat")
         if isinstance(repeat, dict):
             again = self._repeat_text(repeat.get("again_when", ""))
@@ -618,10 +633,12 @@ class WorkPlanExecutor:
                 "tool": {
                     "name": str(node.get("tool", "unknown")),
                     "arguments": copy.deepcopy(facts.get("tool_arguments", node.get("arguments", {}))),
+                    "normal_work": str(facts.get("execution", {}).get("normal_work") or "")[:800],
                 },
                 "result": copy.deepcopy(facts.get("tool_result", {})),
                 "facts": {
                     "body_state": copy.deepcopy(facts.get("body_state", {})),
+                    "execution": copy.deepcopy(facts.get("execution", {})),
                     "reads": copy.deepcopy(facts.get("reads", [])),
                 },
                 "evidence_scope": "Only supplied result, body state and bounded reads are known; omitted facts are unknown.",
@@ -630,7 +647,10 @@ class WorkPlanExecutor:
                 "q": {
                     "type": "choice",
                     "instructions": "Choose exactly one finite option using only the supplied facts.",
-                    "criteria": self._call_options(node),
+                    "criteria": self._call_options(
+                        node,
+                        include_inspect=bool(facts.get("reader_new_fact")),
+                    ),
                 }
             },
         }
@@ -659,7 +679,7 @@ class WorkPlanExecutor:
         self, node: dict[str, Any], node_key: str, intents: list[str], record: NodeRecord,
         *, item: Any = None,
     ) -> str:
-        options = self._call_options(node)
+        options = self._call_options(node, include_inspect=bool(record.decision_facts and record.decision_facts.get("reader_new_fact")))
         while True:
             payload = self._call_question(node, node_key, intents, record)
             purpose = "call_inspect" if record.decision_reads else "call_result"

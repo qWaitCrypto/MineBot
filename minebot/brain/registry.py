@@ -7,7 +7,7 @@ its actual result; cancellation generations still reject stale completions.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from minebot.brain.progress import ProgressAuthority
@@ -44,7 +44,7 @@ SupervisionReader = Callable[[JsonObject], object]
 # Neutral sentinel for a stale-generation completion: truthy but not success,
 # not a failure, and not appended as fresh world truth (schema §8).
 PREEMPTED_PAYLOAD: JsonObject = ToolResult(
-    success=True, reason="preempted", can_retry=True, metrics={"paused": True}
+    success=False, reason="preempted", can_retry=True, metrics={"paused": True}
 ).to_payload()
 
 PROGRESS_YIELDED_REASON = "progress_yielded"
@@ -145,6 +145,14 @@ class ToolRegistry:
                 intent=intent,
                 tool_name=tool.name,
                 implementation=implementation,
+            )
+        if tool.sidecar.can_mutate_body and not tool.supervision_explanation:
+            tool = replace(
+                tool,
+                supervision_explanation=(
+                    "The Body normally carries out the declared physical action through its native process, "
+                    "reports real progress and phase changes, and returns one authoritative terminal result."
+                ),
             )
         self._tools[tool.name] = tool
         return tool

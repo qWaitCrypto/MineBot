@@ -405,6 +405,26 @@ def _tool(
     projector: ObservationProjector | None = None,
     model_visible: bool = True,
 ) -> RegisteredTool:
+    # This is process context for the semantic supervisor, not a detector:
+    # it says what a healthy Body call normally does before its terminal fact.
+    explanation = {
+        "move_to": "The Body normally plans a route, walks toward the target, and returns an authoritative arrival or failure result.",
+        "collect_block_domain": "The Body normally searches candidates, approaches a reachable target, performs the collection, and verifies the inventory change.",
+        "mine_block_collect": "The Body normally approaches the selected block, performs the break, and verifies the collected result.",
+        "craft_item": "The Body normally approaches or selects the crafting context, performs the recipe transaction, and verifies the inventory result.",
+        "smelt_item": "The Body normally approaches or selects a furnace, supplies the declared input and fuel, waits for the furnace transaction, and verifies the output.",
+        "place_block": "The Body normally approaches the support position, selects the declared block, places it, and verifies the world result.",
+        "clear_area": "The Body normally navigates through the declared area, removes the selected blocks, and verifies the cleared result.",
+        "dig_down": "The Body normally finds a safe shaft step, removes the next block, moves through it, and verifies the new position.",
+        "dig_up": "The Body normally selects a safe ascent step, places or removes the needed support, moves upward, and verifies the new position.",
+        "pickup_items": "The Body normally approaches the item targets, transfers the drops, and verifies the inventory change.",
+        "transfer_container_item": "The Body normally approaches the container, opens the requested side, transfers the declared item, and verifies slot truth.",
+        "clear_furnace": "The Body normally approaches the furnace, withdraws the requested slots, and verifies the final furnace and inventory state.",
+        "set_openable_state": "The Body normally approaches the block, applies the requested open or close action, and verifies its state.",
+        "set_switch_state": "The Body normally approaches the switch, applies the requested state, and verifies the powered result.",
+        "farm_area": "The Body normally navigates the crop area, harvests and replants each eligible crop, and verifies the resulting state.",
+        "build_structure": "The Body normally navigates between target cells, selects available materials, places them, and returns a verified world result.",
+    }.get(name, "The Body normally approaches the target or work context, performs the requested physical action, and returns an authoritative terminal result.")
     return RegisteredTool(
         name,
         description,
@@ -422,6 +442,7 @@ def _tool(
             model_visible=model_visible,
         ),
         projector=projector,
+        supervision_explanation=explanation,
     )
 
 

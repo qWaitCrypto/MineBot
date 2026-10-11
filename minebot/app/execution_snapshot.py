@@ -66,6 +66,7 @@ class _Operation:
         self.facts: dict[str, Any] = {}
         # Evidence baselines; a first sample sets them and proves no progress.
         self.position: tuple[float, float, float] | None = None
+        self.start_position: tuple[float, float, float] | None = None
         self.inventory: dict[str, int] | None = None
         self.start_inventory: dict[str, int] | None = None
         self.max_matching: int | None = None
@@ -159,11 +160,15 @@ class ExecutionSnapshots:
             if op is None or op.state in TERMINAL_STATES:
                 return
             if isinstance(facts, Mapping):
-                op.facts.setdefault("bounded_reads", []).append({
-                    "source": source,
-                    "facts": _bounded_value(dict(facts)),
-                })
-            self._mark_fact_frame(op, force=True)
+                bounded = _bounded_value(dict(facts))
+                reads = op.facts.setdefault("bounded_reads", [])
+                candidate = {"source": source, "facts": bounded}
+                # A read is useful only when it contributes new evidence.  Do
+                # not turn an identical body sample into an immediate second
+                # Decision question.
+                if candidate not in reads:
+                    reads.append(candidate)
+                    self._mark_fact_frame(op, force=False)
 
     def finish(self, operation_id: str, *, state: str, reason: str | None, control: str) -> None:
         with self._lock:
@@ -237,6 +242,8 @@ class ExecutionSnapshots:
         position = payload.get("position")
         if isinstance(position, (list, tuple)) and len(position) == 3:
             current = tuple(float(value) for value in position)
+            if op.start_position is None:
+                op.start_position = current
             moved = op.position is not None and sum(
                 (a - b) ** 2 for a, b in zip(current, op.position)) >= MOVEMENT_PROGRESS_BLOCKS ** 2
             # Displacement counts only while a path is being followed, so
@@ -261,6 +268,8 @@ class ExecutionSnapshots:
         facts["source"] = "client"
         if op.position is not None:
             facts["position"] = [round(value, 1) for value in op.position]
+        if op.start_position is not None:
+            facts["start_position"] = [round(value, 1) for value in op.start_position]
         navigation = payload.get("navigation") if isinstance(payload.get("navigation"), Mapping) else None
         if navigation is not None:
             facts["navigation"] = {key: navigation[key] for key in _NAVIGATION_FACTS if key in navigation}

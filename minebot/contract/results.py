@@ -10,7 +10,7 @@ def terminal_event_to_tool_result(event: Event) -> ToolResult:
     if reason == "preempted" or event.name == "ownerPreempted":
         metrics = dict(event.data)
         metrics["paused"] = True
-        return ToolResult(success=True, reason="preempted", can_retry=True, metrics=metrics)
+        return ToolResult(success=False, reason="preempted", can_retry=True, metrics=metrics)
 
     success = bool(
         event.data.get("arrived")

@@ -1948,6 +1948,9 @@ class AgentRuntime:
                 "delivered": True,
                 "tool": receipt.get("tool", tool.name),
             }
+            explanation = getattr(tool, "supervision_explanation", None)
+            if explanation:
+                enriched["_execution"]["normal_work"] = explanation
             return enriched
 
         operation_id = tool_call_id or claim_id
