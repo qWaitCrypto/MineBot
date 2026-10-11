@@ -77,6 +77,9 @@ def test_confirmed_blocker_stops_and_preserves_preexisting_world_and_native_rece
 async def _test_confirmed_blocker_stops_and_preserves_preexisting_world_and_native_receipt():
     ipc = NativeIpc()
     runtime, tool = make_runtime(ipc)
+    # The slice-1 replay chooses the bounded-read branch explicitly; it must
+    # not depend on the external Decision endpoint.
+    runtime.call_supervisor._client = StubDecision(("inspect",))
     try:
         result = await asyncio.wait_for(runtime.run_tool(tool, execute_tool, tool, PARAMS,
             runtime.weld_context, tool_call_id="original-call", timeout_s=10), 3)
