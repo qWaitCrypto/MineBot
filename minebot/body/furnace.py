@@ -10,6 +10,7 @@ from math import dist
 from typing import Callable
 
 from minebot.contract import action_with_timeout, action_wait_timeout_s
+from minebot.contract.execution import current_tool_observation
 from minebot.body.block_work import BlockWork
 from minebot.body.inventory_read import preferred_inventory_page_size
 from minebot.body.inventory import _ScarpetValueParser
@@ -115,6 +116,15 @@ SMELT_OUTPUT_CANDIDATES = {
     "sand": ("glass",),
     "red_sand": ("glass",),
 }
+
+
+def _report_smelt_phase(phase: str) -> None:
+    """Publish the furnace transaction's current lifecycle phase as evidence."""
+    observation = current_tool_observation()
+    if observation is None:
+        return
+    _call_id, notify = observation
+    notify({"phase": phase})
 
 
 @dataclass(frozen=True)
@@ -608,6 +618,7 @@ class FurnaceTransactions:
         plan = preflight
 
         executed: list[dict[str, object]] = []
+        _report_smelt_phase("loading_furnace")
         input_move = self.transfer_slot(
             pos,
             direction="bot_to_furnace",
@@ -633,6 +644,7 @@ class FurnaceTransactions:
             reclaim = self._reclaim_smelt_slots(pos, plan, timeout_s=transfer_timeout_s)
             return _smelt_failure("smelt_fuel_deposit_failed", fuel_move, plan, executed, reclaim=reclaim)
 
+        _report_smelt_phase("smelting")
         deadline = time.monotonic() + smelt_timeout_s
         polls: list[dict[str, object]] = []
         output_ready = False
@@ -647,6 +659,7 @@ class FurnaceTransactions:
             polls.append(poll)
             if output is not None and not output.empty and _same_item(output.item, output_item) and output.count >= output_count:
                 output_ready = True
+                _report_smelt_phase("collecting_output")
                 break
             time.sleep(poll_interval_s)
 
@@ -757,6 +770,7 @@ class FurnaceTransactions:
         transfer_timeout_s: float = 2.0,
         approach_timeout_s: float = 15.0,
     ) -> ToolResult:
+        _report_smelt_phase("finding_furnace")
         targets = find_nearby_block_targets(
             self.body,
             furnace_types,
@@ -782,6 +796,7 @@ class FurnaceTransactions:
                         "attempted_targets": attempted,
                     },
                 )
+            _report_smelt_phase("approaching_furnace")
             approach = ensure_interaction_range(
                 self.body,
                 self.navigator,

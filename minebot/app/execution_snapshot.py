@@ -266,6 +266,13 @@ class ExecutionSnapshots:
     def _merge_facts(op: _Operation, payload: Mapping[str, Any]) -> None:
         facts = op.facts
         facts["source"] = "client"
+        explicit_phase = payload.get("phase")
+        if isinstance(explicit_phase, str) and explicit_phase.strip():
+            # Body transactions may report a meaningful lifecycle phase that
+            # is not represented by the generic navigation/process fields.
+            # It is still evidence from the same snapshot stream, never a
+            # supervisor-side inference.
+            op.phase = explicit_phase.strip()[:80]
         if op.position is not None:
             facts["position"] = [round(value, 1) for value in op.position]
         if op.start_position is not None:
@@ -305,7 +312,8 @@ class ExecutionSnapshots:
             facts["failed_path_calculations"] = failing
         else:
             facts.pop("failed_path_calculations", None)
-        op.phase = ExecutionSnapshots._phase(payload, navigation or {}, active, op.phase)
+        if not isinstance(explicit_phase, str) or not explicit_phase.strip():
+            op.phase = ExecutionSnapshots._phase(payload, navigation or {}, active, op.phase)
         if failing >= 2 and op.phase in {None, "calculating_path"}:
             op.phase = "path_calculation_failing"
 

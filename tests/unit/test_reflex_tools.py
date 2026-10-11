@@ -208,8 +208,12 @@ def test_build_structure_run_tool_keeps_receipt_on_direct_supervisor_path():
             async def run(self, callback, *args, **kwargs):
                 return callback(*args)
 
+        seen_contexts = []
+
         class Supervisor:
             async def run(self, _tool, callback, args, **kwargs):
+                seen_contexts.append(dict(kwargs.get("supervision_context") or {}))
+                assert args[1] == {}
                 return callback(*args)
 
         tool = RegisteredTool(
@@ -225,13 +229,16 @@ def test_build_structure_run_tool_keeps_receipt_on_direct_supervisor_path():
         weld = WeldContext(body=runtime.body, authority=authority, goal_text="build")
         _bind_execution_observation(runtime)
         result = await AgentRuntime.run_tool(
-            runtime, tool, execute_tool, tool, {}, weld,
+            runtime, tool, execute_tool, tool,
+            {"intent": "lay the first wall and stop when it is complete"}, weld,
             return_execution_receipt=True,
         )
         assert result["success"] is True
         assert result["_execution"] == {"delivered": True, "tool": "build_structure"}
         direct_result = await AgentRuntime.run_tool(runtime, tool, execute_tool, tool, {}, weld)
         assert "_execution" not in direct_result
+        assert seen_contexts[0]["intent"] == "lay the first wall and stop when it is complete"
+        assert "intent" not in seen_contexts[1]
 
     asyncio.run(scenario())
 

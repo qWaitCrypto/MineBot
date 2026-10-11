@@ -1898,6 +1898,19 @@ class AgentRuntime:
         return_execution_receipt=False,
         supervision_context: Mapping[str, object] | None = None,
     ):
+        call_args = args
+        call_intent = ""
+        if len(args) > 1 and isinstance(args[1], dict):
+            raw_arguments = dict(args[1])
+            value = raw_arguments.pop("intent", None)
+            if isinstance(value, str) and value.strip():
+                call_intent = value.strip()[:500]
+            if value is not None:
+                call_args = (*args[:1], raw_arguments, *args[2:])
+        if call_intent:
+            supervision_context = dict(supervision_context or {})
+            supervision_context.setdefault("intent", call_intent)
+            supervision_context.setdefault("node_description", call_intent)
         claim_id = body_claim_id or tool_call_id or str(uuid4())
         claim_generation: int | None = None
         if tool.sidecar.can_mutate_body:
@@ -1956,7 +1969,7 @@ class AgentRuntime:
         operation_id = tool_call_id or claim_id
         outcome: tuple[str, str | None] = ("unknown", None)
         if tool.sidecar.can_mutate_body:
-            arguments = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
+            arguments = call_args[1] if len(call_args) > 1 and isinstance(call_args[1], dict) else {}
             self.execution_snapshots.begin(operation_id, tool.name, arguments)
         try:
             supervisor = getattr(self, "call_supervisor", None)
@@ -1969,17 +1982,17 @@ class AgentRuntime:
             # of this slice; keep its existing timing/settlement semantics.
             if (tool.sidecar.can_mutate_body and supervisor is not None
                     and not getattr(self, "native_responses", False)):
-                result = await supervisor.run(tool, admitted_callback, args,
+                result = await supervisor.run(tool, admitted_callback, call_args,
                     call_id=operation_id, timeout_s=timeout_s,
                     supervision_context=supervision_context)
                 outcome = _execution_outcome(result)
                 return with_execution_receipt(result)
             if tool.sidecar.can_mutate_body:
                 admitted_callback = self._observed(admitted_callback, operation_id)
-                result = await self.execution_lane.run(admitted_callback, *args, timeout_s=timeout_s)
+                result = await self.execution_lane.run(admitted_callback, *call_args, timeout_s=timeout_s)
             else:
                 try:
-                    result = await self._off_writer_lane().run(admitted_callback, *args, timeout_s=timeout_s)
+                    result = await self._off_writer_lane().run(admitted_callback, *call_args, timeout_s=timeout_s)
                 except asyncio.CancelledError:
                     if _being_cancelled():
                         raise

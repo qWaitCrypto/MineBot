@@ -629,10 +629,10 @@ def test_question_contains_goal_step_node_intent_and_fact_criteria():
             assert set(criteria) == {"continue", "inspect", "step_done", "call_agent"}
             assert all("state.plan." not in text for text in criteria.values())
             assert all("reach the selected vein" in text for text in criteria.values())
-            assert "continue by default" in criteria["continue"]
-            assert "new reader fact" in criteria["inspect"]
-            assert "facts positively" in criteria["step_done"]
-            assert "positive" in criteria["call_agent"]
+            assert "Continue the normal process" in criteria["continue"]
+            assert "one new fact" in criteria["inspect"]
+            assert "amount or outcome stated" in criteria["step_done"]
+            assert "Return control to Agent" in criteria["call_agent"]
             assert state["request_chars"] <= 16_000
             assert state["request_chars"] <= 2_000
         finally:

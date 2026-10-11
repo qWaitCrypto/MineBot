@@ -159,14 +159,33 @@ def _decision_body_facts(state: Any) -> dict[str, Any]:
     facts: dict[str, Any] = {}
     if "position" in raw or "start_position" in raw:
         facts["where"] = f"started at {raw.get('start_position')}; now at {raw.get('position')}."
-    if raw.get("inventory_delta"):
-        facts["inventory_change"] = f"inventory changed by {raw['inventory_delta']}."
-    if raw.get("navigation"):
-        facts["navigation"] = f"navigation facts: {raw['navigation']}."
+    delta = raw.get("inventory_delta")
+    if isinstance(delta, dict) and delta:
+        changes = ", ".join(f"{item} {'+' if amount >= 0 else ''}{amount}" for item, amount in delta.items())
+        facts["inventory_change"] = f"inventory changed: {changes}."
+    inventory = raw.get("inventory")
+    if isinstance(inventory, dict):
+        entries = [f"{item}={count}" for item, count in list(inventory.items())[:8]]
+        facts["inventory_now"] = "inventory now contains " + (", ".join(entries) or "no listed items") + "."
+    goal = raw.get("goal")
+    if isinstance(goal, str) and goal:
+        facts["body_goal"] = f"The Body is currently pursuing {goal}."
+    navigation = raw.get("navigation")
+    if isinstance(navigation, dict) and navigation:
+        parts = []
+        if navigation.get("dest") is not None:
+            parts.append(f"heading toward {navigation['dest']}")
+        if navigation.get("calculating") is True:
+            parts.append("calculating a route")
+        if navigation.get("path_position") is not None:
+            parts.append(f"at route step {navigation['path_position']}")
+        if navigation.get("repeated_failures"):
+            parts.append(f"route calculation has failed {navigation['repeated_failures']} times")
+        facts["navigation"] = "; ".join(parts) or "navigation has no active movement."
     if raw.get("pathing") is not None:
         facts["pathing"] = f"pathing is {raw['pathing']}."
-    if raw.get("processes") is not None:
-        facts["processes"] = f"active Body processes: {raw['processes']}."
+    if isinstance(raw.get("processes"), list):
+        facts["processes"] = "Body is actively " + (", ".join(str(item) for item in raw["processes"]) or "not running a named process") + "."
     for key in ("phase", "health", "food", "oxygen", "selected_item", "inventory_complete", "last_progress_at"):
         if key in raw:
             facts[key] = copy.deepcopy(raw[key])
@@ -621,25 +640,23 @@ class WorkPlanExecutor:
         plan: dict[str, Any] | None = None, normal_work: str = "",
     ) -> dict[str, str]:
         plan = plan or self._call_plan(node, [])
-        node_text = str(plan.get("node_description") or "this step")[:96]
-        context = f"For {node_text!r}:"
+        intent = str(plan.get("intent") or plan.get("node_description") or plan.get("current_step") or "this step")[:220]
+        normal = str(normal_work or "the Body's normal physical process")[:220]
         options = {
             "step_done": (
-                f"{context} choose step_done only when facts positively show the requested amount, destination, "
-                "or result is achieved."
+                f"Choose this only when the supplied facts show that the amount or outcome stated in “{intent}” is already reached."
             ),
             "call_agent": (
-                f"{context} choose call_agent only with positive evidence of a wrong job, unreachable or "
-                "stuck work, or terminal failure; missing evidence is not enough."
+                f"Return control to Agent when the facts show the Body cannot carry out “{intent}” through {normal}, "
+                "or the actual work conflicts with that purpose while the outcome is not already reached."
             ),
             "repeat": (
-                f"{context} choose repeat when facts show the step is not achieved and the same call is likely "
-                "to add real progress."
+                f"Try the same call again when facts show “{intent}” is not achieved and repeating {normal} can add real progress."
             ),
         }
         if include_inspect:
             options["inspect"] = (
-                f"{context} inspect only when a new reader fact is present and needed."
+                f"Read one new fact only when it can resolve whether “{intent}” is being served; do not repeat an unchanged read."
             )
         repeat = node.get("repeat")
         if isinstance(repeat, dict):
@@ -652,10 +669,12 @@ class WorkPlanExecutor:
         return options
 
     def _call_plan(self, node: dict[str, Any], intents: list[str]) -> dict[str, Any]:
+        intent = str(node.get("intent") or node.get("description") or "")[:800]
         return {
             "goal": str(self.plan.get("goal") or "")[:800],
             "current_step": str(self.plan.get("current_step") or (intents[-1] if intents else ""))[:800],
-            "node_description": str(node.get("description") or node.get("intent") or f"call {node.get('tool', 'unknown')}")[:800],
+            "node_description": intent or f"call {node.get('tool', 'unknown')}",
+            "intent": intent,
             "intent_chain": [str(value)[:400] for value in intents[-8:]],
         }
 

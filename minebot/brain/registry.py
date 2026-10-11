@@ -94,10 +94,23 @@ class RegisteredTool:
 
     def framework_view(self) -> JsonObject:
         """The only fields the agent framework / LLM may see."""
+        schema = self.input_schema
+        if self.sidecar.can_mutate_body and isinstance(schema, dict):
+            # The Agent's one-sentence purpose travels with a direct Body call
+            # so the reflex layer can judge the call against the same meaning
+            # as a plan node.  It is optional and is removed before execution.
+            schema = dict(schema)
+            properties = dict(schema.get("properties") or {})
+            properties.setdefault("intent", {
+                "type": "string",
+                "description": "One sentence explaining what this call is for and what outcome is enough.",
+                "maxLength": 500,
+            })
+            schema["properties"] = properties
         return {
             "name": self.name,
             "description": self.description,
-            "input_schema": self.input_schema,
+            "input_schema": schema,
         }
 
 

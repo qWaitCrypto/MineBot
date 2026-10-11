@@ -74,9 +74,9 @@ class CallSupervisor:
     def _explanation(tool: Any) -> str:
         value = getattr(tool, "supervision_explanation", None)
         if isinstance(value, str) and value.strip():
-            return value.strip()[:90]
+            return value.strip()[:220]
         description = getattr(tool, "description", None)
-        return str(description).strip()[:90] if description else DEFAULT_TOOL_EXPLANATION
+        return str(description).strip()[:220] if description else DEFAULT_TOOL_EXPLANATION
 
     def _snapshot(self, call_id: str) -> dict[str, Any]:
         snapshots = getattr(self.runtime, "execution_snapshots", None)
@@ -145,18 +145,13 @@ class CallSupervisor:
     ) -> dict[str, Any]:
         plan = self._durable_plan_context()
         if isinstance(supervision_context, Mapping):
-            for key in ("goal", "current_step", "node_description", "intent_chain", "is_plan"):
+            for key in ("goal", "current_step", "node_description", "intent", "intent_chain", "is_plan"):
                 if key in supervision_context:
                     plan[key] = supervision_context[key]
+        agent_intent = str(plan.get("intent") or "").strip()
         node_description = str(plan.get("node_description") or "").strip()
         if not node_description:
-            tool_name = str(getattr(tool, "name", "unknown"))
-            arguments = json.dumps(self._bounded(params), ensure_ascii=False, separators=(",", ":"), default=str)
-            current = str(plan.get("current_step") or "").strip()
-            node_description = (
-                f"{current}: use {tool_name} with {arguments}"
-                if current else f"use {tool_name} with {arguments}"
-            )
+            node_description = agent_intent or str(plan.get("current_step") or "").strip()
         intents = plan.get("intent_chain")
         if not isinstance(intents, list):
             intents = [] if not intents else [str(intents)]
@@ -164,6 +159,7 @@ class CallSupervisor:
             "goal": str(plan.get("goal") or "")[:180],
             "current_step": str(plan.get("current_step") or "")[:180],
             "node_description": node_description[:200],
+            "intent": agent_intent[:500],
             "intent_chain": [str(item)[:160] for item in intents[:4]],
         })
 
@@ -172,20 +168,20 @@ class CallSupervisor:
         plan: Mapping[str, Any], options: Mapping[str, str] | None = None,
         *, tool_name: str = "the current tool", normal_work: str = "",
     ) -> dict[str, str]:
-        node = str(plan.get("node_description") or "this step")[:72]
-        context = f"For {node!r}:"
+        intent = str(plan.get("intent") or plan.get("node_description") or plan.get("current_step") or "No Agent intent was supplied")[:220]
+        normal = str(normal_work or "the Body carries out the requested physical action and returns a terminal result")[:220]
         criteria = {
             "continue": (
-                f"{context} continue by default unless facts show wrong, achieved, or failed work."
+                f"Continue the normal process toward “{intent}” while this frame still fits that purpose."
             ),
             "inspect": (
-                f"{context} inspect only with a new reader fact that is needed."
+                f"Read one new fact about whether “{intent}” is being served; use this only when the normal process is unclear."
             ),
             "step_done": (
-                f"{context} step_done only when facts positively show amount, destination, or result achieved."
+                f"Choose this only when current facts show that the amount or outcome stated in “{intent}” is already reached."
             ),
             "call_agent": (
-                f"{context} call_agent only with positive wrong, unreachable, stuck, or terminal-failure evidence."
+                f"Return control to Agent when facts show the Body cannot carry out “{intent}” through {normal}, or the actual work conflicts with it while that outcome is not already reached."
             ),
         }
         if options is None:
@@ -210,7 +206,7 @@ class CallSupervisor:
             compact_facts["bounded_reads"] = reads[-4:]
         facts: dict[str, Any] = {}
         tool = str(execution.get("tool") or "the current tool")
-        phase = str(execution.get("phase") or "starting")
+        phase = str(execution.get("phase") or "working")
         elapsed = execution.get("elapsed_s")
         facts["doing"] = f"{tool} is {phase}; elapsed {elapsed if elapsed is not None else 0}s."
         position = compact_facts.get("position")
@@ -224,14 +220,40 @@ class CallSupervisor:
             if progress else "no real progress has been observed yet."
         )
         delta = compact_facts.get("inventory_delta")
-        if delta:
-            facts["inventory_change"] = f"inventory changed by {delta}."
-        if compact_facts.get("navigation"):
-            facts["navigation"] = f"navigation facts: {compact_facts['navigation']}."
-        if compact_facts.get("construction"):
-            facts["construction"] = f"construction facts: {compact_facts['construction']}."
-        if compact_facts.get("processes") is not None:
-            facts["processes"] = f"active Body processes: {compact_facts['processes']}."
+        if isinstance(delta, Mapping) and delta:
+            changes = ", ".join(f"{item} {'+' if amount >= 0 else ''}{amount}" for item, amount in delta.items())
+            facts["inventory_change"] = f"inventory changed: {changes}."
+        inventory = compact_facts.get("inventory")
+        if isinstance(inventory, Mapping):
+            entries = [f"{item}={count}" for item, count in list(inventory.items())[:8]]
+            facts["inventory_now"] = "inventory now contains " + (", ".join(entries) or "no listed items") + "."
+        goal = compact_facts.get("goal")
+        if isinstance(goal, str) and goal:
+            facts["body_goal"] = f"The Body is currently pursuing {goal}."
+        navigation = compact_facts.get("navigation")
+        if isinstance(navigation, Mapping) and navigation:
+            parts = []
+            if navigation.get("dest") is not None:
+                parts.append(f"heading toward {navigation['dest']}")
+            if navigation.get("calculating") is True:
+                parts.append("calculating a route")
+            if navigation.get("path_position") is not None:
+                parts.append(f"at route step {navigation['path_position']}")
+            failures = navigation.get("repeated_failures")
+            if failures:
+                parts.append(f"route calculation has failed {failures} times")
+            facts["navigation"] = "; ".join(parts) or "navigation state is available but has no active movement."
+        construction = compact_facts.get("construction")
+        if isinstance(construction, Mapping) and construction:
+            matching = construction.get("matching_cells")
+            expected = construction.get("expected_cells")
+            facts["construction"] = (
+                f"construction matches {matching} of {expected} declared cells."
+                if matching is not None and expected is not None else "construction evidence is present."
+            )
+        processes = compact_facts.get("processes")
+        if isinstance(processes, list):
+            facts["processes"] = "Body is actively " + (", ".join(str(item) for item in processes) or "not running a named process") + "."
         facts["phase"] = phase
         compact = {
             "tool": execution.get("tool"),
@@ -256,6 +278,20 @@ class CallSupervisor:
             result["summary"] = CallSupervisor._bounded(dict(summary), depth=0)
         return result
 
+    @staticmethod
+    def _intent_summary(plan: Mapping[str, Any]) -> str:
+        intent = str(plan.get("intent") or plan.get("node_description") or "").strip()
+        step = str(plan.get("current_step") or "").strip()
+        goal = str(plan.get("goal") or "").strip()
+        parts = []
+        if intent:
+            parts.append(f"purpose: {intent}")
+        if step and step != intent:
+            parts.append(f"current step: {step}")
+        if goal and goal not in {intent, step}:
+            parts.append(f"goal: {goal}")
+        return "; ".join(parts)[:900]
+
     def _question(
         self, call_id: str, tool: Any, params: Mapping[str, Any],
         execution: Mapping[str, Any], *, idle_s: float, purpose: str,
@@ -264,6 +300,14 @@ class CallSupervisor:
         decision_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         plan = self._plan_context(supervision_context=supervision_context, tool=tool, params=params)
+        # Keep the semantic fields when they carry different facts, but do not
+        # spend every frame repeating the same sentence under four plan keys.
+        question_plan = dict(plan)
+        intent = str(question_plan.get("intent") or "")
+        if intent:
+            for key in ("goal", "current_step", "node_description"):
+                if question_plan.get(key) == intent:
+                    question_plan.pop(key, None)
         if isinstance(decision_context, Mapping):
             facts = dict(decision_context)
             body_state = facts.get("body_state", execution.get("facts", {}))
@@ -272,16 +316,13 @@ class CallSupervisor:
             request = {
                 "state": {
                     "protocol": "minebot-work-decision/0.2",
-                    "plan": self._bounded(plan),
+                    "plan": self._bounded(question_plan),
                     "tool": {
                         "name": getattr(tool, "name", "unknown"),
                         "arguments": self._bounded(facts.get("tool_arguments", params)),
                         "normal_work": self._explanation(tool),
                     },
-                    "intent_summary": (
-                        f"This call is {plan.get('node_description')}; it serves "
-                        f"{plan.get('current_step') or plan.get('goal')}."
-                    )[:900],
+                    "intent_summary": self._intent_summary(plan),
                     "result": self._compact_result(facts.get("tool_result", {})),
                     "facts": {
                         "body_state": self._bounded(body_state),
@@ -324,7 +365,7 @@ class CallSupervisor:
                     "arguments": self._bounded(params),
                     "normal_work": self._explanation(tool),
                 },
-                "plan": plan,
+                "plan": question_plan,
                 "execution": self._compact_execution(execution),
                 "evidence_scope": "Only this frame and normal work are known.",
             },

@@ -100,3 +100,14 @@ def test_repeated_path_failures_are_reported_until_something_advances():
     assert current["facts"]["failed_path_calculations"] == 7 and "y=76" in current["facts"]["goal"]
     snapshots.observe("call-1", {**base, "path_events": {"CALC_FAILED": 7}, "world_edits": [{"index": 0}]})
     assert "failed_path_calculations" not in snapshots.current()["facts"]
+
+
+def test_body_reported_phase_is_preserved_as_execution_evidence():
+    snapshots = ExecutionSnapshots()
+    snapshots.begin("call-1", "smelt_item", {})
+    snapshots.observe("call-1", {"phase": "smelting", "position": [1, 64, 1]})
+
+    current = snapshots.current()
+    assert current is not None
+    assert current["phase"] == "smelting"
+    assert current["fact_revision"] == 1
