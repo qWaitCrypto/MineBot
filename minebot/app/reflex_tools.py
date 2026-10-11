@@ -400,7 +400,7 @@ class ReflexManager:
 
     async def _call(self, tool_name: str, arguments: dict[str, Any], *, call_id: str, timeout_s: float | None) -> dict[str, Any]:
         tool = self.runtime.registry.get(tool_name)
-        return await self.runtime.run_tool(
+        raw = await self.runtime.run_tool(
             tool,
             execute_tool,
             tool,
@@ -414,6 +414,21 @@ class ReflexManager:
             return_execution_receipt=True,
             supervision_context=self._plan_supervision_context(call_id, tool_name),
         )
+        if not isinstance(raw, dict):
+            return raw
+        # WorkPlanExecutor must judge the same bounded projector that the
+        # Agent sees for an ordinary tool call. Preserve supervision handoff
+        # facts privately so the interpreter can record the Decision choice
+        # without putting raw metrics back into the question.
+        projector = getattr(self.runtime, "shown_plan_result", None)
+        shown = projector(tool_name, raw, f"plan-{call_id}") if callable(projector) else dict(raw)
+        metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
+        handoff = metrics.get("direct_call_handoff")
+        if isinstance(handoff, dict):
+            shown["_supervision_handoff"] = copy.deepcopy(handoff)
+        if isinstance(raw.get("_execution"), dict):
+            shown["_execution"] = copy.deepcopy(raw["_execution"])
+        return shown
 
     def _direct_call(self) -> dict[str, Any] | None:
         """The direct Body call still running after its turn stopped waiting."""

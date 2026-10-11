@@ -1,0 +1,12 @@
+[
+  {"id":"collect_start","kind":"collect","facts":"Collecting 5 oak logs; 1.0s elapsed; still approaching the tree; no inventory change yet.","original_choice":"inspect","semantic_choice":"continue","expected":true},
+  {"id":"collect_first_log","kind":"collect","facts":"Collecting 5 oak logs; 2.4s elapsed; one oak log was just obtained and the Body remains on the task.","original_choice":"call_agent","semantic_choice":"continue","expected":true},
+  {"id":"craft_running","kind":"craft","facts":"Crafting sticks; 0.8s elapsed; the crafting phase is active and no contrary result is present.","original_choice":"inspect","semantic_choice":"continue","expected":true},
+  {"id":"craft_enough","kind":"craft","facts":"Crafting sticks; the inventory already contains 4 sticks, meeting the requested amount.","original_choice":"inspect","semantic_choice":"step_done","expected":true},
+  {"id":"smelt_approaching","kind":"smelt","facts":"Smelting iron; the Body is walking toward the furnace and has not started smelting yet.","original_choice":"call_agent","semantic_choice":"step_done","expected":false},
+  {"id":"plan_move_arrived","kind":"move","facts":"The planned move reached its destination; the result confirms arrival.","original_choice":"inspect","semantic_choice":"step_done","expected":true},
+  {"id":"build_materials","kind":"build","facts":"Building the structure; 5 oak logs are available for the next construction step.","original_choice":null,"semantic_choice":"step_done","expected":true},
+  {"id":"build_stuck","kind":"build","facts":"Building the structure; 31s without real progress and path finding has failed.","original_choice":null,"semantic_choice":"call_agent","expected":true},
+  {"id":"build_wrong_material","kind":"build","facts":"The plan requires collecting wood, but the Body is digging stone instead.","original_choice":null,"semantic_choice":"continue","expected":false},
+  {"id":"build_coal_enough","kind":"build","facts":"The plan requires 8 coal, but the inventory already contains 27 coal.","original_choice":null,"semantic_choice":"continue","expected":false}
+]

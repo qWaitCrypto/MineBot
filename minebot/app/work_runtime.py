@@ -156,12 +156,43 @@ def _decision_body_facts(state: Any) -> dict[str, Any]:
     raw = _state_payload(state)
     if not raw:
         return {}
-    keys = (
-        "position", "start_position", "navigation", "pathing", "processes",
-        "inventory_delta", "inventory_complete", "selected_item",
-        "health", "food", "oxygen", "phase", "last_progress_at",
-    )
-    return {key: copy.deepcopy(raw[key]) for key in keys if key in raw}
+    facts: dict[str, Any] = {}
+    if "position" in raw or "start_position" in raw:
+        facts["where"] = f"started at {raw.get('start_position')}; now at {raw.get('position')}."
+    if raw.get("inventory_delta"):
+        facts["inventory_change"] = f"inventory changed by {raw['inventory_delta']}."
+    if raw.get("navigation"):
+        facts["navigation"] = f"navigation facts: {raw['navigation']}."
+    if raw.get("pathing") is not None:
+        facts["pathing"] = f"pathing is {raw['pathing']}."
+    if raw.get("processes") is not None:
+        facts["processes"] = f"active Body processes: {raw['processes']}."
+    for key in ("phase", "health", "food", "oxygen", "selected_item", "inventory_complete", "last_progress_at"):
+        if key in raw:
+            facts[key] = copy.deepcopy(raw[key])
+    return facts
+
+
+def _decision_result_facts(value: Any) -> dict[str, Any]:
+    """Keep the semantic result and a small bounded receipt for Decision."""
+    if not isinstance(value, dict):
+        return {"result": str(value)[:300]}
+    result = {
+        key: copy.deepcopy(value[key])
+        for key in ("success", "reason", "canRetry", "complete", "outcome", "nextSuggestion")
+        if key in value
+    }
+    metrics = value.get("metrics")
+    if isinstance(metrics, dict):
+        keep = (
+            "item", "requested_item", "target_count", "before_count", "after_count",
+            "collected_delta", "remaining_count", "complete", "furnace_pos", "input",
+            "fuel", "output", "destination", "position", "arrived", "phase",
+        )
+        compact = {key: copy.deepcopy(metrics[key]) for key in keep if key in metrics}
+        if compact:
+            result["summary"] = compact
+    return result
 
 
 def _condition_facts(
@@ -485,6 +516,7 @@ class WorkPlanExecutor:
                     execution = result.get("_execution") if isinstance(result, dict) else None
                     public_result = dict(result)
                     public_result.pop("_execution", None)
+                    private_handoff = public_result.pop("_supervision_handoff", None)
                     record.result = copy.deepcopy(public_result)
                     self.results[node_key] = copy.deepcopy(public_result)
                     if isinstance(execution, dict) and execution.get("delivered") is True:
@@ -505,7 +537,9 @@ class WorkPlanExecutor:
                                        if isinstance(execution, dict) else {},
                         "reads": [],
                     }
-                    handoff = public_result.get("metrics", {}).get("direct_call_handoff") if isinstance(public_result.get("metrics"), dict) else None
+                    handoff = private_handoff
+                    if handoff is None:
+                        handoff = public_result.get("metrics", {}).get("direct_call_handoff") if isinstance(public_result.get("metrics"), dict) else None
                     handoff_choice = handoff.get("facts", {}).get("decision", {}).get("choice") if isinstance(handoff, dict) else None
                     if handoff_choice in {"step_done", "call_agent"}:
                         status = self._apply_call_choice(node, node_key, chain, record, handoff_choice, item=item)
@@ -582,26 +616,30 @@ class WorkPlanExecutor:
                 return text[:800]
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)[:800]
 
-    def _call_options(self, node: dict[str, Any], *, include_inspect: bool = False) -> dict[str, str]:
+    def _call_options(
+        self, node: dict[str, Any], *, include_inspect: bool = False,
+        plan: dict[str, Any] | None = None, normal_work: str = "",
+    ) -> dict[str, str]:
+        plan = plan or self._call_plan(node, [])
+        node_text = str(plan.get("node_description") or "this step")[:96]
+        context = f"For {node_text!r}:"
         options = {
             "step_done": (
-                "Choose step_done only when positive supplied facts establish that state.plan.node_description "
-                "is achieved or the requested amount is already enough for state.plan.current_step and state.plan.goal."
+                f"{context} choose step_done only when facts positively show the requested amount, destination, "
+                "or result is achieved."
             ),
             "call_agent": (
-                "Choose call_agent only when positive supplied facts show work outside state.plan.intent_chain, "
-                "the Body cannot make the requested progress, or a terminal failure needs a new plan for "
-                "state.plan.node_description. Incomplete evidence alone is not enough."
+                f"{context} choose call_agent only with positive evidence of a wrong job, unreachable or "
+                "stuck work, or terminal failure; missing evidence is not enough."
             ),
             "repeat": (
-                "Choose repeat when positive facts show state.plan.node_description is not achieved and the "
-                "same state.tool call is likely to add real progress."
+                f"{context} choose repeat when facts show the step is not achieved and the same call is likely "
+                "to add real progress."
             ),
         }
         if include_inspect:
             options["inspect"] = (
-                "Choose inspect only when a registered reader has just returned a new fact and that fact is "
-                "needed to judge state.plan.node_description and state.plan.intent_chain."
+                f"{context} inspect only when a new reader fact is present and needed."
             )
         repeat = node.get("repeat")
         if isinstance(repeat, dict):
@@ -635,7 +673,7 @@ class WorkPlanExecutor:
                     "arguments": copy.deepcopy(facts.get("tool_arguments", node.get("arguments", {}))),
                     "normal_work": str(facts.get("execution", {}).get("normal_work") or "")[:800],
                 },
-                "result": copy.deepcopy(facts.get("tool_result", {})),
+                "result": _decision_result_facts(facts.get("tool_result", {})),
                 "facts": {
                     "body_state": copy.deepcopy(facts.get("body_state", {})),
                     "execution": copy.deepcopy(facts.get("execution", {})),
@@ -650,6 +688,8 @@ class WorkPlanExecutor:
                     "criteria": self._call_options(
                         node,
                         include_inspect=bool(facts.get("reader_new_fact")),
+                        plan=plan,
+                        normal_work=str(facts.get("execution", {}).get("normal_work") or ""),
                     ),
                 }
             },
@@ -679,7 +719,13 @@ class WorkPlanExecutor:
         self, node: dict[str, Any], node_key: str, intents: list[str], record: NodeRecord,
         *, item: Any = None,
     ) -> str:
-        options = self._call_options(node, include_inspect=bool(record.decision_facts and record.decision_facts.get("reader_new_fact")))
+        facts = record.decision_facts or {}
+        options = self._call_options(
+            node,
+            include_inspect=bool(facts.get("reader_new_fact")),
+            plan=self._call_plan(node, intents),
+            normal_work=str(facts.get("execution", {}).get("normal_work") or ""),
+        )
         while True:
             payload = self._call_question(node, node_key, intents, record)
             purpose = "call_inspect" if record.decision_reads else "call_result"

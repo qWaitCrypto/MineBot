@@ -74,9 +74,9 @@ class CallSupervisor:
     def _explanation(tool: Any) -> str:
         value = getattr(tool, "supervision_explanation", None)
         if isinstance(value, str) and value.strip():
-            return value.strip()[:800]
+            return value.strip()[:90]
         description = getattr(tool, "description", None)
-        return str(description).strip()[:800] if description else DEFAULT_TOOL_EXPLANATION
+        return str(description).strip()[:90] if description else DEFAULT_TOOL_EXPLANATION
 
     def _snapshot(self, call_id: str) -> dict[str, Any]:
         snapshots = getattr(self.runtime, "execution_snapshots", None)
@@ -150,41 +150,42 @@ class CallSupervisor:
                     plan[key] = supervision_context[key]
         node_description = str(plan.get("node_description") or "").strip()
         if not node_description:
-            node_description = f"direct call {getattr(tool, 'name', 'unknown')}"
+            tool_name = str(getattr(tool, "name", "unknown"))
+            arguments = json.dumps(self._bounded(params), ensure_ascii=False, separators=(",", ":"), default=str)
+            current = str(plan.get("current_step") or "").strip()
+            node_description = (
+                f"{current}: use {tool_name} with {arguments}"
+                if current else f"use {tool_name} with {arguments}"
+            )
         intents = plan.get("intent_chain")
         if not isinstance(intents, list):
             intents = [] if not intents else [str(intents)]
         return self._bounded({
-            "goal": str(plan.get("goal") or "")[:800],
-            "current_step": str(plan.get("current_step") or "")[:800],
-            "node_description": node_description[:800],
-            "intent_chain": [str(item)[:400] for item in intents[:8]],
-            "is_plan": bool(plan.get("is_plan", False)),
+            "goal": str(plan.get("goal") or "")[:180],
+            "current_step": str(plan.get("current_step") or "")[:180],
+            "node_description": node_description[:200],
+            "intent_chain": [str(item)[:160] for item in intents[:4]],
         })
 
     @staticmethod
-    def _criteria(plan: Mapping[str, Any], options: Mapping[str, str] | None = None) -> dict[str, str]:
+    def _criteria(
+        plan: Mapping[str, Any], options: Mapping[str, str] | None = None,
+        *, tool_name: str = "the current tool", normal_work: str = "",
+    ) -> dict[str, str]:
+        node = str(plan.get("node_description") or "this step")[:72]
+        context = f"For {node!r}:"
         criteria = {
             "continue": (
-                "Choose continue by default while the supplied facts do not positively show that the work "
-                "is off state.plan.node_description or state.plan.intent_chain, has already met the intended "
-                "result, or has reached a terminal failure. real Body progress, a normal phase change, or "
-                "an initial frame with no contrary evidence all support continuing."
+                f"{context} continue by default unless facts show wrong, achieved, or failed work."
             ),
             "inspect": (
-                "Choose inspect only when a newly returned registered reader fact is present and that fact is "
-                "the missing evidence and the supplied evidence is insufficient to judge "
-                "state.plan.node_description and state.plan.intent_chain."
+                f"{context} inspect only with a new reader fact that is needed."
             ),
             "step_done": (
-                "Choose step_done only when positive supplied facts establish that state.plan.node_description "
-                "is achieved or the requested amount is already enough for state.plan.current_step and "
-                "state.plan.goal."
+                f"{context} step_done only when facts positively show amount, destination, or result achieved."
             ),
             "call_agent": (
-                "Choose call_agent only when positive supplied facts show the work is off the intent in state.plan.intent_chain, "
-                "the Body cannot make the requested progress, or a terminal failure requires a new plan for "
-                "state.plan.node_description. Do not choose it merely because evidence is incomplete."
+                f"{context} call_agent only with positive wrong, unreachable, stuck, or terminal-failure evidence."
             ),
         }
         if options is None:
@@ -207,7 +208,32 @@ class CallSupervisor:
         reads = facts.get("bounded_reads")
         if isinstance(reads, list) and reads:
             compact_facts["bounded_reads"] = reads[-4:]
-        return {
+        facts: dict[str, Any] = {}
+        tool = str(execution.get("tool") or "the current tool")
+        phase = str(execution.get("phase") or "starting")
+        elapsed = execution.get("elapsed_s")
+        facts["doing"] = f"{tool} is {phase}; elapsed {elapsed if elapsed is not None else 0}s."
+        position = compact_facts.get("position")
+        start = compact_facts.get("start_position")
+        if start is not None or position is not None:
+            facts["where"] = f"started at {start}; now at {position}."
+        progress = execution.get("progress_signal")
+        age = execution.get("since_progress_s")
+        facts["last_progress"] = (
+            f"last real progress was {progress} {age}s ago."
+            if progress else "no real progress has been observed yet."
+        )
+        delta = compact_facts.get("inventory_delta")
+        if delta:
+            facts["inventory_change"] = f"inventory changed by {delta}."
+        if compact_facts.get("navigation"):
+            facts["navigation"] = f"navigation facts: {compact_facts['navigation']}."
+        if compact_facts.get("construction"):
+            facts["construction"] = f"construction facts: {compact_facts['construction']}."
+        if compact_facts.get("processes") is not None:
+            facts["processes"] = f"active Body processes: {compact_facts['processes']}."
+        facts["phase"] = phase
+        compact = {
             "tool": execution.get("tool"),
             "state": execution.get("state"),
             "phase": execution.get("phase"),
@@ -216,8 +242,19 @@ class CallSupervisor:
             "last_progress_at": execution.get("last_progress_at"),
             "progress_signal": execution.get("progress_signal"),
             "fact_revision": execution.get("fact_revision"),
-            "facts": compact_facts,
+            "facts": facts,
         }
+        return {key: value for key, value in compact.items() if value is not None}
+
+    @staticmethod
+    def _compact_result(value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            return {"result": str(value)[:500]}
+        result = {key: value[key] for key in ("success", "reason", "canRetry", "complete", "outcome") if key in value}
+        summary = value.get("summary")
+        if isinstance(summary, Mapping):
+            result["summary"] = CallSupervisor._bounded(dict(summary), depth=0)
+        return result
 
     def _question(
         self, call_id: str, tool: Any, params: Mapping[str, Any],
@@ -241,21 +278,25 @@ class CallSupervisor:
                         "arguments": self._bounded(facts.get("tool_arguments", params)),
                         "normal_work": self._explanation(tool),
                     },
-                    "result": self._bounded(facts.get("tool_result", {})),
+                    "intent_summary": (
+                        f"This call is {plan.get('node_description')}; it serves "
+                        f"{plan.get('current_step') or plan.get('goal')}."
+                    )[:900],
+                    "result": self._compact_result(facts.get("tool_result", {})),
                     "facts": {
                         "body_state": self._bounded(body_state),
                         "reads": self._bounded(facts.get("reads", [])),
                         "execution": self._compact_execution(execution),
                     },
-                    "evidence_scope": (
-                        "Only the supplied tool result, latest Body state and bounded reads are known; "
-                        "omitted facts are unknown."
-                    ),
+                    "evidence_scope": "Only supplied facts are known; omissions are unknown.",
                 },
                 "questions": {"q": {
                     "type": "choice",
-                    "instructions": "Choose exactly one finite option using only the supplied facts.",
-                    "criteria": self._criteria(plan, options),
+                    "instructions": "Choose one supplied option.",
+                    "criteria": self._criteria(
+                        plan, options, tool_name=str(getattr(tool, "name", "unknown")),
+                        normal_work=self._explanation(tool),
+                    ),
                 }},
             }
             encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)
@@ -285,16 +326,15 @@ class CallSupervisor:
                 },
                 "plan": plan,
                 "execution": self._compact_execution(execution),
-                "no_explainable_progress_s": round(max(0.0, idle_s), 2),
-                "evidence_scope": (
-                    "Only the bounded execution snapshot, plan facts, and registered normal-work explanation "
-                    "are known. Omitted facts are unknown; process liveness and repeated samples are not progress."
-                ),
+                "evidence_scope": "Only this frame and normal work are known.",
             },
             "questions": {"q": {
                 "type": "choice",
-                "instructions": "Choose exactly one finite option using only the supplied facts.",
-                "criteria": self._criteria(plan, options),
+                "instructions": "Choose one supplied option.",
+                "criteria": self._criteria(
+                    plan, options, tool_name=str(getattr(tool, "name", "unknown")),
+                    normal_work=self._explanation(tool),
+                ),
             }},
         }
         encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)
