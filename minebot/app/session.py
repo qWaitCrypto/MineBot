@@ -1577,6 +1577,18 @@ class AgentSession:
             return
         assert self.work_queue is not None
         task = self.task_workspace.current_task if self.task_workspace is not None else None
+        generation = self.parts.authority.current_generation()
+        dedupe_key = (
+            f"{self._scheduler_id}:recovery:"
+            f"{generation}:"
+            f"{self._recovery_attempts}"
+        )
+        existing = self.work_queue.get_by_dedupe(dedupe_key)
+        if existing is not None and existing.state in {
+            WorkIntentState.QUEUED,
+            WorkIntentState.LEASED,
+        }:
+            return
         intent = self.work_queue.enqueue(
             WorkIntentKind.RECOVERY_RECONCILE,
             source="lifecycle_recovery",
@@ -1584,13 +1596,9 @@ class AgentSession:
                 "reason": "lifecycle_recovering",
                 "attempt": self._recovery_attempts + 1,
             },
-            dedupe_key=(
-                f"{self._scheduler_id}:recovery:"
-                f"{self.parts.authority.current_generation()}:"
-                f"{self._recovery_attempts}"
-            ),
+            dedupe_key=dedupe_key,
             task_id=None if task is None else task.task_id,
-            generation=self.parts.authority.current_generation(),
+            generation=generation,
         )
         self._trace(
             "recovery_intent_queued",
@@ -2204,9 +2212,6 @@ def _queued_preemption(queue: WorkIntentQueue, work_kind: str) -> tuple[str, boo
     queued = queue.queued_intents()
     if work_kind == "recovery":
         queued = [intent for intent in queued if intent.kind in CONTROL_INTENT_KINDS]
-    # An execution fact is not a command. Cancelling the request in flight to
-    # deliver it throws that request away; it is read when the turn ends.
-    queued = [intent for intent in queued if intent.kind is not WorkIntentKind.REFLEX_FACT]
     if not queued:
         return None
     intent = max(

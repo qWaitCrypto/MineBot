@@ -628,15 +628,67 @@ def test_question_contains_goal_step_node_intent_and_fact_criteria():
             criteria = request["questions"]["q"]["criteria"]
             assert set(criteria) == {"continue", "inspect", "step_done", "call_agent"}
             assert all("state.plan." not in text for text in criteria.values())
-            assert all("reach the selected vein" in text for text in criteria.values())
-            assert "Intent:" in criteria["continue"]
-            assert "normal process:" in criteria["continue"]
-            assert "facts still fit" in criteria["continue"]
-            assert "cannot distinguish ongoing work" in criteria["inspect"]
+            assert all("reach the selected vein" in text for text in criteria.values() if text != criteria["inspect"])
+            assert "Agent intent:" in criteria["continue"]
+            assert "normal process:" not in criteria["continue"]
+            assert "ordinary progress" in criteria["continue"]
+            assert "cannot distinguish progress from completion" in criteria["inspect"]
             assert "positively show" in criteria["step_done"]
-            assert "blockage, failure, or work outside" in criteria["call_agent"]
+            assert "blockage, failure, unsafe conditions" in criteria["call_agent"]
+            assert "normal process:" not in json.dumps(criteria, ensure_ascii=False)
+            assert "returns a verified world result" in state["tool"]["normal_work"]
             assert state["request_chars"] <= 16_000
             assert state["request_chars"] <= 2_000
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_ambiguous_decision_is_unknown_and_does_not_stop():
+    async def run():
+        runtime, tool = make_runtime(GenericCallIpc())
+
+        class Ambiguous:
+            async def ask(self, payload, *, priority):
+                return DecisionAnswer(
+                    "call_agent",
+                    {"answers": {"q": {"choice": "call_agent", "probabilities": {
+                        "call_agent": 0.46, "continue": 0.44, "step_done": 0.10,
+                    }}}},
+                    0.2, 1,
+                )
+
+            async def close(self):
+                return None
+
+        runtime.call_supervisor._client = Ambiguous()
+        try:
+            choice = await runtime.call_supervisor.judge(
+                "ambiguous", tool, {},
+                {"state": "running", "phase": "moving", "fact_revision": 1,
+                 "facts": {"position": [0, 5, 0]}},
+                0.2, purpose="running_frame", supervision_context={"intent": "move safely"},
+                options={"continue": "", "step_done": "", "call_agent": ""},
+            )
+            assert choice == "unknown"
+            assert any(e["event"] == "decision_ambiguous" for e in runtime.trace.events)
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_question_compiles_vitals_as_readable_facts():
+    async def run():
+        runtime, tool = make_runtime(GenericCallIpc())
+        try:
+            request = runtime.call_supervisor._question(
+                "vitals", tool, {},
+                {"state": "running", "phase": "moving", "elapsed_s": 3.2,
+                 "fact_revision": 2, "facts": {"health": 10.8, "oxygen": -12, "food": 8}},
+                idle_s=0.2, purpose="running_frame", supervision_context={"intent": "reach dry land"},
+            )
+            facts = request["state"]["execution"]["facts"]
+            assert facts["vitals"] == "health is 10.8; oxygen is -12; hunger level is 8."
         finally:
             await runtime.aclose()
     asyncio.run(run())

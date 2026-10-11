@@ -14,7 +14,7 @@ def _rows():
 
 def test_replay_fixture_contains_raw_frames_intents_and_non_continue_answers():
     rows = _rows()
-    assert len(rows) >= 14
+    assert len(rows) >= 17
     assert {row["expected"] for row in rows} >= {"continue", "step_done", "call_agent"}
     assert {row["id"] for row in rows if row["previous"] != row["expected"]} >= {
         "smelt_approaching", "build_wrong_material", "build_coal_enough"
@@ -22,6 +22,7 @@ def test_replay_fixture_contains_raw_frames_intents_and_non_continue_answers():
     assert {
         "real3_move_start_1", "real3_move_start_2",
         "real3_get_to_block_start", "real3_explore_for_start",
+        "real7_smelt_loaded", "real7_collect_after_edit", "real7_water_escape",
     } <= {row["id"] for row in rows}
     assert all(row["intent"] and isinstance(row["frame"]["facts"], dict) for row in rows)
 
@@ -53,7 +54,7 @@ def test_replay_frames_go_through_the_real_question_builder():
         )
         encoded = json.dumps(request, ensure_ascii=False)
         assert request["state"]["plan"]["intent"] == intent
-        assert intent in encoded
+        assert request["state"]["plan"]["intent"] == intent
         assert "state.plan." not in encoded
         assert "<bounded>" not in encoded
         assert row["expected"] in request["questions"]["q"]["criteria"]

@@ -26,6 +26,7 @@ MAX_SUPERVISION_READS = 4
 MAX_SUPERVISION_QUESTIONS = 0
 MAX_IDLE_UNKNOWN_FRAMES = 3
 MAX_QUESTION_CHARS = 16_000
+DECISION_AMBIGUITY_MARGIN = 0.10
 FAST_COMPLETION_GRACE_S = 0.02
 
 DEFAULT_TOOL_EXPLANATION = (
@@ -207,13 +208,14 @@ class CallSupervisor:
             plan.get("intent") or plan.get("node_description")
             or plan.get("current_step") or plan.get("goal") or "the current goal"
         )[:260]
-        normal = str(normal_work or "the Body performs the operation and reports its result.").strip()[:120]
-        context = f"Intent: “{intent}”; normal process: {normal}."
+        # normal_work is supplied once under state.tool. Repeating it in every
+        # criterion made the choices look identical and wasted the context.
+        context = f"Agent intent: “{intent}”."
         criteria = {
-            "continue": f"{context} Continue when facts still fit this work.",
-            "inspect": f"{context} Read a new fact only when evidence cannot distinguish ongoing work from completion.",
-            "step_done": f"{context} Choose only when facts positively show the intended outcome is complete.",
-            "call_agent": f"{context} Call the Agent only when facts show blockage, failure, or work outside this intent.",
+            "continue": f"{context} Keep the Body doing this work while the current facts show ordinary progress.",
+            "inspect": "Read one new registered fact only when the current evidence cannot distinguish progress from completion.",
+            "step_done": f"{context} Mark this outcome complete only when facts positively show it is achieved.",
+            "call_agent": f"{context} Return control when facts show blockage, failure, unsafe conditions, or work outside this intent.",
         }
         if options is None:
             return criteria
@@ -285,6 +287,15 @@ class CallSupervisor:
         processes = compact_facts.get("processes")
         if isinstance(processes, list):
             facts["processes"] = "Body is actively " + (", ".join(str(item) for item in processes) or "not running a named process") + "."
+        vitals = []
+        if "health" in compact_facts:
+            vitals.append(f"health is {compact_facts['health']}")
+        if "oxygen" in compact_facts:
+            vitals.append(f"oxygen is {compact_facts['oxygen']}")
+        if "food" in compact_facts:
+            vitals.append(f"hunger level is {compact_facts['food']}")
+        if vitals:
+            facts["vitals"] = "; ".join(vitals) + "."
         facts["phase"] = phase
         compact = {
             "tool": execution.get("tool"),
@@ -474,6 +485,14 @@ class CallSupervisor:
             answer = await self._client.ask(request, priority=DecisionPriority.SUPERVISION)
             raw = answer.raw
             choice = answer.choice if answer.choice in request["questions"]["q"]["criteria"] else "unknown"
+            margin = self._ambiguity_margin(raw, choice)
+            if choice != "unknown" and margin is not None and margin < DECISION_AMBIGUITY_MARGIN:
+                self.runtime.trace.emit(
+                    "decision_ambiguous", tool_call_id=call_id, tool=tool_name,
+                    choice=choice, margin=round(margin, 6),
+                    threshold=DECISION_AMBIGUITY_MARGIN,
+                )
+                choice = "unknown"
         except Exception:
             choice = "unknown"
         elapsed = time.monotonic() - started
@@ -484,6 +503,23 @@ class CallSupervisor:
             decision_ms=round(elapsed * 1000.0, 3), fact_revision=fact_revision,
         )
         return choice
+
+    @staticmethod
+    def _ambiguity_margin(raw: Mapping[str, Any] | None, choice: str) -> float | None:
+        if not isinstance(raw, Mapping) or not choice:
+            return None
+        answers = raw.get("answers")
+        answer = answers.get("q", {}) if isinstance(answers, Mapping) else {}
+        probabilities = answer.get("probabilities") if isinstance(answer, Mapping) else None
+        if not isinstance(probabilities, Mapping) or choice not in probabilities:
+            return None
+        values = sorted(
+            (float(value) for value in probabilities.values() if isinstance(value, (int, float))),
+            reverse=True,
+        )
+        if len(values) < 2:
+            return None
+        return values[0] - values[1]
 
     async def _judge_frame(
         self, call_id: str, tool: Any, params: Mapping[str, Any],

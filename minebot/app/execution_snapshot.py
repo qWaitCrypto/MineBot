@@ -283,7 +283,7 @@ class ExecutionSnapshots:
         for key in (
             "pathing", "builder_paused", "selected_item", "selected_item_known",
             "inventory_complete", "inventory_includes_selected", "creative",
-            "any_process_active", "scaffold_blocks",
+            "any_process_active", "scaffold_blocks", "health", "food", "oxygen",
         ):
             if key in payload:
                 facts[key] = payload[key]

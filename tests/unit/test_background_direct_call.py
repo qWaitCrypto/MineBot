@@ -260,13 +260,13 @@ def test_current_context_is_read_again_before_every_request():
     assert "42" in second
 
 
-def test_an_execution_fact_waits_for_the_running_turn():
+def test_an_execution_fact_preempts_the_running_turn_for_immediate_delivery():
     from minebot.app.session import _queued_preemption
     from minebot.app.work_queue import MemoryWorkIntentQueue, WorkIntentKind
 
     queue = MemoryWorkIntentQueue()
     queue.enqueue(WorkIntentKind.REFLEX_FACT, source="reflex_activity", payload={"fact": {}})
-    assert _queued_preemption(queue, "agent_turn") is None
+    assert _queued_preemption(queue, "agent_turn") is not None
     queue.enqueue(WorkIntentKind.MESSAGE, source="player", payload={"text": "stop that"})
     assert _queued_preemption(queue, "agent_turn") is not None
 

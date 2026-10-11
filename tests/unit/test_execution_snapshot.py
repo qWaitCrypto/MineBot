@@ -111,3 +111,16 @@ def test_body_reported_phase_is_preserved_as_execution_evidence():
     assert current is not None
     assert current["phase"] == "smelting"
     assert current["fact_revision"] == 1
+
+
+def test_survival_vitals_are_carried_into_execution_facts():
+    snapshots = ExecutionSnapshots()
+    snapshots.begin("call-1", "move_to", {})
+    snapshots.observe("call-1", {
+        "position": [1, 52, 1], "health": 10.8, "food": 8, "oxygen": -12,
+        "pathing": True,
+    })
+    facts = snapshots.current()["facts"]
+    assert facts["health"] == 10.8
+    assert facts["food"] == 8
+    assert facts["oxygen"] == -12
