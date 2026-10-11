@@ -1567,11 +1567,14 @@ class AgentRuntime:
         self.body_control = BodyControl(authority)
         self._body_stop_lock = asyncio.Lock()
         self._responses_turn_lock = asyncio.Lock()
-        from minebot.app.direct_call_supervision import DirectBuildSupervisor
+        from minebot.app.direct_call_supervision import CallSupervisor
         self.decision_client = DecisionClient(emit=self.trace.emit)
         from minebot.app.panel_telemetry import PanelTelemetry
         self.panel_telemetry = PanelTelemetry(self.trace)
-        self.direct_build_supervisor = DirectBuildSupervisor(self)
+        # One supervisor covers direct Agent calls and work-plan call nodes.
+        # Keep the old attribute as a compatibility alias for slice-1 tools.
+        self.call_supervisor = CallSupervisor(self)
+        self.direct_build_supervisor = self.call_supervisor
         self.reflex_manager = None
         self.background_call: BackgroundCall | None = None
         self.execution_snapshots = ExecutionSnapshots()
@@ -1952,8 +1955,17 @@ class AgentRuntime:
             arguments = args[1] if len(args) > 1 and isinstance(args[1], dict) else {}
             self.execution_snapshots.begin(operation_id, tool.name, arguments)
         try:
-            if tool.name == "build_structure" and callable(getattr(self.body, "confirm_control_idle", None)):
-                result = await self.direct_build_supervisor.run(tool, admitted_callback, args,
+            supervisor = getattr(self, "call_supervisor", None)
+            if supervisor is None:
+                # Older lightweight test runtimes may intentionally omit the
+                # optional supervisor; preserve their direct execution seam.
+                supervisor = getattr(self, "direct_build_supervisor", None)
+            # R2 owns the SDK runner path.  The hand-written native Responses
+            # kernel has its own pending-call protocol and is explicitly out
+            # of this slice; keep its existing timing/settlement semantics.
+            if (tool.sidecar.can_mutate_body and supervisor is not None
+                    and not getattr(self, "native_responses", False)):
+                result = await supervisor.run(tool, admitted_callback, args,
                     call_id=operation_id, timeout_s=timeout_s)
                 outcome = _execution_outcome(result)
                 return with_execution_receipt(result)

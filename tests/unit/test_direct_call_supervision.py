@@ -4,6 +4,7 @@ import time
 
 from minebot.app.client_body_tools import client_body_tools
 from minebot.app.construction_facts import read_construction
+from minebot.app.decision_client import DecisionAnswer
 from minebot.app.wiring import build_agent_runtime
 from minebot.brain.registry import ToolRegistry, RegisteredTool, ToolSidecar, WeldContext, execute_tool
 from minebot.brain.progress import ProgressAuthority
@@ -235,3 +236,208 @@ async def _inspect_budget():
         assert final["reads"] == final["questions"] == 4
     finally:
         await runtime.aclose()
+
+
+class GenericCallIpc(NativeIpc):
+    """A small native stand-in for non-build long calls."""
+
+    def __init__(self, *, progressing=False):
+        super().__init__(complete=True)
+        self.progressing = progressing
+        self.x = 0.0
+
+    def state(self):
+        state = super().state()
+        state["position"] = [self.x, 5, 0]
+        state["pathing"] = self.progressing
+        state["navigation"] = {"pathing": self.progressing, "path_position": int(self.x)}
+        return state
+
+    def command(self, objective, *, action_id, timeout_ms, on_progress):
+        self.active = action_id
+        self.started.set()
+        deadline = time.monotonic() + .35
+        while time.monotonic() < deadline and not self.cancelled.wait(.01):
+            if self.progressing:
+                self.x += .75
+            on_progress({**self.state(), "type": "progress", "action_id": action_id})
+        self.active = None
+        if self.cancelled.is_set():
+            return RealClientTerminal(action_id, "canceled", "cancel_requested", self.state())
+        return RealClientTerminal(action_id, "completed", "world_result_verified", self.state())
+
+
+class StubDecision:
+    def __init__(self, answers):
+        self.answers = iter(answers)
+        self.requests = []
+
+    async def ask(self, payload, *, priority):
+        self.requests.append((payload, priority))
+        choice = next(self.answers)
+        return DecisionAnswer(choice, {"answers": {"q": {"choice": choice}}}, 0.01, len(self.requests))
+
+    async def close(self):
+        return None
+
+
+def _register_generic(runtime, registry, body, name="move_to"):
+    def invoke(params):
+        action = Action.create("moveTo", {"target": params.get("target", [1, 5, 0])})
+        accepted = body.execute(action)
+        if not accepted.accepted:
+            return ToolResult(False, "action_rejected", True)
+        terminal = body.await_action_terminal(action.id)
+        return ToolResult(terminal.data.get("success", False), terminal.data.get("reason", "unknown"),
+                          can_retry=not terminal.data.get("success", False), metrics=dict(terminal.data))
+    tool = RegisteredTool(name, "Move to a target using native navigation.",
+                          {"type": "object", "properties": {"target": {"type": "array"}},
+                           "required": [], "additionalProperties": True}, invoke,
+                          ToolSidecar(name, True, source="test", body_scope=("moveTo",), timeout_s=10),
+                          supervision_explanation="Native navigation advances through movement and returns a terminal result.")
+    registry.register(tool)
+    return tool
+
+
+def test_normal_long_non_build_call_uses_shared_supervisor_without_question():
+    async def run():
+        ipc = GenericCallIpc(progressing=True)
+        runtime, _ = make_runtime(ipc)
+        tool = _register_generic(runtime, runtime.registry, runtime.body)
+        runtime.call_supervisor.suspicion_s = .04
+        runtime.call_supervisor.review_interval_s = .02
+        decision = StubDecision(("continue",))
+        runtime.call_supervisor._client = decision
+        try:
+            result = await runtime.run_tool(tool, execute_tool, tool, {"target": [1, 5, 0]},
+                                            runtime.weld_context, tool_call_id="move-call", timeout_s=2)
+            assert result["success"]
+            assert not [e for e in runtime.trace.events
+                        if e["event"] == "call_supervision_request" and e["tool_call_id"] == "move-call"]
+            assert len(decision.requests) == 0
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_shared_supervisor_yield_stops_generic_call_and_delivers_one_fact():
+    async def run():
+        ipc = GenericCallIpc(progressing=False)
+        runtime, _ = make_runtime(ipc)
+        tool = _register_generic(runtime, runtime.registry, runtime.body, name="collect_resource")
+        runtime.call_supervisor.suspicion_s = .04
+        runtime.call_supervisor.review_interval_s = .02
+        decision = StubDecision(("yield",))
+        runtime.call_supervisor._client = decision
+        try:
+            result = await asyncio.wait_for(runtime.run_tool(
+                tool, execute_tool, tool, {"target": [1, 5, 0]}, runtime.weld_context,
+                tool_call_id="original-generic", timeout_s=2), 2)
+            assert result["metrics"]["direct_call_handoff"]["facts"]["reason"] == "supervision_yield"
+            assert ipc.cancelled.is_set()
+            raw = [e for e in runtime.trace.events if e["event"] == "tool_raw_result"]
+            assert len(raw) == 1 and raw[0]["tool_call_id"] == "original-generic"
+            assert len(decision.requests) == 1
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_unknown_answer_and_read_budget_never_trigger_supervisor_stop():
+    async def run():
+        ipc = GenericCallIpc(progressing=False)
+        runtime, _ = make_runtime(ipc)
+        tool = _register_generic(runtime, runtime.registry, runtime.body, name="smelt_item")
+        runtime.call_supervisor.suspicion_s = .03
+        runtime.call_supervisor.review_interval_s = .01
+        runtime.call_supervisor.max_reads = 2
+        runtime.call_supervisor.max_questions = 2
+        # The second answer is deliberately outside the three-choice protocol;
+        # it must be recorded as unknown just like an explicit unknown answer.
+        decision = StubDecision(("inspect", "garbage"))
+        runtime.call_supervisor._client = decision
+        job = asyncio.create_task(runtime.run_tool(tool, execute_tool, tool, {"target": [1, 5, 0]},
+                                                   runtime.weld_context, tool_call_id="bounded", timeout_s=2))
+        try:
+            await asyncio.sleep(.18)
+            assert not [e for e in runtime.trace.events if e["event"] == "call_supervision_stop_requested"]
+            assert len([e for e in runtime.trace.events if e["event"] == "call_supervision_read"]) == 2
+            assert len(decision.requests) == 2
+            await runtime.cancel_active_execution_with_facts("user_stop")
+            await asyncio.wait_for(job, 1)
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_decision_timeout_is_unknown_and_never_stops_body():
+    class TimeoutDecision:
+        def __init__(self):
+            self.requests = 0
+
+        async def ask(self, payload, *, priority):
+            self.requests += 1
+            raise TimeoutError("decision timed out")
+
+        async def close(self):
+            return None
+
+    async def run():
+        ipc = GenericCallIpc(progressing=False)
+        runtime, _ = make_runtime(ipc)
+        tool = _register_generic(runtime, runtime.registry, runtime.body, name="collect_resource")
+        runtime.call_supervisor.suspicion_s = .03
+        runtime.call_supervisor.review_interval_s = .01
+        decision = TimeoutDecision()
+        runtime.call_supervisor._client = decision
+        job = asyncio.create_task(runtime.run_tool(
+            tool, execute_tool, tool, {"target": [1, 5, 0]}, runtime.weld_context,
+            tool_call_id="decision-timeout", timeout_s=2))
+        try:
+            await asyncio.sleep(.10)
+            assert decision.requests >= 1
+            assert not [e for e in runtime.trace.events
+                        if e["event"] == "call_supervision_stop_requested"]
+            results = [e for e in runtime.trace.events
+                       if e["event"] == "call_supervision_result"]
+            assert results and all(e["choice"] == "unknown" for e in results)
+            await runtime.cancel_active_execution_with_facts("user_stop")
+            await asyncio.wait_for(job, 1)
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_plan_call_and_direct_call_share_the_same_supervisor():
+    from minebot.app.work_runtime import WorkPlanExecutor
+
+    async def run():
+        ipc = GenericCallIpc(progressing=True)
+        runtime, _ = make_runtime(ipc)
+        tool = _register_generic(runtime, runtime.registry, runtime.body, name="craft_item")
+        runtime.call_supervisor.suspicion_s = .04
+        runtime.call_supervisor.review_interval_s = .02
+        runtime.call_supervisor._client = StubDecision(("continue",))
+
+        async def call(tool_name, arguments, *, call_id, timeout_s):
+            return await runtime.run_tool(
+                tool, execute_tool, tool, arguments, runtime.weld_context,
+                tool_call_id=call_id, timeout_s=timeout_s or 2,
+            )
+
+        plan = {
+            "language": "minebot-work/0.2",
+            "timeout_s": 10,
+            "goal": "perform one native call",
+            "work": {"kind": "call", "id": "planned-call", "tool": "craft_item",
+                     "arguments": {"target": [1, 5, 0]}},
+        }
+        try:
+            result = await WorkPlanExecutor(plan, call=call).run()
+            assert result.status == "completed"
+            assert runtime.call_supervisor is runtime.direct_build_supervisor
+            assert [e for e in runtime.trace.events if e["event"] == "call_supervision_finished"
+                    and e["tool_call_id"] == "planned-call"]
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())

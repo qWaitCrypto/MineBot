@@ -136,6 +136,12 @@ def client_body_tools(body: Body, natural_regions: Sequence[object] = ()) -> tup
             ToolSidecar(name, True, source="body.client", body_scope=(action,), timeout_s=310),
             projector=_build_observation if name == "build_structure" else
                 lambda reason, metrics: {key: bounded_summary_value(value) for key, value in metrics.items()},
+            supervision_explanation=(
+                "The builder normally navigates between declared target cells, selects available materials, "
+                "places them, and returns a verified world result. Native progress and world evidence are authoritative."
+            ) if name == "build_structure" else None,
+            supervision_reader=(lambda params, _body=body: read_construction(_body, params))
+            if name == "build_structure" else None,
         ))
     tools.extend((
         RegisteredTool("read_body_processes", "Read native running processes, paused builder, and current path state.",

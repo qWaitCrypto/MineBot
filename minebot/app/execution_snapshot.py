@@ -121,6 +121,24 @@ class ExecutionSnapshots:
                 op.path_failed_at_progress = op.path_failed
             self._merge_facts(op, payload)
 
+    def enrich(self, operation_id: str, facts: Mapping[str, Any], *, source: str = "bounded_read") -> None:
+        """Add a bounded read to the same snapshot used by the observer.
+
+        The read cannot manufacture progress or change the operation state.  It
+        only makes its evidence available to the next supervisor decision and
+        is therefore subject to the same ownership and terminal checks as
+        native samples.
+        """
+        with self._lock:
+            op = self._owned(operation_id)
+            if op is None or op.state in TERMINAL_STATES:
+                return
+            if isinstance(facts, Mapping):
+                op.facts.setdefault("bounded_reads", []).append({
+                    "source": source,
+                    "facts": json.loads(json.dumps(dict(facts), default=str)),
+                })
+
     def finish(self, operation_id: str, *, state: str, reason: str | None, control: str) -> None:
         with self._lock:
             op = self._owned(operation_id)
@@ -201,7 +219,11 @@ class ExecutionSnapshots:
         navigation = payload.get("navigation") if isinstance(payload.get("navigation"), Mapping) else None
         if navigation is not None:
             facts["navigation"] = {key: navigation[key] for key in _NAVIGATION_FACTS if key in navigation}
-        for key in ("pathing", "builder_paused", "selected_item", "scaffold_blocks"):
+        for key in (
+            "pathing", "builder_paused", "selected_item", "selected_item_known",
+            "inventory_complete", "inventory_includes_selected", "creative",
+            "any_process_active", "scaffold_blocks",
+        ):
             if key in payload:
                 facts[key] = payload[key]
         active = [name for name, field in PROCESS_FIELDS.items() if payload.get(field) is True]
@@ -213,6 +235,7 @@ class ExecutionSnapshots:
                                      for key in ("expected_cells", "matching_cells", "material_item")
                                      if key in construction}
         if op.inventory is not None and op.start_inventory is not None:
+            facts["inventory"] = dict(op.inventory)
             delta = {item: count - op.start_inventory.get(item, 0)
                      for item, count in op.inventory.items() if count != op.start_inventory.get(item, 0)}
             delta.update({item: -count for item, count in op.start_inventory.items() if item not in op.inventory})

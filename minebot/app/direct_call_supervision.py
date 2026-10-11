@@ -1,239 +1,383 @@
-"""Supervise the existing direct build tool; no plan interpreter or auto repair."""
+"""Default supervision for every long-running Body call.
+
+The supervisor is shared by direct Agent calls and work-plan call nodes.  It
+reads the execution snapshot, asks Decision only when the snapshot has stopped
+providing real progress, and uses the existing unified stop/settlement path.
+"""
+
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
-from collections import Counter
+from collections.abc import Mapping
+from dataclasses import asdict, is_dataclass
+from typing import Any
 
-from minebot.app.construction_facts import read_construction
 from minebot.app.decision_client import DecisionClient, DecisionPriority
 from minebot.contract.execution import tool_observation_scope
 
-TOOL_EXPLANATION = (
-    "build_structure fills the declared cuboid. Builder may navigate, switch segments, select "
-    "materials from inventory and place while standing still. Every sample need not consume "
-    "material. Heartbeats, a live process, repeated cancellations and Python pending counts "
-    "are not progress. Only native/world evidence supports completion or a concrete blocker."
+MAX_SUPERVISION_READS = 4
+MAX_SUPERVISION_QUESTIONS = 4
+# Keep the common short-call path's scheduling contract close to the existing
+# direct execution lane.  A call that survives this grace period is a long
+# call and receives the monitor below.
+FAST_COMPLETION_GRACE_S = 0.02
+DEFAULT_TOOL_EXPLANATION = (
+    "The call normally advances through native Body evidence and eventually "
+    "returns one authoritative terminal result. Navigation, phase changes, "
+    "world edits and inventory changes are progress; a live process, heartbeat "
+    "or repeated sample is not."
 )
-VOCABULARY = {
-    "inventory_complete": "true: the count map was read in full; absent items count as zero",
-    "inventory_includes_selected": "true: mainhand items are already counted; do not add again",
-    "selected_item_known": "true with empty selected_item: observed empty hand; absent: unknown",
-    "builder_paused": "Builder reports paused; this alone does not explain why",
-    "path_position": "Index in current navigation path; compare only within the same path",
-    "construction_progress": "Bounded native target-cell read. Matching count is world truth, not an attributable placement count.",
-}
 CRITERIA = {
-    "continue": "Evidence shows normal ongoing work; continue the admitted call.",
-    "inspect": "Evidence is missing or unclear; request a bounded read. Absence alone is not a blocker.",
-    "yield": "Evidence supports handing control back; a recommendation, not a diagnosed cause.",
+    "continue": "The supplied execution evidence supports normal ongoing work; keep the admitted call running.",
+    "inspect": "The evidence is incomplete or unclear; request one bounded read before judging again.",
+    "yield": "The supplied evidence supports handing control back after the call is stopped and settled.",
 }
 
 
-class DirectBuildSupervisor:
-    def __init__(self, runtime, *, decision_url=None, suspicion_s=5.0, review_interval_s=15.0):
+class CallSupervisor:
+    """One rule for all running mutating calls.
+
+    ``run`` is invoked from ``AgentRuntime.run_tool`` for both ``agent_call``
+    and ``agent_plan``. It never owns Body control: the runtime's existing
+    claim and unified cancellation entry remain authoritative.
+    """
+
+    def __init__(self, runtime: Any, *, decision_url: str | None = None,
+                 suspicion_s: float = 5.0, review_interval_s: float = 15.0,
+                 max_reads: int = MAX_SUPERVISION_READS,
+                 max_questions: int = MAX_SUPERVISION_QUESTIONS) -> None:
         self.runtime = runtime
         self.decision_url = decision_url or os.environ.get(
-            "MINEBOT_DECISION_URL", "http://117.176.14.165:10004/v1/systemone")
+            "MINEBOT_DECISION_URL", "http://117.176.14.165:10004/v1/systemone"
+        )
         self.suspicion_s = suspicion_s
         self.review_interval_s = review_interval_s
+        self.max_reads = max_reads
+        self.max_questions = max_questions
         self._client = getattr(runtime, "decision_client", None) or DecisionClient(
             url=self.decision_url, emit=runtime.trace.emit
         )
-        self.current = None
+        self.current: dict[str, Any] | None = None
 
-    async def close(self):
+    async def close(self) -> None:
         if self._client is not None:
             await self._client.close()
 
-    async def judge(self, call_id, params, state, world, idle_s):
-        request = {"state": {
-            "protocol": "minebot-direct-build-supervision/1",
-            "tool": {"name": "build_structure", "arguments": params, "normal_work": TOOL_EXPLANATION},
-            "facts": {"bot": {"observed": bool(state), "values": {
-                k: v for k, v in state.items() if k in {
-                    "position", "creative", "inventory", "inventory_complete", "inventory_includes_selected",
-                    "selected_slot", "selected_item", "selected_item_known", "sampled_at_ms", "navigation",
-                    "builder_active", "builder_paused", "allow_inventory", "pathing", "any_process_active",
-                    "active_action_id", "active_action_known", "construction_progress"}} or None},
-                      "site": {"observed": world is not None, "values": {
-                          k: v for k, v in world.items() if k not in {"matched_positions", "remaining_cells", "unknown_cells"}},
-                          "remaining_cell_count": len(world["remaining_cells"]),
-                          "remaining_block_types": dict(Counter(cell["actual"] for cell in world["remaining_cells"])),
-                          "remaining_sample": world["remaining_cells"][:8],
-                          "omitted_remaining_cell_count": max(0, len(world["remaining_cells"]) - 8),
-                          "unknown_cell_count": len(world["unknown_cells"]),
-                          "omitted_position_count": len(world["matched_positions"]) + len(world["remaining_cells"]) + len(world["unknown_cells"])}},
-            "no_explainable_progress_s": round(idle_s, 2), "field_vocabulary": VOCABULARY,
-            "evidence_scope": "Only sampled facts; omitted facts are unknown. A recommendation is not a physical result.",
-        }, "questions": {"q": {"type": "choice",
-            "instructions": "Judge the active tool using only these facts.", "criteria": CRITERIA}}}
+    @staticmethod
+    def _explanation(tool: Any) -> str:
+        value = getattr(tool, "supervision_explanation", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        description = getattr(tool, "description", None)
+        return str(description).strip() if description else DEFAULT_TOOL_EXPLANATION
+
+    def _snapshot(self, call_id: str) -> dict[str, Any]:
+        snapshots = getattr(self.runtime, "execution_snapshots", None)
+        current = snapshots.current() if snapshots is not None else None
+        if isinstance(current, dict) and current.get("operation_id") == call_id:
+            return current
+        return {}
+
+    async def judge(self, call_id: str, tool: Any, params: Mapping[str, Any],
+                    execution: Mapping[str, Any], idle_s: float) -> str:
+        request = {
+            "state": {
+                "protocol": "minebot-call-supervision/2",
+                "tool": {
+                    "name": getattr(tool, "name", "unknown"),
+                    "arguments": dict(params),
+                    "normal_work": self._explanation(tool),
+                },
+                "execution": dict(execution),
+                "no_explainable_progress_s": round(idle_s, 2),
+                "evidence_scope": (
+                    "Only the execution snapshot and the registered normal-work explanation are known. "
+                    "Omitted facts are unknown. Do not infer a physical result from process liveness."
+                ),
+            },
+            "questions": {"q": {"type": "choice",
+                "instructions": "Judge the active call using only these facts.",
+                "criteria": CRITERIA}},
+        }
+        tool_name = getattr(tool, "name", "unknown")
+        self.runtime.trace.emit("call_supervision_request", tool_call_id=call_id,
+                                tool=tool_name, purpose="supervision",
+                                idle_s=round(idle_s, 3), request=request)
+        # Keep slice-1 replay event names in addition to the shared event.
         self.runtime.trace.emit("direct_supervision_request", tool_call_id=call_id,
-                                regression_format="minebot-semantic-regression/1", request=request)
+                                regression_format="minebot-semantic-regression/1",
+                                request=request)
         started = time.monotonic()
+        raw: dict[str, Any] | None = None
         try:
             answer = await self._client.ask(request, priority=DecisionPriority.SUPERVISION)
             raw = answer.raw
             choice = answer.choice if answer.choice in CRITERIA else "unknown"
-        except (ValueError, TypeError):
-            raw, choice = None, "unknown"
+        except Exception:
+            # Transport errors, timeouts and malformed answers are unknown and
+            # never stop Body work on their own.
+            choice = "unknown"
+        elapsed = time.monotonic() - started
+        self.runtime.trace.emit("call_supervision_result", tool_call_id=call_id,
+                                tool=tool_name, purpose="supervision", response=raw,
+                                choice=choice, unknown=choice == "unknown",
+                                elapsed_s=elapsed)
         self.runtime.trace.emit("direct_supervision_result", tool_call_id=call_id,
-                                response=raw, choice=choice, elapsed_s=time.monotonic() - started)
+                                response=raw, choice=choice, elapsed_s=elapsed)
         return choice
 
-    async def run(self, tool, callback, args, *, call_id, timeout_s):
+    async def _bounded_read(self, record: dict[str, Any], tool: Any,
+                            params: Mapping[str, Any]) -> dict[str, Any]:
+        reader = getattr(tool, "supervision_reader", None)
+        try:
+            if callable(reader):
+                value = await self.runtime._read_lane.run(reader, dict(params))
+                source = "registered_reader"
+            else:
+                body = getattr(self.runtime, "body", None)
+                getter = getattr(body, "get_state", None)
+                if not callable(getter):
+                    return {}
+                value = await self.runtime._read_lane.run(getter)
+                source = "body_state"
+        except Exception as exc:
+            self.runtime.trace.emit("call_supervision_read_unknown",
+                                    tool_call_id=record["call_id"], tool=getattr(tool, "name", "unknown"),
+                                    error_type=type(exc).__name__)
+            return {}
+        if isinstance(value, Mapping):
+            facts = dict(value)
+        elif is_dataclass(value):
+            facts = asdict(value)
+        else:
+            raw = getattr(value, "__dict__", None)
+            facts = dict(raw) if isinstance(raw, dict) else {}
+        snapshots = getattr(self.runtime, "execution_snapshots", None)
+        if snapshots is not None:
+            snapshots.enrich(record["call_id"], facts, source=source)
+        record["reads"] += 1
+        self.runtime.trace.emit("call_supervision_read", tool_call_id=record["call_id"],
+                                tool=getattr(tool, "name", "unknown"),
+                                read_number=record["reads"], facts=facts)
+        return facts
+
+    @staticmethod
+    def _deterministic_terminal(execution: Mapping[str, Any], read: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Keep the existing construction terminal evidence intact.
+
+        The supervisor does not select this by tool name. A registered bounded
+        reader may expose a complete, non-empty remainder and the snapshot may
+        prove the native builder is paused with a complete inventory read. No
+        equivalent evidence is inferred for other calls.
+        """
+        if not read.get("complete") or not read.get("remaining_cells"):
+            return None
+        facts = execution.get("facts") if isinstance(execution.get("facts"), Mapping) else {}
+        if facts.get("builder_paused") is not True or facts.get("creative") is True:
+            return None
+        if facts.get("inventory_complete") is not True or facts.get("inventory_includes_selected") is not True:
+            return None
+        construction = facts.get("construction") if isinstance(facts.get("construction"), Mapping) else {}
+        item, inventory = construction.get("material_item"), facts.get("inventory")
+        if not isinstance(item, str) or not item or not isinstance(inventory, Mapping):
+            return None
+        if inventory.get(item, 0) != 0 or not read.get("remaining_cells"):
+            return None
+        # Do not put the material name or a remedy in the Agent handoff.
+        return {"reason": "material_exhausted", "confirmed": True, "construction": read}
+
+    @staticmethod
+    def _handoff_facts(execution: Mapping[str, Any], *, reason: str,
+                       confirmed: bool, decision: str | None,
+                       extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        facts = execution.get("facts") if isinstance(execution.get("facts"), Mapping) else {}
+        evidence = {
+            key: facts.get(key) for key in
+            ("position", "navigation", "pathing", "processes", "builder_paused", "goal")
+            if key in facts
+        }
+        construction = facts.get("construction")
+        if isinstance(construction, Mapping):
+            evidence["construction"] = {
+                key: value for key, value in construction.items()
+                if key != "material_item"
+            }
+        safe: dict[str, Any] = {
+            "reason": reason, "confirmed": confirmed,
+            "what": {"tool": execution.get("tool"), "phase": execution.get("phase"),
+                      "elapsed_s": execution.get("elapsed_s"),
+                      "no_progress_s": execution.get("since_progress_s"),
+                      "last_progress_at": execution.get("last_progress_at"),
+                      "progress_signal": execution.get("progress_signal")},
+            "body": {"position": facts.get("position")},
+            "decision": {"choice": decision, "evidence": evidence},
+        }
+        if isinstance(extra, Mapping) and isinstance(extra.get("construction"), Mapping):
+            construction = dict(extra["construction"])
+            construction.pop("material_item", None)
+            safe["construction"] = construction
+        return safe
+
+    async def run(self, tool: Any, callback: Any, args: tuple[Any, ...], *,
+                  call_id: str, timeout_s: float | None) -> Any:
         loop = asyncio.get_running_loop()
-        latest = {}
         wake = asyncio.Event()
-        record = {"call_id": call_id, "action_id": None, "cancel_requested": False, "settling": False}
+        record: dict[str, Any] = {"call_id": call_id, "action_id": None,
+                                  "cancel_requested": False, "settling": False,
+                                  "reads": 0, "questions": 0}
         self.current = record
-        def receive(payload):
-            if self.current is not record or payload.get("call_id") != call_id:
-                return
-            record["action_id"] = payload.get("action_id")
-            if payload.get("lite"):
-                # Observer-only frames carry no inventory or site facts; keep the last full sample.
-                return
-            latest.clear()
-            latest.update(payload)
-            wake.set()
+
+        def receive(payload: Mapping[str, Any]) -> None:
+            if self.current is record and payload.get("call_id") == call_id:
+                record["action_id"] = payload.get("action_id")
+                wake.set()
+
         telemetry = getattr(self.runtime, "panel_telemetry", None)
         snapshots = getattr(self.runtime, "execution_snapshots", None)
-        def notify(payload):
+
+        def notify(payload: Mapping[str, Any]) -> None:
             if snapshots is not None:
                 snapshots.observe(call_id, payload)
             if telemetry is not None:
                 telemetry.observe(call_id, payload)
             loop.call_soon_threadsafe(receive, dict(payload))
-        def invoke():
+
+        def invoke() -> Any:
+            if snapshots is not None:
+                snapshots.running(call_id)
             with tool_observation_scope(call_id, notify):
                 return callback(*args)
+
         worker = asyncio.create_task(self.runtime.execution_lane.run(invoke, timeout_s=timeout_s))
-        monitor = asyncio.create_task(self._monitor_safely(record, latest, wake, args[1], worker))
+        params = args[1] if len(args) > 1 and isinstance(args[1], Mapping) else {}
+        monitor: asyncio.Task[Any] | None = None
         try:
+            # Fast terminal calls should retain the old lane timing.  This is
+            # only a scheduling grace period; every call that remains active
+            # after it enters the shared monitor.
+            grace = min(FAST_COMPLETION_GRACE_S, max(0.0, self.suspicion_s))
+            if grace:
+                done, _ = await asyncio.wait({worker}, timeout=grace)
+                if not done:
+                    monitor = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
+            else:
+                monitor = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
             result = await worker
-            if record["settling"]:
+            if record["settling"] and monitor is not None:
                 await monitor
             handoff = self.runtime.direct_call_handoffs.get(call_id)
             payload = result if isinstance(result, dict) else getattr(result, "result", None)
             if handoff is not None and isinstance(payload, dict):
                 payload.setdefault("metrics", {})["direct_call_handoff"] = handoff
-            if isinstance(payload, dict) and payload.get("metrics", {}).get("control_unknown"):
+            metrics = payload.get("metrics") if isinstance(payload, dict) else None
+            if isinstance(metrics, dict) and metrics.get("control_unknown"):
                 self.runtime.body_control.mark_unknown()
             return result
         finally:
-            monitor.cancel()
-            await asyncio.gather(monitor, return_exceptions=True)
+            if monitor is not None:
+                monitor.cancel()
+                await asyncio.gather(monitor, return_exceptions=True)
+            self.runtime.trace.emit("call_supervision_finished", tool_call_id=call_id,
+                                    tool=getattr(tool, "name", "unknown"), reads=record["reads"],
+                                    questions=record["questions"],
+                                    unknown_answers=record.get("unknown_answers", 0))
             self.runtime.trace.emit("direct_supervision_finished", tool_call_id=call_id,
-                                    reads=record.get("reads", 0), questions=record.get("questions", 0))
+                                    reads=record["reads"], questions=record["questions"])
             if self.current is record:
                 self.current = None
 
-    async def _monitor_safely(self, *args):
-        try:
-            await self._monitor(*args)
-        except Exception as exc:
-            self.runtime.trace.emit("direct_supervision_unknown", error_type=type(exc).__name__)
-
-    async def _monitor(self, record, latest, wake, params, worker):
-        last_progress, last_review = time.monotonic(), 0.0
-        reads, questions = 0, 0
-        previous = None
-        last_received = None
-        highwater = {}
-        max_matching = None
+    async def _monitor(self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
+                       wake: asyncio.Event, worker: asyncio.Task[Any]) -> None:
+        last_progress_wall = time.monotonic()
+        last_review = 0.0
+        last_marker: tuple[Any, Any] | None = None
+        last_phase: Any = None
         while not worker.done() and not record["cancel_requested"]:
             try:
                 await asyncio.wait_for(wake.wait(), timeout=0.25)
                 wake.clear()
             except asyncio.TimeoutError:
                 pass
-            now = time.monotonic()
-            state = dict(latest)
-            if state and state.get("received_at_monotonic") != last_received:
-                last_received = state.get("received_at_monotonic")
-                self.runtime.trace.emit("direct_call_progress", tool_call_id=record["call_id"],
-                                        action_id=record["action_id"], native_sample=state)
-            if state.get("type") == "terminal":
+            execution = self._snapshot(record["call_id"])
+            if not execution:
+                continue
+            if execution.get("state") in {"succeeded", "failed", "cancelled", "unknown"}:
                 return
-            nav = state.get("navigation") or {}
-            matching = (state.get("construction_progress") or {}).get("matching_cells")
-            if isinstance(matching, int):
-                if max_matching is not None and matching > max_matching:
-                    last_progress = now
-                max_matching = max(matching, max_matching or 0)
-            path = json.dumps([nav.get("src"), nav.get("dest"), nav.get("path_movements")])
-            index = nav.get("path_position")
-            if isinstance(index, int) and index > highwater.get(path, -1):
-                if path in highwater:
-                    last_progress = now
-                highwater[path] = index
-            if previous:
-                pos, old = state.get("position"), previous.get("position")
-                if nav.get("pathing") and pos and old and sum((a-b)**2 for a,b in zip(pos, old)) >= 0.25:
-                    last_progress = now
-            if state:
-                previous = state
-            if not state or now - last_progress < self.suspicion_s or now - last_review < self.review_interval_s:
+            marker = (execution.get("last_progress_at"), execution.get("progress_signal"))
+            if marker[0] is not None and marker != last_marker:
+                last_progress_wall = time.monotonic()
+                self.runtime.trace.emit("call_supervision_progress", tool_call_id=record["call_id"],
+                                        tool=getattr(tool, "name", "unknown"), execution=execution)
+            last_marker = marker
+            phase = execution.get("phase")
+            if last_phase is not None and phase != last_phase:
+                last_progress_wall = time.monotonic()
+            last_phase = phase
+            now = time.monotonic()
+            idle_s = now - last_progress_wall
+            if idle_s < self.suspicion_s or now - last_review < self.review_interval_s:
                 continue
-            if reads >= 4:
-                continue
+            if record["questions"] >= self.max_questions:
+                self.runtime.trace.emit("call_supervision_limit", tool_call_id=record["call_id"],
+                                        tool=getattr(tool, "name", "unknown"), kind="questions",
+                                        limit=self.max_questions)
+                return
             last_review = now
-            for attempt in range(2):
-                if worker.done() or record["cancel_requested"] or reads >= 4:
-                    return
-                if attempt == 0:
-                    world = await self.runtime._read_lane.run(read_construction, self.runtime.body, params)
-                else:
-                    read = await self.runtime._read_lane.run(self.runtime.body.perceive, "baritoneState", {})
-                    state = dict(read.data) if read.ok else {}
-                reads += 1
-                record["reads"] = reads
+            read: dict[str, Any] = {}
+            if record["reads"] < self.max_reads:
+                read = await self._bounded_read(record, tool, params)
                 if worker.done() or record["cancel_requested"]:
                     return
-                if world["complete"] and world["matched_cells"] == world["expected_cells"]:
-                    last_progress = time.monotonic()
-                    break
-                if attempt == 0:
-                    state = dict(latest)
-                item = (state.get("construction_progress") or {}).get("material_item")
-                inventory = state.get("inventory")
-                count = inventory.get(item, 0) if (state.get("inventory_complete") is True
-                    and isinstance(inventory, dict) and isinstance(item, str) and item) else None
-                if (world["complete"] and state.get("builder_paused") is True
-                    and state.get("creative") is False and count == 0
-                    and state.get("inventory_includes_selected") is True and world["remaining_cells"]):
-                    await self._handoff(record, {
-                        "reason": "material_exhausted", "confirmed": True,
-                        "material": item, "available": 0, "construction": world,
-                        "inventory_source": state.get("sampled_at_ms"),
-                    })
+                blocker = self._deterministic_terminal(execution, read)
+                if blocker is not None:
+                    await self._handoff(record, execution, blocker, decision=None)
                     return
-                if questions >= 4:
-                    break
-                choice = await self.judge(record["call_id"], params, state, world, time.monotonic()-last_progress)
-                questions += 1
-                record["questions"] = questions
-                if worker.done() or record["cancel_requested"]:
-                    return
-                if choice == "yield":
-                    await self._handoff(record, {"reason": "supervision_yield", "confirmed": False,
-                        "recommendation": "yield", "construction": world, "unknown": ["blocker_cause"]})
-                    return
-                if choice != "inspect":
-                    break
+            choice = await self.judge(record["call_id"], tool, params,
+                                      self._snapshot(record["call_id"]), idle_s)
+            record["questions"] += 1
+            if choice == "unknown":
+                record["unknown_answers"] = record.get("unknown_answers", 0) + 1
+            if worker.done() or record["cancel_requested"]:
+                return
+            if choice == "yield":
+                await self._handoff(record, self._snapshot(record["call_id"]),
+                                    {"reason": "supervision_yield", "confirmed": False},
+                                    decision=choice)
+                return
+            if choice == "inspect" and record["reads"] >= self.max_reads:
+                self.runtime.trace.emit("call_supervision_limit", tool_call_id=record["call_id"],
+                                        tool=getattr(tool, "name", "unknown"), kind="reads",
+                                        limit=self.max_reads)
 
-    async def _handoff(self, record, facts):
+    async def _handoff(self, record: dict[str, Any], execution: Mapping[str, Any],
+                       details: Mapping[str, Any], *, decision: str | None) -> None:
         if self.current is not record or record["cancel_requested"]:
             return
         record["cancel_requested"] = record["settling"] = True
         call_id = record["call_id"]
-        self.runtime.trace.emit("direct_call_blocked", tool_call_id=call_id, facts=facts)
+        safe = self._handoff_facts(self._snapshot(call_id) or execution,
+                                   reason=str(details.get("reason") or "supervision_yield"),
+                                   confirmed=bool(details.get("confirmed")), decision=decision,
+                                   extra=details)
+        self.runtime.trace.emit("direct_call_blocked", tool_call_id=call_id, facts=safe)
+        self.runtime.trace.emit("call_supervision_stop_requested", tool_call_id=call_id,
+                                tool=execution.get("tool"), reason=safe["reason"], decision=decision)
         kernel = self.runtime.responses_kernel
         if kernel is not None:
-            kernel.notify_fact({"call_id": call_id, "status": "handoff_requested", **facts})
-        settled = await self.runtime.cancel_active_execution_with_facts("direct_call:" + facts["reason"])
-        self.runtime.trace.emit("direct_call_handoff", tool_call_id=call_id, facts=facts, settlement=settled)
-        self.runtime.direct_call_handoffs[call_id] = {"facts": facts, "settlement": settled}
+            kernel.notify_fact({"call_id": call_id, "status": "handoff_requested", **safe})
+        started = time.monotonic()
+        settled = await self.runtime.cancel_active_execution_with_facts("direct_call:" + safe["reason"])
+        self.runtime.trace.emit("call_supervision_stop_settled", tool_call_id=call_id,
+                                elapsed_s=time.monotonic() - started,
+                                settled=bool(settled.get("settled")) if isinstance(settled, Mapping) else None)
+        self.runtime.trace.emit("direct_call_handoff", tool_call_id=call_id, facts=safe, settlement=settled)
+        self.runtime.direct_call_handoffs[call_id] = {"facts": safe, "settlement": settled}
+
+
+# Compatibility name for slice-1 callers; the implementation now covers all
+# mutating calls.
+DirectBuildSupervisor = CallSupervisor
+
+__all__ = ["CallSupervisor", "DirectBuildSupervisor", "MAX_SUPERVISION_READS", "MAX_SUPERVISION_QUESTIONS"]

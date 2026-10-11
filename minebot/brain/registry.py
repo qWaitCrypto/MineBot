@@ -35,6 +35,12 @@ ToolCallable = Callable[[JsonObject], ToolResult]
 # regardless of what the projector surfaces.
 ObservationProjector = Callable[[str, dict[str, object]], JsonObject]
 
+# A bounded, evidence-only read used by the generic long-call supervisor when
+# the execution snapshot cannot answer a doubt.  It is deliberately a reader,
+# not a detector or a second execution path; its result is merged back into the
+# call's execution snapshot.
+SupervisionReader = Callable[[JsonObject], object]
+
 # Neutral sentinel for a stale-generation completion: truthy but not success,
 # not a failure, and not appended as fresh world truth (schema §8).
 PREEMPTED_PAYLOAD: JsonObject = ToolResult(
@@ -83,6 +89,8 @@ class RegisteredTool:
     callable: ToolCallable
     sidecar: ToolSidecar
     projector: ObservationProjector | None = None
+    supervision_explanation: str | None = None
+    supervision_reader: SupervisionReader | None = None
 
     def framework_view(self) -> JsonObject:
         """The only fields the agent framework / LLM may see."""
