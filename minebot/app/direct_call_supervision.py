@@ -163,8 +163,8 @@ class CallSupervisor:
         })
 
     @staticmethod
-    def _criteria(plan: Mapping[str, Any]) -> dict[str, str]:
-        return {
+    def _criteria(plan: Mapping[str, Any], options: Mapping[str, str] | None = None) -> dict[str, str]:
+        criteria = {
             "continue": (
                 "Choose continue when the facts show real Body progress or a phase change consistent with "
                 "state.plan.node_description and state.plan.intent_chain toward state.plan.current_step "
@@ -185,11 +185,15 @@ class CallSupervisor:
                 "resolved by continue, inspect, or step_done for state.plan.node_description."
             ),
         }
+        if options is None:
+            return criteria
+        return {str(key): str(value) for key, value in options.items()}
 
     def _question(
         self, call_id: str, tool: Any, params: Mapping[str, Any],
         execution: Mapping[str, Any], *, idle_s: float, purpose: str,
         supervision_context: Mapping[str, Any] | None,
+        options: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         plan = self._plan_context(supervision_context=supervision_context, tool=tool, params=params)
         request: dict[str, Any] = {
@@ -211,7 +215,7 @@ class CallSupervisor:
             "questions": {"q": {
                 "type": "choice",
                 "instructions": "Choose exactly one finite option using only the supplied facts.",
-                "criteria": self._criteria(plan),
+                "criteria": self._criteria(plan, options),
             }},
         }
         encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)
@@ -255,10 +259,11 @@ class CallSupervisor:
         execution: Mapping[str, Any], idle_s: float, *,
         purpose: str = "running_frame",
         supervision_context: Mapping[str, Any] | None = None,
+        options: Mapping[str, str] | None = None,
     ) -> str:
         request = self._question(
             call_id, tool, params, execution, idle_s=idle_s,
-            purpose=purpose, supervision_context=supervision_context,
+            purpose=purpose, supervision_context=supervision_context, options=options,
         )
         tool_name = getattr(tool, "name", "unknown")
         request_chars_before = int(request.pop("_request_chars_before", request["state"].get("request_chars", 0)))
@@ -275,7 +280,7 @@ class CallSupervisor:
         try:
             answer = await self._client.ask(request, priority=DecisionPriority.SUPERVISION)
             raw = answer.raw
-            choice = answer.choice if answer.choice in self._criteria(request["state"]["plan"]) else "unknown"
+            choice = answer.choice if answer.choice in request["questions"]["q"]["criteria"] else "unknown"
         except Exception:
             choice = "unknown"
         elapsed = time.monotonic() - started
@@ -291,18 +296,20 @@ class CallSupervisor:
         self, call_id: str, tool: Any, params: Mapping[str, Any],
         execution: Mapping[str, Any], idle_s: float, *, purpose: str,
         supervision_context: Mapping[str, Any] | None,
+        options: Mapping[str, str] | None = None,
     ) -> str:
         """Call the overridable judge while accepting slice-1 test seams."""
         signature = inspect.signature(self.judge)
         accepts_context = (
             "purpose" in signature.parameters
             or "supervision_context" in signature.parameters
+            or "options" in signature.parameters
             or any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
         )
         if accepts_context:
             return await self.judge(
                 call_id, tool, params, execution, idle_s,
-                purpose=purpose, supervision_context=supervision_context,
+                purpose=purpose, supervision_context=supervision_context, options=options,
             )
         return await self.judge(call_id, tool, params, execution, idle_s)
 
@@ -603,6 +610,8 @@ class CallSupervisor:
     async def supervise_idle(
         self, tool: Any, *, call_id: str, plan_context: Mapping[str, Any] | None = None,
         duration_s: float = 2.0, frame_interval_s: float = 0.2,
+        options: Mapping[str, str] | None = None, stop_on_choice: bool = False,
+        notify_agent: bool = True,
     ) -> dict[str, Any]:
         """Ask at a bounded cadence while an unfinished tree is idle.
 
@@ -625,7 +634,7 @@ class CallSupervisor:
             choice = await self._judge_frame(
                 call_id, tool, {}, execution,
                 float(execution.get("since_progress_s") or 0.0),
-                purpose="idle_frame", supervision_context=plan_context,
+                purpose="idle_frame", supervision_context=plan_context, options=options,
             )
             counts["questions"] += 1
             if choice == "unknown":
@@ -633,6 +642,8 @@ class CallSupervisor:
                 unknown_same_position += 1
                 if unknown_same_position >= self.idle_unknown_limit:
                     counts["agent"] += 1
+                    if stop_on_choice:
+                        counts["choice"] = "call_agent"
                     facts = self._handoff_facts(
                         execution, reason="idle_unknown_limit", confirmed=False,
                         decision="unknown", plan=plan_context,
@@ -642,7 +653,7 @@ class CallSupervisor:
                         reason="same_position_unknown_limit", limit=self.idle_unknown_limit,
                     )
                     notify = getattr(self.runtime, "notify_reflex_fact", None)
-                    if callable(notify):
+                    if notify_agent and callable(notify):
                         notify({
                             "kind": "supervision_idle",
                             "activity_id": call_id,
@@ -653,7 +664,12 @@ class CallSupervisor:
                     break
             else:
                 unknown_same_position = 0
+                if stop_on_choice and choice != "unknown":
+                    counts["choice"] = choice
+                    return counts
             await asyncio.sleep(max(0.0, frame_interval_s))
+        if stop_on_choice:
+            counts["choice"] = "unknown"
         return counts
 
     async def _handoff(

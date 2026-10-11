@@ -163,6 +163,7 @@ class ReflexManager:
             observe=self._observe_condition,
             emit=lambda event, **payload: self.runtime.trace.emit(event, activity_id=activity.activity_id, **payload),
             records=activity.records,
+            idle_supervise=self._supervise_idle,
         )
         try:
             wait_attempt = 0
@@ -348,11 +349,13 @@ class ReflexManager:
             goal = str(activity.plan.get("goal", ""))[:800]
             found: dict[str, Any] = {}
 
+            lookup_id = str(call_id).split("__repeat_", 1)[0]
+
             def walk(node: Any, chain: list[str]) -> None:
                 if not isinstance(node, dict) or found:
                     return
                 next_chain = chain + ([str(node["intent"])] if node.get("intent") else [])
-                if node.get("kind") == "call" and str(node.get("id") or "") == call_id:
+                if node.get("kind") == "call" and str(node.get("id") or "") == lookup_id:
                     found.update({
                         "node_description": str(node.get("intent") or f"call {tool_name}")[:800],
                         "intent_chain": next_chain[-8:],
@@ -376,6 +379,23 @@ class ReflexManager:
                 "node_description": found.get("node_description", f"plan call {tool_name}"),
                 "intent_chain": found.get("intent_chain", []),
             }
+
+    async def _supervise_idle(
+        self, tool_name: str, *, call_id: str, plan_context: dict[str, Any],
+        options: dict[str, str],
+    ) -> dict[str, Any]:
+        """Keep the shared Decision loop online while a plan has no call running."""
+        try:
+            tool = self.runtime.registry.get(tool_name)
+        except Exception:
+            return {"choice": "unknown"}
+        supervisor = getattr(self.runtime, "call_supervisor", None)
+        if supervisor is None:
+            return {"choice": "unknown"}
+        return await supervisor.supervise_idle(
+            tool, call_id=f"plan-{call_id}", plan_context={**plan_context, "is_plan": True},
+            options=options, stop_on_choice=True, notify_agent=False,
+        )
 
     async def _call(self, tool_name: str, arguments: dict[str, Any], *, call_id: str, timeout_s: float | None) -> dict[str, Any]:
         tool = self.runtime.registry.get(tool_name)
@@ -708,7 +728,7 @@ class ReflexManager:
                                         decision=self.runtime.decision_client,
                                         choice_provider=getattr(self.runtime, "choice_provider", None),
                                         observe=self._observe_condition,
-                                        records=activity.records)
+                                        records=activity.records, idle_supervise=self._supervise_idle)
             return executor.annotated_tree()
         except Exception:
             return copy.deepcopy(activity.plan)
@@ -729,7 +749,7 @@ def reflex_observation_projector(reason: str, metrics: dict[str, object]) -> dic
 def register_reflex_tools(registry: ToolRegistry, manager: ReflexManager) -> None:
     registry.register(RegisteredTool(
         "delegate_work",
-        "Use this tool when a goal involves multiple dependent steps, a long-running action followed by later actions, a condition that may remain pending, or work that may need pause, resume, cancellation, or revision. The runtime owns sequencing, waiting, control, and authoritative terminal state — you do not need to poll or wait after delegating; the terminal result will be delivered to you asynchronously, freeing you to continue reasoning about other things in the meantime.\n\nBatch all the steps you have already decided on into one plan. A plan with two or three nodes is almost always better than three separate delegate_work calls: it keeps execution atomic and avoids re-acquiring body control between steps.\n\nSubmit one minebot-work/0.2 plan object with: language='minebot-work/0.2', goal (string), positive timeout_s, and work (the root node).\n\nNode kinds:\n- call   {kind:'call', tool, arguments, optional id/when/timeout_s} — one tool call, optionally gated by a condition\n- sequence {kind:'sequence', intent, steps:[...]} — ordered steps; intent is required and must describe the composite action\n- wait   {kind:'wait', condition:{text,...}, timeout_s} — hold until a condition is satisfied or times out\n- batch  {kind:'batch', intent, items:[...], body:<node>} — run body once per item; intent required\n- choice {kind:'choice', intent, options:[{id,intent,work},...]} — the runtime picks one branch via Decision; every option needs id, intent and work\n\nsequence, batch, choice, and every choice option all require a non-empty intent field.\n\nExample multi-step plan (move then place):\n  {language:'minebot-work/0.2', goal:'go to [10,64,20] and place oak_log at [10,65,20]', timeout_s:60,\n   work:{kind:'sequence', intent:'travel then build',\n     steps:[\n       {kind:'call', tool:'move_to', arguments:{x:10,y:64,z:20}},\n       {kind:'call', tool:'place_block', arguments:{block:'oak_log',x:10,y:65,z:20}}\n     ]}}\n\nUse only registered tool names, keep arguments as the tool schema requires, choose structure from the goal and evidence rather than assuming a fixed order, and do not use repeat or interrupt_when.",
+        "Use this tool when a goal involves multiple dependent steps, a long-running action followed by later actions, a condition that may remain pending, or work that may need pause, resume, cancellation, or revision. The reflex layer walks the submitted tree and decides each call from bounded facts; you do not need to poll or wait after delegating, and the terminal result will be delivered asynchronously. The tree is a range of allowed steps and intents, not a perfect script.\n\nBatch the steps and alternatives you already know into one plan. A plan with two or three nodes is usually better than separate delegate_work calls because the reflex layer can continue through the same tree.\n\nSubmit one minebot-work/0.2 plan object with: language='minebot-work/0.2', goal (string), positive timeout_s, and work (the root node).\n\nNode kinds:\n- call   {kind:'call', tool, arguments, optional id/when/timeout_s/repeat} — one tool call; Decision judges its result and may repeat it\n- sequence {kind:'sequence', intent, steps:[...]} — ordered range of steps; intent is required and must describe the composite action\n- wait   {kind:'wait', condition:{text,...}, timeout_s} — hold until a condition is satisfied or times out\n- batch  {kind:'batch', intent, items:[...], body:<node>} — run body once per item; intent required\n- choice {kind:'choice', intent, options:[{id,intent,work},...]} — Decision picks among the declared branches whenever the choice is entered; every option needs id, intent and work\n\nA call repeat is {again_when:<text or object>, until:<text or object>}; those conditions are interpreted by Decision after each result. interrupt_when is reserved for a later slice.\n\nsequence, batch, choice, and every choice option all require a non-empty intent field.\n\nExample multi-step plan (move then place):\n  {language:'minebot-work/0.2', goal:'go to [10,64,20] and place oak_log at [10,65,20]', timeout_s:60,\n   work:{kind:'sequence', intent:'travel then build',\n     steps:[\n       {kind:'call', tool:'move_to', arguments:{x:10,y:64,z:20}},\n       {kind:'call', tool:'place_block', arguments:{block:'oak_log',x:10,y:65,z:20}}\n     ]}}\n\nUse only registered tool names and keep arguments as the tool schema requires. Let the reflex layer judge enough, completion and off-intent from facts; do not encode scene detectors or a polling loop in the plan.",
         {"type": "object", "properties": {"plan": {"type": "object"}}, "required": ["plan"], "additionalProperties": False},
         manager.delegate,
         ToolSidecar("reflex_delegate", mutating=False, source="agent.reflex", tool_type="plan", permission="manage_reflex"),

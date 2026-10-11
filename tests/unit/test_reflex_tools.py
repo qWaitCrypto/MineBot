@@ -14,7 +14,7 @@ from minebot.contract.execution import execution_receipt_scope
 
 class Decision:
     async def ask(self, payload, *, priority=None):
-        return SimpleNamespace(choice="satisfied", raw={"choice": "satisfied"})
+        return SimpleNamespace(choice="step_done", raw={"choice": "step_done"})
 
 
 class Trace:

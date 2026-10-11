@@ -13,10 +13,11 @@ class Decision:
 
     async def ask(self, payload, *, priority=None):
         self.payloads.append(payload)
-        return type("Answer", (), {"choice": self.answers.pop(0), "raw": {"choice": self.answers[0] if self.answers else None}})()
+        choice = self.answers.pop(0) if self.answers else "step_done"
+        return type("Answer", (), {"choice": choice, "raw": {"choice": choice}})()
 
 
-async def run_plan(plan, answers=("satisfied",), calls=None):
+async def run_plan(plan, answers=("step_done",), calls=None):
     calls = calls if calls is not None else []
     decision = Decision(*answers)
 
@@ -33,13 +34,15 @@ async def _state():
     return {"bot": {"observed": True, "position": [0, 64, 0]}}
 
 
-def test_validate_rejects_deferred_repeat_and_interrupt():
+def test_validate_accepts_repeat_but_keeps_interrupt_deferred():
     base = {"language": "minebot-work/0.2", "goal": "x", "timeout_s": 10,
             "work": {"kind": "wait", "condition": {"text": "x"}, "timeout_s": 1}}
     validate_plan(base)
     repeated = {**base, "work": {**base["work"], "repeat": {"again_when": {"text": "x"}, "until": {"text": "y"}}}}
+    validate_plan(repeated)
+    interrupted = {**base, "work": {**base["work"], "interrupt_when": {"text": "stop"}}}
     with pytest.raises(WorkPlanError, match="unsupported_in_slice2"):
-        validate_plan(repeated)
+        validate_plan(interrupted)
 
 
 def test_sequence_batch_and_ref_are_executed_and_annotated():
@@ -76,6 +79,102 @@ def test_choice_and_requires_need_all_satisfied():
     calls = []
     result, _ = asyncio.run(run_plan(plan, answers=("near",), calls=calls))
     assert result.status == "completed" and calls[0][1] == {"route": "near"}
+
+
+def test_call_completion_is_decision_owned_and_keeps_real_cancel_result():
+    plan = {"language": "minebot-work/0.2", "goal": "collect", "timeout_s": 10,
+            "work": {"kind": "call", "id": "collect", "tool": "collect", "arguments": {}}}
+    calls = []
+
+    async def call(tool, arguments, *, call_id, timeout_s):
+        calls.append(call_id)
+        return {"success": False, "reason": "cancelled", "metrics": {"real": True}}
+
+    decision = Decision("step_done")
+    result = asyncio.run(WorkPlanExecutor(plan, call=call, state=lambda: _state(), decision=decision).run())
+    assert result.status == "completed"
+    assert result.results["collect"]["success"] is False
+    assert result.tree["work"]["_runtime"]["decision"]["choice"] == "step_done"
+    assert calls == ["collect"]
+    assert decision.payloads[0]["state"]["plan"]["goal"] == "collect"
+
+
+def test_repeat_is_decision_driven_and_each_reentry_gets_a_new_call_id():
+    plan = {"language": "minebot-work/0.2", "goal": "collect enough", "timeout_s": 10,
+            "work": {"kind": "call", "id": "collect", "tool": "collect", "arguments": {},
+                     "repeat": {"again_when": "more is needed", "until": "enough is present"}}}
+    calls = []
+    decision = Decision("repeat", "repeat", "step_done")
+    async def call(tool, arguments, *, call_id, timeout_s):
+        calls.append(call_id)
+        return {"success": True, "reason": "ok", "metrics": {}}
+    result = asyncio.run(WorkPlanExecutor(plan, call=call, state=lambda: _state(), decision=decision).run())
+    assert result.status == "completed"
+    assert calls == ["collect", "collect__repeat_1", "collect__repeat_2"]
+    assert "again_when" in decision.payloads[0]["questions"]["q"]["criteria"]["repeat"]
+
+
+def test_unknown_call_decision_does_not_advance_or_write_again():
+    plan = {"language": "minebot-work/0.2", "goal": "collect", "timeout_s": 10,
+            "work": {"kind": "call", "id": "collect", "tool": "collect", "arguments": {}}}
+    calls = []
+    executor = WorkPlanExecutor(
+        plan,
+        call=lambda tool, arguments, *, call_id, timeout_s: _cancelled_call(calls, call_id),
+        state=lambda: _state(),
+        decision=Decision("unknown"),
+    )
+    first = asyncio.run(executor.run())
+    assert first.status == "waiting" and calls == ["collect"]
+    assert first.tree["work"]["_runtime"]["decision_pending"] is True
+
+
+def test_unknown_call_can_be_resolved_by_the_idle_supervisor_without_a_second_call():
+    plan = {"language": "minebot-work/0.2", "goal": "collect", "timeout_s": 10,
+            "work": {"kind": "call", "id": "collect", "tool": "collect", "arguments": {}}}
+    calls = []
+    decisions = Decision("unknown")
+    idle_requests = []
+
+    async def call(tool, arguments, *, call_id, timeout_s):
+        calls.append(call_id)
+        return {"success": False, "reason": "cancelled", "metrics": {}}
+
+    async def idle(tool, *, call_id, plan_context, options):
+        idle_requests.append((tool, call_id, plan_context, options))
+        return {"choice": "step_done", "questions": 1, "unknown": 0}
+
+    result = asyncio.run(WorkPlanExecutor(
+        plan, call=call, state=lambda: _state(), decision=decisions,
+        idle_supervise=idle,
+    ).run())
+    assert result.status == "completed"
+    assert calls == ["collect"]
+    assert idle_requests and "step_done" in idle_requests[0][3]
+
+
+def test_inspect_is_one_bounded_read_before_the_next_decision():
+    plan = {"language": "minebot-work/0.2", "goal": "inspect", "timeout_s": 10,
+            "work": {"kind": "call", "id": "inspect", "tool": "read", "arguments": {}}}
+    reads = []
+    decision = Decision("inspect", "step_done")
+
+    async def state():
+        reads.append(True)
+        return {"bot": {"observed": True, "position": [len(reads), 64, 0]}}
+
+    async def call(tool, arguments, *, call_id, timeout_s):
+        return {"success": True, "reason": "read", "metrics": {}}
+
+    result = asyncio.run(WorkPlanExecutor(plan, call=call, state=state, decision=decision).run())
+    assert result.status == "completed"
+    assert len(reads) == 3  # argument facts, post-call facts, one bounded inspect read
+    assert len(decision.payloads) == 2
+
+
+async def _cancelled_call(calls, call_id):
+    calls.append(call_id)
+    return {"success": False, "reason": "cancelled", "metrics": {}}
 
 
 def test_runtime_choice_provider_supplies_options():

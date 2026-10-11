@@ -24,6 +24,7 @@ from minebot.app.decision_client import DecisionClient, DecisionPriority
 
 NodeStatus = Literal["pending", "active", "waiting", "blocked", "done", "cancelled"]
 ConditionStatus = Literal["satisfied", "pending", "unknown"]
+MAX_CALL_DECISION_QUESTIONS = 4
 
 WORK_FIELD_VOCABULARY: dict[str, str] = {
     "pos": "current Body position [x,y,z] from the latest complete state read",
@@ -61,6 +62,13 @@ class WorkDecision(Protocol):
 
 class WorkChoiceProvider(Protocol):
     def __call__(self, node: dict[str, Any], *, intents: list[str], state: dict[str, Any], item: Any) -> Any: ...
+
+
+class WorkIdleSupervisor(Protocol):
+    async def __call__(
+        self, tool: str, *, call_id: str, plan_context: dict[str, Any],
+        options: dict[str, str],
+    ) -> dict[str, Any]: ...
 
 
 def _schema_path() -> Path:
@@ -107,8 +115,15 @@ def validate_plan(plan: dict[str, Any]) -> None:
     if not isinstance(plan.get("timeout_s"), (int, float)) or plan["timeout_s"] <= 0:
         raise WorkPlanError("plan timeout_s must be positive")
     def visit(node: dict[str, Any], path: str) -> None:
-        if "repeat" in node or node.get("interrupt_when") is not None:
-            raise WorkPlanError(f"unsupported_in_slice2 at {path}: repeat/interrupt_when")
+        if node.get("interrupt_when") is not None:
+            raise WorkPlanError(f"unsupported_in_slice2 at {path}: interrupt_when")
+        repeat = node.get("repeat")
+        if repeat is not None and not isinstance(repeat, dict):
+            raise WorkPlanError(f"repeat must be an object at {path}")
+        if isinstance(repeat, dict):
+            for key in ("again_when", "until"):
+                if key in repeat and not isinstance(repeat[key], (str, dict)):
+                    raise WorkPlanError(f"repeat.{key} must be text or an object at {path}")
         if node.get("kind") == "wait" and (not isinstance(node.get("timeout_s"), (int, float)) or node["timeout_s"] <= 0):
             raise WorkPlanError(f"wait timeout_s must be positive at {path}")
         if node.get("kind") == "sequence":
@@ -275,6 +290,12 @@ class NodeRecord:
     signature: str | None = None
     started_at: float | None = None
     updated_at: float = field(default_factory=time.time)
+    decision: dict[str, Any] | None = None
+    decision_facts: dict[str, Any] | None = None
+    decision_pending: bool = False
+    decision_reads: int = 0
+    decision_questions: int = 0
+    repeat_count: int = 0
 
     def payload(self) -> dict[str, Any]:
         value: dict[str, Any] = {"status": self.status, "updated_at": self.updated_at}
@@ -292,6 +313,18 @@ class NodeRecord:
             value["condition"] = copy.deepcopy(self.condition)
         if self.signature is not None:
             value["signature"] = self.signature
+        if self.decision is not None:
+            value["decision"] = copy.deepcopy(self.decision)
+        if self.decision_facts is not None:
+            value["decision_facts"] = copy.deepcopy(self.decision_facts)
+        if self.decision_pending:
+            value["decision_pending"] = True
+        if self.decision_reads:
+            value["decision_reads"] = self.decision_reads
+        if self.decision_questions:
+            value["decision_questions"] = self.decision_questions
+        if self.repeat_count:
+            value["repeat_count"] = self.repeat_count
         return value
 
 
@@ -313,6 +346,7 @@ class WorkPlanExecutor:
         decision: WorkDecision | None = None,
         choice_provider: WorkChoiceProvider | None = None,
         observe: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+        idle_supervise: WorkIdleSupervisor | None = None,
         emit: Callable[..., None] | None = None,
         records: dict[str, NodeRecord] | None = None,
     ) -> None:
@@ -323,6 +357,7 @@ class WorkPlanExecutor:
         self.decision = decision or DecisionClient()
         self.choice_provider = choice_provider
         self.observe = observe
+        self.idle_supervise = idle_supervise
         self.emit = emit or (lambda *_args, **_kwargs: None)
         # An empty mapping is a meaningful caller-owned revision store.  Do
         # not replace it with a new mapping or completed nodes would be lost
@@ -349,11 +384,14 @@ class WorkPlanExecutor:
         facts = {"status": public_status, "results": copy.deepcopy(self.results)}
         return WorkRunResult(public_status, tree, copy.deepcopy(self.results), facts)
 
-    async def _execute(self, node: dict[str, Any], path: str, intents: list[str], *, item: Any = None) -> str:
+    async def _execute(
+        self, node: dict[str, Any], path: str, intents: list[str], *, item: Any = None,
+        invocation: int = 0,
+    ) -> str:
         signature = _node_signature(node)
         explicit_id = node.get("id")
         if isinstance(explicit_id, str) and explicit_id:
-            node_key = explicit_id
+            node_key = explicit_id if invocation == 0 else f"{explicit_id}__repeat_{invocation}"
         else:
             occurrence = self._legacy_occurrences.get(signature, 0)
             self._legacy_occurrences[signature] = occurrence + 1
@@ -389,7 +427,7 @@ class WorkPlanExecutor:
             self.records[node_key] = record
             if record.status == "blocked":
                 return "blocked"
-        if record.status == "done":
+        if record.status == "done" and node.get("kind") != "choice":
             if record.result is not None:
                 self.results[node_key] = copy.deepcopy(record.result)
             return "done"
@@ -414,9 +452,15 @@ class WorkPlanExecutor:
                 return self._wait_or_block(record, condition_status, facts, node, "when")
         kind = node.get("kind")
         if kind == "call":
+            if record.decision_pending and record.result is not None:
+                return await self._decide_call(node, node_key, path, chain, record, invocation=invocation, item=item)
+            call_state = await self.state()
+            arguments = _resolve_ref(
+                node.get("arguments", {}), results=self.results, item=item, state=call_state,
+            )
             result = await self.call(
                 str(node["tool"]),
-                _resolve_ref(node.get("arguments", {}), results=self.results, item=item, state=await self.state()),
+                arguments,
                 call_id=node_key,
                 timeout_s=node.get("timeout_s"),
             )
@@ -425,18 +469,28 @@ class WorkPlanExecutor:
             public_result.pop("_execution", None)
             record.result = copy.deepcopy(public_result)
             self.results[node_key] = copy.deepcopy(public_result)
-            if result.get("success") is True:
-                record.status = "done"
-                if isinstance(execution, dict) and execution.get("delivered") is True:
-                    record.delivered = {
-                        "tool": execution.get("tool", node.get("tool")),
-                        "execution_channel": True,
-                    }
-                return "done"
-            blocked = {"reason": result.get("reason", "call_failed"), "result": copy.deepcopy(public_result)}
-            record.blocked = blocked
-            record.status = "blocked"
-            return "blocked"
+            if isinstance(execution, dict) and execution.get("delivered") is True:
+                record.delivered = {
+                    "tool": execution.get("tool", node.get("tool")),
+                    "execution_channel": True,
+                }
+            try:
+                decision_state = await self.state()
+            except Exception:
+                decision_state = call_state
+            record.decision_facts = {
+                "tool_result": copy.deepcopy(public_result),
+                "body_state": _state_payload(decision_state),
+                "execution": {key: copy.deepcopy(value) for key, value in execution.items()
+                               if key in {"tool", "phase", "delivered", "reason"}}
+                               if isinstance(execution, dict) else {},
+                "reads": [],
+            }
+            handoff = public_result.get("metrics", {}).get("direct_call_handoff") if isinstance(public_result.get("metrics"), dict) else None
+            handoff_choice = handoff.get("facts", {}).get("decision", {}).get("choice") if isinstance(handoff, dict) else None
+            if handoff_choice in {"step_done", "call_agent"}:
+                return self._apply_call_choice(node, node_key, chain, record, handoff_choice, item=item)
+            return await self._decide_call(node, node_key, path, chain, record, invocation=invocation, item=item)
         if kind == "sequence":
             for index, child in enumerate(node.get("steps", [])):
                 child_status = await self._execute(child, f"{path}.steps[{index}]", chain, item=item)
@@ -469,6 +523,198 @@ class WorkPlanExecutor:
         if kind == "wait":
             return await self._wait(node, node_key, chain, item=item)
         raise WorkPlanError(f"unsupported node kind at {path}: {kind!r}")
+
+    @staticmethod
+    def _repeat_text(value: Any) -> str:
+        if isinstance(value, str):
+            return value[:800]
+        if isinstance(value, dict):
+            text = value.get("text")
+            if isinstance(text, str):
+                return text[:800]
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)[:800]
+
+    def _call_options(self, node: dict[str, Any]) -> dict[str, str]:
+        options = {
+            "step_done": (
+                "Choose step_done when the supplied state.result and state.facts establish that "
+                "state.plan.node_description is achieved for state.plan.current_step and state.plan.goal."
+            ),
+            "inspect": (
+                "Choose inspect when state.result and state.facts do not provide enough evidence to decide "
+                "whether state.plan.node_description is achieved or still matches state.plan.intent_chain."
+            ),
+            "call_agent": (
+                "Choose call_agent when the supplied facts show work outside state.plan.intent_chain, or "
+                "the available choices cannot resolve the node described by state.plan.node_description."
+            ),
+        }
+        repeat = node.get("repeat")
+        if isinstance(repeat, dict):
+            again = self._repeat_text(repeat.get("again_when", ""))
+            until = self._repeat_text(repeat.get("until", ""))
+            options["repeat"] = (
+                "Choose repeat when the current facts do not establish state.plan.node_description as done, "
+                f"and the node's again_when condition is {again!r}; stop repeating when its until condition "
+                f"is {until!r}."
+            )
+        return options
+
+    def _call_plan(self, node: dict[str, Any], intents: list[str]) -> dict[str, Any]:
+        return {
+            "goal": str(self.plan.get("goal") or "")[:800],
+            "current_step": str(self.plan.get("current_step") or (intents[-1] if intents else ""))[:800],
+            "node_description": str(node.get("description") or node.get("intent") or f"call {node.get('tool', 'unknown')}")[:800],
+            "intent_chain": [str(value)[:400] for value in intents[-8:]],
+        }
+
+    def _call_question(
+        self, node: dict[str, Any], node_key: str, intents: list[str], record: NodeRecord,
+    ) -> dict[str, Any]:
+        facts = record.decision_facts or {}
+        plan = self._call_plan(node, intents)
+        payload = {
+            "state": {
+                "protocol": "minebot-work-decision/0.2",
+                "plan": plan,
+                "tool": {
+                    "name": str(node.get("tool", "unknown")),
+                    "arguments": copy.deepcopy(node.get("arguments", {})),
+                },
+                "result": copy.deepcopy(facts.get("tool_result", {})),
+                "facts": {
+                    "body_state": copy.deepcopy(facts.get("body_state", {})),
+                    "reads": copy.deepcopy(facts.get("reads", [])),
+                },
+                "evidence_scope": "Only supplied result, body state and bounded reads are known; omitted facts are unknown.",
+            },
+            "questions": {
+                "q": {
+                    "type": "choice",
+                    "instructions": "Choose exactly one finite option using only the supplied facts.",
+                    "criteria": self._call_options(node),
+                }
+            },
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+        if len(encoded) > 16_000:
+            reads = payload["state"]["facts"].get("reads")
+            if isinstance(reads, list):
+                while reads and len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)) > 15_500:
+                    reads.pop(0)
+            if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)) > 15_500:
+                state = payload["state"].get("facts", {}).get("body_state")
+                if isinstance(state, dict):
+                    for key in ("inventory_counts", "inventory", "inventory_delta"):
+                        state.pop(key, None)
+                        if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)) <= 15_500:
+                            break
+        payload["state"]["request_chars"] = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str))
+        return payload
+
+    @staticmethod
+    def _decision_choice(answer: Any, options: dict[str, str]) -> str:
+        choice = getattr(answer, "choice", answer if isinstance(answer, str) else "unknown")
+        return str(choice) if choice in options else "unknown"
+
+    async def _decide_call(
+        self, node: dict[str, Any], node_key: str, path: str, intents: list[str], record: NodeRecord,
+        invocation: int = 0,
+        *, item: Any = None,
+    ) -> str:
+        options = self._call_options(node)
+        while True:
+            if record.decision_questions >= MAX_CALL_DECISION_QUESTIONS:
+                record.decision = {"choice": "unknown", "options": list(options), "reads": record.decision_reads}
+                record.decision_pending = True
+                record.status = "waiting"
+                return "waiting"
+            payload = self._call_question(node, node_key, intents, record)
+            purpose = "call_inspect" if record.decision_reads else "call_result"
+            decision_started = time.monotonic()
+            record.decision_questions += 1
+            self.emit(
+                "work_decision_request", purpose=purpose, node_id=node_key,
+                request_chars=int(payload["state"].get("request_chars", 0)), request=copy.deepcopy(payload),
+            )
+            try:
+                answer = await self.decision.ask(payload, priority=DecisionPriority.PLAN)
+                choice = self._decision_choice(answer, options)
+            except Exception:
+                choice = "unknown"
+            elapsed = time.monotonic() - decision_started
+            self.emit(
+                "work_decision_result", purpose=purpose, node_id=node_key, choice=choice,
+                unknown=choice == "unknown", decision_ms=round(elapsed * 1000.0, 3),
+            )
+            record.decision = {"choice": choice, "options": list(options), "reads": record.decision_reads}
+            if choice == "inspect":
+                if record.decision_reads >= 4:
+                    choice = "unknown"
+                    record.decision["choice"] = choice
+                else:
+                    record.decision_reads += 1
+                    try:
+                        read = await self.state()
+                    except Exception:
+                        read = {}
+                    if not isinstance(record.decision_facts, dict):
+                        record.decision_facts = {}
+                    record.decision_facts.setdefault("reads", []).append(_state_payload(read))
+                    continue
+            if choice == "unknown":
+                record.decision_pending = True
+                record.status = "waiting"
+                if self.idle_supervise is not None:
+                    idle = await self.idle_supervise(
+                        str(node.get("tool", "unknown")), call_id=node_key,
+                        plan_context=self._call_plan(node, intents), options=options,
+                    )
+                    idle_choice = idle.get("choice") if isinstance(idle, dict) else None
+                    if idle_choice in options:
+                        choice = idle_choice
+                        if choice == "inspect":
+                            continue
+                    else:
+                        return "waiting"
+                else:
+                    return "waiting"
+            if choice == "repeat":
+                record.decision_pending = False
+                record.repeat_count += 1
+                record.status = "active"
+                repeated_status = await self._execute(
+                    node, f"{path}.repeat[{invocation + 1}]", intents,
+                    item=item, invocation=invocation + 1,
+                )
+                if repeated_status == "done":
+                    record.status = "done"
+                return repeated_status
+            return self._apply_call_choice(node, node_key, intents, record, choice, item=item)
+
+    def _apply_call_choice(
+        self, node: dict[str, Any], node_key: str, intents: list[str], record: NodeRecord,
+        choice: str, *, item: Any = None,
+    ) -> str:
+        record.decision_pending = False
+        if choice == "step_done":
+            record.status = "done"
+            return "done"
+        if choice == "call_agent":
+            record.status = "blocked"
+            record.blocked = {"reason": "decision_call_agent", "facts": copy.deepcopy(record.decision_facts or {})}
+            return "blocked"
+        if choice == "inspect":
+            record.decision_pending = True
+            record.status = "waiting"
+            return "waiting"
+        if choice == "repeat":
+            record.repeat_count += 1
+            record.status = "active"
+            return "repeat"
+        record.decision_pending = True
+        record.status = "waiting"
+        return "waiting"
 
     async def _condition(self, condition: dict[str, Any], intents: list[str], *, item: Any = None) -> tuple[ConditionStatus, dict[str, Any]]:
         state = await self.state()
@@ -625,5 +871,5 @@ async def _async_empty_state() -> dict[str, Any]:
 
 __all__ = [
     "ConditionStatus", "NodeRecord", "NodeStatus", "WorkCall", "WorkPlanError",
-    "WorkChoiceProvider", "WorkPlanExecutor", "WorkRunResult", "validate_plan",
+    "WorkChoiceProvider", "WorkIdleSupervisor", "WorkPlanExecutor", "WorkRunResult", "validate_plan",
 ]
