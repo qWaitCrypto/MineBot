@@ -687,8 +687,8 @@ def build_phase1_registry(
             dig_timeout_s=min(30.0, timeout_s),
         )
 
-    # Targets no path reached, remembered for the life of this goal's runtime.
-    unreachable_targets: set[tuple[int, int, int]] = set()
+    # Targets no path reached and when; collection lets the memory fade.
+    unreachable_targets: dict[tuple[int, int, int], float] = {}
     resource_collection = ResourceCollectionTransactions(
         body,
         navigator,

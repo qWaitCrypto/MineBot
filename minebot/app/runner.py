@@ -213,6 +213,7 @@ class BackgroundCall:
         return {
             "success": True,
             "reason": "running_in_background",
+            "complete": False,
             "canRetry": False,
             "nextSuggestion": (
                 "This is not the result. The Body keeps working on this call and its real result "
@@ -1438,7 +1439,8 @@ def _include_generic_small_metric_facts(
         # A small map is a fact and is shown as it is; bounding it first used
         # to drop any map with more than a dozen entries entirely. A list of
         # records is per-step detail and stays behind the handle.
-        if isinstance(safe_value, (list, tuple)) and not _projection_values_equal(
+        # Long text (a document body, a log) stays behind it too.
+        if isinstance(safe_value, (list, tuple, str)) and not _projection_values_equal(
                 safe_value, _bounded_summary_value(safe_value)):
             continue
         encoded = json.dumps(safe_value, ensure_ascii=False, sort_keys=True, default=str)
@@ -2887,7 +2889,8 @@ class AgentRuntime:
         instructions = data.model_data.instructions
         received = items
         items = self._bounded_items(items)
-        view = await self.conversation_compactor.view(items, static_chars=len(instructions or ""))
+        view = await self.conversation_compactor.view(
+            items, static_chars=len(instructions or ""), live_chars=len(live_context))
         context_item = current_context_item(live_context)
         if context_item is not None:
             view = [*view, context_item]

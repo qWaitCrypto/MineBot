@@ -218,7 +218,7 @@ def test_unreachable_target_is_remembered_and_can_be_retried(monkeypatch: pytest
         return read
 
     body.perceive = perceive
-    memory: set = set()
+    memory: dict = {}
     config = ResourceCollectionConfig(max_wall_s=30.0, mutation_budget=4)
 
     def collect(**overrides):
@@ -227,13 +227,20 @@ def test_unreachable_target_is_remembered_and_can_be_retried(monkeypatch: pytest
             config=ResourceCollectionConfig(max_wall_s=30.0, mutation_budget=4, **overrides), unreachable=memory)
 
     first = collect()
-    assert first.reason == "path_unreachable" and memory == {(1, 76, 1)}
+    assert first.reason == "path_unreachable" and set(memory) == {(1, 76, 1)}
     assert first.metrics["avoided_targets"] == [[1, 76, 1]]
 
     body.interrupted.clear()
     retried = collect(retry_unreachable=True)
-    assert retried.reason == "path_unreachable" and memory == {(1, 76, 1)}  # tried again, failed again
+    assert retried.reason == "path_unreachable" and set(memory) == {(1, 76, 1)}  # tried again, failed again
     assert config.avoid == ()
+
+    # The memory fades by itself: a new goal later is not held to an old verdict.
+    memory[(1, 76, 1)] -= cluster_collection.UNREACHABLE_MEMORY_S
+    memory[(9, 70, 9)] = memory[(1, 76, 1)]
+    body.interrupted.clear()
+    later = collect()
+    assert (9, 70, 9) not in memory and later.metrics.get("avoided_target_count") == 1
 
 
 def test_avoided_log_is_never_selected() -> None:

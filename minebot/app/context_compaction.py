@@ -197,24 +197,28 @@ class ConversationCompactor:
         if input_tokens > 0 and self._last_view_chars is not None:
             self._last_input_tokens = int(input_tokens)
 
-    def estimate_tokens(self, view: list[Any], static_chars: int) -> int:
-        chars = _chars(view)
+    def estimate_tokens(self, view: list[Any], static_chars: int, live_chars: int = 0) -> int:
+        chars = _chars(view) + live_chars
         if self._last_input_tokens is not None and self._last_view_chars is not None:
             return max(0, int(self._last_input_tokens + (chars - self._last_view_chars) / CHARS_PER_TOKEN))
         return int((chars + static_chars) / CHARS_PER_TOKEN) + UNSEEN_STATIC_TOKENS
 
-    async def view(self, items: list[Any], *, static_chars: int = 0) -> list[Any]:
-        """The items to send: everything, or summary plus what followed it."""
+    async def view(self, items: list[Any], *, static_chars: int = 0, live_chars: int = 0) -> list[Any]:
+        """The items to send: everything, or summary plus what followed it.
+
+        ``live_chars`` is what the caller appends after the view on every
+        request (the current context); it is part of the size being judged.
+        """
         items = list(items)
         start = self._anchor_index(items)
         view = self._render(items, start)
-        estimate = self.estimate_tokens(view, static_chars)
+        estimate = self.estimate_tokens(view, static_chars, live_chars)
         over = bool(self.threshold_tokens) and estimate >= self.threshold_tokens
         if over:
             compacted = await self._compact(items, start, estimate)
             if compacted is not None:
                 view = compacted
-        self._last_view_chars = _chars(view)
+        self._last_view_chars = _chars(view) + live_chars
         if over:
             # The calibration belonged to the larger request.
             self._last_input_tokens = None
@@ -271,6 +275,9 @@ class ConversationCompactor:
                 f"[{len(older)} older conversation items could not be summarized and are omitted. "
                 "Use the conversation archive tools if an older exact exchange is needed.]"
             )
+        if len(summary) > MAX_ITEM_CHARS:
+            summary = (summary[:MAX_ITEM_CHARS]
+                       + f"\n[{len(summary) - MAX_ITEM_CHARS} further characters of this summary omitted]")
         self._compaction = _Compaction(item_fingerprint(items[tail]), summary)
         view = self._render(items, tail)
         self.emit("conversation_compaction_finished", before_items=len(items), after_items=len(view),

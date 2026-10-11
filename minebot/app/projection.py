@@ -27,10 +27,7 @@ def bounded_summary_value(value: object) -> object:
     if isinstance(value, dict):
         out: JsonObject = {}
         for key, item in list(value.items())[:12]:
-            if isinstance(item, (dict, list, tuple)):
-                out[str(key)] = bounded_summary_value(item)
-            else:
-                out[str(key)] = item
+            out[str(key)] = bounded_summary_value(item)
         return out
     if isinstance(value, (list, tuple)):
         if len(value) <= 8 and all(not isinstance(item, (dict, list, tuple)) for item in value):

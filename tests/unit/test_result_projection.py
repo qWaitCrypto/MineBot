@@ -13,7 +13,8 @@ from minebot.app.body_capability_tools import (
 )
 from minebot.app.context_compaction import MAX_ITEM_CHARS, bound_item
 from minebot.app.reflex_tools import ReflexActivity, ReflexManager, reflex_observation_projector
-from minebot.app.runner import _model_tool_payload
+from minebot.app.projection import bounded_summary_value
+from minebot.app.runner import BackgroundCall, _model_tool_payload
 from minebot.app.work_runtime import WorkRunResult
 from minebot.game import real_client_frame
 from minebot.game.real_client_frame import (
@@ -211,3 +212,16 @@ def test_blocked_node_does_not_repeat_its_result():
 def test_read_reflex_shows_the_tree_it_was_asked_for():
     tree = {"goal": "tools", "work": {"kind": "call", "tool": "craft_item", "_runtime": {"status": "done"}}}
     assert reflex_observation_projector("ok", {"tree": tree}) == {"tree": tree, "tree_complete": True}
+
+
+def test_long_text_is_bounded_wherever_it_sits_and_stays_behind_the_handle():
+    assert len(json.dumps(bounded_summary_value({"outer": {"text": "x" * 50_000}}))) < 400
+    result = {"success": True, "reason": "skill_created", "metrics": {"name": "n", "body": "y" * 900}}
+    summary = _model_tool_payload("create_skill", result, trace_ref="call-4")["summary"]
+    assert summary == {"name": "n"}
+
+
+def test_background_receipt_does_not_read_as_a_finished_call():
+    call = BackgroundCall("call-5", "collect_resource", {"item": "oak_log"}, task=None)
+    payload = _model_tool_payload("collect_resource", call.receipt(), trace_ref="call-5")
+    assert payload["reason"] == "running_in_background" and payload["complete"] is False

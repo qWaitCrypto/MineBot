@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 # of being left to run out its deadline. Anything picked up or used up and any
 # real travel counts, so tunnelling toward ore or walking to a far tree does
 # not; a Body standing in front of something it cannot get at does.
+# A target no path reached is left alone this long: the Body or the world may have changed since.
+UNREACHABLE_MEMORY_S = 900
 NO_PROGRESS_WINDOW_S = 45.0
 NO_PROGRESS_TRAVEL_BLOCKS = 24.0
 # Baritone keeps recalculating a path it cannot find. This many failures in a
@@ -168,13 +170,13 @@ def _await_with_progress(body: Body, action: Action, inventory_total) -> tuple[T
 def collect_native_cluster(
     body: Body, *, block_types: tuple[str, ...], expected_drops: tuple[str, ...],
     remaining_count: int, dry: bool, config: ResourceCollectionConfig,
-    unreachable: set[Position] | None = None,
+    unreachable: dict[Position, float] | None = None,
 ) -> ToolResult | None:
     """Return None to retain the governed legacy path outside disposable worlds.
 
-    ``unreachable`` is the task's memory of targets no path reached. They are
-    skipped until the caller asks to retry them, so one such block cannot be
-    selected again by every later call.
+    ``unreachable`` remembers targets no path reached and when. They are
+    skipped until the memory fades or the caller asks to retry them, so one
+    such block cannot be selected again by every later call.
     """
     if dry:
         return None
@@ -190,8 +192,11 @@ def collect_native_cluster(
 
     before = inventory_total()
     deadline = time.monotonic() + config.max_wall_s
-    if unreachable is not None and config.retry_unreachable:
-        unreachable.clear()
+    if unreachable is not None:
+        now = time.monotonic()
+        for pos in [pos for pos, at in unreachable.items()
+                    if config.retry_unreachable or now - at >= UNREACHABLE_MEMORY_S]:
+            del unreachable[pos]
     avoided = {tuple(int(value) for value in pos) for pos in config.avoid} | set(unreachable or ())
     attempts, excluded, actions_used = [], set(avoided), 0
     finish_target: Position | None = None
@@ -223,8 +228,9 @@ def collect_native_cluster(
                 tried = (f"failed {failed_count} path calculations in a row" if failed_count else
                          f"planned {stalled.get('path_calculations_without_moving')} paths without moving")
                 suggestion = (
-                    f"Baritone {tried} and found no way to this target.{where} Later collections in this "
-                    "task skip it; pass retry_unreachable=true once the Body has a way to reach it."
+                    f"Baritone {tried} and found no way to this target.{where} Collections in the next "
+                    f"{UNREACHABLE_MEMORY_S // 60} minutes skip it; pass retry_unreachable=true once the "
+                    "Body has a way to reach it."
                 )
         return ToolResult(success, reason, can_retry=not success, next_suggestion=suggestion, metrics=metrics)
 
@@ -309,7 +315,7 @@ def collect_native_cluster(
         if stalled:
             target = stalled.get("target")
             if unreachable is not None and stalled.get("reason") == "path_unreachable" and target:
-                unreachable.add(tuple(target))
+                unreachable[tuple(target)] = time.monotonic()
                 avoided.add(tuple(target))
             return result(False, str(stalled["reason"]), stalled)
         if not terminal.success:
