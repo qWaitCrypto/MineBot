@@ -1896,6 +1896,7 @@ class AgentRuntime:
         body_claim_id=None,
         retain_claim=False,
         return_execution_receipt=False,
+        supervision_context: Mapping[str, object] | None = None,
     ):
         claim_id = body_claim_id or tool_call_id or str(uuid4())
         claim_generation: int | None = None
@@ -1966,7 +1967,8 @@ class AgentRuntime:
             if (tool.sidecar.can_mutate_body and supervisor is not None
                     and not getattr(self, "native_responses", False)):
                 result = await supervisor.run(tool, admitted_callback, args,
-                    call_id=operation_id, timeout_s=timeout_s)
+                    call_id=operation_id, timeout_s=timeout_s,
+                    supervision_context=supervision_context)
                 outcome = _execution_outcome(result)
                 return with_execution_receipt(result)
             if tool.sidecar.can_mutate_body:

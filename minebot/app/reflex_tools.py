@@ -334,6 +334,49 @@ class ReflexManager:
             "sampled_at_ms": sampled_at,
         }}
 
+    def _plan_supervision_context(self, call_id: str, tool_name: str) -> dict[str, Any]:
+        """Compile bounded intent facts for the shared Body supervisor.
+
+        The execution interpreter remains the owner of node state. This is
+        only a read of the submitted tree so Decision can see the range the
+        current call belongs to; it does not advance or stop the tree.
+        """
+        with self._lock:
+            activity = self._activities.get(self._active_activity_id or "")
+            if activity is None:
+                return {"is_plan": True, "node_description": f"plan call {tool_name}"}
+            goal = str(activity.plan.get("goal", ""))[:800]
+            found: dict[str, Any] = {}
+
+            def walk(node: Any, chain: list[str]) -> None:
+                if not isinstance(node, dict) or found:
+                    return
+                next_chain = chain + ([str(node["intent"])] if node.get("intent") else [])
+                if node.get("kind") == "call" and str(node.get("id") or "") == call_id:
+                    found.update({
+                        "node_description": str(node.get("intent") or f"call {tool_name}")[:800],
+                        "intent_chain": next_chain[-8:],
+                    })
+                    return
+                kind = node.get("kind")
+                if kind == "sequence":
+                    for child in node.get("steps", []):
+                        walk(child, next_chain)
+                elif kind == "batch":
+                    walk(node.get("body"), next_chain)
+                elif kind == "choice":
+                    for option in node.get("options", []):
+                        if isinstance(option, dict):
+                            walk(option.get("work"), next_chain + ([str(option["intent"])] if option.get("intent") else []))
+
+            walk(activity.plan.get("work"), [])
+            return {
+                "is_plan": True,
+                "goal": goal,
+                "node_description": found.get("node_description", f"plan call {tool_name}"),
+                "intent_chain": found.get("intent_chain", []),
+            }
+
     async def _call(self, tool_name: str, arguments: dict[str, Any], *, call_id: str, timeout_s: float | None) -> dict[str, Any]:
         tool = self.runtime.registry.get(tool_name)
         return await self.runtime.run_tool(
@@ -348,6 +391,7 @@ class ReflexManager:
             body_claim_id=self._active_activity_id,
             retain_claim=self._active_activity_id is not None,
             return_execution_receipt=True,
+            supervision_context=self._plan_supervision_context(call_id, tool_name),
         )
 
     def _direct_call(self) -> dict[str, Any] | None:
