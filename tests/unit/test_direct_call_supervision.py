@@ -629,12 +629,37 @@ def test_question_contains_goal_step_node_intent_and_fact_criteria():
             assert set(criteria) == {"continue", "inspect", "step_done", "call_agent"}
             assert all("state.plan." not in text for text in criteria.values())
             assert all("reach the selected vein" in text for text in criteria.values())
-            assert "Continue the normal process" in criteria["continue"]
-            assert "one new fact" in criteria["inspect"]
-            assert "amount or outcome stated" in criteria["step_done"]
-            assert "Return control to Agent" in criteria["call_agent"]
+            assert "Intent:" in criteria["continue"]
+            assert "normal process:" in criteria["continue"]
+            assert "facts still fit" in criteria["continue"]
+            assert "cannot distinguish ongoing work" in criteria["inspect"]
+            assert "positively show" in criteria["step_done"]
+            assert "blockage, failure, or work outside" in criteria["call_agent"]
             assert state["request_chars"] <= 16_000
             assert state["request_chars"] <= 2_000
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_direct_question_uses_spoken_agent_intent_and_elapsed_fact_without_placeholder():
+    async def run():
+        runtime, tool = make_runtime(GenericCallIpc())
+        try:
+            spoken = "我先过去，到了再砍木头。"
+            runtime.agent_context.observe_assistant_message(spoken)
+            request = runtime.call_supervisor._question(
+                "spoken-intent", tool, {"pos": [8, 5, 0]},
+                {"operation_id": "spoken-intent", "state": "running", "phase": "moving",
+                 "elapsed_s": 0.7, "fact_revision": 1, "facts": {"position": [0, 5, 0]}},
+                idle_s=0.7, purpose="running_frame", supervision_context={"is_plan": False},
+            )
+            encoded = json.dumps(request, ensure_ascii=False)
+            assert request["state"]["plan"]["intent"] == spoken
+            assert spoken in encoded
+            assert "No Agent intent was supplied" not in encoded
+            assert "0.7s have elapsed since the call began." in encoded
+            assert "no real progress has been observed" not in encoded
         finally:
             await runtime.aclose()
     asyncio.run(run())

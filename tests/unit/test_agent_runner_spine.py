@@ -365,7 +365,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         asyncio.run(runtime.run_turn())
 
         self.assertIn(("assistant", "I found the first tree."), context.session_messages())
-        self.assertNotIn(("assistant", "I am starting with nearby logs."), context.session_messages())
+        self.assertIn(("assistant", "I am starting with nearby logs."), context.session_messages())
 
     def test_visible_assistant_output_is_sent_to_optional_speech_sink_once_per_turn(self):
         class SpeechRunResult:
@@ -1225,6 +1225,28 @@ class AgentRunnerSpineTests(unittest.TestCase):
         self.assertTrue(payload["summary"]["counts_complete"])
         self.assertNotIn("omitted_item_count", payload["summary"])
         self.assertNotIn("metrics", payload)
+
+    def test_model_tool_payload_exposes_supervision_handoff_reason_and_decision(self):
+        result = ToolResult(
+            False,
+            "preempted",
+            True,
+            metrics={
+                "direct_call_handoff": {
+                    "facts": {
+                        "reason": "decision_call_agent",
+                        "decision": {"choice": "call_agent", "evidence": {"phase": "moving"}},
+                    },
+                    "settlement": {"settled": True},
+                }
+            },
+        ).to_payload()
+
+        payload = _model_tool_payload("move_to", result, trace_ref="handoff-trace")
+
+        self.assertEqual(payload["supervision"]["facts"]["reason"], "decision_call_agent")
+        self.assertEqual(payload["supervision"]["facts"]["decision"]["choice"], "call_agent")
+        self.assertTrue(payload["supervision"]["settlement"]["settled"])
 
     def test_model_tool_payload_marks_inventory_count_projection_truncation(self):
         counts = {f"item_{index:02d}": index for index in range(50)}

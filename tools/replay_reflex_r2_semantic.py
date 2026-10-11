@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
+from itertools import permutations
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,10 +45,11 @@ def build_question(supervisor: CallSupervisor, row: dict[str, object]) -> dict[s
             "goal": intent, "current_step": intent, "node_description": intent,
             "intent": intent, "is_plan": False,
         },
+        options={"continue": "", "step_done": "", "call_agent": ""},
     )
 
 
-async def main(live: bool) -> None:
+async def main(live: bool, all_option_orders: bool) -> None:
     rows = json.loads(FIXTURE.read_text(encoding="utf-8"))
     supervisor = CallSupervisor(SimpleNamespace(
         agent_context=None,
@@ -59,12 +62,27 @@ async def main(live: bool) -> None:
         for row in rows:
             payload = build_question(supervisor, row)
             if client is None:
-                print(json.dumps({"id": row["id"], "request_chars": payload["state"]["request_chars"]}, ensure_ascii=False))
+                print(json.dumps({
+                    "id": row["id"], "request_chars": payload["state"]["request_chars"],
+                    "option_orders": 6 if all_option_orders else 1,
+                }, ensure_ascii=False))
                 continue
-            answer = await client.ask(payload, priority=DecisionPriority.SUPERVISION)
+            orders = list(permutations(payload["questions"]["q"]["criteria"])) if all_option_orders else [
+                tuple(payload["questions"]["q"]["criteria"])
+            ]
+            answers = []
+            for order in orders:
+                request = copy.deepcopy(payload)
+                criteria = request["questions"]["q"]["criteria"]
+                request["questions"]["q"]["criteria"] = {key: criteria[key] for key in order}
+                answer = await client.ask(request, priority=DecisionPriority.SUPERVISION)
+                answers.append({"order": list(order), "choice": answer.choice,
+                                "elapsed_ms": round(answer.elapsed_s * 1000, 1)})
+            choices = {item["choice"] for item in answers}
             print(json.dumps({
-                "id": row["id"], "choice": answer.choice,
-                "expected": row["expected"], "elapsed_ms": round(answer.elapsed_s * 1000, 1),
+                "id": row["id"], "answers": answers,
+                "consistent": len(choices) <= 1,
+                "expected": row["expected"],
                 "request_chars": payload["state"]["request_chars"],
             }, ensure_ascii=False))
     finally:
@@ -75,5 +93,7 @@ async def main(live: bool) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="send prompts to the configured Decision endpoint")
+    parser.add_argument("--all-option-orders", action="store_true",
+                        help="ask every permutation of the three runtime options and report consistency")
     args = parser.parse_args()
-    asyncio.run(main(args.live))
+    asyncio.run(main(args.live, args.all_option_orders))

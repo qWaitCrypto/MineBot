@@ -14,11 +14,15 @@ def _rows():
 
 def test_replay_fixture_contains_raw_frames_intents_and_non_continue_answers():
     rows = _rows()
-    assert len(rows) == 10
+    assert len(rows) >= 14
     assert {row["expected"] for row in rows} >= {"continue", "step_done", "call_agent"}
     assert {row["id"] for row in rows if row["previous"] != row["expected"]} >= {
         "smelt_approaching", "build_wrong_material", "build_coal_enough"
     }
+    assert {
+        "real3_move_start_1", "real3_move_start_2",
+        "real3_get_to_block_start", "real3_explore_for_start",
+    } <= {row["id"] for row in rows}
     assert all(row["intent"] and isinstance(row["frame"]["facts"], dict) for row in rows)
 
 

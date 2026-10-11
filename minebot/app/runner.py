@@ -294,6 +294,19 @@ class RuntimeHooks(RunHooks[RuntimeRunContext]):
 
     async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
         trace = _trace_from_context(context)
+        observations = extract_model_response_observations(response)
+        runtime = getattr(getattr(context, "context", None), "runtime", None)
+        # The SDK invokes a function tool immediately after this hook.  Keep
+        # the model's spoken explanation in the reflex context now, rather
+        # than waiting for the complete turn (which is too late for the
+        # first supervision frame of that tool call).
+        if runtime is not None:
+            for event in observations:
+                if event.get("event") not in {"assistant_message", "assistant_final_output"}:
+                    continue
+                content = str(event.get("content") or "").strip()
+                if content:
+                    runtime._latest_reflex_intent = content[:500]
         if trace is not None:
             trace.emit("llm_end", agent=getattr(agent, "name", None), response_type=type(response).__name__)
             usage = model_usage_observation(getattr(response, "usage", None))
@@ -313,7 +326,7 @@ class RuntimeHooks(RunHooks[RuntimeRunContext]):
                 if layout:
                     # Which part of the request repeated the previous one.
                     trace.emit("prompt_cache_layout", **layout)
-            for event in extract_model_response_observations(response):
+            for event in observations:
                 trace.emit(**event)
         progress_epochs = getattr(getattr(context, "context", None), "progress_epochs", None)
         if progress_epochs is not None:
@@ -1222,6 +1235,13 @@ def _model_tool_payload(
         payload["summary"] = summary
     if observation_handle is not None:
         payload["observationHandle"] = observation_handle
+    # A supervised stop is a decision result, not ambient Body metrics. Keep
+    # the finite choice and the bounded facts beside the projected tool result
+    # so the Agent can act on why this call was handed back without polling
+    # ``read_reflex`` or guessing from ``preempted`` alone.
+    handoff = metrics.get("direct_call_handoff")
+    if isinstance(handoff, dict):
+        payload["supervision"] = handoff
     payload["projection"] = _projection_metadata(
         shown,
         summary,
@@ -3034,9 +3054,24 @@ class AgentRuntime:
                 self.trace.emit(**event)
                 if key is not None:
                     existing.add(key)
+        # Keep the model's spoken explanation available at the Body boundary.
+        # SDK tool calls often arrive in the same response as a short assistant
+        # message ("I am going to..."), while ``final_output`` is empty or is
+        # only the turn's closing text. The reflex layer must use that
+        # explanation as the direct-call intent instead of inventing a
+        # placeholder.
+        assistant_contents = [
+            str(event.get("content") or "")
+            for event in extracted
+            if event.get("event") in {"assistant_message", "assistant_final_output"}
+            and str(event.get("content") or "").strip()
+        ]
+        for content in assistant_contents:
+            self.agent_context.observe_assistant_message(content)
         final_text = _final_assistant_text(result, extracted)
         if final_text:
-            self.agent_context.observe_assistant_message(final_text)
+            if final_text not in assistant_contents:
+                self.agent_context.observe_assistant_message(final_text)
             if self.speech_sink is not None:
                 try:
                     self.speech_sink(final_text)

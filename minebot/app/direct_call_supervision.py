@@ -139,6 +139,31 @@ class CallSupervisor:
                     break
         return {"goal": goal, "current_step": current_step}
 
+    def _latest_agent_intent(self) -> str:
+        """Return the latest spoken explanation before a direct Body call.
+
+        A direct SDK call already has an intent in the Agent's visible prose;
+        requiring a second structured ``intent`` argument makes the reflex
+        layer blind in normal use.  Keep this lookup read-only and bounded.
+        """
+        # The SDK calls the reflex hook before dispatching a function tool.
+        # Prefer that same-turn observation; the durable context is updated
+        # only after the whole turn has completed.
+        current = str(getattr(self.runtime, "_latest_reflex_intent", "") or "").strip()
+        if current:
+            return current[:500]
+        context = getattr(self.runtime, "agent_context", None)
+        messages = getattr(context, "session_messages", None)
+        if not callable(messages):
+            return ""
+        try:
+            for role, content in reversed(messages()):
+                if role == "assistant" and str(content or "").strip():
+                    return str(content).strip()[:500]
+        except Exception:
+            return ""
+        return ""
+
     def _plan_context(
         self, *, supervision_context: Mapping[str, Any] | None,
         tool: Any, params: Mapping[str, Any],
@@ -149,6 +174,16 @@ class CallSupervisor:
                 if key in supervision_context:
                     plan[key] = supervision_context[key]
         agent_intent = str(plan.get("intent") or "").strip()
+        if not agent_intent:
+            spoken_intent = self._latest_agent_intent()
+            if spoken_intent:
+                agent_intent = spoken_intent
+                plan["intent"] = agent_intent
+        if not agent_intent:
+            # A direct call may have no spoken preamble.  The durable user
+            # goal is the only semantic fallback; never manufacture an
+            # intent-shaped placeholder for Decision to repeat.
+            agent_intent = str(plan.get("goal") or "").strip()
         node_description = str(plan.get("node_description") or "").strip()
         if not node_description:
             node_description = agent_intent or str(plan.get("current_step") or "").strip()
@@ -159,7 +194,7 @@ class CallSupervisor:
             "goal": str(plan.get("goal") or "")[:180],
             "current_step": str(plan.get("current_step") or "")[:180],
             "node_description": node_description[:200],
-            "intent": agent_intent[:500],
+            "intent": str(plan.get("intent") or "")[:500],
             "intent_chain": [str(item)[:160] for item in intents[:4]],
         })
 
@@ -168,21 +203,17 @@ class CallSupervisor:
         plan: Mapping[str, Any], options: Mapping[str, str] | None = None,
         *, tool_name: str = "the current tool", normal_work: str = "",
     ) -> dict[str, str]:
-        intent = str(plan.get("intent") or plan.get("node_description") or plan.get("current_step") or "No Agent intent was supplied")[:220]
-        normal = str(normal_work or "the Body carries out the requested physical action and returns a terminal result")[:220]
+        intent = str(
+            plan.get("intent") or plan.get("node_description")
+            or plan.get("current_step") or plan.get("goal") or "the current goal"
+        )[:260]
+        normal = str(normal_work or "the Body performs the operation and reports its result.").strip()[:120]
+        context = f"Intent: “{intent}”; normal process: {normal}."
         criteria = {
-            "continue": (
-                f"Continue the normal process toward “{intent}” while this frame still fits that purpose."
-            ),
-            "inspect": (
-                f"Read one new fact about whether “{intent}” is being served; use this only when the normal process is unclear."
-            ),
-            "step_done": (
-                f"Choose this only when current facts show that the amount or outcome stated in “{intent}” is already reached."
-            ),
-            "call_agent": (
-                f"Return control to Agent when facts show the Body cannot carry out “{intent}” through {normal}, or the actual work conflicts with it while that outcome is not already reached."
-            ),
+            "continue": f"{context} Continue when facts still fit this work.",
+            "inspect": f"{context} Read a new fact only when evidence cannot distinguish ongoing work from completion.",
+            "step_done": f"{context} Choose only when facts positively show the intended outcome is complete.",
+            "call_agent": f"{context} Call the Agent only when facts show blockage, failure, or work outside this intent.",
         }
         if options is None:
             return criteria
@@ -216,8 +247,8 @@ class CallSupervisor:
         progress = execution.get("progress_signal")
         age = execution.get("since_progress_s")
         facts["last_progress"] = (
-            f"last real progress was {progress} {age}s ago."
-            if progress else "no real progress has been observed yet."
+            f"last progress event: {progress}, {age}s ago."
+            if progress else f"{elapsed if elapsed is not None else 0}s have elapsed since the call began."
         )
         delta = compact_facts.get("inventory_delta")
         if isinstance(delta, Mapping) and delta:
@@ -896,7 +927,6 @@ class CallSupervisor:
         )
         # The existing stop/settlement entry remains the only stop owner. Do
         # not revoke the containing plan: step_done must let it advance.
-        kernel = self.runtime.responses_kernel
         is_plan = bool(record["supervision_context"].get("is_plan"))
         started = time.monotonic()
         settled = await self.runtime.cancel_active_execution_with_facts(
@@ -919,8 +949,14 @@ class CallSupervisor:
         # its fact to the Agent. Plan calls are reported once by
         # ReflexManager, after WorkPlanExecutor records the node state; doing
         # both here and there would create two facts for one stopped node.
-        if kernel is not None and not is_plan:
-            kernel.notify_fact({"call_id": call_id, "status": "handoff_requested", **safe})
+        if not is_plan:
+            # Use the runtime's unified delivery path.  Responses sessions
+            # forward this to the kernel; SDK sessions forward it to their
+            # outer AgentSession listener.  Calling the kernel directly here
+            # silently drops the handoff for SDK direct calls.
+            notify_fact = getattr(self.runtime, "notify_reflex_fact", None)
+            if callable(notify_fact):
+                notify_fact({"call_id": call_id, "status": "handoff_requested", **safe})
 
 
 # Compatibility name for slice-1 callers.
