@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 import time
 
@@ -6,6 +7,7 @@ from minebot.app.client_body_tools import client_body_tools
 from minebot.app.construction_facts import read_construction
 from minebot.app.decision_client import DecisionAnswer
 from minebot.app.wiring import build_agent_runtime
+from minebot.app.reflex_tools import ReflexManager
 from minebot.brain.registry import ToolRegistry, RegisteredTool, ToolSidecar, WeldContext, execute_tool
 from minebot.brain.progress import ProgressAuthority
 from minebot.game.real_client_body import RealClientBody, _body_state
@@ -13,6 +15,8 @@ from minebot.game.real_client_ipc import RealClientIpcError, RealClientTerminal
 from minebot.contract import Action, ToolResult
 from minebot.contract.execution import tool_observation_scope
 from minebot.app.execution_snapshot import ExecutionSnapshots
+import minebot.app.direct_call_supervision as supervision_module
+import minebot.app.execution_snapshot as snapshot_module
 
 
 class NativeIpc:
@@ -236,7 +240,7 @@ async def _inspect_budget():
         assert count >= 1
         await runtime.cancel_active_execution_with_facts("user_stop")
         await asyncio.wait_for(job, 1)
-        final = [e for e in runtime.trace.events if e["event"] == "direct_supervision_finished"][-1]
+        final = [e for e in runtime.trace.events if e["event"] == "call_supervision_finished"][-1]
         assert final["reads"] <= final["questions"] and final["reads"] == 4
     finally:
         await runtime.aclose()
@@ -344,7 +348,10 @@ def test_shared_supervisor_yield_stops_generic_call_and_delivers_one_fact():
                 tool, execute_tool, tool, {"target": [1, 5, 0]}, runtime.weld_context,
                 tool_call_id="original-generic", timeout_s=2), 2)
             assert result["metrics"]["direct_call_handoff"]["facts"]["reason"] == "decision_step_done"
-            assert result["success"] and result["reason"] == "decision_step_done"
+            assert result["reason"] != "decision_step_done"
+            assert "supervision_step_done" not in result.get("metrics", {})
+            original = result.get("metrics", {}).get("original_result", {})
+            assert original.get("reason") == "cancel_requested"
             assert ipc.cancelled.is_set()
             raw = [e for e in runtime.trace.events if e["event"] == "tool_raw_result"]
             assert len(raw) == 1 and raw[0]["tool_call_id"] == "original-generic"
@@ -506,6 +513,102 @@ def test_snapshot_reuses_same_fact_frame_and_marks_phase_change():
     assert changed["fact_revision"] == 2
 
 
+def test_snapshot_tick_emits_latest_change_after_rate_limit():
+    snapshots = ExecutionSnapshots()
+    snapshots.begin("tick", "move_to", {})
+    snapshots.observe("tick", {"position": [0, 5, 0], "pathing": True})
+    first = snapshots.current()
+    assert first["fact_revision"] == 1
+    # A changed sample inside the cadence window is retained as facts but is
+    # not yet a new frame. The next clock tick must expose that latest state.
+    snapshots.observe("tick", {"position": [3, 5, 0], "pathing": True})
+    assert snapshots.current()["fact_revision"] == 1
+    snapshots._current.fact_frame_at -= snapshot_module.FACT_FRAME_INTERVAL_S
+    snapshots.tick("tick")
+    latest = snapshots.current()
+    assert latest["fact_revision"] == 2
+    assert latest["facts"]["position"] == [3.0, 5.0, 0.0]
+
+
+def test_supervisor_clock_questions_when_body_sends_no_samples(monkeypatch):
+    async def run():
+        ipc = GenericCallIpc(progressing=False)
+        runtime, _ = make_runtime(ipc)
+        tool = _register_generic(runtime, runtime.registry, runtime.body, name="silent_long_call")
+        # Keep the test short while preserving the one-frame-per-cadence rule.
+        monkeypatch.setattr(supervision_module, "FACT_FRAME_INTERVAL_S", 0.05)
+        monkeypatch.setattr(snapshot_module, "FACT_FRAME_INTERVAL_S", 0.05)
+
+        decisions = []
+
+        async def always_continue(*_args, **_kwargs):
+            decisions.append(True)
+            return "continue"
+
+        runtime.call_supervisor.judge = always_continue
+        original = ipc.command
+
+        def silent_command(objective, *, action_id, timeout_ms, on_progress):
+            # The native call remains active but never reports progress.
+            return original(objective, action_id=action_id, timeout_ms=timeout_ms, on_progress=lambda _payload: None)
+
+        ipc.command = silent_command
+        try:
+            result = await asyncio.wait_for(runtime.run_tool(
+                tool, execute_tool, tool, {"target": [1, 5, 0]}, runtime.weld_context,
+                tool_call_id="silent", timeout_s=2), 2)
+            assert result["success"]
+            assert len(decisions) >= 5
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_throttled_body_change_is_seen_on_the_next_clock_frame(monkeypatch):
+    async def run():
+        ipc = GenericCallIpc(progressing=False)
+        runtime, _ = make_runtime(ipc)
+        monkeypatch.setattr(supervision_module, "FACT_FRAME_INTERVAL_S", 0.05)
+        monkeypatch.setattr(snapshot_module, "FACT_FRAME_INTERVAL_S", 0.05)
+        seen = []
+
+        def invoke(_params):
+            observation = __import__("minebot.contract.execution", fromlist=["current_tool_observation"]).current_tool_observation()
+            _call_id, notify = observation
+            notify({"position": [0, 5, 0], "pathing": True})
+            time.sleep(0.02)
+            notify({"position": [3, 5, 0], "pathing": True})
+            time.sleep(0.12)
+            return ToolResult(True, "world_result_verified", False)
+
+        tool = RegisteredTool(
+            "moving_then_stuck", "A moving call", {"type": "object"}, invoke,
+            ToolSidecar("moving_then_stuck", True, source="test"),
+            supervision_explanation="The call reports movement and then keeps its latest state.",
+        )
+        runtime.registry.register(tool)
+
+        class CaptureDecision:
+            async def ask(self, payload, *, priority):
+                seen.append(payload)
+                return DecisionAnswer("continue", {"choice": "continue"}, 0.001, len(seen))
+            async def close(self):
+                return None
+
+        runtime.call_supervisor._client = CaptureDecision()
+        try:
+            await runtime.run_tool(tool, execute_tool, tool, {}, runtime.weld_context,
+                                   tool_call_id="moving-stuck", timeout_s=2)
+            positions = [
+                payload["state"]["execution"]["facts"].get("position")
+                for payload in seen
+            ]
+            assert [3.0, 5.0, 0.0] in positions
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
 def test_question_contains_goal_step_node_intent_and_fact_criteria():
     async def run():
         runtime, tool = make_runtime(GenericCallIpc())
@@ -526,13 +629,101 @@ def test_question_contains_goal_step_node_intent_and_fact_criteria():
             assert state["plan"]["current_step"] == "travel to vein"
             criteria = request["questions"]["q"]["criteria"]
             assert set(criteria) == {"continue", "inspect", "step_done", "call_agent"}
-            assert all("reach the selected vein" in text for text in criteria.values())
+            assert all("state.plan." in text for text in criteria.values())
+            assert all("reach the selected vein" not in text for text in criteria.values())
             assert "real Body progress" in criteria["continue"]
             assert "insufficient" in criteria["inspect"]
             assert "requested amount is already enough" in criteria["step_done"]
             assert "off the intent" in criteria["call_agent"]
             assert state["request_chars"] <= 16_000
         finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_question_compacts_old_reads_before_inventory_detail():
+    async def run():
+        runtime, tool = make_runtime(GenericCallIpc())
+        try:
+            execution = {
+                "operation_id": "large", "state": "running", "phase": "moving",
+                "fact_revision": 4,
+                "facts": {
+                    "position": [1, 5, 0],
+                    "inventory_complete": True,
+                    "inventory": {f"item-{index}": "x" * 500 for index in range(26)},
+                    "bounded_reads": [
+                        {"source": "bounded_read", "facts": {"marker": f"read-{index}", "blob": "x" * 500}}
+                        for index in range(16)
+                    ],
+                },
+            }
+            request = runtime.call_supervisor._question(
+                "large", tool, {}, execution, idle_s=1.0, purpose="running_frame",
+                supervision_context={"goal": "collect", "current_step": "collect", "is_plan": False},
+            )
+            state = request["state"]
+            assert state["request_chars"] <= 16_000
+            assert request["_request_chars_before"] > state["request_chars"]
+            facts = state["execution"]["facts"]
+            if "bounded_reads" in facts:
+                assert len(facts["bounded_reads"]) < 16
+                assert facts["bounded_reads"][-1]["source"] == "bounded_read"
+                assert "inventory" not in facts or len(facts["inventory"]) <= 26
+            assert "<execution facts bounded>" not in json.dumps(request)
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_plan_call_agent_has_one_manager_fact_and_no_supervisor_duplicate():
+    async def run():
+        ipc = GenericCallIpc(progressing=False)
+        runtime, _ = make_runtime(ipc)
+        tool = _register_generic(runtime, runtime.registry, runtime.body, name="plan_call_agent")
+        runtime.call_supervisor._client = StubDecision(("call_agent",))
+        delivered = []
+        kernel_facts = []
+
+        class Kernel:
+            pending = []
+            def notify_fact(self, fact):
+                kernel_facts.append(fact)
+            def halt(self):
+                return None
+            async def close(self):
+                return None
+
+        runtime.responses_kernel = Kernel()
+        runtime.notify_reflex_fact = delivered.append
+        manager = ReflexManager(runtime)
+        manager.bind_loop(asyncio.get_running_loop())
+        plan = {
+            "language": "minebot-work/0.2", "goal": "finish the planned call", "timeout_s": 5,
+            "work": {"kind": "call", "id": "planned", "tool": tool.name, "arguments": {}},
+        }
+        try:
+            accepted = manager.delegate({"plan": plan})
+            activity_id = accepted["metrics"]["activity_id"]
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if manager.read(activity_id)["metrics"]["status"] in {"completed", "blocked"}:
+                    break
+            assert len(delivered) == 1, (
+                manager._activities[activity_id].status,
+                [(event["event"], event.get("reason")) for event in runtime.trace.events],
+            )
+            assert not kernel_facts
+            fact = delivered[0]
+            tree = fact["tree"]
+            node_runtime = tree["work"]["_runtime"]
+            assert fact["activity_id"] == activity_id
+            assert fact["status"] == manager.read(activity_id)["metrics"]["status"]
+            assert node_runtime["status"] in {"done", "blocked"}
+            assert node_runtime.get("result", {}).get("reason") == "preempted"
+            assert "plan-planned" in runtime.direct_call_handoffs
+        finally:
+            await manager.close()
             await runtime.aclose()
     asyncio.run(run())
 

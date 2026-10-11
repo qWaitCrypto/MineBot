@@ -18,6 +18,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from minebot.app.decision_client import DecisionClient, DecisionPriority
+from minebot.app.execution_snapshot import FACT_FRAME_INTERVAL_S
 from minebot.contract.execution import tool_observation_scope
 
 MAX_SUPERVISION_READS = 4
@@ -163,26 +164,25 @@ class CallSupervisor:
 
     @staticmethod
     def _criteria(plan: Mapping[str, Any]) -> dict[str, str]:
-        node = str(plan.get("node_description") or "the current call")
-        goal = str(plan.get("goal") or "the Agent goal")
-        step = str(plan.get("current_step") or "the current plan step is unavailable")
-        chain = " → ".join(str(item) for item in (plan.get("intent_chain") or [])) or "no parent intent is available"
         return {
             "continue": (
-                f"Choose continue when the facts show real Body progress or a phase change consistent with "
-                f"node '{node}', the intent chain '{chain}', and plan step '{step}' toward goal '{goal}'."
+                "Choose continue when the facts show real Body progress or a phase change consistent with "
+                "state.plan.node_description and state.plan.intent_chain toward state.plan.current_step "
+                "and state.plan.goal."
             ),
             "inspect": (
-                f"Choose inspect when the facts for node '{node}' and intent '{chain}' are insufficient to tell "
-                f"whether the requested amount is enough, the step is achieved, or the work still matches '{goal}'."
+                "Choose inspect when the supplied facts are insufficient to tell whether the requested amount "
+                "is enough, the node is achieved, or the work still matches state.plan.node_description and "
+                "state.plan.intent_chain."
             ),
             "step_done": (
-                f"Choose step_done only when the supplied facts establish that node '{node}' has achieved its "
-                f"description or the requested amount is already enough for plan step '{step}' and goal '{goal}'."
+                "Choose step_done only when the supplied facts establish that state.plan.node_description is "
+                "achieved or the requested amount is already enough for state.plan.current_step and "
+                "state.plan.goal."
             ),
             "call_agent": (
-                f"Choose call_agent when the facts show the work is off the intent '{chain}' or otherwise cannot "
-                f"be resolved by continue, inspect, or step_done for node '{node}'."
+                "Choose call_agent when the facts show the work is off the intent in state.plan.intent_chain or cannot be "
+                "resolved by continue, inspect, or step_done for state.plan.node_description."
             ),
         }
 
@@ -215,13 +215,38 @@ class CallSupervisor:
             }},
         }
         encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)
-        if len(encoded) > MAX_QUESTION_CHARS:
-            request["state"]["execution"] = {
-                "state": execution.get("state"), "phase": execution.get("phase"),
-                "fact_revision": execution.get("fact_revision"),
-                "facts": "<execution facts bounded>",
-            }
+        request_chars_before = len(encoded)
+        if request_chars_before > MAX_QUESTION_CHARS:
+            # Keep the current frame and its evidence. Remove only the oldest
+            # bounded reads first, then inventory detail; never replace the
+            # whole fact set with a blind placeholder.
+            compact = dict(request["state"]["execution"])
+            facts = dict(compact.get("facts") or {})
+            compact_limit = MAX_QUESTION_CHARS - 512
+            def compact_size() -> int:
+                candidate = dict(request)
+                candidate["state"] = {
+                    **request["state"],
+                    "execution": {**compact, "facts": facts},
+                }
+                return len(json.dumps(candidate, ensure_ascii=False, separators=(",", ":"), default=str))
+            reads = facts.get("bounded_reads")
+            if isinstance(reads, list):
+                while reads and compact_size() > compact_limit:
+                    reads.pop(0)
+                if not reads:
+                    facts.pop("bounded_reads", None)
+            if compact_size() > compact_limit:
+                for key in ("inventory_delta", "inventory", "inventory_delta_omitted"):
+                    facts.pop(key, None)
+                    if compact_size() <= compact_limit:
+                        break
+            compact["facts"] = facts
+            request["state"]["execution"] = compact
             encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)
+        # This private value is removed before the request reaches Decision;
+        # the trace reports both sides of compaction.
+        request["_request_chars_before"] = request_chars_before
         request["state"]["request_chars"] = len(encoded)
         return request
 
@@ -236,16 +261,14 @@ class CallSupervisor:
             purpose=purpose, supervision_context=supervision_context,
         )
         tool_name = getattr(tool, "name", "unknown")
+        request_chars_before = int(request.pop("_request_chars_before", request["state"].get("request_chars", 0)))
         request_chars = int(request["state"].get("request_chars", 0))
         fact_revision = execution.get("fact_revision")
         self.runtime.trace.emit(
             "call_supervision_request", tool_call_id=call_id, tool=tool_name,
             purpose=purpose, idle_s=round(idle_s, 3), fact_revision=fact_revision,
-            request_chars=request_chars, request=request,
-        )
-        self.runtime.trace.emit(
-            "direct_supervision_request", tool_call_id=call_id,
-            regression_format="minebot-semantic-regression/1", request=request,
+            request_chars_before=request_chars_before, request_chars=request_chars,
+            request=request,
         )
         started = time.monotonic()
         raw: dict[str, Any] | None = None
@@ -261,10 +284,6 @@ class CallSupervisor:
             purpose=purpose, response=raw, choice=choice,
             unknown=choice == "unknown", elapsed_s=elapsed,
             decision_ms=round(elapsed * 1000.0, 3), fact_revision=fact_revision,
-        )
-        self.runtime.trace.emit(
-            "direct_supervision_result", tool_call_id=call_id, response=raw,
-            choice=choice, elapsed_s=elapsed,
         )
         return choice
 
@@ -384,20 +403,6 @@ class CallSupervisor:
             safe["construction"] = construction
         return CallSupervisor._bounded(safe)
 
-    @staticmethod
-    def _logical_step_done(result: Any) -> Any:
-        """Turn an already-settled Decision completion into a node success."""
-        if not isinstance(result, dict):
-            return result
-        result = dict(result)
-        metrics = dict(result.get("metrics") or {})
-        metrics["supervision_step_done"] = True
-        result["metrics"] = metrics
-        result["success"] = True
-        result["reason"] = "decision_step_done"
-        result["canRetry"] = False
-        return result
-
     async def run(
         self, tool: Any, callback: Any, args: tuple[Any, ...], *, call_id: str,
         timeout_s: float | None, supervision_context: Mapping[str, Any] | None = None,
@@ -449,8 +454,6 @@ class CallSupervisor:
             result = await worker
             if record["settling"] and monitor is not None:
                 await monitor
-            if record.get("decision") == "step_done":
-                result = self._logical_step_done(result)
             handoff = self.runtime.direct_call_handoffs.get(call_id)
             payload = result if isinstance(result, dict) else getattr(result, "result", None)
             if handoff is not None and isinstance(payload, dict):
@@ -476,10 +479,6 @@ class CallSupervisor:
                     record["questions"] / max(time.monotonic() - record["started_at"], 0.001) * 60.0, 3,
                 ),
             )
-            self.runtime.trace.emit(
-                "direct_supervision_finished", tool_call_id=call_id,
-                reads=record["reads"], questions=record["questions"],
-            )
             if self.current is record:
                 self.current = None
 
@@ -491,18 +490,23 @@ class CallSupervisor:
         decision_task: asyncio.Task[str] | None = None
         pending: tuple[dict[str, Any], float, str] | None = None
         decision_revision = -1
+        snapshots = getattr(self.runtime, "execution_snapshots", None)
         while not record["cancel_requested"]:
             if worker.done() and decision_task is None:
                 return
             wake_wait = asyncio.create_task(wake.wait())
+            clock_wait = asyncio.create_task(asyncio.sleep(FACT_FRAME_INTERVAL_S))
             wait_set: set[asyncio.Future[Any]] = {wake_wait}
+            wait_set.add(clock_wait)
             if decision_task is not None:
                 wait_set.add(decision_task)
             if not worker.done():
                 wait_set.add(worker)
             done, pending_tasks = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
             finished_decision = decision_task if decision_task is not None and decision_task in done else None
-            if wake_wait in done:
+            if clock_wait in done and not worker.done() and snapshots is not None:
+                snapshots.tick(record["call_id"])
+            if wake_wait in done or clock_wait in done:
                 wake.clear()
                 execution = self._snapshot(record["call_id"])
                 if execution:
@@ -580,12 +584,21 @@ class CallSupervisor:
                         ))
                         record["decision_task"] = decision_task
             if worker in done and decision_task is None:
+                for waiter in (wake_wait, clock_wait):
+                    if waiter not in done:
+                        waiter.cancel()
+                await asyncio.gather(wake_wait, clock_wait, return_exceptions=True)
                 return
             if wake_wait not in done and decision_task is None and worker.done():
+                for waiter in (wake_wait, clock_wait):
+                    if waiter not in done:
+                        waiter.cancel()
+                await asyncio.gather(wake_wait, clock_wait, return_exceptions=True)
                 return
-            if wake_wait not in done:
-                wake_wait.cancel()
-                await asyncio.gather(wake_wait, return_exceptions=True)
+            for waiter in (wake_wait, clock_wait):
+                if waiter not in done:
+                    waiter.cancel()
+            await asyncio.gather(wake_wait, clock_wait, return_exceptions=True)
 
     async def supervise_idle(
         self, tool: Any, *, call_id: str, plan_context: Mapping[str, Any] | None = None,
@@ -670,6 +683,10 @@ class CallSupervisor:
         started = time.monotonic()
         settled = await self.runtime.cancel_active_execution_with_facts(
             "direct_call:" + safe["reason"], cancel_reflex=False,
+            # A plan handoff stops the current node but does not invalidate
+            # the containing activity. Direct calls have no owner to preserve
+            # and keep the existing generation invalidation safety boundary.
+            invalidate_generation=not is_plan,
         )
         self.runtime.trace.emit(
             "call_supervision_stop_settled", tool_call_id=call_id,
@@ -680,10 +697,11 @@ class CallSupervisor:
             "direct_call_handoff", tool_call_id=call_id, facts=safe, settlement=settled,
         )
         self.runtime.direct_call_handoffs[call_id] = {"facts": safe, "settlement": settled}
-        # Only after the unified stop path has settled may the native Agent
-        # channel receive the fact. A plan step_done is consumed by its tree;
-        # direct step_done and call_agent are delivered as Agent facts.
-        if kernel is not None and (decision != "step_done" or not is_plan):
+        # Only after the unified stop path has settled may a direct call send
+        # its fact to the Agent. Plan calls are reported once by
+        # ReflexManager, after WorkPlanExecutor records the node state; doing
+        # both here and there would create two facts for one stopped node.
+        if kernel is not None and not is_plan:
             kernel.notify_fact({"call_id": call_id, "status": "handoff_requested", **safe})
 
 

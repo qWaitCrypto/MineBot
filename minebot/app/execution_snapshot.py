@@ -73,8 +73,9 @@ class _Operation:
         self.world_edits = 0
         self.path_failed = 0
         self.path_failed_at_progress = 0
-        # Stable identity for a new evidence frame. Repeated native samples
-        # with the same bounded facts do not advance this revision.
+        # Stable identity for a new evidence frame. Frames are emitted by the
+        # supervisor cadence even when the facts repeat; a phase change is
+        # emitted immediately.
         self.fact_revision = 0
         self.fact_observed_at: str | None = None
         self.fact_frame_at = 0.0
@@ -113,7 +114,6 @@ class ExecutionSnapshots:
                 return
             if op.state == "accepted":
                 op.state = "running"
-            before = self._fact_digest(op)
             action_id = payload.get("action_id")
             if isinstance(action_id, str) and action_id:
                 op.action_id = action_id
@@ -131,7 +131,20 @@ class ExecutionSnapshots:
                 op.progress_signal = signal
                 op.path_failed_at_progress = op.path_failed
             self._merge_facts(op, payload)
-            self._mark_fact_frame(op, before)
+            self._mark_fact_frame(op)
+
+    def tick(self, operation_id: str) -> None:
+        """Advance the cadence frame without requiring a Body sample.
+
+        The absence of a new sample is itself evidence for Decision. This is
+        deliberately a clock tick rather than a progress detector: it never
+        changes progress timestamps or invents Body facts.
+        """
+        with self._lock:
+            op = self._owned(operation_id)
+            if op is None or op.state in TERMINAL_STATES:
+                return
+            self._mark_fact_frame(op)
 
     def enrich(self, operation_id: str, facts: Mapping[str, Any], *, source: str = "bounded_read") -> None:
         """Add a bounded read to the same snapshot used by the observer.
@@ -145,13 +158,12 @@ class ExecutionSnapshots:
             op = self._owned(operation_id)
             if op is None or op.state in TERMINAL_STATES:
                 return
-            before = self._fact_digest(op)
             if isinstance(facts, Mapping):
                 op.facts.setdefault("bounded_reads", []).append({
                     "source": source,
                     "facts": _bounded_value(dict(facts)),
                 })
-            self._mark_fact_frame(op, before, force=True)
+            self._mark_fact_frame(op, force=True)
 
     def finish(self, operation_id: str, *, state: str, reason: str | None, control: str) -> None:
         with self._lock:
@@ -188,15 +200,16 @@ class ExecutionSnapshots:
         )
 
     @staticmethod
-    def _mark_fact_frame(op: _Operation, before: str, *, force: bool = False) -> None:
-        if ExecutionSnapshots._fact_digest(op) != before:
-            now = time.monotonic()
-            phase_changed = op.phase != op.fact_frame_phase
-            if force or op.fact_revision == 0 or phase_changed or now - op.fact_frame_at >= FACT_FRAME_INTERVAL_S:
-                op.fact_revision += 1
-                op.fact_frame_at = now
-                op.fact_frame_phase = op.phase
-                op.fact_observed_at = op.observed_at or _utc_now()
+    def _mark_fact_frame(op: _Operation, *, force: bool = False) -> None:
+        now = time.monotonic()
+        phase_changed = op.phase != op.fact_frame_phase
+        if force or op.fact_revision == 0 or phase_changed or now - op.fact_frame_at >= FACT_FRAME_INTERVAL_S:
+            op.fact_revision += 1
+            op.fact_frame_at = now
+            op.fact_frame_phase = op.phase
+            # A cadence frame is observed now, even when the Body supplied no
+            # new sample since the previous frame.
+            op.fact_observed_at = _utc_now()
 
     @staticmethod
     def _progress_signal(op: _Operation, payload: Mapping[str, Any]) -> str | None:
