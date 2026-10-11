@@ -194,13 +194,13 @@ def test_summary_instructions_preserve_world_facts_without_copying_live_state():
 
 def test_the_live_context_appended_after_the_view_counts_toward_the_threshold():
     calls = []
-    compactor = _compactor(4_000, calls, tail_chars=2_000)
+    compactor = _compactor(40_000, calls, tail_chars=2_000)
     history = _history(20)
 
     async def scenario():
         await compactor.view(history)
         assert calls == []
-        await compactor.view(history, live_chars=40_000)
+        await compactor.view(history, live_chars=90_000)
 
     asyncio.run(scenario())
     assert len(calls) == 1

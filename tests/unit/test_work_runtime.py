@@ -4207,6 +4207,8 @@ class BlockWorkTests(unittest.TestCase):
                 (1, 63, 0): ("stone", "SOLID"),
                 (2, 64, 0): ("stone", "SOLID"),
                 (2, 65, 0): ("air", "CLEAR"),
+                # No headroom on top of it: the only stance is inside the carved cell.
+                (2, 66, 0): ("stone", "SOLID"),
                 (2, 63, 0): ("stone", "SOLID"),
                 (1, 64, 1): ("air", "CLEAR"),
                 (1, 63, 1): ("air", "CLEAR"),
@@ -4266,6 +4268,7 @@ class BlockWorkTests(unittest.TestCase):
                 (1, 63, 0): ("stone", "SOLID"),
                 (2, 64, 0): ("chest", "SOLID"),
                 (2, 65, 0): ("air", "CLEAR"),
+                (2, 66, 0): ("chest", "SOLID"),
                 (2, 63, 0): ("stone", "SOLID"),
                 (1, 64, 1): ("air", "CLEAR"),
                 (1, 63, 1): ("air", "CLEAR"),

@@ -142,6 +142,9 @@ class ResourceOrchestrationServer(FakeBodyServer):
             for fact in [data] if scope == "blockAt" else data["cells"]:
                 pos = (fact["x"], fact["y"], fact["z"])
                 fact["standing_y"] = 64.0 if pos == (10, 64, -4) else None
+        if scope == "blockAt" and params.get("interaction_radius") is not None:
+            # The Body answers its live reach predicate when asked for one.
+            data["interaction_ready"] = True
         self._emit_response(rid, "WORLD_READ_RESULT", {
             "bot": message.get("bot_name"),
             "scope": scope,

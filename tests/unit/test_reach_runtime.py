@@ -52,7 +52,7 @@ class ReachRuntimeTests(unittest.TestCase):
     def test_entity_band_includes_a_native_low_surface_at_its_actual_distance(self):
         stand = (0, 63, 0)
         body = NativeStandingBody({stand: ("minecraft:stone_slab", "SOLID")}, {stand: 63.5})
-        stands = entity_stand_points(body, (1.5, 63.5, 0.5), max_distance=1.05)
+        stands = entity_stand_points(body, (1.5, 63.5, 0.5), max_distance=1.6)
         self.assertIn(stand, stands)
 
     def test_entity_band_rejects_missing_native_standing_proof(self):

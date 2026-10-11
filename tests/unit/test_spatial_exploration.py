@@ -26,7 +26,7 @@ class WalkingIpc(FakeClientIpc):
     def state(self):
         return {**super().state(), "position": list(self.pos), "entities": []}
 
-    def command(self, objective, *, action_id, timeout_ms):
+    def command(self, objective, *, action_id, timeout_ms, on_progress=None):
         self.commands.append((objective, action_id, timeout_ms))
         self._cancel.clear()
         parts = objective.split(":")

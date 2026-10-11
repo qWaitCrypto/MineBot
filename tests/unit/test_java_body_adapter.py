@@ -612,6 +612,9 @@ class FakeBodyServer:
                 int(params["x"]), int(params["y"]), int(params["z"]),
                 block="minecraft:oak_log", properties={"axis": "x"},
             )
+            if params.get("interaction_radius") is not None:
+                # The Body answers its live reach predicate when asked for one.
+                data["interaction_ready"] = True
             complete = True
             next_cursor = None
         elif scope == "blockCells":
