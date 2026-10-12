@@ -26,8 +26,6 @@ from minebot.contract.execution import tool_observation_scope
 
 MAX_SUPERVISION_READS = 4
 # Kept as a compatibility export. R2 no longer caps questions per call.
-MAX_SUPERVISION_QUESTIONS = 0
-MAX_IDLE_UNKNOWN_FRAMES = 3
 MAX_QUESTION_CHARS = 16_000
 FAST_COMPLETION_GRACE_S = 0.02
 # What each default tool is for, recorded as the intent of the call it starts.
@@ -49,23 +47,13 @@ class CallSupervisor:
         runtime: Any,
         *,
         decision_url: str | None = None,
-        # Deprecated aliases retained for callers configuring the old slice.
-        suspicion_s: float = 0.0,
-        review_interval_s: float = 0.0,
         max_reads: int = MAX_SUPERVISION_READS,
-        max_questions: int = MAX_SUPERVISION_QUESTIONS,
-        idle_unknown_limit: int = MAX_IDLE_UNKNOWN_FRAMES,
     ) -> None:
         self.runtime = runtime
         self.decision_url = decision_url or os.environ.get(
             "MINEBOT_DECISION_URL", "http://117.176.14.165:10004/v1/systemone"
         )
-        # The old no-progress gate and 15-second review interval are not used.
-        self.suspicion_s = suspicion_s
-        self.review_interval_s = review_interval_s
         self.max_reads = max(0, int(max_reads))
-        self.max_questions = max_questions
-        self.idle_unknown_limit = max(1, int(idle_unknown_limit))
         self._client = getattr(runtime, "decision_client", None) or DecisionClient(
             url=self.decision_url, emit=runtime.trace.emit
         )
@@ -537,7 +525,10 @@ class CallSupervisor:
         try:
             while True:
                 worker = asyncio.create_task(self.runtime.execution_lane.run(invoke, timeout_s=timeout_s))
-                grace = min(FAST_COMPLETION_GRACE_S, max(0.0, self.suspicion_s))
+                # Give very short calls a small completion race window. This
+                # is scheduling protection, not a supervision gate: calls
+                # that remain live are always handed to BodyLoop._monitor.
+                grace = FAST_COMPLETION_GRACE_S
                 if grace:
                     done, _ = await asyncio.wait({worker}, timeout=grace)
                     if not done:
@@ -870,5 +861,4 @@ DirectBuildSupervisor = CallSupervisor
 
 __all__ = [
     "CallSupervisor", "DirectBuildSupervisor", "MAX_SUPERVISION_READS",
-    "MAX_SUPERVISION_QUESTIONS", "MAX_IDLE_UNKNOWN_FRAMES",
 ]
