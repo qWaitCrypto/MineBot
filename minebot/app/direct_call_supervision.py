@@ -459,7 +459,10 @@ class CallSupervisor:
             if value is None:
                 value = next((facts.get(k) for k in keys if facts.get(k) not in (None, "")), None)
             if value is not None:
-                state[target] = value if isinstance(value, str) else str(value)
+                rendered_value = value if isinstance(value, str) else str(value)
+                if target == "position" and result is None and isinstance(raw.get("position"), (list, tuple)):
+                    rendered_value += f" (raw coordinates {list(raw['position'])})"
+                state[target] = rendered_value
         if facts.get("quantity"):
             state["quantity"] = str(facts["quantity"])
         if result is None:
