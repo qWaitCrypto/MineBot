@@ -106,7 +106,17 @@ def _inventory(facts: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return None
 
 
+def dead(facts: Mapping[str, Any]) -> bool:
+    health = facts.get("health")
+    return isinstance(health, (int, float)) and health <= 0
+
+
+_DEAD_OPTIONS = {"call_agent": "The Body has died. Hand control back to the Agent."}
+
+
 def _body_sentence(facts: Mapping[str, Any]) -> str:
+    if dead(facts):
+        return "The Body has died."
     parts: list[str] = []
     health, food, air = facts.get("health"), facts.get("food"), facts.get("oxygen")
     if isinstance(health, (int, float)):
@@ -119,6 +129,11 @@ def _body_sentence(facts: Mapping[str, Any]) -> str:
             parts.append("Air supply is full.")
         elif air <= 0:
             parts.append("Air supply is empty; the Body is under water and is drowning.")
+        elif isinstance(air_before, (int, float)) and air > air_before:
+            parts.append(
+                f"The Body is breathing again: air supply was {air_before:.0f} {_ago(facts)} ago "
+                f"and is {air:.0f} of {AIR_FULL} now."
+            )
         elif isinstance(air_before, (int, float)):
             parts.append(
                 "The head is under water and the Body cannot breathe: air supply was "
@@ -241,6 +256,9 @@ def frame_options(
     ``intent_of_plan`` says the step wrote no intent of its own and ``intent``
     is the one of the plan around it.
     """
+    if dead(facts):
+        # A dead Body can do none of the other things.
+        return dict(_DEAD_OPTIONS)
     call = call_text(tool, params)
     result = result if isinstance(result, Mapping) else {}
     failed = not running and result.get("success") is not True
@@ -283,8 +301,11 @@ def frame_options(
 
 def after_default_options(
     *, original_call: str, intent: str, default_call: str, result: Mapping[str, Any] | None,
+    facts: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     """What the Body may do once a protective action has ended."""
+    if dead(facts or {}):
+        return dict(_DEAD_OPTIONS)
     result = result if isinstance(result, Mapping) else {}
     options = {
         "resume": f"Go back to the earlier work, {original_call}" + (f", for: “{intent}”" if intent else "."),

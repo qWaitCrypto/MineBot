@@ -153,3 +153,31 @@ def test_a_step_without_its_own_intent_is_said_to_be_one_step_of_the_plan():
         'Keep doing the current step, collect_resource(item="cobblestone", count=3). '
         'It is one step of the plan: “make and equip a stone pickaxe”')
     assert list(inherited) == list(own)
+
+
+def test_a_dead_body_is_handed_to_the_agent_without_asking():
+    # Live run reflex-stage-20261012f: with health 0 the question still
+    # offered the surface action again, and Decision took it.
+    facts = {"health": 0, "food": 17, "oxygen": 0}
+    running = rq.frame_options(tool="collect_resource", params={"item": "raw_iron"}, intent="get iron",
+                               facts=facts, running=True, next_call="craft_item()")
+    after = rq.after_default_options(original_call="collect_resource()", intent="get iron",
+                                     default_call="go_to_surface()", result={"success": False}, facts=facts)
+    assert list(running) == list(after) == ["call_agent"]
+    assert rq.only_option(rq.frame_questions(running)) == "call_agent"
+    state = rq.frame_state(goal="g", intent="get iron", tool="collect_resource", params={}, facts=facts, running=True)
+    assert state["body"] == "The Body has died."
+    alive = rq.after_default_options(original_call="c()", intent="i", default_call="d()", result={"success": True},
+                                     facts={"health": 3})
+    assert "resume" in alive
+
+
+def test_rising_air_is_said_as_breathing_again_not_as_under_water():
+    # Live run reflex-stage-20261012i: after surfacing, with air climbing back,
+    # the frame still said the head was under water.
+    rising = rq.frame_state(goal="g", intent="i", tool="t", params={}, running=True,
+                            facts={"health": 20, "food": 20, "oxygen": 237, "oxygen_before": 150, "vital_age_s": 5})
+    assert rising["body"].endswith("The Body is breathing again: air supply was 150 5 seconds ago and is 237 of 300 now.")
+    falling = rq.frame_state(goal="g", intent="i", tool="t", params={}, running=True,
+                             facts={"health": 20, "food": 20, "oxygen": 150, "oxygen_before": 237, "vital_age_s": 5})
+    assert "The head is under water and the Body cannot breathe" in falling["body"]

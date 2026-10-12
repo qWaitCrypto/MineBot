@@ -8,9 +8,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SurfaceSwimProgressTest {
     @Test
     void requiresHeadOutAndRecoveringAir() {
-        assertFalse(SurfaceSwimProgress.completed(false, 100, 120));
-        assertFalse(SurfaceSwimProgress.completed(true, 100, 100));
-        assertTrue(SurfaceSwimProgress.completed(true, 100, 101));
+        assertFalse(SurfaceSwimProgress.completed(false, 100, 120, 300));
+        assertFalse(SurfaceSwimProgress.completed(true, 100, 100, 300));
+        assertTrue(SurfaceSwimProgress.completed(true, 100, 101, 300));
+    }
+
+    @Test
+    void headOutWithFullAirIsAlreadyAtTheSurface() {
+        assertTrue(SurfaceSwimProgress.completed(true, 300, 300, 300));
+        assertFalse(SurfaceSwimProgress.completed(false, 300, 300, 300));
+    }
+
+    @Test
+    void notRisingForTwoSecondsMeansTheWayUpIsClosed() {
+        assertFalse(SurfaceSwimProgress.blocked(39));
+        assertTrue(SurfaceSwimProgress.blocked(40));
     }
 
     @Test

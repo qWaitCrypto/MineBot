@@ -1015,7 +1015,7 @@ public final class MineBotClientBody implements ClientModInitializer {
                 if (run.kind.equals("rangedAttack") || run.kind.equals("useItem")) {
                     client.options.keyUse.setDown(false);
                 }
-                if (run.swimmingUp) client.player.setJumping(false);
+                if (run.swimmingUp) client.options.keyJump.setDown(false);
                 if (run.kind.equals("containerTransfer") || run.kind.equals("furnaceTransfer") || run.kind.equals("craftItem")) {
                     if (client.player.containerMenu.containerId == run.openMenuId) client.player.closeContainer();
                 }
@@ -2588,6 +2588,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             current.verticalDistance = Math.max(1, Math.min(128, integer(current.params, "max_distance", 64)));
             current.swimmingUp = true;
             current.swimPreviousAir = client.player.getAirSupply();
+            current.swimBestY = client.player.getY();
             current.phase = 1;
             current.phaseTick = current.ticks;
         }
@@ -2595,22 +2596,33 @@ public final class MineBotClientBody implements ClientModInitializer {
         boolean chunkLoaded = clientChunkLoaded(client, eye);
         if (!SurfaceSwimProgress.allowed(false, chunkLoaded, eye.getY(),
                 client.level.getMinY(), client.level.getMaxY())) {
-            client.player.setJumping(false);
+            client.options.keyJump.setDown(false);
             requestStop("failed", !chunkLoaded ? "vertical_chunk_unloaded"
                 : "vertical_target_out_of_bounds");
             return;
         }
-        client.player.setJumping(true);
+        // Hold the jump key as a player does; the client rewrites the jumping
+        // flag from its keys every tick, so setting the flag does nothing.
+        client.options.keyJump.setDown(true);
+        double y = client.player.getY();
+        if (y > current.swimBestY + 0.05) {
+            current.swimBestY = y;
+            current.swimNoRiseTicks = 0;
+        } else if (SurfaceSwimProgress.blocked(++current.swimNoRiseTicks)) {
+            client.options.keyJump.setDown(false);
+            requestStop("failed", "swim_up_blocked");
+            return;
+        }
         int air = client.player.getAirSupply();
         boolean headOut = client.level.getFluidState(eye).isEmpty();
-        if (SurfaceSwimProgress.completed(headOut, current.swimPreviousAir, air)) {
-            client.player.setJumping(false);
+        if (SurfaceSwimProgress.completed(headOut, current.swimPreviousAir, air, client.player.getMaxAirSupply())) {
+            client.options.keyJump.setDown(false);
             requestStop("completed", "surface_reached");
             return;
         }
         current.swimPreviousAir = air;
         if (client.player.getY() - current.anchor.getY() > current.verticalDistance) {
-            client.player.setJumping(false);
+            client.options.keyJump.setDown(false);
             requestStop("failed", "vertical_target_out_of_bounds");
         }
     }
@@ -3292,6 +3304,8 @@ public final class MineBotClientBody implements ClientModInitializer {
         int verticalIdleTicks;
         boolean swimmingUp;
         int swimPreviousAir;
+        double swimBestY;
+        int swimNoRiseTicks;
         List<net.minecraft.world.item.Item> previousThrowawayItems;
         Integer previousFollowRadius;
         final Set<BlockPos> collectionTargets = new HashSet<>();

@@ -1037,6 +1037,7 @@ class CallSupervisor:
             options = rq.after_default_options(
                 original_call=rq.call_text(record["tool"], record["params"]), intent=intent,
                 default_call=rq.call_text(action[0], action[1]), result=payload,
+                facts=execution["facts"],
             )
             try:
                 choice = await asyncio.wait_for(self._judge_frame(
