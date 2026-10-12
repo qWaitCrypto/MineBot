@@ -36,15 +36,14 @@ def _load_frame_metadata() -> list[dict]:
 
 
 def _orders(keys: list[str], limit: int = 12) -> list[list[str]]:
-    result: list[list[str]] = []
-    seen: set[tuple[str, ...]] = set()
-    for order in itertools.permutations(keys):
-        if tuple(order) not in seen:
-            seen.add(tuple(order))
-            result.append(list(order))
-        if len(result) >= limit:
-            return result
-    return result[:limit]
+    permutations = [list(order) for order in itertools.permutations(keys)]
+    if not permutations:
+        return []
+    # The bench asks every frame for twelve orderings.  A three-option frame
+    # has only six unique permutations (and a two-option frame only two), so
+    # cycle the complete permutation set rather than silently testing fewer
+    # requests.
+    return [permutations[index % len(permutations)] for index in range(limit)]
 
 
 def _raw_frame(meta: dict, candidates: dict[tuple[str, int], dict]) -> dict:
