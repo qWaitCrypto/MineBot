@@ -1015,6 +1015,7 @@ public final class MineBotClientBody implements ClientModInitializer {
                 if (run.kind.equals("rangedAttack") || run.kind.equals("useItem")) {
                     client.options.keyUse.setDown(false);
                 }
+                if (run.swimmingUp) client.player.setJumping(false);
                 if (run.kind.equals("containerTransfer") || run.kind.equals("furnaceTransfer") || run.kind.equals("craftItem")) {
                     if (client.player.containerMenu.containerId == run.openMenuId) client.player.closeContainer();
                 }
@@ -2525,8 +2526,12 @@ public final class MineBotClientBody implements ClientModInitializer {
     }
 
     private void tickVertical(Minecraft client, Run current) {
-        if (client.player.isInLava() || client.player.isInWater()) {
+        if (client.player.isInLava()) {
             requestStop("failed", "vertical_liquid_hazard");
+            return;
+        }
+        if (current.kind.equals("ascend") && (current.swimmingUp || client.player.isInWater())) {
+            tickSwimUp(client, current);
             return;
         }
         if (current.phase == 0) {
@@ -2573,6 +2578,40 @@ public final class MineBotClientBody implements ClientModInitializer {
                 && !processActive() && !baritone.getPathingBehavior().isPathing()) {
                 if (++current.verticalIdleTicks >= 10) requestStop("failed", "vertical_no_path");
             } else current.verticalIdleTicks = 0;
+        }
+    }
+
+    /** Swim vertically until the head is clear and the air supply has started recovering. */
+    private void tickSwimUp(Minecraft client, Run current) {
+        if (current.phase == 0) {
+            current.anchor = client.player.blockPosition();
+            current.verticalDistance = Math.max(1, Math.min(128, integer(current.params, "max_distance", 64)));
+            current.swimmingUp = true;
+            current.swimPreviousAir = client.player.getAirSupply();
+            current.phase = 1;
+            current.phaseTick = current.ticks;
+        }
+        BlockPos eye = BlockPos.containing(client.player.getEyePosition());
+        boolean chunkLoaded = clientChunkLoaded(client, eye);
+        if (!SurfaceSwimProgress.allowed(false, chunkLoaded, eye.getY(),
+                client.level.getMinY(), client.level.getMaxY())) {
+            client.player.setJumping(false);
+            requestStop("failed", !chunkLoaded ? "vertical_chunk_unloaded"
+                : "vertical_target_out_of_bounds");
+            return;
+        }
+        client.player.setJumping(true);
+        int air = client.player.getAirSupply();
+        boolean headOut = client.level.getFluidState(eye).isEmpty();
+        if (SurfaceSwimProgress.completed(headOut, current.swimPreviousAir, air)) {
+            client.player.setJumping(false);
+            requestStop("completed", "surface_reached");
+            return;
+        }
+        current.swimPreviousAir = air;
+        if (client.player.getY() - current.anchor.getY() > current.verticalDistance) {
+            client.player.setJumping(false);
+            requestStop("failed", "vertical_target_out_of_bounds");
         }
     }
 
@@ -3251,6 +3290,8 @@ public final class MineBotClientBody implements ClientModInitializer {
         int verticalDistance;
         int verticalSettledTicks;
         int verticalIdleTicks;
+        boolean swimmingUp;
+        int swimPreviousAir;
         List<net.minecraft.world.item.Item> previousThrowawayItems;
         Integer previousFollowRadius;
         final Set<BlockPos> collectionTargets = new HashSet<>();

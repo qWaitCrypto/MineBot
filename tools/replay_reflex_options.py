@@ -13,7 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from collections.abc import Mapping
 
-sys.path.insert(0, "/tmp/reflexbench")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(1, "/tmp/reflexbench")
 import bench  # type: ignore
 from minebot.app.decision_client import DecisionPriority
 from minebot.app.direct_call_supervision import CallSupervisor
@@ -67,6 +68,17 @@ def _raw_frame(meta: dict, candidates: dict[tuple[str, int], dict]) -> dict:
     facts["position"] = body.get("pos")
     facts["nearby_entities"] = entities
     facts["in_water"] = bool(body.get("oxygen", 300) < 300)
+    # Body progress rows are intentionally sparse. If a fact was already
+    # compiled into the recorded request, replay that structured fact rather
+    # than reverse-engineering the expected benchmark prose.
+    request_execution = state.get("execution") if isinstance(state.get("execution"), Mapping) else {}
+    request_facts = request_execution.get("facts") if isinstance(request_execution.get("facts"), Mapping) else {}
+    for key in ("inventory_now", "inventory_change", "last_progress", "where", "phase", "hostiles", "threats", "in_water", "oxygen", "oxygen_max", "health", "food"):
+        if key not in facts or facts.get(key) in (None, "", {}):
+            if key in request_facts:
+                facts[key] = request_facts[key]
+    if request_execution.get("phase"):
+        facts["phase"] = request_execution["phase"]
     if previous.get("oxygen") is not None:
         facts["oxygen_previous"] = previous["oxygen"]
     if previous.get("health") is not None:
@@ -80,16 +92,19 @@ def _raw_frame(meta: dict, candidates: dict[tuple[str, int], dict]) -> dict:
     candidate = candidates.get((source, rid), {})
     result = candidate.get("result") if meta.get("kind") == "result" else None
     raw_plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    recorded_plan = state.get("plan") if isinstance(state.get("plan"), Mapping) else {}
+    if recorded_plan:
+        raw_plan = {**recorded_plan, **raw_plan}
     operation_id = f"{source}:{tool}:{json.dumps(params, ensure_ascii=False, sort_keys=True)}"
     execution = {
         "operation_id": operation_id,
         "tool": tool,
         "state": "running" if result is None else ("succeeded" if result.get("success") is True else "failed"),
-        "phase": body.get("phase") or (
+        "phase": request_execution.get("phase") or body.get("phase") or (
             "navigating" if body.get("pathing") or body.get("navigation") else
             "working"
         ),
-        "elapsed_s": 0.0,
+        "elapsed_s": request_execution.get("elapsed_s", 0.0),
         "facts": facts,
         "result": result or {},
     }
@@ -101,10 +116,13 @@ def _raw_frame(meta: dict, candidates: dict[tuple[str, int], dict]) -> dict:
         "is_plan": bool(meta.get("kind") == "result" and _is_plan_result(trace, request["ts"], tool)),
     }
     next_call = str(meta.get("next") or "")
+    history_meta = meta.get("history")
+    history = {"recent_results": list(history_meta)} if isinstance(history_meta, list) else {"recent_results": []}
     return {
         "meta": meta, "trace": trace, "request": request, "state": state,
         "tool": tool, "params": params, "facts": facts, "result": result,
         "execution": execution, "context": context, "next_call": next_call,
+        "history": history,
     }
 
 
@@ -151,7 +169,7 @@ def _direct_request(supervisor: CallSupervisor, frame: dict, options: dict[str, 
         supervision_context=frame["context"],
         decision_context={
             "tool_arguments": frame["params"], "tool_result": frame["result"],
-            "body_state": frame["facts"], "history": {"recent_results": []}, "reads": [],
+            "body_state": frame["facts"], "history": frame["history"], "reads": [],
         },
     )
 
@@ -185,6 +203,8 @@ def _plan_request(frame: dict, options: dict[str, str]) -> dict:
     for key in ("inventory", "body", "threats", "position", "finished_call", "earlier_attempts_of_this_call"):
         if key in human:
             payload["state"][key] = human[key]
+    if frame["history"].get("recent_results"):
+        payload["state"]["earlier_attempts_of_this_call"] = list(frame["history"]["recent_results"])
     criteria = payload["questions"]["q"]["criteria"]
     payload["questions"]["q"]["criteria"] = {key: criteria[key] for key in options if key in criteria}
     return payload

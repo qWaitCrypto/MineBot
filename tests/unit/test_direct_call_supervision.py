@@ -740,8 +740,8 @@ def test_question_compiles_vitals_as_readable_facts():
                  "fact_revision": 2, "facts": {"health": 10.8, "oxygen": -12, "food": 8}},
                 idle_s=0.2, purpose="running_frame", supervision_context={"intent": "reach dry land"},
             )
-            assert "health is 10.8" in request["state"]["body"]
-            assert "oxygen is -12" in request["state"]["body"]
+            assert "health is 11" in request["state"]["body"]
+            assert "air supply is -12 of 300" in request["state"]["body"]
             assert "hunger level is 8" in request["state"]["body"]
         finally:
             await runtime.aclose()

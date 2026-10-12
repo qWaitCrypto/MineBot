@@ -126,21 +126,54 @@ class CallSupervisor:
             url=self.decision_url, emit=runtime.trace.emit
         )
         self.current: dict[str, Any] | None = None
-        self._vital_history: dict[str, dict[str, Any]] = {}
+        # Vital history is Body-wide, not call-owned. A new call must still
+        # see a recent fall in health or oxygen from the preceding call.
+        self._vital_samples: list[tuple[float, dict[str, float]]] = []
 
     async def close(self) -> None:
         if self._client is not None:
             await self._client.close()
 
     def _with_vital_history(self, call_id: str, facts: Mapping[str, Any]) -> dict[str, Any]:
+        del call_id  # history belongs to the Body, not to a tool call
         current = dict(facts)
-        previous = self._vital_history.get(call_id, {})
-        for key in ("oxygen", "health"):
-            if key in previous and key in current:
-                current[f"{key}_previous"] = previous[key]
-                if key == "health" and isinstance(previous[key], (int, float)) and isinstance(current[key], (int, float)) and current[key] < previous[key]:
-                    current["recently_hurt"] = True
-        self._vital_history[call_id] = {key: current[key] for key in ("oxygen", "health") if key in current}
+        now = time.monotonic()
+        sample = {
+            key: float(current[key]) for key in ("oxygen", "health", "food")
+            if isinstance(current.get(key), (int, float))
+        }
+        if sample:
+            self._vital_samples.append((now, sample))
+            self._vital_samples = [
+                (stamp, values) for stamp, values in self._vital_samples
+                if now - stamp <= 12.0
+            ]
+        window = [
+            (stamp, values) for stamp, values in self._vital_samples
+            if now - stamp <= 8.0
+        ]
+        # Prefer a sample about five seconds old. A very recent adjacent
+        # sample is not a useful baseline for a semantic change sentence.
+        reference = next(
+            ((stamp, values) for stamp, values in reversed(window)
+             if now - stamp >= 4.0),
+            None,
+        )
+        if reference is not None:
+            stamp, values = reference
+            current["vital_age_s"] = round(now - stamp, 1)
+            for key in ("oxygen", "health", "food"):
+                if key in values:
+                    current[f"{key}_previous"] = values[key]
+        health_values = [
+            (stamp, values["health"]) for stamp, values in window
+            if "health" in values
+        ]
+        for (before_stamp, before), (after_stamp, after) in zip(health_values, health_values[1:]):
+            if after < before:
+                current["recently_hurt"] = True
+                current["health_drop_from"] = before
+                current["health_drop_to"] = after
         return current
 
     @staticmethod
@@ -460,8 +493,6 @@ class CallSupervisor:
                 value = next((facts.get(k) for k in keys if facts.get(k) not in (None, "")), None)
             if value is not None:
                 rendered_value = value if isinstance(value, str) else str(value)
-                if target == "position" and result is None and isinstance(raw.get("position"), (list, tuple)):
-                    rendered_value += f" (raw coordinates {list(raw['position'])})"
                 state[target] = rendered_value
         if facts.get("quantity"):
             state["quantity"] = str(facts["quantity"])
@@ -494,10 +525,18 @@ class CallSupervisor:
         vital_lines: list[str] = []
         health = raw.get("health")
         health_previous = raw.get("health_previous")
+        health_drop_from = raw.get("health_drop_from")
+        health_drop_to = raw.get("health_drop_to", health)
+        vital_age = raw.get("vital_age_s")
+        period = f"{vital_age:g} seconds" if isinstance(vital_age, (int, float)) else "the recent interval"
+        ago = f"{period} ago" if isinstance(vital_age, (int, float)) else "the previous sample"
         if isinstance(health, (int, float)):
-            vital_lines.append(f"health is {health} of 20.")
-            if isinstance(health_previous, (int, float)) and health < health_previous:
-                vital_lines.append(f"Health fell from {health_previous} to {health} since the previous sample.")
+            vital_lines.append(f"health is {round(health):d} of 20.")
+            if (isinstance(health_drop_from, (int, float)) and
+                    isinstance(health_drop_to, (int, float)) and health_drop_to < health_drop_from):
+                vital_lines.append(f"The Body was just hurt: health fell from {round(health_drop_from):d} to {round(health_drop_to):d} in the last {period}.")
+            elif isinstance(health_previous, (int, float)) and health < health_previous:
+                vital_lines.append(f"The Body was just hurt: health fell from {round(health_previous):d} to {round(health):d} since {ago}.")
         food = raw.get("food")
         if isinstance(food, (int, float)):
             vital_lines.append(f"hunger level is {food} of 20.")
@@ -507,11 +546,11 @@ class CallSupervisor:
         if isinstance(oxygen, (int, float)):
             if oxygen < oxygen_max:
                 if isinstance(oxygen_previous, (int, float)) and oxygen != oxygen_previous:
-                    vital_lines.append(f"oxygen changed from {oxygen_previous} to {oxygen} of {oxygen_max} since the previous sample; the head is underwater.")
+                    vital_lines.append(f"The head is under water and the Body cannot breathe: air supply was {round(oxygen_previous):d} {ago} and is {round(oxygen):d} of {round(oxygen_max):d} now.")
                 else:
-                    vital_lines.append(f"oxygen is {oxygen} of {oxygen_max}; the head is underwater.")
+                    vital_lines.append(f"The head is under water and the Body cannot breathe: air supply is {round(oxygen):d} of {round(oxygen_max):d} now.")
             else:
-                vital_lines.append(f"oxygen is full at {oxygen_max}.")
+                vital_lines.append(f"oxygen is full at {round(oxygen_max):d}.")
         if vital_lines:
             state["body"] = " ".join(vital_lines)
         return {key: value for key, value in state.items() if value not in (None, "")}
@@ -589,14 +628,10 @@ class CallSupervisor:
         decision_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         plan = self._plan_context(supervision_context=supervision_context, tool=tool, params=params)
-        # Keep the semantic fields when they carry different facts, but do not
-        # spend every frame repeating the same sentence under four plan keys.
+        # Keep the goal and the call intent as separate state fields.  They
+        # answer different questions even when a direct call falls back to the
+        # user goal as its intent.
         question_plan = dict(plan)
-        intent = str(question_plan.get("intent") or "")
-        if intent:
-            for key in ("goal", "current_step", "node_description"):
-                if question_plan.get(key) == intent:
-                    question_plan.pop(key, None)
         if isinstance(decision_context, Mapping):
             facts = dict(decision_context)
             body_state = facts.get("body_state", execution.get("facts", {}))
