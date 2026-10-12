@@ -214,6 +214,23 @@ def test_agent_call_wakes_lifecycle_and_cancels_idle_question():
     asyncio.run(run())
 
 
+def test_result_pending_suppresses_idle_until_released(monkeypatch):
+    async def run():
+        runtime, trace, _decision = _runtime()
+        monkeypatch.setattr("minebot.app.body_loop.FACT_FRAME_INTERVAL_S", 0.001)
+        loop = BodyLoop(runtime)
+        loop._result_pending["call-1"] = {"call_id": "call-1"}
+        await loop.start()
+        await asyncio.sleep(0.01)
+        assert not [e for e in trace.events if e["event"] == "call_supervision_request"]
+        loop._release_result_pending("call-1")
+        await asyncio.sleep(0.01)
+        await loop.stop()
+        assert any(e["event"] == "call_supervision_request" for e in trace.events)
+
+    asyncio.run(run())
+
+
 def test_running_question_trace_identifies_the_body_loop_state():
     async def run():
         runtime, trace, _decision = _runtime()
