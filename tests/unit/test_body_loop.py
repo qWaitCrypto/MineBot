@@ -282,6 +282,7 @@ def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
     latest_progress: dict | None = None
     progress_by_call: dict[str, dict] = {}
     params_by_call: dict[str, dict] = {}
+    plan_goal = ""
 
     for row in rows:
         if row.get("event") == "body_progress":
@@ -300,6 +301,11 @@ def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
                     parsed = None
                 if isinstance(parsed, dict):
                     params_by_call[str(call_id)] = parsed
+            continue
+        if row.get("event") == "tool_result":
+            tree = ((row.get("full_result") or {}).get("metrics") or {}).get("tree")
+            if isinstance(tree, dict) and isinstance(tree.get("goal"), str):
+                plan_goal = tree["goal"]
             continue
         if row.get("event") == "call_supervision_request":
             call_id = str(row.get("tool_call_id") or "")
@@ -348,7 +354,7 @@ def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
             row.get("tool_call_id", "replay"),
             SimpleNamespace(name=row.get("tool", "unknown")),
             params, execution, idle_s=float(row.get("idle_s") or 0),
-            purpose="replay", supervision_context={"intent": intent},
+            purpose="replay", supervision_context={"goal": plan_goal, "intent": intent},
         )
         assert request["questions"]
         assert request["state"].get("body")
@@ -361,7 +367,7 @@ def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
             SimpleNamespace(name=row.get("node_id", "unknown")), {},
             {"tool": row.get("node_id", "unknown"), "state": "succeeded", "facts": facts},
             idle_s=0.0, purpose="replay_result",
-            supervision_context={"intent": row.get("request", {}).get("state", {}).get("agent_intent", "")},
+            supervision_context={"goal": plan_goal, "intent": row.get("request", {}).get("state", {}).get("agent_intent", "")},
             decision_context={"tool_result": {"success": True}, "body_state": facts},
         )
         assert request["questions"]
