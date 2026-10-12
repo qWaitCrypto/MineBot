@@ -638,7 +638,12 @@ class BodyLoop(CallSupervisor):
             result = await self.runtime.run_tool(
                 default_tool, execute_tool, default_tool, action[1],
                 getattr(self.runtime, "weld_context", None),
-                tool_call_id=call_id, claim_holder="life",
+                # A protective action owns the Body as threat/survival work,
+                # even when it was selected while the Agent was idle.  This
+                # lets an arriving Agent call wait for it through the normal
+                # threat admission path instead of treating it as disposable
+                # life activity.
+                tool_call_id=call_id, claim_holder="threat",
                 supervision_context={
                     "is_reflex_action": True,
                     "reflex_action_choice": choice,

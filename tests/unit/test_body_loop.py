@@ -90,7 +90,7 @@ def test_reflex_experiences_are_bounded_and_available_to_live_context():
     assert list(loop.recent_experiences) == [f"experience {index}" for index in range(2, 7)]
 
 
-def test_idle_protection_is_executed_once_through_life_claim():
+def test_idle_protection_is_executed_once_through_threat_claim():
     async def run():
         runtime, trace, _decision = _runtime()
         calls = []
@@ -108,7 +108,7 @@ def test_idle_protection_is_executed_once_through_life_claim():
         runtime.run_tool = run_tool
         loop = BodyLoop(runtime)
         await loop._run_idle_protection("surface", {"oxygen": 100, "position": [1, 60, 2]})
-        assert calls and calls[0]["claim_holder"] == "life"
+        assert calls and calls[0]["claim_holder"] == "threat"
         assert calls[0]["supervision_context"]["is_reflex_action"] is True
         assert calls[0]["supervision_context"]["reflex_action_choice"] == "surface"
         assert any(e["event"] == "call_supervision_default_finished" for e in trace.events)
