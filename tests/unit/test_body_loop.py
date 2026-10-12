@@ -281,6 +281,7 @@ def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
     results: list[tuple[dict, dict]] = []
     latest_progress: dict | None = None
     progress_by_call: dict[str, dict] = {}
+    params_by_call: dict[str, dict] = {}
 
     for row in rows:
         if row.get("event") == "body_progress":
@@ -288,6 +289,17 @@ def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
             call_id = row.get("tool_call_id")
             if call_id:
                 progress_by_call[str(call_id)] = row
+            continue
+        if row.get("event") == "tool_invoke":
+            call_id = row.get("tool_call_id")
+            summary = row.get("arguments_summary")
+            if call_id and isinstance(summary, str):
+                try:
+                    parsed = json.loads(summary)
+                except (TypeError, ValueError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    params_by_call[str(call_id)] = parsed
             continue
         if row.get("event") == "call_supervision_request":
             call_id = str(row.get("tool_call_id") or "")
@@ -321,7 +333,8 @@ def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
         return facts
 
     for row, raw in running:
-        state = row.get("request", {}).get("state", {})
+        params = params_by_call.get(str(row.get("tool_call_id") or ""), {})
+        intent = params.get("intent", "") if isinstance(params, dict) else ""
         execution = {
             "operation_id": row.get("tool_call_id"),
             "tool": row.get("tool"),
@@ -334,8 +347,8 @@ def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
         request = supervisor._question(
             row.get("tool_call_id", "replay"),
             SimpleNamespace(name=row.get("tool", "unknown")),
-            {}, execution, idle_s=float(row.get("idle_s") or 0),
-            purpose="replay", supervision_context={"intent": state.get("agent_intent", "")},
+            params, execution, idle_s=float(row.get("idle_s") or 0),
+            purpose="replay", supervision_context={"intent": intent},
         )
         assert request["questions"]
         assert request["state"].get("body")
