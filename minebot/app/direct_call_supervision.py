@@ -65,6 +65,19 @@ class CallSupervisor:
         if self._client is not None:
             await self._client.close()
 
+    def _start_monitor(
+        self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
+        wake: asyncio.Event, worker: asyncio.Task[Any],
+    ) -> asyncio.Task[Any]:
+        """Start the Body-owned frame consumer.
+
+        The concrete per-Body loop supplies this hook.  Keeping the call
+        runner responsible only for registration and awaiting the returned
+        task prevents a second supervision implementation from appearing in
+        the execution path.
+        """
+        raise RuntimeError("a BodyLoop is required for mutating calls")
+
     def _frame(self, execution: Mapping[str, Any] | None) -> dict[str, Any]:
         """Add what health and air were a few seconds ago to this frame's facts."""
         if not execution:
@@ -532,10 +545,10 @@ class CallSupervisor:
                 if grace:
                     done, _ = await asyncio.wait({worker}, timeout=grace)
                     if not done:
-                        monitor = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
+                        monitor = self._start_monitor(record, tool, params, wake, worker)
                         record["monitor_task"] = monitor
                 else:
-                    monitor = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
+                    monitor = self._start_monitor(record, tool, params, wake, worker)
                     record["monitor_task"] = monitor
                 try:
                     result = await worker

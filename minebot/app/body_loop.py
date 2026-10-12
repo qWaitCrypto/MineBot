@@ -51,6 +51,27 @@ class BodyLoop(CallSupervisor):
             return await super().run(tool, callback, args, **kwargs)
         finally:
             self._set_state(previous, "call_ended")
+            self._ensure_idle_task()
+
+    def _start_monitor(
+        self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
+        wake: asyncio.Event, worker: asyncio.Task[Any],
+    ) -> asyncio.Task[Any]:
+        """Use the Body lifecycle slot for a normal Agent call.
+
+        The idle reader is cancelled before a work call takes the slot.  A
+        nested protective call is already running inside the lifecycle task;
+        it gets a child monitor while the parent task remains the owner and
+        resumes the lifecycle after the protective call settles.
+        """
+        current_task = asyncio.current_task()
+        lifecycle = self._lifecycle_task
+        if lifecycle is not None and lifecycle is not current_task and not lifecycle.done():
+            lifecycle.cancel()
+        task = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
+        if lifecycle is not current_task:
+            self._lifecycle_task = task
+        return task
 
     async def _monitor(
         self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
@@ -456,6 +477,13 @@ class BodyLoop(CallSupervisor):
         self._lifecycle_started = True
         self.runtime.trace.emit("reflex_loop_started", loop_state=self.loop_state)
         self._lifecycle_task = asyncio.create_task(self._idle_frames())
+
+    def _ensure_idle_task(self) -> None:
+        if not self._lifecycle_started or self.current is not None:
+            return
+        task = self._lifecycle_task
+        if task is None or task.done():
+            self._lifecycle_task = asyncio.create_task(self._idle_frames())
 
     async def stop(self) -> None:
         """Stop the lifecycle task before the runtime closes its read lane."""

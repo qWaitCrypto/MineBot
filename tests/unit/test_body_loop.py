@@ -152,6 +152,30 @@ def test_body_loop_owns_the_running_frame_consumer():
     assert "_monitor" in BodyLoop.__dict__
 
 
+def test_body_loop_reuses_lifecycle_slot_for_a_running_call():
+    async def run():
+        runtime, _trace, _decision = _runtime()
+        loop = BodyLoop(runtime)
+        await loop.start()
+        idle_task = loop._lifecycle_task
+        worker = asyncio.create_task(asyncio.sleep(0.2))
+        record = {"call_id": "slot", "cancel_requested": False}
+        monitor = loop._start_monitor(
+            record, SimpleNamespace(name="move_to"), {}, asyncio.Event(), worker,
+        )
+        await asyncio.sleep(0)
+        assert idle_task is not None and idle_task is not loop._lifecycle_task
+        assert idle_task.cancelled() or idle_task.done()
+        assert loop._lifecycle_task is monitor
+        monitor.cancel()
+        await asyncio.gather(monitor, return_exceptions=True)
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await loop.stop()
+
+    asyncio.run(run())
+
+
 def test_running_question_trace_identifies_the_body_loop_state():
     async def run():
         runtime, trace, _decision = _runtime()
