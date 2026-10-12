@@ -102,6 +102,15 @@ def _raw_frame(meta: dict, candidates: dict[tuple[str, int], dict]) -> dict:
     if index > 0:
         facts["vital_interval_s"] = round(float(body["ts"] - previous["ts"]), 3)
     candidate = candidates.get((source, rid), {})
+    candidate_facts = candidate.get("facts") if isinstance(candidate.get("facts"), Mapping) else {}
+    for key, value in candidate_facts.items():
+        if key not in facts or facts.get(key) in (None, "", {}):
+            facts[key] = value
+    for key in ("health", "oxygen", "food", "pos", "inventory_counts", "hotbar"):
+        if key not in facts and key in candidate:
+            facts[key] = candidate[key]
+    if "position" not in facts and facts.get("pos") is not None:
+        facts["position"] = facts["pos"]
     result = candidate.get("result") if meta.get("kind") == "result" else None
     raw_plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
     recorded_plan = state.get("plan") if isinstance(state.get("plan"), Mapping) else {}
