@@ -37,7 +37,11 @@ def provider_registry_from_env(env: Mapping[str, str] | None = None) -> ModelPro
     if not model:
         raise AppConfigError("MINEBOT_LLM_MODEL or OPENAI_MODEL is unset")
 
-    default_kernel = "responses" if auth == "chatgpt" or env.get("MINEBOT_LLM_KIND") == "openai_responses" else "sdk"
+    # The SDK kernel is the default for every API-key provider, including the
+    # Responses API: the reflex layer supervises Body calls only there.  The
+    # hand-written Responses kernel stays for ChatGPT login and for an
+    # explicit MINEBOT_AGENT_KERNEL=responses.
+    default_kernel = "responses" if auth == "chatgpt" else "sdk"
     kernel = env.get("MINEBOT_AGENT_KERNEL", default_kernel)
     if kernel not in {"sdk", "responses"}:
         raise AppConfigError("MINEBOT_AGENT_KERNEL must be responses or sdk")
