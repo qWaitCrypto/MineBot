@@ -533,7 +533,17 @@ class CallSupervisor:
                 else:
                     monitor = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
                     record["monitor_task"] = monitor
-                result = await worker
+                try:
+                    result = await worker
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if not record["cancel_requested"] or (task is not None and task.cancelling() > 0):
+                        raise
+                    # Our own stop reached the tool as a cancellation. That
+                    # ends this call, not its caller: the stop still has to
+                    # settle and be handed on like any other stopped call.
+                    result = {"success": False, "reason": "stopped_by_decision",
+                              "canRetry": True, "metrics": {}}
                 if monitor is not None:
                     await monitor
                     monitor = None

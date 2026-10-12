@@ -392,7 +392,14 @@ class WorkPlanExecutor:
         try:
             status = await self._execute(self.plan["work"], "work", [])
         except asyncio.CancelledError:
-            status = "cancelled"
+            task = asyncio.current_task()
+            if task is not None and task.cancelling() > 0:
+                status = "cancelled"
+            else:
+                # Nobody asked this plan to stop: something it awaited was
+                # cancelled underneath it. The plan must say so itself.
+                self.emit("work_plan_blocked", reason="call_cancelled")
+                status = "blocked"
         except WorkPlanError as exc:
             self.emit("work_plan_blocked", reason=str(exc))
             status = "blocked"

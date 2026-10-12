@@ -833,3 +833,75 @@ def test_plan_idle_question_uses_work_result_and_body_fact_shape():
         finally:
             await runtime.aclose()
     asyncio.run(run())
+
+
+def test_plan_step_stopped_by_decision_through_a_cancellation_still_advances():
+    """A stopped tool may leave through its cancellation checkpoint instead of
+    returning a result.  That ends the step, not the plan."""
+    from minebot.app.work_runtime import WorkPlanExecutor
+    from minebot.contract.execution import execution_checkpoint
+
+    async def run():
+        ipc = ResetGenericCallIpc(progressing=False)
+        runtime, _ = make_runtime(ipc)
+        second = _register_generic(runtime, runtime.registry, runtime.body, name="second_step")
+
+        def invoke(params):
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                execution_checkpoint()
+                time.sleep(.01)
+            return ToolResult(False, "never_stopped", True)
+
+        first = RegisteredTool(
+            "checkpoint_step", "Work that leaves through its cancellation checkpoint.",
+            {"type": "object", "properties": {}, "required": [], "additionalProperties": True}, invoke,
+            ToolSidecar("checkpoint_step", True, source="test", body_scope=("moveTo",), timeout_s=10),
+            supervision_explanation="Cooperative work that checks for a stop between small steps.")
+        runtime.registry.register(first)
+        runtime.call_supervisor.suspicion_s = .04
+        runtime.call_supervisor._client = StubDecision(("next_step", "next_step"))
+
+        async def call(tool_name, arguments, *, call_id, timeout_s):
+            tool = runtime.registry.get(tool_name)
+            return await runtime.run_tool(
+                tool, execute_tool, tool, arguments, runtime.weld_context,
+                tool_call_id=call_id, timeout_s=timeout_s or 5,
+            )
+
+        plan = {
+            "language": "minebot-work/0.2", "timeout_s": 10,
+            "goal": "finish two calls",
+            "work": {"kind": "sequence", "intent": "complete both calls", "steps": [
+                {"kind": "call", "id": "first", "tool": first.name, "arguments": {"intent": "complete the first body step"}},
+                {"kind": "call", "id": "second", "tool": second.name, "arguments": {"intent": "complete the second body step"}},
+            ]},
+        }
+        try:
+            result = await asyncio.wait_for(WorkPlanExecutor(plan, call=call, decision=StubDecision(("next_step", "next_step"))).run(), 8)
+            assert result.status == "completed"
+            assert result.tree["work"]["steps"][0]["_runtime"]["status"] == "done"
+            assert result.tree["work"]["steps"][1]["_runtime"]["status"] == "done"
+            events = [e["event"] for e in runtime.trace.events if e.get("tool_call_id") == "first"]
+            assert "call_supervision_stop_settled" in events and "direct_call_handoff" in events
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_plan_reports_blocked_when_a_call_is_cancelled_underneath_it():
+    from minebot.app.work_runtime import WorkPlanExecutor
+
+    async def run():
+        async def call(tool_name, arguments, *, call_id, timeout_s):
+            raise asyncio.CancelledError
+
+        emitted = []
+        plan = {
+            "language": "minebot-work/0.2", "timeout_s": 10, "goal": "one call",
+            "work": {"kind": "call", "id": "only", "tool": "anything", "arguments": {"intent": "do the step"}},
+        }
+        result = await WorkPlanExecutor(plan, call=call, emit=lambda event, **p: emitted.append((event, p))).run()
+        assert result.status == "blocked"
+        assert ("work_plan_blocked", {"reason": "call_cancelled"}) in emitted
+    asyncio.run(run())
