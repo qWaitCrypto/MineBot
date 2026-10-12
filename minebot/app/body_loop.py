@@ -158,6 +158,9 @@ class BodyLoop(CallSupervisor):
         near = rq.hostiles(facts)
         if near and near[0].get("dist", float("inf")) <= rq.HOSTILE_REACH:
             options["move_away"] = "Move away from the nearby hostile entity."
+        safe = facts.get("safe_standing_position", facts.get("last_safe_position"))
+        if rq.just_hurt(facts) and rq._position(safe):
+            options["retreat_safe"] = "Go back to the last place where the Body stood safely."
         return options
 
     def _idle_question(self, facts: Mapping[str, Any], options: Mapping[str, str]) -> dict[str, Any]:
