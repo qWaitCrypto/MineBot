@@ -684,6 +684,27 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(tool.sidecar.permission, "compose_ensure")
         self.assertEqual(tool.sidecar.terminal_truth, ("inventory", "ToolResult"))
 
+    def test_ensure_tool_for_empty_inventory_reports_missing_materials_without_gathering(self):
+        """An unavailable recipe is evidence for the Agent, not a gather command."""
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_tool_for({"resource": "stone_pickaxe"}, ctx, lambda _item: None)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "missing_materials")
+        self.assertFalse(result.can_retry)
+        self.assertEqual(result.metrics["inventory_counts"], {})
+        self.assertEqual(
+            result.metrics["missing_materials"],
+            [{"item": "stone_pickaxe", "required": 1, "available": 0}],
+        )
+        self.assertEqual(calls, [])
+
     def test_ensure_item_executes_resolver_plan_through_leaf_tools(self):
         body = FakeBody()
         body.inventory_counts = {}

@@ -589,6 +589,7 @@ def ensure_tool_for(params: JsonObject, context: CompositionContext, recipe_look
         context,
         recipe_lookup,
         equip_target=target in PICKAXE_BY_TIER.values(),
+        report_missing_materials=True,
     )
 
 
@@ -598,6 +599,7 @@ def ensure_item(
     recipe_lookup: RecipeLookup,
     *,
     equip_target: bool = False,
+    report_missing_materials: bool = False,
 ) -> ToolResult:
     item = _normalize_item(str(params.get("item") or params.get("resource") or ""))
     count = int(params.get("count") or 1)
@@ -629,6 +631,35 @@ def ensure_item(
         plan = resolve_acquisition(item, count, counts, recipe_lookup, max_depth=18)
         if isinstance(plan, AcquisitionError):
             error = _acquisition_error_payload(plan)
+            if report_missing_materials and plan.reason == "unplannable":
+                # The Body cannot expand an unavailable recipe. Report the
+                # missing target and authoritative inventory, then leave the
+                # acquisition choice to the Agent.
+                return ToolResult(
+                    False,
+                    "missing_materials",
+                    False,
+                    next_suggestion=(
+                        f"The Body does not have the materials or an available recipe for {item}. "
+                        "Choose what materials to obtain, then retry."
+                    ),
+                    metrics={
+                        "item": item,
+                        "target_count": count,
+                        "inventory_counts": dict(counts),
+                        "missing_materials": [{
+                            "item": item,
+                            "required": count,
+                            "available": int(counts.get(item, 0)),
+                        }],
+                        "recipe_available": False,
+                        "error": error,
+                        "plan": step_payloads,
+                        "completed_steps": completed_steps,
+                        "failed_step": {"index": len(step_payloads), "phase": "planning", "error": error},
+                        "resume_hint": "reinvoke_ensure",
+                    },
+                )
             return ToolResult(
                 False,
                 plan.reason,

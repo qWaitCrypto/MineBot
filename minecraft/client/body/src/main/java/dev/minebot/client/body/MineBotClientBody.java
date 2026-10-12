@@ -1988,8 +1988,12 @@ public final class MineBotClientBody implements ClientModInitializer {
         if (current.phase == 1) {
             ItemStack result = confirmedResults.getOrDefault(menu.containerId, ItemStack.EMPTY);
             if (resultRevision <= current.resultRevision || result.isEmpty()) return;
-            if (!itemPath(result).equals(outputItem) || result.getCount() != current.craftUnitCount) {
-                requestStop("failed", "recipe_output_mismatch");
+            if (!CraftOutputProgress.matches(itemPath(result), result.getCount(), outputItem, current.craftUnitCount)) {
+                // The menu can publish an intermediate result while the placed inputs
+                // are still being resolved. A newer result revision is the evidence
+                // needed to decide; do not turn that transient state into a false
+                // terminal failure.
+                current.resultRevision = resultRevision;
                 return;
             }
             current.resultRevision = resultRevision;
