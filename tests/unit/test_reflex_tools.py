@@ -47,7 +47,7 @@ def test_delegate_and_same_tree_read_revision():
         manager = ReflexManager(runtime)
         manager.bind_loop(asyncio.get_running_loop())
         plan = {"language": "minebot-work/0.2", "goal": "x", "timeout_s": 4,
-                "work": {"kind": "call", "id": "one", "tool": "fake", "arguments": {"x": 1}}}
+                "work": {"kind": "call", "intent": "perform the planned physical step", "id": "one", "tool": "fake", "arguments": {"x": 1}}}
         accepted = manager.delegate({"plan": plan})
         assert accepted["success"]
         activity_id = accepted["metrics"]["activity_id"]
@@ -100,7 +100,7 @@ def test_delegate_waits_for_current_body_owner_then_starts():
         manager.bind_loop(asyncio.get_running_loop())
         plan = {
             "language": "minebot-work/0.2", "goal": "x", "timeout_s": 4,
-            "work": {"kind": "call", "id": "one", "tool": "fake", "arguments": {}},
+            "work": {"kind": "call", "intent": "perform the planned physical step", "id": "one", "tool": "fake", "arguments": {}},
         }
         accepted = manager.delegate({"plan": plan})
         activity_id = accepted["metrics"]["activity_id"]
@@ -235,10 +235,13 @@ def test_build_structure_run_tool_keeps_receipt_on_direct_supervisor_path():
         )
         assert result["success"] is True
         assert result["_execution"] == {"delivered": True, "tool": "build_structure"}
-        direct_result = await AgentRuntime.run_tool(runtime, tool, execute_tool, tool, {}, weld)
+        direct_result = await AgentRuntime.run_tool(
+            runtime, tool, execute_tool, tool,
+            {"intent": "repeat the declared wall operation"}, weld,
+        )
         assert "_execution" not in direct_result
         assert seen_contexts[0]["intent"] == "lay the first wall and stop when it is complete"
-        assert "intent" not in seen_contexts[1]
+        assert seen_contexts[1]["intent"] == "repeat the declared wall operation"
 
     asyncio.run(scenario())
 
@@ -284,7 +287,7 @@ def test_run_tool_to_plan_executor_records_delivery_and_blocks_changed_write():
         manager = ReflexManager(runtime)
         manager.bind_loop(asyncio.get_running_loop())
         plan = {"language": "minebot-work/0.2", "goal": "place", "timeout_s": 4,
-                "work": {"kind": "call", "id": "one", "tool": "place_block",
+                "work": {"kind": "call", "intent": "perform the planned physical step", "id": "one", "tool": "place_block",
                           "arguments": {"pos": [1, 64, 1]}}}
         accepted = manager.delegate({"plan": plan})
         activity_id = accepted["metrics"]["activity_id"]
@@ -435,13 +438,27 @@ def test_composite_plan_reports_missing_intent_at_node():
         raise AssertionError("missing sequence intent was accepted")
 
 
+def test_delegate_rejects_plan_without_outer_intent():
+    runtime = SimpleNamespace(
+        trace=SimpleNamespace(emit=lambda *args, **kwargs: None),
+        responses_kernel=None, registry={},
+    )
+    manager = ReflexManager(runtime)
+    result = manager.delegate({
+        "plan": {"language": "minebot-work/0.2", "goal": "move", "timeout_s": 5,
+                  "work": {"kind": "call", "tool": "move_to", "arguments": {}}}
+    })
+    assert result["reason"] == "missing_intent"
+    assert result["metrics"]["missing"] == "work.intent"
+
+
 def test_changed_completed_call_uses_execution_receipt_not_tool_metrics():
     async def scenario():
         calls = []
         records = {}
         plan = {
             "language": "minebot-work/0.2", "goal": "place", "timeout_s": 4,
-            "work": {"kind": "call", "id": "place", "tool": "place_block", "arguments": {"pos": [1, 2, 3]}},
+            "work": {"kind": "call", "intent": "perform the planned physical step", "id": "place", "tool": "place_block", "arguments": {"pos": [1, 2, 3]}},
         }
 
         async def call(_tool, arguments, *, call_id, timeout_s):
@@ -485,9 +502,9 @@ def test_update_publishes_new_revision_before_async_native_settlement():
         manager = ReflexManager(runtime)
         manager.bind_loop(asyncio.get_running_loop())
         first = {"language": "minebot-work/0.2", "goal": "first", "timeout_s": 4,
-                 "work": {"kind": "call", "id": "one", "tool": "fake", "arguments": {"x": 1}}}
+                 "work": {"kind": "call", "intent": "perform the planned physical step", "id": "one", "tool": "fake", "arguments": {"x": 1}}}
         second = {"language": "minebot-work/0.2", "goal": "second", "timeout_s": 4,
-                  "work": {"kind": "call", "id": "one", "tool": "fake", "arguments": {"x": 2}}}
+                  "work": {"kind": "call", "intent": "perform the planned physical step", "id": "one", "tool": "fake", "arguments": {"x": 2}}}
         accepted = manager.delegate({"plan": first})
         activity_id = accepted["metrics"]["activity_id"]
         for _ in range(20):
@@ -534,9 +551,9 @@ def test_update_cannot_be_overwritten_by_old_run_finishing_late():
         manager = ReflexManager(runtime)
         manager.bind_loop(asyncio.get_running_loop())
         first = {"language": "minebot-work/0.2", "goal": "first", "timeout_s": 4,
-                 "work": {"kind": "call", "id": "one", "tool": "fake", "arguments": {"x": 1}}}
+                 "work": {"kind": "call", "intent": "perform the planned physical step", "id": "one", "tool": "fake", "arguments": {"x": 1}}}
         second = {"language": "minebot-work/0.2", "goal": "second", "timeout_s": 4,
-                  "work": {"kind": "call", "id": "one", "tool": "fake", "arguments": {"x": 2}}}
+                  "work": {"kind": "call", "intent": "perform the planned physical step", "id": "one", "tool": "fake", "arguments": {"x": 2}}}
         accepted = manager.delegate({"plan": first})
         activity_id = accepted["metrics"]["activity_id"]
         await asyncio.sleep(0.03)
@@ -576,7 +593,7 @@ def test_unknown_body_control_blocks_plan_and_wakes_agent_instead_of_waiting():
         manager = ReflexManager(runtime)
         manager.bind_loop(asyncio.get_running_loop())
         plan = {"language": "minebot-work/0.2", "goal": "blocked", "timeout_s": 2,
-                "work": {"kind": "call", "id": "one", "tool": "fake", "arguments": {}}}
+                "work": {"kind": "call", "intent": "perform the planned physical step", "id": "one", "tool": "fake", "arguments": {}}}
         accepted = manager.delegate({"plan": plan})
         activity_id = accepted["metrics"]["activity_id"]
         for _ in range(30):

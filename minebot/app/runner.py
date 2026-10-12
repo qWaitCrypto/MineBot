@@ -296,17 +296,6 @@ class RuntimeHooks(RunHooks[RuntimeRunContext]):
         trace = _trace_from_context(context)
         observations = extract_model_response_observations(response)
         runtime = getattr(getattr(context, "context", None), "runtime", None)
-        # The SDK invokes a function tool immediately after this hook.  Keep
-        # the model's spoken explanation in the reflex context now, rather
-        # than waiting for the complete turn (which is too late for the
-        # first supervision frame of that tool call).
-        if runtime is not None:
-            for event in observations:
-                if event.get("event") not in {"assistant_message", "assistant_final_output"}:
-                    continue
-                content = str(event.get("content") or "").strip()
-                if content:
-                    runtime._latest_reflex_intent = content[:500]
         if trace is not None:
             trace.emit("llm_end", agent=getattr(agent, "name", None), response_type=type(response).__name__)
             usage = model_usage_observation(getattr(response, "usage", None))
@@ -1930,6 +1919,12 @@ class AgentRuntime:
             supervision_context = dict(supervision_context or {})
             supervision_context.setdefault("intent", call_intent)
             supervision_context.setdefault("node_description", call_intent)
+        if tool.sidecar.can_mutate_body and not call_intent and not (supervision_context or {}).get("intent"):
+            return ToolResult(
+                False, "missing_intent", False,
+                next_suggestion="Supply the required intent field describing what this Body call is for and when it is enough.",
+                metrics={"missing": "intent", "tool": tool.name},
+            ).to_payload()
         claim_id = body_claim_id or tool_call_id or str(uuid4())
         claim_generation: int | None = None
         if tool.sidecar.can_mutate_body:

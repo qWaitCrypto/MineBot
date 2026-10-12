@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -53,11 +54,13 @@ def test_sequence_batch_and_ref_are_executed_and_annotated():
                  "body": {"kind": "call", "id": "place_one", "tool": "place", "arguments": {"at": {"ref": "item.x"}}}},
             ]}}
     calls = []
-    result, _ = asyncio.run(run_plan(plan, calls=calls))
+    result, decision = asyncio.run(run_plan(plan, calls=calls))
     assert result.status == "completed"
     assert [call[0] for call in calls] == ["collect", "place", "place"]
     assert [call[1] for call in calls[1:]] == [{"at": 1}, {"at": 2}]
     assert result.tree["work"]["_runtime"]["status"] == "done"
+    call_questions = [p for p in decision.payloads if "finished_call" in p.get("state", {})]
+    assert call_questions and call_questions[0]["state"]["agent_intent"] == "prepare then build"
 
 
 def test_wait_unknown_is_waiting_and_does_not_call_body():
@@ -96,7 +99,7 @@ def test_call_completion_is_decision_owned_and_keeps_real_cancel_result():
     assert result.results["collect"]["success"] is False
     assert result.tree["work"]["_runtime"]["decision"]["choice"] == "step_done"
     assert calls == ["collect"]
-    assert decision.payloads[0]["state"]["plan"]["goal"] == "collect"
+    assert decision.payloads[0]["state"]["task"] == "collect"
 
 
 def test_repeat_is_decision_driven_and_each_reentry_gets_a_new_call_id():
@@ -142,15 +145,15 @@ def test_unknown_call_can_be_resolved_by_the_idle_supervisor_without_a_second_ca
 
     async def idle(tool, *, call_id, plan_context, options):
         idle_requests.append((tool, call_id, plan_context, options))
-        return {"choice": "step_done", "questions": 1, "unknown": 0}
+        return {"choice": "call_agent", "questions": 1, "unknown": 0}
 
     result = asyncio.run(WorkPlanExecutor(
         plan, call=call, state=lambda: _state(), decision=decisions,
         idle_supervise=idle,
     ).run())
-    assert result.status == "completed"
+    assert result.status == "blocked"
     assert calls == ["collect"]
-    assert idle_requests and "step_done" in idle_requests[0][3]
+    assert idle_requests and "call_agent" in idle_requests[0][3]
 
 
 def test_inspect_is_one_bounded_read_before_the_next_decision():
@@ -386,4 +389,30 @@ def test_repeat_is_available_as_a_base_call_option_without_agent_repeat_metadata
     result = asyncio.run(WorkPlanExecutor(plan, call=call, state=lambda: _state(), decision=decision).run())
     assert result.status == "completed"
     assert calls == ["collect", "collect__repeat_1"]
-    assert "same call once more" in decision.payloads[0]["questions"]["q"]["criteria"]["repeat"]
+    assert "same call" in decision.payloads[0]["questions"]["q"]["criteria"]["repeat"]
+
+
+def test_result_question_contains_recent_raw_history_without_running_execution_fields():
+    plan = {"language": "minebot-work/0.2", "goal": "collect", "timeout_s": 10,
+            "work": {"kind": "call", "id": "collect", "tool": "collect", "arguments": {}}}
+    decision = Decision("repeat", "repeat", "call_agent")
+    state_number = 0
+    calls = []
+
+    async def state():
+        nonlocal state_number
+        state_number += 1
+        return {"position": [state_number, 64, 0], "inventory": {"stone": state_number}}
+
+    async def call(tool, arguments, *, call_id, timeout_s):
+        calls.append(call_id)
+        return {"success": False, "reason": "same_failure", "canRetry": True}
+
+    result = asyncio.run(WorkPlanExecutor(plan, call=call, state=state, decision=decision).run())
+    assert result.status == "blocked"
+    payload = decision.payloads[-1]
+    history = payload["state"].get("earlier_attempts_of_this_call", [])
+    assert len(history) >= 3
+    assert "same_failure" in json.dumps(history, ensure_ascii=False)
+    assert "current_work" not in payload["state"]
+    assert "elapsed" not in json.dumps(payload, ensure_ascii=False).lower()

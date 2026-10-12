@@ -142,7 +142,14 @@ class DecisionClient:
             response.raise_for_status()
             decoded = response.json()
             raw = decoded if isinstance(decoded, dict) else None
-            answer = raw.get("answers", {}).get("q", {}) if raw else {}
+            answers = raw.get("answers", {}) if raw else {}
+            answer = answers.get("q", {}) if isinstance(answers, dict) else {}
+            if not isinstance(answer, dict) or not answer.get("choice"):
+                for key in ("danger", "normal", "protective"):
+                    candidate = answers.get(key) if isinstance(answers, dict) else None
+                    if isinstance(candidate, dict) and candidate.get("choice"):
+                        answer = candidate
+                        break
             selected = answer.get("choice") if isinstance(answer, dict) else None
             if isinstance(selected, str) and selected:
                 choice = selected

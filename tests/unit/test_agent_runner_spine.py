@@ -466,7 +466,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         tool = RegisteredTool(
             name="blocking_step",
             description="Blocking body step",
-            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            input_schema={"type": "object", "properties": {"intent": {"type": "string"}}, "required": ["intent"], "additionalProperties": False},
             callable=callable_,
             sidecar=ToolSidecar(progress_key="blocking_step", mutating=True),
         )
@@ -894,7 +894,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         tool = RegisteredTool(
             name="move_to",
             description="Move",
-            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            input_schema={"type": "object", "properties": {"intent": {"type": "string"}}, "required": ["intent"], "additionalProperties": False},
             callable=callable_,
             sidecar=ToolSidecar(
                 progress_key="move_to",
@@ -925,8 +925,8 @@ class AgentRunnerSpineTests(unittest.TestCase):
             context = runtime_context
 
         try:
-            timeout_result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
-            next_result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            timeout_result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{\"intent\":\"reach the requested destination\"}"))
+            next_result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{\"intent\":\"reach the requested destination\"}"))
             trace = runtime.trace.snapshot()
         finally:
             runtime.close()

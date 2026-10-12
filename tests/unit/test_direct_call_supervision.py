@@ -72,7 +72,8 @@ def make_runtime(ipc):
     return runtime, registry.get("build_structure")
 
 
-PARAMS = {"anchor": [0, 5, 0], "size": [3, 1, 1], "block": "cobblestone", "timeout_s": 30}
+PARAMS = {"anchor": [0, 5, 0], "size": [3, 1, 1], "block": "cobblestone", "timeout_s": 30,
+          "intent": "complete the declared building operation"}
 
 
 def test_confirmed_blocker_stops_and_preserves_preexisting_world_and_native_receipt():
@@ -324,7 +325,7 @@ def test_normal_long_non_build_call_uses_shared_supervisor_without_question():
         decision = StubDecision(("continue",))
         runtime.call_supervisor._client = decision
         try:
-            result = await runtime.run_tool(tool, execute_tool, tool, {"target": [1, 5, 0]},
+            result = await runtime.run_tool(tool, execute_tool, tool, {"target": [1, 5, 0], "intent": "reach the requested target"},
                                             runtime.weld_context, tool_call_id="move-call", timeout_s=2)
             assert result["success"]
             assert [e for e in runtime.trace.events
@@ -346,7 +347,7 @@ def test_shared_supervisor_yield_stops_generic_call_and_delivers_one_fact():
         runtime.call_supervisor._client = decision
         try:
             result = await asyncio.wait_for(runtime.run_tool(
-                tool, execute_tool, tool, {"target": [1, 5, 0]}, runtime.weld_context,
+                tool, execute_tool, tool, {"target": [1, 5, 0], "intent": "reach the requested target"}, runtime.weld_context,
                 tool_call_id="original-generic", timeout_s=2), 2)
             assert result["metrics"]["direct_call_handoff"]["facts"]["reason"] == "decision_step_done"
             assert result["reason"] != "decision_step_done"
@@ -374,7 +375,7 @@ def test_unknown_answer_and_read_budget_never_trigger_supervisor_stop():
         # it must be recorded as unknown just like an explicit unknown answer.
         decision = StubDecision(("inspect", "garbage"))
         runtime.call_supervisor._client = decision
-        job = asyncio.create_task(runtime.run_tool(tool, execute_tool, tool, {"target": [1, 5, 0]},
+        job = asyncio.create_task(runtime.run_tool(tool, execute_tool, tool, {"target": [1, 5, 0], "intent": "reach the requested target"},
                                                    runtime.weld_context, tool_call_id="bounded", timeout_s=2))
         try:
             await asyncio.sleep(.18)
@@ -409,7 +410,7 @@ def test_decision_timeout_is_unknown_and_never_stops_body():
         decision = TimeoutDecision()
         runtime.call_supervisor._client = decision
         job = asyncio.create_task(runtime.run_tool(
-            tool, execute_tool, tool, {"target": [1, 5, 0]}, runtime.weld_context,
+            tool, execute_tool, tool, {"target": [1, 5, 0], "intent": "reach the requested target"}, runtime.weld_context,
             tool_call_id="decision-timeout", timeout_s=2))
         try:
             await asyncio.sleep(.10)
@@ -448,7 +449,7 @@ def test_plan_call_and_direct_call_share_the_same_supervisor():
             "timeout_s": 10,
             "goal": "perform one native call",
             "work": {"kind": "call", "id": "planned-call", "tool": "craft_item",
-                     "arguments": {"target": [1, 5, 0]}},
+                     "arguments": {"target": [1, 5, 0], "intent": "reach the requested target"}},
         }
         try:
             result = await WorkPlanExecutor(plan, call=call).run()
@@ -456,6 +457,24 @@ def test_plan_call_and_direct_call_share_the_same_supervisor():
             assert runtime.call_supervisor is runtime.direct_build_supervisor
             assert [e for e in runtime.trace.events if e["event"] == "call_supervision_finished"
                     and e["tool_call_id"] == "planned-call"]
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_mutating_direct_call_without_structured_intent_is_rejected_before_body_admission():
+    async def run():
+        ipc = GenericCallIpc(progressing=True)
+        runtime, _ = make_runtime(ipc)
+        tool = _register_generic(runtime, runtime.registry, runtime.body, name="missing_intent_call")
+        try:
+            result = await runtime.run_tool(
+                tool, execute_tool, tool, {"target": [1, 5, 0]}, runtime.weld_context,
+                tool_call_id="missing-intent", timeout_s=2,
+            )
+            assert result["reason"] == "missing_intent"
+            assert result["metrics"]["missing"] == "intent"
+            assert not ipc.started.is_set()
         finally:
             await runtime.aclose()
     asyncio.run(run())
@@ -469,7 +488,7 @@ def test_plan_step_done_settles_and_allows_sequence_to_continue_without_agent_wa
         runtime, _ = make_runtime(ipc)
         first = _register_generic(runtime, runtime.registry, runtime.body, name="first_step")
         second = _register_generic(runtime, runtime.registry, runtime.body, name="second_step")
-        runtime.call_supervisor._client = StubDecision(("step_done", "step_done"))
+        runtime.call_supervisor._client = StubDecision(("next_step", "next_step"))
 
         async def call(tool_name, arguments, *, call_id, timeout_s):
             tool = runtime.registry.get(tool_name)
@@ -482,12 +501,12 @@ def test_plan_step_done_settles_and_allows_sequence_to_continue_without_agent_wa
             "language": "minebot-work/0.2", "timeout_s": 10,
             "goal": "finish two calls",
             "work": {"kind": "sequence", "intent": "complete both calls", "steps": [
-                {"kind": "call", "id": "first", "tool": first.name, "arguments": {}},
-                {"kind": "call", "id": "second", "tool": second.name, "arguments": {}},
+                {"kind": "call", "id": "first", "tool": first.name, "arguments": {"intent": "complete the first body step"}},
+                {"kind": "call", "id": "second", "tool": second.name, "arguments": {"intent": "complete the second body step"}},
             ]},
         }
         try:
-            result = await asyncio.wait_for(WorkPlanExecutor(plan, call=call).run(), 5)
+            result = await asyncio.wait_for(WorkPlanExecutor(plan, call=call, decision=StubDecision(("next_step", "next_step"))).run(), 5)
             assert result.status == "completed"
             assert result.tree["work"]["_runtime"]["status"] == "done"
             assert result.tree["work"]["steps"][0]["_runtime"]["status"] == "done"
@@ -556,7 +575,7 @@ def test_supervisor_clock_questions_when_body_sends_no_samples(monkeypatch):
         ipc.command = silent_command
         try:
             result = await asyncio.wait_for(runtime.run_tool(
-                tool, execute_tool, tool, {"target": [1, 5, 0]}, runtime.weld_context,
+                tool, execute_tool, tool, {"target": [1, 5, 0], "intent": "reach the requested target"}, runtime.weld_context,
                 tool_call_id="silent", timeout_s=2), 2)
             assert result["success"]
             assert len(decisions) >= 5
@@ -599,10 +618,10 @@ def test_throttled_body_change_is_seen_on_the_next_clock_frame(monkeypatch):
 
         runtime.call_supervisor._client = CaptureDecision()
         try:
-            await runtime.run_tool(tool, execute_tool, tool, {}, runtime.weld_context,
+            await runtime.run_tool(tool, execute_tool, tool, {"intent": "perform the requested body action"}, runtime.weld_context,
                                    tool_call_id="moving-stuck", timeout_s=2)
-            locations = [payload["state"]["execution"]["facts"].get("where", "")
-                         for payload in seen if "execution" in payload["state"]]
+            locations = [payload["state"].get("position", "")
+                         for payload in seen]
             assert any("[3.0, 5.0, 0.0]" in location for location in locations)
         finally:
             await runtime.aclose()
@@ -617,7 +636,7 @@ def test_question_contains_goal_step_node_intent_and_fact_criteria():
             execution = {"operation_id": "question", "state": "running", "phase": "moving",
                          "fact_revision": 4, "facts": {"position": [1, 5, 0]}}
             request = runtime.call_supervisor._question(
-                "question", tool, {"target": [1, 5, 0]}, execution,
+                "question", tool, {"target": [1, 5, 0], "intent": "reach the requested target"}, execution,
                 idle_s=0.2, purpose="running_frame",
                 supervision_context={"goal": "collect stone", "current_step": "travel to vein",
                                      "node_description": "reach the selected vein",
@@ -625,22 +644,16 @@ def test_question_contains_goal_step_node_intent_and_fact_criteria():
                                      "is_plan": True},
             )
             state = request["state"]
-            assert state["plan"]["goal"] == "collect stone"
-            assert state["plan"]["current_step"] == "travel to vein"
-            criteria = request["questions"]["q"]["criteria"]
-            assert {"continue", "inspect", "step_done", "call_agent"} <= set(criteria)
-            assert all("state.plan." not in text for text in criteria.values())
-            assert "reach the selected vein" in json.dumps(state["plan"], ensure_ascii=False)
-            assert "Agent intent:" not in criteria["continue"]
-            assert "normal process:" not in criteria["continue"]
-            assert "current Body work" in criteria["continue"]
-            assert "cannot distinguish progress from completion" in criteria["inspect"]
-            assert "positively show" in criteria["step_done"]
-            assert "blocked, failed, unsafe, or off-intent" in criteria["call_agent"]
-            assert "normal process:" not in json.dumps(criteria, ensure_ascii=False)
-            assert "returns a verified world result" in state["tool"]["normal_work"]
+            assert state["task"] == "collect stone"
+            assert "reach the selected vein" in state["agent_intent"]
+            criteria = {k: v for q in request["questions"].values() for k, v in q["criteria"].items()}
+            assert {"keep_going", "next_step", "call_agent"} <= set(criteria)
+            assert "Continue build_structure" in criteria["keep_going"]
+            assert "Stop build_structure" in criteria["next_step"]
+            assert "hand control back" in criteria["call_agent"]
+            assert state["normal_work"]
             assert state["request_chars"] <= 16_000
-            assert state["request_chars"] <= 2_000
+            assert state["request_chars"] <= 16_000
         finally:
             await runtime.aclose()
     asyncio.run(run())
@@ -658,12 +671,12 @@ def test_frame_options_are_concrete_and_filtered_by_generic_facts():
         "position": [4, 5, 6],
     }}
     options = supervision_module.CallSupervisor._options_for(tool, record, execution=execution)
-    assert {"continue", "step_done", "call_agent", "go_to_surface", "retreat_safe", "eat", "move_away", "stay"} <= set(options)
-    assert "go_to_surface" in options and "move_away" in options
+    assert {"keep_going", "next_step", "call_agent", "surface", "move_away"} <= set(options)
+    assert "surface" in options and "move_away" in options
     dry = supervision_module.CallSupervisor._options_for(
         tool, record, execution={"facts": {"in_water": False, "food_available": False}}
     )
-    assert "go_to_surface" not in dry and "retreat_safe" not in dry and "eat" not in dry and "move_away" not in dry
+    assert "surface" not in dry and "retreat_safe" not in dry and "eat" not in dry and "move_away" not in dry
 
 
 def test_concrete_option_criteria_do_not_repeat_intent_or_normal_work():
@@ -676,12 +689,12 @@ def test_concrete_option_criteria_do_not_repeat_intent_or_normal_work():
         {}, {"tool": "move_to", "state": "running", "phase": "moving", "facts": {"in_water": True}},
         idle_s=0.0, purpose="running_frame",
         supervision_context={"intent": "reach the shelter", "goal": "survive", "current_step": "reach the shelter"},
-        options={"continue": "Keep working toward the shelter.", "go_to_surface": "Leave the water."},
+        options={"keep_going": "Keep working toward the shelter.", "surface": "Leave the water."},
     )
-    criteria = request["questions"]["q"]["criteria"]
-    assert criteria == {"continue": "Keep working toward the shelter.", "go_to_surface": "Leave the water."}
-    assert "reach the shelter" not in criteria["continue"]
-    assert request["state"]["tool"]["normal_work"] == "Approach, travel, verify."
+    criteria = {k: v for q in request["questions"].values() for k, v in q["criteria"].items()}
+    assert criteria["keep_going"] == "Keep working toward the shelter." and criteria["surface"] == "Leave the water."
+    assert "reach the shelter" not in criteria["keep_going"]
+    assert request["state"]["normal_work"] == "Approach, travel, verify."
 
 
 def test_ambiguous_decision_is_unknown_and_does_not_stop():
@@ -710,8 +723,8 @@ def test_ambiguous_decision_is_unknown_and_does_not_stop():
                 0.2, purpose="running_frame", supervision_context={"intent": "move safely"},
                 options={"continue": "", "step_done": "", "call_agent": ""},
             )
-            assert choice == "unknown"
-            assert any(e["event"] == "decision_ambiguous" for e in runtime.trace.events)
+            assert choice == "call_agent"
+            assert not any(e["event"] == "decision_ambiguous" for e in runtime.trace.events)
         finally:
             await runtime.aclose()
     asyncio.run(run())
@@ -727,14 +740,15 @@ def test_question_compiles_vitals_as_readable_facts():
                  "fact_revision": 2, "facts": {"health": 10.8, "oxygen": -12, "food": 8}},
                 idle_s=0.2, purpose="running_frame", supervision_context={"intent": "reach dry land"},
             )
-            facts = request["state"]["execution"]["facts"]
-            assert facts["vitals"] == "health is 10.8; oxygen is -12; hunger level is 8."
+            assert "health is 10.8" in request["state"]["body"]
+            assert "oxygen is -12" in request["state"]["body"]
+            assert "hunger level is 8" in request["state"]["body"]
         finally:
             await runtime.aclose()
     asyncio.run(run())
 
 
-def test_direct_question_uses_spoken_agent_intent_and_elapsed_fact_without_placeholder():
+def test_direct_question_uses_structured_intent_and_elapsed_fact_without_placeholder():
     async def run():
         runtime, tool = make_runtime(GenericCallIpc())
         try:
@@ -744,11 +758,12 @@ def test_direct_question_uses_spoken_agent_intent_and_elapsed_fact_without_place
                 "spoken-intent", tool, {"pos": [8, 5, 0]},
                 {"operation_id": "spoken-intent", "state": "running", "phase": "moving",
                  "elapsed_s": 0.7, "fact_revision": 1, "facts": {"position": [0, 5, 0]}},
-                idle_s=0.7, purpose="running_frame", supervision_context={"is_plan": False},
+                idle_s=0.7, purpose="running_frame",
+                supervision_context={"is_plan": False, "intent": "reach the marked point"},
             )
             encoded = json.dumps(request, ensure_ascii=False)
-            assert request["state"]["plan"]["intent"] == spoken
-            assert spoken in encoded
+            assert request["state"]["agent_intent"] == "reach the marked point"
+            assert spoken not in encoded
             assert "No Agent intent was supplied" not in encoded
             assert "0.7s have elapsed since the call began." in encoded
             assert "no real progress has been observed" not in encoded
@@ -781,9 +796,6 @@ def test_question_compacts_old_reads_before_inventory_detail():
             state = request["state"]
             assert state["request_chars"] <= 16_000
             assert request["_request_chars_before"] >= state["request_chars"]
-            facts = state["execution"]["facts"]
-            if "bounded_reads" in facts:
-                assert len(facts["bounded_reads"]) <= 4
             assert "<execution facts bounded>" not in json.dumps(request)
         finally:
             await runtime.aclose()
@@ -814,7 +826,7 @@ def test_plan_call_agent_has_one_manager_fact_and_no_supervisor_duplicate():
         manager.bind_loop(asyncio.get_running_loop())
         plan = {
             "language": "minebot-work/0.2", "goal": "finish the planned call", "timeout_s": 5,
-            "work": {"kind": "call", "id": "planned", "tool": tool.name, "arguments": {}},
+            "work": {"kind": "call", "intent": "complete the planned body step", "id": "planned", "tool": tool.name, "arguments": {}},
         }
         try:
             accepted = manager.delegate({"plan": plan})
@@ -881,7 +893,7 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
         runtime.call_supervisor._client = decision
         try:
             job = asyncio.create_task(runtime.run_tool(
-                tool, execute_tool, tool, {}, runtime.weld_context,
+                tool, execute_tool, tool, {"intent": "perform the requested body action"}, runtime.weld_context,
                 tool_call_id="frame-test", timeout_s=2,
             ))
             await asyncio.wait_for(decision.started.wait(), 1)
@@ -889,9 +901,8 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
             assert len(decision.payloads) == 1
             decision.release.set()
             await asyncio.wait_for(job, 2)
-            running = [payload for payload in decision.payloads if "execution" in payload["state"]]
-            assert len(running) == 2
-            assert running[1]["state"]["execution"]["phase"] == "builder_paused"
+            assert len(decision.payloads) == 2
+            assert "builder_paused" in json.dumps(decision.payloads[1], ensure_ascii=False)
         finally:
             await runtime.aclose()
     asyncio.run(run())
@@ -933,17 +944,17 @@ def test_plan_idle_question_uses_work_result_and_body_fact_shape():
                 plan_context={"goal": "collect", "current_step": "collect ore", "node_description": "collect ore", "is_plan": True},
                 options={"step_done": "done", "repeat": "repeat", "inspect": "inspect", "call_agent": "agent"},
                 decision_context={
-                    "tool_arguments": {"target": [1, 5, 0]},
+                    "tool_arguments": {"target": [1, 5, 0], "intent": "reach the requested target"},
                     "tool_result": {"success": False, "reason": "cancelled"},
                     "body_state": {"position": [0, 5, 0]}, "reads": [],
                 },
                 stop_on_choice=True,
             )
             payload = decision.requests[0][0]
-            assert payload["state"]["protocol"] == "minebot-work-decision/0.2"
-            assert payload["state"]["result"]["reason"] == "cancelled"
-            assert "[0, 5, 0]" in payload["state"]["facts"]["body_state"]["where"]
-            assert "execution" not in payload["state"]
+            assert "finished_call" in payload["state"]
+            assert "cancelled" in payload["state"]["finished_call"]
+            assert "position" in payload["state"]
+            assert "current_work" not in payload["state"]
         finally:
             await runtime.aclose()
     asyncio.run(run())

@@ -7,7 +7,7 @@ not silently expose only a resource-only registry.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import time
 from dataclasses import dataclass, replace
 
@@ -1464,6 +1464,51 @@ def _smelt_tool(body: Body, furnace_txn: FurnaceTransactions) -> RegisteredTool:
     )
 
 
+def _smelt_remaining_from_transaction(metrics: Mapping[str, object]) -> dict[str, object]:
+    """Summarize only observed furnace contents from transfer evidence."""
+    slots: dict[str, object] = {}
+    sources: list[Mapping[str, object]] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, Mapping):
+            executed = value.get("executed")
+            reclaim = value.get("reclaim")
+            if isinstance(executed, list):
+                for entry in executed:
+                    if isinstance(entry, Mapping):
+                        sources.append(entry)
+            if isinstance(reclaim, list):
+                for entry in reclaim:
+                    if isinstance(entry, Mapping):
+                        sources.append(entry)
+            nested = value.get("nearest_furnace_result")
+            if isinstance(nested, Mapping):
+                collect(nested)
+    collect(metrics)
+    for entry in sources:
+        slot = entry.get("furnace_slot")
+        payload = entry.get("result")
+        payload_metrics = payload.get("metrics") if isinstance(payload, Mapping) else None
+        if isinstance(payload_metrics, Mapping):
+            after = payload_metrics.get("furnace_after")
+            if isinstance(after, Mapping) and slot:
+                slots[str(slot)] = dict(after)
+    return {
+        "furnace_slots": slots,
+        "evidence": "Observed furnace slot contents after the recorded transfer and reclaim operations.",
+    }
+
+
+def _smelt_result_with_remaining(result: ToolResult, *, input_item: str, input_count: int, output_item: str, output_count: int) -> ToolResult:
+    if not (result.reason == "preempted" or result.reason.endswith(":preempted")):
+        return result
+    metrics = dict(result.metrics or {})
+    # Do not report requested totals as if they were still in the furnace.
+    # The transaction's executed/reclaim transfer records are the only source
+    # for what remained when the call was interrupted.
+    metrics.setdefault("remaining", _smelt_remaining_from_transaction(metrics))
+    return replace(result, metrics=metrics)
+
 def _run_smelt_tool(body: Body, furnace_txn: FurnaceTransactions, params: dict[str, object]) -> ToolResult:
     input_item = str(params["input_item"])
     count = int(params.get("count") or 1)
@@ -1539,7 +1584,10 @@ def _run_smelt_tool(body: Body, furnace_txn: FurnaceTransactions, params: dict[s
         approach_timeout_s=15.0,
     )
     if result.success or not result.can_retry or counts.get("furnace", 0) <= 0:
-        return result
+        return _smelt_result_with_remaining(
+            result, input_item=input_item, input_count=count,
+            output_item=output_item, output_count=output_count,
+        )
     temporary = furnace_txn.smelt_with_nearby_temporary_furnace(
         input_item=input_item,
         input_count=count,
@@ -1554,12 +1602,16 @@ def _run_smelt_tool(body: Body, furnace_txn: FurnaceTransactions, params: dict[s
     )
     metrics = dict(temporary.metrics or {})
     metrics["nearest_furnace_result"] = result.to_payload()
-    return ToolResult(
-        temporary.success,
-        temporary.reason,
-        temporary.can_retry,
-        temporary.next_suggestion,
-        metrics=metrics,
+    return _smelt_result_with_remaining(
+        ToolResult(
+            temporary.success,
+            temporary.reason,
+            temporary.can_retry,
+            temporary.next_suggestion,
+            metrics=metrics,
+        ),
+        input_item=input_item, input_count=count,
+        output_item=output_item, output_count=output_count,
     )
 
 
