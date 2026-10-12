@@ -230,17 +230,36 @@ def test_plan_result_uses_the_same_body_loop_judge_once():
     reason="recorded Stage-2 trace is not available on this host",
 )
 def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
-    """Pin the offline corpus before changing the loop ownership.
+    """Replay raw body facts through the production question builder.
 
-    The test deliberately never calls DecisionClient.  It consumes raw
-    body_progress facts and proves that every recorded running frame still
-    compiles through the production question builder; result frames remain in
-    the corpus count so the later result-path move cannot silently drop them.
+    The test deliberately never calls DecisionClient.  It walks the trace in
+    time order, carries forward the latest raw ``body_progress`` sample, and
+    feeds those fields into the same running and result question compiler used
+    online.  It does not read the recorded prose as input.
     """
     path = Path("/home/qwait/MineBot-reflex/logs/reflex-stage-20261012d/trace.jsonl")
     rows = [json.loads(line) for line in path.open(encoding="utf-8")]
-    running = [row for row in rows if row.get("event") == "call_supervision_request"]
-    results = [row for row in rows if row.get("event") == "work_decision_request"]
+    running: list[tuple[dict, dict]] = []
+    results: list[tuple[dict, dict]] = []
+    latest_progress: dict | None = None
+    progress_by_call: dict[str, dict] = {}
+
+    for row in rows:
+        if row.get("event") == "body_progress":
+            latest_progress = row
+            call_id = row.get("tool_call_id")
+            if call_id:
+                progress_by_call[str(call_id)] = row
+            continue
+        if row.get("event") == "call_supervision_request":
+            call_id = str(row.get("tool_call_id") or "")
+            raw = progress_by_call.get(call_id) or latest_progress
+            assert raw is not None, "a running frame must have a preceding raw body sample"
+            running.append((row, raw))
+        elif row.get("event") == "work_decision_request":
+            assert latest_progress is not None, "a result frame must have a raw body sample"
+            results.append((row, latest_progress))
+
     assert len(running) == 118
     assert len(results) == 16
 
@@ -249,7 +268,21 @@ def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
         trace=SimpleNamespace(emit=lambda *args, **kwargs: None),
     )
     supervisor = CallSupervisor(runtime)
-    for row in running:
+    def facts_from(raw: dict) -> dict:
+        facts = {
+            key: raw[key] for key in (
+                "health", "food", "oxygen", "on_ground", "selected_item",
+            ) if key in raw
+        }
+        if isinstance(raw.get("pos"), list):
+            facts["position"] = list(raw["pos"])
+        if isinstance(raw.get("inventory_counts"), dict):
+            facts["inventory_counts"] = dict(raw["inventory_counts"])
+        if isinstance(raw.get("entities_near"), list):
+            facts["entities_near"] = list(raw["entities_near"])
+        return facts
+
+    for row, raw in running:
         state = row.get("request", {}).get("state", {})
         execution = {
             "operation_id": row.get("tool_call_id"),
@@ -258,7 +291,7 @@ def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
             "phase": "running",
             "elapsed_s": row.get("idle_s", 0),
             "fact_revision": row.get("fact_revision"),
-            "facts": {"health": 20, "food": 20, "oxygen": 300},
+            "facts": facts_from(raw),
         }
         request = supervisor._question(
             row.get("tool_call_id", "replay"),
@@ -267,3 +300,18 @@ def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
             purpose="replay", supervision_context={"intent": state.get("agent_intent", "")},
         )
         assert request["questions"]
+        assert request["state"].get("body")
+        assert "Health" in request["state"]["body"]
+
+    for row, raw in results:
+        facts = facts_from(raw)
+        request = supervisor._question(
+            row.get("node_id", "result"),
+            SimpleNamespace(name=row.get("node_id", "unknown")), {},
+            {"tool": row.get("node_id", "unknown"), "state": "succeeded", "facts": facts},
+            idle_s=0.0, purpose="replay_result",
+            supervision_context={"intent": row.get("request", {}).get("state", {}).get("agent_intent", "")},
+            decision_context={"tool_result": {"success": True}, "body_state": facts},
+        )
+        assert request["questions"]
+        assert request["state"].get("finished_call")
