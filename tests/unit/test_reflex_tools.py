@@ -629,3 +629,82 @@ def test_plan_step_context_says_whether_the_intent_is_its_own():
     assert sticks["intent"] == "have 2 sticks" and sticks["intent_of_plan"] is False
     pick = manager._plan_supervision_context("pick__repeat_1", "craft_item")
     assert pick["intent"] == "hold a stone pickaxe" and pick["intent_of_plan"] is False
+
+
+def _progress_state(**inventory):
+    return BodyState(
+        bot="Bot", pos=(0.0, 64.0, 0.0), yaw=0.0, pitch=0.0, health=20.0, food=20, oxygen=300,
+        inventory_raw="[]", inventory_hash="inventory", effects=[], time=0, weather="clear",
+        dimension="minecraft:overworld", complete=True, inventory_counts=dict(inventory),
+    )
+
+
+def test_plan_calls_do_not_feed_the_agents_progress_counters(monkeypatch):
+    # Live run reflex-stage-20261012d: a plan's own failed attempts filled the
+    # counters, and the Agent's next, different plan was stopped for no progress.
+    import minebot.app.reflex_tools as reflex_tools
+
+    authority = ProgressAuthority()
+
+    def failing(tool, arguments, context):
+        context.authority.note_step(("collect", "iron"), False, "same-place")
+        return {"success": False, "reason": "not_found"}
+
+    monkeypatch.setattr(reflex_tools, "execute_tool", failing)
+    for _ in range(6):
+        reflex_tools._execute_plan_call(None, {}, SimpleNamespace(authority=authority))
+    assert (authority.stagnant_steps, authority.stalled_steps, authority.failure_steps) == (0, 0, 0)
+    assert not authority.should_yield()
+
+
+def test_a_finished_plan_is_one_step_for_the_agents_progress_counters():
+    async def scenario(result, after, choice):
+        trace = Trace()
+        authority = ProgressAuthority()
+        states = iter([_progress_state(), after])
+        registry = SimpleNamespace(get=lambda name: SimpleNamespace(sidecar=SimpleNamespace(timeout_s=None)))
+
+        class Chooser:
+            async def ask(self, payload, *, priority=None):
+                return SimpleNamespace(choice=choice, raw={"choice": choice})
+
+        async def read_progress_state():
+            return next(states)
+
+        async def run_tool(tool, callback, *args, **kwargs):
+            return dict(result)
+
+        runtime = SimpleNamespace(
+            body_control=BodyControl(), decision_client=Chooser(), trace=trace, responses_kernel=None,
+            last_known_body_state={}, registry=registry, weld_context=None, authority=authority,
+            read_progress_state=read_progress_state, run_tool=run_tool,
+        )
+        manager = ReflexManager(runtime)
+        manager.bind_loop(asyncio.get_running_loop())
+        plan = {"language": "minebot-work/0.2", "goal": "x", "timeout_s": 4,
+                "work": {"kind": "call", "intent": "get the iron", "id": "one", "tool": "fake", "arguments": {}}}
+        activity_id = manager.delegate({"plan": plan})["metrics"]["activity_id"]
+        for _ in range(40):
+            if manager.read(activity_id)["metrics"]["status"] not in {"accepted", "running"}:
+                break
+            await asyncio.sleep(0.02)
+        for _ in range(40):
+            noted = [payload for event, payload in trace.events if event == "reflex_activity_progress_noted"]
+            if noted:
+                break
+            await asyncio.sleep(0.02)
+        await manager.close()
+        return authority, noted
+
+    failed = {"success": False, "reason": "not_found", "canRetry": True, "metrics": {}}
+    authority, noted = asyncio.run(scenario(failed, _progress_state(), "call_agent"))
+    assert len(noted) == 1 and noted[0]["material_evidence"] == []
+    assert authority.failure_steps == 1
+
+    authority, noted = asyncio.run(scenario(failed, _progress_state(raw_iron=2), "call_agent"))
+    assert noted[0]["material_evidence"] == ["inventory_gain"]
+    assert authority.failure_steps == 0
+
+    done = {"success": True, "reason": "done", "metrics": {}}
+    authority, noted = asyncio.run(scenario(done, _progress_state(), "next_step"))
+    assert noted[0]["status"] == "completed" and authority.failure_steps == 0

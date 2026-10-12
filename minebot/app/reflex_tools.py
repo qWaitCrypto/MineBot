@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import threading
 import time
@@ -14,8 +15,22 @@ from uuid import uuid4
 from minebot.app.decision_client import DecisionClient
 from minebot.app.projection import answer_value
 from minebot.app.work_runtime import NodeRecord, WorkPlanError, WorkPlanExecutor, WorkRunResult, validate_plan
+from minebot.brain.progress import material_progress_evidence
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, execute_tool
 from minebot.contract import ToolResult
+
+
+def _execute_plan_call(tool: Any, arguments: Any, context: Any) -> Any:
+    """Run one plan call without feeding the Agent's progress counters.
+
+    Those counters stop an Agent that repeats itself.  A plan's repeats are
+    Decision's choice; the counters hear of the plan once, when it ends.
+    """
+    authority = getattr(context, "authority", None)
+    if authority is None or not callable(getattr(authority, "capture_steps", None)):
+        return execute_tool(tool, arguments, context)
+    with authority.capture_steps():
+        return execute_tool(tool, arguments, context)
 
 
 @dataclass
@@ -158,9 +173,36 @@ class ReflexManager:
             "tree": self._shown_tree(activity),
         }).to_payload()
 
+    async def _progress_state(self) -> Any:
+        read = getattr(self.runtime, "read_progress_state", None)
+        return await read() if callable(read) else None
+
+    async def _note_plan_outcome(self, activity: ReflexActivity, status: str, before: Any) -> None:
+        """Tell the Agent's progress counters about the plan once, as one step.
+
+        The plan's own calls are the reflex layer's attempts and are judged by
+        Decision.  For the Agent the step is the delegation: it worked when
+        the plan completed or the Body ended up holding more than before.
+        """
+        authority = getattr(self.runtime, "authority", None)
+        after = await self._progress_state()
+        if authority is None or after is None:
+            return
+        gained = material_progress_evidence(before, after, successful_body_action=False)
+        work = json.dumps(activity.plan.get("work"), sort_keys=True, default=str, ensure_ascii=False)
+        authority.note_step(
+            ("delegate_work", hashlib.sha256(work.encode()).hexdigest()[:16]),
+            status == "completed" or bool(gained), authority.fingerprint(after),
+        )
+        self.runtime.trace.emit(
+            "reflex_activity_progress_noted", activity_id=activity.activity_id,
+            status=status, material_evidence=list(gained),
+        )
+
     async def _run(self, activity: ReflexActivity) -> None:
         run_revision = activity.revision
         self._active_activity_id = activity.activity_id
+        state_before = await self._progress_state()
         executor = WorkPlanExecutor(
             activity.plan,
             call=self._call,
@@ -252,7 +294,10 @@ class ReflexManager:
                 return
             self.runtime.trace.emit("reflex_activity_finished", activity_id=activity.activity_id,
                                     status=result.status, tree=result.tree)
+            # The fact goes out with the status it reports; the counters are
+            # brought up to date long before the woken Agent can act on it.
             self._notify_activity(activity)
+            await self._note_plan_outcome(activity, result.status, state_before)
         except asyncio.CancelledError:
             if activity.revision == run_revision and activity.status not in {"paused", "cancelled", "updating"}:
                 activity.status = "cancelled"
@@ -424,7 +469,7 @@ class ReflexManager:
         tool = self.runtime.registry.get(tool_name)
         raw = await self.runtime.run_tool(
             tool,
-            execute_tool,
+            _execute_plan_call,
             tool,
             arguments,
             self.runtime.weld_context,
