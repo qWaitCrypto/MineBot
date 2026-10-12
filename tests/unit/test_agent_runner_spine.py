@@ -834,7 +834,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             context = runtime_context
 
         try:
-            result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"complete the timed body action"}'))
         finally:
             runtime.close()
 
@@ -1779,7 +1779,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         class Wrapper:
             context = runtime_context
 
-        output = asyncio.run(sdk_tool_for(tool).on_invoke_tool(Wrapper(), "{}"))
+        output = asyncio.run(sdk_tool_for(tool).on_invoke_tool(Wrapper(), '{"intent":"continue the declared body work"}'))
 
         self.assertFalse(output["success"])
         self.assertEqual(runtime_context.profile.situational, "mobility")
@@ -2748,7 +2748,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         class Wrapper:
             context = runtime_context
 
-        asyncio.run(sdk_tool_for(tool).on_invoke_tool(Wrapper(), "{}"))
+        asyncio.run(sdk_tool_for(tool).on_invoke_tool(Wrapper(), '{"intent":"collect the requested block"}'))
 
         snapshots = [event for event in trace.snapshot() if event["event"] == "body_state"]
         self.assertEqual(len(snapshots), 1)

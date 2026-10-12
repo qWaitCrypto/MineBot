@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import os
 import contextlib
@@ -362,7 +363,15 @@ def tool_is_enabled(
 
 
 def tool_invoker_for(tool: RegisteredTool):
-    validator = Draft202012Validator(tool.input_schema)
+    schema = copy.deepcopy(tool.input_schema)
+    if tool.sidecar.can_mutate_body and isinstance(schema, dict):
+        properties = schema.setdefault("properties", {})
+        if isinstance(properties, dict):
+            properties.setdefault("intent", {
+                "type": "string",
+                "description": "The result this Body call is meant to achieve.",
+            })
+    validator = Draft202012Validator(schema)
 
     async def on_invoke_tool(ctx: RunContextWrapper[RuntimeRunContext], input_json: str) -> JsonObject:
         trace = ctx.context.trace
@@ -887,10 +896,20 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             )
         return enabled
 
+    # Intent is transport metadata for mutating calls.  It must be accepted
+    # by the SDK schema and removed before the Body callback sees tool args.
+    params_schema = copy.deepcopy(tool.input_schema)
+    if tool.sidecar.can_mutate_body and isinstance(params_schema, dict):
+        properties = params_schema.setdefault("properties", {})
+        if isinstance(properties, dict):
+            properties.setdefault("intent", {
+                "type": "string",
+                "description": "The result this Body call is meant to achieve.",
+            })
     return FunctionTool(
         name=tool.name,
         description=tool.description,
-        params_json_schema=tool.input_schema,
+        params_json_schema=params_schema,
         on_invoke_tool=tool_invoker_for(tool),
         strict_json_schema=False,
         is_enabled=is_enabled,
