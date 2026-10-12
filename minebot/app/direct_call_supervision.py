@@ -253,6 +253,7 @@ class CallSupervisor:
         self.runtime.trace.emit(
             "call_supervision_request", tool_call_id=call_id, tool=tool_name,
             purpose=purpose, idle_s=round(idle_s, 3), fact_revision=fact_revision,
+            loop_state=getattr(self, "loop_state", None),
             request_chars_before=request_chars_before, request_chars=request_chars,
             request=request,
         )

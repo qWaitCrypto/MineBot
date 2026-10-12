@@ -146,6 +146,23 @@ def test_body_loop_state_changes_are_reported_with_standard_fields():
     assert event["cause"] == "decision"
 
 
+def test_running_question_trace_identifies_the_body_loop_state():
+    async def run():
+        runtime, trace, _decision = _runtime()
+        loop = BodyLoop(runtime)
+        loop._set_state("work", "agent_call")
+        choice = await loop.judge(
+            "call-1", SimpleNamespace(name="move_to"), {},
+            {"state": "running", "facts": runtime.last_known_body_state, "fact_revision": 1},
+            0.0, options={"keep_going": "Continue the current work."},
+        )
+        assert choice == "keep_going"
+        request = next(item for item in trace.events if item["event"] == "call_supervision_request")
+        assert request["loop_state"] == "work"
+
+    asyncio.run(run())
+
+
 def test_plan_result_uses_the_same_body_loop_judge_once():
     async def run():
         calls = []
