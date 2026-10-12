@@ -622,7 +622,7 @@ def test_throttled_body_change_is_seen_on_the_next_clock_frame(monkeypatch):
                                    tool_call_id="moving-stuck", timeout_s=2)
             locations = [payload["state"].get("position", "")
                          for payload in seen]
-            assert any("[3.0, 5.0, 0.0]" in location for location in locations)
+            assert any("(3.0, 5.0, 0.0)" in location for location in locations)
         finally:
             await runtime.aclose()
     asyncio.run(run())
