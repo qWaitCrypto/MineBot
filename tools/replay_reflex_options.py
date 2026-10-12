@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import asyncio
 import itertools
 import json
@@ -10,6 +11,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from collections.abc import Mapping
 
 sys.path.insert(0, "/tmp/reflexbench")
 import bench  # type: ignore
@@ -22,7 +24,14 @@ def _load_frame_metadata() -> list[dict]:
     source = Path("/tmp/reflexbench/frames1.py").read_text(encoding="utf-8")
     namespace: dict = {}
     exec(source.split("import os\nRT=")[0], namespace)
-    return namespace["F"]
+    frames = list(namespace["F"])
+    if not any(item.get("id") == "r7_head_dips" for item in frames):
+        frames.append(dict(
+            id="r7_head_dips", src="real7", rid=32, intent_rid=30,
+            kind="running", expect=["keep_going", "surface"], unsure=True,
+            why="采矿时头刚入水，氧气 298/300",
+        ))
+    return frames
 
 
 def _orders(keys: list[str], limit: int = 12) -> list[list[str]]:
@@ -48,10 +57,15 @@ def _raw_frame(meta: dict, candidates: dict[tuple[str, int], dict]) -> dict:
     tool = str(tool_data.get("name") or meta.get("tool") or "unknown")
     params = dict(tool_data.get("arguments") or meta.get("args") or {})
     timestamp = meta.get("at", request["ts"] - trace["t0"])
-    body, previous, entities = bench.snap(source, timestamp)
+    trace_rows = trace["bp"]
+    index = bisect.bisect_right(trace["bts"], trace["t0"] + timestamp) - 1
+    index = max(index, 0)
+    body = trace_rows[index]
+    previous = trace_rows[index - 1] if index > 0 else {}
+    entities = body.get("entities_near")
     facts = dict(body)
     facts["position"] = body.get("pos")
-    facts["nearby_entities"] = entities if entities is not None else body.get("entities_near")
+    facts["nearby_entities"] = entities
     facts["in_water"] = bool(body.get("oxygen", 300) < 300)
     if previous.get("oxygen") is not None:
         facts["oxygen_previous"] = previous["oxygen"]
@@ -59,6 +73,10 @@ def _raw_frame(meta: dict, candidates: dict[tuple[str, int], dict]) -> dict:
         facts["health_previous"] = previous["health"]
         if body.get("health") is not None and body["health"] < previous["health"]:
             facts["recently_hurt"] = True
+    if isinstance(body.get("inventory_counts"), Mapping):
+        facts["inventory"] = dict(body["inventory_counts"])
+    if index > 0:
+        facts["vital_interval_s"] = round(float(body["ts"] - previous["ts"]), 3)
     candidate = candidates.get((source, rid), {})
     result = candidate.get("result") if meta.get("kind") == "result" else None
     raw_plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
@@ -67,7 +85,10 @@ def _raw_frame(meta: dict, candidates: dict[tuple[str, int], dict]) -> dict:
         "operation_id": operation_id,
         "tool": tool,
         "state": "running" if result is None else ("succeeded" if result.get("success") is True else "failed"),
-        "phase": body.get("phase") or "working",
+        "phase": body.get("phase") or (
+            "navigating" if body.get("pathing") or body.get("navigation") else
+            "working"
+        ),
         "elapsed_s": 0.0,
         "facts": facts,
         "result": result or {},
@@ -140,6 +161,7 @@ def _plan_request(frame: dict, options: dict[str, str]) -> dict:
         "kind": "call", "id": frame["execution"]["operation_id"],
         "tool": frame["tool"], "arguments": frame["params"],
         "intent": frame["context"]["intent"],
+        "next_call": frame["next_call"],
     }
     executor = WorkPlanExecutor.__new__(WorkPlanExecutor)
     executor.plan = {"goal": frame["context"]["goal"]}
@@ -148,10 +170,21 @@ def _plan_request(frame: dict, options: dict[str, str]) -> dict:
         "tool_result": frame["result"] or {},
         "tool_arguments": frame["params"],
         "body_state": frame["facts"],
-        "execution": {"tool": frame["tool"], "normal_work": frame["state"].get("tool", {}).get("normal_work", "")},
+        "execution": {"tool": frame["tool"], "params": frame["params"], "phase": frame["execution"].get("phase"), "normal_work": frame["state"].get("tool", {}).get("normal_work", "")},
         "history": [], "history_earlier": 0,
     }
     payload = executor._call_question(node, frame["execution"]["operation_id"], [frame["context"]["intent"]], record)
+    # Feed the same human fact sentences as a live supervisor frame. The
+    # executor still compiles the plan/result option vocabulary.
+    human = CallSupervisor._sentence_state(
+        frame["context"], frame["facts"], frame["execution"],
+        SimpleNamespace(name=frame["tool"]),
+        frame["params"], result=frame["result"] or {},
+        normal_work=frame["state"].get("tool", {}).get("normal_work", ""),
+    )
+    for key in ("inventory", "body", "threats", "position", "finished_call", "earlier_attempts_of_this_call"):
+        if key in human:
+            payload["state"][key] = human[key]
     criteria = payload["questions"]["q"]["criteria"]
     payload["questions"]["q"]["criteria"] = {key: criteria[key] for key in options if key in criteria}
     return payload

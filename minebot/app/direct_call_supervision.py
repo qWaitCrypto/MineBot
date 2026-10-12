@@ -254,7 +254,7 @@ class CallSupervisor:
         facts = execution.get("facts") if isinstance(execution.get("facts"), Mapping) else {}
         keep = (
             "start_position", "position", "navigation", "pathing", "processes",
-            "inventory_delta", "inventory", "construction", "goal", "failed_path_calculations",
+            "inventory_delta", "inventory", "inventory_counts", "construction", "goal", "failed_path_calculations",
             "builder_paused", "selected_item", "health", "food", "oxygen",
             "in_water", "submerged", "water", "safe_standing_position",
             "last_safe_position", "food_available", "food_item",
@@ -269,27 +269,39 @@ class CallSupervisor:
         facts: dict[str, Any] = {}
         tool = str(execution.get("tool") or "the current tool")
         phase = str(execution.get("phase") or "working")
-        elapsed = execution.get("elapsed_s")
-        facts["doing"] = f"{tool} is {phase}; elapsed {elapsed if elapsed is not None else 0}s."
+        params = execution.get("params") if isinstance(execution.get("params"), Mapping) else {}
+        facts["doing"] = f"The Body is carrying out {format_call(tool, params)} in the {phase} phase."
         position = compact_facts.get("position")
         start = compact_facts.get("start_position")
+        def position_text(value: Any) -> str:
+            if isinstance(value, (list, tuple)) and len(value) == 3:
+                return "(" + ", ".join(str(v) for v in value) + ")"
+            return str(value)
         if start is not None and position is not None:
-            facts["where"] = f"started at {start}; now at {position}."
+            facts["where"] = f"The call started at {position_text(start)} and the Body is now at {position_text(position)}."
         elif position is not None:
-            facts["where"] = f"now at {position}."
+            facts["where"] = f"The Body is now at {position_text(position)}."
         elif start is not None:
-            facts["where"] = f"started at {start}."
+            facts["where"] = f"The call started at {position_text(start)}."
         progress = execution.get("progress_signal")
         age = execution.get("since_progress_s")
-        facts["last_progress"] = (
-            f"last progress event: {progress}, {age}s ago."
-            if progress else f"{elapsed if elapsed is not None else 0}s have elapsed since the call began."
-        )
+        if progress and isinstance(age, (int, float)):
+            facts["last_progress"] = f"The last real progress was {progress}, {age:g} seconds ago."
+        elif progress:
+            facts["last_progress"] = f"The last real progress was {progress}."
+        else:
+            elapsed = execution.get("elapsed_s")
+            if isinstance(elapsed, (int, float)) and elapsed > 0:
+                facts["last_progress"] = f"No real progress has been recorded yet; {elapsed:g}s have elapsed since the call began."
+            else:
+                facts["last_progress"] = "No real progress has been recorded yet."
         delta = compact_facts.get("inventory_delta")
         if isinstance(delta, Mapping) and delta:
             changes = ", ".join(f"{item} {'+' if amount >= 0 else ''}{amount}" for item, amount in delta.items())
             facts["inventory_change"] = f"inventory changed: {changes}."
         inventory = compact_facts.get("inventory")
+        if not isinstance(inventory, Mapping):
+            inventory = compact_facts.get("inventory_counts")
         if isinstance(inventory, Mapping):
             entries = [f"{item}={count}" for item, count in list(inventory.items())[:8]]
             facts["inventory_now"] = "inventory now contains " + (", ".join(entries) or "no listed items") + "."
@@ -318,7 +330,9 @@ class CallSupervisor:
                 if matching is not None and expected is not None else "construction evidence is present."
             )
         processes = compact_facts.get("processes")
-        if isinstance(processes, list):
+        if isinstance(processes, Mapping):
+            processes = [name for name, active in processes.items() if active is True]
+        if isinstance(processes, (list, tuple)):
             facts["processes"] = "Body is actively " + (", ".join(str(item) for item in processes) or "not running a named process") + "."
         vitals = []
         if "health" in compact_facts:
@@ -364,6 +378,7 @@ class CallSupervisor:
         facts["phase"] = phase
         compact = {
             "tool": execution.get("tool"),
+            "params": execution.get("params"),
             "state": execution.get("state"),
             "phase": execution.get("phase"),
             "elapsed_s": execution.get("elapsed_s"),
@@ -417,7 +432,7 @@ class CallSupervisor:
         normal_work: str = "",
     ) -> dict[str, Any]:
         raw = dict(body_state or {})
-        compact = cls._compact_execution({**dict(execution or {}), "facts": raw})
+        compact = cls._compact_execution({**dict(execution or {}), "facts": raw, "params": dict(params)})
         facts = dict(compact.get("facts") or {})
         # Replay rows already contain the human sentence fields. Live snapshots
         # are converted by _compact_execution into the same vocabulary.
@@ -429,13 +444,16 @@ class CallSupervisor:
             "inventory": ("inventory", "inventory_now"),
             "body": ("body", "vitals"),
             "threats": ("threats", "hostiles"),
-            "position": ("position", "where"),
+            "position": ("where", "position"),
             "progress": ("progress", "last_progress"),
         }
         for target, keys in aliases.items():
             if result is not None and target == "progress":
                 continue
-            value = next((raw.get(k) for k in keys if raw.get(k) not in (None, "")), None)
+            value = next((raw.get(k) for k in keys
+                          if raw.get(k) not in (None, "")
+                          and not (target == "inventory" and isinstance(raw.get(k), Mapping))
+                          and not (target == "position" and isinstance(raw.get(k), (list, tuple)))), None)
             if value is None:
                 value = next((facts.get(k) for k in keys if facts.get(k) not in (None, "")), None)
             if value is not None:
@@ -460,17 +478,37 @@ class CallSupervisor:
                         current_sentence = cls._result_sentence(tool, params, result)
                         if rendered and rendered[-1] == current_sentence:
                             rendered = rendered[:-1]
-                    state["earlier_attempts_of_this_call"] = (
-                        ([earlier] if earlier else []) + rendered
-                    )
+                    history_lines = ([earlier] if earlier else []) + rendered
+                    if history_lines:
+                        state["earlier_attempts_of_this_call"] = history_lines
         if normal_work:
             state["normal_work"] = normal_work[:800]
-        # Keep a changing oxygen/health fact as a sentence rather than a raw
-        # field.  This is only emitted when the snapshot supplies both sides.
-        if raw.get("oxygen_previous") is not None and raw.get("oxygen") is not None:
-            state["body"] = f"The head is under water and oxygen changed from {raw['oxygen_previous']} five seconds ago to {raw['oxygen']} of {raw.get('oxygen_max', 300)} now."
-        if raw.get("health_previous") is not None and raw.get("health") is not None:
-            state["body"] = f"The Body was hurt: health changed from {raw['health_previous']} to {raw['health']} in the last five seconds."
+        # Compose each survival fact once. A previous value is evidence of a
+        # change only when the current value actually moved in the relevant
+        # direction; it is not itself evidence of harm or of being underwater.
+        vital_lines: list[str] = []
+        health = raw.get("health")
+        health_previous = raw.get("health_previous")
+        if isinstance(health, (int, float)):
+            vital_lines.append(f"health is {health} of 20.")
+            if isinstance(health_previous, (int, float)) and health < health_previous:
+                vital_lines.append(f"Health fell from {health_previous} to {health} since the previous sample.")
+        food = raw.get("food")
+        if isinstance(food, (int, float)):
+            vital_lines.append(f"hunger level is {food} of 20.")
+        oxygen = raw.get("oxygen")
+        oxygen_max = raw.get("oxygen_max", 300)
+        oxygen_previous = raw.get("oxygen_previous")
+        if isinstance(oxygen, (int, float)):
+            if oxygen < oxygen_max:
+                if isinstance(oxygen_previous, (int, float)) and oxygen != oxygen_previous:
+                    vital_lines.append(f"oxygen changed from {oxygen_previous} to {oxygen} of {oxygen_max} since the previous sample; the head is underwater.")
+                else:
+                    vital_lines.append(f"oxygen is {oxygen} of {oxygen_max}; the head is underwater.")
+            else:
+                vital_lines.append(f"oxygen is full at {oxygen_max}.")
+        if vital_lines:
+            state["body"] = " ".join(vital_lines)
         return {key: value for key, value in state.items() if value not in (None, "")}
 
     @staticmethod
@@ -497,10 +535,10 @@ class CallSupervisor:
         return {
             "danger": {
                 "type": "choice",
-                "instructions": "First decide whether immediate danger requires a protective action.",
+                "instructions": "Is the Body in danger?",
                 "criteria": {
-                    "danger": "Choose danger when the facts mention a hostile entity close to the Body, recent health loss, falling oxygen, or being unable to breathe.",
-                    "safe": "Choose safe only when the facts show no nearby hostile, no recent injury, and no falling oxygen or breathing problem.",
+                    "safe": "Nothing is harming the Body and nothing nearby is about to harm it.",
+                    "in_danger": "The Body is being harmed right now, or something nearby is about to harm it.",
                 },
             },
             "normal": {
@@ -525,7 +563,7 @@ class CallSupervisor:
         danger = answers.get("danger")
         if isinstance(danger, Mapping):
             danger_choice = str(danger.get("choice") or "")
-            if danger_choice in {"danger", "unsafe", "yes"}:
+            if danger_choice in {"danger", "in_danger", "unsafe", "yes"}:
                 selected = answers.get("protective")
                 return str(selected.get("choice")) if isinstance(selected, Mapping) and selected.get("choice") else (fallback if fallback in allowed else "unknown")
             if danger_choice in {"safe", "no"}:
