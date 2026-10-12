@@ -139,28 +139,21 @@ def test_unknown_call_decision_does_not_advance_or_write_again():
     assert first.tree["work"]["_runtime"]["decision_pending"] is True
 
 
-def test_unknown_call_can_be_resolved_by_the_idle_supervisor_without_a_second_call():
+def test_unknown_call_waits_for_the_single_body_loop_without_a_second_call():
     plan = {"language": "minebot-work/0.2", "goal": "collect", "timeout_s": 10,
             "work": {"kind": "call", "id": "collect", "tool": "collect", "arguments": {}}}
     calls = []
     decisions = Decision("unknown")
-    idle_requests = []
 
     async def call(tool, arguments, *, call_id, timeout_s):
         calls.append(call_id)
         return {"success": False, "reason": "cancelled", "metrics": {}}
 
-    async def idle(tool, *, call_id, plan_context, options):
-        idle_requests.append((tool, call_id, plan_context, options))
-        return {"choice": "call_agent", "questions": 1, "unknown": 0}
-
     result = asyncio.run(WorkPlanExecutor(
         plan, call=call, state=lambda: _state(), decision=decisions,
-        idle_supervise=idle,
     ).run())
-    assert result.status == "blocked"
+    assert result.status == "waiting"
     assert calls == ["collect"]
-    assert idle_requests and "call_agent" in idle_requests[0][3]
 
 
 

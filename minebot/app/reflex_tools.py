@@ -212,7 +212,6 @@ class ReflexManager:
             observe=self._observe_condition,
             emit=lambda event, **payload: self.runtime.trace.emit(event, activity_id=activity.activity_id, **payload),
             records=activity.records,
-            idle_supervise=self._supervise_idle,
             result_judge=getattr(getattr(self.runtime, "body_loop", None), "decide_plan_result", None),
         )
         try:
@@ -447,24 +446,6 @@ class ReflexManager:
                 "intent_chain": found.get("intent_chain", []),
                 "next_call": found.get("next_call", ""),
             }
-
-    async def _supervise_idle(
-        self, tool_name: str, *, call_id: str, plan_context: dict[str, Any],
-        options: dict[str, str], facts: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Keep the shared Decision loop online while a plan has no call running."""
-        try:
-            tool = self.runtime.registry.get(tool_name)
-        except Exception:
-            return {"choice": "unknown"}
-        supervisor = getattr(self.runtime, "call_supervisor", None)
-        if supervisor is None:
-            return {"choice": "unknown"}
-        return await supervisor.supervise_idle(
-            tool, call_id=f"plan-{call_id}", plan_context={**plan_context, "is_plan": True},
-            options=options, stop_on_choice=True, notify_agent=False,
-            decision_context=facts,
-        )
 
     async def _call(self, tool_name: str, arguments: dict[str, Any], *, call_id: str, timeout_s: float | None) -> dict[str, Any]:
         tool = self.runtime.registry.get(tool_name)
@@ -812,7 +793,7 @@ class ReflexManager:
                                         decision=self.runtime.decision_client,
                                         choice_provider=getattr(self.runtime, "choice_provider", None),
                                         observe=self._observe_condition,
-                                        records=activity.records, idle_supervise=self._supervise_idle)
+                                        records=activity.records)
             return executor.annotated_tree()
         except Exception:
             return copy.deepcopy(activity.plan)

@@ -66,13 +66,6 @@ class WorkChoiceProvider(Protocol):
     def __call__(self, node: dict[str, Any], *, intents: list[str], state: dict[str, Any], item: Any) -> Any: ...
 
 
-class WorkIdleSupervisor(Protocol):
-    async def __call__(
-        self, tool: str, *, call_id: str, plan_context: dict[str, Any],
-        options: dict[str, str], facts: dict[str, Any],
-    ) -> dict[str, Any]: ...
-
-
 class WorkResultJudge(Protocol):
     async def __call__(
         self, *, call_id: str, tool: Any, params: dict[str, Any],
@@ -366,7 +359,6 @@ class WorkPlanExecutor:
         decision: WorkDecision | None = None,
         choice_provider: WorkChoiceProvider | None = None,
         observe: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
-        idle_supervise: WorkIdleSupervisor | None = None,
         result_judge: WorkResultJudge | None = None,
         emit: Callable[..., None] | None = None,
         records: dict[str, NodeRecord] | None = None,
@@ -378,7 +370,6 @@ class WorkPlanExecutor:
         self.decision = decision or DecisionClient()
         self.choice_provider = choice_provider
         self.observe = observe
-        self.idle_supervise = idle_supervise
         self.result_judge = result_judge
         self.emit = emit or (lambda *_args, **_kwargs: None)
         # An empty mapping is a meaningful caller-owned revision store.  Do
@@ -823,36 +814,10 @@ class WorkPlanExecutor:
                     )
                 record.decision_pending = True
                 record.status = "waiting"
-                if self.idle_supervise is not None:
-                    try:
-                        idle = await self.idle_supervise(
-                            str(node.get("tool", "unknown")), call_id=node_key,
-                            plan_context=self._call_plan(node, intents), options=options,
-                            facts=copy.deepcopy(record.decision_facts or {}),
-                        )
-                    except TypeError as exc:
-                        # Keep the pre-R2 test seam usable while all production
-                        # supervisors receive the unified result facts.
-                        if "facts" not in str(exc):
-                            raise
-                        idle = await self.idle_supervise(
-                            str(node.get("tool", "unknown")), call_id=node_key,
-                            plan_context=self._call_plan(node, intents), options=options,
-                        )
-                    idle_choice = idle.get("choice") if isinstance(idle, dict) else None
-                    if idle_choice in options:
-                        choice = idle_choice
-                        if choice == "call_agent":
-                            return self._apply_call_choice(
-                                node, node_key, intents, record, choice, item=item,
-                                block_reason=str((idle or {}).get("reason") or "decision_unknown_limit"),
-                            )
-                        if choice == "inspect":
-                            continue
-                    else:
-                        return "waiting"
-                else:
-                    return "waiting"
+                # Unknown never starts a second supervision loop.  The single
+                # BodyLoop owns idle frames and will ask again at the normal
+                # cadence while this plan remains waiting.
+                return "waiting"
             record.unknown_streak = 0
             if choice == "repeat":
                 record.decision_pending = False

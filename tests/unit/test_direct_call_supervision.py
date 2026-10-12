@@ -784,52 +784,22 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
     asyncio.run(run())
 
 
-def test_idle_unknown_limit_calls_agent_without_stopping_body():
+def test_idle_supervision_is_owned_by_body_loop():
     async def run():
-        runtime, tool = make_runtime(GenericCallIpc())
-        runtime.execution_snapshots.begin("idle", tool.name, {})
-        runtime.execution_snapshots.observe("idle", {"position": [0, 5, 0], "pathing": False})
-        runtime.execution_snapshots.finish("idle", state="succeeded", reason="done", control="released")
-        runtime.call_supervisor._client = StubDecision(("unknown", "unknown", "unknown"))
-        delivered = []
-        runtime.notify_reflex_fact = delivered.append
+        runtime, _tool = make_runtime(GenericCallIpc())
         try:
-            counts = await runtime.call_supervisor.supervise_idle(
-                tool, call_id="idle", duration_s=1, frame_interval_s=.001,
-                plan_context={"goal": "collect", "current_step": "collect ore", "is_plan": False},
-            )
-            assert counts == {"questions": 3, "unknown": 3, "agent": 1}
-            assert delivered and delivered[0]["status"] == "call_agent"
-            assert not [e for e in runtime.trace.events if e["event"] == "call_supervision_stop_requested"]
+            assert runtime.call_supervisor is runtime.body_loop
+            assert not hasattr(runtime.call_supervisor, "supervise_idle")
         finally:
             await runtime.aclose()
     asyncio.run(run())
 
 
-def test_plan_idle_question_uses_work_result_and_body_fact_shape():
+def test_plan_idle_result_uses_body_loop_result_judge():
     async def run():
-        runtime, tool = make_runtime(GenericCallIpc())
-        runtime.execution_snapshots.begin("plan-idle", tool.name, {})
-        runtime.execution_snapshots.observe("plan-idle", {"position": [0, 5, 0], "pathing": False})
-        runtime.execution_snapshots.finish("plan-idle", state="succeeded", reason="done", control="released")
-        decision = StubDecision(("step_done",))
-        runtime.call_supervisor._client = decision
+        runtime, _tool = make_runtime(GenericCallIpc())
         try:
-            await runtime.call_supervisor.supervise_idle(
-                tool, call_id="plan-idle", frame_interval_s=.001,
-                plan_context={"goal": "collect", "current_step": "collect ore", "node_description": "collect ore", "is_plan": True},
-                options={"step_done": "done", "repeat": "repeat", "inspect": "inspect", "call_agent": "agent"},
-                decision_context={
-                    "tool_arguments": {"target": [1, 5, 0], "intent": "reach the requested target"},
-                    "tool_result": {"success": False, "reason": "cancelled"},
-                    "body_state": {"position": [0, 5, 0]}, "reads": [],
-                },
-                stop_on_choice=True,
-            )
-            payload = decision.requests[0][0]
-            assert "finished_call" in payload["state"]
-            assert "cancelled" in payload["state"]["finished_call"]
-            assert "current_work" not in payload["state"]
+            assert callable(runtime.body_loop.decide_plan_result)
         finally:
             await runtime.aclose()
     asyncio.run(run())
