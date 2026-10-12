@@ -68,7 +68,7 @@ class CallSupervisor:
     def _start_monitor(
         self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
         wake: asyncio.Event, worker: asyncio.Task[Any],
-    ) -> asyncio.Task[Any]:
+    ) -> asyncio.Task[Any] | None:
         """Start the Body-owned frame consumer.
 
         The concrete per-Body loop supplies this hook.  Keeping the call
@@ -77,6 +77,10 @@ class CallSupervisor:
         the execution path.
         """
         raise RuntimeError("a BodyLoop is required for mutating calls")
+
+    async def _wait_monitor(self, record: Mapping[str, Any]) -> None:
+        """Wait for a Body-owned monitor when a concrete loop registered one."""
+        return None
 
     def _frame(self, execution: Mapping[str, Any] | None) -> dict[str, Any]:
         """Add what health and air were a few seconds ago to this frame's facts."""
@@ -564,6 +568,8 @@ class CallSupervisor:
                 if monitor is not None:
                     await monitor
                     monitor = None
+                elif record.get("monitor_registered"):
+                    await self._wait_monitor(record)
                 # A direct call is a one-node work tree: when it ends, Decision
                 # chooses between running it again, calling it done, and the
                 # Agent.  Plan calls are judged by WorkPlanExecutor instead.

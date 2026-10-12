@@ -164,14 +164,52 @@ def test_body_loop_reuses_lifecycle_slot_for_a_running_call():
             record, SimpleNamespace(name="move_to"), {}, asyncio.Event(), worker,
         )
         await asyncio.sleep(0)
-        assert idle_task is not None and idle_task is not loop._lifecycle_task
-        assert idle_task.cancelled() or idle_task.done()
-        assert loop._lifecycle_task is monitor
-        monitor.cancel()
-        await asyncio.gather(monitor, return_exceptions=True)
+        assert idle_task is loop._lifecycle_task
+        assert monitor is None
+        assert loop._active_monitor is not None
+        record["cancel_requested"] = True
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
         await loop.stop()
+
+    asyncio.run(run())
+
+
+def test_agent_call_wakes_lifecycle_and_cancels_idle_question():
+    async def run():
+        runtime, trace, _decision = _runtime()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        class BlockingDecision:
+            async def ask(self, request, *, priority=None):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            async def close(self):
+                return None
+
+        runtime.decision_client = BlockingDecision()
+        loop = BodyLoop(runtime)
+        worker = asyncio.create_task(asyncio.sleep(1))
+        record = {"call_id": "wake", "cancel_requested": False}
+        try:
+            await loop.start()
+            await asyncio.wait_for(started.wait(), 2)
+            monitor = loop._start_monitor(
+                record, SimpleNamespace(name="move_to"), {}, asyncio.Event(), worker,
+            )
+            assert monitor is None
+            await asyncio.wait_for(cancelled.wait(), 1)
+            assert loop._active_monitor is not None
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            await loop.stop()
 
     asyncio.run(run())
 

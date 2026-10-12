@@ -33,6 +33,8 @@ class BodyLoop(CallSupervisor):
         self.loop_state = "idle"
         self._lifecycle_task: asyncio.Task[Any] | None = None
         self._lifecycle_started = False
+        self._active_monitor: tuple[dict[str, Any], Any, Mapping[str, Any], asyncio.Event, asyncio.Task[Any]] | None = None
+        self._loop_wakeup = asyncio.Event()
         self._idle_sequence = 0
         self.recent_experiences: deque[str] = deque(maxlen=5)
 
@@ -56,22 +58,33 @@ class BodyLoop(CallSupervisor):
     def _start_monitor(
         self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
         wake: asyncio.Event, worker: asyncio.Task[Any],
-    ) -> asyncio.Task[Any]:
-        """Use the Body lifecycle slot for a normal Agent call.
+    ) -> asyncio.Task[Any] | None:
+        """Register a top-level call with the one Body lifecycle task.
 
-        The idle reader is cancelled before a work call takes the slot.  A
-        nested protective call is already running inside the lifecycle task;
-        it gets a child monitor while the parent task remains the owner and
-        resumes the lifecycle after the protective call settles.
+        A protective action can be started from inside the lifecycle monitor;
+        that nested case retains a short child monitor so the parent can await
+        its physical result.  Ordinary Agent work is registered in the
+        lifecycle task itself and therefore does not create another monitor.
         """
         current_task = asyncio.current_task()
         lifecycle = self._lifecycle_task
-        if lifecycle is not None and lifecycle is not current_task and not lifecycle.done():
-            lifecycle.cancel()
-        task = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
-        if lifecycle is not current_task:
-            self._lifecycle_task = task
-        return task
+        if lifecycle is not None and not lifecycle.done() and lifecycle is not current_task:
+            if self._active_monitor is not None:
+                raise RuntimeError("BodyLoop already has an active monitor")
+            record["monitor_registered"] = True
+            record["monitor_done"] = asyncio.Event()
+            self._active_monitor = (record, tool, params, wake, worker)
+            self._loop_wakeup.set()
+            return None
+        # A call made before the session lifecycle starts, or a nested
+        # protective call made by the lifecycle task, keeps the compatibility
+        # child monitor path.  The parent lifecycle remains the owner.
+        return asyncio.create_task(self._monitor(record, tool, params, wake, worker))
+
+    async def _wait_monitor(self, record: Mapping[str, Any]) -> None:
+        done = record.get("monitor_done")
+        if isinstance(done, asyncio.Event):
+            await done.wait()
 
     async def _monitor(
         self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
@@ -541,16 +554,23 @@ class BodyLoop(CallSupervisor):
         self._lifecycle_task = asyncio.create_task(self._idle_frames())
 
     def _ensure_idle_task(self) -> None:
-        if not self._lifecycle_started or self.current is not None:
-            return
-        task = self._lifecycle_task
-        if task is None or task.done():
-            self._lifecycle_task = asyncio.create_task(self._idle_frames())
+        # The lifecycle task never ends after a call; it switches back to its
+        # idle branch once the registered monitor signals completion.
+        if self._lifecycle_started and self._lifecycle_task is not None:
+            self._loop_wakeup.set()
 
     async def stop(self) -> None:
         """Stop the lifecycle task before the runtime closes its read lane."""
         task = self._lifecycle_task
         self._lifecycle_task = None
+        active = self._active_monitor
+        self._active_monitor = None
+        if active is not None:
+            active[0]["cancel_requested"] = True
+            done = active[0].get("monitor_done")
+            if isinstance(done, asyncio.Event):
+                done.set()
+        self._loop_wakeup.set()
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -680,8 +700,26 @@ class BodyLoop(CallSupervisor):
         """
         try:
             while True:
-                await asyncio.sleep(FACT_FRAME_INTERVAL_S)
-                if self.current is not None:
+                active = self._active_monitor
+                if active is not None:
+                    record, tool, params, wake, worker = active
+                    try:
+                        await self._monitor(record, tool, params, wake, worker)
+                    finally:
+                        if self._active_monitor is active:
+                            self._active_monitor = None
+                        done = record.get("monitor_done")
+                        if isinstance(done, asyncio.Event):
+                            done.set()
+                    continue
+
+                self._loop_wakeup.clear()
+                try:
+                    await asyncio.wait_for(self._loop_wakeup.wait(), timeout=FACT_FRAME_INTERVAL_S)
+                    continue
+                except asyncio.TimeoutError:
+                    pass
+                if self._active_monitor is not None:
                     continue
                 snapshots = getattr(self.runtime, "execution_snapshots", None)
                 if snapshots is not None and snapshots.current() is not None:
@@ -701,8 +739,21 @@ class BodyLoop(CallSupervisor):
                     # Idle is a live state, so still ask even when the only
                     # reversible normal option is ``stay``.  This keeps the
                     # same one-question-per-frame contract as a running call.
-                    answer = await self._client.ask(request)
-                    choice = rq.frame_choice(answer.raw, request["questions"])
+                    answer_task = asyncio.create_task(self._client.ask(request))
+                    wake_task = asyncio.create_task(self._loop_wakeup.wait())
+                    done, _ = await asyncio.wait(
+                        {answer_task, wake_task}, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if wake_task in done and answer_task not in done:
+                        answer_task.cancel()
+                        await asyncio.gather(answer_task, return_exceptions=True)
+                        choice = "unknown"
+                    else:
+                        answer = await answer_task
+                        choice = rq.frame_choice(answer.raw, request["questions"])
+                    if wake_task not in done:
+                        wake_task.cancel()
+                    await asyncio.gather(wake_task, return_exceptions=True)
                 except Exception:
                     choice = "unknown"
                 self.runtime.trace.emit(
