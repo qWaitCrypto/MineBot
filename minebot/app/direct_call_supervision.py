@@ -82,6 +82,10 @@ class CallSupervisor:
         """Wait for a Body-owned monitor when a concrete loop registered one."""
         return None
 
+    def _release_result_pending(self, call_id: str) -> None:
+        """Allow a concrete Body loop to resume idle after result judgment."""
+        return None
+
     def _frame(self, execution: Mapping[str, Any] | None) -> dict[str, Any]:
         """Add what health and air were a few seconds ago to this frame's facts."""
         if not execution:
@@ -596,6 +600,7 @@ class CallSupervisor:
                 self.runtime.body_control.mark_unknown()
             return result
         finally:
+            self._release_result_pending(str(record.get("call_id") or ""))
             if monitor is not None:
                 monitor.cancel()
                 await asyncio.gather(monitor, return_exceptions=True)

@@ -34,6 +34,7 @@ class BodyLoop(CallSupervisor):
         self._lifecycle_task: asyncio.Task[Any] | None = None
         self._lifecycle_started = False
         self._active_monitor: tuple[dict[str, Any], Any, Mapping[str, Any], asyncio.Event, asyncio.Task[Any]] | None = None
+        self._result_pending: dict[str, dict[str, Any]] = {}
         self._loop_wakeup = asyncio.Event()
         self._idle_sequence = 0
         self.recent_experiences: deque[str] = deque(maxlen=5)
@@ -73,6 +74,7 @@ class BodyLoop(CallSupervisor):
                 raise RuntimeError("BodyLoop already has an active monitor")
             record["monitor_registered"] = True
             record["monitor_done"] = asyncio.Event()
+            self._result_pending.pop(str(record.get("call_id") or ""), None)
             self._active_monitor = (record, tool, params, wake, worker)
             self._loop_wakeup.set()
             return None
@@ -539,11 +541,18 @@ class BodyLoop(CallSupervisor):
         )
         options = {key: value for key, value in options.items()
                    if key not in rq.PROTECTIVE and key != "inspect"}
-        return await self._judge_frame(
-            call_id, tool, params, execution, 0.0,
-            purpose="plan_result_frame", supervision_context=plan_context,
-            options=options, decision_context=decision_context,
-        )
+        try:
+            return await self._judge_frame(
+                call_id, tool, params, execution, 0.0,
+                purpose="plan_result_frame", supervision_context=plan_context,
+                options=options, decision_context=decision_context,
+            )
+        finally:
+            self._release_result_pending(str(call_id))
+
+    def _release_result_pending(self, call_id: str) -> None:
+        self._result_pending.pop(str(call_id), None)
+        self._loop_wakeup.set()
 
     async def start(self) -> None:
         """Start the one lifecycle task when the SDK session enters the world."""
@@ -565,6 +574,7 @@ class BodyLoop(CallSupervisor):
         self._lifecycle_task = None
         active = self._active_monitor
         self._active_monitor = None
+        self._result_pending.clear()
         if active is not None:
             active[0]["cancel_requested"] = True
             done = active[0].get("monitor_done")
@@ -708,6 +718,7 @@ class BodyLoop(CallSupervisor):
                     finally:
                         if self._active_monitor is active:
                             self._active_monitor = None
+                        self._result_pending[str(record.get("call_id") or "")] = record
                         done = record.get("monitor_done")
                         if isinstance(done, asyncio.Event):
                             done.set()
@@ -720,6 +731,12 @@ class BodyLoop(CallSupervisor):
                 except asyncio.TimeoutError:
                     pass
                 if self._active_monitor is not None:
+                    continue
+                if self._result_pending:
+                    # The worker has ended, but the Agent/plan result judge is
+                    # still using the Body facts.  Do not start idle work or
+                    # ask an idle Decision question until it releases this
+                    # result slot.
                     continue
                 snapshots = getattr(self.runtime, "execution_snapshots", None)
                 if snapshots is not None and snapshots.current() is not None:
