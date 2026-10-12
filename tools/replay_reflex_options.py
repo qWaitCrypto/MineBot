@@ -59,11 +59,23 @@ def _raw_frame(meta: dict, candidates: dict[tuple[str, int], dict]) -> dict:
     params = dict(tool_data.get("arguments") or meta.get("args") or {})
     timestamp = meta.get("at", request["ts"] - trace["t0"])
     trace_rows = trace["bp"]
-    index = bisect.bisect_right(trace["bts"], trace["t0"] + timestamp) - 1
-    index = max(index, 0)
+    insertion = bisect.bisect_right(trace["bts"], trace["t0"] + timestamp)
+    candidates_indices = [max(0, insertion - 1), min(len(trace_rows) - 1, insertion)]
+    index = min(candidates_indices, key=lambda i: abs(float(trace_rows[i]["ts"]) - (trace["t0"] + timestamp)))
     body = trace_rows[index]
     previous = trace_rows[index - 1] if index > 0 else {}
     entities = body.get("entities_near")
+    if not entities:
+        # A request can fall between two sparse entity samples.  Preserve the
+        # nearest surrounding observation rather than silently dropping a
+        # threat that the raw recording did contain.
+        nearby_indices = sorted(
+            (i for i in range(max(0, index - 2), min(len(trace_rows), index + 3))
+             if trace_rows[i].get("entities_near")),
+            key=lambda i: abs(float(trace_rows[i]["ts"]) - float(body["ts"])),
+        )
+        if nearby_indices:
+            entities = trace_rows[nearby_indices[0]].get("entities_near")
     facts = dict(body)
     facts["position"] = body.get("pos")
     facts["nearby_entities"] = entities
