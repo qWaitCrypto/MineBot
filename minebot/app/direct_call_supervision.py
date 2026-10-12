@@ -609,66 +609,6 @@ class CallSupervisor:
             if self.current is record:
                 self.current = previous_current
 
-    async def _handoff(
-        self, record: dict[str, Any], execution: Mapping[str, Any],
-        details: Mapping[str, Any], *, decision: str | None,
-        plan: Mapping[str, Any] | None = None,
-    ) -> None:
-        if self.current is not record or record["cancel_requested"]:
-            return
-        record["cancel_requested"] = record["settling"] = True
-        call_id = record["call_id"]
-        safe = self._handoff_facts(
-            self._snapshot(call_id) or execution,
-            reason=str(details.get("reason") or "decision_call_agent"),
-            confirmed=bool(details.get("confirmed")), decision=decision,
-            plan=plan, extra=details,
-        )
-        self.runtime.trace.emit("direct_call_blocked", tool_call_id=call_id, facts=safe)
-        self.runtime.trace.emit(
-            "call_supervision_stop_requested", tool_call_id=call_id,
-            tool=execution.get("tool"), reason=safe["reason"], decision=decision,
-        )
-        # The existing stop/settlement entry remains the only stop owner. Do
-        # not revoke the containing plan: step_done must let it advance.
-        is_plan = bool(record["supervision_context"].get("is_plan"))
-        started = time.monotonic()
-        settled = await self.runtime.cancel_active_execution_with_facts(
-            "direct_call:" + safe["reason"], cancel_reflex=False,
-            # A plan handoff stops the current node but does not invalidate
-            # the containing activity. Direct calls have no owner to preserve
-            # and keep the existing generation invalidation safety boundary.
-            invalidate_generation=not is_plan,
-        )
-        self.runtime.trace.emit(
-            "call_supervision_stop_settled", tool_call_id=call_id,
-            elapsed_s=time.monotonic() - started,
-            settled=bool(settled.get("settled")) if isinstance(settled, Mapping) else None,
-        )
-        self.runtime.trace.emit(
-            "direct_call_handoff", tool_call_id=call_id, facts=safe, settlement=settled,
-        )
-        self.runtime.direct_call_handoffs[call_id] = {"facts": safe, "settlement": settled}
-        remember = getattr(self, "record_experience", None)
-        if callable(remember):
-            remember(
-                f"{safe.get('what', {}).get('tool', execution.get('tool'))} was stopped by "
-                f"Decision ({safe.get('decision', {}).get('choice') or 'unknown'}); "
-                f"the Body is at {safe.get('body', {}).get('position')}."
-            )
-        # Only after the unified stop path has settled may a direct call send
-        # its fact to the Agent. Plan calls are reported once by
-        # ReflexManager, after WorkPlanExecutor records the node state; doing
-        # both here and there would create two facts for one stopped node.
-        if not is_plan:
-            # Use the runtime's unified delivery path.  Responses sessions
-            # forward this to the kernel; SDK sessions forward it to their
-            # outer AgentSession listener.  Calling the kernel directly here
-            # silently drops the handoff for SDK direct calls.
-            notify_fact = getattr(self.runtime, "notify_reflex_fact", None)
-            if callable(notify_fact):
-                notify_fact({"call_id": call_id, "status": "handoff_requested", **safe})
-
 
 
 # Compatibility name for slice-1 callers.
