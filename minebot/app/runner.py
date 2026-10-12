@@ -1967,6 +1967,31 @@ class AgentRuntime:
         claim_generation: int | None = None
         if tool.sidecar.can_mutate_body:
             control = self.body_control
+            # Life actions may be interrupted immediately when an Agent call
+            # arrives.  A threat action keeps the Body until it settles; an
+            # Agent call waits only for its own timeout and then receives the
+            # ordinary body_busy result.  Both paths use the existing stop and
+            # claim records; no second admission lock is introduced.
+            if claim_holder in {"agent_call", "agent_plan"}:
+                snapshot = control.snapshot()
+                if snapshot.holder == "life" and snapshot.stop_state == "running":
+                    await self.cancel_active_execution_with_facts(
+                        "agent_call_arrived", invalidate_generation=False, cancel_reflex=False,
+                    )
+                elif snapshot.holder == "threat" and snapshot.stop_state == "running":
+                    deadline = time.monotonic() + max(0.0, float(timeout_s or 0.0))
+                    self.trace.emit(
+                        "body_call_waiting", tool_call_id=tool_call_id,
+                        holder="threat", timeout_s=max(0.0, float(timeout_s or 0.0)),
+                    )
+                    while True:
+                        snapshot = control.snapshot()
+                        if snapshot.holder != "threat" or snapshot.stop_state != "running":
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise BodyRecoveryRequired("body_busy", facts={"holder": snapshot.to_payload()})
+                        await asyncio.sleep(min(0.05, remaining))
             if control.unknown:
                 probe = getattr(self.body, "confirm_control_idle", None)
                 native = None
