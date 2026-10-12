@@ -272,6 +272,20 @@ def frame_options(
     return options
 
 
+def after_default_options(
+    *, original_call: str, intent: str, default_call: str, result: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """What the Body may do once a protective action has ended."""
+    result = result if isinstance(result, Mapping) else {}
+    options = {
+        "resume": f"Go back to the earlier work, {original_call}" + (f", for: “{intent}”" if intent else "."),
+    }
+    if not (result.get("success") is not True and result.get("canRetry") is False):
+        options["repeat"] = f"Run the same call again: {default_call}."
+    options["call_agent"] = "Do not go back and hand control back to the Agent for a new plan."
+    return options
+
+
 def frame_questions(options: Mapping[str, str]) -> dict[str, Any]:
     """One request.  The danger question is asked only when a protective
     action is on offer in this frame."""
@@ -313,7 +327,7 @@ def frame_choice(raw: Mapping[str, Any] | None, questions: Mapping[str, Any]) ->
 
 
 __all__ = [
-    "PROTECTIVE", "VitalWindow", "attempt_lines", "call_text", "frame_choice",
+    "PROTECTIVE", "VitalWindow", "after_default_options", "attempt_lines", "call_text", "frame_choice",
     "frame_options", "frame_questions", "frame_state", "hostiles", "just_hurt",
     "only_option", "result_sentence",
 ]

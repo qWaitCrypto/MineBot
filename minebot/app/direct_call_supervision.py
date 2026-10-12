@@ -20,6 +20,7 @@ from typing import Any
 
 from minebot.app import reflex_question as rq
 from minebot.app.decision_client import DecisionClient, DecisionPriority
+from minebot.body.use import _is_food_item
 from minebot.app.execution_snapshot import FACT_FRAME_INTERVAL_S
 from minebot.contract.execution import tool_observation_scope
 
@@ -82,6 +83,13 @@ class CallSupervisor:
             return {}
         facts = dict(execution.get("facts") or {})
         facts.update(self._vitals.add(time.monotonic(), facts))
+        inventory = facts.get("inventory", facts.get("inventory_counts"))
+        if "food_item" not in facts and isinstance(inventory, Mapping):
+            # Which items are food is the Body's knowledge, not the reflex layer's.
+            food = next((str(item) for item, count in inventory.items()
+                         if isinstance(count, int) and count > 0 and _is_food_item(str(item))), None)
+            if food:
+                facts["food_item"] = food
         return {**execution, "facts": facts}
 
     def _snapshot(self, call_id: str) -> dict[str, Any]:
@@ -509,31 +517,43 @@ class CallSupervisor:
             with tool_observation_scope(call_id, notify):
                 return callback(*args)
 
-        worker = asyncio.create_task(self.runtime.execution_lane.run(invoke, timeout_s=timeout_s))
         params = args[1] if len(args) > 1 and isinstance(args[1], Mapping) else {}
         monitor: asyncio.Task[Any] | None = None
+        direct = (getattr(self.runtime, "reflex_manager", None) is not None
+                  and not bool(record["supervision_context"].get("is_plan")))
         try:
-            grace = min(FAST_COMPLETION_GRACE_S, max(0.0, self.suspicion_s))
-            if grace:
-                done, _ = await asyncio.wait({worker}, timeout=grace)
-                if not done:
+            while True:
+                worker = asyncio.create_task(self.runtime.execution_lane.run(invoke, timeout_s=timeout_s))
+                grace = min(FAST_COMPLETION_GRACE_S, max(0.0, self.suspicion_s))
+                if grace:
+                    done, _ = await asyncio.wait({worker}, timeout=grace)
+                    if not done:
+                        monitor = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
+                        record["monitor_task"] = monitor
+                else:
                     monitor = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
                     record["monitor_task"] = monitor
-            else:
-                monitor = asyncio.create_task(self._monitor(record, tool, params, wake, worker))
-                record["monitor_task"] = monitor
-            result = await worker
-            if monitor is not None:
-                await monitor
-                monitor = None
-            # A direct call is a one-node work tree.  Its terminal result is a
-            # fact; plan calls are judged by WorkPlanExecutor, the sole owner
-            # of repeat.  Direct calls ask one result question and never
-            # replay the Body invocation inside this supervisor.
-            if (not record["cancel_requested"]
-                    and getattr(self.runtime, "reflex_manager", None) is not None
-                    and not bool(record["supervision_context"].get("is_plan"))):
-                await self._decide_result(record, tool, params, result)
+                result = await worker
+                if monitor is not None:
+                    await monitor
+                    monitor = None
+                # A direct call is a one-node work tree: when it ends, Decision
+                # chooses between running it again, calling it done, and the
+                # Agent.  Plan calls are judged by WorkPlanExecutor instead.
+                again = False
+                if direct and record.pop("resume_original", False):
+                    again = True
+                elif direct and not record["cancel_requested"]:
+                    again = await self._decide_result(record, tool, params, result) == "repeat"
+                if not again:
+                    break
+                record["cancel_requested"] = record["settling"] = False
+                record["initial_reader_done"] = record["reader_new_fact"] = False
+                record.pop("decision", None)
+                self.runtime.direct_call_handoffs.pop(call_id, None)
+                if snapshots is not None:
+                    snapshots.begin(call_id, record["tool"], record["params"])
+                wake.clear()
             handoff = self.runtime.direct_call_handoffs.get(call_id)
             payload = result if isinstance(result, dict) else getattr(result, "result", None)
             if handoff is not None and isinstance(payload, dict):
@@ -574,12 +594,20 @@ class CallSupervisor:
         execution = self._frame({**execution, "state": "succeeded" if payload.get("success") is True else "failed",
                                  "result": dict(payload)})
         options = self._options_for(tool, record, execution=execution)
+        body = dict(execution.get("facts") or {})
+        history = record.setdefault("history", [])
+        history.append({"result": self._compact_result(payload),
+                        "body": {"position": body.get("position"), "inventory": body.get("inventory")}})
+        record["history_total"] = int(record.get("history_total") or 0) + 1
+        del history[:-5]
         context = {
             "tool_result": dict(payload),
             "tool_arguments": dict(params),
-            "body_state": dict(execution.get("facts") or {}),
+            "body_state": body,
             "execution": execution,
             "reads": [],
+            "history": list(history),
+            "history_earlier": record["history_total"] - len(history),
         }
         try:
             # A terminal result must never hold the Body or an Agent turn
@@ -596,8 +624,10 @@ class CallSupervisor:
         if choice == "unknown":
             record["unknown_answers"] += 1
             return "unknown"
-        choice = {"next_step": "step_done", "keep_going": "repeat"}.get(choice, choice)
-        if choice in {"step_done", "repeat", "call_agent"}:
+        if choice == "repeat":
+            return "repeat"
+        choice = {"next_step": "step_done"}.get(choice, choice)
+        if choice in {"step_done", "call_agent"}:
             record["decision"] = choice
             # The Body is already terminal.  Store the result judgement for
             # the caller without routing a second stop through the running
@@ -921,16 +951,17 @@ class CallSupervisor:
         )
         settled = await self.runtime.cancel_active_execution_with_facts(
             "direct_call:decision_default_tool", cancel_reflex=False,
-            invalidate_generation=not bool(record["supervision_context"].get("is_plan")),
+            # The earlier work may be resumed, so its owner stays valid.
+            invalidate_generation=False,
         )
         default_result: Any = None
+        default_id = f"reflex-default-{uuid4()}"
         registry = getattr(self.runtime, "registry", None)
         try:
             default_tool = registry.get(action[0]) if registry is not None else None
             if default_tool is None:
                 raise LookupError(action[0])
             from minebot.brain.registry import execute_tool
-            default_id = f"reflex-default-{uuid4()}"
             default_result = await self.runtime.run_tool(
                 default_tool, execute_tool, default_tool, action[1],
                 getattr(self.runtime, "weld_context", None),
@@ -948,18 +979,79 @@ class CallSupervisor:
                 choice=choice, error_type=type(exc).__name__,
             )
             default_result = {"success": False, "reason": type(exc).__name__}
+        after = await self._after_default_action(record, action, default_result, default_id)
         handoff = {**safe, "default_action": {
             "choice": choice, "tool": action[0], "result": self._compact_result(default_result),
+            "then": after,
         }, "settlement": settled}
+        # The plan runtime reads this choice: "repeat" re-enters the stopped node.
+        handoff["decision"] = {**dict(handoff.get("decision") or {}),
+                               "choice": "repeat" if after == "resume" else "call_agent"}
         self.runtime.direct_call_handoffs[call_id] = {"facts": handoff, "settlement": settled}
         self.runtime.trace.emit(
             "call_supervision_default_finished", tool_call_id=call_id,
             choice=choice, facts=handoff,
         )
-        if not bool(record["supervision_context"].get("is_plan")):
+        if after == "resume":
+            # Back to the earlier work; the Agent is not woken for this.
+            record["resume_original"] = True
+        elif not bool(record["supervision_context"].get("is_plan")):
             notify_fact = getattr(self.runtime, "notify_reflex_fact", None)
             if callable(notify_fact):
                 notify_fact({"call_id": call_id, "status": "default_action_completed", **handoff})
+
+    async def _after_default_action(
+        self, record: dict[str, Any], action: tuple[str, dict[str, Any]],
+        default_result: Any, default_id: str,
+    ) -> str:
+        """Ask what follows a protective action: go back, do it again, or the Agent."""
+        context = record["supervision_context"]
+        intent = str(context.get("intent") or context.get("node_description") or "")
+        registry = getattr(self.runtime, "registry", None)
+        default_tool = registry.get(action[0]) if registry is not None else None
+        history: list[dict[str, Any]] = []
+        total = 0
+        while default_tool is not None:
+            payload = default_result if isinstance(default_result, Mapping) else getattr(default_result, "result", default_result)
+            if not isinstance(payload, Mapping):
+                payload = {"success": False, "reason": str(payload)[:200]}
+            state = getattr(self.runtime, "last_known_body_state", None)
+            facts = dict(state) if isinstance(state, Mapping) else {}
+            execution = self._frame({"tool": action[0], "state": "succeeded" if payload.get("success") is True else "failed",
+                                     "facts": facts, "result": dict(payload)})
+            history.append({"result": self._compact_result(payload),
+                            "body": {"position": facts.get("position", facts.get("pos")), "inventory": facts.get("inventory")}})
+            total += 1
+            del history[:-5]
+            options = rq.after_default_options(
+                original_call=rq.call_text(record["tool"], record["params"]), intent=intent,
+                default_call=rq.call_text(action[0], action[1]), result=payload,
+            )
+            try:
+                choice = await asyncio.wait_for(self._judge_frame(
+                    record["call_id"], default_tool, action[1], execution, 0.0,
+                    purpose="default_result_frame", supervision_context=context, options=options,
+                    decision_context={"tool_result": dict(payload), "tool_arguments": dict(action[1]),
+                                      "body_state": execution["facts"], "history": list(history),
+                                      "history_earlier": total - len(history)},
+                ), timeout=2.2)
+            except asyncio.TimeoutError:
+                choice = "unknown"
+            record["questions"] += 1
+            if choice != "repeat":
+                return "resume" if choice == "resume" else "call_agent"
+            try:
+                from minebot.brain.registry import execute_tool
+                default_result = await self.runtime.run_tool(
+                    default_tool, execute_tool, default_tool, action[1],
+                    getattr(self.runtime, "weld_context", None),
+                    tool_call_id=f"{default_id}-{total}", claim_holder="agent_call",
+                    supervision_context={"is_reflex_action": True, "_skip_supervision": True,
+                                         "intent": _DEFAULT_ACTION_TEXT.get(action[0], action[0])},
+                )
+            except Exception as exc:
+                default_result = {"success": False, "reason": type(exc).__name__, "canRetry": False}
+        return "call_agent"
 
 
 # Compatibility name for slice-1 callers.

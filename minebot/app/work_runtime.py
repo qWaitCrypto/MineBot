@@ -534,6 +534,12 @@ class WorkPlanExecutor:
                     handoff_choice = handoff.get("facts", {}).get("decision", {}).get("choice") if isinstance(handoff, dict) else None
                     if handoff_choice in {"step_done", "next_step", "call_agent"}:
                         status = self._apply_call_choice(node, node_key, chain, record, handoff_choice, item=item)
+                    elif handoff_choice == "repeat":
+                        # A protective action interrupted this call and Decision
+                        # chose to go back to it.
+                        record.decision_pending = False
+                        record.status = "active"
+                        status = "repeat"
                     else:
                         status = await self._decide_call(node, node_key, chain, record, item=item)
                 if status != "repeat":

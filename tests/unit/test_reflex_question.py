@@ -123,3 +123,18 @@ def test_danger_is_asked_only_when_a_protective_action_is_on_offer():
     assert rq.frame_choice(raw(q="keep_going"), calm) == "keep_going"
     assert rq.frame_choice(raw(q="made_up"), calm) == "unknown"
     assert rq.frame_choice(None, calm) == "unknown"
+
+
+def test_after_a_protective_action_the_body_may_go_back_to_its_work():
+    options = rq.after_default_options(
+        original_call='collect_resource(count=3, item="raw_iron")', intent="get 3 raw iron",
+        default_call="go_to_surface()", result={"success": True},
+    )
+    assert options == {
+        "resume": 'Go back to the earlier work, collect_resource(count=3, item="raw_iron"), for: “get 3 raw iron”',
+        "repeat": "Run the same call again: go_to_surface().",
+        "call_agent": "Do not go back and hand control back to the Agent for a new plan.",
+    }
+    stuck = rq.after_default_options(original_call="x()", intent="", default_call="go_to_surface()",
+                                     result={"success": False, "reason": "blocked", "canRetry": False})
+    assert list(stuck) == ["resume", "call_agent"]
