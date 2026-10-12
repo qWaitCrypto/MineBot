@@ -373,6 +373,12 @@ class CallSupervisor:
             tree=supplied,
             intent_of_plan=bool(context.get("intent_of_plan")),
         )
+        # A protective call is already the selected response to danger.  It
+        # must be allowed to run or finish, never start the same protective
+        # action again from its own supervision frame.
+        reflex_choice = context.get("reflex_action_choice")
+        if isinstance(reflex_choice, str):
+            options.pop(reflex_choice, None)
         if callable(getattr(tool, "supervision_reader", None)) and record.get("reader_new_fact"):
             options["inspect"] = "Read one new registered fact."
         return options
@@ -495,6 +501,10 @@ class CallSupervisor:
             "initial_reader_done": False,
             "reader_new_fact": False,
         }
+        # A protective action can be launched while its parent call is still
+        # settling.  Preserve that parent so the per-Body loop does not lose
+        # ownership when the short reflex call returns.
+        previous_current = self.current
         self.current = record
 
         def receive(payload: Mapping[str, Any]) -> None:
@@ -592,7 +602,7 @@ class CallSupervisor:
                 ),
             )
             if self.current is record:
-                self.current = None
+                self.current = previous_current
 
     async def _decide_result(
         self, record: dict[str, Any], tool: Any, params: Mapping[str, Any], result: Any,
@@ -985,9 +995,10 @@ class CallSupervisor:
                 default_tool, execute_tool, default_tool, action[1],
                 getattr(self.runtime, "weld_context", None),
                 tool_call_id=default_id,
-                claim_holder="agent_call",
+                claim_holder="threat",
                 supervision_context={
                     "is_reflex_action": True,
+                    "reflex_action_choice": choice,
                     "intent": _DEFAULT_ACTION_TEXT.get(choice, choice),
                 },
             )
@@ -1064,8 +1075,9 @@ class CallSupervisor:
                 default_result = await self.runtime.run_tool(
                     default_tool, execute_tool, default_tool, action[1],
                     getattr(self.runtime, "weld_context", None),
-                    tool_call_id=f"{default_id}-{total}", claim_holder="agent_call",
+                    tool_call_id=f"{default_id}-{total}", claim_holder="threat",
                     supervision_context={"is_reflex_action": True,
+                                         "reflex_action_choice": choice,
                                          "intent": _DEFAULT_ACTION_TEXT.get(action[0], action[0])},
                 )
             except Exception as exc:

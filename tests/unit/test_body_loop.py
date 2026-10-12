@@ -90,6 +90,62 @@ def test_reflex_experiences_are_bounded_and_available_to_live_context():
     assert list(loop.recent_experiences) == [f"experience {index}" for index in range(2, 7)]
 
 
+def test_idle_protection_is_executed_once_through_life_claim():
+    async def run():
+        runtime, trace, _decision = _runtime()
+        calls = []
+
+        class Tool:
+            name = "go_to_surface"
+
+        runtime.registry = SimpleNamespace(get=lambda name: Tool())
+        runtime.weld_context = None
+
+        async def run_tool(*args, **kwargs):
+            calls.append(kwargs)
+            return {"success": True, "reason": "surface_reached"}
+
+        runtime.run_tool = run_tool
+        loop = BodyLoop(runtime)
+        await loop._run_idle_protection("surface", {"oxygen": 100, "position": [1, 60, 2]})
+        assert calls and calls[0]["claim_holder"] == "life"
+        assert calls[0]["supervision_context"]["is_reflex_action"] is True
+        assert calls[0]["supervision_context"]["reflex_action_choice"] == "surface"
+        assert any(e["event"] == "call_supervision_default_finished" for e in trace.events)
+
+    asyncio.run(run())
+
+
+def test_reflex_action_cannot_offer_the_same_protective_action_again():
+    runtime, _trace, _decision = _runtime()
+    record = {
+        "tool": "move_to",
+        "params": {},
+        "supervision_context": {
+            "is_reflex_action": True,
+            "reflex_action_choice": "surface",
+            "intent": "swim up to air",
+        },
+    }
+    options = CallSupervisor._options_for(
+        SimpleNamespace(name="go_to_surface"), record,
+        execution={"state": "running", "facts": {"oxygen": 100}},
+    )
+    assert "surface" not in options
+    assert "keep_going" in options
+
+
+def test_body_loop_state_changes_are_reported_with_standard_fields():
+    runtime, trace, _decision = _runtime()
+    loop = BodyLoop(runtime)
+    loop._set_state("survival", "decision")
+    assert loop.loop_state == "survival"
+    event = next(item for item in trace.events if item["event"] == "reflex_state_changed")
+    assert event["from"] == "idle"
+    assert event["to"] == "survival"
+    assert event["cause"] == "decision"
+
+
 def test_plan_result_uses_the_same_body_loop_judge_once():
     async def run():
         calls = []

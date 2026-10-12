@@ -34,6 +34,31 @@ class BodyLoop(CallSupervisor):
         self._idle_sequence = 0
         self.recent_experiences: deque[str] = deque(maxlen=5)
 
+    async def run(self, tool: Any, callback: Any, args: tuple[Any, ...], **kwargs: Any) -> Any:
+        """Keep the lifecycle state aligned with the one physical call path."""
+        context = kwargs.get("supervision_context") or {}
+        context = context if isinstance(context, Mapping) else {}
+        previous = self.loop_state
+        if context.get("is_reflex_action"):
+            choice = context.get("reflex_action_choice")
+            target = "threat" if choice == "move_away" else "survival"
+        else:
+            target = "work"
+        self._set_state(target, "agent_call" if target == "work" else "decision")
+        try:
+            return await super().run(tool, callback, args, **kwargs)
+        finally:
+            self._set_state(previous, "call_ended")
+
+    def _set_state(self, state: str, cause: str) -> None:
+        if state == self.loop_state:
+            return
+        previous = self.loop_state
+        self.loop_state = state
+        self.runtime.trace.emit(
+            "reflex_state_changed", **{"from": previous, "to": state, "cause": cause}
+        )
+
     def record_experience(self, text: str) -> None:
         """Keep the short reflex handoff history used by live Agent context."""
         value = str(text).strip()
@@ -146,12 +171,61 @@ class BodyLoop(CallSupervisor):
             state["inventory"] = ", ".join(f"{k}={v}" for k, v in inventory.items()) or "empty"
         return {"state": state, "questions": rq.frame_questions(options)}
 
+    async def _run_idle_protection(self, choice: str, facts: Mapping[str, Any]) -> None:
+        """Execute one reversible idle protection action through run_tool."""
+        action = self._default_action(choice, {"facts": dict(facts)})
+        if action is None:
+            return
+        registry = getattr(self.runtime, "registry", None)
+        default_tool = registry.get(action[0]) if registry is not None else None
+        if default_tool is None:
+            self.runtime.trace.emit("call_supervision_default_unknown", tool_call_id="idle-loop", choice=choice)
+            return
+        from minebot.brain.registry import execute_tool
+
+        call_id = f"reflex-idle-{self._idle_sequence}"
+        self.runtime.trace.emit(
+            "call_supervision_default_requested", tool_call_id="idle-loop",
+            choice=choice, tool=action[0], arguments=action[1], loop_state=self.loop_state,
+        )
+        try:
+            result = await self.runtime.run_tool(
+                default_tool, execute_tool, default_tool, action[1],
+                getattr(self.runtime, "weld_context", None),
+                tool_call_id=call_id, claim_holder="life",
+                supervision_context={
+                    "is_reflex_action": True,
+                    "reflex_action_choice": choice,
+                    "intent": {"surface": "Swim up to air.", "eat": "Eat food from the inventory.",
+                               "move_away": "Move away from the nearby hostile mob.",
+                               "retreat_safe": "Go back to the last safe standing place."}.get(choice, choice),
+                },
+            )
+            compact = CallSupervisor._compact_result(result)
+            self.record_experience(
+                f"The Body took the protective action {choice} while idle; "
+                f"the action result was {compact}."
+            )
+            self.runtime.trace.emit(
+                "call_supervision_default_finished", tool_call_id="idle-loop",
+                choice=choice, tool=action[0], result=compact,
+            )
+        except Exception as exc:
+            self.runtime.trace.emit(
+                "call_supervision_default_failed", tool_call_id="idle-loop",
+                choice=choice, error_type=type(exc).__name__,
+            )
+
+    @staticmethod
+    def _default_action(choice: str, execution: Mapping[str, Any]) -> tuple[str, dict[str, Any]] | None:
+        return CallSupervisor._default_action(choice, execution)
+
     async def _idle_frames(self) -> None:
         """Produce idle facts at the same cadence as running frames.
 
-        This skeleton deliberately only reports the finite choice.  Protective
-        action execution is added by the survival slice; no write is started by
-        an unknown or an idle answer in Step 2.
+        Unknown answers remain inert.  A selected protective action is the
+        only write this step executes while idle, and it uses the existing
+        ``run_tool`` admission and settlement path.
         """
         try:
             while True:
@@ -186,6 +260,8 @@ class BodyLoop(CallSupervisor):
                     unknown=choice == "unknown",
                     decision_ms=round((time.monotonic() - started) * 1000.0, 3),
                 )
+                if choice in rq.PROTECTIVE or choice == "eat":
+                    await self._run_idle_protection(choice, facts)
         except asyncio.CancelledError:
             raise
 
