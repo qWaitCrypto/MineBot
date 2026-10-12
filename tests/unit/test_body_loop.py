@@ -146,6 +146,12 @@ def test_body_loop_state_changes_are_reported_with_standard_fields():
     assert event["cause"] == "decision"
 
 
+def test_body_loop_owns_the_running_frame_consumer():
+    runtime, _trace, _decision = _runtime()
+    assert "_monitor" not in CallSupervisor.__dict__
+    assert "_monitor" in BodyLoop.__dict__
+
+
 def test_running_question_trace_identifies_the_body_loop_state():
     async def run():
         runtime, trace, _decision = _runtime()

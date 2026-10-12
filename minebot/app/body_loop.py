@@ -17,6 +17,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping
 
 from minebot.app import reflex_question as rq
+from minebot.app import direct_call_supervision as supervision_module
 from minebot.app.direct_call_supervision import (
     CallSupervisor,
     FACT_FRAME_INTERVAL_S,
@@ -49,6 +50,154 @@ class BodyLoop(CallSupervisor):
             return await super().run(tool, callback, args, **kwargs)
         finally:
             self._set_state(previous, "call_ended")
+
+    async def _monitor(
+        self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
+        wake: asyncio.Event, worker: asyncio.Task[Any],
+    ) -> None:
+        """Consume work facts and execute the one in-flight Decision answer.
+
+        ``CallSupervisor`` supplies the call registration and settlement
+        helpers; this Body-owned method is the only frame consumer.  A newer
+        fact replaces a pending frame while a Decision request is in flight.
+        """
+        last_revision = -1
+        decision_task: asyncio.Task[str] | None = None
+        pending: tuple[dict[str, Any], float, str] | None = None
+        decision_revision = -1
+        snapshots = getattr(self.runtime, "execution_snapshots", None)
+        while not record["cancel_requested"]:
+            if worker.done() and decision_task is None:
+                return
+            wake_wait = asyncio.create_task(wake.wait())
+            clock_wait = asyncio.create_task(asyncio.sleep(supervision_module.FACT_FRAME_INTERVAL_S))
+            wait_set: set[asyncio.Future[Any]] = {wake_wait, clock_wait}
+            if decision_task is not None:
+                wait_set.add(decision_task)
+            if not worker.done():
+                wait_set.add(worker)
+            done, _pending_tasks = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+            finished_decision = decision_task if decision_task is not None and decision_task in done else None
+            if clock_wait in done and not worker.done() and snapshots is not None:
+                snapshots.tick(record["call_id"])
+            if wake_wait in done or clock_wait in done:
+                wake.clear()
+                execution = self._frame(self._snapshot(record["call_id"]))
+                if execution:
+                    revision = int(execution.get("fact_revision") or 0)
+                    phase_changed = execution.get("phase") != record.get("last_phase")
+                    record["last_phase"] = execution.get("phase")
+                    if revision > last_revision and (phase_changed or revision != last_revision):
+                        last_revision = revision
+                        idle_s = float(execution.get("since_progress_s") or 0.0)
+                        frame = (execution, idle_s, "running_frame")
+                        if (not record["initial_reader_done"]
+                                and callable(getattr(tool, "supervision_reader", None))):
+                            record["initial_reader_done"] = True
+                            await self._bounded_read(record, tool, params)
+                            execution = self._frame(self._snapshot(record["call_id"]) or execution)
+                        frame_options = self._options_for(
+                            tool, record,
+                            supplied=self._tree_options(record["supervision_context"]),
+                            execution=execution,
+                        )
+                        if decision_task is not None and not decision_task.done():
+                            pending = frame
+                        elif decision_task is None and execution.get("state") not in {"succeeded", "failed", "cancelled", "unknown"}:
+                            decision_revision = revision
+                            decision_task = asyncio.create_task(self._judge_frame(
+                                record["call_id"], tool, params, execution, idle_s,
+                                purpose="running_frame",
+                                supervision_context=record["supervision_context"], options=frame_options,
+                            ))
+                            record["decision_task"] = decision_task
+            if finished_decision is not None:
+                try:
+                    choice = finished_decision.result()
+                except Exception:
+                    choice = "unknown"
+                if decision_task is finished_decision:
+                    decision_task = None
+                record["questions"] += 1
+                if choice == "unknown":
+                    record["unknown_answers"] += 1
+                execution = self._snapshot(record["call_id"]) or (pending[0] if pending else {})
+                if choice == "inspect" and record["reads"] < self.max_reads:
+                    record["reader_new_fact"] = False
+                    read = await self._bounded_read(record, tool, params)
+                    blocker = self._deterministic_terminal(
+                        self._snapshot(record["call_id"]) or execution, read,
+                    )
+                    if blocker is not None:
+                        await self._handoff(
+                            record, self._snapshot(record["call_id"]) or execution,
+                            blocker, decision=None,
+                            plan=self._plan_context(
+                                supervision_context=record["supervision_context"],
+                                tool=tool, params=params,
+                            ),
+                        )
+                        return
+                elif choice == "inspect":
+                    self.runtime.trace.emit(
+                        "call_supervision_limit", tool_call_id=record["call_id"],
+                        tool=getattr(tool, "name", "unknown"), kind="reads", limit=self.max_reads,
+                    )
+                elif choice in {"step_done", "next_step", "call_agent"}:
+                    record["decision"] = choice
+                    plan = self._plan_context(
+                        supervision_context=record["supervision_context"],
+                        tool=tool, params=params,
+                    )
+                    normalized_choice = "step_done" if choice in {"step_done", "next_step"} else choice
+                    record["decision"] = normalized_choice
+                    reason = "decision_step_done" if normalized_choice == "step_done" else "decision_call_agent"
+                    await self._handoff(
+                        record, execution,
+                        {"reason": reason, "confirmed": normalized_choice == "step_done"},
+                        decision=choice, plan=plan,
+                    )
+                    return
+                elif choice in {"surface", "go_to_surface", "retreat_safe", "eat", "move_away"}:
+                    action = self._default_action(choice, execution)
+                    if action is not None:
+                        await self._run_default_action(record, execution, choice, action)
+                        return
+                    self.runtime.trace.emit(
+                        "call_supervision_default_unknown", tool_call_id=record["call_id"],
+                        choice=choice,
+                    )
+                if pending is not None:
+                    frame = pending
+                    pending = None
+                    if int(frame[0].get("fact_revision") or -1) > decision_revision:
+                        decision_revision = int(frame[0].get("fact_revision") or -1)
+                        decision_task = asyncio.create_task(self._judge_frame(
+                            record["call_id"], tool, params, frame[0], frame[1],
+                            purpose=frame[2], supervision_context=record["supervision_context"],
+                            options=self._options_for(
+                                tool, record,
+                                supplied=self._tree_options(record["supervision_context"]),
+                                execution=frame[0],
+                            ),
+                        ))
+                        record["decision_task"] = decision_task
+            if worker in done and decision_task is None:
+                for waiter in (wake_wait, clock_wait):
+                    if waiter not in done:
+                        waiter.cancel()
+                await asyncio.gather(wake_wait, clock_wait, return_exceptions=True)
+                return
+            if wake_wait not in done and decision_task is None and worker.done():
+                for waiter in (wake_wait, clock_wait):
+                    if waiter not in done:
+                        waiter.cancel()
+                await asyncio.gather(wake_wait, clock_wait, return_exceptions=True)
+                return
+            for waiter in (wake_wait, clock_wait):
+                if waiter not in done:
+                    waiter.cancel()
+            await asyncio.gather(wake_wait, clock_wait, return_exceptions=True)
 
     def _set_state(self, state: str, cause: str) -> None:
         if state == self.loop_state:
