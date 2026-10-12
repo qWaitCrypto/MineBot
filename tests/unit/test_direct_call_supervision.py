@@ -327,6 +327,9 @@ def test_normal_long_non_build_call_uses_shared_supervisor_without_question():
         decision = StubDecision(("continue",))
         runtime.call_supervisor._client = decision
         try:
+            # Exercise the per-Body lifecycle task rather than the
+            # pre-session compatibility child monitor.
+            await runtime.body_loop.start()
             result = await runtime.run_tool(tool, execute_tool, tool, {"target": [1, 5, 0], "intent": "reach the requested target"},
                                             runtime.weld_context, tool_call_id="move-call", timeout_s=2)
             assert result["success"]
@@ -348,6 +351,7 @@ def test_shared_supervisor_yield_stops_generic_call_and_delivers_one_fact():
         decision = StubDecision(("step_done",))
         runtime.call_supervisor._client = decision
         try:
+            await runtime.body_loop.start()
             result = await asyncio.wait_for(runtime.run_tool(
                 tool, execute_tool, tool, {"target": [1, 5, 0], "intent": "reach the requested target"}, runtime.weld_context,
                 tool_call_id="original-generic", timeout_s=2), 2)
