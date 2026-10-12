@@ -305,6 +305,8 @@ class CallSupervisor:
         if isinstance(inventory, Mapping):
             entries = [f"{item}={count}" for item, count in list(inventory.items())[:8]]
             facts["inventory_now"] = "inventory now contains " + (", ".join(entries) or "no listed items") + "."
+        else:
+            facts["inventory_now"] = "Inventory contents were not included in this Body sample."
         goal = compact_facts.get("goal")
         if isinstance(goal, str) and goal:
             facts["body_goal"] = f"The Body is currently pursuing {goal}."
