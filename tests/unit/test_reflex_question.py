@@ -138,3 +138,18 @@ def test_after_a_protective_action_the_body_may_go_back_to_its_work():
     stuck = rq.after_default_options(original_call="x()", intent="", default_call="go_to_surface()",
                                      result={"success": False, "reason": "blocked", "canRetry": False})
     assert list(stuck) == ["resume", "call_agent"]
+
+
+def test_a_step_without_its_own_intent_is_said_to_be_one_step_of_the_plan():
+    # Live run reflex-stage-20261012d: read as the step's own purpose, the
+    # plan's "make a stone pickaxe" made gathering stop after four seconds.
+    common = dict(tool="collect_resource", params={"item": "cobblestone", "count": 3}, facts={},
+                  running=True, next_call='craft_item(item="stone_pickaxe")')
+    own = rq.frame_options(intent="have 3 cobblestone", **common)
+    inherited = rq.frame_options(intent="make and equip a stone pickaxe", intent_of_plan=True, **common)
+    assert own["keep_going"] == (
+        'Keep doing the current work, collect_resource(item="cobblestone", count=3), for: “have 3 cobblestone”')
+    assert inherited["keep_going"] == (
+        'Keep doing the current step, collect_resource(item="cobblestone", count=3). '
+        'It is one step of the plan: “make and equip a stone pickaxe”')
+    assert list(inherited) == list(own)

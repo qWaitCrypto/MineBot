@@ -234,18 +234,27 @@ def frame_options(
     *, tool: str, params: Mapping[str, Any] | None, intent: str,
     facts: Mapping[str, Any], running: bool, result: Mapping[str, Any] | None = None,
     next_call: str = "", tree: Mapping[str, str] | None = None, repeat_note: str = "",
+    intent_of_plan: bool = False,
 ) -> dict[str, str]:
-    """The concrete things the Body may do next in this frame."""
+    """The concrete things the Body may do next in this frame.
+
+    ``intent_of_plan`` says the step wrote no intent of its own and ``intent``
+    is the one of the plan around it.
+    """
     call = call_text(tool, params)
     result = result if isinstance(result, Mapping) else {}
     failed = not running and result.get("success") is not True
     stop = "Stop the current action" if running else "Do not repeat it"
     options: dict[str, str] = {}
     if running:
-        options["keep_going"] = (
-            f"Keep doing the current work, {call}, for: “{intent}”" if intent
-            else f"Keep doing the current work, {call}."
-        )
+        if intent and intent_of_plan:
+            # Said as the plan's words: read as this step's own purpose, a
+            # plan that ends in the next step makes the next step look due.
+            options["keep_going"] = f"Keep doing the current step, {call}. It is one step of the plan: “{intent}”"
+        elif intent:
+            options["keep_going"] = f"Keep doing the current work, {call}, for: “{intent}”"
+        else:
+            options["keep_going"] = f"Keep doing the current work, {call}."
     elif not (failed and result.get("canRetry") is False):
         options["repeat"] = f"Run the same call again: {call}." + (f" {repeat_note}" if repeat_note else "")
     # After a failed step the plan cannot simply move on: later steps depend on it.

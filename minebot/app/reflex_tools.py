@@ -363,10 +363,13 @@ class ReflexManager:
                     return
                 next_chain = chain + ([str(node["intent"])] if node.get("intent") else [])
                 if node.get("kind") == "call" and str(node.get("id") or "") == lookup_id:
-                    intent = str(node.get("intent") or (next_chain[-1] if next_chain else "")).strip()
+                    arguments = node.get("arguments") if isinstance(node.get("arguments"), dict) else {}
+                    own = str(node.get("intent") or arguments.get("intent") or "").strip()
+                    intent = own or str(next_chain[-1] if next_chain else "").strip()
                     found.update({
                         "node_description": intent[:800],
                         "intent": intent[:500],
+                        "intent_of_plan": bool(intent) and not own,
                         "intent_chain": next_chain[-8:],
                     })
                     return
@@ -394,6 +397,7 @@ class ReflexManager:
                 "goal": goal,
                 "node_description": found.get("node_description", f"plan call {tool_name}"),
                 "intent": found.get("intent", ""),
+                "intent_of_plan": bool(found.get("intent_of_plan")),
                 "intent_chain": found.get("intent_chain", []),
                 "next_call": found.get("next_call", ""),
             }

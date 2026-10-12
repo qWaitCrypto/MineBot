@@ -371,6 +371,7 @@ class CallSupervisor:
             result=current.get("result") if isinstance(current.get("result"), Mapping) else None,
             next_call=str(context.get("next_call") or ""),
             tree=supplied,
+            intent_of_plan=bool(context.get("intent_of_plan")),
         )
         if callable(getattr(tool, "supervision_reader", None)) and record.get("reader_new_fact"):
             options["inspect"] = "Read one new registered fact."

@@ -608,3 +608,24 @@ def test_unknown_body_control_blocks_plan_and_wakes_agent_instead_of_waiting():
         await manager.close()
 
     asyncio.run(scenario())
+
+
+def test_plan_step_context_says_whether_the_intent_is_its_own():
+    from types import SimpleNamespace
+    from minebot.app.reflex_tools import ReflexActivity, ReflexManager
+
+    manager = ReflexManager(SimpleNamespace())
+    plan = {"goal": "stone pickaxe", "work": {"kind": "sequence", "intent": "make a stone pickaxe", "steps": [
+        {"kind": "call", "id": "stone", "tool": "collect_resource", "arguments": {"item": "cobblestone", "count": 3}},
+        {"kind": "call", "id": "sticks", "tool": "craft_item", "intent": "have 2 sticks", "arguments": {"item": "stick"}},
+        {"kind": "call", "id": "pick", "tool": "craft_item",
+         "arguments": {"item": "stone_pickaxe", "intent": "hold a stone pickaxe"}},
+    ]}}
+    manager._activities["a"] = ReflexActivity("a", plan)
+    manager._active_activity_id = "a"
+    stone = manager._plan_supervision_context("stone", "collect_resource")
+    assert stone["intent"] == "make a stone pickaxe" and stone["intent_of_plan"] is True
+    sticks = manager._plan_supervision_context("sticks", "craft_item")
+    assert sticks["intent"] == "have 2 sticks" and sticks["intent_of_plan"] is False
+    pick = manager._plan_supervision_context("pick__repeat_1", "craft_item")
+    assert pick["intent"] == "hold a stone pickaxe" and pick["intent_of_plan"] is False
