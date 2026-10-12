@@ -75,11 +75,11 @@ def test_idle_and_running_frames_share_body_fact_keys():
     facts = runtime.last_known_body_state
     idle = loop._idle_question(facts, loop._idle_options(facts))
     running = rq.frame_state(
-        goal="", intent="wait", tool="move_to", params={}, facts=facts,
+        goal="", intent="", tool="move_to", params={}, facts=facts,
         running=True, phase="moving", elapsed_s=1.0,
     )
-    assert {"body", "threats", "inventory"} <= set(idle["state"])
-    assert {"body", "threats", "inventory"} <= set(running)
+    running_fact_keys = set(running) - {"current_work", "progress"}
+    assert set(idle["state"]) == running_fact_keys
 
 
 def test_reflex_experiences_are_bounded_and_available_to_live_context():

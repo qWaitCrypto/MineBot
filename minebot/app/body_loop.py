@@ -612,6 +612,9 @@ class BodyLoop(CallSupervisor):
         inventory = facts.get("inventory", facts.get("inventory_counts"))
         if isinstance(inventory, Mapping):
             state["inventory"] = ", ".join(f"{k}={v}" for k, v in inventory.items()) or "empty"
+        position = rq._position(facts.get("position", facts.get("pos")))
+        if position:
+            state["position"] = f"now at {position}."
         return {"state": state, "questions": rq.frame_questions(options)}
 
     async def _run_idle_protection(self, choice: str, facts: Mapping[str, Any]) -> None:
