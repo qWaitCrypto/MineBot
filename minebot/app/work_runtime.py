@@ -21,7 +21,7 @@ from typing import Any, Awaitable, Callable, Literal, Protocol
 from jsonschema import Draft202012Validator
 
 from minebot.app.decision_client import DecisionClient, DecisionPriority
-from minebot.app.direct_call_supervision import compile_work_options, format_call
+from minebot.app import reflex_question as rq
 
 NodeStatus = Literal["pending", "active", "waiting", "blocked", "done", "cancelled"]
 ConditionStatus = Literal["satisfied", "pending", "unknown"]
@@ -152,47 +152,6 @@ def _state_payload(state: Any) -> dict[str, Any]:
     return copy.deepcopy(values) if isinstance(values, dict) else {}
 
 
-def _decision_body_facts(state: Any, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Keep result decisions focused on the facts that distinguish outcomes."""
-    raw = _state_payload(state)
-    if not raw:
-        return {}
-    facts: dict[str, Any] = {}
-    if "position" in raw or "start_position" in raw:
-        facts["where"] = f"started at {raw.get('start_position')}; now at {raw.get('position')}."
-    delta = raw.get("inventory_delta")
-    if isinstance(delta, dict) and delta:
-        changes = ", ".join(f"{item} {'+' if amount >= 0 else ''}{amount}" for item, amount in delta.items())
-        facts["inventory_change"] = f"inventory changed: {changes}."
-    inventory = raw.get("inventory")
-    if isinstance(inventory, dict):
-        entries = [f"{item}={count}" for item, count in list(inventory.items())[:8]]
-        facts["inventory_now"] = "inventory now contains " + (", ".join(entries) or "no listed items") + "."
-    goal = raw.get("goal")
-    if isinstance(goal, str) and goal:
-        facts["body_goal"] = f"The Body is currently pursuing {goal}."
-    navigation = raw.get("navigation")
-    if isinstance(navigation, dict) and navigation:
-        parts = []
-        if navigation.get("dest") is not None:
-            parts.append(f"heading toward {navigation['dest']}")
-        if navigation.get("calculating") is True:
-            parts.append("calculating a route")
-        if navigation.get("path_position") is not None:
-            parts.append(f"at route step {navigation['path_position']}")
-        if navigation.get("repeated_failures"):
-            parts.append(f"route calculation has failed {navigation['repeated_failures']} times")
-        facts["navigation"] = "; ".join(parts) or "navigation has no active movement."
-    if raw.get("pathing") is not None:
-        facts["pathing"] = f"pathing is {raw['pathing']}."
-    if isinstance(raw.get("processes"), list):
-        facts["processes"] = "Body is actively " + (", ".join(str(item) for item in raw["processes"]) or "not running a named process") + "."
-    for key in ("phase", "health", "food", "oxygen", "selected_item", "inventory_complete", "last_progress_at"):
-        if key in raw:
-            facts[key] = copy.deepcopy(raw[key])
-    return facts
-
-
 def _decision_result_facts(value: Any) -> dict[str, Any]:
     """Keep the raw projected result; the result projector already bounds it."""
     if isinstance(value, dict):
@@ -282,7 +241,7 @@ def _obligation_value(value: Any) -> Any:
         return {
             key: _obligation_value(child)
             for key, child in value.items()
-            if key not in {"intent", "_runtime"}
+            if key not in {"intent", "_runtime", "next_call"}
         }
     if isinstance(value, list):
         return [_obligation_value(child) for child in value]
@@ -540,7 +499,7 @@ class WorkPlanExecutor:
                     record.decision_facts = {
                         "tool_result": copy.deepcopy(public_result),
                         "tool_arguments": copy.deepcopy(arguments),
-                        "body_state": _decision_body_facts(decision_state, arguments),
+                        "body_state": _state_payload(decision_state),
                         "execution": {key: copy.deepcopy(value) for key, value in execution.items()
                                        if key in {"tool", "phase", "delivered", "reason", "normal_work"}}
                                        if isinstance(execution, dict) else {},
@@ -573,7 +532,7 @@ class WorkPlanExecutor:
                     if handoff is None:
                         handoff = public_result.get("metrics", {}).get("direct_call_handoff") if isinstance(public_result.get("metrics"), dict) else None
                     handoff_choice = handoff.get("facts", {}).get("decision", {}).get("choice") if isinstance(handoff, dict) else None
-                    if handoff_choice in {"step_done", "call_agent"}:
+                    if handoff_choice in {"step_done", "next_step", "call_agent"}:
                         status = self._apply_call_choice(node, node_key, chain, record, handoff_choice, item=item)
                     else:
                         status = await self._decide_call(node, node_key, chain, record, item=item)
@@ -648,7 +607,7 @@ class WorkPlanExecutor:
     def _first_call_description(node: dict[str, Any]) -> str:
         kind = node.get("kind")
         if kind == "call":
-            return format_call(
+            return rq.call_text(
                 str(node.get("tool", "unknown")),
                 node.get("arguments") if isinstance(node.get("arguments"), dict) else {},
             )
@@ -681,25 +640,26 @@ class WorkPlanExecutor:
     def _call_options(
         self, node: dict[str, Any], *, include_inspect: bool = False,
         plan: dict[str, Any] | None = None, normal_work: str = "",
-        result: Mapping[str, Any] | None = None,
+        result: Mapping[str, Any] | None = None, facts: Mapping[str, Any] | None = None,
     ) -> dict[str, str]:
         plan = plan or {}
         repeat = node.get("repeat")
-        repeat_text = None
+        repeat_note = ""
         if isinstance(repeat, dict):
             again = self._repeat_text(repeat.get("again_when", ""))
             until = self._repeat_text(repeat.get("until", ""))
-            repeat_text = f"again_when={again!r}; until={until!r}."
-        return compile_work_options(
+            repeat_note = f"The Agent said to repeat when: {again}; and to stop when: {until}."
+        options = rq.frame_options(
             tool=str(node.get("tool", "unknown")),
             params=node.get("arguments") if isinstance(node.get("arguments"), dict) else {},
             intent=str(plan.get("intent") or node.get("intent") or ""),
+            facts=facts or {}, running=False, result=result,
             next_call=str(plan.get("next_call") or node.get("next_call") or ""),
-            running=False,
-            result=result,
-            include_inspect=include_inspect,
-            repeat_text=repeat_text,
+            repeat_note=repeat_note,
         )
+        # Between two plan calls nothing is running to interrupt; the next
+        # running frame offers the protective actions again.
+        return {key: text for key, text in options.items() if key not in rq.PROTECTIVE}
 
     def _call_plan(self, node: dict[str, Any], intents: list[str]) -> dict[str, Any]:
         intent = str(node.get("intent") or node.get("description") or (intents[-1] if intents else ""))[:800]
@@ -717,84 +677,37 @@ class WorkPlanExecutor:
     def _call_question(
         self, node: dict[str, Any], node_key: str, intents: list[str], record: NodeRecord,
     ) -> dict[str, Any]:
+        """The result question for one plan call; wording lives in reflex_question."""
         facts = record.decision_facts or {}
         plan = self._call_plan(node, intents)
         body = facts.get("body_state") if isinstance(facts.get("body_state"), dict) else {}
-        state: dict[str, Any] = {
-            "task": str(plan.get("goal") or ""),
-            "agent_intent": str(plan.get("intent") or plan.get("node_description") or ""),
-            "inventory": body.get("inventory_now") or body.get("inventory"),
-            "body": body.get("body") or body.get("vitals"),
-            "threats": body.get("threats") or body.get("hostiles"),
-            "position": body.get("position") or body.get("where"),
-            "normal_work": str(facts.get("execution", {}).get("normal_work") or "")[:800],
-            "finished_call": self._result_sentence(node, facts.get("tool_result", {})),
-        }
-        history = facts.get("history", [])
-        recent = [copy.deepcopy(item.get("result", {})) for item in history if isinstance(item, dict)]
-        earlier = int(facts.get("history_earlier", 0) or 0)
-        if recent or earlier:
-            rendered = [self._result_sentence(node, result) for result in recent]
-            current_sentence = self._result_sentence(node, facts.get("tool_result", {}))
-            if rendered and rendered[-1] == current_sentence:
-                rendered.pop()
-            state["earlier_attempts_of_this_call"] = (
-                ([f"此前还有 {earlier} 次"] if earlier else []) + rendered
-            )
-        state = {key: value for key, value in state.items() if value not in (None, "")}
-        result = facts.get("tool_result") if isinstance(facts, dict) else None
-        options = self._call_options(
-            node, result=result, include_inspect=True, plan=plan,
-            normal_work=str(facts.get("execution", {}).get("normal_work") or ""),
+        history = facts.get("history") if isinstance(facts.get("history"), list) else []
+        state = rq.frame_state(
+            goal=str(plan.get("goal") or ""),
+            intent=str(plan.get("intent") or ""),
+            tool=str(node.get("tool", "unknown")),
+            params=facts.get("tool_arguments", node.get("arguments", {})),
+            facts=body, running=False, result=facts.get("tool_result"),
+            earlier_attempts=rq.attempt_lines(history, int(facts.get("history_earlier", 0) or 0)),
         )
-        payload = {
-            "state": state,
-            "questions": {
-                "q": {
-                    "type": "choice",
-                    "instructions": "Choose one concrete option using only the supplied facts.",
-                    "criteria": options,
-                }
-            },
-        }
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
-        if len(encoded) > 16_000:
-            history_items = payload["state"].get("earlier_attempts_of_this_call")
-            while isinstance(history_items, list) and len(history_items) > 2 and len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)) > 15_500:
-                history_items.pop(0)
-            payload["state"].pop("inventory", None)
+        options = self._call_options(node, result=facts.get("tool_result"), plan=plan, facts=body)
+        payload = {"state": state, "questions": rq.frame_questions(options)}
         payload["state"]["request_chars"] = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str))
         return payload
 
-    @staticmethod
-    def _result_sentence(node: dict[str, Any], result: Any) -> str:
-        name = str(node.get("tool", "unknown"))
-        args = json.dumps(node.get("arguments", {}), ensure_ascii=False, separators=(",", ":"))
-        result = result if isinstance(result, dict) else {}
-        if result.get("success") is True:
-            return f"{name}({args}) has ended normally."
-        reason = str(result.get("reason") or "unknown")
-        human = {
-            "unplannable": "the Body could not find a valid way to complete this operation",
-            "craft_plan_not_available": "no crafting plan was available for the requested result",
-            "crafting_table_select_failed:not_in_inventory": "the required crafting table was not in the inventory",
-        }.get(reason, reason.replace("_", " "))
-        if reason.startswith("crafting_table_place_failed:") and "stand_point_unreachable" in reason:
-            human = "the crafting table could not be placed because the required standing point was unreachable"
-        return f"{name}({args}) has ended. It reported failure: {human} ({reason})."
 
     @staticmethod
-    def _decision_choice(answer: Any, options: dict[str, str]) -> str:
-        choice = str(getattr(answer, "choice", answer if isinstance(answer, str) else "unknown"))
-        aliases = {"next_step": "step_done", "keep_going": "continue"}
-        normalized = aliases.get(choice, choice)
-        if normalized in options:
-            return normalized
-        # Compatibility for old local Decision seams; production questions
-        # contain only the concrete labels above.
-        if normalized == "step_done":
-            return "step_done"
-        return "unknown"
+    def _decision_choice(answer: Any, options: dict[str, str],
+                         questions: dict[str, Any] | None = None) -> str:
+        raw = getattr(answer, "raw", None)
+        if questions is not None and isinstance(raw, dict) and isinstance(raw.get("answers"), dict):
+            choice = rq.frame_choice(raw, questions)
+        else:
+            choice = str(getattr(answer, "choice", answer if isinstance(answer, str) else "unknown"))
+        # "step_done" is the earlier name of "next_step"; local Decision seams still use it.
+        if choice == "step_done":
+            choice = "next_step"
+        return choice if choice in options else "unknown"
 
     async def _decide_call(
         self, node: dict[str, Any], node_key: str, intents: list[str], record: NodeRecord,
@@ -813,6 +726,7 @@ class WorkPlanExecutor:
         )
         while True:
             payload = self._call_question(node, node_key, intents, record)
+            options = dict(payload["questions"]["q"]["criteria"])
             purpose = "call_inspect" if record.decision_reads else "call_result"
             decision_started = time.monotonic()
             self.emit(
@@ -820,8 +734,10 @@ class WorkPlanExecutor:
                 request_chars=int(payload["state"].get("request_chars", 0)), request=copy.deepcopy(payload),
             )
             try:
-                answer = await self.decision.ask(payload, priority=DecisionPriority.PLAN)
-                choice = self._decision_choice(answer, options)
+                choice = rq.only_option(payload["questions"])
+                if choice is None:
+                    answer = await self.decision.ask(payload, priority=DecisionPriority.PLAN)
+                    choice = self._decision_choice(answer, options, payload["questions"])
             except Exception:
                 choice = "unknown"
             elapsed = time.monotonic() - decision_started

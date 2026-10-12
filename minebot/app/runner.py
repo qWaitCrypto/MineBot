@@ -362,16 +362,39 @@ def tool_is_enabled(
     return True
 
 
-def tool_invoker_for(tool: RegisteredTool):
+INTENT_DESCRIPTION = (
+    "The result this call should achieve, not what you are thinking. "
+    "Good: 'have 4 logs in the inventory'. Bad: 'I will try the trees first'."
+)
+
+
+def agent_input_schema(tool: RegisteredTool, *, required: bool = True):
+    """The argument schema the Agent sees for a tool.
+
+    A call that changes the Body also says what it is for.  The Agent's
+    schema requires that field, ``run_tool`` refuses the call without it,
+    and it is stripped before the Body callback sees the arguments.
+    """
     schema = copy.deepcopy(tool.input_schema)
-    if tool.sidecar.can_mutate_body and isinstance(schema, dict):
-        properties = schema.setdefault("properties", {})
-        if isinstance(properties, dict):
-            properties.setdefault("intent", {
-                "type": "string",
-                "description": "The result this Body call is meant to achieve.",
-            })
-    validator = Draft202012Validator(schema)
+    if not isinstance(schema, dict):
+        return schema
+    properties = schema.setdefault("properties", {})
+    if not isinstance(properties, dict):
+        return schema
+    if not tool.sidecar.can_mutate_body:
+        # A read needs no intent, but saying one is not an error.
+        if not required:
+            properties.setdefault("intent", {"type": "string"})
+        return schema
+    properties.setdefault("intent", {"type": "string", "description": INTENT_DESCRIPTION})
+    names = schema.setdefault("required", [])
+    if required and isinstance(names, list) and "intent" not in names:
+        names.append("intent")
+    return schema
+
+
+def tool_invoker_for(tool: RegisteredTool):
+    validator = Draft202012Validator(agent_input_schema(tool, required=False))
 
     async def on_invoke_tool(ctx: RunContextWrapper[RuntimeRunContext], input_json: str) -> JsonObject:
         trace = ctx.context.trace
@@ -595,6 +618,8 @@ def tool_invoker_for(tool: RegisteredTool):
                 "success": False, "reason": "invalid_tool_input", "canRetry": True,
                 "metrics": {"path": list(invalid.absolute_path), "error": invalid.message[:400]},
             }, status="rejected")
+        if not tool.sidecar.can_mutate_body and isinstance(params, dict):
+            params.pop("intent", None)
         if not ctx.context.body_actions_allowed and tool.sidecar.can_mutate_body:
             result = {
                 "success": False,
@@ -896,20 +921,10 @@ def sdk_tool_for(tool: RegisteredTool) -> FunctionTool:
             )
         return enabled
 
-    # Intent is transport metadata for mutating calls.  It must be accepted
-    # by the SDK schema and removed before the Body callback sees tool args.
-    params_schema = copy.deepcopy(tool.input_schema)
-    if tool.sidecar.can_mutate_body and isinstance(params_schema, dict):
-        properties = params_schema.setdefault("properties", {})
-        if isinstance(properties, dict):
-            properties.setdefault("intent", {
-                "type": "string",
-                "description": "The result this Body call is meant to achieve.",
-            })
     return FunctionTool(
         name=tool.name,
         description=tool.description,
-        params_json_schema=params_schema,
+        params_json_schema=agent_input_schema(tool),
         on_invoke_tool=tool_invoker_for(tool),
         strict_json_schema=False,
         is_enabled=is_enabled,
@@ -1665,7 +1680,7 @@ class AgentRuntime:
             if tool.sidecar.can_mutate_body and not ctx.body_actions_allowed:
                 continue
             definition = {"type": "function", "name": name, "description": tool.description,
-                          "parameters": tool.input_schema, "strict": False}
+                          "parameters": agent_input_schema(tool), "strict": False}
             if tool.sidecar.can_mutate_body:
                 definition["async"] = True
             definitions.append(definition)
@@ -1939,9 +1954,10 @@ class AgentRuntime:
             supervision_context.setdefault("intent", call_intent)
             supervision_context.setdefault("node_description", call_intent)
         if tool.sidecar.can_mutate_body and not call_intent and not (supervision_context or {}).get("intent"):
+            # Agreed rule: a call that changes the Body says what it is for.
             return ToolResult(
                 False, "missing_intent", False,
-                next_suggestion="Supply the required intent field describing what this Body call is for and when it is enough.",
+                next_suggestion="Add the intent field: the result this call should achieve.",
                 metrics={"missing": "intent", "tool": tool.name},
             ).to_payload()
         claim_id = body_claim_id or tool_call_id or str(uuid4())

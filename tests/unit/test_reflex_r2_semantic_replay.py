@@ -91,7 +91,8 @@ def test_failure_replay_uses_result_shape_and_recent_history():
         purpose="replay_result", options={"continue": "continue", "step_done": "done", "call_agent": "agent"},
         supervision_context={"intent": row["intent"]},
         decision_context={"tool_arguments": row["params"], "tool_result": row["result"],
-                          "body_state": row["frame"]["facts"], "history": row["history"], "reads": []},
+                          "body_state": row["frame"]["facts"], "reads": [], "history_earlier": 85,
+                          "history": [{"result": item} for item in row["history"]["recent_results"]] + [{"result": row["result"]}]},
     )
     payload = json.dumps(request, ensure_ascii=False)
     assert "finished_call" in request["state"]

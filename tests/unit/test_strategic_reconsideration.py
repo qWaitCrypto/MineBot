@@ -286,7 +286,7 @@ def test_granted_reconsideration_reopens_the_work_lane_in_the_successor_run(tmp_
             observed = []
 
             async def call(name, params):
-                args = json.dumps(params)
+                args = json.dumps({"intent": "finish the requested body work", **params})
                 call_id = f"call-{phase}-{name}-{archive.latest_cursor()}"
                 await context.progress_epochs.open(SimpleNamespace(output=[SimpleNamespace(
                     type="function_call", call_id=call_id, name=name, arguments=args)]))

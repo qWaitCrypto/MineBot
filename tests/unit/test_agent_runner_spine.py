@@ -293,7 +293,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             final_output = None
 
             def to_input_list(self):
-                return [{"type": "function_call", "name": "collect_resource", "arguments": "{}"}]
+                return [{"type": "function_call", "name": "collect_resource", "arguments": '{"intent":"finish the requested body work"}'}]
 
         async def fake_runner(*args, **kwargs):
             return ToolOnlyRunResult()
@@ -398,7 +398,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             final_output = None
 
             def to_input_list(self):
-                return [{"type": "function_call", "name": "collect_resource", "arguments": "{}"}]
+                return [{"type": "function_call", "name": "collect_resource", "arguments": '{"intent":"finish the requested body work"}'}]
 
         async def fake_runner(*args, **kwargs):
             return ToolOnlyRunResult()
@@ -466,7 +466,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         tool = RegisteredTool(
             name="blocking_step",
             description="Blocking body step",
-            input_schema={"type": "object", "properties": {"intent": {"type": "string"}}, "required": ["intent"], "additionalProperties": False},
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             callable=callable_,
             sidecar=ToolSidecar(progress_key="blocking_step", mutating=True),
         )
@@ -493,7 +493,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         async def scenario():
             fallback = threading.Timer(1.0, release.set)
             fallback.start()
-            task = asyncio.create_task(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            task = asyncio.create_task(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
             while not started.is_set():
                 await asyncio.sleep(0.01)
             await asyncio.sleep(0.05)
@@ -645,7 +645,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             context = runtime_context
 
         async def scenario():
-            task = asyncio.create_task(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            task = asyncio.create_task(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
             while not started.is_set():
                 await asyncio.sleep(0.01)
             task.cancel()
@@ -729,7 +729,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             def request(self, _command):
                 self.started.set()
                 time.sleep(0.05)
-                return "{}"
+                return '{"intent":"finish the requested body work"}'
 
         transport = SlowTransport()
         body = ScarpetBody("Bot1", transport)
@@ -834,7 +834,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             context = runtime_context
 
         try:
-            result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"complete the timed body action"}'))
+            result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
         finally:
             runtime.close()
 
@@ -894,7 +894,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         tool = RegisteredTool(
             name="move_to",
             description="Move",
-            input_schema={"type": "object", "properties": {"intent": {"type": "string"}}, "required": ["intent"], "additionalProperties": False},
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             callable=callable_,
             sidecar=ToolSidecar(
                 progress_key="move_to",
@@ -925,8 +925,8 @@ class AgentRunnerSpineTests(unittest.TestCase):
             context = runtime_context
 
         try:
-            timeout_result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{\"intent\":\"reach the requested destination\"}"))
-            next_result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{\"intent\":\"reach the requested destination\"}"))
+            timeout_result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
+            next_result = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
             trace = runtime.trace.snapshot()
         finally:
             runtime.close()
@@ -1035,7 +1035,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         class Wrapper:
             context = runtime_context
 
-        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
         self.assertEqual(out["reason"], "partial_budget_exhausted")
         self.assertFalse(out["complete"])
@@ -1646,7 +1646,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         items = [
             {"role": "user", "content": "question"},
             {"type": "function_call", "call_id": "call-1", "name": "read_state"},
-            {"type": "function_call_output", "call_id": "call-1", "output": "{}"},
+            {"type": "function_call_output", "call_id": "call-1", "output": '{"intent":"finish the requested body work"}'},
             {"role": "assistant", "content": "answer"},
         ]
         result = ToolResult(
@@ -1723,7 +1723,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         class Wrapper:
             context = runtime_context
 
-        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
         self.assertTrue(out["success"])
         events = trace.snapshot()
@@ -1779,7 +1779,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         class Wrapper:
             context = runtime_context
 
-        output = asyncio.run(sdk_tool_for(tool).on_invoke_tool(Wrapper(), '{"intent":"continue the declared body work"}'))
+        output = asyncio.run(sdk_tool_for(tool).on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
         self.assertFalse(output["success"])
         self.assertEqual(runtime_context.profile.situational, "mobility")
@@ -1997,7 +1997,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         class Wrapper:
             context = runtime_context
 
-        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
         self.assertTrue(out["success"])
         self.assertFalse(out["complete"])
@@ -2439,7 +2439,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         class Wrapper:
             context = runtime_context
 
-        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
         self.assertFalse(out["success"])
         self.assertEqual(out["reason"], "transport_error")
@@ -2480,7 +2480,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         class Wrapper:
             context = runtime_context
 
-        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+        out = asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
         self.assertFalse(out["success"])
         self.assertEqual(out["reason"], "action_reconciliation_unknown")
@@ -2583,7 +2583,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             context = runtime_context
 
         with self.assertRaises(BodyRecoveryRequired):
-            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
         self.assertTrue(any(event["event"] == "tool_body_recovery_preempt" for event in trace.snapshot()))
 
     def test_sdk_tool_preempts_nested_missing_body_perception_failure(self):
@@ -2619,7 +2619,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             context = runtime_context
 
         with self.assertRaises(BodyRecoveryRequired) as raised:
-            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
         self.assertEqual(raised.exception.facts["tool"], "search_for_block")
         self.assertEqual(raised.exception.reason, "missing_body")
@@ -2678,7 +2678,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         class Wrapper:
             context = runtime_context
 
-        asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+        asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
         self.assertEqual(runtime.last_known_body_state["pos"], [4.5, 70.0, -2.25])
         self.assertEqual(runtime.last_known_body_state["health"], 13.0)
@@ -2748,7 +2748,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         class Wrapper:
             context = runtime_context
 
-        asyncio.run(sdk_tool_for(tool).on_invoke_tool(Wrapper(), '{"intent":"collect the requested block"}'))
+        asyncio.run(sdk_tool_for(tool).on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
         snapshots = [event for event in trace.snapshot() if event["event"] == "body_state"]
         self.assertEqual(len(snapshots), 1)
@@ -2804,7 +2804,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
         class Wrapper:
             context = runtime_context
 
-        asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+        asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
         self.assertEqual(runtime.last_known_body_state["inventory_counts"], {"oak_log": 1, "torch": 16})
         body_state_events = [event for event in trace.snapshot() if event["event"] == "body_state"]
@@ -2836,7 +2836,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             context = runtime_context
 
         with self.assertRaises(BodyRecoveryRequired):
-            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
     def test_sdk_tool_preserves_death_inventory_counts_for_recovery_driver(self):
         def callable_(_params):
@@ -2871,7 +2871,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
             context = runtime_context
 
         with self.assertRaises(BodyRecoveryRequired) as raised:
-            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), "{}"))
+            asyncio.run(sdk_tool.on_invoke_tool(Wrapper(), '{"intent":"finish the requested body work"}'))
 
         self.assertEqual(raised.exception.facts["inventory_counts_before"], {"minecraft:oak_log": 8})
         self.assertEqual(raised.exception.facts["inventory_hash"], "dead-inventory")
@@ -3160,7 +3160,7 @@ class AgentRunnerSpineTests(unittest.TestCase):
                     self.context = context
 
             for _ in range(3):
-                await tool.on_invoke_tool(Wrapper(context), "{}")
+                await tool.on_invoke_tool(Wrapper(context), '{"intent":"finish the requested body work"}')
 
         runtime = AgentRuntime(
             body=body,

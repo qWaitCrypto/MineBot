@@ -372,8 +372,15 @@ class ReflexManager:
                     return
                 kind = node.get("kind")
                 if kind == "sequence":
-                    for child in node.get("steps", []):
+                    steps = node.get("steps", [])
+                    for index, child in enumerate(steps):
                         walk(child, next_chain)
+                        if found:
+                            # The step after the current call, so a running
+                            # frame can offer "start the next step" concretely.
+                            if not found.get("next_call") and index + 1 < len(steps) and isinstance(steps[index + 1], dict):
+                                found["next_call"] = WorkPlanExecutor._first_call_description(steps[index + 1])
+                            return
                 elif kind == "batch":
                     walk(node.get("body"), next_chain)
                 elif kind == "choice":
@@ -387,7 +394,8 @@ class ReflexManager:
                 "goal": goal,
                 "node_description": found.get("node_description", f"plan call {tool_name}"),
                 "intent": found.get("intent", ""),
-                    "intent_chain": found.get("intent_chain", []),
+                "intent_chain": found.get("intent_chain", []),
+                "next_call": found.get("next_call", ""),
             }
 
     async def _supervise_idle(

@@ -166,7 +166,7 @@ def runtime_with(
 
 def invoke(tool: RegisteredTool, context: RuntimeRunContext, call_id: str):
     wrapper = SimpleNamespace(context=context, tool_call_id=call_id)
-    return sdk_tool_for(tool).on_invoke_tool(wrapper, "{}")
+    return sdk_tool_for(tool).on_invoke_tool(wrapper, '{"intent":"finish the requested body work"}')
 
 
 @pytest.mark.parametrize("change,success,expected", [
@@ -809,7 +809,7 @@ def test_duplicate_same_name_calls_claim_predeclared_ids_in_fifo_order():
                 type="function_call",
                 call_id=call_id,
                 name="read_state",
-                arguments="{}",
+                arguments='{"intent":"finish the requested body work"}',
             )
             for call_id in ("call-first", "call-second")
         ]
@@ -820,8 +820,8 @@ def test_duplicate_same_name_calls_claim_predeclared_ids_in_fifo_order():
     async def scenario():
         await adapter.open(batch)
         return (
-            await sdk_tool.on_invoke_tool(wrapper, "{}"),
-            await sdk_tool.on_invoke_tool(wrapper, "{}"),
+            await sdk_tool.on_invoke_tool(wrapper, '{"intent":"finish the requested body work"}'),
+            await sdk_tool.on_invoke_tool(wrapper, '{"intent":"finish the requested body work"}'),
         )
 
     asyncio.run(scenario())
@@ -883,7 +883,7 @@ def test_real_sdk_hook_and_tool_context_share_the_same_call_id():
                 return ModelResponse(
                     output=[
                         ResponseFunctionToolCall(
-                            arguments="{}",
+                            arguments='{"intent":"finish the requested body work"}',
                             call_id="sdk-native-call",
                             name="read_state",
                             type="function_call",

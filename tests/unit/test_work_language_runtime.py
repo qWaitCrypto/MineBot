@@ -93,11 +93,13 @@ def test_call_completion_is_decision_owned_and_keeps_real_cancel_result():
         calls.append(call_id)
         return {"success": False, "reason": "cancelled", "metrics": {"real": True}}
 
-    decision = Decision("step_done")
+    # A failed call cannot be passed over as done: only repeat or the Agent remain.
+    decision = Decision("call_agent")
     result = asyncio.run(WorkPlanExecutor(plan, call=call, state=lambda: _state(), decision=decision).run())
-    assert result.status == "completed"
+    assert result.status == "blocked"
     assert result.results["collect"]["success"] is False
-    assert result.tree["work"]["_runtime"]["decision"]["choice"] == "step_done"
+    assert "next_step" not in decision.payloads[0]["questions"]["q"]["criteria"]
+    assert result.tree["work"]["_runtime"]["decision"]["choice"] == "call_agent"
     assert calls == ["collect"]
     assert decision.payloads[0]["state"]["task"] == "collect"
 
@@ -114,7 +116,12 @@ def test_repeat_is_decision_driven_and_each_reentry_gets_a_new_call_id():
     result = asyncio.run(WorkPlanExecutor(plan, call=call, state=lambda: _state(), decision=decision).run())
     assert result.status == "completed"
     assert calls == ["collect", "collect__repeat_1", "collect__repeat_2"]
-    assert "again_when" in decision.payloads[0]["questions"]["q"]["criteria"]["repeat"]
+    assert "more is needed" in decision.payloads[0]["questions"]["q"]["criteria"]["repeat"]
+
+
+async def _cancelled_call(calls, call_id):
+    calls.append(call_id)
+    return {"success": False, "reason": "cancelled", "metrics": {}}
 
 
 def test_unknown_call_decision_does_not_advance_or_write_again():
@@ -156,28 +163,6 @@ def test_unknown_call_can_be_resolved_by_the_idle_supervisor_without_a_second_ca
     assert idle_requests and "call_agent" in idle_requests[0][3]
 
 
-def test_inspect_is_one_bounded_read_before_the_next_decision():
-    plan = {"language": "minebot-work/0.2", "goal": "inspect", "timeout_s": 10,
-            "work": {"kind": "call", "id": "inspect", "tool": "read", "arguments": {}}}
-    reads = []
-    decision = Decision("inspect", "step_done")
-
-    async def state():
-        reads.append(True)
-        return {"bot": {"observed": True, "position": [len(reads), 64, 0]}}
-
-    async def call(tool, arguments, *, call_id, timeout_s):
-        return {"success": True, "reason": "read", "metrics": {}}
-
-    result = asyncio.run(WorkPlanExecutor(plan, call=call, state=state, decision=decision).run())
-    assert result.status == "completed"
-    assert len(reads) == 3  # argument facts, post-call facts, one bounded inspect read
-    assert len(decision.payloads) == 2
-
-
-async def _cancelled_call(calls, call_id):
-    calls.append(call_id)
-    return {"success": False, "reason": "cancelled", "metrics": {}}
 
 
 def test_runtime_choice_provider_supplies_options():
@@ -412,7 +397,7 @@ def test_result_question_contains_recent_raw_history_without_running_execution_f
     assert result.status == "blocked"
     payload = decision.payloads[-1]
     history = payload["state"].get("earlier_attempts_of_this_call", [])
-    assert len(history) >= 3
+    assert len(history) == 2  # the two earlier attempts; the current one is finished_call
     assert "same_failure" in json.dumps(history, ensure_ascii=False)
     assert "current_work" not in payload["state"]
     assert "elapsed" not in json.dumps(payload, ensure_ascii=False).lower()

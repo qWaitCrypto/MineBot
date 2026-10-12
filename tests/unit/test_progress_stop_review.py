@@ -122,7 +122,7 @@ def test_session_reviews_within_the_same_run_and_never_queues_more_work(closure)
                 phases.append("run")
 
                 async def call(name, params):
-                    args = json.dumps(params)
+                    args = json.dumps({"intent": "finish the requested body work", **params})
                     call_id = f"call-{archive.latest_cursor()}"
                     await context.progress_epochs.open(SimpleNamespace(output=[SimpleNamespace(
                         type="function_call", call_id=call_id, name=name, arguments=args)]))
@@ -219,7 +219,7 @@ def test_actual_sdk_gets_stop_feedback_and_finishes_without_more_work():
             names = (["blocked"] if self.calls <= 4 else
                 ["other", "write_memory"] if self.calls == 5 else
                 ["checkpoint_task"] if self.calls == 6 else [])
-            output = [ResponseFunctionToolCall(arguments="{}", call_id=f"{self.calls}-{name}",
+            output = [ResponseFunctionToolCall(arguments='{"intent":"finish the requested body work"}', call_id=f"{self.calls}-{name}",
                 name=name, type="function_call", status="completed") for name in names]
             if not output:
                 output = [ResponseOutputMessage(id="final", content=[ResponseOutputText(

@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
+from minebot.app import reflex_question as rq
 from minebot.app.decision_client import DecisionClient, DecisionPriority
 from minebot.app.execution_snapshot import FACT_FRAME_INTERVAL_S
 from minebot.contract.execution import tool_observation_scope
@@ -28,73 +29,15 @@ MAX_SUPERVISION_QUESTIONS = 0
 MAX_IDLE_UNKNOWN_FRAMES = 3
 MAX_QUESTION_CHARS = 16_000
 FAST_COMPLETION_GRACE_S = 0.02
-# ``move_away`` is a short-range safety move.  The option is useful only when
-# the recorded hazard is close enough that the tool's bounded candidate search
-# can change the immediate situation; a distant observation is context, not an
-# applicable escape action.
-MOVE_AWAY_APPLICABLE_DISTANCE = 16.0
-
-DEFAULT_TOOL_EXPLANATION = (
-    "The call normally advances through native Body evidence and eventually "
-    "returns one authoritative terminal result. Navigation, phase changes, "
-    "world edits and inventory changes are facts; process liveness and a "
-    "repeated sample are not."
-)
-
-# These are semantic escape hatches, not scene detectors.  Their availability
-# comes only from generic facts already present in the execution snapshot.
+# What each default tool is for, recorded as the intent of the call it starts.
 _DEFAULT_ACTION_TEXT = {
-    "go_to_surface": "Move upward to a verified natural surface now, leaving the current underwater or below-grade state.",
-    "retreat_safe": "Return to the most recent safe standing position recorded by the Body.",
-    "eat": "Consume one available food item and restore the Body's hunger state.",
-    "move_away": "Move away from the nearest hostile presence using the recorded hazard position.",
+    "surface": "Swim up to air.",
+    "retreat_safe": "Go back to the last place where the Body stood safely.",
+    "eat": "Eat food from the inventory.",
+    "move_away": "Move away from the nearby hostile mob.",
 }
 
-
-def format_call(tool: str, params: Mapping[str, Any] | None = None) -> str:
-    """Render a bounded concrete Body call for a Decision option."""
-    args = json.dumps(dict(params or {}), ensure_ascii=False, separators=(",", ":"))
-    return f"{tool}({args})"
-
-
-def compile_work_options(
-    *,
-    tool: str,
-    params: Mapping[str, Any] | None = None,
-    intent: str = "",
-    next_call: str = "",
-    running: bool = True,
-    result: Mapping[str, Any] | None = None,
-    include_inspect: bool = False,
-    repeat_text: str | None = None,
-) -> dict[str, str]:
-    """Compile one concrete option vocabulary used by direct and plan calls."""
-    call = format_call(tool, params)
-    intent_text = f' toward “{intent}”' if intent else ""
-    options: dict[str, str] = {}
-    if running:
-        options["keep_going"] = f"Continue {call}{intent_text}."
-        options["next_step"] = (
-            f"Stop {call} and start the next step by calling {next_call}."
-            if next_call else f"Stop {call} and report this step finished to the Agent."
-        )
-        options["call_agent"] = f"Stop {call} and hand control back to the Agent for a new plan."
-    else:
-        success = isinstance(result, Mapping) and result.get("success") is True
-        can_retry = not (isinstance(result, Mapping) and result.get("canRetry") is False)
-        if success or can_retry:
-            options["repeat"] = f"Run {call} again."
-        if success:
-            options["next_step"] = (
-                f"Treat the result as complete and start the next step by calling {next_call}."
-                if next_call else f"Treat the result as complete and report this step finished to the Agent."
-            )
-        options["call_agent"] = f"Hand control back to the Agent after {call}."
-    if repeat_text and "repeat" in options:
-        options["repeat"] += f" {repeat_text}"
-    if include_inspect:
-        options["inspect"] = "Read one new registered fact."
-    return options
+format_call = rq.call_text
 
 
 class CallSupervisor:
@@ -126,63 +69,20 @@ class CallSupervisor:
             url=self.decision_url, emit=runtime.trace.emit
         )
         self.current: dict[str, Any] | None = None
-        # Vital history is Body-wide, not call-owned. A new call must still
-        # see a recent fall in health or oxygen from the preceding call.
-        self._vital_samples: list[tuple[float, dict[str, float]]] = []
+        # Health and air history belongs to the Body, not to one call.
+        self._vitals = rq.VitalWindow()
 
     async def close(self) -> None:
         if self._client is not None:
             await self._client.close()
 
-    def _with_vital_history(self, call_id: str, facts: Mapping[str, Any]) -> dict[str, Any]:
-        del call_id  # history belongs to the Body, not to a tool call
-        current = dict(facts)
-        now = time.monotonic()
-        sample = {
-            key: float(current[key]) for key in ("oxygen", "health", "food")
-            if isinstance(current.get(key), (int, float))
-        }
-        if sample:
-            self._vital_samples.append((now, sample))
-            self._vital_samples = [
-                (stamp, values) for stamp, values in self._vital_samples
-                if now - stamp <= 12.0
-            ]
-        window = [
-            (stamp, values) for stamp, values in self._vital_samples
-            if now - stamp <= 8.0
-        ]
-        # Prefer a sample about five seconds old. A very recent adjacent
-        # sample is not a useful baseline for a semantic change sentence.
-        reference = next(
-            ((stamp, values) for stamp, values in reversed(window)
-             if now - stamp >= 4.0),
-            None,
-        )
-        if reference is not None:
-            stamp, values = reference
-            current["vital_age_s"] = round(now - stamp, 1)
-            for key in ("oxygen", "health", "food"):
-                if key in values:
-                    current[f"{key}_previous"] = values[key]
-        health_values = [
-            (stamp, values["health"]) for stamp, values in window
-            if "health" in values
-        ]
-        for (before_stamp, before), (after_stamp, after) in zip(health_values, health_values[1:]):
-            if after < before:
-                current["recently_hurt"] = True
-                current["health_drop_from"] = before
-                current["health_drop_to"] = after
-        return current
-
-    @staticmethod
-    def _explanation(tool: Any) -> str:
-        value = getattr(tool, "supervision_explanation", None)
-        if isinstance(value, str) and value.strip():
-            return value.strip()[:220]
-        description = getattr(tool, "description", None)
-        return str(description).strip()[:220] if description else DEFAULT_TOOL_EXPLANATION
+    def _frame(self, execution: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Add what health and air were a few seconds ago to this frame's facts."""
+        if not execution:
+            return {}
+        facts = dict(execution.get("facts") or {})
+        facts.update(self._vitals.add(time.monotonic(), facts))
+        return {**execution, "facts": facts}
 
     def _snapshot(self, call_id: str) -> dict[str, Any]:
         snapshots = getattr(self.runtime, "execution_snapshots", None)
@@ -272,160 +172,6 @@ class CallSupervisor:
         })
 
     @staticmethod
-    def _criteria(
-        plan: Mapping[str, Any], options: Mapping[str, str] | None = None,
-        *, tool_name: str = "the current tool", normal_work: str = "",
-    ) -> dict[str, str]:
-        if options is not None:
-            return {str(key): str(value) for key, value in options.items()}
-        intent = str(plan.get("intent") or plan.get("node_description") or "")
-        return compile_work_options(tool=tool_name, intent=intent, running=True)
-
-    @staticmethod
-    def _compact_execution(execution: Mapping[str, Any]) -> dict[str, Any]:
-        """Compile the small set of Body facts Decision needs each frame."""
-        facts = execution.get("facts") if isinstance(execution.get("facts"), Mapping) else {}
-        keep = (
-            "start_position", "position", "navigation", "pathing", "processes",
-            "inventory_delta", "inventory", "inventory_counts", "construction", "goal", "failed_path_calculations",
-            "builder_paused", "selected_item", "health", "food", "oxygen",
-            "in_water", "submerged", "water", "safe_standing_position",
-            "last_safe_position", "food_available", "food_item",
-            "nearest_hostile_position", "nearby_entities", "nearby_hostiles",
-            "entities", "hostiles",
-            "required_count", "target_count", "quantity_item", "item", "quantity",
-        )
-        compact_facts = {key: facts[key] for key in keep if key in facts}
-        reads = facts.get("bounded_reads")
-        if isinstance(reads, list) and reads:
-            compact_facts["bounded_reads"] = reads[-4:]
-        facts: dict[str, Any] = {}
-        tool = str(execution.get("tool") or "the current tool")
-        phase = str(execution.get("phase") or "working")
-        params = execution.get("params") if isinstance(execution.get("params"), Mapping) else {}
-        facts["doing"] = f"The Body is carrying out {format_call(tool, params)} in the {phase} phase."
-        position = compact_facts.get("position")
-        start = compact_facts.get("start_position")
-        def position_text(value: Any) -> str:
-            if isinstance(value, (list, tuple)) and len(value) == 3:
-                return "(" + ", ".join(str(v) for v in value) + ")"
-            return str(value)
-        if start is not None and position is not None:
-            facts["where"] = f"The call started at {position_text(start)} and the Body is now at {position_text(position)}."
-        elif position is not None:
-            facts["where"] = f"The Body is now at {position_text(position)}."
-        elif start is not None:
-            facts["where"] = f"The call started at {position_text(start)}."
-        progress = execution.get("progress_signal")
-        age = execution.get("since_progress_s")
-        if progress and isinstance(age, (int, float)):
-            facts["last_progress"] = f"The last real progress was {progress}, {age:g} seconds ago."
-        elif progress:
-            facts["last_progress"] = f"The last real progress was {progress}."
-        else:
-            elapsed = execution.get("elapsed_s")
-            if isinstance(elapsed, (int, float)) and elapsed > 0:
-                facts["last_progress"] = f"No real progress has been recorded yet; {elapsed:g}s have elapsed since the call began."
-            else:
-                facts["last_progress"] = "No real progress has been recorded yet."
-        delta = compact_facts.get("inventory_delta")
-        if isinstance(delta, Mapping) and delta:
-            changes = ", ".join(f"{item} {'+' if amount >= 0 else ''}{amount}" for item, amount in delta.items())
-            facts["inventory_change"] = f"inventory changed: {changes}."
-        inventory = compact_facts.get("inventory")
-        if not isinstance(inventory, Mapping):
-            inventory = compact_facts.get("inventory_counts")
-        if isinstance(inventory, Mapping):
-            entries = [f"{item}={count}" for item, count in list(inventory.items())[:8]]
-            facts["inventory_now"] = "inventory now contains " + (", ".join(entries) or "no listed items") + "."
-        else:
-            facts["inventory_now"] = "Inventory contents were not included in this Body sample."
-        goal = compact_facts.get("goal")
-        if isinstance(goal, str) and goal:
-            facts["body_goal"] = f"The Body is currently pursuing {goal}."
-        navigation = compact_facts.get("navigation")
-        if isinstance(navigation, Mapping) and navigation:
-            parts = []
-            if navigation.get("dest") is not None:
-                parts.append(f"heading toward {navigation['dest']}")
-            if navigation.get("calculating") is True:
-                parts.append("calculating a route")
-            if navigation.get("path_position") is not None:
-                parts.append(f"at route step {navigation['path_position']}")
-            failures = navigation.get("repeated_failures")
-            if failures:
-                parts.append(f"route calculation has failed {failures} times")
-            facts["navigation"] = "; ".join(parts) or "navigation state is available but has no active movement."
-        construction = compact_facts.get("construction")
-        if isinstance(construction, Mapping) and construction:
-            matching = construction.get("matching_cells")
-            expected = construction.get("expected_cells")
-            facts["construction"] = (
-                f"construction matches {matching} of {expected} declared cells."
-                if matching is not None and expected is not None else "construction evidence is present."
-            )
-        processes = compact_facts.get("processes")
-        if isinstance(processes, Mapping):
-            processes = [name for name, active in processes.items() if active is True]
-        if isinstance(processes, (list, tuple)):
-            facts["processes"] = "Body is actively " + (", ".join(str(item) for item in processes) or "not running a named process") + "."
-        vitals = []
-        if "health" in compact_facts:
-            vitals.append(f"health is {compact_facts['health']}")
-        if "oxygen" in compact_facts:
-            vitals.append(f"oxygen is {compact_facts['oxygen']}")
-        if "food" in compact_facts:
-            vitals.append(f"hunger level is {compact_facts['food']}")
-        if vitals:
-            facts["vitals"] = "; ".join(vitals) + "."
-        water = next((compact_facts.get(key) for key in ("in_water", "submerged", "water")
-                      if key in compact_facts), None)
-        if water is not None:
-            facts["water"] = "The Body is in water." if bool(water) else "The Body is not in water."
-        safe_position = compact_facts.get("safe_standing_position", compact_facts.get("last_safe_position"))
-        if safe_position is not None:
-            facts["safe_standing_position"] = f"A previous safe standing position is recorded at {safe_position}."
-        if compact_facts.get("food_available") is True:
-            facts["food"] = "An edible item is available in the inventory."
-        hostile_items = compact_facts.get("nearby_hostiles", compact_facts.get("hostiles"))
-        if hostile_items is None:
-            hostile_items = compact_facts.get("nearby_entities", compact_facts.get("entities"))
-        if isinstance(hostile_items, Mapping):
-            hostile_items = hostile_items.get("entities", hostile_items.get("items"))
-        if isinstance(hostile_items, list):
-            hostile = [item for item in hostile_items if isinstance(item, Mapping)
-                       and item.get("hostile") is not False]
-            distances = []
-            for item in hostile:
-                distance = item.get("distance", item.get("dist"))
-                if distance is None and isinstance(item.get("dist2"), (int, float)):
-                    distance = round(float(item["dist2"]) ** 0.5, 1)
-                if isinstance(distance, (int, float)):
-                    distances.append(float(distance))
-            if hostile:
-                nearest = min(distances) if distances else None
-                facts["hostiles"] = (
-                    f"Nearby hostile entities: {len(hostile)} in the supplied observation"
-                    + (f", nearest about {nearest:g} blocks away." if nearest is not None else ".")
-                )
-            else:
-                facts["hostiles"] = "No hostile entities are present in the supplied observation."
-        facts["phase"] = phase
-        compact = {
-            "tool": execution.get("tool"),
-            "params": execution.get("params"),
-            "state": execution.get("state"),
-            "phase": execution.get("phase"),
-            "elapsed_s": execution.get("elapsed_s"),
-            "since_progress_s": execution.get("since_progress_s"),
-            "last_progress_at": execution.get("last_progress_at"),
-            "progress_signal": execution.get("progress_signal"),
-            "fact_revision": execution.get("fact_revision"),
-            "facts": facts,
-        }
-        return {key: value for key, value in compact.items() if value is not None}
-
-    @staticmethod
     def _compact_result(value: Any) -> dict[str, Any]:
         if not isinstance(value, Mapping):
             return {"result": str(value)[:500]}
@@ -435,191 +181,6 @@ class CallSupervisor:
             result["summary"] = CallSupervisor._bounded(dict(summary), depth=0)
         return result
 
-    @staticmethod
-    def _reason_sentence(reason: Any) -> str:
-        code = str(reason or "unknown")
-        known = {
-            "unplannable": "the Body could not find a valid way to complete this operation",
-            "crafting_table_select_failed:not_in_inventory": "the required crafting table was not in the inventory",
-            "craft_plan_not_available": "no crafting plan was available for the requested result",
-        }
-        if code.startswith("crafting_table_place_failed:") and "stand_point_unreachable" in code:
-            return "the crafting table could not be placed because the required standing point was unreachable"
-        return known.get(code, code.replace("_", " "))
-
-    @classmethod
-    def _result_sentence(cls, tool: Any, params: Mapping[str, Any], result: Any) -> str:
-        name = getattr(tool, "name", "unknown")
-        arguments = json.dumps(dict(params), ensure_ascii=False, separators=(",", ":"))
-        payload = result if isinstance(result, Mapping) else {}
-        reason = payload.get("reason") if isinstance(payload, Mapping) else None
-        if payload.get("success") is True:
-            return f"{name}({arguments}) has ended normally."
-        if reason:
-            return f"{name}({arguments}) has ended. It reported failure: {cls._reason_sentence(reason)} ({reason})."
-        return f"{name}({arguments}) has ended with no confirmed success."
-
-    @classmethod
-    def _sentence_state(
-        cls, plan: Mapping[str, Any], body_state: Mapping[str, Any] | None,
-        execution: Mapping[str, Any] | None, tool: Any, params: Mapping[str, Any],
-        *, result: Any = None, history: Mapping[str, Any] | None = None,
-        normal_work: str = "",
-    ) -> dict[str, Any]:
-        raw = dict(body_state or {})
-        compact = cls._compact_execution({**dict(execution or {}), "facts": raw, "params": dict(params)})
-        facts = dict(compact.get("facts") or {})
-        # Replay rows already contain the human sentence fields. Live snapshots
-        # are converted by _compact_execution into the same vocabulary.
-        state: dict[str, Any] = {
-            "task": str(plan.get("goal") or ""),
-            "agent_intent": str(plan.get("intent") or plan.get("node_description") or ""),
-        }
-        aliases = {
-            "inventory": ("inventory", "inventory_now"),
-            "body": ("body", "vitals"),
-            "threats": ("threats", "hostiles"),
-            "position": ("where", "position"),
-            "progress": ("progress", "last_progress"),
-        }
-        for target, keys in aliases.items():
-            if result is not None and target == "progress":
-                continue
-            value = next((raw.get(k) for k in keys
-                          if raw.get(k) not in (None, "")
-                          and not (target == "inventory" and isinstance(raw.get(k), Mapping))
-                          and not (target == "position" and isinstance(raw.get(k), (list, tuple)))), None)
-            if value is None:
-                value = next((facts.get(k) for k in keys if facts.get(k) not in (None, "")), None)
-            if value is not None:
-                rendered_value = value if isinstance(value, str) else str(value)
-                state[target] = rendered_value
-        if facts.get("quantity"):
-            state["quantity"] = str(facts["quantity"])
-        if result is None:
-            value = raw.get("current_work") or facts.get("doing")
-            if value:
-                state["current_work"] = value
-        else:
-            state["finished_call"] = cls._result_sentence(tool, params, result)
-            if history:
-                recent = history.get("recent_results") if isinstance(history, Mapping) else None
-                earlier = history.get("earlier") if isinstance(history, Mapping) else ""
-                if isinstance(recent, list):
-                    rendered = [
-                        item if isinstance(item, str) else cls._result_sentence(tool, params, item)
-                        for item in recent
-                    ]
-                    if result is not None:
-                        current_sentence = cls._result_sentence(tool, params, result)
-                        if rendered and rendered[-1] == current_sentence:
-                            rendered = rendered[:-1]
-                    history_lines = ([earlier] if earlier else []) + rendered
-                    if history_lines:
-                        state["earlier_attempts_of_this_call"] = history_lines
-        if normal_work:
-            state["normal_work"] = normal_work[:800]
-        # Compose each survival fact once. A previous value is evidence of a
-        # change only when the current value actually moved in the relevant
-        # direction; it is not itself evidence of harm or of being underwater.
-        vital_lines: list[str] = []
-        health = raw.get("health")
-        health_previous = raw.get("health_previous")
-        health_drop_from = raw.get("health_drop_from")
-        health_drop_to = raw.get("health_drop_to", health)
-        vital_age = raw.get("vital_age_s")
-        period = f"{vital_age:g} seconds" if isinstance(vital_age, (int, float)) else "the recent interval"
-        ago = f"{period} ago" if isinstance(vital_age, (int, float)) else "the previous sample"
-        if isinstance(health, (int, float)):
-            vital_lines.append(f"health is {round(health):d} of 20.")
-            if (isinstance(health_drop_from, (int, float)) and
-                    isinstance(health_drop_to, (int, float)) and health_drop_to < health_drop_from):
-                vital_lines.append(f"The Body was just hurt: health fell from {round(health_drop_from):d} to {round(health_drop_to):d} in the last {period}.")
-            elif isinstance(health_previous, (int, float)) and health < health_previous:
-                vital_lines.append(f"The Body was just hurt: health fell from {round(health_previous):d} to {round(health):d} since {ago}.")
-        food = raw.get("food")
-        if isinstance(food, (int, float)):
-            vital_lines.append(f"hunger level is {food} of 20.")
-        oxygen = raw.get("oxygen")
-        oxygen_max = raw.get("oxygen_max", 300)
-        oxygen_previous = raw.get("oxygen_previous")
-        if isinstance(oxygen, (int, float)):
-            if oxygen < oxygen_max:
-                if isinstance(oxygen_previous, (int, float)) and oxygen != oxygen_previous:
-                    vital_lines.append(f"The head is under water and the Body cannot breathe: air supply was {round(oxygen_previous):d} {ago} and is {round(oxygen):d} of {round(oxygen_max):d} now.")
-                else:
-                    vital_lines.append(f"The head is under water and the Body cannot breathe: air supply is {round(oxygen):d} of {round(oxygen_max):d} now.")
-            else:
-                vital_lines.append(f"oxygen is full at {round(oxygen_max):d}.")
-        if vital_lines:
-            state["body"] = " ".join(vital_lines)
-        return {key: value for key, value in state.items() if value not in (None, "")}
-
-    @staticmethod
-    def _intent_summary(plan: Mapping[str, Any]) -> str:
-        intent = str(plan.get("intent") or plan.get("node_description") or "").strip()
-        step = str(plan.get("current_step") or "").strip()
-        goal = str(plan.get("goal") or "").strip()
-        parts = []
-        if intent:
-            parts.append(f"purpose: {intent}")
-        if step and step != intent:
-            parts.append(f"current step: {step}")
-        if goal and goal not in {intent, step}:
-            parts.append(f"goal: {goal}")
-        return "; ".join(parts)[:900]
-
-    @staticmethod
-    def _question_set(criteria: Mapping[str, str]) -> dict[str, Any]:
-        danger_keys = {"surface", "move_away", "retreat_safe"}
-        protective = {key: value for key, value in criteria.items() if key in danger_keys}
-        normal = {key: value for key, value in criteria.items() if key not in danger_keys}
-        if not protective:
-            return {"q": {"type": "choice", "instructions": "Choose one supplied option.", "criteria": normal}}
-        return {
-            "danger": {
-                "type": "choice",
-                "instructions": "Is the Body in danger?",
-                "criteria": {
-                    "safe": "Nothing is harming the Body and nothing nearby is about to harm it.",
-                    "in_danger": "The Body is being harmed right now, or something nearby is about to harm it.",
-                },
-            },
-            "normal": {
-                "type": "choice",
-                "instructions": "If safe, choose one normal work option.",
-                "criteria": normal,
-            },
-            "protective": {
-                "type": "choice",
-                "instructions": "If dangerous, choose one concrete protective action.",
-                "criteria": {**protective, "call_agent": criteria.get("call_agent", "Stop and return control to the Agent.")},
-            },
-        }
-
-    @staticmethod
-    def _answer_for_questions(raw: Mapping[str, Any] | None, fallback: str,
-                              questions: Mapping[str, Any]) -> str:
-        answers = raw.get("answers") if isinstance(raw, Mapping) else None
-        if not isinstance(answers, Mapping):
-            return fallback
-        allowed = {str(key) for question in questions.values() for key in (question.get("criteria") or {})}
-        danger = answers.get("danger")
-        if isinstance(danger, Mapping):
-            danger_choice = str(danger.get("choice") or "")
-            if danger_choice in {"danger", "in_danger", "unsafe", "yes"}:
-                selected = answers.get("protective")
-                return str(selected.get("choice")) if isinstance(selected, Mapping) and selected.get("choice") else (fallback if fallback in allowed else "unknown")
-            if danger_choice in {"safe", "no"}:
-                selected = answers.get("normal")
-                return str(selected.get("choice")) if isinstance(selected, Mapping) and selected.get("choice") else (fallback if fallback in allowed else "unknown")
-        allowed = {str(key) for question in questions.values() for key in (question.get("criteria") or {})}
-        for key in ("q", "normal", "protective"):
-            selected = answers.get(key)
-            if isinstance(selected, Mapping) and selected.get("choice"):
-                return str(selected["choice"])
-        return fallback if fallback in allowed else (fallback if fallback in allowed else "unknown")
-
     def _question(
         self, call_id: str, tool: Any, params: Mapping[str, Any],
         execution: Mapping[str, Any], *, idle_s: float, purpose: str,
@@ -627,84 +188,41 @@ class CallSupervisor:
         options: Mapping[str, str] | None = None,
         decision_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Write one frame as a request; all wording lives in reflex_question."""
         plan = self._plan_context(supervision_context=supervision_context, tool=tool, params=params)
-        # Keep the goal and the call intent as separate state fields.  They
-        # answer different questions even when a direct call falls back to the
-        # user goal as its intent.
-        question_plan = dict(plan)
-        if isinstance(decision_context, Mapping):
-            facts = dict(decision_context)
-            body_state = facts.get("body_state", execution.get("facts", {}))
-            if isinstance(body_state, Mapping):
-                body_state = self._with_vital_history(call_id, body_state)
-                if not any(key in body_state for key in ("body", "inventory", "threats", "current_work", "progress", "position")):
-                    body_state = self._compact_execution({"facts": body_state})["facts"]
-            result_frame = purpose in {"result_frame", "call_result"} or "tool_result" in facts
-            if result_frame:
-                # The tool has returned.  Do not carry the running-call
-                # narration into a terminal result question.
-                body_state.pop("doing", None)
-                if str(body_state.get("last_progress", "")).endswith("since the call began."):
-                    body_state.pop("last_progress", None)
-                if body_state.get("phase") == "working":
-                    body_state.pop("phase", None)
-            execution_facts = {} if result_frame else self._compact_execution(execution)
-            state = self._sentence_state(
-                question_plan, body_state, execution, tool,
-                facts.get("tool_arguments", params),
-                result=facts.get("tool_result", {}),
-                history=facts.get("history"),
-                normal_work=self._explanation(tool),
-            )
-            request = {
-                "state": state,
-                "questions": self._question_set(self._criteria(
-                    plan, options, tool_name=str(getattr(tool, "name", "unknown")),
-                    normal_work=self._explanation(tool),
-                )),
-            }
-            encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)
-            request_chars_before = len(encoded)
-            if request_chars_before > MAX_QUESTION_CHARS:
-                history = request["state"].get("earlier_attempts_of_this_call")
-                while isinstance(history, list) and len(history) > 2 and len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)) > MAX_QUESTION_CHARS - 512:
-                    history.pop(0)
-                if len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)) > MAX_QUESTION_CHARS - 512:
-                    request["state"].pop("inventory", None)
-                encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)
-            request["_request_chars_before"] = request_chars_before
-            request["state"]["request_chars"] = len(encoded)
-            return request
-        execution_for_question = dict(execution)
-        execution_facts = execution_for_question.get("facts")
-        if isinstance(execution_facts, Mapping):
-            execution_facts = self._with_vital_history(call_id, execution_facts)
-            execution_for_question["facts"] = execution_facts
-        state = self._sentence_state(
-            question_plan, execution_for_question.get("facts") or {},
-            execution_for_question, tool, params,
-            normal_work=self._explanation(tool),
+        context = decision_context if isinstance(decision_context, Mapping) else {}
+        tool_name = str(getattr(tool, "name", "unknown"))
+        result = context.get("tool_result")
+        running = not isinstance(result, Mapping)
+        facts = execution.get("facts") if isinstance(execution.get("facts"), Mapping) else {}
+        if not running and isinstance(context.get("body_state"), Mapping) and context["body_state"]:
+            facts = context["body_state"]
+        call_params = context.get("tool_arguments", params)
+        intent = str(plan.get("intent") or plan.get("node_description") or "")
+        history = context.get("history")
+        earlier = rq.attempt_lines(
+            [item for item in history if isinstance(item, Mapping)],
+            int(context.get("history_earlier") or 0),
+        ) if isinstance(history, list) else []
+        state = rq.frame_state(
+            goal=str(plan.get("goal") or ""), intent=intent, tool=tool_name,
+            params=call_params if isinstance(call_params, Mapping) else {}, facts=facts,
+            running=running, phase=execution.get("phase"), elapsed_s=execution.get("elapsed_s"),
+            progress_signal=execution.get("progress_signal"),
+            since_progress_s=execution.get("since_progress_s"),
+            result=result if isinstance(result, Mapping) else None, earlier_attempts=earlier,
         )
-        request: dict[str, Any] = {
-            "state": state,
-            "questions": self._question_set(self._criteria(
-                    plan, options, tool_name=str(getattr(tool, "name", "unknown")),
-                    normal_work=self._explanation(tool),
-                )),
-        }
-        encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)
-        request_chars_before = len(encoded)
-        if request_chars_before > MAX_QUESTION_CHARS:
-            history = request["state"].get("earlier_attempts_of_this_call")
-            while isinstance(history, list) and len(history) > 2 and len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)) > MAX_QUESTION_CHARS - 512:
-                history.pop(0)
-            if len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)) > MAX_QUESTION_CHARS - 512:
-                request["state"].pop("inventory", None)
-            encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str)
-        # This private value is removed before the request reaches Decision;
-        # the trace reports both sides of compaction.
-        request["_request_chars_before"] = request_chars_before
-        request["state"]["request_chars"] = len(encoded)
+        if options is None:
+            options = rq.frame_options(
+                tool=tool_name, params=call_params if isinstance(call_params, Mapping) else {},
+                intent=intent, facts=facts, running=running,
+                result=result if isinstance(result, Mapping) else None,
+            )
+        request: dict[str, Any] = {"state": state, "questions": rq.frame_questions(options)}
+        size = len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str))
+        # Private values, removed before the request reaches Decision.
+        request["_request_chars_before"] = size
+        request["_request_chars"] = size
         return request
 
     async def judge(
@@ -721,8 +239,8 @@ class CallSupervisor:
             decision_context=decision_context,
         )
         tool_name = getattr(tool, "name", "unknown")
-        request_chars_before = int(request.pop("_request_chars_before", request["state"].get("request_chars", 0)))
-        request_chars = int(request["state"].get("request_chars", 0))
+        request_chars_before = int(request.pop("_request_chars_before", 0))
+        request_chars = int(request.pop("_request_chars", request_chars_before))
         fact_revision = execution.get("fact_revision")
         self.runtime.trace.emit(
             "call_supervision_request", tool_call_id=call_id, tool=tool_name,
@@ -733,16 +251,11 @@ class CallSupervisor:
         started = time.monotonic()
         raw: dict[str, Any] | None = None
         try:
-            answer = await self._client.ask(request, priority=DecisionPriority.SUPERVISION)
-            raw = answer.raw
-            choice = self._answer_for_questions(
-                raw, answer.choice, request["questions"]
-            )
-            allowed = set()
-            for question in request["questions"].values():
-                allowed.update((question.get("criteria") or {}).keys())
-            choice = {"step_done": "next_step", "continue": "keep_going", "go_to_surface": "surface", "stay": "unknown"}.get(choice, choice)
-            choice = choice if choice in allowed else "unknown"
+            choice = rq.only_option(request["questions"])
+            if choice is None:
+                answer = await self._client.ask(request, priority=DecisionPriority.SUPERVISION)
+                raw = answer.raw
+                choice = rq.frame_choice(raw, request["questions"])
         except Exception:
             choice = "unknown"
         elapsed = time.monotonic() - started
@@ -836,51 +349,21 @@ class CallSupervisor:
         cls, tool: Any, record: Mapping[str, Any], supplied: Mapping[str, str] | None = None,
         execution: Mapping[str, Any] | None = None,
     ) -> dict[str, str]:
-        """Compile concrete work and safety choices from generic facts."""
+        """The concrete things the Body may do in this frame."""
         current = execution or {}
         terminal = str(current.get("state") or "") in {"succeeded", "failed", "cancelled", "unknown"}
         context = record.get("supervision_context")
         context = context if isinstance(context, Mapping) else {}
-        options = compile_work_options(
+        options = rq.frame_options(
             tool=str(record.get("tool") or getattr(tool, "name", "unknown")),
             params=record.get("params") if isinstance(record.get("params"), Mapping) else {},
             intent=str(context.get("intent") or context.get("node_description") or ""),
-            next_call=str(context.get("next_call") or ""),
+            facts=cls._facts_for_options(current),
             running=not terminal,
             result=current.get("result") if isinstance(current.get("result"), Mapping) else None,
-            include_inspect=bool(callable(getattr(tool, "supervision_reader", None)) and record.get("reader_new_fact")),
+            next_call=str(context.get("next_call") or ""),
+            tree=supplied,
         )
-        if supplied is not None:
-            # Tree-provided options are semantic alternatives supplied by the
-            # Agent; the runtime still compiles every base option here.
-            options.update({str(key): str(value) for key, value in supplied.items()})
-        facts = cls._facts_for_options(execution or {})
-        water = any(facts.get(key) is True for key in ("in_water", "submerged", "water"))
-        if water or (isinstance(facts.get("oxygen"), (int, float)) and facts.get("oxygen") < facts.get("oxygen_max", 300)):
-            options.setdefault("surface", _DEFAULT_ACTION_TEXT["go_to_surface"])
-        if facts.get("safe_standing_position") is not None or facts.get("last_safe_position") is not None:
-            if facts.get("recently_hurt") is True or facts.get("health_drop") is not None:
-                options.setdefault("retreat_safe", _DEFAULT_ACTION_TEXT["retreat_safe"])
-        if facts.get("food_available") is True and isinstance(facts.get("food"), (int, float)) and facts.get("food") < facts.get("food_max", 20):
-            options.setdefault("eat", _DEFAULT_ACTION_TEXT["eat"])
-        hostile = facts.get("nearby_hostiles", facts.get("hostiles"))
-        if hostile is None:
-            hostile = facts.get("nearby_entities", facts.get("entities"))
-        if isinstance(hostile, Mapping):
-            hostile = hostile.get("entities", hostile.get("items"))
-        close_hostile = False
-        if isinstance(hostile, list):
-            for item in hostile:
-                if not isinstance(item, Mapping) or item.get("hostile") is False:
-                    continue
-                distance = item.get("distance", item.get("dist"))
-                if distance is None and isinstance(item.get("dist2"), (int, float)):
-                    distance = float(item["dist2"]) ** 0.5
-                if isinstance(distance, (int, float)) and float(distance) <= MOVE_AWAY_APPLICABLE_DISTANCE:
-                    close_hostile = True
-                    break
-        if close_hostile or facts.get("recently_hurt") is True:
-            options.setdefault("move_away", _DEFAULT_ACTION_TEXT["move_away"])
         if callable(getattr(tool, "supervision_reader", None)) and record.get("reader_new_fact"):
             options["inspect"] = "Read one new registered fact."
         return options
@@ -917,6 +400,9 @@ class CallSupervisor:
                 return "consume_item", {"item": item.strip()}
         if choice == "move_away":
             pos = facts.get("nearest_hostile_position")
+            if not (isinstance(pos, (list, tuple)) and len(pos) == 3):
+                near = rq.hostiles(facts)
+                pos = near[0]["pos"] if near else None
             if isinstance(pos, (list, tuple)) and len(pos) == 3:
                 return "move_away", {"danger_pos": [float(value) for value in pos], "min_distance": 8.0}
         return None
@@ -1085,13 +571,9 @@ class CallSupervisor:
         payload = result if isinstance(result, Mapping) else getattr(result, "result", result)
         if not isinstance(payload, Mapping):
             payload = {"result": str(payload)[:500]}
-        options = compile_work_options(
-            tool=str(getattr(tool, "name", "unknown")),
-            params=params,
-            intent=str(record.get("supervision_context", {}).get("intent") or record.get("supervision_context", {}).get("node_description") or ""),
-            running=False,
-            result=dict(payload),
-        )
+        execution = self._frame({**execution, "state": "succeeded" if payload.get("success") is True else "failed",
+                                 "result": dict(payload)})
+        options = self._options_for(tool, record, execution=execution)
         context = {
             "tool_result": dict(payload),
             "tool_arguments": dict(params),
@@ -1167,7 +649,7 @@ class CallSupervisor:
                 snapshots.tick(record["call_id"])
             if wake_wait in done or clock_wait in done:
                 wake.clear()
-                execution = self._snapshot(record["call_id"])
+                execution = self._frame(self._snapshot(record["call_id"]))
                 if execution:
                     revision = int(execution.get("fact_revision") or 0)
                     phase_changed = execution.get("phase") != record.get("last_phase")
@@ -1184,7 +666,7 @@ class CallSupervisor:
                             # returned new evidence.
                             record["initial_reader_done"] = True
                             await self._bounded_read(record, tool, params)
-                            execution = self._snapshot(record["call_id"]) or execution
+                            execution = self._frame(self._snapshot(record["call_id"]) or execution)
                         frame_options = self._options_for(
                             tool, record,
                             supplied=self._tree_options(record["supervision_context"]),

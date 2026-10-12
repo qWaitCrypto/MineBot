@@ -46,7 +46,7 @@ def terminal(rid, *, reason=None):
 
 def call(call_id, name="work"):
     return {"type": "response.output_item.done", "item": {
-        "type": "function_call", "call_id": call_id, "name": name, "arguments": "{}", "async": name == "work"}}
+        "type": "function_call", "call_id": call_id, "name": name, "arguments": '{"intent":"finish the requested body work"}', "async": name == "work"}}
 
 
 async def until(predicate):
@@ -736,7 +736,7 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
             registry.register(RegisteredTool(name="read", description="Read with a deadline", callable=slow_read,
                 input_schema={"type": "object", "properties": {}},
                 sidecar=ToolSidecar(progress_key="read", mutating=False, timeout_s=0.02)))
-            result = await session.parts.runtime._invoke_responses_tool("read", "{}", "read-deadline")
+            result = await session.parts.runtime._invoke_responses_tool("read", '{"intent":"finish the requested body work"}', "read-deadline")
             self.assertFalse(result["success"])
             self.assertFalse(stopped.is_set())
             self.assertEqual(body.interrupt_reasons, [])
@@ -845,7 +845,7 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
                         steps=[{"title": "Move"}, {"title": "Verify"}])
                     self.assertEqual(runtime.native_task_outcome["status"], "blocked")
                     # A read/chat does not remove the terminal action restriction.
-                    rejected = await runtime._invoke_responses_tool("work", "{}", "before-resume")
+                    rejected = await runtime._invoke_responses_tool("work", '{"intent":"finish the requested body work"}', "before-resume")
                     self.assertEqual(rejected["reason"], "task_finished")
                     self.assertEqual(moves, [])
                     session.submit(SessionCommand.continue_(guidance))

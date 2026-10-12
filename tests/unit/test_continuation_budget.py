@@ -388,7 +388,7 @@ def test_initial_model_recovery_keeps_unleased_work_after_an_outgoing_checkpoint
             assert context.progress_epochs.budget is None
 
             async def call(name, params):
-                args = json.dumps(params)
+                args = json.dumps({"intent": "finish the requested body work", **params})
                 call_id = f"call-{archive.latest_cursor()}"
                 await context.progress_epochs.open(SimpleNamespace(output=[SimpleNamespace(
                     type="function_call", call_id=call_id, name=name, arguments=args)]))
@@ -531,7 +531,7 @@ def test_exhausted_approach_can_close_then_run_a_model_selected_alternative(tmp_
             inputs.append(input_text)
 
             async def call(name, params=None):
-                args = json.dumps(params or {})
+                args = json.dumps({"intent": "finish the requested body work", **(params or {})})
                 call_id = f"call-{len(inputs)}-{archive.latest_cursor()}"
                 await context.progress_epochs.open(SimpleNamespace(output=[SimpleNamespace(
                     type="function_call", call_id=call_id, name=name, arguments=args)]))

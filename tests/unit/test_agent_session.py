@@ -550,10 +550,10 @@ class AgentSessionTests(unittest.TestCase):
                 name = "alternative_route" if reconsidering and not repeat_failure else "blocked_route"
                 call_id = f"call-{len(calls)}"
                 await context.progress_epochs.open(SimpleNamespace(output=[SimpleNamespace(
-                    type="function_call", call_id=call_id, name=name, arguments="{}",
+                    type="function_call", call_id=call_id, name=name, arguments='{"intent":"finish the requested body work"}',
                 )]))
                 result = await sdk_tool_for(parts.registry.get(name)).on_invoke_tool(
-                    SimpleNamespace(context=context, tool_call_id=call_id), "{}",
+                    SimpleNamespace(context=context, tool_call_id=call_id), '{"intent":"finish the requested body work"}',
                 )
                 task = workspace.current_task
                 if reconsidering and not repeat_failure:

@@ -74,12 +74,12 @@ def test_long_call_leaves_the_turn_and_delivers_its_one_result_later():
     other_write = sdk_tool_for(_tool("other_write", lambda _p: ToolResult(True, "completed", False)))
 
     async def scenario():
-        receipt = await long_tool.on_invoke_tool(wrapper, "{}")
+        receipt = await long_tool.on_invoke_tool(wrapper, '{"intent":"finish the requested body work"}')
         owner = runtime.live_body_owner()
         holder = runtime.body_control.snapshot().holder
         # Reads and the next turn's preflight must not queue behind the writer.
         state = await asyncio.wait_for(runtime.run_read(body.get_state), timeout=1)
-        busy = await asyncio.wait_for(other_write.on_invoke_tool(wrapper, "{}"), timeout=1)
+        busy = await asyncio.wait_for(other_write.on_invoke_tool(wrapper, '{"intent":"finish the requested body work"}'), timeout=1)
         work = runtime.background_work()
         # A cancelled turn has nothing of its own left on the writer lane.
         idle = (await runtime.wait_for_turn_execution_idle(timeout_s=0.2),
@@ -130,7 +130,7 @@ def test_call_that_settles_inside_the_window_is_answered_in_the_turn():
     runtime, wrapper, facts = _runtime(body, window_s=5.0)
     quick = sdk_tool_for(_tool("quick", lambda _p: ToolResult(True, "completed", False)))
     try:
-        result = asyncio.run(quick.on_invoke_tool(wrapper, "{}"))
+        result = asyncio.run(quick.on_invoke_tool(wrapper, '{"intent":"finish the requested body work"}'))
     finally:
         runtime.close()
     assert result["success"] and result["reason"] == "completed"
@@ -147,7 +147,7 @@ def test_call_stays_in_the_turn_when_nobody_listens_for_a_later_result():
 
     runtime, wrapper, _facts = _runtime(body, listening=False)
     try:
-        result = asyncio.run(sdk_tool_for(_tool("slow", slow)).on_invoke_tool(wrapper, "{}"))
+        result = asyncio.run(sdk_tool_for(_tool("slow", slow)).on_invoke_tool(wrapper, '{"intent":"finish the requested body work"}'))
     finally:
         runtime.close()
     assert result["reason"] == "completed"
@@ -164,7 +164,7 @@ def test_failed_background_call_reports_blocked():
     runtime, wrapper, facts = _runtime(body)
 
     async def scenario():
-        receipt = await sdk_tool_for(_tool("fails", fails)).on_invoke_tool(wrapper, "{}")
+        receipt = await sdk_tool_for(_tool("fails", fails)).on_invoke_tool(wrapper, '{"intent":"finish the requested body work"}')
         release.set()
         for _ in range(200):
             if facts:

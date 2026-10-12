@@ -145,7 +145,7 @@ async def _runtime_traces_progress():
     runtime.trace.sink = sink
     try:
         tool = registry.get("clear_area")
-        await asyncio.wait_for(runtime.run_tool(tool, execute_tool, tool, {"start": [0, 5, 0], "end": [0, 5, 0]},
+        await asyncio.wait_for(runtime.run_tool(tool, execute_tool, tool, {"start": [0, 5, 0], "end": [0, 5, 0], "intent": "clear the marked block"},
                                                 runtime.weld_context, tool_call_id="call-clear", timeout_s=10), 5)
     finally:
         await runtime.aclose()
@@ -220,7 +220,7 @@ def synthetic_trace():
                                  "inventory_after": {"oak_planks": 14}}})
     add("responses_tool_output", tool="move_to", tool_call_id="c1")
     add("tool_invoke", tool="dig_up", tool_call_id="c2", source="body.objective", permission="dig_vertical",
-        mutating=True, arguments_summary="{}")
+        mutating=True, arguments_summary='{"intent":"finish the requested body work"}')
     add("tool_result", 2.0, tool="dig_up", tool_call_id="c2", success=False, reason="vertical_no_path",
         full_result={"success": False, "reason": "vertical_no_path", "canRetry": True, "metrics": {}})
     add("assistant_message", content="檐口坏了，先修。")
