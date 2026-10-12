@@ -521,7 +521,8 @@ class CallSupervisor:
         params = args[1] if len(args) > 1 and isinstance(args[1], Mapping) else {}
         monitor: asyncio.Task[Any] | None = None
         direct = (getattr(self.runtime, "reflex_manager", None) is not None
-                  and not bool(record["supervision_context"].get("is_plan")))
+                  and not bool(record["supervision_context"].get("is_plan"))
+                  and not bool(record["supervision_context"].get("is_reflex_action")))
         try:
             while True:
                 worker = asyncio.create_task(self.runtime.execution_lane.run(invoke, timeout_s=timeout_s))
@@ -925,6 +926,13 @@ class CallSupervisor:
             "direct_call_handoff", tool_call_id=call_id, facts=safe, settlement=settled,
         )
         self.runtime.direct_call_handoffs[call_id] = {"facts": safe, "settlement": settled}
+        remember = getattr(self, "record_experience", None)
+        if callable(remember):
+            remember(
+                f"{safe.get('what', {}).get('tool', execution.get('tool'))} was stopped by "
+                f"Decision ({safe.get('decision', {}).get('choice') or 'unknown'}); "
+                f"the Body is at {safe.get('body', {}).get('position')}."
+            )
         # Only after the unified stop path has settled may a direct call send
         # its fact to the Agent. Plan calls are reported once by
         # ReflexManager, after WorkPlanExecutor records the node state; doing
@@ -980,7 +988,6 @@ class CallSupervisor:
                 claim_holder="agent_call",
                 supervision_context={
                     "is_reflex_action": True,
-                    "_skip_supervision": True,
                     "intent": _DEFAULT_ACTION_TEXT.get(choice, choice),
                 },
             )
@@ -1058,7 +1065,7 @@ class CallSupervisor:
                     default_tool, execute_tool, default_tool, action[1],
                     getattr(self.runtime, "weld_context", None),
                     tool_call_id=f"{default_id}-{total}", claim_holder="agent_call",
-                    supervision_context={"is_reflex_action": True, "_skip_supervision": True,
+                    supervision_context={"is_reflex_action": True,
                                          "intent": _DEFAULT_ACTION_TEXT.get(action[0], action[0])},
                 )
             except Exception as exc:

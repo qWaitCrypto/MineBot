@@ -1610,13 +1610,16 @@ class AgentRuntime:
         self.body_control = BodyControl(authority)
         self._body_stop_lock = asyncio.Lock()
         self._responses_turn_lock = asyncio.Lock()
-        from minebot.app.direct_call_supervision import CallSupervisor
+        from minebot.app.body_loop import BodyLoop
         self.decision_client = DecisionClient(emit=self.trace.emit)
         from minebot.app.panel_telemetry import PanelTelemetry
         self.panel_telemetry = PanelTelemetry(self.trace)
         # One supervisor covers direct Agent calls and work-plan call nodes.
         # Keep the old attribute as a compatibility alias for slice-1 tools.
-        self.call_supervisor = CallSupervisor(self)
+        # One lifecycle owner for all SDK Body calls.  ``call_supervisor`` is
+        # retained as the compatibility name used by older integrations.
+        self.body_loop = BodyLoop(self)
+        self.call_supervisor = self.body_loop
         self.direct_build_supervisor = self.call_supervisor
         self.reflex_manager = None
         self.background_call: BackgroundCall | None = None
@@ -2031,7 +2034,7 @@ class AgentRuntime:
             # of this slice; keep its existing timing/settlement semantics.
             if (tool.sidecar.can_mutate_body and supervisor is not None
                     and not getattr(self, "native_responses", False)
-                    and not bool((supervision_context or {}).get("_skip_supervision"))):
+                    ):
                 result = await supervisor.run(tool, admitted_callback, call_args,
                     call_id=operation_id, timeout_s=timeout_s,
                     supervision_context=supervision_context)
@@ -2127,6 +2130,8 @@ class AgentRuntime:
         continuation_budget: ContinuationEpochBudget | None = None,
         review_grant_stop_epoch_id: str | None = None,
     ) -> AgentTurnOutcome:
+        if hasattr(self, "body_loop") and not self.native_responses:
+            await self.body_loop.start()
         if self.reflex_manager is not None:
             self.reflex_manager.bind_loop(asyncio.get_running_loop())
         if self.native_responses:
@@ -2494,6 +2499,10 @@ class AgentRuntime:
         plan = summary() if callable(summary) else None
         if plan is not None:
             work["plan"] = plan
+        loop = getattr(self, "body_loop", None)
+        experiences = getattr(loop, "recent_experiences", None)
+        if experiences:
+            work["reflex_experiences"] = list(experiences)
         if work:
             execution = self.execution_snapshots.current()
             if execution is not None:
@@ -2721,7 +2730,12 @@ class AgentRuntime:
             await asyncio.gather(call.task, return_exceptions=True)
         if self.reflex_manager is not None:
             await self.reflex_manager.close()
-        await self.direct_build_supervisor.close()
+        body_loop = getattr(self, "body_loop", None)
+        if body_loop is not None:
+            await body_loop.stop()
+            await body_loop.close()
+        else:
+            await self.direct_build_supervisor.close()
         if self.responses_kernel is not None:
             self.responses_kernel.halt()
             if any(c.mutating and not c.task.done() for c in self.responses_kernel.pending):

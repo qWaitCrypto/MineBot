@@ -213,6 +213,7 @@ class ReflexManager:
             emit=lambda event, **payload: self.runtime.trace.emit(event, activity_id=activity.activity_id, **payload),
             records=activity.records,
             idle_supervise=self._supervise_idle,
+            result_judge=getattr(getattr(self.runtime, "body_loop", None), "decide_plan_result", None),
         )
         try:
             wait_attempt = 0

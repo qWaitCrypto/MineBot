@@ -16,6 +16,7 @@ import json
 import time
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Literal, Protocol
 
 from jsonschema import Draft202012Validator
@@ -70,6 +71,14 @@ class WorkIdleSupervisor(Protocol):
         self, tool: str, *, call_id: str, plan_context: dict[str, Any],
         options: dict[str, str], facts: dict[str, Any],
     ) -> dict[str, Any]: ...
+
+
+class WorkResultJudge(Protocol):
+    async def __call__(
+        self, *, call_id: str, tool: Any, params: dict[str, Any],
+        plan_context: dict[str, Any], decision_context: dict[str, Any],
+        next_call: str = "", repeat_note: str = "",
+    ) -> str: ...
 
 
 def _schema_path() -> Path:
@@ -358,6 +367,7 @@ class WorkPlanExecutor:
         choice_provider: WorkChoiceProvider | None = None,
         observe: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
         idle_supervise: WorkIdleSupervisor | None = None,
+        result_judge: WorkResultJudge | None = None,
         emit: Callable[..., None] | None = None,
         records: dict[str, NodeRecord] | None = None,
     ) -> None:
@@ -369,6 +379,7 @@ class WorkPlanExecutor:
         self.choice_provider = choice_provider
         self.observe = observe
         self.idle_supervise = idle_supervise
+        self.result_judge = result_judge
         self.emit = emit or (lambda *_args, **_kwargs: None)
         # An empty mapping is a meaningful caller-owned revision store.  Do
         # not replace it with a new mapping or completed nodes would be lost
@@ -727,6 +738,36 @@ class WorkPlanExecutor:
         *, item: Any = None,
     ) -> str:
         facts = record.decision_facts or {}
+        if self.result_judge is not None:
+            plan = self._call_plan(node, intents)
+            repeat = node.get("repeat")
+            repeat_note = ""
+            if isinstance(repeat, dict):
+                repeat_note = (
+                    f"Repeat when: {self._repeat_text(repeat.get('again_when', ''))}; "
+                    f"stop when: {self._repeat_text(repeat.get('until', ''))}."
+                )
+            try:
+                choice = await self.result_judge(
+                    call_id=node_key,
+                    tool=SimpleNamespace(name=str(node.get("tool", "unknown"))),
+                    params=(facts.get("tool_arguments") if isinstance(facts.get("tool_arguments"), dict)
+                            else (node.get("arguments") if isinstance(node.get("arguments"), dict) else {})),
+                    plan_context=plan,
+                    decision_context=facts,
+                    next_call=str(node.get("next_call") or ""),
+                    repeat_note=repeat_note,
+                )
+            except Exception:
+                choice = "unknown"
+            record.decision = {"choice": choice, "options": [], "reads": record.decision_reads}
+            if choice == "unknown":
+                record.unknown_streak += 1
+                record.decision_pending = True
+                record.status = "waiting"
+                return "waiting"
+            record.unknown_streak = 0
+            return self._apply_call_choice(node, node_key, intents, record, choice, item=item)
         options = self._call_options(
             node,
             result=facts.get("tool_result") if isinstance(facts, dict) else None,
