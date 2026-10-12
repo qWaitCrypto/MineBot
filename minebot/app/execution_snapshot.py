@@ -64,6 +64,7 @@ class _Operation:
         self.last_progress = self.started
         self.progress_signal: str | None = None
         self.facts: dict[str, Any] = {}
+        self.vitals: dict[str, float] = {}
         # Evidence baselines; a first sample sets them and proves no progress.
         self.position: tuple[float, float, float] | None = None
         self.start_position: tuple[float, float, float] | None = None
@@ -282,6 +283,20 @@ class ExecutionSnapshots:
         navigation = payload.get("navigation") if isinstance(payload.get("navigation"), Mapping) else None
         if navigation is not None:
             facts["navigation"] = {key: navigation[key] for key in _NAVIGATION_FACTS if key in navigation}
+        # Preserve adjacent Body samples as facts for the question builder.
+        # A previous value is evidence only for this immediately preceding
+        # sample; the supervisor decides what that change means.
+        for vital in ("oxygen", "health", "food"):
+            current = payload.get(vital)
+            if isinstance(current, (int, float)):
+                previous = op.vitals.get(vital)
+                if previous is not None:
+                    facts[f"{vital}_previous"] = previous
+                    if vital == "health" and current < previous:
+                        facts["recently_hurt"] = True
+                    elif vital == "health":
+                        facts.pop("recently_hurt", None)
+                op.vitals[vital] = float(current)
         for key in (
             "pathing", "builder_paused", "selected_item", "selected_item_known",
             "inventory_complete", "inventory_includes_selected", "creative",
