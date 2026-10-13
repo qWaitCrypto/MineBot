@@ -429,6 +429,25 @@ class BodyLoop(CallSupervisor):
                         ))
                         record["decision_task"] = decision_task
             if worker in done and decision_task is None:
+                # Protective actions are registered as ordinary current work,
+                # so their terminal result must be judged by this same
+                # lifecycle consumer.  The orchestration task that suspended
+                # the original call only waits for this verdict; it must not
+                # open a second Decision request from _after_default_action.
+                if (record["supervision_context"].get("is_reflex_action")
+                        and not record.get("protective_result_judged")):
+                    try:
+                        protective_result = worker.result()
+                    except asyncio.CancelledError:
+                        protective_result = {
+                            "success": False, "reason": "stopped_by_decision", "canRetry": True,
+                        }
+                    except Exception as exc:
+                        protective_result = {
+                            "success": False, "reason": type(exc).__name__, "canRetry": True,
+                        }
+                    record["result"] = protective_result
+                    await self._judge_protective_result(record, protective_result)
                 for waiter in (wake_wait, clock_wait):
                     if waiter not in done:
                         waiter.cancel()
@@ -444,6 +463,101 @@ class BodyLoop(CallSupervisor):
                 if waiter not in done:
                     waiter.cancel()
             await asyncio.gather(wake_wait, clock_wait, return_exceptions=True)
+
+    async def _judge_protective_result(self, record: dict[str, Any], result: Any) -> str:
+        """Judge a completed protective action on the lifecycle task.
+
+        The suspended work remains in ``self._suspended`` while this runs.  A
+        result question is therefore compiled from the original call and the
+        just-finished protective call, but the request itself has one owner:
+        the BodyLoop lifecycle consumer.
+        """
+        record["protective_result_judged"] = True
+        parent = self._suspended
+        if not isinstance(parent, dict):
+            # Idle/profile actions intentionally have no suspended Agent call.
+            # Their running-frame verdict already controls whether the Agent
+            # is notified, so there is no second result question here.
+            record["protective_verdict"] = "unknown"
+            return "unknown"
+        payload = result if isinstance(result, Mapping) else getattr(result, "result", result)
+        if not isinstance(payload, Mapping):
+            payload = {"success": False, "reason": str(payload)[:200], "canRetry": True}
+        facts = await self._read_idle_facts()
+        execution = {
+            "tool": record.get("tool", "unknown"),
+            "state": "succeeded" if payload.get("success") is True else "failed",
+            "facts": facts,
+            "result": dict(payload),
+        }
+        action = record.get("protective_action")
+        if not (isinstance(action, (tuple, list)) and len(action) == 2):
+            action = (record.get("tool", "unknown"), record.get("params", {}))
+        options = rq.after_default_options(
+            original_call=rq.call_text(parent.get("tool", "unknown"), parent.get("params", {})),
+            intent=str(parent.get("supervision_context", {}).get("intent")
+                       or parent.get("supervision_context", {}).get("node_description") or ""),
+            default_call=rq.call_text(str(action[0]), action[1] if isinstance(action[1], Mapping) else {}),
+            result=payload,
+            facts=facts,
+        )
+        while True:
+            if await self._process_lifecycle_events(facts):
+                choice = "unknown"
+                break
+            remaining = self._remaining(parent)
+            if remaining is not None and remaining <= 0:
+                choice = "unknown"
+                break
+            try:
+                choice = await asyncio.wait_for(self._judge_frame(
+                    parent["call_id"],
+                    self.runtime.registry.get(str(action[0])),
+                    action[1] if isinstance(action[1], Mapping) else {},
+                    execution,
+                    0.0,
+                    purpose="default_result_frame",
+                    supervision_context=parent["supervision_context"],
+                    options=options,
+                    decision_context={
+                        "tool_result": dict(payload),
+                        "tool_arguments": dict(action[1]) if isinstance(action[1], Mapping) else {},
+                        "body_state": facts,
+                        "history": list(parent.get("history", [])),
+                        "history_earlier": int(parent.get("history_total", 0))
+                        - len(parent.get("history", [])),
+                    },
+                ), timeout=2.2 if remaining is None else min(2.2, remaining))
+            except asyncio.TimeoutError:
+                choice = "unknown"
+            except Exception:
+                choice = "unknown"
+            parent["questions"] = int(parent.get("questions") or 0) + 1
+            if choice != "unknown":
+                break
+            parent["unknown_answers"] = int(parent.get("unknown_answers") or 0) + 1
+            remaining = self._remaining(parent)
+            if remaining is not None and remaining <= 0:
+                break
+            await asyncio.sleep(
+                FACT_FRAME_INTERVAL_S if remaining is None else min(FACT_FRAME_INTERVAL_S, remaining)
+            )
+        record["protective_verdict"] = choice
+        # The enclosing suspended call is the consumer of this terminal
+        # decision.  Copy the answer there so its orchestration task can act
+        # without issuing a second request of its own.
+        parent["protective_verdict"] = choice
+        if choice == "call_agent":
+            self._protective_verdict = "call_agent"
+        self.runtime.trace.emit(
+            "call_supervision_result",
+            tool_call_id=record.get("call_id"),
+            tool=record.get("tool", "unknown"),
+            purpose="default_result_frame",
+            choice=choice,
+            unknown=choice == "unknown",
+        )
+        return choice
 
     async def _handoff(
         self, record: dict[str, Any], execution: Mapping[str, Any],
@@ -896,23 +1010,47 @@ class BodyLoop(CallSupervisor):
                 total += 1
                 del history[:-5]
                 new_attempt = False
-            options = rq.after_default_options(
-                original_call=rq.call_text(record["tool"], record["params"]), intent=intent,
-                default_call=rq.call_text(action[0], action[1]), result=payload,
-                facts=execution["facts"],
-            )
-            try:
-                choice = await asyncio.wait_for(self._judge_frame(
-                    record["call_id"], default_tool, action[1], execution, 0.0,
-                    purpose="default_result_frame", supervision_context=context, options=options,
-                    decision_context={"tool_result": dict(payload), "tool_arguments": dict(action[1]),
-                                      "body_state": execution["facts"], "history": list(history),
-                                      "history_earlier": total - len(history),
-                                      "interrupted_history": copy.deepcopy(record.get("history", [])),
-                                      "interrupted_history_earlier": int(record.get("history_total", 0)) - len(record.get("history", []))},
-                ), timeout=2.2 if remaining is None else min(2.2, remaining))
-            except asyncio.TimeoutError:
-                choice = "unknown"
+            # A result judged by the lifecycle monitor is already authoritative
+            # for this attempt.  Direct callers in older tests can still enter
+            # here without a precomputed verdict and use the compatibility
+            # path below.
+            precomputed = record.pop("protective_verdict", None)
+            if precomputed is not None:
+                choice = str(precomputed)
+            else:
+                options = rq.after_default_options(
+                    original_call=rq.call_text(record["tool"], record["params"]), intent=intent,
+                    default_call=rq.call_text(action[0], action[1]), result=payload,
+                    facts=execution["facts"],
+                )
+                try:
+                    choice = await asyncio.wait_for(self._judge_frame(
+                        record["call_id"], default_tool, action[1], execution, 0.0,
+                        purpose="default_result_frame", supervision_context=context, options=options,
+                        decision_context={"tool_result": dict(payload), "tool_arguments": dict(action[1]),
+                                          "body_state": execution["facts"], "history": list(history),
+                                          "history_earlier": total - len(history),
+                                          "interrupted_history": copy.deepcopy(record.get("history", [])),
+                                          "interrupted_history_earlier": int(record.get("history_total", 0)) - len(record.get("history", []))},
+                    ), timeout=2.2 if remaining is None else min(2.2, remaining))
+                except asyncio.TimeoutError:
+                    choice = "unknown"
+            if precomputed is not None:
+                if choice in {"resume", "call_agent"}:
+                    return choice
+                if choice == "unknown":
+                    return "unknown"
+                # ``repeat`` is a real protective attempt.  The next attempt
+                # will be judged by the lifecycle monitor in the same way.
+                if choice == "repeat":
+                    protective_choice, action, default_result, default_id = await self._execute_protection(
+                        protective_choice, action, record, call_id=f"{default_id}-{total}"
+                    )
+                    default_tool = registry.get(action[0])
+                    if self._protective_verdict == "call_agent":
+                        return "call_agent"
+                    new_attempt = True
+                    continue
             record["questions"] += 1
             if choice in {"resume", "call_agent"}:
                 return choice

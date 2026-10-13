@@ -653,7 +653,7 @@ def test_lifecycle_monitors_work_protection_and_switch_without_nested_consumer(m
         runtime.direct_call_handoffs = {}
         runtime.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
         runtime.weld_context = None
-        notifications, frames, actions, consumers = [], [], [], []
+        notifications, frames, result_frames, actions, consumers = [], [], [], [], []
         runtime.notify_reflex_fact = notifications.append
         state = {'current': None, 'last': None}
         stop_events = {}
@@ -709,6 +709,7 @@ def test_lifecycle_monitors_work_protection_and_switch_without_nested_consumer(m
 
         async def judge(call_id, tool, params, execution, idle_s, **kwargs):
             if kwargs['purpose'] == 'default_result_frame':
+                result_frames.append(asyncio.current_task())
                 return verdict
             frames.append((tool.name, asyncio.current_task()))
             if tool.name == 'collect_resource':
@@ -728,6 +729,8 @@ def test_lifecycle_monitors_work_protection_and_switch_without_nested_consumer(m
                 tool_call_id='original', supervision_context={'intent': 'have three logs'}), 2)
             assert frames and len(consumers) >= 2
             assert all(task is loop._lifecycle_task for task in consumers)
+            if verdict != 'call_agent':
+                assert result_frames and all(task is loop._lifecycle_task for task in result_frames)
             assert {name for name, _ in frames} >= {'collect_resource', 'go_to_surface'}
             assert len(notifications) == (1 if verdict == 'call_agent' else 0)
             assert len(loop.recent_experiences) == (0 if verdict == 'call_agent' else 1)
