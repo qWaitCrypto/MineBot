@@ -25,6 +25,7 @@ from minebot.app.direct_call_supervision import (
     CallSupervisor,
     FACT_FRAME_INTERVAL_S,
 )
+from minebot.app.life_profile import load_profile, life_intent
 
 
 class BodyLoop(CallSupervisor):
@@ -55,6 +56,7 @@ class BodyLoop(CallSupervisor):
         self._reaction_actions: dict[str, dict[str, Any]] = {}
         self._reaction_event_loop: asyncio.AbstractEventLoop | None = None
         self._ambient_facts: dict[str, Any] = {}
+        self._life_profile = load_profile()
 
     def _queue_lifecycle_event(self, event: Event) -> None:
         self._lifecycle_events.append(event)
@@ -1063,6 +1065,9 @@ class BodyLoop(CallSupervisor):
                     self.runtime.trace.emit(
                         "reflex_idle_read_unknown", scope="nearbyEntities", error_type=type(exc).__name__
                     )
+        if self._life_profile:
+            facts["life_profile"] = copy.deepcopy(self._life_profile)
+            facts["life_intent"] = life_intent(self._life_profile)
         return self._frame({"facts": facts})["facts"]
 
     @staticmethod

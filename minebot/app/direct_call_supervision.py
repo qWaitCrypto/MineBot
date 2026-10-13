@@ -473,6 +473,23 @@ class CallSupervisor:
                 pos = near[0]["pos"] if near else None
             if isinstance(pos, (list, tuple)) and len(pos) == 3:
                 return "move_away", {"danger_pos": [float(value) for value in pos], "min_distance": 8.0}
+        if choice == "go_home":
+            profile = facts.get("life_profile")
+            home = profile.get("home") if isinstance(profile, Mapping) else None
+            pos = home.get("pos") if isinstance(home, Mapping) else None
+            if isinstance(pos, (list, tuple)) and len(pos) == 3:
+                return "move_to", {"pos": list(pos), "radius": 2, "timeout_s": 60.0}
+        if choice == "approach_player":
+            players = [item for item in facts.get("nearby_entities", [])
+                       if isinstance(item, Mapping) and item.get("entity_type", item.get("type")) == "player"]
+            if players:
+                player = players[0]
+                return "move_to", {"pos": player.get("pos"), "radius": 2, "timeout_s": 60.0}
+        if choice == "follow_player":
+            players = [item for item in facts.get("nearby_entities", [])
+                       if isinstance(item, Mapping) and item.get("entity_type", item.get("type")) == "player"]
+            if players and players[0].get("id"):
+                return "follow_entity", {"target": players[0]["id"], "timeout_s": 60.0}
         return None
 
     @staticmethod

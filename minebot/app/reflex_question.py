@@ -512,10 +512,24 @@ def interrupt_result_question(*, goal: str, intent: str, original_call: str,
 
 
 def idle_options(facts: Mapping[str, Any]) -> dict[str, str]:
-    """The Step-2 idle range: waiting plus the applicable protective calls."""
+    """Idle range compiled from generic player/profile facts and protection."""
     if dead(facts):
         return {}
-    options = {"stay": "Stay where the Body is and wait for the next step."}
+    options = {}
+    players = [item for item in facts.get("nearby_entities", [])
+               if isinstance(item, Mapping) and item.get("entity_type", item.get("type")) == "player"]
+    if players:
+        player = players[0]
+        name = str(player.get("name") or player.get("id") or "the nearby player")
+        options["approach_player"] = f"Walk to {name} at the observed position."
+        options["follow_player"] = f"Follow {name} as a moving player."
+    profile = facts.get("life_profile") if isinstance(facts.get("life_profile"), Mapping) else {}
+    home = profile.get("home") if isinstance(profile, Mapping) else None
+    position = _position(facts.get("position", facts.get("pos")))
+    home_pos = _position(home.get("pos")) if isinstance(home, Mapping) else None
+    if home_pos and position and home_pos != position:
+        options["go_home"] = f"Walk to the home position {home_pos}."
+    options["stay"] = "Stay where the Body is and wait for the next step."
     options.update(protective_options(facts))
     return options
 
@@ -523,6 +537,8 @@ def idle_options(facts: Mapping[str, Any]) -> dict[str, str]:
 def idle_question(facts: Mapping[str, Any], options: Mapping[str, str]) -> dict[str, Any]:
     """Compile idle prose here, alongside the work-frame prose."""
     state: dict[str, Any] = {"body": _body_sentence(facts)}
+    if facts.get("life_intent"):
+        state["agent_intent"] = f"This is the idle-life intention: “{facts['life_intent']}”."
     threats = _threat_sentence(facts)
     if threats:
         state["threats"] = threats
