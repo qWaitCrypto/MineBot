@@ -46,6 +46,7 @@ import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.core.Direction;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -1006,6 +1007,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             run.stopAt = System.nanoTime();
             baritone.getPathingBehavior().cancelEverything();
             baritone.getInputOverrideHandler().clearAllKeys();
+            restoreSwimSettings(run);
             if (run.structured && Minecraft.getInstance().player != null) {
                 Minecraft client = Minecraft.getInstance();
                 if (isVertical(run) && client.gameMode != null) client.gameMode.stopDestroyBlock();
@@ -2585,7 +2587,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
     }
 
-    /** Swim vertically until the head is clear and the air supply has started recovering. */
+    /** Swim up, using upstream water pathing to go around a closed column. */
     private void tickSwimUp(Minecraft client, Run current) {
         if (current.phase == 0) {
             current.anchor = client.player.blockPosition();
@@ -2593,6 +2595,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             current.swimmingUp = true;
             current.swimPreviousAir = client.player.getAirSupply();
             current.swimBestY = client.player.getY();
+            current.swimProgressPosition = client.player.position();
             current.phase = 1;
             current.phaseTick = current.ticks;
         }
@@ -2605,18 +2608,6 @@ public final class MineBotClientBody implements ClientModInitializer {
                 : "vertical_target_out_of_bounds");
             return;
         }
-        // Hold the jump key as a player does; the client rewrites the jumping
-        // flag from its keys every tick, so setting the flag does nothing.
-        client.options.keyJump.setDown(true);
-        double y = client.player.getY();
-        if (y > current.swimBestY + 0.05) {
-            current.swimBestY = y;
-            current.swimNoRiseTicks = 0;
-        } else if (SurfaceSwimProgress.blocked(++current.swimNoRiseTicks)) {
-            client.options.keyJump.setDown(false);
-            requestStop("failed", "swim_up_blocked");
-            return;
-        }
         int air = client.player.getAirSupply();
         boolean headOut = client.level.getFluidState(eye).isEmpty();
         if (SurfaceSwimProgress.completed(headOut, current.swimPreviousAir, air, client.player.getMaxAirSupply())) {
@@ -2625,10 +2616,83 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         current.swimPreviousAir = air;
+        // During a detour upstream controls all movement, including jumping in
+        // water. Once it reaches the open column, jump through the final air
+        // boundary, which upstream's water-pillar movement does not support.
+        if (current.swimRouteGoal != null && current.swimRouteGoal.isInGoal(client.player.blockPosition())) {
+            baritone.getPathingBehavior().cancelEverything();
+            baritone.getInputOverrideHandler().clearAllKeys();
+            current.swimRouteGoal = null;
+            current.phase = 3;
+        }
+        client.options.keyJump.setDown(current.swimRouteGoal == null);
+        double y = client.player.getY();
+        boolean movedOnRoute = current.swimRouteGoal != null
+            && client.player.position().distanceToSqr(current.swimProgressPosition) > 0.01;
+        if (y > current.swimBestY + 0.05 || movedOnRoute) {
+            current.swimBestY = y;
+            current.swimProgressPosition = client.player.position();
+            current.swimNoRiseTicks = 0;
+        } else if (SurfaceSwimProgress.blocked(++current.swimNoRiseTicks)) {
+            client.options.keyJump.setDown(false);
+            if (!routeSwimToAir(client, current)) {
+                requestStop("failed", "swim_surface_route_not_found");
+                return;
+            }
+            current.swimNoRiseTicks = 0;
+            current.swimProgressPosition = client.player.position();
+        }
         if (client.player.getY() - current.anchor.getY() > current.verticalDistance) {
             client.options.keyJump.setDown(false);
             requestStop("failed", "vertical_target_out_of_bounds");
         }
+    }
+
+    private boolean routeSwimToAir(Minecraft client, Run current) {
+        SurfaceSwimProgress.Space space = new SurfaceSwimProgress.Space() {
+            private boolean clear(BlockPos pos) {
+                return clientChunkLoaded(client, pos)
+                    && client.level.getBlockState(pos).getCollisionShape(client.level, pos).isEmpty();
+            }
+            public boolean water(int x, int y, int z) {
+                BlockPos pos = new BlockPos(x, y, z);
+                return clear(pos) && client.level.getFluidState(pos).is(FluidTags.WATER);
+            }
+            public boolean breathable(int x, int y, int z) {
+                BlockPos pos = new BlockPos(x, y, z);
+                return clear(pos) && client.level.getFluidState(pos).isEmpty();
+            }
+        };
+        var anchor = new SurfaceSwimProgress.Cell(current.anchor.getX(), current.anchor.getY(), current.anchor.getZ());
+        var targets = SurfaceSwimProgress.routeTargets(space, anchor, client.level.getMinY(),
+            client.level.getMaxY(), current.verticalDistance, current.swimNextRing);
+        if (targets.isEmpty()) return false;
+        var settings = BaritoneAPI.getSettings();
+        if (current.swimPreviousAllowBreak == null) {
+            current.swimPreviousAllowBreak = settings.allowBreak.value;
+            current.swimPreviousAllowPlace = settings.allowPlace.value;
+        }
+        // An emergency detour must not dig through somebody's ceiling or place
+        // blocks. Restore the caller's settings on every stop path.
+        settings.allowBreak.value = false;
+        settings.allowPlace.value = false;
+        var first = targets.getFirst();
+        current.swimNextRing = Math.max(Math.abs(first.x() - anchor.x()), Math.abs(first.z() - anchor.z())) + 1;
+        current.swimRouteGoal = new GoalComposite(targets.stream()
+            .map(p -> (Goal) new GoalBlock(p.x(), p.y(), p.z())).toArray(Goal[]::new));
+        current.goal = current.swimRouteGoal;
+        current.phase = 2;
+        current.phaseTick = current.ticks;
+        baritone.getCustomGoalProcess().setGoalAndPath(current.swimRouteGoal);
+        return true;
+    }
+
+    private static void restoreSwimSettings(Run current) {
+        if (current == null || current.swimPreviousAllowBreak == null) return;
+        BaritoneAPI.getSettings().allowBreak.value = current.swimPreviousAllowBreak;
+        BaritoneAPI.getSettings().allowPlace.value = current.swimPreviousAllowPlace;
+        current.swimPreviousAllowBreak = null;
+        current.swimPreviousAllowPlace = null;
     }
 
     private int findSurfaceY(Minecraft client, Run current) {
@@ -3310,6 +3374,11 @@ public final class MineBotClientBody implements ClientModInitializer {
         int swimPreviousAir;
         double swimBestY;
         int swimNoRiseTicks;
+        Vec3 swimProgressPosition;
+        Goal swimRouteGoal;
+        int swimNextRing = 1;
+        Boolean swimPreviousAllowBreak;
+        Boolean swimPreviousAllowPlace;
         List<net.minecraft.world.item.Item> previousThrowawayItems;
         Integer previousFollowRadius;
         final Set<BlockPos> collectionTargets = new HashSet<>();
