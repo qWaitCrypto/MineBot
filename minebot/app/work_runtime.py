@@ -518,14 +518,13 @@ class WorkPlanExecutor:
                     history = self._call_histories.setdefault(base_key, [])
                     history_count = self._call_history_counts.get(base_key, 0) + 1
                     self._call_history_counts[base_key] = history_count
-                    body_facts = record.decision_facts["body_state"]
                     raw_body = _state_payload(decision_state)
                     history.append({
                         "reason": public_result.get("reason"),
                         "result": _decision_result_facts(public_result),
                         "body": {
-                            "position": raw_body.get("position"),
-                            "inventory": raw_body.get("inventory"),
+                            "position": raw_body.get("position", raw_body.get("pos")),
+                            "inventory": raw_body.get("inventory", raw_body.get("inventory_counts")),
                         },
                     })
                     # The question carries the five most recent raw results;

@@ -1985,7 +1985,7 @@ class AgentRuntime:
                     await self.cancel_active_execution_with_facts(
                         "agent_call_arrived", invalidate_generation=False, cancel_reflex=False,
                     )
-                elif snapshot.holder == "threat" and snapshot.stop_state == "running":
+                elif snapshot.holder == "threat" and snapshot.stop_state in {"running", "stopping"}:
                     deadline = time.monotonic() + max(0.0, float(timeout_s or 0.0))
                     self.trace.emit(
                         "body_call_waiting", tool_call_id=tool_call_id,
@@ -1993,11 +1993,16 @@ class AgentRuntime:
                     )
                     while True:
                         snapshot = control.snapshot()
-                        if snapshot.holder != "threat" or snapshot.stop_state != "running":
+                        if snapshot.holder != "threat" or snapshot.stop_state not in {"running", "stopping"}:
                             break
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
-                            raise BodyRecoveryRequired("body_busy", facts={"holder": snapshot.to_payload()})
+                            # Protection still owns a healthy Body. Admission
+                            # timed out; this is a receipt, not a recovery fault.
+                            return ToolResult(
+                                False, "body_busy", True,
+                                metrics={"holder": snapshot.to_payload()},
+                            ).to_payload()
                         await asyncio.sleep(min(0.05, remaining))
             if control.unknown:
                 probe = getattr(self.body, "confirm_control_idle", None)

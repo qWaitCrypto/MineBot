@@ -4,6 +4,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from minebot.app.client_body_tools import client_body_tools
 from minebot.app.construction_facts import read_construction
 from minebot.app.decision_client import DecisionAnswer
@@ -963,6 +965,92 @@ def test_sdk_epoch_preserves_missing_intent_rejection_without_running_body():
             assert receipts[0]["full_result"]["reason"] == "missing_intent"
             assert not [e for e in runtime.trace.events if e.get("event") == "tool_exception"]
         finally:
+            await runtime.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("settling", [False, True])
+def test_sdk_threat_admission_timeout_is_a_busy_receipt_without_recovery(settling):
+    from minebot.app.runner import ProgressEpochAdapter, RuntimeRunContext, sdk_tool_for
+    from minebot.brain.lifecycle import LifecycleState
+
+    async def run():
+        runtime, _ = make_runtime(ResetGenericCallIpc(progressing=False))
+        invoked = []
+        tool = RegisteredTool(
+            "waiting_agent_call", "An Agent call arriving during protection.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda params: invoked.append(params),
+            ToolSidecar("waiting_agent_call", True, source="test", body_scope=("moveTo",), timeout_s=.02),
+        )
+        runtime.registry.register(tool)
+        epochs = ProgressEpochAdapter(runtime=runtime, run_id="threat-busy")
+        context = RuntimeRunContext(
+            agent_context=runtime.agent_context, weld_context=runtime.weld_context,
+            profile=runtime.mode_runtime.profile_for(LifecycleState.ACTIVE),
+            trace=runtime.trace, runtime=runtime, progress_epochs=epochs,
+        )
+        owner = runtime.body_control.claim("protective-call", holder="threat")
+        if settling:
+            owner = runtime.body_control.mark_stopping("protective-call")
+        call_id = "waiting-agent-call"
+        try:
+            await epochs.open(SimpleNamespace(output=[SimpleNamespace(
+                type="function_call", call_id=call_id, name=tool.name,
+            )]))
+            result = await sdk_tool_for(tool).on_invoke_tool(
+                SimpleNamespace(context=context, tool_call_id=call_id),
+                json.dumps({"intent": "reach the requested position"}),
+            )
+            assert result["success"] is False
+            assert result["reason"] == "body_busy"
+            assert result["canRetry"] is True
+            assert runtime.body_control.snapshot() == owner
+            assert not invoked
+            assert not runtime.direct_call_handoffs
+            receipts = [e for e in runtime.trace.events if e.get("event") == "tool_result"
+                        and e.get("tool_call_id") == call_id]
+            assert len(receipts) == 1
+            assert not [e for e in runtime.trace.events
+                        if e.get("event") in {"body_recovery_required", "body_recovery_started", "execution_cancel_requested"}]
+        finally:
+            runtime.body_control.settle(claim_id="protective-call")
+            await runtime.aclose()
+
+    asyncio.run(run())
+
+
+def test_agent_call_runs_after_threat_owner_settles():
+    async def run():
+        runtime, _ = make_runtime(ResetGenericCallIpc(progressing=False))
+        invoked = []
+        tool = RegisteredTool(
+            "after_protection", "An Agent call that waits for protection.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda params: (invoked.append(params) or ToolResult(True, "completed", False)),
+            ToolSidecar("after_protection", True, source="test", body_scope=("moveTo",), timeout_s=1),
+        )
+        owner = runtime.body_control.claim("protection", holder="threat")
+        job = asyncio.create_task(runtime.run_tool(
+            tool, execute_tool, tool, {"intent": "reach the requested position"},
+            runtime.weld_context, timeout_s=1, tool_call_id="after-protection",
+        ))
+        try:
+            for _ in range(20):
+                if any(e["event"] == "body_call_waiting" for e in runtime.trace.events):
+                    break
+                await asyncio.sleep(.001)
+            assert not invoked
+            assert runtime.body_control.snapshot() == owner
+            runtime.body_control.settle(claim_id="protection")
+            result = await asyncio.wait_for(job, 2)
+            assert result["success"] is True
+            assert len(invoked) == 1
+        finally:
+            if not job.done():
+                job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
             await runtime.aclose()
 
     asyncio.run(run())

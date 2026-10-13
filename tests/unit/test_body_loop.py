@@ -219,6 +219,114 @@ def test_agent_arrival_supersedes_an_idle_answer_that_finishes_at_the_same_time(
     asyncio.run(run())
 
 
+def test_protective_result_unknown_is_reasked_without_repeating_the_action(monkeypatch):
+    async def run():
+        runtime, _trace, _decision = _runtime()
+        writes = []
+        requests = []
+        replies = iter(("invalid", "unknown", "resume"))
+        runtime.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
+
+        async def run_tool(*args, **kwargs):
+            writes.append(kwargs)
+            raise AssertionError("unknown must not execute another action")
+
+        class Decision:
+            async def ask(self, request, *, priority=None):
+                requests.append(request)
+                runtime.last_known_body_state["position"] = [len(requests), 64, 2]
+                return DecisionAnswer("unknown", {"answers": {"q": {"choice": next(replies)}}}, .001, len(requests))
+
+        runtime.run_tool = run_tool
+        runtime.decision_client = Decision()
+        loop = BodyLoop(runtime)
+        record = {
+            "call_id": "interrupted-work", "tool": "collect_resource",
+            "params": {"item": "oak_log", "count": 3}, "questions": 0,
+            "unknown_answers": 0,
+            "supervision_context": {"intent": "have three oak logs"},
+        }
+        monkeypatch.setattr("minebot.app.body_loop.FACT_FRAME_INTERVAL_S", .001)
+        choice = await loop._after_default_action(
+            record, ("go_to_surface", {}), {"success": True, "reason": "surface_reached"}, "surface-call",
+        )
+        assert choice == "resume"
+        assert len(requests) == 3
+        assert record["unknown_answers"] == 2
+        assert not writes
+        assert all("earlier_attempts_of_this_call" not in r["state"] for r in requests)
+        assert requests[0]["state"]["position"] != requests[-1]["state"]["position"]
+
+    asyncio.run(run())
+
+
+def test_protective_result_unknown_remains_cancellable(monkeypatch):
+    async def run():
+        runtime, _trace, _decision = _runtime()
+        runtime.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
+        requests = []
+
+        class Decision:
+            async def ask(self, request, *, priority=None):
+                requests.append(request)
+                return DecisionAnswer("unknown", None, .001, len(requests))
+
+        runtime.decision_client = Decision()
+        loop = BodyLoop(runtime)
+        record = {"call_id": "original", "tool": "move_to", "params": {},
+                  "questions": 0, "unknown_answers": 0,
+                  "supervision_context": {"intent": "reach the requested position"}}
+        monkeypatch.setattr("minebot.app.body_loop.FACT_FRAME_INTERVAL_S", .001)
+        job = asyncio.create_task(loop._after_default_action(
+            record, ("go_to_surface", {}), {"success": True}, "surface-call",
+        ))
+        await asyncio.sleep(.02)
+        assert not job.done()
+        assert len(requests) > 1
+        job.cancel()
+        result = await asyncio.gather(job, return_exceptions=True)
+        assert isinstance(result[0], asyncio.CancelledError)
+
+    asyncio.run(run())
+
+
+def test_protective_retry_retains_its_action_identity_and_counts_only_real_attempts(monkeypatch):
+    async def run():
+        runtime, _trace, _decision = _runtime()
+        runtime.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
+        requests, writes = [], []
+        replies = iter(("unknown", "repeat", "resume"))
+
+        class Decision:
+            async def ask(self, request, *, priority=None):
+                requests.append(request)
+                return DecisionAnswer("unknown", {"answers": {"q": {"choice": next(replies)}}}, .001, len(requests))
+
+        async def run_tool(*args, **kwargs):
+            writes.append(kwargs)
+            return {"success": True, "reason": "surface_reached"}
+
+        runtime.decision_client = Decision()
+        runtime.run_tool = run_tool
+        loop = BodyLoop(runtime)
+        record = {"call_id": "original", "tool": "move_to", "params": {},
+                  "questions": 0, "unknown_answers": 0,
+                  "supervision_context": {"intent": "reach the requested position"}}
+        monkeypatch.setattr("minebot.app.body_loop.FACT_FRAME_INTERVAL_S", .001)
+        choice = await loop._after_default_action(
+            record, ("go_to_surface", {}), {"success": True}, "surface-call",
+            protective_choice="surface",
+        )
+        assert choice == "resume"
+        assert len(writes) == 1
+        assert writes[0]["supervision_context"]["reflex_action_choice"] == "surface"
+        assert writes[0]["tool_call_id"] == "surface-call-1"
+        assert "earlier_attempts_of_this_call" not in requests[1]["state"]
+        assert requests[2]["state"]["earlier_attempts_of_this_call"] == ["Attempt 1: ended normally."]
+
+    asyncio.run(run())
+
+
 def test_reflex_experiences_are_bounded_and_available_to_live_context():
     runtime, _trace, _decision = _runtime()
     loop = BodyLoop(runtime)

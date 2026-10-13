@@ -1,5 +1,7 @@
 import asyncio
 import json
+import copy
+from pathlib import Path
 
 import pytest
 
@@ -394,3 +396,39 @@ def test_result_question_contains_recent_raw_history_without_running_execution_f
     assert "same_failure" in json.dumps(history, ensure_ascii=False)
     assert "current_work" not in payload["state"]
     assert "elapsed" not in json.dumps(payload, ensure_ascii=False).lower()
+
+
+def test_node_history_uses_native_state_fields_from_recorded_crafting_attempts():
+    """Stage-d table failed, then succeeded with a changed inventory."""
+    source = Path(__file__).parents[1] / "fixtures" / "reflex_step2_plan_result_frames.json"
+    cases = {case["seq"]: case for case in json.loads(source.read_text())['cases']}
+    attempts = [cases[1523]["raw_decision_facts"], cases[1538]["raw_decision_facts"]]
+    state = copy.deepcopy(attempts[0]["body_state"])
+    decision = Decision("repeat", "step_done")
+    calls = []
+
+    async def native_state():
+        return copy.deepcopy(state)
+
+    async def call(tool, arguments, *, call_id, timeout_s):
+        nonlocal state
+        attempt = attempts[len(calls)]
+        calls.append(call_id)
+        state = copy.deepcopy(attempt["body_state"])
+        return copy.deepcopy(attempt["tool_result"])
+
+    node = copy.deepcopy(cases[1523]["node"])
+    node.pop("next_call", None)
+    node["intent"] = cases[1523]["intents"][-1]
+    plan = {"language": "minebot-work/0.2", "goal": "make the crafting table",
+            "timeout_s": 10, "work": node}
+    executor = WorkPlanExecutor(plan, call=call, state=native_state, decision=decision)
+    outcome = asyncio.run(executor.run())
+    assert outcome.status == "completed"
+    history = executor._call_histories["table"]
+    assert history[0]["body"]["position"] == attempts[0]["body_state"]["pos"]
+    assert history[0]["body"]["inventory"] == attempts[0]["body_state"]["inventory_counts"]
+    assert history[1]["body"]["inventory"] == attempts[1]["body_state"]["inventory_counts"]
+    assert decision.payloads[-1]["state"]["earlier_attempts_of_this_call"] == [
+        "Attempt 1: failure: craft_recipe_failed:recipe_output_mismatch; inventory or position changed since."
+    ]

@@ -421,7 +421,9 @@ class BodyLoop(CallSupervisor):
                 choice=choice, error_type=type(exc).__name__,
             )
             default_result = {"success": False, "reason": type(exc).__name__}
-        after = await self._after_default_action(record, action, default_result, default_id)
+        after = await self._after_default_action(
+            record, action, default_result, default_id, protective_choice=choice,
+        )
         handoff = {**safe, "default_action": {
             "choice": choice, "tool": action[0], "result": self._compact_result(default_result),
             "then": after,
@@ -444,7 +446,7 @@ class BodyLoop(CallSupervisor):
 
     async def _after_default_action(
         self, record: dict[str, Any], action: tuple[str, dict[str, Any]],
-        default_result: Any, default_id: str,
+        default_result: Any, default_id: str, *, protective_choice: str = "",
     ) -> str:
         """Ask what follows a protective action: go back, do it again, or the Agent."""
         context = record["supervision_context"]
@@ -453,18 +455,21 @@ class BodyLoop(CallSupervisor):
         default_tool = registry.get(action[0]) if registry is not None else None
         history: list[dict[str, Any]] = []
         total = 0
+        new_attempt = True
         while default_tool is not None:
             payload = default_result if isinstance(default_result, Mapping) else getattr(default_result, "result", default_result)
             if not isinstance(payload, Mapping):
                 payload = {"success": False, "reason": str(payload)[:200]}
-            state = getattr(self.runtime, "last_known_body_state", None)
-            facts = dict(state) if isinstance(state, Mapping) else {}
-            execution = self._frame({"tool": action[0], "state": "succeeded" if payload.get("success") is True else "failed",
-                                     "facts": facts, "result": dict(payload)})
-            history.append({"result": self._compact_result(payload),
-                            "body": {"position": facts.get("position", facts.get("pos")), "inventory": facts.get("inventory")}})
-            total += 1
-            del history[:-5]
+            facts = await self._read_idle_facts()
+            execution = {"tool": action[0], "state": "succeeded" if payload.get("success") is True else "failed",
+                         "facts": facts, "result": dict(payload)}
+            if new_attempt:
+                history.append({"result": self._compact_result(payload),
+                                "body": {"position": facts.get("position", facts.get("pos")),
+                                         "inventory": facts.get("inventory", facts.get("inventory_counts"))}})
+                total += 1
+                del history[:-5]
+                new_attempt = False
             options = rq.after_default_options(
                 original_call=rq.call_text(record["tool"], record["params"]), intent=intent,
                 default_call=rq.call_text(action[0], action[1]), result=payload,
@@ -481,8 +486,15 @@ class BodyLoop(CallSupervisor):
             except asyncio.TimeoutError:
                 choice = "unknown"
             record["questions"] += 1
+            if choice in {"resume", "call_agent"}:
+                return choice
             if choice != "repeat":
-                return "resume" if choice == "resume" else "call_agent"
+                # A missing/illegal/late answer is no choice. Keep the
+                # interrupted work pending, refresh facts at the next cadence,
+                # and do not wake the Agent or add a fictitious tool attempt.
+                record["unknown_answers"] = int(record.get("unknown_answers") or 0) + 1
+                await asyncio.sleep(FACT_FRAME_INTERVAL_S)
+                continue
             try:
                 from minebot.brain.registry import execute_tool
                 default_result = await self.runtime.run_tool(
@@ -490,11 +502,12 @@ class BodyLoop(CallSupervisor):
                     getattr(self.runtime, "weld_context", None),
                     tool_call_id=f"{default_id}-{total}", claim_holder="threat",
                     supervision_context={"is_reflex_action": True,
-                                         "reflex_action_choice": choice,
-                                         "intent": supervision_module._DEFAULT_ACTION_TEXT.get(action[0], action[0])},
+                                         "reflex_action_choice": protective_choice,
+                                         "intent": supervision_module._DEFAULT_ACTION_TEXT.get(protective_choice, action[0])},
                 )
             except Exception as exc:
                 default_result = {"success": False, "reason": type(exc).__name__, "canRetry": False}
+            new_attempt = True
         return "call_agent"
 
 
