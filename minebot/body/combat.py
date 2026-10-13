@@ -342,6 +342,7 @@ class CombatTransactions:
                 "cooldown_ticks": td.get("cooldown_ticks"),
                 "min_attack_interval_ticks": td.get("min_attack_interval_ticks"),
                 "max_attack_interval_ticks": td.get("max_attack_interval_ticks"),
+                **({"broken_item": td["broken_item"]} if isinstance(td.get("broken_item"), str) else {}),
             },
         )
 

@@ -119,7 +119,7 @@ def validate_plan(plan: dict[str, Any]) -> None:
         raise WorkPlanError("plan timeout_s must be positive")
     def visit(node: dict[str, Any], path: str) -> None:
         if node.get("interrupt_when") is not None:
-            raise WorkPlanError(f"unsupported_in_slice2 at {path}: interrupt_when")
+            raise WorkPlanError(f"interrupt_when belongs to the plan at {path}")
         repeat = node.get("repeat")
         if repeat is not None and not isinstance(repeat, dict):
             raise WorkPlanError(f"repeat must be an object at {path}")
@@ -138,6 +138,17 @@ def validate_plan(plan: dict[str, Any]) -> None:
             for option in node.get("options", []):
                 visit(option["work"], f"{path}.options.{option['id']}")
     visit(plan["work"], "work")
+    interruption = plan.get("interrupt_when")
+    if interruption is not None:
+        if not isinstance(interruption, dict) or set(interruption) != {"condition", "handler"}:
+            raise WorkPlanError("interrupt_when requires condition and handler")
+        condition, handler = interruption["condition"], interruption["handler"]
+        if not isinstance(condition, dict) or not isinstance(condition.get("text"), str) or not condition["text"].strip():
+            raise WorkPlanError("interrupt_when.condition requires text")
+        if not isinstance(handler, dict):
+            raise WorkPlanError("interrupt_when.handler requires a node")
+        require_composite_intent(handler, "interrupt_when.handler")
+        visit(handler, "interrupt_when.handler")
 
 
 def _node_id(node: dict[str, Any], path: str) -> str:
@@ -307,6 +318,7 @@ class NodeRecord:
     unknown_streak: int = 0
     repeat_count: int = 0
     choice_id: str | None = None
+    interruption: dict[str, Any] | None = None
 
     def payload(self) -> dict[str, Any]:
         value: dict[str, Any] = {"status": self.status, "updated_at": self.updated_at}
@@ -336,6 +348,8 @@ class NodeRecord:
             value["unknown_streak"] = self.unknown_streak
         if self.repeat_count:
             value["repeat_count"] = self.repeat_count
+        if self.interruption is not None:
+            value["interruption"] = copy.deepcopy(self.interruption)
         if self.choice_id:
             value["choice_id"] = self.choice_id
         return value
@@ -385,6 +399,7 @@ class WorkPlanExecutor:
         self._call_histories: dict[str, list[dict[str, Any]]] = {}
         self._call_history_counts: dict[str, int] = {}
         self._active_call_context: tuple[str, dict[str, Any]] | None = None
+        self._handling_interrupt = False
 
     def call_context(self, call_id: str) -> dict[str, Any]:
         """Read the actual dispatched node, including generated and batch ids."""
@@ -487,7 +502,12 @@ class WorkPlanExecutor:
         kind = node.get("kind")
         if kind == "call":
             while True:
-                if record.decision_pending and record.result is not None:
+                if record.interruption is not None:
+                    if record.interruption.get("kind") == "equipment":
+                        status = await self._handle_equipment(node, node_key, path, chain, record, item=item)
+                    else:
+                        status = await self._handle_interrupt(node, node_key, path, chain, record, item=item)
+                elif record.decision_pending and record.result is not None:
                     status = await self._decide_call(node, node_key, chain, record, item=item)
                 else:
                     call_state = await self.state()
@@ -574,7 +594,10 @@ class WorkPlanExecutor:
                     if handoff is None:
                         handoff = public_result.get("metrics", {}).get("direct_call_handoff") if isinstance(public_result.get("metrics"), dict) else None
                     handoff_choice = handoff.get("facts", {}).get("decision", {}).get("choice") if isinstance(handoff, dict) else None
-                    if handoff_choice in {"step_done", "next_step", "call_agent"}:
+                    if handoff_choice == "interrupt":
+                        record.interruption = {"attempt": 0, "phase": "handler"}
+                        status = await self._handle_interrupt(node, node_key, path, chain, record, item=item)
+                    elif handoff_choice in {"step_done", "next_step", "call_agent"}:
                         status = self._apply_call_choice(node, node_key, chain, record, handoff_choice, item=item)
                     elif handoff_choice == "repeat":
                         # A protective action interrupted this call and Decision
@@ -714,7 +737,7 @@ class WorkPlanExecutor:
         own = str(node.get("intent") or arguments.get("intent") or node.get("description") or "").strip()
         intent = str(own or (intents[-1] if intents else ""))[:800]
         current_step = intent or (intents[-1] if intents else "")
-        return {
+        context = {
             "goal": str(self.plan.get("goal") or "")[:800],
             # The top-level current_step is a mutable Agent note and may lag
             # behind the node being dispatched.  Use the tree position only.
@@ -726,6 +749,146 @@ class WorkPlanExecutor:
             "intent_chain": [str(value)[:400] for value in intents[-8:]],
             "next_call": str(node.get("next_call") or ""),
         }
+        if not self._handling_interrupt and isinstance(self.plan.get("interrupt_when"), dict):
+            context["interrupt_when"] = copy.deepcopy(self.plan["interrupt_when"])
+            context["interrupt_when"]["handler"].setdefault("intent", self.plan["work"].get("intent") or intent)
+        return context
+
+    async def _handle_interrupt(self, node, node_key, path, intents, record, *, item=None):
+        """Run the declared handler after the Body's existing stop has settled."""
+        interruption = record.interruption
+        spec = self.plan.get("interrupt_when")
+        if not isinstance(spec, dict) or interruption is None:
+            raise WorkPlanError("selected interrupt has no declared handler")
+        while True:
+            deadline = self._deadline
+            if node.get("timeout_s") is not None and record.started_at is not None:
+                deadline = min(deadline, record.started_at + float(node["timeout_s"]))
+            if time.monotonic() >= deadline:
+                record.status = "blocked"
+                record.blocked = {"reason": "node_timeout", "interruption": copy.deepcopy(interruption)}
+                return "blocked"
+            if interruption["phase"] == "handler":
+                attempt = interruption["attempt"]
+                handler = copy.deepcopy(spec["handler"])
+                # A repeat is a fresh invocation, including explicit ids in
+                # the subtree. Never reuse completed writes from an old run.
+                def namespace(value):
+                    if isinstance(value.get("id"), str):
+                        value["id"] = f"{node_key}__interrupt_{attempt}__{value['id']}"
+                    if value.get("kind") == "sequence":
+                        for child in value.get("steps", []):
+                            namespace(child)
+                    elif value.get("kind") == "batch":
+                        namespace(value["body"])
+                    elif value.get("kind") == "choice":
+                        for option in value.get("options", []):
+                            namespace(option["work"])
+                namespace(handler)
+                self.emit("work_interrupt_handler_started", node_id=node_key, attempt=attempt)
+                self._handling_interrupt = True
+                try:
+                    status = await asyncio.wait_for(
+                        self._execute(handler, f"{path}.interrupt[{attempt}]", intents, item=item),
+                        timeout=deadline - time.monotonic())
+                except asyncio.TimeoutError:
+                    record.status = "blocked"
+                    record.blocked = {"reason": "node_timeout", "interruption": copy.deepcopy(interruption)}
+                    return "blocked"
+                finally:
+                    self._handling_interrupt = False
+                if status != "done":
+                    record.status = "waiting" if status == "waiting" else status
+                    if status == "blocked":
+                        record.blocked = {"reason": "interrupt_handler_blocked"}
+                    return status
+                interruption["phase"] = "result"
+                self.emit("work_interrupt_handler_finished", node_id=node_key, attempt=attempt)
+            facts = _state_payload(await self.state())
+            plan = self._call_plan(node, intents)
+            original = rq.call_text(str(node["tool"]), (record.decision_facts or {}).get("tool_arguments", node.get("arguments", {})))
+            question = rq.interrupt_result_question(
+                goal=plan["goal"], intent=plan["intent"], original_call=original,
+                handler_intent=spec["handler"].get("intent") or self.plan["work"].get("intent") or plan["intent"],
+                handler_call=self._first_call_description(spec["handler"]), facts=facts,
+            )
+            try:
+                if self.result_judge is not None:
+                    choice = await self.result_judge(
+                        call_id=node_key, tool=SimpleNamespace(name="interrupt_handler"), params={},
+                        plan_context=plan,
+                        decision_context={"body_state": facts, "tool_result": {"success": True, "reason": "handler_completed"}},
+                        question=question,
+                    )
+                else:
+                    answer = await self.decision.ask(question, priority=DecisionPriority.PLAN)
+                    choice = rq.frame_choice(getattr(answer, "raw", {}), question["questions"])
+            except Exception:
+                choice = "unknown"
+            self.emit("work_interrupt_result", node_id=node_key, choice=choice, request=question)
+            if choice == "resume":
+                record.interruption = None
+                record.status = "active"
+                return "repeat"
+            if choice == "repeat":
+                interruption["attempt"] += 1
+                interruption["phase"] = "handler"
+                continue
+            if choice == "call_agent":
+                record.status = "blocked"
+                record.blocked = {"reason": "decision_call_agent", "interruption": copy.deepcopy(interruption)}
+                return "blocked"
+            record.status = "waiting"
+            return "waiting"
+
+    async def _handle_equipment(self, node, node_key, path, intents, record, *, item=None):
+        """The selected concrete option equips, then re-enters the same call.
+
+        The equip call itself goes through the existing interpreter and Body
+        loop. Its terminal is judged by Decision, never treated as completion
+        just because the inventory transaction returned success.
+        """
+        pending = record.interruption
+        selected = pending["item"]
+        deadline = self._deadline
+        if node.get("timeout_s") is not None and record.started_at is not None:
+            deadline = min(deadline, record.started_at + float(node["timeout_s"]))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            record.status = "blocked"
+            record.blocked = {"reason": "node_timeout", "interruption": copy.deepcopy(pending)}
+            return "blocked"
+        arguments = (record.decision_facts or {}).get("tool_arguments", node.get("arguments", {}))
+        equip = {"kind": "call", "id": f"{node_key}__equip", "tool": "equip_item",
+                 "intent": rq.equipment_intent(selected),
+                 "timeout_s": pending.setdefault("timeout_s", remaining),
+                 "arguments": {"item": selected, "target": "mainhand"},
+                 "next_call": rq.call_text(str(node["tool"]), arguments)}
+        try:
+            status = await asyncio.wait_for(
+                self._execute(equip, f"{path}.equipment", intents, item=item), timeout=remaining)
+        except asyncio.TimeoutError:
+            record.status = "blocked"
+            record.blocked = {"reason": "node_timeout", "interruption": copy.deepcopy(pending)}
+            return "blocked"
+        if status == "done":
+            record.interruption = None
+            record.status = "active"
+            return "repeat"
+        record.status = "waiting" if status == "waiting" else status
+        if status == "blocked":
+            record.blocked = {"reason": "equipment_action_blocked", "item": selected}
+        return status
+
+    async def _selected_equipment(self, choice, node, node_key, intents, record, *, item=None):
+        facts = record.decision_facts or {}
+        candidates = rq.equipment_candidates(facts.get("body_state", {}), facts.get("tool_result", {}))
+        if choice not in candidates:
+            return None
+        record.decision_pending = False
+        record.interruption = {"kind": "equipment", "item": candidates[choice]}
+        path = next((path for path, key in self._path_keys.items() if key == node_key), node_key)
+        return await self._handle_equipment(node, node_key, path, intents, record, item=item)
 
     def _call_question(
         self, node: dict[str, Any], node_key: str, intents: list[str], record: NodeRecord,
@@ -797,6 +960,9 @@ class WorkPlanExecutor:
                 record.status = "waiting"
                 return "waiting"
             record.unknown_streak = 0
+            equipment = await self._selected_equipment(choice, node, node_key, intents, record, item=item)
+            if equipment is not None:
+                return equipment
             return self._apply_call_choice(node, node_key, intents, record, choice, item=item)
         options = self._call_options(
             node,
@@ -858,6 +1024,9 @@ class WorkPlanExecutor:
                 # cadence while this plan remains waiting.
                 return "waiting"
             record.unknown_streak = 0
+            equipment = await self._selected_equipment(choice, node, node_key, intents, record, item=item)
+            if equipment is not None:
+                return equipment
             if choice == "repeat":
                 record.decision_pending = False
                 record.status = "active"

@@ -350,7 +350,7 @@ def test_protection_experience_uses_the_terminal_position_after_swimming():
 
 
 def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent():
-    """Preserve sixteen historical frames except intent and observed main hand.
+    """Preserve historical facts, with intent, main hand and equipment options.
 
     This compares raw node facts through the actual executor -> BodyLoop path;
     it neither asks a real model nor claims to recover the 118 running frames.
@@ -365,7 +365,8 @@ def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent(
             # The old request mistakenly inherited the enclosing plan intent.
             # Keep the historical fixture intact and permit only this repair
             # and the omitted, recorded main hand plus their character-count
-            # changes. Do not alter historical fixtures or any options.
+            # changes. Four failed frames now also offer their recorded
+            # owned spare pickaxe; keep every older option and fact intact.
             expected = copy.deepcopy(case["expected_request"])
             old_intent = expected["state"]["agent_intent"]
             intent = case["node"]["arguments"]["intent"]
@@ -383,6 +384,15 @@ def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent(
                     len(json.dumps(expected["state"]["body"], ensure_ascii=False))
                     - len(json.dumps(old_body, ensure_ascii=False))
                 )
+            if case["seq"] in {3785, 3805, 3825, 3845}:
+                candidates = rq.equipment_candidates(facts, case["raw_decision_facts"]["tool_result"])
+                assert candidates == {"equip:wooden_pickaxe": "wooden_pickaxe"}
+                criteria = expected["questions"]["q"]["criteria"]
+                old = json.dumps(criteria, ensure_ascii=False, separators=(",", ":"))
+                agent = criteria.pop("call_agent")
+                criteria["equip:wooden_pickaxe"] = 'Equip wooden_pickaxe from the inventory and run the same call again: collect_resource(item="iron_ore", count=2).'
+                criteria["call_agent"] = agent
+                expected["state"]["request_chars"] += len(json.dumps(criteria, ensure_ascii=False, separators=(",", ":"))) - len(old)
             runtime, trace, _decision = _runtime()
             loop = BodyLoop(runtime)
             executor = WorkPlanExecutor(

@@ -409,6 +409,7 @@ class CallSupervisor:
             next_call=str(context.get("next_call") or ""),
             tree=supplied,
             intent_of_plan=bool(context.get("intent_of_plan")),
+            interrupt=context.get("interrupt_when"),
         )
         # A protective call is already the selected response to danger.  It
         # must be allowed to run or finish, never start the same protective

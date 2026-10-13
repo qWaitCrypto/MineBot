@@ -37,15 +37,17 @@ async def _state():
     return {"bot": {"observed": True, "position": [0, 64, 0]}}
 
 
-def test_validate_accepts_repeat_but_keeps_interrupt_deferred():
+def test_validate_accepts_repeat_and_plan_interrupt_with_condition_and_handler():
     base = {"language": "minebot-work/0.2", "goal": "x", "timeout_s": 10,
             "work": {"kind": "wait", "condition": {"text": "x"}, "timeout_s": 1}}
     validate_plan(base)
     repeated = {**base, "work": {**base["work"], "repeat": {"again_when": {"text": "x"}, "until": {"text": "y"}}}}
     validate_plan(repeated)
-    interrupted = {**base, "work": {**base["work"], "interrupt_when": {"text": "stop"}}}
-    with pytest.raises(WorkPlanError, match="unsupported_in_slice2"):
-        validate_plan(interrupted)
+    interrupted = {**base, "interrupt_when": {"condition": {"text": "stop"},
+        "handler": {"kind": "call", "intent": "Reach shelter", "tool": "move_to", "arguments": {}}}}
+    validate_plan(interrupted)
+    with pytest.raises(WorkPlanError, match="condition and handler|invalid plan"):
+        validate_plan({**base, "interrupt_when": {"text": "stop"}})
 
 
 def test_sequence_batch_and_ref_are_executed_and_annotated():

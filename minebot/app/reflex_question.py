@@ -358,6 +358,7 @@ def frame_options(
     facts: Mapping[str, Any], running: bool, result: Mapping[str, Any] | None = None,
     next_call: str = "", tree: Mapping[str, str] | None = None, repeat_note: str = "",
     intent_of_plan: bool = False,
+    interrupt: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     """The concrete things the Body may do next in this frame.
 
@@ -390,9 +391,43 @@ def frame_options(
         )
     for key, text in (tree or {}).items():
         options[str(key)] = str(text)
+    if running and isinstance(interrupt, Mapping):
+        condition = interrupt.get("condition")
+        handler = interrupt.get("handler")
+        if isinstance(condition, Mapping) and isinstance(handler, Mapping):
+            options["interrupt"] = (
+                f"Stop the current action because “{condition.get('text', '')}” "
+                f"and do: {handler.get('intent', '')}."
+            )
+    if failed:
+        for key, item in equipment_candidates(facts, result).items():
+            options[key] = f"Equip {item} from the inventory and run the same call again: {call}."
     options.update(protective_options(facts, stop=stop))
     options["call_agent"] = f"{stop} and hand control back to the Agent for a new plan."
     return options
+
+
+def equipment_candidates(facts: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, str]:
+    """Other owned tools of the observed held/broken tool's game category."""
+    held = str(facts.get("selected_item") or "").removeprefix("minecraft:")
+    source = held
+    for details in (result.get("summary"), result.get("metrics")):
+        if isinstance(details, Mapping) and isinstance(details.get("broken_item"), str):
+            source = details["broken_item"].removeprefix("minecraft:")
+            break
+    category = next((kind for kind in ("pickaxe", "axe", "shovel", "sword")
+                     if source.endswith("_" + kind)), None)
+    if category is None:
+        return {}
+    return {"equip:" + str(item).removeprefix("minecraft:"): str(item)
+            for item, count in sorted((_inventory(facts) or {}).items())
+            if isinstance(count, (int, float)) and count > 0
+            and str(item).endswith("_" + category)
+            and str(item).removeprefix("minecraft:") not in {held, source}}
+
+
+def equipment_intent(item: str) -> str:
+    return f"Hold {item} in the main hand."
 
 
 def protective_options(facts: Mapping[str, Any], *, stop: str = "") -> dict[str, str]:
@@ -460,6 +495,20 @@ def frame_questions(
             "criteria": {**protective, **({"call_agent": options["call_agent"]} if "call_agent" in options else {})},
         }
     return questions
+
+
+def interrupt_result_question(*, goal: str, intent: str, original_call: str,
+                              handler_intent: str, handler_call: str,
+                              facts: Mapping[str, Any]) -> dict[str, Any]:
+    state = frame_state(goal=goal, intent=intent, tool="interrupt_handler", params={},
+                        facts=facts, running=False,
+                        result={"success": True, "reason": "handler_completed"})
+    state["finished_call"] = f"The interruption handler for “{handler_intent}” has ended normally."
+    options = after_default_options(
+        original_call=original_call, default_call=handler_call, intent=intent,
+        result={"success": True}, facts=facts)
+    options["repeat"] = f"Do the interruption handler again: “{handler_intent}”, starting with {handler_call}."
+    return {"state": state, "questions": frame_questions(options)}
 
 
 def idle_options(facts: Mapping[str, Any]) -> dict[str, str]:

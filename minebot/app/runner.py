@@ -1739,7 +1739,9 @@ class AgentRuntime:
                 "or wait for progress because the runtime delivers terminal facts asynchronously. "
                 "Use only call, sequence, batch, choice and wait; write concrete intent and preserve complex Body "
                 "arguments. Conditions may use requires as AND. Read and revise the annotated tree with read_reflex "
-                "and control_reflex; never claim _runtime results yourself. interrupt_when is deferred."
+                "and control_reflex; never claim _runtime results yourself. A plan may include "
+                "interrupt_when={condition:{text:...},handler:<work node with intent>}. Decision may "
+                "stop the current node, run that handler, and choose whether to resume the earlier work."
             )
         return "\n\n".join(parts)
 

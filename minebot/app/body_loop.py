@@ -239,7 +239,7 @@ class BodyLoop(CallSupervisor):
                 self._set_state(previous, "call_ended")
             handoff = getattr(self.runtime, "direct_call_handoffs", {}).get(call_id, {})
             decided = handoff.get("facts", {}).get("decision", {}).get("choice")
-            if not context.get("is_plan") or decided in {"step_done", "next_step", "call_agent", "repeat"}:
+            if not context.get("is_plan") or decided in {"step_done", "next_step", "call_agent", "repeat", "interrupt"}:
                 # WorkPlanExecutor consumes a running-frame verdict directly,
                 # without asking another result question. There is therefore
                 # no later decide_plan_result owner to release this slot.
@@ -370,7 +370,7 @@ class BodyLoop(CallSupervisor):
                         "call_supervision_limit", tool_call_id=record["call_id"],
                         tool=getattr(tool, "name", "unknown"), kind="reads", limit=self.max_reads,
                     )
-                elif choice in {"step_done", "next_step", "call_agent"}:
+                elif choice in {"step_done", "next_step", "call_agent", "interrupt"}:
                     record["decision"] = choice
                     plan = self._plan_context(
                         supervision_context=record["supervision_context"],
@@ -378,7 +378,8 @@ class BodyLoop(CallSupervisor):
                     )
                     normalized_choice = "step_done" if choice in {"step_done", "next_step"} else choice
                     record["decision"] = normalized_choice
-                    reason = "decision_step_done" if normalized_choice == "step_done" else "decision_call_agent"
+                    reason = ("decision_step_done" if normalized_choice == "step_done" else
+                              "decision_interrupt" if choice == "interrupt" else "decision_call_agent")
                     await self._handoff(
                         record, execution,
                         {"reason": reason, "confirmed": normalized_choice == "step_done"},
@@ -542,6 +543,11 @@ class BodyLoop(CallSupervisor):
             return "unknown"
         if choice == "repeat":
             return "repeat"
+        candidates = rq.equipment_candidates(body, payload)
+        if choice in candidates:
+            choice = await self._run_result_equipment(record, tool, params, candidates[choice])
+            if choice in {"repeat", "unknown"}:
+                return choice
         choice = {"next_step": "step_done"}.get(choice, choice)
         if choice in {"step_done", "call_agent"}:
             record["decision"] = choice
@@ -556,7 +562,9 @@ class BodyLoop(CallSupervisor):
                     supervision_context=record["supervision_context"],
                     tool=tool, params=params,
                 ),
-                extra={"tool_result": self._compact_result(payload)},
+                extra={"tool_result": self._compact_result(payload),
+                       **({"default_action": record["equipment_result"]}
+                          if "equipment_result" in record else {})},
             )
             self.runtime.trace.emit("direct_call_handoff", tool_call_id=record["call_id"],
                                     facts=safe, settlement={"settled": True, "terminal": True})
@@ -568,6 +576,49 @@ class BodyLoop(CallSupervisor):
                 if callable(notify):
                     notify({"call_id": record["call_id"], "status": "handoff_requested", **safe})
         return choice
+
+    async def _run_result_equipment(self, record, original_tool, original_params, item):
+        """A direct result uses the same single-node tree for its equip option."""
+        from minebot.app.work_runtime import WorkPlanExecutor
+        from minebot.brain.registry import execute_tool
+        budget = self._remaining(record)
+        if budget is None or budget <= 0:
+            return "unknown"
+        await self.runtime.cancel_active_execution_with_facts(
+            "direct_call:decision_equipment", cancel_reflex=False, invalidate_generation=False)
+        node_id = f"equipment_{uuid4().hex}"
+        spec = {"language": "minebot-work/0.2", "goal": str(record["supervision_context"].get("intent") or ""),
+                "timeout_s": budget, "work": {"kind": "call", "id": node_id,
+                    "tool": "equip_item", "intent": rq.equipment_intent(item),
+                    "arguments": {"item": item, "target": "mainhand"}}}
+        executor = None
+        async def call(name, arguments, *, call_id, timeout_s):
+            target = self.runtime.registry.get(name)
+            transport_id = f"plan-{call_id}"
+            raw = await self.runtime.run_tool(target, execute_tool, target, arguments,
+                getattr(self.runtime, "weld_context", None), tool_call_id=transport_id,
+                claim_holder="agent_call", timeout_s=self._remaining(record),
+                return_execution_receipt=True, supervision_context=executor.call_context(call_id))
+            projector = getattr(self.runtime, "shown_plan_result", None)
+            shown = projector(name, raw, transport_id) if callable(projector) else dict(raw)
+            if isinstance(raw.get("_execution"), dict):
+                shown["_execution"] = raw["_execution"]
+            handoff = (raw.get("metrics") or {}).get("direct_call_handoff")
+            if isinstance(handoff, dict):
+                shown["_supervision_handoff"] = copy.deepcopy(handoff)
+            return shown
+        executor = WorkPlanExecutor(spec, call=call, state=self._read_idle_facts,
+                                    result_judge=self.decide_plan_result, emit=self.runtime.trace.emit)
+        executor.plan["work"]["next_call"] = rq.call_text(getattr(original_tool, "name", "unknown"), original_params)
+        while self._remaining(record) > 0:
+            result = await asyncio.wait_for(executor.run(), timeout=self._remaining(record))
+            record["equipment_result"] = {"tool": "equip_item", "result": result.results}
+            if result.status == "completed":
+                return "repeat"
+            if result.status != "waiting":
+                return "call_agent" if result.status != "cancelled" else "unknown"
+            await asyncio.sleep(supervision_module.FACT_FRAME_INTERVAL_S)
+        return "unknown"
 
     async def _judge_frame(self, *args: Any, **kwargs: Any) -> str:
         if await self._process_lifecycle_events():
@@ -1112,6 +1163,7 @@ class BodyLoop(CallSupervisor):
                     compiler_input={"facts": dict(facts), "options": dict(options)},
                     clock={"request_monotonic_s": started},
                 )
+                answer_task = wake_task = None
                 try:
                     # Idle is a live state, so still ask even when the only
                     # reversible normal option is ``stay``.  This keeps the
@@ -1134,10 +1186,11 @@ class BodyLoop(CallSupervisor):
                 except Exception:
                     choice = "unknown"
                 finally:
-                    for child in (answer_task, wake_task):
+                    children = [child for child in (answer_task, wake_task) if child is not None]
+                    for child in children:
                         if not child.done():
                             child.cancel()
-                    await asyncio.gather(answer_task, wake_task, return_exceptions=True)
+                    await asyncio.gather(*children, return_exceptions=True)
                 self.runtime.trace.emit(
                     "call_supervision_result", tool_call_id="idle-loop",
                     tool="__idle__", purpose="idle_frame", choice=choice,

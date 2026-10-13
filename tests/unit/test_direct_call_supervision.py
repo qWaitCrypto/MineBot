@@ -460,7 +460,7 @@ def test_plan_call_and_direct_call_share_the_same_supervisor():
                      "arguments": {"target": [1, 5, 0], "intent": "reach the requested target"}},
         }
         try:
-            result = await WorkPlanExecutor(plan, call=call).run()
+            result = await WorkPlanExecutor(plan, call=call, decision=StubDecision(("next_step",))).run()
             assert result.status == "completed"
             assert runtime.call_supervisor is runtime.direct_build_supervisor
             assert [e for e in runtime.trace.events if e["event"] == "call_supervision_finished"
