@@ -32,6 +32,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.DeathScreen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.ItemStack;
@@ -106,11 +107,19 @@ public final class MineBotClientBody implements ClientModInitializer {
     private volatile boolean ready;
     private long readyAtMs;
     private final long loadedAt = System.nanoTime();
+    private DeathRespawnProgress lifecycle = new DeathRespawnProgress();
+    private final List<JsonObject> lifecycleEvents = new ArrayList<>();
+    private long lifecycleSeq;
+    private final String lifecycleEpoch = java.util.UUID.randomUUID().toString();
+    private JsonObject lastLivingState;
 
     @Override
     public void onInitializeClient() {
         instance = this;
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            lifecycle = new DeathRespawnProgress();
+            lifecycleEvents.clear();
+            lastLivingState = null;
             joinedTicks = 0;
             ready = false;
             baritone = BaritoneAPI.getProvider().getBaritoneForMinecraft(client);
@@ -177,6 +186,7 @@ public final class MineBotClientBody implements ClientModInitializer {
                             response.addProperty("type", "ready");
                             response.addProperty("mod_to_ready_ms", readyAtMs);
                             connection.send(response);
+                            for (JsonObject event : lifecycleEvents) connection.send(event);
                         });
                     }
                     while (true) {
@@ -1053,6 +1063,25 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         joinedTicks++;
+        boolean playerDead = client.player.isDeadOrDying();
+        var changes = lifecycle.observe(true, playerDead, client.screen instanceof DeathScreen,
+            client.level.hasChunkAt(client.player.blockPosition()));
+        if (changes.died()) {
+            JsonObject facts = state(client);
+            if (lastLivingState != null) facts.add("last_living_state", lastLivingState.deepCopy());
+            lifecycleEvents.clear();
+            emitLifecycle(client, "death", facts);
+            if (run != null) requestStop("failed", "death");
+        }
+        if (changes.requestRespawn()) client.player.respawn();
+        if (changes.respawned()) emitLifecycle(client, "respawned", state(client));
+        if (playerDead) {
+            if (run != null && !processActive() && !baritone.getPathingBehavior().isPathing())
+                terminal(client, "failed", "death");
+            return;
+        }
+        // These are native observations, not a second danger detector.
+        if (joinedTicks % 20 == 0) lastLivingState = state(client);
         if (menuRead != null) tickMenuRead(client);
         if (!ready && joinedTicks >= 20 && client.level.hasChunkAt(client.player.blockPosition()) && client.player.onGround()) {
             ready = true;
@@ -1062,6 +1091,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             response.addProperty("mod_to_ready_ms", readyAtMs);
             if (peer != null) {
                 peer.send(response);
+                for (JsonObject event : lifecycleEvents) peer.send(event);
             }
             LOG.info("MINEBOT_PHASE_A ready {}", response);
         }
@@ -1148,6 +1178,19 @@ public final class MineBotClientBody implements ClientModInitializer {
                 terminal(client, current.stopStatus, current.stopReason);
             }
         }
+    }
+
+    private void emitLifecycle(Minecraft client, String name, JsonObject facts) {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "body_event");
+        event.addProperty("epoch", lifecycleEpoch);
+        event.addProperty("seq", ++lifecycleSeq);
+        event.addProperty("tick", client.level.getGameTime());
+        event.addProperty("name", name);
+        event.add("data", facts);
+        lifecycleEvents.add(event);
+        if (peer != null) peer.send(event);
+        LOG.info("MINEBOT_LIFECYCLE {}", event);
     }
 
     private void tickBuilderFile(Minecraft client, Run current) {

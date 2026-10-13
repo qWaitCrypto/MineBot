@@ -252,7 +252,7 @@ def test_a_step_without_its_own_intent_is_said_to_be_one_step_of_the_plan():
     assert list(inherited) == list(own)
 
 
-def test_a_dead_body_is_handed_to_the_agent_without_asking():
+def test_a_dead_body_has_no_decision_options():
     # Live run reflex-stage-20261012f: with health 0 the question still
     # offered the surface action again, and Decision took it.
     facts = {"health": 0, "food": 17, "oxygen": 0}
@@ -260,8 +260,7 @@ def test_a_dead_body_is_handed_to_the_agent_without_asking():
                                facts=facts, running=True, next_call="craft_item()")
     after = rq.after_default_options(original_call="collect_resource()", intent="get iron",
                                      default_call="go_to_surface()", result={"success": False}, facts=facts)
-    assert list(running) == list(after) == ["call_agent"]
-    assert rq.only_option(rq.frame_questions(running)) == "call_agent"
+    assert running == after == rq.idle_options(facts) == {}
     state = rq.frame_state(goal="g", intent="get iron", tool="collect_resource", params={}, facts=facts, running=True)
     assert state["body"] == "The Body has died."
     alive = rq.after_default_options(original_call="c()", intent="i", default_call="d()", result={"success": True},

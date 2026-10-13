@@ -111,6 +111,43 @@ class RealClientBody:
         self._ready_lock = threading.Lock()
         self._ready = False
         self._container_pages: dict[tuple[int, int, int], dict[str, Any]] = {}
+        self._lifecycle_seen: set[tuple[str, int]] = set()
+        self._lifecycle_listeners: list[Any] = []
+        listener = getattr(self.ipc, "set_event_listener", None)
+        if callable(listener):
+            listener(self._on_lifecycle_event)
+
+    def add_lifecycle_listener(self, listener: Any) -> None:
+        with self._lock:
+            if listener not in self._lifecycle_listeners:
+                self._lifecycle_listeners.append(listener)
+            # Replay persisted native edges to a newly entered Body loop.
+            events = [event for event in self.event_log if event.name in {"death", "respawned"}]
+        for event in events:
+            listener(event)
+
+    def remove_lifecycle_listener(self, listener: Any) -> None:
+        with self._lock:
+            if listener in self._lifecycle_listeners:
+                self._lifecycle_listeners.remove(listener)
+
+    def _on_lifecycle_event(self, payload: Mapping[str, Any]) -> None:
+        if payload.get("name") not in {"death", "respawned"}:
+            return
+        native_id = (str(payload.get("epoch") or ""), int(payload.get("seq") or 0))
+        with self._lock:
+            if native_id in self._lifecycle_seen:
+                return
+            self._lifecycle_seen.add(native_id)
+            event = Event(seq=self._next_seq(), tick=int(payload.get("tick") or 0),
+                          bot=self.bot_name, name=str(payload["name"]),
+                          data={**dict(payload.get("data") or {}), "native_epoch": native_id[0],
+                                "native_seq": native_id[1]})
+            self.event_log.append(event)
+            self._event_queue.append(event)
+            listeners = list(self._lifecycle_listeners)
+        for listener in listeners:
+            listener(event)
 
     @property
     def capabilities(self) -> Mapping[str, RealClientCapability]:

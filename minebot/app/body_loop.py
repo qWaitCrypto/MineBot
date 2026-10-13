@@ -17,6 +17,7 @@ from collections import deque
 from uuid import uuid4
 from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping
+from minebot.contract import Event
 
 from minebot.app import reflex_question as rq
 from minebot.app import direct_call_supervision as supervision_module
@@ -44,6 +45,64 @@ class BodyLoop(CallSupervisor):
         self._protective_verdict: str | None = None
         self.recent_experiences: deque[str] = deque(maxlen=5)
         self.safe_standing_position: list[float] | None = None
+        self._lifecycle_events: deque[Event] = deque()
+        self._death_facts: dict[str, Any] | None = None
+        self._death_count = 0
+        self._native_lifecycle = False
+        self._body_lifecycle_listener = None
+
+    def _queue_lifecycle_event(self, event: Event) -> None:
+        self._lifecycle_events.append(event)
+        self._loop_wakeup.set()
+        if self._active_monitor is not None:
+            self._active_monitor[3].set()
+
+    async def _process_lifecycle_events(self, facts: Mapping[str, Any] | None = None) -> bool:
+        """Deterministic edges, consumed only by the one Body lifecycle task."""
+        if (not self._lifecycle_events and rq.dead(facts or {})
+                and self.loop_state != "dead" and not (self._native_lifecycle and self._death_facts)):
+            self._lifecycle_events.append(Event(seq=0, tick=0, bot="", name="death", data=dict(facts or {})))
+        if self._lifecycle_task is not None and asyncio.current_task() is not self._lifecycle_task:
+            self._loop_wakeup.set()
+            return self.loop_state == "dead" or any(e.name == "death" for e in self._lifecycle_events)
+        while self._lifecycle_events:
+            event = self._lifecycle_events.popleft()
+            if event.name == "death":
+                if self.loop_state == "dead":
+                    continue
+                self._set_state("dead", "death")
+                self._death_count += 1
+                death = dict(event.data)
+                death["vital_samples"] = copy.deepcopy(self._vitals._samples)
+                self._death_facts = death
+                self.safe_standing_position = None
+                self._result_pending.clear()
+                self._suspended = None
+                protection = self._protection_task
+                self._protection_task = None
+                if protection is not None and protection is not asyncio.current_task() and not protection.done():
+                    protection.cancel()
+                if self.current is not None:
+                    self.current["cancel_requested"] = True
+                    self.current["result_abandoned"] = True
+                settled = await self.runtime.cancel_active_execution_with_facts("death")
+                if protection is not None and protection is not asyncio.current_task():
+                    await asyncio.gather(protection, return_exceptions=True)
+                self.runtime.trace.emit("reflex_death", facts=death, settlement=settled)
+                event = Event(seq=event.seq, tick=event.tick, bot=event.bot, name=event.name, data=death)
+                notify = getattr(self.runtime, "notify_body_lifecycle_event", None)
+                if callable(notify):
+                    notify(event)
+            elif event.name == "respawned":
+                self._vitals = rq.VitalWindow()
+                self.safe_standing_position = None
+                self._result_pending.clear()
+                self._set_state("idle", "respawned")
+                self.runtime.trace.emit("reflex_respawned", facts=dict(event.data))
+                notify = getattr(self.runtime, "notify_body_lifecycle_event", None)
+                if callable(notify):
+                    notify(event)
+        return self.loop_state == "dead"
 
     def _frame(self, execution: Mapping[str, Any] | None) -> dict[str, Any]:
         previous = copy.deepcopy(self.safe_standing_position)
@@ -68,7 +127,10 @@ class BodyLoop(CallSupervisor):
         context = kwargs.get("supervision_context") or {}
         context = context if isinstance(context, Mapping) else {}
         previous = self.loop_state
+        death_count = self._death_count
         await self.start()
+        if await self._process_lifecycle_events():
+            return {"success": False, "reason": "death", "canRetry": False}
         call_id = str(kwargs.get("call_id") or "")
         self._result_pending[call_id] = {"call_id": call_id}
         if context.get("is_reflex_action"):
@@ -82,7 +144,7 @@ class BodyLoop(CallSupervisor):
         finally:
             # A protective terminal still awaits Decision's return/handoff
             # choice. Keep its survival/threat state through that result.
-            if not context.get("is_reflex_action"):
+            if not context.get("is_reflex_action") and death_count == self._death_count:
                 self._set_state(previous, "call_ended")
             handoff = getattr(self.runtime, "direct_call_handoffs", {}).get(call_id, {})
             decided = handoff.get("facts", {}).get("decision", {}).get("choice")
@@ -131,6 +193,8 @@ class BodyLoop(CallSupervisor):
         decision_revision = -1
         snapshots = getattr(self.runtime, "execution_snapshots", None)
         while not record["cancel_requested"]:
+            if await self._process_lifecycle_events():
+                return
             if worker.done() and decision_task is None:
                 return
             wake_wait = asyncio.create_task(wake.wait())
@@ -147,6 +211,14 @@ class BodyLoop(CallSupervisor):
             if wake_wait in done or clock_wait in done:
                 wake.clear()
                 execution = self._frame(self._snapshot(record["call_id"]))
+                if await self._process_lifecycle_events(execution.get("facts")) or record["cancel_requested"]:
+                    if decision_task is not None:
+                        decision_task.cancel()
+                        await asyncio.gather(decision_task, return_exceptions=True)
+                    for waiter in (wake_wait, clock_wait):
+                        waiter.cancel()
+                    await asyncio.gather(wake_wait, clock_wait, return_exceptions=True)
+                    return
                 if execution:
                     revision = int(execution.get("fact_revision") or 0)
                     phase_changed = execution.get("phase") != record.get("last_phase")
@@ -280,7 +352,7 @@ class BodyLoop(CallSupervisor):
         details: Mapping[str, Any], *, decision: str | None,
         plan: Mapping[str, Any] | None = None,
     ) -> None:
-        if self.current is not record or record["cancel_requested"]:
+        if self.loop_state == "dead" or self.current is not record or record["cancel_requested"]:
             return
         record["cancel_requested"] = record["settling"] = True
         call_id = record["call_id"]
@@ -344,6 +416,8 @@ class BodyLoop(CallSupervisor):
             payload = {"result": str(payload)[:500]}
         execution = self._frame({**execution, "state": "succeeded" if payload.get("success") is True else "failed",
                                  "result": dict(payload)})
+        if await self._process_lifecycle_events(execution.get("facts")):
+            return "unknown"
         options = self._options_for(tool, record, execution=execution)
         body = dict(execution.get("facts") or {})
         history = record.setdefault("history", [])
@@ -402,6 +476,15 @@ class BodyLoop(CallSupervisor):
                 notify = getattr(self.runtime, "notify_reflex_fact", None)
                 if callable(notify):
                     notify({"call_id": record["call_id"], "status": "handoff_requested", **safe})
+        return choice
+
+    async def _judge_frame(self, *args: Any, **kwargs: Any) -> str:
+        if await self._process_lifecycle_events():
+            return "unknown"
+        death_count = self._death_count
+        choice = await super()._judge_frame(*args, **kwargs)
+        if death_count != self._death_count or await self._process_lifecycle_events():
+            return "unknown"
         return choice
 
     @staticmethod
@@ -599,6 +682,8 @@ class BodyLoop(CallSupervisor):
         new_attempt = True
         while default_tool is not None:
             self._refresh_interrupted_result(record)
+            if await self._process_lifecycle_events():
+                return "unknown"
             remaining = self._remaining(record)
             if remaining is not None and remaining <= 0:
                 return "unknown"
@@ -653,6 +738,8 @@ class BodyLoop(CallSupervisor):
 
 
     def _set_state(self, state: str, cause: str) -> None:
+        if self.loop_state == "dead" and cause != "respawned":
+            return
         if state == self.loop_state:
             return
         previous = self.loop_state
@@ -684,6 +771,8 @@ class BodyLoop(CallSupervisor):
         result = result if isinstance(result, Mapping) else {}
         facts = decision_context.get("body_state")
         facts = facts if isinstance(facts, Mapping) else {}
+        if await self._process_lifecycle_events(facts):
+            return "unknown"
         execution = decision_context.get("execution")
         execution = dict(execution) if isinstance(execution, Mapping) else {}
         execution.setdefault("tool", getattr(tool, "name", "unknown"))
@@ -727,6 +816,16 @@ class BodyLoop(CallSupervisor):
         if self._lifecycle_started:
             return
         self._lifecycle_started = True
+        loop = asyncio.get_running_loop()
+        body = getattr(self.runtime, "body", None)
+        register = getattr(body, "add_lifecycle_listener", None)
+        if callable(register):
+            def receive(event):
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(self._queue_lifecycle_event, event)
+            self._body_lifecycle_listener = receive
+            self._native_lifecycle = True
+            register(receive)
         self.runtime.trace.emit("reflex_loop_started", loop_state=self.loop_state)
         self._lifecycle_task = asyncio.create_task(self._idle_frames())
 
@@ -739,6 +838,10 @@ class BodyLoop(CallSupervisor):
     async def stop(self) -> None:
         """Stop the lifecycle task before the runtime closes its read lane."""
         task = self._lifecycle_task
+        remove = getattr(getattr(self.runtime, "body", None), "remove_lifecycle_listener", None)
+        if callable(remove) and self._body_lifecycle_listener is not None:
+            remove(self._body_lifecycle_listener)
+        self._body_lifecycle_listener = None
         self._lifecycle_task = None
         active = self._active_monitor
         self._active_monitor = None
@@ -854,6 +957,7 @@ class BodyLoop(CallSupervisor):
         """
         try:
             while True:
+                await self._process_lifecycle_events()
                 active = self._active_monitor
                 if active is not None:
                     record, tool, params, wake, worker = active
@@ -887,6 +991,8 @@ class BodyLoop(CallSupervisor):
                 if snapshots is not None and snapshots.current() is not None:
                     continue
                 facts = await self._read_idle_facts()
+                if await self._process_lifecycle_events(facts):
+                    continue
                 # An Agent call can arrive while the read lane is sampling.
                 if self._active_monitor is not None or self._result_pending:
                     continue

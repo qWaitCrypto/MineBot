@@ -1652,6 +1652,8 @@ class AgentRuntime:
         self.responses_kernel = None
         self._reflex_wakeup_task: asyncio.Task[Any] | None = None
         self._sdk_reflex_fact_listener: Callable[[dict[str, Any]], None] | None = None
+        self._sdk_body_event_listener: Callable[[Any], None] | None = None
+        self._pending_body_death: dict[str, Any] | None = None
         self._native_context = None
         self.native_task_workspace = None
         self.native_task_outcome = None
@@ -1898,6 +1900,21 @@ class AgentRuntime:
     ) -> None:
         """Attach the outer SDK session's reflex-result wake callback."""
         self._sdk_reflex_fact_listener = listener
+
+    def set_sdk_body_event_listener(self, listener: Callable[[Any], None] | None) -> None:
+        """Use the SDK session's existing BODY_EVENT/recovery queue."""
+        self._sdk_body_event_listener = listener
+
+    def notify_body_lifecycle_event(self, event: Any) -> None:
+        from minebot.app.body_events import agent_event_data
+        from minebot.contract import Event
+        event = Event(seq=event.seq, tick=event.tick, bot=event.bot, name=event.name,
+                      data=agent_event_data(event))
+        if event.name == "death":
+            self._pending_body_death = dict(event.data)
+        listener = self._sdk_body_event_listener
+        if callable(listener):
+            listener(event)
 
     async def _run_responses_turn(self, extra_signals, *, body_actions_allowed: bool) -> AgentTurnOutcome:
         prepared = await self._read_lane.run(self._prepare_turn, extra_signals)
@@ -2858,6 +2875,10 @@ class AgentRuntime:
         failures = 0
         while True:
             await asyncio.sleep(BODY_WATCH_POLL_S)
+            if self._pending_body_death is not None:
+                facts = self._pending_body_death
+                self._pending_body_death = None
+                return "death", facts
             try:
                 state = await self.run_read(self.body.get_state)
             except Exception as exc:
@@ -3499,6 +3520,7 @@ class AgentRuntime:
         )
 
     def _enter_recovery_from_body_fact(self, reason: str, facts: dict[str, object] | None = None) -> AgentTurnOutcome:
+        self._pending_body_death = None
         payload = dict(facts or {})
         signal = AgentSignal.death_detected(reason, **payload)
         reduction = self.mode_runtime.reduce([signal], self.lifecycle.state, goal_text=self.agent_context.goal_text)
@@ -3646,6 +3668,8 @@ class AgentRuntime:
             *signalize_events(events),
             *(extra_signals or []),
         ]
+        if any(signal.kind == "death_detected" for signal in signals):
+            self._pending_body_death = None
         pending_mobility_terminal = self._pending_mobility_terminal
         if pending_mobility_terminal is not None:
             signals.append(

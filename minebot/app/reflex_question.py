@@ -143,9 +143,6 @@ def dead(facts: Mapping[str, Any]) -> bool:
     return isinstance(health, (int, float)) and health <= 0
 
 
-_DEAD_OPTIONS = {"call_agent": "The Body has died. Hand control back to the Agent."}
-
-
 def _body_sentence(facts: Mapping[str, Any]) -> str:
     if dead(facts):
         return "The Body has died."
@@ -359,8 +356,7 @@ def frame_options(
     is the one of the plan around it.
     """
     if dead(facts):
-        # A dead Body can do none of the other things.
-        return dict(_DEAD_OPTIONS)
+        return {}
     call = call_text(tool, params)
     result = result if isinstance(result, Mapping) else {}
     failed = not running and result.get("success") is not True
@@ -417,7 +413,7 @@ def after_default_options(
 ) -> dict[str, str]:
     """What the Body may do once a protective action has ended."""
     if dead(facts or {}):
-        return dict(_DEAD_OPTIONS)
+        return {}
     result = result if isinstance(result, Mapping) else {}
     options = {
         "resume": f"Go back to the earlier work, {original_call}" + (f", for: “{intent}”" if intent else "."),
@@ -452,6 +448,8 @@ def frame_questions(
 
 def idle_options(facts: Mapping[str, Any]) -> dict[str, str]:
     """The Step-2 idle range: waiting plus the applicable protective calls."""
+    if dead(facts):
+        return {}
     options = {"stay": "Stay where the Body is and wait for the next step."}
     options.update(protective_options(facts))
     return options
