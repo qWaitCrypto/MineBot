@@ -2,6 +2,8 @@ import asyncio
 import copy
 from types import SimpleNamespace
 
+import pytest
+
 from minebot.app.body_control import BodyControl
 from minebot.app.reflex_tools import ReflexManager
 from minebot.app.work_runtime import WorkPlanError, WorkPlanExecutor, validate_plan
@@ -612,23 +614,67 @@ def test_unknown_body_control_blocks_plan_and_wakes_agent_instead_of_waiting():
 
 def test_plan_step_context_says_whether_the_intent_is_its_own():
     from types import SimpleNamespace
-    from minebot.app.reflex_tools import ReflexActivity, ReflexManager
-
-    manager = ReflexManager(SimpleNamespace())
-    plan = {"goal": "stone pickaxe", "work": {"kind": "sequence", "intent": "make a stone pickaxe", "steps": [
+    plan = {"language": "minebot-work/0.2", "timeout_s": 4, "goal": "stone pickaxe", "work": {"kind": "sequence", "intent": "make a stone pickaxe", "steps": [
         {"kind": "call", "id": "stone", "tool": "collect_resource", "arguments": {"item": "cobblestone", "count": 3}},
         {"kind": "call", "id": "sticks", "tool": "craft_item", "intent": "have 2 sticks", "arguments": {"item": "stick"}},
         {"kind": "call", "id": "pick", "tool": "craft_item",
          "arguments": {"item": "stone_pickaxe", "intent": "hold a stone pickaxe"}},
     ]}}
-    manager._activities["a"] = ReflexActivity("a", plan)
-    manager._active_activity_id = "a"
-    stone = manager._plan_supervision_context("stone", "collect_resource")
+    executor = WorkPlanExecutor(plan, call=None)
+    steps = plan["work"]["steps"]
+    stone = executor._call_plan(steps[0], ["make a stone pickaxe"])
     assert stone["intent"] == "make a stone pickaxe" and stone["intent_of_plan"] is True
-    sticks = manager._plan_supervision_context("sticks", "craft_item")
+    sticks = executor._call_plan(steps[1], ["make a stone pickaxe", "have 2 sticks"])
     assert sticks["intent"] == "have 2 sticks" and sticks["intent_of_plan"] is False
-    pick = manager._plan_supervision_context("pick__repeat_1", "craft_item")
+    pick = executor._call_plan(steps[2], ["make a stone pickaxe"])
     assert pick["intent"] == "hold a stone pickaxe" and pick["intent_of_plan"] is False
+
+
+@pytest.mark.parametrize("work,expected", [
+    ({"kind": "sequence", "intent": "make a stone pickaxe", "steps": [
+        {"kind": "call", "tool": "collect_resource", "arguments": {
+            "item": "logs", "count": 4, "intent": "have 4 logs in the inventory"}},
+        {"kind": "call", "tool": "craft_item", "arguments": {"item": "planks"}},
+    ]}, [("have 4 logs in the inventory", False), ("make a stone pickaxe", True)]),
+    ({"kind": "batch", "intent": "collect the required materials", "items": ["logs", "coal"],
+      "body": {"kind": "call", "id": "gather", "tool": "collect_resource",
+               "arguments": {"item": {"ref": "item"}, "count": 1}}},
+     [("collect the required materials", True), ("collect the required materials", True)]),
+])
+def test_dispatched_plan_call_keeps_agent_intent_without_matching_explicit_ids(work, expected):
+    async def scenario():
+        seen = []
+        runtime = SimpleNamespace(
+            body_control=BodyControl(), decision_client=Decision(), trace=Trace(),
+            responses_kernel=None, last_known_body_state={}, weld_context=None,
+            registry=SimpleNamespace(get=lambda name: SimpleNamespace(
+                name=name, sidecar=SimpleNamespace(timeout_s=1))),
+        )
+
+        async def run_tool(tool, callback, *args, **kwargs):
+            seen.append((kwargs["tool_call_id"], copy.deepcopy(kwargs["supervision_context"])))
+            return {"success": True, "reason": "done", "canRetry": True, "metrics": {}}
+
+        runtime.run_tool = run_tool
+        manager = ReflexManager(runtime)
+        manager.bind_loop(asyncio.get_running_loop())
+        accepted = manager.delegate({"plan": {
+            "language": "minebot-work/0.2", "goal": "stone pickaxe", "timeout_s": 4,
+            "work": work,
+        }})
+        activity = manager._activities[accepted["metrics"]["activity_id"]]
+        await activity.task
+        assert activity.status == "completed"
+        assert [(context["intent"], context["intent_of_plan"]) for _, context in seen] == expected
+        assert all(context["node_description"] == context["intent"] for _, context in seen)
+        if work["kind"] == "sequence":
+            assert "craft_item" in seen[0][1]["next_call"]
+            assert seen[0][0].startswith("plan-legacy:")
+        else:
+            assert [call_id for call_id, _ in seen] == ["plan-gather__item_0", "plan-gather__item_1"]
+        await manager.close()
+
+    asyncio.run(scenario())
 
 
 def _progress_state(**inventory):

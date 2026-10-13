@@ -203,9 +203,16 @@ class ReflexManager:
         run_revision = activity.revision
         self._active_activity_id = activity.activity_id
         state_before = await self._progress_state()
+
+        async def dispatch(tool_name, arguments, *, call_id, timeout_s):
+            return await self._call(
+                tool_name, arguments, call_id=call_id, timeout_s=timeout_s,
+                supervision_context=executor.call_context(call_id),
+            )
+
         executor = WorkPlanExecutor(
             activity.plan,
-            call=self._call,
+            call=dispatch,
             state=self._state,
             decision=self.runtime.decision_client,
             choice_provider=getattr(self.runtime, "choice_provider", None),
@@ -387,67 +394,10 @@ class ReflexManager:
             "sampled_at_ms": sampled_at,
         }}
 
-    def _plan_supervision_context(self, call_id: str, tool_name: str) -> dict[str, Any]:
-        """Compile bounded intent facts for the shared Body supervisor.
-
-        The execution interpreter remains the owner of node state. This is
-        only a read of the submitted tree so Decision can see the range the
-        current call belongs to; it does not advance or stop the tree.
-        """
-        with self._lock:
-            activity = self._activities.get(self._active_activity_id or "")
-            if activity is None:
-                return {"is_plan": True, "node_description": f"plan call {tool_name}"}
-            goal = str(activity.plan.get("goal", ""))[:800]
-            found: dict[str, Any] = {}
-
-            lookup_id = str(call_id).split("__repeat_", 1)[0]
-
-            def walk(node: Any, chain: list[str]) -> None:
-                if not isinstance(node, dict) or found:
-                    return
-                next_chain = chain + ([str(node["intent"])] if node.get("intent") else [])
-                if node.get("kind") == "call" and str(node.get("id") or "") == lookup_id:
-                    arguments = node.get("arguments") if isinstance(node.get("arguments"), dict) else {}
-                    own = str(node.get("intent") or arguments.get("intent") or "").strip()
-                    intent = own or str(next_chain[-1] if next_chain else "").strip()
-                    found.update({
-                        "node_description": intent[:800],
-                        "intent": intent[:500],
-                        "intent_of_plan": bool(intent) and not own,
-                        "intent_chain": next_chain[-8:],
-                    })
-                    return
-                kind = node.get("kind")
-                if kind == "sequence":
-                    steps = node.get("steps", [])
-                    for index, child in enumerate(steps):
-                        walk(child, next_chain)
-                        if found:
-                            # The step after the current call, so a running
-                            # frame can offer "start the next step" concretely.
-                            if not found.get("next_call") and index + 1 < len(steps) and isinstance(steps[index + 1], dict):
-                                found["next_call"] = WorkPlanExecutor._first_call_description(steps[index + 1])
-                            return
-                elif kind == "batch":
-                    walk(node.get("body"), next_chain)
-                elif kind == "choice":
-                    for option in node.get("options", []):
-                        if isinstance(option, dict):
-                            walk(option.get("work"), next_chain + ([str(option["intent"])] if option.get("intent") else []))
-
-            walk(activity.plan.get("work"), [])
-            return {
-                "is_plan": True,
-                "goal": goal,
-                "node_description": found.get("node_description", f"plan call {tool_name}"),
-                "intent": found.get("intent", ""),
-                "intent_of_plan": bool(found.get("intent_of_plan")),
-                "intent_chain": found.get("intent_chain", []),
-                "next_call": found.get("next_call", ""),
-            }
-
-    async def _call(self, tool_name: str, arguments: dict[str, Any], *, call_id: str, timeout_s: float | None) -> dict[str, Any]:
+    async def _call(
+        self, tool_name: str, arguments: dict[str, Any], *, call_id: str,
+        timeout_s: float | None, supervision_context: dict[str, Any],
+    ) -> dict[str, Any]:
         tool = self.runtime.registry.get(tool_name)
         raw = await self.runtime.run_tool(
             tool,
@@ -461,7 +411,7 @@ class ReflexManager:
             body_claim_id=self._active_activity_id,
             retain_claim=self._active_activity_id is not None,
             return_execution_receipt=True,
-            supervision_context=self._plan_supervision_context(call_id, tool_name),
+            supervision_context=supervision_context,
         )
         if not isinstance(raw, dict):
             return raw

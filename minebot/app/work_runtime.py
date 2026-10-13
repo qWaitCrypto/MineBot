@@ -384,6 +384,14 @@ class WorkPlanExecutor:
         self._repeat_history: dict[str, list[str]] = {}
         self._call_histories: dict[str, list[dict[str, Any]]] = {}
         self._call_history_counts: dict[str, int] = {}
+        self._active_call_context: tuple[str, dict[str, Any]] | None = None
+
+    def call_context(self, call_id: str) -> dict[str, Any]:
+        """Read the actual dispatched node, including generated and batch ids."""
+        current = self._active_call_context
+        if current is None or current[0] != call_id:
+            raise WorkPlanError("no context for the dispatched call")
+        return copy.deepcopy(current[1])
 
     async def run(self) -> WorkRunResult:
         self._legacy_occurrences.clear()
@@ -486,10 +494,14 @@ class WorkPlanExecutor:
                     arguments = _resolve_ref(
                         node.get("arguments", {}), results=self.results, item=item, state=call_state,
                     )
-                    result = await self.call(
-                        str(node["tool"]), arguments, call_id=node_key,
-                        timeout_s=node.get("timeout_s"),
-                    )
+                    self._active_call_context = (node_key, self._call_plan(node, chain))
+                    try:
+                        result = await self.call(
+                            str(node["tool"]), arguments, call_id=node_key,
+                            timeout_s=node.get("timeout_s"),
+                        )
+                    finally:
+                        self._active_call_context = None
                     execution = result.get("_execution") if isinstance(result, dict) else None
                     public_result = dict(result)
                     public_result.pop("_execution", None)
@@ -676,7 +688,9 @@ class WorkPlanExecutor:
         return {key: text for key, text in options.items() if key not in rq.PROTECTIVE}
 
     def _call_plan(self, node: dict[str, Any], intents: list[str]) -> dict[str, Any]:
-        intent = str(node.get("intent") or node.get("description") or (intents[-1] if intents else ""))[:800]
+        arguments = node.get("arguments") if isinstance(node.get("arguments"), dict) else {}
+        own = str(node.get("intent") or arguments.get("intent") or node.get("description") or "").strip()
+        intent = str(own or (intents[-1] if intents else ""))[:800]
         current_step = intent or (intents[-1] if intents else "")
         return {
             "goal": str(self.plan.get("goal") or "")[:800],
@@ -685,7 +699,10 @@ class WorkPlanExecutor:
             "current_step": current_step[:800],
             "node_description": intent or f"call {node.get('tool', 'unknown')}",
             "intent": intent,
+            "is_plan": True,
+            "intent_of_plan": bool(intent) and not own,
             "intent_chain": [str(value)[:400] for value in intents[-8:]],
+            "next_call": str(node.get("next_call") or ""),
         }
 
     def _call_question(
