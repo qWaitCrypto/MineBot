@@ -628,6 +628,12 @@ class CallSupervisor:
                 self.runtime.body_control.mark_unknown()
             return result
         finally:
+            caller = asyncio.current_task()
+            if caller is not None and caller.cancelling():
+                # A cancelled containing plan will never ask a result
+                # question. Its lifecycle completion must not reserve a slot.
+                record["result_abandoned"] = True
+                self._release_result_pending(str(record.get("call_id") or ""))
             # Plan calls are judged by WorkPlanExecutor immediately after this
             # method returns; BodyLoop releases their result slot from
             # decide_plan_result. Direct calls have no second owner and can

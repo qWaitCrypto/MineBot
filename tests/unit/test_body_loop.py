@@ -771,3 +771,32 @@ def test_running_plan_verdict_releases_pending_slot_without_a_second_result_ques
             finally:
                 await loop.stop()
     asyncio.run(run())
+
+def test_cancelled_plan_releases_result_slot_even_when_lifecycle_finishes_later(monkeypatch):
+    async def run():
+        runtime, trace, _ = _runtime()
+        runtime.direct_call_handoffs = {}
+        runtime.execution_snapshots = SimpleNamespace(current=lambda: None, last=lambda: None)
+        async def blocked_lane(*args, **kwargs):
+            await asyncio.Event().wait()
+        runtime.execution_lane = SimpleNamespace(run=blocked_lane)
+        loop = BodyLoop(runtime)
+        task = asyncio.create_task(loop.run(SimpleNamespace(name='collect_resource'), None, (),
+            call_id='plan-cancelled', timeout_s=30,
+            supervision_context={'is_plan': True, 'intent': 'have three logs'}))
+        try:
+            while loop._active_monitor is None:
+                await asyncio.sleep(0)
+            task.cancel()
+            result = await asyncio.gather(task, return_exceptions=True)
+            assert isinstance(result[0], asyncio.CancelledError)
+            await asyncio.sleep(.02)
+            assert not loop._result_pending
+            assert any(e['event'] == 'call_supervision_request' and e['purpose'] == 'idle_frame'
+                       for e in trace.events)
+        finally:
+            await loop.stop()
+    monkeypatch.setattr('minebot.app.direct_call_supervision.FAST_COMPLETION_GRACE_S', 0)
+    monkeypatch.setattr('minebot.app.direct_call_supervision.FACT_FRAME_INTERVAL_S', .001)
+    monkeypatch.setattr('minebot.app.body_loop.FACT_FRAME_INTERVAL_S', .001)
+    asyncio.run(run())

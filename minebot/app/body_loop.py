@@ -774,7 +774,8 @@ class BodyLoop(CallSupervisor):
                     finally:
                         if self._active_monitor is active:
                             self._active_monitor = None
-                        self._result_pending[str(record.get("call_id") or "")] = record
+                        if not record.get("result_abandoned"):
+                            self._result_pending[str(record.get("call_id") or "")] = record
                         done = record.get("monitor_done")
                         if isinstance(done, asyncio.Event):
                             done.set()
