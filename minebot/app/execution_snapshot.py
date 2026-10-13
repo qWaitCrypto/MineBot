@@ -303,7 +303,7 @@ class ExecutionSnapshots:
             "any_process_active", "scaffold_blocks", "health", "food", "oxygen",
             # These are ambient survival and safety facts.  They are copied
             # from the Body frame; the snapshot does not infer them.
-            "in_water", "submerged", "water", "safe_standing_position",
+            "in_water", "submerged", "water", "on_ground", "head_in_liquid", "safe_standing_position",
             "last_safe_position", "food_available", "food_item",
             "nearest_hostile_position",
         ):

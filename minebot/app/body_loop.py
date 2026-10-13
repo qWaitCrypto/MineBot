@@ -11,6 +11,7 @@ there is still one instance and one Decision client for a Body.
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from collections import deque
 from uuid import uuid4
@@ -42,6 +43,25 @@ class BodyLoop(CallSupervisor):
         self._protective_redirect: tuple[str, tuple[str, dict[str, Any]]] | None = None
         self._protective_verdict: str | None = None
         self.recent_experiences: deque[str] = deque(maxlen=5)
+        self.safe_standing_position: list[float] | None = None
+
+    def _frame(self, execution: Mapping[str, Any] | None) -> dict[str, Any]:
+        previous = copy.deepcopy(self.safe_standing_position)
+        frame = super()._frame(execution)
+        if not frame:
+            return frame
+        facts = frame["facts"]
+        health, before = facts.get("health"), facts.get("health_before")
+        position = facts.get("position", facts.get("pos"))
+        if (facts.get("on_ground") is True and facts.get("head_in_liquid") is False
+                and isinstance(health, (int, float)) and health > 0
+                and isinstance(before, (int, float)) and health >= before
+                and isinstance(position, (list, tuple)) and len(position) == 3):
+            self.safe_standing_position = list(position)
+        if self.safe_standing_position is not None:
+            facts["safe_standing_position"] = copy.deepcopy(self.safe_standing_position)
+        frame["_frame_input"]["safe_standing_position"] = previous
+        return frame
 
     async def run(self, tool: Any, callback: Any, args: tuple[Any, ...], **kwargs: Any) -> Any:
         """Keep the lifecycle state aligned with the one physical call path."""
@@ -60,7 +80,10 @@ class BodyLoop(CallSupervisor):
         try:
             return await super().run(tool, callback, args, **kwargs)
         finally:
-            self._set_state(previous, "decision" if context.get("is_reflex_action") else "call_ended")
+            # A protective terminal still awaits Decision's return/handoff
+            # choice. Keep its survival/threat state through that result.
+            if not context.get("is_reflex_action"):
+                self._set_state(previous, "call_ended")
             handoff = getattr(self.runtime, "direct_call_handoffs", {}).get(call_id, {})
             decided = handoff.get("facts", {}).get("decision", {}).get("choice")
             if not context.get("is_plan") or decided in {"step_done", "next_step", "call_agent", "repeat"}:
@@ -397,11 +420,14 @@ class BodyLoop(CallSupervisor):
             else:
                 await asyncio.wait_for(self._run_default_action(record, execution, choice, action), remaining)
         except asyncio.TimeoutError:
+            self._refresh_interrupted_result(record)
             safe = self._handoff_facts(execution, reason="decision_default_tool",
                                        confirmed=False, decision="unknown")
             safe["default_action"] = {"choice": choice, "tool": action[0],
                                       "result": self._compact_result(record.get("protective_result", {})),
                                       "then": "unknown"}
+            safe["history"] = copy.deepcopy(record.get("history", []))
+            safe["history_earlier"] = int(record.get("history_total", 0)) - len(record.get("history", []))
             self.runtime.direct_call_handoffs[record["call_id"]] = {"facts": safe, "settlement": {"settled": True}}
             self.runtime.trace.emit("call_supervision_default_deadline", tool_call_id=record["call_id"], facts=safe)
         finally:
@@ -435,11 +461,31 @@ class BodyLoop(CallSupervisor):
                                         choice=choice, error_type=type(exc).__name__)
             if record is not None:
                 record["protective_result"] = result
+                record["protective_action"] = (choice, action)
+                self._refresh_interrupted_result(record)
             redirect = self._protective_redirect
             if redirect is None:
                 return choice, action, result, default_id
             choice, action = redirect
             call_id = None
+
+    def _refresh_interrupted_result(self, record) -> None:
+        """Keep actual terminals when settlement and the caller resume separately."""
+        outcome = record.get("interrupted_result")
+        if not isinstance(outcome, dict):
+            return
+        interruption = outcome["metrics"]["direct_call_handoff"]
+        original = record.get("result")
+        if isinstance(original, Mapping):
+            outcome.clear()
+            outcome.update(self._compact_result(original))
+            outcome["metrics"] = {"direct_call_handoff": interruption}
+        protective = record.get("protective_action")
+        if protective is not None:
+            choice, action = protective
+            interruption["facts"]["default_action"].update(
+                choice=choice, tool=action[0],
+                result=self._compact_result(record.get("protective_result", {})))
 
     def _remember_protection(self, action, result) -> None:
         facts = self._idle_facts()
@@ -480,15 +526,44 @@ class BodyLoop(CallSupervisor):
             # The earlier work may be resumed, so its owner stays valid.
             invalidate_generation=False,
         )
+        original = record.get("result")
+        original = original if isinstance(original, Mapping) else {"success": False, "reason": "stopped_by_decision"}
+        outcome = self._compact_result(original)
+        outcome["metrics"] = {"direct_call_handoff": {"facts": {
+            "reason": "decision_default_tool", "decision": {"choice": choice},
+            "default_action": {"choice": choice, "tool": action[0]},
+        }}}
+        record["interrupted_result"] = outcome
+        record.pop("protective_action", None)
+        record.pop("protective_result", None)
+        body = execution.get("facts") or {}
+        history = record.setdefault("history", [])
+        history.append({"result": outcome, "body": {
+            "position": body.get("position", body.get("pos")),
+            "inventory": body.get("inventory", body.get("inventory_counts")),
+        }})
+        record["history_total"] = int(record.get("history_total") or 0) + 1
+        del history[:-5]
         choice, action, default_result, default_id = await self._execute_protection(choice, action, record)
         record["protective_result"] = default_result
+        record["protective_action"] = (choice, action)
+        self._refresh_interrupted_result(record)
+        outcome["metrics"]["direct_call_handoff"]["facts"]["default_action"].update(
+            choice=choice, tool=action[0], result=self._compact_result(default_result))
         after = await self._after_default_action(
             record, action, default_result, default_id, protective_choice=choice,
         )
+        self._refresh_interrupted_result(record)
+        choice, action = record.get("protective_action", (choice, action))
+        default_result = record.get("protective_result", default_result)
         handoff = {**safe, "default_action": {
             "choice": choice, "tool": action[0], "result": self._compact_result(default_result),
             "then": after,
         }, "settlement": settled}
+        # Reuse the existing handoff facts rather than adding tool receipt
+        # fields. The Agent and next node attempt receive the same raw record.
+        handoff["history"] = copy.deepcopy(history)
+        handoff["history_earlier"] = record["history_total"] - len(history)
         # The plan runtime reads this choice: "repeat" re-enters the stopped node.
         handoff["decision"] = {**dict(handoff.get("decision") or {}),
                                "choice": "repeat" if after == "resume" else after}
@@ -498,10 +573,12 @@ class BodyLoop(CallSupervisor):
             choice=choice, facts=handoff,
         )
         if after == "resume":
+            self._set_state("work", "decision")
             # Back to the earlier work; the Agent is not woken for this.
             record["resume_original"] = True
             self._remember_protection(action, default_result)
         elif after == "call_agent" and not bool(record["supervision_context"].get("is_plan")):
+            self._set_state("idle", "decision")
             notify_fact = getattr(self.runtime, "notify_reflex_fact", None)
             if callable(notify_fact):
                 notify_fact({"call_id": call_id, "status": "default_action_completed", **handoff})
@@ -521,6 +598,7 @@ class BodyLoop(CallSupervisor):
         total = 0
         new_attempt = True
         while default_tool is not None:
+            self._refresh_interrupted_result(record)
             remaining = self._remaining(record)
             if remaining is not None and remaining <= 0:
                 return "unknown"
@@ -548,7 +626,9 @@ class BodyLoop(CallSupervisor):
                     purpose="default_result_frame", supervision_context=context, options=options,
                     decision_context={"tool_result": dict(payload), "tool_arguments": dict(action[1]),
                                       "body_state": execution["facts"], "history": list(history),
-                                      "history_earlier": total - len(history)},
+                                      "history_earlier": total - len(history),
+                                      "interrupted_history": copy.deepcopy(record.get("history", [])),
+                                      "interrupted_history_earlier": int(record.get("history_total", 0)) - len(record.get("history", []))},
                 ), timeout=2.2 if remaining is None else min(2.2, remaining))
             except asyncio.TimeoutError:
                 choice = "unknown"
@@ -691,7 +771,7 @@ class BodyLoop(CallSupervisor):
     async def _read_idle_facts(self) -> dict[str, Any]:
         """Read state and nearby entities on the read lane, then join Body history."""
         body = getattr(self.runtime, "body", None)
-        getter = getattr(body, "get_state", None)
+        getter = getattr(body, "get_reflex_facts", None) or getattr(body, "get_state", None)
         read_lane = getattr(self.runtime, "_read_lane", None)
         facts = self._idle_facts()
         if callable(getter) and read_lane is not None:
@@ -758,6 +838,7 @@ class BodyLoop(CallSupervisor):
             self.runtime.trace.emit("call_supervision_default_finished", tool_call_id="idle-loop",
                                     choice=choice, tool=action[0], result=self._compact_result(result))
         finally:
+            self._set_state("idle", "call_ended")
             self._loop_wakeup.set()
 
     @staticmethod

@@ -8,7 +8,7 @@ it never falls back to the server FakePlayer implementation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
@@ -156,6 +156,19 @@ class RealClientBody:
         with self._lock:
             active = self._active is not None
         return _body_state(self.bot_name, cached, pending=active)
+
+    def get_reflex_facts(self) -> dict[str, Any]:
+        """Read existing native facts before the public BodyState projection.
+
+        Ground/contact facts belong to the reflex frame; they are not added
+        to tool receipts or the public BodyState contract.
+        """
+        raw = self._state_payload()
+        with self._lock:
+            active = self._active is not None
+        # Preserve the established pos/inventory_counts vocabulary for plan
+        # bindings while exposing ground/eye facts from the SAME sample.
+        return {**asdict(_body_state(self.bot_name, raw, pending=active)), **raw}
 
     def _state_payload(self) -> dict[str, Any]:
         self._ensure_connected()

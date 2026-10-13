@@ -494,7 +494,13 @@ class WorkPlanExecutor:
                     arguments = _resolve_ref(
                         node.get("arguments", {}), results=self.results, item=item, state=call_state,
                     )
-                    self._active_call_context = (node_key, self._call_plan(node, chain))
+                    base_key = str(node.get("id") or node_key.split("__repeat_", 1)[0])
+                    context = self._call_plan(node, chain)
+                    prior = self._call_histories.get(base_key, [])
+                    if prior:
+                        context["history"] = copy.deepcopy(prior)
+                        context["history_earlier"] = self._call_history_counts.get(base_key, 0) - len(prior)
+                    self._active_call_context = (node_key, context)
                     try:
                         result = await self.call(
                             str(node["tool"]), arguments, call_id=node_key,
@@ -531,9 +537,25 @@ class WorkPlanExecutor:
                     history_count = self._call_history_counts.get(base_key, 0) + 1
                     self._call_history_counts[base_key] = history_count
                     raw_body = _state_payload(decision_state)
+                    history_result = _decision_result_facts(public_result)
+                    if isinstance(private_handoff, dict) and private_handoff.get("facts", {}).get("default_action"):
+                        # Preserve the stop cause even if the public projector
+                        # omitted raw metrics. Do not recursively embed earlier
+                        # histories in every new history entry.
+                        interruption = {"facts": {key: copy.deepcopy(private_handoff["facts"][key])
+                            for key in ("reason", "decision", "default_action")
+                            if key in private_handoff["facts"]}}
+                        history_result.setdefault("metrics", {})["direct_call_handoff"] = interruption
+                        if "supervision" in history_result:
+                            history_result["supervision"] = copy.deepcopy(interruption)
+                        interrupted_history = private_handoff["facts"].get("history")
+                        if isinstance(interrupted_history, list) and interrupted_history:
+                            interrupted_body = interrupted_history[-1].get("body")
+                            if isinstance(interrupted_body, dict):
+                                raw_body = interrupted_body
                     history.append({
                         "reason": public_result.get("reason"),
-                        "result": _decision_result_facts(public_result),
+                        "result": history_result,
                         "body": {
                             "position": raw_body.get("position", raw_body.get("pos")),
                             "inventory": raw_body.get("inventory", raw_body.get("inventory_counts")),

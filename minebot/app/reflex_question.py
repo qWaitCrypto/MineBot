@@ -159,9 +159,17 @@ def _body_sentence(facts: Mapping[str, Any]) -> str:
         air_before = facts.get("oxygen_before")
         if air >= AIR_FULL:
             parts.append("Air supply is full.")
+        elif facts.get("head_in_liquid") is False:
+            if isinstance(air_before, (int, float)) and air > air_before:
+                parts.append(
+                    f"The Body is breathing again: air supply was {air_before:.0f} {_ago(facts, 'oxygen_age_s')} ago "
+                    f"and is {air:.0f} of {AIR_FULL} now."
+                )
+            else:
+                parts.append(f"The head is out of liquid; air supply is {air:.0f} of {AIR_FULL} now.")
         elif air <= 0:
             parts.append("Air supply is empty; the Body is under water and is drowning.")
-        elif isinstance(air_before, (int, float)) and air > air_before:
+        elif facts.get("head_in_liquid") is not True and isinstance(air_before, (int, float)) and air > air_before:
             parts.append(
                 f"The Body is breathing again: air supply was {air_before:.0f} {_ago(facts, 'oxygen_age_s')} ago "
                 f"and is {air:.0f} of {AIR_FULL} now."
@@ -224,6 +232,10 @@ def attempt_lines(history: list[Mapping[str, Any]], earlier: int = 0) -> list[st
     lines = [f"There were {earlier} earlier attempts before these."] if earlier else []
     for index, attempt in enumerate(history[:-1], start=earlier + 1):
         result = attempt.get("result") if isinstance(attempt.get("result"), Mapping) else {}
+        interruption = _interruption(result)
+        if interruption:
+            lines.extend(interruption_lines([attempt], earlier=index - 1, include_count=False))
+            continue
         if result.get("success") is True:
             lines.append(f"Attempt {index}: ended normally.")
             continue
@@ -235,12 +247,58 @@ def attempt_lines(history: list[Mapping[str, Any]], earlier: int = 0) -> list[st
     return lines
 
 
+def _interruption(result: Mapping[str, Any]) -> Mapping[str, Any]:
+    metrics = result.get("metrics")
+    handoff = metrics.get("direct_call_handoff") if isinstance(metrics, Mapping) else None
+    if not isinstance(handoff, Mapping):
+        handoff = result.get("supervision")
+    facts = handoff.get("facts") if isinstance(handoff, Mapping) else None
+    return facts if isinstance(facts, Mapping) and facts.get("default_action") else {}
+
+
+def interruption_lines(history: list[Mapping[str, Any]], earlier: int = 0, *,
+                       style: str = "attempts", include_count: bool = True) -> list[str]:
+    """All attempts of the suspended work, including the one just stopped.
+
+    Its current attempt is distinct from the protective call's current result.
+    No judgement about whether another attempt is worthwhile is added.
+    The alternate styles are for the required offline wording comparison.
+    """
+    lines = [f"There were {earlier} earlier attempts before these."] if earlier and include_count else []
+    for index, attempt in enumerate(history, start=earlier + 1):
+        result = attempt.get("result") if isinstance(attempt.get("result"), Mapping) else {}
+        facts = _interruption(result)
+        default = facts.get("default_action") or {}
+        tool = default.get("tool")
+        if not tool:
+            lines.append(f"Attempt {index}: {result_sentence('the original call', result)}")
+            continue
+        body = attempt.get("body") or {}
+        position = _position(body.get("position", body.get("pos")))
+        inventory = _inventory(body)
+        values = (", ".join(f"{k} {v}" for k, v in inventory.items()) or "empty") if inventory is not None else "not recorded"
+        protective_result = default.get("result")
+        protective_result = protective_result if isinstance(protective_result, Mapping) else {}
+        reason = result.get("reason") or "no reason given"
+        if style == "events":
+            prefix = f"On attempt {index}, Decision stopped the original work ({reason}) and the Body ran {tool}()."
+        elif style == "outcomes":
+            prefix = f"Attempt {index} of the original work returned {reason}; the Body switched to {tool}()."
+        else:
+            prefix = f"Attempt {index}: the original work was interrupted for {tool}() ({reason})."
+        if protective_result:
+            prefix += " " + result_sentence(f"{tool}()", protective_result)
+        lines.append(prefix + f" Inventory at interruption: {values}. Position: {position or 'not recorded'}.")
+    return lines
+
+
 def frame_state(
     *, goal: str, intent: str, tool: str, params: Mapping[str, Any] | None,
     facts: Mapping[str, Any], running: bool, phase: str | None = None,
     elapsed_s: float | None = None, progress_signal: str | None = None,
     since_progress_s: float | None = None, result: Mapping[str, Any] | None = None,
     earlier_attempts: list[str] | None = None,
+    interrupted_attempts: list[str] | None = None,
 ) -> dict[str, Any]:
     """Describe one frame.  Every fact is said once, as a sentence."""
     call = call_text(tool, params)
@@ -278,6 +336,8 @@ def frame_state(
         state["finished_call"] = result_sentence(call, result)
         if earlier_attempts:
             state["earlier_attempts_of_this_call"] = list(earlier_attempts)
+        if interrupted_attempts:
+            state["interruptions_of_the_original_work"] = list(interrupted_attempts)
     start = _position(facts.get("start_position"))
     now = _position(facts.get("position", facts.get("pos")))
     if start and now:

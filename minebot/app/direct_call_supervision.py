@@ -228,6 +228,11 @@ class CallSupervisor:
             [item for item in history if isinstance(item, Mapping)],
             int(context.get("history_earlier") or 0),
         ) if isinstance(history, list) else []
+        interrupted = context.get("interrupted_history")
+        interrupted_lines = rq.interruption_lines(
+            [item for item in interrupted if isinstance(item, Mapping)],
+            int(context.get("interrupted_history_earlier") or 0),
+        ) if isinstance(interrupted, list) else []
         state = rq.frame_state(
             goal=str(plan.get("goal") or ""), intent=intent, tool=tool_name,
             params=call_params if isinstance(call_params, Mapping) else {}, facts=facts,
@@ -235,6 +240,7 @@ class CallSupervisor:
             progress_signal=execution.get("progress_signal"),
             since_progress_s=execution.get("since_progress_s"),
             result=result if isinstance(result, Mapping) else None, earlier_attempts=earlier,
+            interrupted_attempts=interrupted_lines,
         )
         if options is None:
             options = rq.frame_options(
@@ -540,6 +546,9 @@ class CallSupervisor:
             "timeout_s": timeout_s,
             "initial_reader_done": False,
             "reader_new_fact": False,
+            "history": copy.deepcopy((supervision_context or {}).get("history", [])),
+            "history_total": (len((supervision_context or {}).get("history", []))
+                              + int((supervision_context or {}).get("history_earlier") or 0)),
         }
         # A protective action can be launched while its parent call is still
         # settling.  Preserve that parent so the per-Body loop does not lose
@@ -599,6 +608,7 @@ class CallSupervisor:
                     # settle and be handed on like any other stopped call.
                     result = {"success": False, "reason": "stopped_by_decision",
                               "canRetry": True, "metrics": {}}
+                record["result"] = result
                 if monitor is not None:
                     await monitor
                     monitor = None
@@ -620,6 +630,7 @@ class CallSupervisor:
                 if readmit is not None:
                     readmit()
                 record["cancel_requested"] = record["settling"] = False
+                record.pop("result", None)
                 record["initial_reader_done"] = record["reader_new_fact"] = False
                 record.pop("decision", None)
                 self.runtime.direct_call_handoffs.pop(call_id, None)

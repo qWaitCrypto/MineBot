@@ -3033,6 +3033,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             frame.addProperty("yaw", client.player.getYRot());
             frame.addProperty("pitch", client.player.getXRot());
             frame.addProperty("on_ground", client.player.onGround());
+            frame.addProperty("head_in_liquid", client.player.isEyeInFluid(FluidTags.WATER) || client.player.isEyeInFluid(FluidTags.LAVA));
             frame.addProperty("health", client.player.getHealth());
             frame.addProperty("food", client.player.getFoodData().getFoodLevel());
             frame.addProperty("oxygen", client.player.getAirSupply());
@@ -3093,6 +3094,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             pos.add(client.player.getZ());
             state.add("position", pos);
             state.addProperty("on_ground", client.player.onGround());
+            state.addProperty("head_in_liquid", client.player.isEyeInFluid(FluidTags.WATER) || client.player.isEyeInFluid(FluidTags.LAVA));
             state.addProperty("creative", client.player.getAbilities().instabuild);
             state.addProperty("dimension", client.level.dimension().identifier().toString());
             state.addProperty("difficulty", client.level.getDifficulty().name().toLowerCase(java.util.Locale.ROOT));

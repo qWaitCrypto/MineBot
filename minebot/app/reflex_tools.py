@@ -328,7 +328,9 @@ class ReflexManager:
 
     async def _state(self) -> dict[str, Any]:
         try:
-            state = await self.runtime._read_lane.run(self.runtime.body.get_state)
+            getter = (getattr(self.runtime.body, "get_reflex_facts", None)
+                      or self.runtime.body.get_state)
+            state = await self.runtime._read_lane.run(getter)
             if isinstance(state, dict):
                 return copy.deepcopy(state)
             if is_dataclass(state):
