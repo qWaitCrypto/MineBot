@@ -241,7 +241,14 @@ def frame_state(
 ) -> dict[str, Any]:
     """Describe one frame.  Every fact is said once, as a sentence."""
     call = call_text(tool, params)
-    state: dict[str, Any] = {"task": goal, "agent_intent": intent}
+    state: dict[str, Any] = {
+        "task": goal,
+        # Outcome-shaped Agent words such as "there is a pickaxe in the
+        # inventory" are an intention, not an observed inventory fact.
+        # This clarification was verified on recorded running frames; keep
+        # the separately verified terminal-frame wording unchanged.
+        "agent_intent": f"The Agent wants the following result: “{intent}”." if running and intent else intent,
+    }
     inventory = _inventory(facts)
     if inventory is not None:
         state["inventory"] = ", ".join(f"{item} {count}" for item, count in inventory.items()) or "empty"
@@ -358,13 +365,18 @@ def after_default_options(
     return options
 
 
-def frame_questions(options: Mapping[str, str], *, protecting: bool = False) -> dict[str, Any]:
+def frame_questions(
+    options: Mapping[str, str], *, protecting: bool = False, acting_for_intent: bool = False,
+) -> dict[str, Any]:
     """One request.  The danger question is asked only when a protective
     action is on offer in this frame."""
     protective = {key: text for key, text in options.items() if key in PROTECTIVE and not protecting}
     normal = dict(options) if protecting else {key: text for key, text in options.items() if key not in PROTECTIVE}
     questions: dict[str, Any] = {
-        "q": {"type": "choice", "instructions": "Choose what the Body does next.", "criteria": normal},
+        "q": {"type": "choice", "instructions": (
+            "Choose what the Body does right now to achieve the Agent's intent."
+            if acting_for_intent else "Choose what the Body does next."
+        ), "criteria": normal},
     }
     if protective:
         questions["d"] = {"type": "choice", "instructions": "Is the Body in danger?", "criteria": dict(_DANGER)}

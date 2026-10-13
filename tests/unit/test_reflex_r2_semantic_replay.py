@@ -63,7 +63,7 @@ def test_replay_frames_go_through_the_real_question_builder():
             supervision_context=context,
         )
         encoded = json.dumps(request, ensure_ascii=False)
-        assert request["state"]["agent_intent"] == intent
+        assert request["state"]["agent_intent"] == f"The Agent wants the following result: “{intent}”."
         assert "state.plan." not in encoded
         assert "<bounded>" not in encoded
         expected_key = {"continue": "keep_going", "step_done": "next_step", "go_to_surface": "surface"}.get(row["expected"], row["expected"])

@@ -1,5 +1,6 @@
 """Equal-input compiler baseline; missing historical snapshots are NOT reconstructed."""
 import importlib.util
+import copy
 import json
 from pathlib import Path
 import subprocess
@@ -10,7 +11,7 @@ from unittest.mock import patch
 from minebot.app.direct_call_supervision import CallSupervisor
 
 
-def test_step2_new_old_equivalence_on_118_identical_inputs():
+def test_step2_new_old_protocol_on_118_inputs_except_verified_running_intent_wording():
     root = Path(__file__).parents[2]
     fixture = json.loads((root / 'tests/fixtures/reflex_step2_equivalent_inputs.json').read_text())
     cases = fixture['cases']
@@ -44,5 +45,14 @@ def test_step2_new_old_equivalence_on_118_identical_inputs():
                     request = {k: v for k, v in request.items() if not k.startswith('_request_chars')}
                     requests.append(request)
                 assert requests[0] == case['old_request'], case['seq']
-                assert json.dumps(requests[0], ensure_ascii=False, separators=(',', ':')) == json.dumps(
+                expected = copy.deepcopy(requests[0])
+                intent = expected['state'].get('agent_intent')
+                if intent:
+                    expected['state']['agent_intent'] = f'The Agent wants the following result: “{intent}”.'
+                    expected['questions']['q']['instructions'] = (
+                        "Choose what the Body does right now to achieve the Agent's intent."
+                    )
+                # Only these two deliberate wording changes are permitted.
+                # Body facts, all options, and the danger questions stay exact.
+                assert json.dumps(expected, ensure_ascii=False, separators=(',', ':')) == json.dumps(
                     requests[1], ensure_ascii=False, separators=(',', ':')), case['seq']

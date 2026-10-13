@@ -25,7 +25,7 @@ def test_running_frame_says_each_fact_once_as_a_sentence():
     )
     assert state == {
         "task": GOAL,
-        "agent_intent": "get 3 raw iron",
+        "agent_intent": "The Agent wants the following result: “get 3 raw iron”.",
         "inventory": "stone_pickaxe 1, dirt 2",
         "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
         "threats": "Nearest hostile mob: Creeper, 21 blocks away.",

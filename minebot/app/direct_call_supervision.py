@@ -243,7 +243,8 @@ class CallSupervisor:
                 result=result if isinstance(result, Mapping) else None,
             )
         request: dict[str, Any] = {"state": state, "questions": rq.frame_questions(
-            options, protecting=bool((supervision_context or {}).get("is_reflex_action")))}
+            options, protecting=bool((supervision_context or {}).get("is_reflex_action")),
+            acting_for_intent=running and bool(intent))}
         size = len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str))
         # Private values, removed before the request reaches Decision.
         request["_request_chars_before"] = size
