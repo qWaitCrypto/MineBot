@@ -309,7 +309,11 @@ class ExecutionSnapshots:
         ):
             if key in payload:
                 facts[key] = payload[key]
-        for key in ("nearby_entities", "nearby_hostiles", "entities", "hostiles"):
+        entity_keys = ("nearby_entities", "nearby_hostiles", "entities", "hostiles")
+        if any(key in payload and isinstance(payload[key], (list, tuple)) for key in entity_keys):
+            for key in entity_keys:
+                facts.pop(key, None)
+        for key in entity_keys:
             if key in payload and isinstance(payload[key], (list, tuple)):
                 facts[key] = list(payload[key])[:32]
         active = [name for name, field in PROCESS_FIELDS.items() if payload.get(field) is True]

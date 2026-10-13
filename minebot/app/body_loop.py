@@ -50,6 +50,11 @@ class BodyLoop(CallSupervisor):
         self._death_count = 0
         self._native_lifecycle = False
         self._body_lifecycle_listener = None
+        self._reaction_observations: dict[str, dict[str, Any]] = {}
+        self._reaction_selection: dict[str, Any] | None = None
+        self._reaction_actions: dict[str, dict[str, Any]] = {}
+        self._reaction_event_loop: asyncio.AbstractEventLoop | None = None
+        self._ambient_facts: dict[str, Any] = {}
 
     def _queue_lifecycle_event(self, event: Event) -> None:
         self._lifecycle_events.append(event)
@@ -72,6 +77,10 @@ class BodyLoop(CallSupervisor):
                     continue
                 self._set_state("dead", "death")
                 self._death_count += 1
+                self._reaction_observations.clear()
+                self._reaction_actions.clear()
+                self._reaction_selection = None
+                self._ambient_facts.clear()
                 death = dict(event.data)
                 death["vital_samples"] = copy.deepcopy(self._vitals._samples)
                 self._death_facts = death
@@ -95,6 +104,7 @@ class BodyLoop(CallSupervisor):
                     notify(event)
             elif event.name == "respawned":
                 self._vitals = rq.VitalWindow()
+                self._ambient_facts.clear()
                 self.safe_standing_position = None
                 self._result_pending.clear()
                 self._set_state("idle", "respawned")
@@ -105,10 +115,38 @@ class BodyLoop(CallSupervisor):
         return self.loop_state == "dead"
 
     def _frame(self, execution: Mapping[str, Any] | None) -> dict[str, Any]:
+        if not execution:
+            return {}
+        # Native lite progress omits inventory and perception. That is not an
+        # empty inventory or an observation that all entities have disappeared.
+        # Keep only Body observations across calls, never the previous call's
+        # phase, navigation, deltas or progress. Explicit observations replace
+        # every alias of that observation, including explicit empty containers.
+        ambient_before = copy.deepcopy(self._ambient_facts)
+        observed = dict(execution.get("facts") or {})
+        groups = (
+            ("inventory", "inventory_counts"),
+            ("nearby_hostiles", "hostiles", "nearby_entities", "entities", "entities_near"),
+        )
+        for group in groups:
+            if any(key in observed for key in group):
+                for key in group:
+                    self._ambient_facts.pop(key, None)
+                self._ambient_facts.update({key: copy.deepcopy(observed[key])
+                                            for key in group if key in observed})
+        for key in ("selected_item", "selected_item_known", "inventory_complete",
+                    "inventory_includes_selected", "creative", "dimension"):
+            if key in observed:
+                self._ambient_facts[key] = copy.deepcopy(observed[key])
+        combined = {**copy.deepcopy(self._ambient_facts), **observed}
         previous = copy.deepcopy(self.safe_standing_position)
-        frame = super()._frame(execution)
-        if not frame:
-            return frame
+        frame = super()._frame({**execution, "facts": combined})
+        # Store both raw sources so replay can reproduce exactly what online
+        # compilation saw, rather than presenting carried observations as raw
+        # data supplied by the current tool.
+        frame["_frame_input"]["execution"] = copy.deepcopy(
+            {key: value for key, value in execution.items() if key != "_frame_input"})
+        frame["_frame_input"]["ambient_facts"] = ambient_before
         facts = frame["facts"]
         health, before = facts.get("health"), facts.get("health_before")
         position = facts.get("position", facts.get("pos"))
@@ -120,7 +158,60 @@ class BodyLoop(CallSupervisor):
         if self.safe_standing_position is not None:
             facts["safe_standing_position"] = copy.deepcopy(self.safe_standing_position)
         frame["_frame_input"]["safe_standing_position"] = previous
+        self._observe_reaction_frame(facts)
         return frame
+
+    def _observe_reaction_frame(self, facts: Mapping[str, Any]) -> None:
+        """Telemetry only: first frame in which an existing option is eligible."""
+        near = rq.hostiles(facts)
+        ids = set()
+        hurt = rq.just_hurt(facts)
+        for entity in near:
+            identity = entity.get("id")
+            if not isinstance(identity, str) or not identity:
+                continue
+            if entity["dist"] <= rq.HOSTILE_REACH or hurt:
+                ids.add(identity)
+                self._reaction_observations.setdefault(identity, {
+                    "target": identity, "event_monotonic_s": time.monotonic(),
+                    "event_sampled_at_ms": facts.get("sampled_at_ms"),
+                    "event_health": facts.get("health"), "event_distance": entity["dist"],
+                })
+        self._reaction_observations = {key: value for key, value in self._reaction_observations.items() if key in ids}
+
+    def _reaction_question(self, facts: Mapping[str, Any], stamp: float) -> dict[str, Any] | None:
+        near = rq.hostiles(facts)
+        observed = self._reaction_observations.get(near[0].get("id")) if near else None
+        return None if observed is None else {**observed, "request_monotonic_s": stamp}
+
+    def _reaction_answer(self, chain: dict[str, Any] | None, choice: str) -> None:
+        if chain is not None and choice in {"engage", "ranged", "move_away", "retreat_safe"}:
+            self._reaction_selection = {**chain, "choice": choice, "answer_monotonic_s": time.monotonic()}
+
+    def observe_native_action_progress(self, operation_id: str, payload: Mapping[str, Any]) -> None:
+        """Called by the existing observation lane; no new sampler or loop."""
+        event_loop = self._reaction_event_loop
+        if event_loop is not None and not event_loop.is_closed() and payload.get("action_id"):
+            event_loop.call_soon_threadsafe(self._reaction_progress, operation_id, time.monotonic(),
+                                           payload.get("action_id"), payload.get("sampled_at_ms"))
+
+    def _reaction_progress(self, operation_id: str, stamp: float, native_id: Any, sampled_at: Any) -> None:
+        chain = self._reaction_actions.pop(operation_id, None)
+        if chain is not None:
+            self.runtime.trace.emit("reflex_reaction_chain", **chain,
+                tool_call_id=operation_id, action_progress_monotonic_s=stamp,
+                native_action_id=native_id, action_sampled_at_ms=sampled_at,
+                event_to_request_s=chain["request_monotonic_s"]-chain["event_monotonic_s"],
+                request_to_answer_s=chain["answer_monotonic_s"]-chain["request_monotonic_s"],
+                answer_to_action_s=stamp-chain["answer_monotonic_s"],
+                total_s=stamp-chain["event_monotonic_s"], first_native_progress=True)
+
+    async def judge(self, call_id, tool, params, execution, idle_s, **kwargs):
+        facts = execution.get("facts") or {}
+        chain = self._reaction_question(facts, time.monotonic())
+        choice = await super().judge(call_id, tool, params, execution, idle_s, **kwargs)
+        self._reaction_answer(chain, choice)
+        return choice
 
     async def run(self, tool: Any, callback: Any, args: tuple[Any, ...], **kwargs: Any) -> Any:
         """Keep the lifecycle state aligned with the one physical call path."""
@@ -135,7 +226,7 @@ class BodyLoop(CallSupervisor):
         self._result_pending[call_id] = {"call_id": call_id}
         if context.get("is_reflex_action"):
             choice = context.get("reflex_action_choice")
-            target = "threat" if choice == "move_away" else "survival"
+            target = "threat" if choice in {"move_away", "engage", "ranged"} else "survival"
         else:
             target = "work"
         self._set_state(target, "agent_call" if target == "work" else "decision")
@@ -294,7 +385,7 @@ class BodyLoop(CallSupervisor):
                         decision=choice, plan=plan,
                     )
                     return
-                elif choice in {"surface", "go_to_surface", "retreat_safe", "eat", "move_away"}:
+                elif choice in rq.PROTECTIVE or choice in {"go_to_surface", "eat"}:
                     action = self._default_action(choice, execution)
                     if action is not None:
                         if record["supervision_context"].get("is_reflex_action"):
@@ -529,6 +620,10 @@ class BodyLoop(CallSupervisor):
             self._protective_verdict = None
             default_id = call_id or f"reflex-default-{uuid4()}"
             default_tool = self.runtime.registry.get(action[0])
+            chain = self._reaction_selection
+            self._reaction_selection = None
+            if chain is not None and chain["choice"] == choice:
+                self._reaction_actions[default_id] = {**chain, "tool": action[0]}
             try:
                 result = await self.runtime.run_tool(
                     default_tool, execute_tool, default_tool, action[1],
@@ -542,6 +637,11 @@ class BodyLoop(CallSupervisor):
                 result = {"success": False, "reason": type(exc).__name__}
                 self.runtime.trace.emit("call_supervision_default_failed", tool_call_id=default_id,
                                         choice=choice, error_type=type(exc).__name__)
+            incomplete = self._reaction_actions.pop(default_id, None)
+            if incomplete is not None:
+                self.runtime.trace.emit("reflex_reaction_chain", **incomplete,
+                                        tool_call_id=default_id, first_native_progress=False,
+                                        result=self._compact_result(result))
             if record is not None:
                 record["protective_result"] = result
                 record["protective_action"] = (choice, action)
@@ -817,6 +917,7 @@ class BodyLoop(CallSupervisor):
             return
         self._lifecycle_started = True
         loop = asyncio.get_running_loop()
+        self._reaction_event_loop = loop
         body = getattr(self.runtime, "body", None)
         register = getattr(body, "add_lifecycle_listener", None)
         if callable(register):
@@ -864,6 +965,7 @@ class BodyLoop(CallSupervisor):
         if self._lifecycle_started:
             self.runtime.trace.emit("reflex_loop_stopped", loop_state=self.loop_state)
         self._lifecycle_started = False
+        self._ambient_facts.clear()
 
     def _idle_facts(self) -> dict[str, Any]:
         cached = getattr(self.runtime, "last_known_body_state", None)
@@ -1000,6 +1102,7 @@ class BodyLoop(CallSupervisor):
                 request = self._idle_question(facts, options)
                 self._idle_sequence += 1
                 started = time.monotonic()
+                reaction = self._reaction_question(facts, started)
                 self.runtime.trace.emit(
                     "call_supervision_request", tool_call_id="idle-loop",
                     tool="__idle__", purpose="idle_frame", loop_state="idle",
@@ -1041,6 +1144,7 @@ class BodyLoop(CallSupervisor):
                     unknown=choice == "unknown",
                     decision_ms=round((time.monotonic() - started) * 1000.0, 3),
                 )
+                self._reaction_answer(reaction, choice)
                 if choice in rq.PROTECTIVE or choice == "eat":
                     self._protection_task = asyncio.create_task(self._run_idle_protection(choice, facts))
         except asyncio.CancelledError:

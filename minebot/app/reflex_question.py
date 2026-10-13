@@ -14,10 +14,18 @@ from typing import Any
 
 # Options that protect the Body.  They are asked in a separate question and
 # only used when Decision says the Body is in danger.
-PROTECTIVE = ("surface", "move_away", "retreat_safe")
+PROTECTIVE = ("surface", "engage", "ranged", "move_away", "retreat_safe")
 # A hostile mob farther than this cannot be escaped by one short move.
 HOSTILE_REACH = 16.0
 AIR_FULL = 300
+DEFAULT_ACTION_INTENTS = {
+    "surface": "Swim up to air.",
+    "retreat_safe": "Go back to the last place where the Body stood safely.",
+    "eat": "Eat food from the inventory.",
+    "move_away": "Move away from the nearby hostile mob.",
+    "engage": "Fight back against the selected hostile mob.",
+    "ranged": "Shoot the selected hostile mob.",
+}
 # A health change smaller than this is regeneration noise, not an injury.
 HURT_MARGIN = 0.4
 VITAL_BASELINE_S = (3.0, 8.0)
@@ -108,6 +116,7 @@ def hostiles(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
             if not isinstance(dist, (int, float)):
                 continue
             found.append({
+                "id": item.get("id", item.get("uuid")),
                 "name": str(item.get("name") or item.get("type") or "hostile mob"),
                 "dist": float(dist),
                 "pos": item.get("pos", item.get("position")),
@@ -401,6 +410,13 @@ def protective_options(facts: Mapping[str, Any], *, stop: str = "") -> dict[str,
     near = hostiles(facts)
     hurt = just_hurt(facts)
     if near and (near[0]["dist"] <= HOSTILE_REACH or hurt):
+        if isinstance(near[0].get("id"), str) and near[0]["id"]:
+            options["engage"] = text(f"fight back against the {near[0]['name']} in melee.")
+            inventory = _inventory(facts) or {}
+            held = {str(item).removeprefix("minecraft:"): count for item, count in inventory.items()}
+            weapon = next((weapon for weapon in ("bow", "crossbow") if held.get(weapon, 0) > 0), None)
+            if weapon and held.get("arrow", 0) > 0:
+                options["ranged"] = text(f"shoot the {near[0]['name']} with the {weapon} from the inventory.")
         options["move_away"] = text(f"move away from the {near[0]['name']}.")
     if hurt and _position(facts.get("safe_standing_position", facts.get("last_safe_position"))):
         options["retreat_safe"] = text("go back to the last place where the Body stood safely.")

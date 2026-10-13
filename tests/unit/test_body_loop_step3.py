@@ -59,6 +59,7 @@ def test_new_raw_frame_replay_restores_the_previous_safe_position():
     original = frame(loop, 106, head_in_liquid=True, oxygen=200)
     saved = original["_frame_input"]
     replica = BodyLoop(owner)
+    replica._ambient_facts = copy.deepcopy(saved["ambient_facts"])
     replica._vitals._samples = copy.deepcopy(saved["vital_samples"])
     replica.safe_standing_position = copy.deepcopy(saved["safe_standing_position"])
     with patch("time.monotonic", return_value=saved["monotonic_s"]):

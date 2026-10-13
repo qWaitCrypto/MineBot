@@ -2143,6 +2143,10 @@ class AgentRuntime:
 
         def notify(payload: JsonObject) -> None:
             snapshots.observe(operation_id, payload)
+            loop = getattr(self, "call_supervisor", None)
+            observe = getattr(loop, "observe_native_action_progress", None)
+            if callable(observe):
+                observe(operation_id, payload)
             if telemetry is not None:
                 telemetry.observe(operation_id, payload)
 

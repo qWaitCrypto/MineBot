@@ -30,12 +30,7 @@ MAX_SUPERVISION_READS = 4
 MAX_QUESTION_CHARS = 16_000
 FAST_COMPLETION_GRACE_S = 0.02
 # What each default tool is for, recorded as the intent of the call it starts.
-_DEFAULT_ACTION_TEXT = {
-    "surface": "Swim up to air.",
-    "retreat_safe": "Go back to the last place where the Body stood safely.",
-    "eat": "Eat food from the inventory.",
-    "move_away": "Move away from the nearby hostile mob.",
-}
+_DEFAULT_ACTION_TEXT = rq.DEFAULT_ACTION_INTENTS
 
 format_call = rq.call_text
 
@@ -420,7 +415,9 @@ class CallSupervisor:
         # action again from its own supervision frame.
         reflex_choice = context.get("reflex_action_choice")
         if isinstance(reflex_choice, str):
-            options.pop(reflex_choice, None)
+            response = cls._default_action(reflex_choice, current)
+            if reflex_choice not in {"engage", "ranged"} or response is None or response[1].get("target") == record.get("params", {}).get("target"):
+                options.pop(reflex_choice, None)
         if context.get("is_reflex_action") and not terminal:
             options.pop("next_step", None)
         if callable(getattr(tool, "supervision_reader", None)) and record.get("reader_new_fact"):
@@ -457,6 +454,17 @@ class CallSupervisor:
             item = facts.get("food_item")
             if isinstance(item, str) and item.strip():
                 return "consume_item", {"item": item.strip()}
+        if choice in {"engage", "ranged"}:
+            near = rq.hostiles(facts)
+            target = near[0].get("id") if near else None
+            if isinstance(target, str) and target:
+                if choice == "engage":
+                    return "engage_entity", {"target": target}
+                inventory = rq._inventory(facts) or {}
+                weapon = next((item for item in ("bow", "crossbow")
+                               if inventory.get(item, inventory.get("minecraft:" + item, 0)) > 0), None)
+                if weapon:
+                    return "ranged_attack", {"target": target, "weapon": weapon}
         if choice == "move_away":
             pos = facts.get("nearest_hostile_position")
             if not (isinstance(pos, (list, tuple)) and len(pos) == 3):
@@ -567,6 +575,9 @@ class CallSupervisor:
         def notify(payload: Mapping[str, Any]) -> None:
             if snapshots is not None:
                 snapshots.observe(call_id, payload)
+            observe = getattr(self, "observe_native_action_progress", None)
+            if callable(observe):
+                observe(call_id, payload)
             if telemetry is not None:
                 telemetry.observe(call_id, payload)
             loop.call_soon_threadsafe(receive, {**dict(payload), "call_id": call_id})
