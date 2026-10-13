@@ -671,12 +671,19 @@ def tool_invoker_for(tool: RegisteredTool):
                         timeout_s=tool.sidecar.timeout_s,
                         tool_call_id=tool_call_id,
                     )
-                    progress_steps = captured.progress_steps
-                    post_state = captured.post_state
-                    if captured.error is not None:
-                        raise captured.error
-                    assert captured.result is not None
-                    result = captured.result
+                    if isinstance(captured, _CapturedToolExecution):
+                        progress_steps = captured.progress_steps
+                        post_state = captured.post_state
+                        if captured.error is not None:
+                            raise captured.error
+                        assert captured.result is not None
+                        result = captured.result
+                    else:
+                        # Admission rejection and a cooperative Decision stop
+                        # return the runtime's terminal payload without a
+                        # completed callback capture. Preserve that receipt;
+                        # neither path proves captured progress or post-state.
+                        result = captured
                 elif runtime is None:
                     result = execute_tool(tool, params, ctx.context.weld_context)
                 else:

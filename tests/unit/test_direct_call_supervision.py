@@ -863,6 +863,111 @@ def test_plan_step_stopped_by_decision_through_a_cancellation_still_advances():
     asyncio.run(run())
 
 
+def test_sdk_epoch_preserves_decision_cancellation_as_one_final_receipt():
+    """Real DeepSeek calls used the captured SDK path, unlike plan calls.
+
+    Its cooperative stop must remain a cancellation result, rather than an
+    AttributeError when the runtime returns a payload instead of a capture.
+    """
+    from minebot.app.runner import ProgressEpochAdapter, RuntimeRunContext, sdk_tool_for
+    from minebot.brain.lifecycle import LifecycleState
+    from minebot.contract.execution import execution_checkpoint
+
+    async def run():
+        runtime, _ = make_runtime(ResetGenericCallIpc(progressing=False))
+
+        def invoke(_params):
+            while True:
+                execution_checkpoint()
+                time.sleep(.01)
+
+        tool = RegisteredTool(
+            "captured_checkpoint", "A call stopped at a cooperative checkpoint.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            invoke,
+            ToolSidecar("captured_checkpoint", True, source="test",
+                        body_scope=("moveTo",), timeout_s=5),
+        )
+        runtime.registry.register(tool)
+        runtime.call_supervisor._client = StubDecision(("next_step",))
+        epochs = ProgressEpochAdapter(runtime=runtime, run_id="captured-stop")
+        context = RuntimeRunContext(
+            agent_context=runtime.agent_context, weld_context=runtime.weld_context,
+            profile=runtime.mode_runtime.profile_for(LifecycleState.ACTIVE),
+            trace=runtime.trace, runtime=runtime, progress_epochs=epochs,
+        )
+        call_id = "captured-stop-call"
+        try:
+            await epochs.open(SimpleNamespace(output=[SimpleNamespace(
+                type="function_call", call_id=call_id, name=tool.name,
+            )]))
+            result = await asyncio.wait_for(sdk_tool_for(tool).on_invoke_tool(
+                SimpleNamespace(context=context, tool_call_id=call_id),
+                json.dumps({"intent": "complete the requested body step"}),
+            ), 4)
+            if result.get("reason") == "running_in_background":
+                async def wait_for_settlement():
+                    while runtime.background_calls:
+                        await asyncio.sleep(.01)
+                await asyncio.wait_for(wait_for_settlement(), 4)
+            receipts = [e for e in runtime.trace.events
+                        if e.get("event") == "tool_result"
+                        and e.get("tool_call_id") == call_id]
+            assert len(receipts) == 1
+            receipt = receipts[0]["full_result"]
+            assert receipt["success"] is False
+            assert receipt["reason"] == "stopped_by_decision"
+            assert receipt["metrics"]["direct_call_handoff"]["settlement"]["settled"]
+            assert not [e for e in runtime.trace.events if e.get("event") == "tool_exception"]
+        finally:
+            await runtime.aclose()
+
+    asyncio.run(run())
+
+
+def test_sdk_epoch_preserves_missing_intent_rejection_without_running_body():
+    from minebot.app.runner import ProgressEpochAdapter, RuntimeRunContext, sdk_tool_for
+    from minebot.brain.lifecycle import LifecycleState
+
+    async def run():
+        runtime, _ = make_runtime(ResetGenericCallIpc(progressing=False))
+        invoked = []
+        tool = RegisteredTool(
+            "captured_admission", "A body call requiring intent.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda params: invoked.append(params),
+            ToolSidecar("captured_admission", True, source="test", body_scope=("moveTo",)),
+        )
+        runtime.registry.register(tool)
+        epochs = ProgressEpochAdapter(runtime=runtime, run_id="captured-admission")
+        context = RuntimeRunContext(
+            agent_context=runtime.agent_context, weld_context=runtime.weld_context,
+            profile=runtime.mode_runtime.profile_for(LifecycleState.ACTIVE),
+            trace=runtime.trace, runtime=runtime, progress_epochs=epochs,
+        )
+        call_id = "captured-admission-call"
+        try:
+            await epochs.open(SimpleNamespace(output=[SimpleNamespace(
+                type="function_call", call_id=call_id, name=tool.name,
+            )]))
+            result = await sdk_tool_for(tool).on_invoke_tool(
+                SimpleNamespace(context=context, tool_call_id=call_id), "{}",
+            )
+            assert result["success"] is False
+            assert result["reason"] == "missing_intent"
+            assert not invoked
+            receipts = [e for e in runtime.trace.events
+                        if e.get("event") == "tool_result"
+                        and e.get("tool_call_id") == call_id]
+            assert len(receipts) == 1
+            assert receipts[0]["full_result"]["reason"] == "missing_intent"
+            assert not [e for e in runtime.trace.events if e.get("event") == "tool_exception"]
+        finally:
+            await runtime.aclose()
+
+    asyncio.run(run())
+
+
 def test_plan_reports_blocked_when_a_call_is_cancelled_underneath_it():
     from minebot.app.work_runtime import WorkPlanExecutor
 
