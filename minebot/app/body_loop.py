@@ -38,6 +38,7 @@ class BodyLoop(CallSupervisor):
         self._lifecycle_started = False
         self._active_monitor: tuple[dict[str, Any], Any, Mapping[str, Any], asyncio.Event, asyncio.Task[Any]] | None = None
         self._result_pending: dict[str, dict[str, Any]] = {}
+        self._terminal_questions: deque[tuple[asyncio.Future[str], tuple[Any, ...], dict[str, Any]]] = deque()
         self._loop_wakeup = asyncio.Event()
         self._idle_sequence = 0
         self._suspended: dict[str, Any] | None = None
@@ -429,25 +430,6 @@ class BodyLoop(CallSupervisor):
                         ))
                         record["decision_task"] = decision_task
             if worker in done and decision_task is None:
-                # Protective actions are registered as ordinary current work,
-                # so their terminal result must be judged by this same
-                # lifecycle consumer.  The orchestration task that suspended
-                # the original call only waits for this verdict; it must not
-                # open a second Decision request from _after_default_action.
-                if (record["supervision_context"].get("is_reflex_action")
-                        and not record.get("protective_result_judged")):
-                    try:
-                        protective_result = worker.result()
-                    except asyncio.CancelledError:
-                        protective_result = {
-                            "success": False, "reason": "stopped_by_decision", "canRetry": True,
-                        }
-                    except Exception as exc:
-                        protective_result = {
-                            "success": False, "reason": type(exc).__name__, "canRetry": True,
-                        }
-                    record["result"] = protective_result
-                    await self._judge_protective_result(record, protective_result)
                 for waiter in (wake_wait, clock_wait):
                     if waiter not in done:
                         waiter.cancel()
@@ -463,101 +445,6 @@ class BodyLoop(CallSupervisor):
                 if waiter not in done:
                     waiter.cancel()
             await asyncio.gather(wake_wait, clock_wait, return_exceptions=True)
-
-    async def _judge_protective_result(self, record: dict[str, Any], result: Any) -> str:
-        """Judge a completed protective action on the lifecycle task.
-
-        The suspended work remains in ``self._suspended`` while this runs.  A
-        result question is therefore compiled from the original call and the
-        just-finished protective call, but the request itself has one owner:
-        the BodyLoop lifecycle consumer.
-        """
-        record["protective_result_judged"] = True
-        parent = self._suspended
-        if not isinstance(parent, dict):
-            # Idle/profile actions intentionally have no suspended Agent call.
-            # Their running-frame verdict already controls whether the Agent
-            # is notified, so there is no second result question here.
-            record["protective_verdict"] = "unknown"
-            return "unknown"
-        payload = result if isinstance(result, Mapping) else getattr(result, "result", result)
-        if not isinstance(payload, Mapping):
-            payload = {"success": False, "reason": str(payload)[:200], "canRetry": True}
-        facts = await self._read_idle_facts()
-        execution = {
-            "tool": record.get("tool", "unknown"),
-            "state": "succeeded" if payload.get("success") is True else "failed",
-            "facts": facts,
-            "result": dict(payload),
-        }
-        action = record.get("protective_action")
-        if not (isinstance(action, (tuple, list)) and len(action) == 2):
-            action = (record.get("tool", "unknown"), record.get("params", {}))
-        options = rq.after_default_options(
-            original_call=rq.call_text(parent.get("tool", "unknown"), parent.get("params", {})),
-            intent=str(parent.get("supervision_context", {}).get("intent")
-                       or parent.get("supervision_context", {}).get("node_description") or ""),
-            default_call=rq.call_text(str(action[0]), action[1] if isinstance(action[1], Mapping) else {}),
-            result=payload,
-            facts=facts,
-        )
-        while True:
-            if await self._process_lifecycle_events(facts):
-                choice = "unknown"
-                break
-            remaining = self._remaining(parent)
-            if remaining is not None and remaining <= 0:
-                choice = "unknown"
-                break
-            try:
-                choice = await asyncio.wait_for(self._judge_frame(
-                    parent["call_id"],
-                    self.runtime.registry.get(str(action[0])),
-                    action[1] if isinstance(action[1], Mapping) else {},
-                    execution,
-                    0.0,
-                    purpose="default_result_frame",
-                    supervision_context=parent["supervision_context"],
-                    options=options,
-                    decision_context={
-                        "tool_result": dict(payload),
-                        "tool_arguments": dict(action[1]) if isinstance(action[1], Mapping) else {},
-                        "body_state": facts,
-                        "history": list(parent.get("history", [])),
-                        "history_earlier": int(parent.get("history_total", 0))
-                        - len(parent.get("history", [])),
-                    },
-                ), timeout=2.2 if remaining is None else min(2.2, remaining))
-            except asyncio.TimeoutError:
-                choice = "unknown"
-            except Exception:
-                choice = "unknown"
-            parent["questions"] = int(parent.get("questions") or 0) + 1
-            if choice != "unknown":
-                break
-            parent["unknown_answers"] = int(parent.get("unknown_answers") or 0) + 1
-            remaining = self._remaining(parent)
-            if remaining is not None and remaining <= 0:
-                break
-            await asyncio.sleep(
-                FACT_FRAME_INTERVAL_S if remaining is None else min(FACT_FRAME_INTERVAL_S, remaining)
-            )
-        record["protective_verdict"] = choice
-        # The enclosing suspended call is the consumer of this terminal
-        # decision.  Copy the answer there so its orchestration task can act
-        # without issuing a second request of its own.
-        parent["protective_verdict"] = choice
-        if choice == "call_agent":
-            self._protective_verdict = "call_agent"
-        self.runtime.trace.emit(
-            "call_supervision_result",
-            tool_call_id=record.get("call_id"),
-            tool=record.get("tool", "unknown"),
-            purpose="default_result_frame",
-            choice=choice,
-            unknown=choice == "unknown",
-        )
-        return choice
 
     async def _handoff(
         self, record: dict[str, Any], execution: Mapping[str, Any],
@@ -649,7 +536,7 @@ class BodyLoop(CallSupervisor):
         try:
             # A terminal result must never hold the Body or an Agent turn
             # indefinitely when the Decision endpoint is unavailable.
-            choice = await asyncio.wait_for(self._judge_frame(
+            choice = await asyncio.wait_for(self._judge_terminal_frame(
                 record["call_id"], tool, params, execution,
                 float(execution.get("since_progress_s") or 0.0),
                 purpose="result_frame", supervision_context=record["supervision_context"],
@@ -739,6 +626,61 @@ class BodyLoop(CallSupervisor):
                 return "call_agent" if result.status != "cancelled" else "unknown"
             await asyncio.sleep(supervision_module.FACT_FRAME_INTERVAL_S)
         return "unknown"
+
+    async def _judge_terminal_frame(self, *args: Any, **kwargs: Any) -> str:
+        """Submit a terminal question to the single lifecycle consumer.
+
+        Callers retain settlement/history and their existing timeout budget.
+        They never open a parallel Decision request while waiting for a result.
+        """
+        await self.start()
+        answer = asyncio.get_running_loop().create_future()
+        self._terminal_questions.append((answer, args, kwargs))
+        self._loop_wakeup.set()
+        try:
+            return await answer
+        finally:
+            if not answer.done():
+                answer.cancel()
+            self._loop_wakeup.set()
+
+    async def _serve_terminal_question(self, answer, args, kwargs) -> None:
+        """The lifecycle schedules at most one request, including terminals."""
+        if answer.done():
+            return
+        request = asyncio.create_task(self._judge_frame(*args, **kwargs))
+        wake = None
+        try:
+            while not answer.done():
+                self._loop_wakeup.clear()
+                wake = asyncio.create_task(self._loop_wakeup.wait())
+                done, _ = await asyncio.wait({request, answer, wake}, return_when=asyncio.FIRST_COMPLETED)
+                if wake not in done:
+                    wake.cancel()
+                await asyncio.gather(wake, return_exceptions=True)
+                wake = None
+                if self._lifecycle_events and await self._process_lifecycle_events():
+                    if not answer.done():
+                        answer.set_result("unknown")
+                    break
+                if answer.done():
+                    break
+                if request in done:
+                    answer.set_result(request.result())
+                    break
+        except asyncio.CancelledError:
+            answer.cancel()
+            raise
+        except Exception as exc:
+            if not answer.done():
+                answer.set_exception(exc)
+        finally:
+            if wake is not None:
+                wake.cancel()
+                await asyncio.gather(wake, return_exceptions=True)
+            if not request.done():
+                request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
 
     async def _judge_frame(self, *args: Any, **kwargs: Any) -> str:
         if await self._process_lifecycle_events():
@@ -980,6 +922,25 @@ class BodyLoop(CallSupervisor):
         self, record: dict[str, Any], action: tuple[str, dict[str, Any]],
         default_result: Any, default_id: str, *, protective_choice: str = "",
     ) -> str:
+        # The Body remains in its protective result state during unknown
+        # retries. Reserve the existing result slot for the entire transaction,
+        # including the cadence between requests, so idle never consumes a
+        # result answer or starts unrelated work in that gap.
+        call_id = str(record["call_id"])
+        reserved_here = call_id not in self._result_pending
+        if reserved_here:
+            self._result_pending[call_id] = record
+        try:
+            return await self._follow_default_result(
+                record, action, default_result, default_id, protective_choice=protective_choice)
+        finally:
+            if reserved_here:
+                self._release_result_pending(call_id)
+
+    async def _follow_default_result(
+        self, record: dict[str, Any], action: tuple[str, dict[str, Any]],
+        default_result: Any, default_id: str, *, protective_choice: str = "",
+    ) -> str:
         """Ask what follows a protective action: go back, do it again, or the Agent."""
         if self._protective_verdict == "call_agent":
             return "call_agent"
@@ -1010,47 +971,23 @@ class BodyLoop(CallSupervisor):
                 total += 1
                 del history[:-5]
                 new_attempt = False
-            # A result judged by the lifecycle monitor is already authoritative
-            # for this attempt.  Direct callers in older tests can still enter
-            # here without a precomputed verdict and use the compatibility
-            # path below.
-            precomputed = record.pop("protective_verdict", None)
-            if precomputed is not None:
-                choice = str(precomputed)
-            else:
-                options = rq.after_default_options(
-                    original_call=rq.call_text(record["tool"], record["params"]), intent=intent,
-                    default_call=rq.call_text(action[0], action[1]), result=payload,
-                    facts=execution["facts"],
-                )
-                try:
-                    choice = await asyncio.wait_for(self._judge_frame(
-                        record["call_id"], default_tool, action[1], execution, 0.0,
-                        purpose="default_result_frame", supervision_context=context, options=options,
-                        decision_context={"tool_result": dict(payload), "tool_arguments": dict(action[1]),
-                                          "body_state": execution["facts"], "history": list(history),
-                                          "history_earlier": total - len(history),
-                                          "interrupted_history": copy.deepcopy(record.get("history", [])),
-                                          "interrupted_history_earlier": int(record.get("history_total", 0)) - len(record.get("history", []))},
-                    ), timeout=2.2 if remaining is None else min(2.2, remaining))
-                except asyncio.TimeoutError:
-                    choice = "unknown"
-            if precomputed is not None:
-                if choice in {"resume", "call_agent"}:
-                    return choice
-                if choice == "unknown":
-                    return "unknown"
-                # ``repeat`` is a real protective attempt.  The next attempt
-                # will be judged by the lifecycle monitor in the same way.
-                if choice == "repeat":
-                    protective_choice, action, default_result, default_id = await self._execute_protection(
-                        protective_choice, action, record, call_id=f"{default_id}-{total}"
-                    )
-                    default_tool = registry.get(action[0])
-                    if self._protective_verdict == "call_agent":
-                        return "call_agent"
-                    new_attempt = True
-                    continue
+            options = rq.after_default_options(
+                original_call=rq.call_text(record["tool"], record["params"]), intent=intent,
+                default_call=rq.call_text(action[0], action[1]), result=payload,
+                facts=execution["facts"],
+            )
+            try:
+                choice = await asyncio.wait_for(self._judge_terminal_frame(
+                    record["call_id"], default_tool, action[1], execution, 0.0,
+                    purpose="default_result_frame", supervision_context=context, options=options,
+                    decision_context={"tool_result": dict(payload), "tool_arguments": dict(action[1]),
+                                      "body_state": execution["facts"], "history": list(history),
+                                      "history_earlier": total - len(history),
+                                      "interrupted_history": copy.deepcopy(record.get("history", [])),
+                                      "interrupted_history_earlier": int(record.get("history_total", 0)) - len(record.get("history", []))},
+                ), timeout=2.2 if remaining is None else min(2.2, remaining))
+            except asyncio.TimeoutError:
+                choice = "unknown"
             record["questions"] += 1
             if choice in {"resume", "call_agent"}:
                 return choice
@@ -1123,7 +1060,7 @@ class BodyLoop(CallSupervisor):
             options = {key: value for key, value in options.items()
                        if key not in rq.PROTECTIVE and key != "inspect"}
         try:
-            return await self._judge_frame(
+            return await self._judge_terminal_frame(
                 call_id, tool, params, execution, 0.0,
                 purpose="plan_result_frame", supervision_context=plan_context,
                 options=options, decision_context=decision_context,
@@ -1181,6 +1118,9 @@ class BodyLoop(CallSupervisor):
         active = self._active_monitor
         self._active_monitor = None
         self._result_pending.clear()
+        while self._terminal_questions:
+            answer, _, _ = self._terminal_questions.popleft()
+            answer.cancel()
         if active is not None:
             active[0]["cancel_requested"] = True
             done = active[0].get("monitor_done")
@@ -1310,6 +1250,11 @@ class BodyLoop(CallSupervisor):
                         done = record.get("monitor_done")
                         if isinstance(done, asyncio.Event):
                             done.set()
+                    continue
+
+                if self._terminal_questions:
+                    answer, args, kwargs = self._terminal_questions.popleft()
+                    await self._serve_terminal_question(answer, args, kwargs)
                     continue
 
                 self._loop_wakeup.clear()
