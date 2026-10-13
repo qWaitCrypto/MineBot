@@ -58,6 +58,27 @@ class VitalWindow:
         if sample:
             self._samples.append((now, sample))
         self._samples = [(stamp, values) for stamp, values in self._samples if now - stamp <= oldest]
+        if "oxygen" in sample:
+            # The current uninterrupted direction of air change, rather than
+            # a net change across an earlier breath followed by another dive.
+            air = sample["oxygen"]
+            direction = 0
+            baseline = None
+            for stamp, values in reversed(self._samples[:-1]):
+                if "oxygen" not in values:
+                    continue
+                previous = values["oxygen"]
+                change = (air > previous) - (air < previous)
+                if change and direction and change != direction:
+                    break
+                if change:
+                    direction = change
+                baseline = (stamp, previous)
+                air = previous
+            before.pop("oxygen_before", None)
+            if baseline is not None:
+                before["oxygen_before"] = baseline[1]
+                before["oxygen_age_s"] = now - baseline[0]
         return before
 
 
@@ -94,9 +115,12 @@ def just_hurt(facts: Mapping[str, Any]) -> bool:
             and health < before - HURT_MARGIN)
 
 
-def _ago(facts: Mapping[str, Any]) -> str:
-    age = facts.get("vital_age_s")
-    return f"{age:.0f} seconds" if isinstance(age, (int, float)) else "a few seconds"
+def _ago(facts: Mapping[str, Any], key: str = "vital_age_s") -> str:
+    age = facts.get(key, facts.get("vital_age_s"))
+    if not isinstance(age, (int, float)):
+        return "a few seconds"
+    rounded = round(age)
+    return f"{rounded} second" + ("" if rounded == 1 else "s")
 
 
 def _inventory(facts: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -131,13 +155,13 @@ def _body_sentence(facts: Mapping[str, Any]) -> str:
             parts.append("Air supply is empty; the Body is under water and is drowning.")
         elif isinstance(air_before, (int, float)) and air > air_before:
             parts.append(
-                f"The Body is breathing again: air supply was {air_before:.0f} {_ago(facts)} ago "
+                f"The Body is breathing again: air supply was {air_before:.0f} {_ago(facts, 'oxygen_age_s')} ago "
                 f"and is {air:.0f} of {AIR_FULL} now."
             )
         elif isinstance(air_before, (int, float)):
             parts.append(
                 "The head is under water and the Body cannot breathe: air supply was "
-                f"{air_before:.0f} {_ago(facts)} ago and is {air:.0f} of {AIR_FULL} now."
+                f"{air_before:.0f} {_ago(facts, 'oxygen_age_s')} ago and is {air:.0f} of {AIR_FULL} now."
             )
         else:
             parts.append(
@@ -283,19 +307,29 @@ def frame_options(
         )
     for key, text in (tree or {}).items():
         options[str(key)] = str(text)
+    options.update(protective_options(facts, stop=stop))
+    options["call_agent"] = f"{stop} and hand control back to the Agent for a new plan."
+    return options
+
+
+def protective_options(facts: Mapping[str, Any], *, stop: str = "") -> dict[str, str]:
+    """One eligibility compiler for work and idle protective tools."""
+    options: dict[str, str] = {}
+    prefix = f"{stop} and " if stop else ""
+    def text(action: str) -> str:
+        return prefix + action if prefix else action[0].upper() + action[1:]
     air = facts.get("oxygen")
     if isinstance(air, (int, float)) and air < AIR_FULL:
-        options["surface"] = f"{stop} and swim up to air now."
+        options["surface"] = text("swim up to air now.")
     food_item, food = facts.get("food_item"), facts.get("food")
     if isinstance(food_item, str) and food_item and isinstance(food, (int, float)) and food < 20:
-        options["eat"] = f"{stop} and eat {food_item} from the inventory."
+        options["eat"] = text(f"eat {food_item} from the inventory.")
     near = hostiles(facts)
     hurt = just_hurt(facts)
     if near and (near[0]["dist"] <= HOSTILE_REACH or hurt):
-        options["move_away"] = f"{stop} and move away from the {near[0]['name']}."
+        options["move_away"] = text(f"move away from the {near[0]['name']}.")
     if hurt and _position(facts.get("safe_standing_position", facts.get("last_safe_position"))):
-        options["retreat_safe"] = f"{stop} and go back to the last place where the Body stood safely."
-    options["call_agent"] = f"{stop} and hand control back to the Agent for a new plan."
+        options["retreat_safe"] = text("go back to the last place where the Body stood safely.")
     return options
 
 
@@ -336,18 +370,7 @@ def frame_questions(options: Mapping[str, str]) -> dict[str, Any]:
 def idle_options(facts: Mapping[str, Any]) -> dict[str, str]:
     """The Step-2 idle range: waiting plus the applicable protective calls."""
     options = {"stay": "Stay where the Body is and wait for the next step."}
-    air = facts.get("oxygen")
-    if isinstance(air, (int, float)) and air < AIR_FULL:
-        options["surface"] = "Swim up to air."
-    food_item, food = facts.get("food_item"), facts.get("food")
-    if isinstance(food_item, str) and food_item and isinstance(food, (int, float)) and food < 20:
-        options["eat"] = f"Eat {food_item} from the inventory."
-    near = hostiles(facts)
-    if near and near[0].get("dist", float("inf")) <= HOSTILE_REACH:
-        options["move_away"] = "Move away from the nearby hostile entity."
-    safe = facts.get("safe_standing_position", facts.get("last_safe_position"))
-    if just_hurt(facts) and _position(safe):
-        options["retreat_safe"] = "Go back to the last place where the Body stood safely."
+    options.update(protective_options(facts))
     return options
 
 
@@ -359,7 +382,7 @@ def idle_question(facts: Mapping[str, Any], options: Mapping[str, str]) -> dict[
         state["threats"] = threats
     inventory = _inventory(facts)
     if inventory is not None:
-        state["inventory"] = ", ".join(f"{k}={v}" for k, v in inventory.items()) or "empty"
+        state["inventory"] = ", ".join(f"{k} {v}" for k, v in inventory.items()) or "empty"
     position = _position(facts.get("position", facts.get("pos")))
     if position:
         state["position"] = f"now at {position}."

@@ -1,5 +1,8 @@
 """The frame question wording, checked against the sentences settled offline."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from minebot.app import reflex_question as rq
@@ -49,10 +52,61 @@ def test_changing_air_and_injury_are_written_as_change():
 def test_vital_window_gives_values_from_a_few_seconds_ago():
     window = rq.VitalWindow()
     assert window.add(0.0, {"health": 20, "oxygen": 300}) == {}
-    assert window.add(1.0, {"health": 20, "oxygen": 280}) == {}
+    assert window.add(1.0, {"health": 20, "oxygen": 280}) == {"oxygen_before": 300.0, "oxygen_age_s": 1.0}
     before = window.add(5.0, {"health": 14, "oxygen": 200})
-    assert before == {"health_before": 20.0, "oxygen_before": 300.0, "vital_age_s": 5.0}
+    assert before == {"health_before": 20.0, "oxygen_before": 300.0, "vital_age_s": 5.0, "oxygen_age_s": 5.0}
     assert window.add(30.0, {"health": 14}) == {}
+
+
+def test_recorded_air_turnaround_uses_current_direction_and_its_own_age():
+    recorded = json.loads((Path(__file__).parents[1] / "fixtures" / "reflex_step2_oxygen_direction.json").read_text())
+    expected = {
+        2197: (122, 1, 211, True), 2286: (122, 2, 295, True),
+        2287: (295, 1, 291, False), 2288: (295, 2, 271, False),
+        2289: (295, 3, 250, False), 2290: (295, 4, 229, False),
+        2291: (295, 5, 208, False), 2292: (295, 6, 188, False),
+    }
+    window = rq.VitalWindow()
+    seen = []
+    for sample in recorded["samples"]:
+        facts = {**sample, **window.add(sample["ts"], sample)}
+        if sample["seq"] not in expected:
+            continue
+        baseline, age, air, rising = expected[sample["seq"]]
+        prefix = "The Body is breathing again:" if rising else "The head is under water and the Body cannot breathe:"
+        unit = "second" if age == 1 else "seconds"
+        assert rq._body_sentence(facts) == (
+            f"Health is 20 of 20. Hunger is 20 of 20. {prefix} air supply was "
+            f"{baseline} {age} {unit} ago and is {air} of 300 now."
+        )
+        seen.append(sample["seq"])
+    assert seen == recorded["targets"]
+
+
+@pytest.mark.parametrize("samples,baseline,age", [
+    ([(0, 300), (1, 270), (2, 240), (3, 270), (4, 290)], 240, 2),
+    ([(0, 270), (1, 270), (2, 270), (3, 250), (4, 250)], 270, 4),
+    ([(0, 270)], None, None),
+])
+def test_air_direction_with_recovery_plateaus_and_one_sample(samples, baseline, age):
+    window = rq.VitalWindow()
+    for stamp, air in samples:
+        facts = window.add(stamp, {"oxygen": air})
+    assert facts.get("oxygen_before") == baseline
+    assert facts.get("oxygen_age_s") == age
+
+
+def test_idle_and_work_use_the_same_protective_eligibility_and_inventory_words():
+    facts = {"health": 5, "health_before": 10, "vital_age_s": 5,
+             "oxygen": 77, "food": 15, "food_item": "apple", "inventory": {"apple": 2},
+             "safe_standing_position": [1, 64, 1],
+             "entities": [{"hostile": True, "name": "hostile mob", "dist": 30}]}
+    idle = rq.idle_options(facts)
+    work = rq.frame_options(tool="move_to", params={}, intent="reach home", facts=facts, running=True)
+    assert set(idle) - {"stay"} == set(work) - {"keep_going", "next_step", "call_agent"}
+    assert "move_away" in idle
+    idle_state = rq.idle_question(facts, idle)["state"]
+    assert idle_state["inventory"] == _running(facts)["inventory"] == "apple 2"
 
 
 def test_running_options_are_concrete_and_protective_ones_follow_the_facts():
