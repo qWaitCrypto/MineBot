@@ -102,6 +102,12 @@ class DecisionClient:
 
     async def _run(self) -> None:
         while True:
+            # Transport cleanup may turn a cancellation into a final unknown
+            # response. Do not then become an uncancellable empty-queue waiter
+            # while asyncio is shutting the session down.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise asyncio.CancelledError
             async with self._condition:
                 while not self._pending and not self._closed:
                     await self._condition.wait()

@@ -2,7 +2,7 @@ import asyncio
 
 import httpx
 
-from minebot.app.decision_client import DecisionClient, DecisionPriority
+from minebot.app.decision_client import DecisionAnswer, DecisionClient, DecisionPriority
 
 
 class FakeClient:
@@ -56,3 +56,35 @@ def test_client_transport_failure_is_unknown():
 
     answer = asyncio.run(scenario())
     assert answer.choice == "unknown"
+
+
+def test_worker_shutdown_does_not_wait_again_when_transport_swallows_cancellation():
+    async def run():
+        client = DecisionClient()
+        started = asyncio.Event()
+
+        async def interrupted_post(request):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # A transport cleanup can return a last unknown response.
+                return DecisionAnswer('unknown', None, 0, request.sequence)
+
+        client._post = interrupted_post
+        caller = asyncio.create_task(client.ask({'state': {}, 'questions': {}}))
+        await started.wait()
+        worker = client._worker
+        worker.cancel()
+        try:
+            done, pending = await asyncio.wait({worker}, timeout=.1)
+            assert not pending, 'cancelled worker waited on an empty queue again'
+            assert worker.cancelled()
+            assert (await caller).choice == 'unknown'
+        finally:
+            worker.cancel()
+            caller.cancel()
+            await asyncio.gather(worker, caller, return_exceptions=True)
+            await client.close()
+
+    asyncio.run(run())
