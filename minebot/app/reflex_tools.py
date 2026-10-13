@@ -327,8 +327,6 @@ class ReflexManager:
                 self.runtime.body_control.settle(claim_id=activity.activity_id)
 
     async def _state(self) -> dict[str, Any]:
-        if self.runtime.last_known_body_state:
-            return copy.deepcopy(self.runtime.last_known_body_state)
         try:
             state = await self.runtime._read_lane.run(self.runtime.body.get_state)
             if isinstance(state, dict):
@@ -338,7 +336,10 @@ class ReflexManager:
             values = getattr(state, "__dict__", None)
             return copy.deepcopy(values) if isinstance(values, dict) else {}
         except Exception:
-            return {}
+            # A plan can run while the Agent has no turns. Its cache may be
+            # the observation before that plan, so use it only if sampling
+            # fails, never in preference to the present Body observation.
+            return copy.deepcopy(self.runtime.last_known_body_state or {})
 
     async def _observe_condition(self, condition: dict[str, Any]) -> dict[str, Any]:
         """Read one generic object projection for non-body bindings.
@@ -415,6 +416,12 @@ class ReflexManager:
         )
         if not isinstance(raw, dict):
             return raw
+        # Plan calls execute outside the Agent tool wrapper, whose settlement
+        # normally records these observations. Update from the real result
+        # before the executor takes its terminal Body snapshot or projects it.
+        remember_body = getattr(self.runtime, "remember_tool_body_facts", None)
+        if callable(remember_body):
+            remember_body(raw)
         # WorkPlanExecutor must judge the same bounded projector that the
         # Agent sees for an ordinary tool call. Preserve supervision handoff
         # facts privately so the interpreter can record the Decision choice

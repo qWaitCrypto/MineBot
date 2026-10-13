@@ -34,6 +34,94 @@ def _bind_execution_observation(runtime):
     runtime._observed = lambda callback, operation_id: AgentRuntime._observed(runtime, callback, operation_id)
 
 
+def test_plan_result_question_uses_observations_from_the_call_before_projection():
+    """Regression for live seq9186: result had coal12; cached question had coal3."""
+    async def scenario():
+        trace = Trace()
+        runtime = SimpleNamespace(
+            trace=trace, weld_context=None,
+            registry=SimpleNamespace(get=lambda name: SimpleNamespace(
+                name=name, sidecar=SimpleNamespace(timeout_s=None))),
+            last_known_body_state={"bot": "Bot", "pos": [153.6, 65, 175.5],
+                                   "health": 20, "inventory_counts": {"coal": 3}},
+        )
+        runtime._emit_last_known_body_state_trace = lambda **kw: (
+            AgentRuntime._emit_last_known_body_state_trace(runtime, **kw))
+        runtime.remember_tool_body_facts = lambda result: (
+            AgentRuntime.remember_tool_body_facts(runtime, result))
+
+        async def run_tool(*args, **kwargs):
+            return {"success": True, "reason": "inventory_counted", "canRetry": False,
+                    "metrics": {"counts": {"coal": 12}, "inventory_complete": True}}
+
+        def project(name, result, call_id):
+            # Projection runs after the ordinary settlement hook, not before it.
+            assert runtime.last_known_body_state["inventory_counts"] == {"coal": 12}
+            return {"success": result["success"], "reason": result["reason"],
+                    "summary": {"counts": result["metrics"]["counts"]}}
+
+        runtime.run_tool = run_tool
+        runtime.shown_plan_result = project
+        manager = ReflexManager(runtime)
+        questions = []
+
+        async def judge(**kwargs):
+            questions.append(kwargs["question"])
+            assert kwargs["decision_context"]["body_state"]["inventory_counts"] == {"coal": 12}
+            assert kwargs["question"]["state"]["inventory"] == "coal 12"
+            return "next_step"
+
+        plan = {"language": "minebot-work/0.2", "goal": "coal is in the inventory", "timeout_s": 4,
+                "work": {"kind": "call", "intent": "there are twelve coal in the inventory",
+                         "tool": "read_inventory", "arguments": {}}}
+        executor = WorkPlanExecutor(plan, call=manager._call, state=manager._state,
+                                    decision=Decision(), result_judge=judge)
+        # The manager's dispatch normally attaches the execution context.
+        async def dispatch(name, arguments, *, call_id, timeout_s):
+            return await manager._call(name, arguments, call_id=call_id, timeout_s=timeout_s,
+                                       supervision_context=executor.call_context(call_id))
+        executor.call = dispatch
+        result = await executor.run()
+        assert result.status == "completed"
+        assert len(questions) == 1
+        assert runtime.last_known_body_state["health"] == 20
+        assert runtime.last_known_body_state["pos"] == [153.6, 65, 175.5]
+        assert "metrics" not in executor.records[next(iter(executor.records))].result
+
+    asyncio.run(scenario())
+
+
+def test_plan_state_samples_current_body_even_when_the_agent_cache_is_populated():
+    async def scenario():
+        class Lane:
+            async def run(self, callback):
+                return callback()
+
+        current = {"pos": [149.5, 57, 163.3], "health": 18,
+                   "oxygen": 139, "inventory_counts": {"coal": 12}}
+        runtime = SimpleNamespace(
+            _read_lane=Lane(), body=SimpleNamespace(get_state=lambda: copy.deepcopy(current)),
+            last_known_body_state={"pos": [153.6, 65, 175.5], "health": 20,
+                                   "oxygen": 300, "inventory_counts": {"coal": 3}},
+        )
+        manager = ReflexManager(runtime)
+        assert await manager._state() == current
+        current["pos"][1] = 58
+        current["oxygen"] = 134
+        assert (await manager._state())["oxygen"] == 134
+
+        def unavailable():
+            raise OSError("body sampling unavailable")
+
+        runtime.body.get_state = unavailable
+        fallback = await manager._state()
+        assert fallback == runtime.last_known_body_state
+        fallback["inventory_counts"]["coal"] = 0
+        assert runtime.last_known_body_state["inventory_counts"] == {"coal": 3}
+
+    asyncio.run(scenario())
+
+
 def test_delegate_and_same_tree_read_revision():
     async def scenario():
         trace = Trace()
