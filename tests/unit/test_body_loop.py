@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import time
 from pathlib import Path
@@ -348,8 +349,8 @@ def test_protection_experience_uses_the_terminal_position_after_swimming():
     assert runtime.last_known_body_state["position"] == [1, 64, 2]
 
 
-def test_plan_result_raw_facts_reproduce_the_same_request_through_body_loop():
-    """All sixteen historical result frames retain their protocol.
+def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent():
+    """Preserve all sixteen historical frames except the repaired intent source.
 
     This compares raw node facts through the actual executor -> BodyLoop path;
     it neither asks a real model nor claims to recover the 118 running frames.
@@ -360,6 +361,19 @@ def test_plan_result_raw_facts_reproduce_the_same_request_through_body_loop():
 
     async def run():
         for case in cases:
+            # These recorded calls supplied their own outcome in arguments.
+            # The old request mistakenly inherited the enclosing plan intent.
+            # Keep the historical fixture intact and permit only this repair
+            # plus the corresponding character-count change, not new facts
+            # or different options.
+            expected = copy.deepcopy(case["expected_request"])
+            old_intent = expected["state"]["agent_intent"]
+            intent = case["node"]["arguments"]["intent"]
+            expected["state"]["agent_intent"] = intent
+            expected["state"]["request_chars"] += (
+                len(json.dumps(intent, ensure_ascii=False))
+                - len(json.dumps(old_intent, ensure_ascii=False))
+            )
             runtime, trace, _decision = _runtime()
             loop = BodyLoop(runtime)
             executor = WorkPlanExecutor(
@@ -368,15 +382,15 @@ def test_plan_result_raw_facts_reproduce_the_same_request_through_body_loop():
             record = NodeRecord(decision_facts=case["raw_decision_facts"])
             assert executor._call_question(
                 case["node"], case["node_id"], case["intents"], record,
-            ) == case["expected_request"]
+            ) == expected, case["seq"]
             await executor._decide_call(
                 case["node"], case["node_id"], case["intents"], record,
             )
             requests = [e["request"] for e in trace.events
                         if e["event"] == "call_supervision_request"]
-            assert requests == [case["expected_request"]], case["seq"]
+            assert requests == [expected], case["seq"]
             assert json.dumps(requests[0], ensure_ascii=False, separators=(",", ":")) == json.dumps(
-                case["expected_request"], ensure_ascii=False, separators=(",", ":"),
+                expected, ensure_ascii=False, separators=(",", ":"),
             ), case["seq"]
             assert not loop._result_pending
 
