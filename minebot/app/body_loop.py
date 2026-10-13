@@ -551,7 +551,16 @@ class BodyLoop(CallSupervisor):
             self._release_result_pending(str(call_id))
 
     def _release_result_pending(self, call_id: str) -> None:
-        self._result_pending.pop(str(call_id), None)
+        # Plan calls enter the shared runtime with the transport id
+        # ``plan-{node_id}``, while the result judge is deliberately passed
+        # the tree's node id.  Release both spellings so a judged plan result
+        # cannot leave the lifecycle loop permanently waiting for a slot.
+        value = str(call_id)
+        keys = {value, f"plan-{value}"}
+        if value.startswith("plan-"):
+            keys.add(value[5:])
+        for key in keys:
+            self._result_pending.pop(key, None)
         self._loop_wakeup.set()
 
     async def start(self) -> None:
