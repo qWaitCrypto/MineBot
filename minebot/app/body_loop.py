@@ -443,6 +443,13 @@ class BodyLoop(CallSupervisor):
 
     def _remember_protection(self, action, result) -> None:
         facts = self._idle_facts()
+        # Native action terminals use ``position``; the Agent's cached state
+        # may still be its read before the protective movement.
+        metrics = result.get("metrics") if isinstance(result, Mapping) else None
+        if isinstance(metrics, Mapping):
+            position = metrics.get("position", metrics.get("pos"))
+            if isinstance(position, (list, tuple)) and len(position) == 3:
+                facts["position"] = list(position)
         self.record_experience(rq.protection_experience(time.time(), action[0], action[1],
                                                        self._compact_result(result), facts))
 

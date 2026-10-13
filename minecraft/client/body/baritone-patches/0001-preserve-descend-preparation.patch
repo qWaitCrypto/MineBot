@@ -1,3 +1,29 @@
+diff --git a/src/api/java/baritone/api/Settings.java b/src/api/java/baritone/api/Settings.java
+index 57a375f..11a6320 100644
+--- a/src/api/java/baritone/api/Settings.java
++++ b/src/api/java/baritone/api/Settings.java
+@@ -163,0 +164,3 @@ public final class Settings {
++    /** Permit submerged/flowing water traversal during MineBot surfacing only. */
++    public final Setting<Boolean> allowSubmergedNavigation = new Setting<>(false);
++
+diff --git a/src/main/java/baritone/pathing/movement/MovementHelper.java b/src/main/java/baritone/pathing/movement/MovementHelper.java
+index 51a2357..4238e5c 100644
+--- a/src/main/java/baritone/pathing/movement/MovementHelper.java
++++ b/src/main/java/baritone/pathing/movement/MovementHelper.java
+@@ -173,0 +174,6 @@ public interface MovementHelper extends ActionCosts, Helper {
++        // Waterlogged solids retain their ordinary collision rules; lava is
++        // never admitted. The Body restores this flag on all stop paths.
++        if (Baritone.settings().allowSubmergedNavigation.value
++                && block instanceof LiquidBlock && fluidState.getType() instanceof WaterFluid) {
++            return YES;
++        }
+@@ -213,0 +220,6 @@ public interface MovementHelper extends ActionCosts, Helper {
++        // Waterlogged solids retain their ordinary collision rules; lava is
++        // never admitted. The Body restores this flag on all stop paths.
++        if (Baritone.settings().allowSubmergedNavigation.value
++                && block instanceof LiquidBlock && fluidState.getType() instanceof WaterFluid) {
++            return true;
++        }
 diff --git a/src/main/java/baritone/pathing/path/PathExecutor.java b/src/main/java/baritone/pathing/path/PathExecutor.java
 index 8a5359b..ddbffd1 100644
 --- a/src/main/java/baritone/pathing/path/PathExecutor.java

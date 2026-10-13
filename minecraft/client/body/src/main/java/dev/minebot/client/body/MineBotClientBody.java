@@ -158,7 +158,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         });
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
         Thread.ofPlatform().daemon().name("minebot-spike-ipc").start(this::serve);
-        LOG.info("MINEBOT_PHASE_A client_body_loaded minecraft=26.1.2 baritone=1.18.0+minebot.1");
+        LOG.info("MINEBOT_PHASE_A client_body_loaded minecraft=26.1.2 baritone=1.18.0+minebot.2");
     }
 
     private void serve() {
@@ -2702,11 +2702,13 @@ public final class MineBotClientBody implements ClientModInitializer {
         if (current.swimPreviousAllowBreak == null) {
             current.swimPreviousAllowBreak = settings.allowBreak.value;
             current.swimPreviousAllowPlace = settings.allowPlace.value;
+            current.swimPreviousSubmergedNavigation = settings.allowSubmergedNavigation.value;
         }
         // An emergency detour must not dig through somebody's ceiling or place
         // blocks. Restore the caller's settings on every stop path.
         settings.allowBreak.value = false;
         settings.allowPlace.value = false;
+        settings.allowSubmergedNavigation.value = true;
         var first = targets.getFirst();
         current.swimNextRing = Math.max(Math.abs(first.x() - anchor.x()), Math.abs(first.z() - anchor.z())) + 1;
         current.swimRouteGoal = new GoalComposite(targets.stream()
@@ -2731,8 +2733,10 @@ public final class MineBotClientBody implements ClientModInitializer {
         if (current == null || current.swimPreviousAllowBreak == null) return;
         BaritoneAPI.getSettings().allowBreak.value = current.swimPreviousAllowBreak;
         BaritoneAPI.getSettings().allowPlace.value = current.swimPreviousAllowPlace;
+        BaritoneAPI.getSettings().allowSubmergedNavigation.value = current.swimPreviousSubmergedNavigation;
         current.swimPreviousAllowBreak = null;
         current.swimPreviousAllowPlace = null;
+        current.swimPreviousSubmergedNavigation = null;
     }
 
     private int findSurfaceY(Minecraft client, Run current) {
@@ -3421,6 +3425,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         int swimNextRing = 1;
         Boolean swimPreviousAllowBreak;
         Boolean swimPreviousAllowPlace;
+        Boolean swimPreviousSubmergedNavigation;
         List<net.minecraft.world.item.Item> previousThrowawayItems;
         Integer previousFollowRadius;
         final Set<BlockPos> collectionTargets = new HashSet<>();

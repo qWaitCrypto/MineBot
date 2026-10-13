@@ -335,6 +335,19 @@ def test_reflex_experiences_are_bounded_and_available_to_live_context():
     assert list(loop.recent_experiences) == [f"experience {index}" for index in range(2, 7)]
 
 
+def test_protection_experience_uses_the_terminal_position_after_swimming():
+    runtime, _, _ = _runtime()
+    loop = BodyLoop(runtime)
+    # The Agent's last read predates the swim. The native terminal already
+    # contains where it finished; remembering the old read would lie.
+    loop._remember_protection(("go_to_surface", {}), {
+        "success": True, "reason": "surface_reached",
+        "metrics": {"position": [4, 72, 5]},
+    })
+    assert "Now at [4.0, 72.0, 5.0]" in loop.recent_experiences[0]
+    assert runtime.last_known_body_state["position"] == [1, 64, 2]
+
+
 def test_plan_result_raw_facts_reproduce_the_same_request_through_body_loop():
     """All sixteen historical result frames retain their protocol.
 

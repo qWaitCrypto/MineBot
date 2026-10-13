@@ -3024,6 +3024,10 @@ class AgentRuntime:
         context_item = current_context_item(live_context)
         if context_item is not None:
             view = [*view, context_item]
+            if isinstance(work, dict) and work.get("reflex_experiences"):
+                self.trace.emit("reflex_context_included",
+                    experiences=list(work["reflex_experiences"]),
+                    context_item_role=context_item["role"])
         elif len(view) == len(items) and not isinstance(original, str) and all(
                 shown is given for shown, given in zip(items, received)):
             return data.model_data
