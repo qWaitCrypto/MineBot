@@ -153,15 +153,18 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
     def test_every_base_player_intent_is_registered_through_the_canonical_catalog(self):
         registry = _registry()
 
-        self.assertEqual(tuple(registry.names()), canonical_body_tool_names(stage="base"))
+        self.assertEqual(tuple(name for name in registry.names() if name != "__reflex_look_at"),
+                         canonical_body_tool_names(stage="base"))
+        self.assertNotIn("__reflex_look_at", registry.model_names())
         bindings = registry.canonical_bindings()
         self.assertEqual(len(bindings), 41)
         self.assertEqual(
             {binding.intent for binding in bindings},
             {f"body:{name}" for name in canonical_body_tool_names(stage="base")},
         )
-        self.assertTrue(all(row["intent"] for row in tool_manifest(registry)))
-        self.assertTrue(all(row["implementation"] for row in tool_manifest(registry)))
+        canonical_manifest = [row for row in tool_manifest(registry) if row["name"] != "__reflex_look_at"]
+        self.assertTrue(all(row["intent"] for row in canonical_manifest))
+        self.assertTrue(all(row["implementation"] for row in canonical_manifest))
 
     def test_production_runtime_completes_all_player_intents(self):
         parts = build_phase1_agent_runtime(
@@ -200,7 +203,8 @@ class BodyCapabilityRegistryClosureTests(unittest.TestCase):
         self.assertLessEqual(client_names, set(registry.names()))
         bound = {binding.tool_name: binding for binding in registry.canonical_bindings()}
         # Every model-visible Body tool has exactly one catalogued intent.
-        self.assertEqual(set(bound), set(registry.names()))
+        self.assertEqual(set(bound), set(registry.names()) - {"__reflex_look_at"})
+        self.assertNotIn("__reflex_look_at", registry.model_names())
         self.assertTrue(all(bound[name].implementation == "real_client" for name in client_names))
         # Native mining stays reachable only behind the governed collection tools.
         self.assertNotIn("mine_resource", registry)

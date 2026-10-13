@@ -246,6 +246,10 @@ class CallSupervisor:
         request: dict[str, Any] = {"state": state, "questions": rq.frame_questions(
             options, protecting=bool((supervision_context or {}).get("is_reflex_action")),
             acting_for_intent=running and bool(intent))}
+        if (supervision_context or {}).get("is_life_action"):
+            request = rq.idle_question(facts, options)
+            if running:
+                request["state"]["current_work"] = rq.call_text(tool_name, params)
         size = len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str))
         # Private values, removed before the request reaches Decision.
         request["_request_chars_before"] = size
@@ -399,6 +403,11 @@ class CallSupervisor:
         terminal = str(current.get("state") or "") in {"succeeded", "failed", "cancelled", "unknown"}
         context = record.get("supervision_context")
         context = context if isinstance(context, Mapping) else {}
+        if context.get("is_life_action") and not terminal:
+            options = rq.idle_options(cls._facts_for_options(current),
+                                      current=rq.call_text(str(record.get("tool")), record.get("params")))
+            options.pop(str(context.get("reflex_action_choice")), None)
+            return options
         options = rq.frame_options(
             tool=str(record.get("tool") or getattr(tool, "name", "unknown")),
             params=record.get("params") if isinstance(record.get("params"), Mapping) else {},
@@ -480,16 +489,26 @@ class CallSupervisor:
             if isinstance(pos, (list, tuple)) and len(pos) == 3:
                 return "move_to", {"pos": list(pos), "radius": 2, "timeout_s": 60.0}
         if choice == "approach_player":
-            players = [item for item in facts.get("nearby_entities", [])
-                       if isinstance(item, Mapping) and item.get("entity_type", item.get("type")) == "player"]
+            players = rq.nearby_players(facts)
             if players:
                 player = players[0]
                 return "move_to", {"pos": player.get("pos"), "radius": 2, "timeout_s": 60.0}
         if choice == "follow_player":
-            players = [item for item in facts.get("nearby_entities", [])
-                       if isinstance(item, Mapping) and item.get("entity_type", item.get("type")) == "player"]
+            players = rq.nearby_players(facts)
             if players and players[0].get("id"):
                 return "follow_entity", {"target": players[0]["id"], "timeout_s": 60.0}
+        if choice == "look_player":
+            players = rq.nearby_players(facts)
+            if players and isinstance(players[0].get("pos"), (list, tuple)):
+                return "__reflex_look_at", {"pos": list(players[0]["pos"]), "timeout_s": 5.0}
+        if choice == "seek_player":
+            profile = facts.get("life_profile") or {}
+            visible = {str(p.get("name")) for p in rq.nearby_players(facts)}
+            for relationship in profile.get("relationships") or []:
+                name = relationship.get("player") if isinstance(relationship, Mapping) else None
+                if name and name not in visible:
+                    return "search_for_entity", {"entity_name": name, "entity_types": ["player"],
+                                                  "max_distance": 2.0, "timeout_s": 60.0}
         return None
 
     @staticmethod

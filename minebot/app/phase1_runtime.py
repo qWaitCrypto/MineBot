@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 
 from agents import Session
 
-from minebot.app.body_capability_tools import _java_dig_down, body_capability_tools
+from minebot.app.body_capability_tools import _java_dig_down, _reflex_look_tool, body_capability_tools
 from minebot.app.body_tool_catalog import CanonicalBodyToolCatalog
 from minebot.app.client_body_tools import client_body_tools
 from minebot.app.spatial_exploration import SpatialExploration, spatial_exploration_tools
@@ -713,6 +713,9 @@ def build_phase1_registry(
     )
     container_txn = ContainerTransactions(body, navigator=approach_navigator, governance=policy)
     combat = CombatTransactions(body, progress=progress)
+    # Existing attention capability for the life range, not another public
+    # Agent tool or a new canonical player intent.
+    registry.register(_reflex_look_tool(interaction_txn))
     catalog.register_many(
         (
             _read_state_tool(body),

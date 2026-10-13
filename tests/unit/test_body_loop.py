@@ -445,7 +445,10 @@ def test_idle_protection_is_executed_once_through_threat_claim():
 def test_idle_profile_action_uses_life_claim_and_shared_supervision():
     async def run():
         runtime, trace, _decision = _runtime()
-        runtime.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
+        from minebot.brain.registry import RegisteredTool, ToolSidecar
+        runtime.registry = SimpleNamespace(get=lambda name: RegisteredTool(
+            name, "", {}, lambda params: None, ToolSidecar(name, True)))
+        runtime.body = SimpleNamespace()
         runtime.weld_context = None
         calls = []
 

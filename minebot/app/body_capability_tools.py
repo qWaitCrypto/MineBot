@@ -389,6 +389,18 @@ def body_capability_tools(
     return tools
 
 
+def _reflex_look_tool(interaction: InteractionTransactions) -> RegisteredTool:
+    """Internal adapter to existing attention, using normal claim/stop lanes."""
+    return _tool(
+        "__reflex_look_at", "Look toward an observed player's position.",
+        _object_schema({"pos": VECTOR_SCHEMA, "timeout_s": {"type": "number"}}, required=("pos",)),
+        lambda params: interaction._look_at_pos(tuple(params["pos"]), timeout_s=float(params.get("timeout_s") or 5)),
+        mutating=True, source="body.interaction", tool_type="attention", permission="move",
+        body_scope=("attention",), terminal_truth=("lookDone", "ToolResult"), timeout_s=10.0,
+        model_visible=False,
+    )
+
+
 def _tool(
     name: str,
     description: str,

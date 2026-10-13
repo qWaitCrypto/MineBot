@@ -511,26 +511,62 @@ def interrupt_result_question(*, goal: str, intent: str, original_call: str,
     return {"state": state, "questions": frame_questions(options)}
 
 
-def idle_options(facts: Mapping[str, Any]) -> dict[str, str]:
+def nearby_players(facts: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    return [item for item in facts.get("nearby_entities", [])
+            if isinstance(item, Mapping)
+            and str(item.get("entity_type", item.get("type", ""))).removeprefix("minecraft:") == "player"]
+
+
+def player_distance(player: Mapping[str, Any], facts: Mapping[str, Any]) -> float | None:
+    if isinstance(player.get("dist"), (int, float)):
+        return float(player["dist"])
+    if isinstance(player.get("dist2"), (int, float)):
+        return max(0, player["dist2"]) ** 0.5
+    here, there = facts.get("position", facts.get("pos")), player.get("pos")
+    if isinstance(here, (list, tuple)) and isinstance(there, (list, tuple)) and len(here) == len(there) == 3:
+        return sum((float(a) - float(b)) ** 2 for a, b in zip(here, there)) ** 0.5
+    return None
+
+
+def idle_options(facts: Mapping[str, Any], *, current: str = "") -> dict[str, str]:
     """Idle range compiled from generic player/profile facts and protection."""
     if dead(facts):
         return {}
-    options = {}
-    players = [item for item in facts.get("nearby_entities", [])
-               if isinstance(item, Mapping) and item.get("entity_type", item.get("type")) == "player"]
+    options = {"keep_going": f"Keep doing the current life activity: {current}."} if current else {}
+    profile = facts.get("life_profile") if isinstance(facts.get("life_profile"), Mapping) else {}
+    players = nearby_players(facts) if profile else []
+    thinking = facts.get("agent_thinking") is True
     if players:
         player = players[0]
         name = str(player.get("name") or player.get("id") or "the nearby player")
-        options["approach_player"] = f"Walk to {name} at the observed position."
-        options["follow_player"] = f"Follow {name} as a moving player."
-    profile = facts.get("life_profile") if isinstance(facts.get("life_profile"), Mapping) else {}
+        options["look_player"] = f"Look toward {name} at the observed position."
+        distance = player_distance(player, facts)
+        # This is the existing approach tool's arrival band, not a judgement
+        # about when the life intention has been achieved.
+        if distance is not None and distance > 2:
+            options["approach_player"] = f"Walk to {name} at the observed position."
+        if not thinking:
+            options["follow_player"] = f"Follow {name} as a moving player."
     home = profile.get("home") if isinstance(profile, Mapping) else None
     position = _position(facts.get("position", facts.get("pos")))
     home_pos = _position(home.get("pos")) if isinstance(home, Mapping) else None
-    if home_pos and position and home_pos != position:
+    at_home = False
+    if home_pos and position:
+        at_home = player_distance({"pos": home.get("pos")}, facts) <= 2
+    if home_pos and position and not at_home and not thinking:
         options["go_home"] = f"Walk to the home position {home_pos}."
+    if not thinking:
+        relationships = profile.get("relationships") or []
+        visible = {str(p.get("name")) for p in players}
+        for relationship in relationships:
+            if isinstance(relationship, Mapping) and relationship.get("player") not in visible:
+                name = str(relationship.get("player") or "")
+                if name:
+                    options.setdefault("seek_player", f"Search nearby for {name} and walk up to them.")
     options["stay"] = "Stay where the Body is and wait for the next step."
     options.update(protective_options(facts))
+    if profile:
+        options["call_agent"] = "Hand control back to the Agent for a new direction."
     return options
 
 
@@ -539,6 +575,20 @@ def idle_question(facts: Mapping[str, Any], options: Mapping[str, str]) -> dict[
     state: dict[str, Any] = {"body": _body_sentence(facts)}
     if facts.get("life_intent"):
         state["agent_intent"] = f"This is the idle-life intention: “{facts['life_intent']}”."
+    clock = facts.get("time")
+    if isinstance(clock, (int, float)):
+        tick = clock % 24000
+        state["daylight"] = ("It is day." if tick < 12000 or tick >= 23000 else
+                             "It is dusk; night falls soon." if tick < 13000 else "It is night.")
+    players = nearby_players(facts)
+    if players:
+        lines = []
+        for player in players:
+            distance = player_distance(player, facts)
+            name = player.get("name") or player.get("id") or "a nearby player"
+            lines.append(f"Player {name} is {distance:.0f} blocks away." if distance is not None
+                         else f"Player {name} is in view.")
+        state["players"] = " ".join(lines)
     threats = _threat_sentence(facts)
     if threats:
         state["threats"] = threats

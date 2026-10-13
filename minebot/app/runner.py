@@ -2294,6 +2294,7 @@ class AgentRuntime:
             "session": self.conversation_session,
         }
         self.agent_context.acknowledge_turn_input(pending_input_count)
+        self.agent_thinking = True
         try:
             if self.runner_run_streamed is not None:
                 streamed = self.runner_run_streamed(turn_agent, input_text, **runner_kwargs)
@@ -2337,6 +2338,8 @@ class AgentRuntime:
             progress_epochs.finalize_unsettled("runner_error")
             self._raise_model_transport_error_if_retryable(exc)
             raise
+        finally:
+            self.agent_thinking = False
 
         deferred = progress_epochs.finalize_unsettled("runner_completed_with_unsettled_epoch")
         if deferred is not None:

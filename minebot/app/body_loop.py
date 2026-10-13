@@ -15,9 +15,9 @@ import copy
 import time
 from collections import deque
 from uuid import uuid4
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from typing import Any, Mapping
-from minebot.contract import Event
+from minebot.contract import Action, Event, ToolResult
 
 from minebot.app import reflex_question as rq
 from minebot.app import direct_call_supervision as supervision_module
@@ -140,10 +140,14 @@ class BodyLoop(CallSupervisor):
                 self._ambient_facts.update({key: copy.deepcopy(observed[key])
                                             for key in group if key in observed})
         for key in ("selected_item", "selected_item_known", "inventory_complete",
-                    "inventory_includes_selected", "creative", "dimension"):
+                    "inventory_includes_selected", "creative", "dimension", "time"):
             if key in observed:
                 self._ambient_facts[key] = copy.deepcopy(observed[key])
         combined = {**copy.deepcopy(self._ambient_facts), **observed}
+        if self._life_profile:
+            combined["life_profile"] = copy.deepcopy(self._life_profile)
+            combined["life_intent"] = life_intent(self._life_profile)
+        combined["agent_thinking"] = bool(getattr(self.runtime, "agent_thinking", False))
         previous = copy.deepcopy(self.safe_standing_position)
         frame = super()._frame({**execution, "facts": combined})
         # Store both raw sources so replay can reproduce exactly what online
@@ -393,7 +397,12 @@ class BodyLoop(CallSupervisor):
                         decision=choice, plan=plan,
                     )
                     return
-                elif choice in rq.PROTECTIVE or choice in {"go_to_surface", "eat"}:
+                elif (choice in rq.PROTECTIVE or choice in {"go_to_surface", "eat"}
+                      or (record["supervision_context"].get("is_life_action")
+                          and choice in {"go_home", "approach_player", "follow_player", "look_player", "seek_player", "stay"})):
+                    if choice == "stay":
+                        await self._handoff(record, execution, {"reason": "decision_stay"}, decision=choice)
+                        return
                     action = self._default_action(choice, execution)
                     if action is not None:
                         if record["supervision_context"].get("is_reflex_action"):
@@ -733,6 +742,8 @@ class BodyLoop(CallSupervisor):
             self._protective_verdict = None
             default_id = call_id or f"reflex-default-{uuid4()}"
             default_tool = self.runtime.registry.get(action[0])
+            if getattr(self, "_reflex_claim_holder", "threat") == "life":
+                default_tool = self._life_tool(default_tool)
             chain = self._reaction_selection
             self._reaction_selection = None
             if chain is not None and chain["choice"] == choice:
@@ -765,7 +776,32 @@ class BodyLoop(CallSupervisor):
             if redirect is None:
                 return choice, action, result, default_id
             choice, action = redirect
+            if choice in rq.PROTECTIVE:
+                self._reflex_claim_holder = "threat"
+                self._reflex_action_intent = None
             call_id = None
+
+    def _life_tool(self, tool):
+        """Life movement may not edit terrain. Scope existing Body settings
+        inside the admitted writer operation and restore them after settlement.
+        This does not introduce another execution lane or stop entrance.
+        """
+        body = self.runtime.body
+        def execute(params):
+            state = body.get_reflex_facts()
+            previous = {key: state[key] for key in ("allow_break", "allow_place") if isinstance(state.get(key), bool)}
+            if len(previous) != 2:
+                return ToolResult(False, "life_movement_permissions_unknown", True)
+            accepted = body.execute(Action.create("setBaritoneSettings", {"allow_break": False, "allow_place": False}))
+            if not accepted.ok:
+                return ToolResult(False, "life_movement_permissions_rejected", True)
+            try:
+                return tool.callable(params)
+            finally:
+                restored = body.execute(Action.create("setBaritoneSettings", previous))
+                if not restored.ok:
+                    self.runtime.trace.emit("reflex_life_settings_restore_failed", tool=tool.name)
+        return replace(tool, callable=execute)
 
     async def _run_idle_action(self, choice: str, facts: Mapping[str, Any]) -> None:
         """Run one reversible life-profile action through the shared Body loop."""
@@ -783,6 +819,8 @@ class BodyLoop(CallSupervisor):
             "go_home": "Walk to the home position.",
             "approach_player": "Walk to the nearby player.",
             "follow_player": "Follow the nearby player.",
+            "look_player": "Look toward the nearby player.",
+            "seek_player": "Find the player named in the life profile.",
         }.get(choice, choice)
         try:
             choice, action, result, call_id = await self._execute_protection(
@@ -1331,8 +1369,13 @@ class BodyLoop(CallSupervisor):
                 self._reaction_answer(reaction, choice)
                 if choice in rq.PROTECTIVE or choice == "eat":
                     self._protection_task = asyncio.create_task(self._run_idle_protection(choice, facts))
-                elif choice in {"go_home", "approach_player", "follow_player"}:
+                elif choice in {"go_home", "approach_player", "follow_player", "look_player", "seek_player"}:
                     self._protection_task = asyncio.create_task(self._run_idle_action(choice, facts))
+                elif choice == "call_agent":
+                    notify = getattr(self.runtime, "notify_reflex_fact", None)
+                    if callable(notify):
+                        notify({"call_id": "idle-loop", "status": "handoff_requested",
+                                "reason": "decision_call_agent", "facts": dict(facts)})
         except asyncio.CancelledError:
             raise
 
