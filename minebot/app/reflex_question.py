@@ -333,6 +333,39 @@ def frame_questions(options: Mapping[str, str]) -> dict[str, Any]:
     return questions
 
 
+def idle_options(facts: Mapping[str, Any]) -> dict[str, str]:
+    """The Step-2 idle range: waiting plus the applicable protective calls."""
+    options = {"stay": "Stay where the Body is and wait for the next step."}
+    air = facts.get("oxygen")
+    if isinstance(air, (int, float)) and air < AIR_FULL:
+        options["surface"] = "Swim up to air."
+    food_item, food = facts.get("food_item"), facts.get("food")
+    if isinstance(food_item, str) and food_item and isinstance(food, (int, float)) and food < 20:
+        options["eat"] = f"Eat {food_item} from the inventory."
+    near = hostiles(facts)
+    if near and near[0].get("dist", float("inf")) <= HOSTILE_REACH:
+        options["move_away"] = "Move away from the nearby hostile entity."
+    safe = facts.get("safe_standing_position", facts.get("last_safe_position"))
+    if just_hurt(facts) and _position(safe):
+        options["retreat_safe"] = "Go back to the last place where the Body stood safely."
+    return options
+
+
+def idle_question(facts: Mapping[str, Any], options: Mapping[str, str]) -> dict[str, Any]:
+    """Compile idle prose here, alongside the work-frame prose."""
+    state: dict[str, Any] = {"body": _body_sentence(facts)}
+    threats = _threat_sentence(facts)
+    if threats:
+        state["threats"] = threats
+    inventory = _inventory(facts)
+    if inventory is not None:
+        state["inventory"] = ", ".join(f"{k}={v}" for k, v in inventory.items()) or "empty"
+    position = _position(facts.get("position", facts.get("pos")))
+    if position:
+        state["position"] = f"now at {position}."
+    return {"state": state, "questions": frame_questions(options)}
+
+
 def only_option(questions: Mapping[str, Any]) -> str | None:
     """When a frame leaves a single thing to do there is nothing to ask."""
     if set(questions) == {"q"} and len(questions["q"]["criteria"]) == 1:
@@ -365,5 +398,6 @@ def frame_choice(raw: Mapping[str, Any] | None, questions: Mapping[str, Any]) ->
 __all__ = [
     "PROTECTIVE", "VitalWindow", "after_default_options", "attempt_lines", "call_text", "frame_choice",
     "frame_options", "frame_questions", "frame_state", "hostiles", "just_hurt",
+    "idle_options", "idle_question",
     "only_option", "result_sentence",
 ]

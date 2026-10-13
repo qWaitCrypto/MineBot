@@ -1,15 +1,17 @@
 import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 
 from minebot.app.body_loop import BodyLoop
 from minebot.app.decision_client import DecisionAnswer
 from minebot.app.direct_call_supervision import CallSupervisor
 from minebot.app import reflex_question as rq
 from minebot.app.work_runtime import NodeRecord, WorkPlanExecutor
+from minebot.app.execution_lane import SerialExecutionLane
+from minebot.game.real_client_body import RealClientBody
 
 
 class _Trace:
@@ -82,6 +84,141 @@ def test_idle_and_running_frames_share_body_fact_keys():
     assert set(idle["state"]) == running_fact_keys
 
 
+def test_idle_reader_retains_body_vital_history_entities_and_food():
+    """Exercise the client projection and the separate read lane, not a dict getter."""
+    async def run():
+        runtime, _trace, _decision = _runtime()
+        lane = SerialExecutionLane(thread_name="idle-fact-test")
+
+        class RecordedIpc:
+            def connect(self):
+                pass
+
+            def state(self):
+                return {
+                    "position": [1, 60, 2], "health": 6, "food": 10,
+                    "oxygen": 139, "inventory": {"apple": 1},
+                    "entities": [{"id": "hostile-1", "type": "hostile",
+                                  "hostile": True, "dist2": 9, "pos": [4, 60, 2]}],
+                }
+
+        runtime.body = RealClientBody("RecordedBody", RecordedIpc())
+        runtime._read_lane = lane
+        loop = BodyLoop(runtime)
+        # The baseline was observed while a previous call was running.
+        loop._vitals._samples = [(time.monotonic() - 5, {"health": 10, "oxygen": 243})]
+        try:
+            facts = await loop._read_idle_facts()
+            assert facts["health_before"] == 10
+            assert facts["oxygen_before"] == 243
+            assert 5 <= facts["vital_age_s"] < 6
+            assert rq.hostiles(facts)[0]["dist"] == 3
+            assert facts["food_item"] == "apple"
+            question = loop._idle_question(facts, loop._idle_options(facts))
+            assert "fell from 10 to 6" in question["state"]["body"]
+            assert "243 5 seconds ago" in question["state"]["body"]
+            assert "3 blocks away" in question["state"]["threats"]
+            assert "move_away" in question["questions"]["p"]["criteria"]
+            assert "eat" in question["questions"]["q"]["criteria"]
+            # Returning to work retains the same Body history.
+            running = loop._frame({"facts": {"health": 5, "oxygen": 120}})
+            assert running["facts"]["health_before"] == 10
+        finally:
+            lane.close()
+
+    asyncio.run(run())
+
+
+def test_idle_entity_read_failure_preserves_successful_state_read():
+    async def run():
+        runtime, trace, _decision = _runtime()
+        lane = SerialExecutionLane(thread_name="idle-read-failure-test")
+
+        def unavailable_entities(scope, params):
+            raise OSError("entity reader unavailable")
+
+        runtime.body = SimpleNamespace(
+            get_state=lambda: {"position": [8, 64, 9], "health": 12, "oxygen": 200},
+            perceive=unavailable_entities,
+        )
+        runtime._read_lane = lane
+        loop = BodyLoop(runtime)
+        try:
+            facts = await loop._read_idle_facts()
+            assert facts["position"] == [8, 64, 9]
+            assert facts["health"] == 12
+            assert any(e["event"] == "reflex_idle_read_unknown" for e in trace.events)
+        finally:
+            lane.close()
+
+    asyncio.run(run())
+
+
+def test_body_loop_stop_cancels_an_inflight_idle_answer():
+    async def run():
+        runtime, _trace, _decision = _runtime()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        class BlockingDecision:
+            async def ask(self, request, *, priority=None):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+        runtime.decision_client = BlockingDecision()
+        loop = BodyLoop(runtime)
+        await loop.start()
+        await asyncio.wait_for(started.wait(), 2)
+        await loop.stop()
+        assert cancelled.is_set()
+
+    asyncio.run(run())
+
+
+def test_agent_arrival_supersedes_an_idle_answer_that_finishes_at_the_same_time():
+    async def run():
+        runtime, _trace, _decision = _runtime()
+        monitor_started = asyncio.Event()
+        protected = []
+        worker = asyncio.create_task(asyncio.Event().wait())
+        record = {"call_id": "arriving-work", "cancel_requested": False}
+
+        class ArrivingDecision:
+            async def ask(self, request, *, priority=None):
+                loop._start_monitor(record, SimpleNamespace(name="move_to"), {}, asyncio.Event(), worker)
+                return DecisionAnswer("surface", {"answers": {
+                    "q": {"choice": "stay"}, "d": {"choice": "in_danger"},
+                    "p": {"choice": "surface"},
+                }}, 0.001, 1)
+
+        runtime.last_known_body_state["oxygen"] = 100
+        runtime.decision_client = ArrivingDecision()
+        loop = BodyLoop(runtime)
+
+        async def monitor(*args):
+            monitor_started.set()
+            await asyncio.Event().wait()
+
+        async def protect(choice, facts):
+            protected.append(choice)
+
+        loop._monitor = monitor
+        loop._run_idle_protection = protect
+        try:
+            await loop.start()
+            await asyncio.wait_for(monitor_started.wait(), 2)
+            assert protected == []
+        finally:
+            await loop.stop()
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    asyncio.run(run())
+
+
 def test_reflex_experiences_are_bounded_and_available_to_live_context():
     runtime, _trace, _decision = _runtime()
     loop = BodyLoop(runtime)
@@ -91,14 +228,14 @@ def test_reflex_experiences_are_bounded_and_available_to_live_context():
 
 
 def test_plan_result_raw_facts_reproduce_the_same_request_through_body_loop():
-    """The eight recoverable historical result frames retain their protocol.
+    """All sixteen historical result frames retain their protocol.
 
     This compares raw node facts through the actual executor -> BodyLoop path;
-    it neither asks a real model nor claims to recover the other eight frames.
+    it neither asks a real model nor claims to recover the 118 running frames.
     """
     path = Path(__file__).parents[1] / "fixtures" / "reflex_step2_plan_result_frames.json"
     cases = json.loads(path.read_text(encoding="utf-8"))["cases"]
-    assert len(cases) == 8
+    assert len(cases) == 16
 
     async def run():
         for case in cases:
@@ -313,114 +450,3 @@ def test_plan_result_uses_the_same_body_loop_judge_once():
         assert calls[0]["call_id"] == "one"
 
     asyncio.run(run())
-
-
-@pytest.mark.skipif(
-    not Path("/home/qwait/MineBot-reflex/logs/reflex-stage-20261012d/trace.jsonl").exists(),
-    reason="recorded Stage-2 trace is not available on this host",
-)
-def test_stage2_replay_baseline_builds_all_recorded_frames_without_network():
-    """Replay raw body facts through the production question builder.
-
-    The test deliberately never calls DecisionClient.  It walks the trace in
-    time order, carries forward the latest raw ``body_progress`` sample, and
-    feeds those fields into the same running and result question compiler used
-    online.  It does not read the recorded prose as input.
-    """
-    path = Path("/home/qwait/MineBot-reflex/logs/reflex-stage-20261012d/trace.jsonl")
-    rows = [json.loads(line) for line in path.open(encoding="utf-8")]
-    running: list[tuple[dict, dict]] = []
-    results: list[tuple[dict, dict]] = []
-    latest_progress: dict | None = None
-    progress_by_call: dict[str, dict] = {}
-    params_by_call: dict[str, dict] = {}
-    plan_goal = ""
-
-    for row in rows:
-        if row.get("event") == "body_progress":
-            latest_progress = row
-            call_id = row.get("tool_call_id")
-            if call_id:
-                progress_by_call[str(call_id)] = row
-            continue
-        if row.get("event") == "tool_invoke":
-            call_id = row.get("tool_call_id")
-            summary = row.get("arguments_summary")
-            if call_id and isinstance(summary, str):
-                try:
-                    parsed = json.loads(summary)
-                except (TypeError, ValueError):
-                    parsed = None
-                if isinstance(parsed, dict):
-                    params_by_call[str(call_id)] = parsed
-            continue
-        if row.get("event") == "tool_result":
-            tree = ((row.get("full_result") or {}).get("metrics") or {}).get("tree")
-            if isinstance(tree, dict) and isinstance(tree.get("goal"), str):
-                plan_goal = tree["goal"]
-            continue
-        if row.get("event") == "call_supervision_request":
-            call_id = str(row.get("tool_call_id") or "")
-            raw = progress_by_call.get(call_id) or latest_progress
-            assert raw is not None, "a running frame must have a preceding raw body sample"
-            running.append((row, raw))
-        elif row.get("event") == "work_decision_request":
-            assert latest_progress is not None, "a result frame must have a raw body sample"
-            results.append((row, latest_progress))
-
-    assert len(running) == 118
-    assert len(results) == 16
-
-    runtime = SimpleNamespace(
-        agent_context=None, native_task_workspace=None, decision_client=None,
-        trace=SimpleNamespace(emit=lambda *args, **kwargs: None),
-    )
-    supervisor = CallSupervisor(runtime)
-    def facts_from(raw: dict) -> dict:
-        facts = {
-            key: raw[key] for key in (
-                "health", "food", "oxygen", "on_ground", "selected_item",
-            ) if key in raw
-        }
-        if isinstance(raw.get("pos"), list):
-            facts["position"] = list(raw["pos"])
-        if isinstance(raw.get("inventory_counts"), dict):
-            facts["inventory_counts"] = dict(raw["inventory_counts"])
-        if isinstance(raw.get("entities_near"), list):
-            facts["entities_near"] = list(raw["entities_near"])
-        return facts
-
-    for row, raw in running:
-        params = params_by_call.get(str(row.get("tool_call_id") or ""), {})
-        intent = params.get("intent", "") if isinstance(params, dict) else ""
-        execution = {
-            "operation_id": row.get("tool_call_id"),
-            "tool": row.get("tool"),
-            "state": "running",
-            "phase": "running",
-            "elapsed_s": row.get("idle_s", 0),
-            "fact_revision": row.get("fact_revision"),
-            "facts": facts_from(raw),
-        }
-        request = supervisor._question(
-            row.get("tool_call_id", "replay"),
-            SimpleNamespace(name=row.get("tool", "unknown")),
-            params, execution, idle_s=float(row.get("idle_s") or 0),
-            purpose="replay", supervision_context={"goal": plan_goal, "intent": intent},
-        )
-        assert request["questions"]
-        assert request["state"].get("body")
-        assert "Health" in request["state"]["body"]
-
-    for row, raw in results:
-        facts = facts_from(raw)
-        request = supervisor._question(
-            row.get("node_id", "result"),
-            SimpleNamespace(name=row.get("node_id", "unknown")), {},
-            {"tool": row.get("node_id", "unknown"), "state": "succeeded", "facts": facts},
-            idle_s=0.0, purpose="replay_result",
-            supervision_context={"goal": plan_goal, "intent": row.get("request", {}).get("state", {}).get("agent_intent", "")},
-            decision_context={"tool_result": {"success": True}, "body_state": facts},
-        )
-        assert request["questions"]
-        assert request["state"].get("finished_call")

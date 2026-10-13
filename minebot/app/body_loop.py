@@ -609,57 +609,52 @@ class BodyLoop(CallSupervisor):
         return {}
 
     async def _read_idle_facts(self) -> dict[str, Any]:
-        """Read through the existing read lane; never use the execution lane."""
+        """Read state and nearby entities on the read lane, then join Body history."""
         body = getattr(self.runtime, "body", None)
         getter = getattr(body, "get_state", None)
         read_lane = getattr(self.runtime, "_read_lane", None)
+        facts = self._idle_facts()
         if callable(getter) and read_lane is not None:
             try:
                 value = await read_lane.run(getter)
                 if isinstance(value, Mapping):
-                    return dict(value)
-                if is_dataclass(value):
-                    return asdict(value)
-                raw = getattr(value, "__dict__", None)
-                if isinstance(raw, dict):
-                    return dict(raw)
+                    facts = dict(value)
+                elif is_dataclass(value):
+                    facts = asdict(value)
+                else:
+                    raw = getattr(value, "__dict__", None)
+                    if isinstance(raw, dict):
+                        facts = dict(raw)
             except Exception as exc:
                 self.runtime.trace.emit(
-                    "reflex_idle_read_unknown", error_type=type(exc).__name__
+                    "reflex_idle_read_unknown", scope="state", error_type=type(exc).__name__
                 )
-        return self._idle_facts()
+            # BodyState intentionally projects state, not nearby entities.
+            # Use the existing perception API rather than adding BodyState or
+            # tool-result fields. An entity read gap must not discard a state
+            # read that already succeeded.
+            perceive = getattr(body, "perceive", None)
+            if callable(perceive):
+                try:
+                    nearby = await read_lane.run(perceive, "nearbyEntities", {"radius": 64, "limit": 32})
+                    ok = nearby.get("ok") if isinstance(nearby, Mapping) else getattr(nearby, "ok", False)
+                    data = nearby.get("data") if isinstance(nearby, Mapping) else getattr(nearby, "data", None)
+                    if ok is True and isinstance(data, Mapping) and isinstance(data.get("entities"), list):
+                        facts["nearby_entities"] = list(data["entities"])
+                    else:
+                        self.runtime.trace.emit("reflex_idle_read_unknown", scope="nearbyEntities")
+                except Exception as exc:
+                    self.runtime.trace.emit(
+                        "reflex_idle_read_unknown", scope="nearbyEntities", error_type=type(exc).__name__
+                    )
+        return self._frame({"facts": facts})["facts"]
 
     @staticmethod
     def _idle_options(facts: Mapping[str, Any]) -> dict[str, str]:
-        """The Step-2 idle range: reversible waiting plus applicable protection."""
-        options = {"stay": "Stay where the Body is and wait for the next step."}
-        air = facts.get("oxygen")
-        if isinstance(air, (int, float)) and air < rq.AIR_FULL:
-            options["surface"] = "Swim up to air."
-        food_item, food = facts.get("food_item"), facts.get("food")
-        if isinstance(food_item, str) and food_item and isinstance(food, (int, float)) and food < 20:
-            options["eat"] = f"Eat {food_item} from the inventory."
-        near = rq.hostiles(facts)
-        if near and near[0].get("dist", float("inf")) <= rq.HOSTILE_REACH:
-            options["move_away"] = "Move away from the nearby hostile entity."
-        safe = facts.get("safe_standing_position", facts.get("last_safe_position"))
-        if rq.just_hurt(facts) and rq._position(safe):
-            options["retreat_safe"] = "Go back to the last place where the Body stood safely."
-        return options
+        return rq.idle_options(facts)
 
     def _idle_question(self, facts: Mapping[str, Any], options: Mapping[str, str]) -> dict[str, Any]:
-        body = rq._body_sentence(facts)
-        state: dict[str, Any] = {"body": body}
-        threats = rq._threat_sentence(facts)
-        if threats:
-            state["threats"] = threats
-        inventory = facts.get("inventory", facts.get("inventory_counts"))
-        if isinstance(inventory, Mapping):
-            state["inventory"] = ", ".join(f"{k}={v}" for k, v in inventory.items()) or "empty"
-        position = rq._position(facts.get("position", facts.get("pos")))
-        if position:
-            state["position"] = f"now at {position}."
-        return {"state": state, "questions": rq.frame_questions(options)}
+        return rq.idle_question(facts, options)
 
     async def _run_idle_protection(self, choice: str, facts: Mapping[str, Any]) -> None:
         """Execute one reversible idle protection action through run_tool."""
@@ -756,6 +751,9 @@ class BodyLoop(CallSupervisor):
                 if snapshots is not None and snapshots.current() is not None:
                     continue
                 facts = await self._read_idle_facts()
+                # An Agent call can arrive while the read lane is sampling.
+                if self._active_monitor is not None or self._result_pending:
+                    continue
                 options = self._idle_options(facts)
                 request = self._idle_question(facts, options)
                 self._idle_sequence += 1
@@ -775,9 +773,9 @@ class BodyLoop(CallSupervisor):
                     done, _ = await asyncio.wait(
                         {answer_task, wake_task}, return_when=asyncio.FIRST_COMPLETED,
                     )
-                    if wake_task in done and answer_task not in done:
-                        answer_task.cancel()
-                        await asyncio.gather(answer_task, return_exceptions=True)
+                    if wake_task in done:
+                        # Even a completed answer belongs to the superseded
+                        # idle frame when work arrived in the same wait cycle.
                         choice = "unknown"
                     else:
                         answer = await answer_task
@@ -787,6 +785,11 @@ class BodyLoop(CallSupervisor):
                     await asyncio.gather(wake_task, return_exceptions=True)
                 except Exception:
                     choice = "unknown"
+                finally:
+                    for child in (answer_task, wake_task):
+                        if not child.done():
+                            child.cancel()
+                    await asyncio.gather(answer_task, wake_task, return_exceptions=True)
                 self.runtime.trace.emit(
                     "call_supervision_result", tool_call_id="idle-loop",
                     tool="__idle__", purpose="idle_frame", choice=choice,
