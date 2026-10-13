@@ -61,7 +61,12 @@ class BodyLoop(CallSupervisor):
             return await super().run(tool, callback, args, **kwargs)
         finally:
             self._set_state(previous, "decision" if context.get("is_reflex_action") else "call_ended")
-            if not context.get("is_plan"):
+            handoff = getattr(self.runtime, "direct_call_handoffs", {}).get(call_id, {})
+            decided = handoff.get("facts", {}).get("decision", {}).get("choice")
+            if not context.get("is_plan") or decided in {"step_done", "next_step", "call_agent", "repeat"}:
+                # WorkPlanExecutor consumes a running-frame verdict directly,
+                # without asking another result question. There is therefore
+                # no later decide_plan_result owner to release this slot.
                 self._release_result_pending(call_id)
             self._ensure_idle_task()
 

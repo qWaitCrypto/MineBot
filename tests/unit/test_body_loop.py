@@ -749,3 +749,25 @@ def test_trace_retains_replay_inputs_and_uses_no_recursive_frame_metadata():
         assert event['clock']['elapsed_s'] == 3
         assert '_frame_input' not in event['request']
     asyncio.run(run())
+
+
+def test_running_plan_verdict_releases_pending_slot_without_a_second_result_question():
+    from unittest.mock import patch
+    async def run():
+        for verdict in ('next_step', 'step_done', 'call_agent', 'repeat'):
+            runtime, _, _ = _runtime()
+            runtime.direct_call_handoffs = {}
+            loop = BodyLoop(runtime)
+            async def settled(*args, **kwargs):
+                loop._result_pending['plan-node'] = {'call_id': 'plan-node'}
+                runtime.direct_call_handoffs['plan-node'] = {'facts': {'decision': {'choice': verdict}}}
+                return {'success': False, 'reason': 'stopped_by_decision'}
+            try:
+                with patch.object(CallSupervisor, 'run', settled):
+                    await loop.run(SimpleNamespace(name='move_to'), None, (),
+                                   call_id='plan-node', timeout_s=30,
+                                   supervision_context={'is_plan': True, 'intent': 'reach the requested place'})
+                assert loop._result_pending == {}, verdict
+            finally:
+                await loop.stop()
+    asyncio.run(run())
