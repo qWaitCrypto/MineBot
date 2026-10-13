@@ -120,6 +120,9 @@ public final class MineBotClientBody implements ClientModInitializer {
                     if (run != null) {
                         run.lastPathEvent = event.name();
                         run.pathEvents.merge(event.name(), 1, Integer::sum);
+                        if (run.swimRouteGoal != null && event == PathEvent.CALC_FAILED) {
+                            run.swimPathFailed = true;
+                        }
                         LOG.info("MINEBOT_PHASE_A path_event id={} event={}", run.id, event);
                     }
                 }
@@ -2616,6 +2619,16 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         current.swimPreviousAir = air;
+        if (current.swimPathFailed) {
+            // Upstream has already proved these goal cells unreachable. Try
+            // the next ring immediately rather than wait motionless for the
+            // ordinary physical stall detector to expire again.
+            if (!routeSwimToAir(client, current)) {
+                requestStop("failed", "swim_surface_route_not_found");
+                return;
+            }
+            current.swimNoRiseTicks = 0;
+        }
         // During a detour upstream controls all movement, including jumping in
         // water. Once it reaches the open column, jump through the final air
         // boundary, which upstream's water-pillar movement does not support.
@@ -2681,6 +2694,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         current.swimRouteGoal = new GoalComposite(targets.stream()
             .map(p -> (Goal) new GoalBlock(p.x(), p.y(), p.z())).toArray(Goal[]::new));
         current.goal = current.swimRouteGoal;
+        current.swimPathFailed = false;
         current.phase = 2;
         current.phaseTick = current.ticks;
         baritone.getCustomGoalProcess().setGoalAndPath(current.swimRouteGoal);
@@ -3376,6 +3390,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         int swimNoRiseTicks;
         Vec3 swimProgressPosition;
         Goal swimRouteGoal;
+        volatile boolean swimPathFailed;
         int swimNextRing = 1;
         Boolean swimPreviousAllowBreak;
         Boolean swimPreviousAllowPlace;

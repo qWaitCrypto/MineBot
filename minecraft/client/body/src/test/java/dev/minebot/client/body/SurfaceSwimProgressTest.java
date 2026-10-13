@@ -80,4 +80,19 @@ class SurfaceSwimProgressTest {
         assertEquals(16, targets.size());
         assertTrue(targets.stream().allMatch(p -> Math.max(Math.abs(p.x()), Math.abs(p.z())) == 2));
     }
+
+    @Test
+    void shallowWaterBesideACanopyIsAnExitEvenWithoutADeepColumn() {
+        var space = new SurfaceSwimProgress.Space() {
+            public boolean water(int x, int y, int z) {
+                return y == 60 && x == 2 && z == 0;
+            }
+            public boolean breathable(int x, int y, int z) {
+                return y == 61 && x == 2 && z == 0;
+            }
+        };
+        assertEquals(java.util.List.of(new SurfaceSwimProgress.Cell(2, 60, 0)),
+            SurfaceSwimProgress.routeTargets(space,
+                new SurfaceSwimProgress.Cell(0, 60, 0), 0, 320, 8, 1));
+    }
 }

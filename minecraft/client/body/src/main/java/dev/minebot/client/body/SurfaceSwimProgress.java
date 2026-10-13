@@ -46,6 +46,12 @@ public final class SurfaceSwimProgress {
                     int x = anchor.x() + dx, z = anchor.z() + dz;
                     for (int y = Math.max(minY, anchor.y() - 1);
                          y <= Math.min(maxY - 3, anchor.y() + maxDistance); y++) {
+                        // A shallow edge is already breathable at this feet
+                        // cell; do not require a deep column to escape into.
+                        if (space.water(x, y, z) && space.breathable(x, y + 1, z)) {
+                            targets.add(new Cell(x, y, z));
+                            break;
+                        }
                         if (space.water(x, y, z) && space.water(x, y + 1, z)
                                 && space.breathable(x, y + 2, z)) {
                             targets.add(new Cell(x, y, z));
