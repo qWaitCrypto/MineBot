@@ -249,14 +249,21 @@ class CallSupervisor:
         supervision_context: Mapping[str, Any] | None = None,
         options: Mapping[str, str] | None = None,
         decision_context: Mapping[str, Any] | None = None,
+        question: Mapping[str, Any] | None = None,
     ) -> str:
-        request = self._question(
+        # Plan nodes compile their terminal facts through the existing tree
+        # compiler. The Body loop judges that same request; rebuilding it here
+        # would change the goal bounds, repeat wording and request metadata.
+        request = dict(question) if question is not None else self._question(
             call_id, tool, params, execution, idle_s=idle_s,
             purpose=purpose, supervision_context=supervision_context, options=options,
             decision_context=decision_context,
         )
         tool_name = getattr(tool, "name", "unknown")
-        request_chars_before = int(request.pop("_request_chars_before", 0))
+        compiled_chars = len(json.dumps(
+            request, ensure_ascii=False, separators=(",", ":"), default=str,
+        )) if question is not None else 0
+        request_chars_before = int(request.pop("_request_chars_before", compiled_chars))
         request_chars = int(request.pop("_request_chars", request_chars_before))
         fact_revision = execution.get("fact_revision")
         self.runtime.trace.emit(
@@ -291,6 +298,7 @@ class CallSupervisor:
         supervision_context: Mapping[str, Any] | None,
         options: Mapping[str, str] | None = None,
         decision_context: Mapping[str, Any] | None = None,
+        question: Mapping[str, Any] | None = None,
     ) -> str:
         """Call the overridable judge while accepting slice-1 test seams."""
         signature = inspect.signature(self.judge)
@@ -302,10 +310,12 @@ class CallSupervisor:
             or any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
         )
         if accepts_context:
+            compiled = {"question": question} if question is not None else {}
             return await self.judge(
                 call_id, tool, params, execution, idle_s,
                 purpose=purpose, supervision_context=supervision_context, options=options,
                 decision_context=decision_context,
+                **compiled,
             )
         return await self.judge(call_id, tool, params, execution, idle_s)
 

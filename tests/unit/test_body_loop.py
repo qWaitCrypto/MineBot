@@ -9,7 +9,7 @@ from minebot.app.body_loop import BodyLoop
 from minebot.app.decision_client import DecisionAnswer
 from minebot.app.direct_call_supervision import CallSupervisor
 from minebot.app import reflex_question as rq
-from minebot.app.work_runtime import WorkPlanExecutor
+from minebot.app.work_runtime import NodeRecord, WorkPlanExecutor
 
 
 class _Trace:
@@ -88,6 +88,41 @@ def test_reflex_experiences_are_bounded_and_available_to_live_context():
     for index in range(7):
         loop.record_experience(f"experience {index}")
     assert list(loop.recent_experiences) == [f"experience {index}" for index in range(2, 7)]
+
+
+def test_plan_result_raw_facts_reproduce_the_same_request_through_body_loop():
+    """The eight recoverable historical result frames retain their protocol.
+
+    This compares raw node facts through the actual executor -> BodyLoop path;
+    it neither asks a real model nor claims to recover the other eight frames.
+    """
+    path = Path(__file__).parents[1] / "fixtures" / "reflex_step2_plan_result_frames.json"
+    cases = json.loads(path.read_text(encoding="utf-8"))["cases"]
+    assert len(cases) == 8
+
+    async def run():
+        for case in cases:
+            runtime, trace, _decision = _runtime()
+            loop = BodyLoop(runtime)
+            executor = WorkPlanExecutor(
+                case["plan"], call=None, result_judge=loop.decide_plan_result,
+            )
+            record = NodeRecord(decision_facts=case["raw_decision_facts"])
+            assert executor._call_question(
+                case["node"], case["node_id"], case["intents"], record,
+            ) == case["expected_request"]
+            await executor._decide_call(
+                case["node"], case["node_id"], case["intents"], record,
+            )
+            requests = [e["request"] for e in trace.events
+                        if e["event"] == "call_supervision_request"]
+            assert requests == [case["expected_request"]], case["seq"]
+            assert json.dumps(requests[0], ensure_ascii=False, separators=(",", ":")) == json.dumps(
+                case["expected_request"], ensure_ascii=False, separators=(",", ":"),
+            ), case["seq"]
+            assert not loop._result_pending
+
+    asyncio.run(run())
 
 
 def test_idle_protection_is_executed_once_through_threat_claim():

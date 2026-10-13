@@ -350,9 +350,15 @@ def frame_choice(raw: Mapping[str, Any] | None, questions: Mapping[str, Any]) ->
         answer = answers.get(name)
         choice = answer.get("choice") if isinstance(answer, Mapping) else None
         allowed = (questions.get(name) or {}).get("criteria") or {}
-        return str(choice) if choice in allowed else None
+        return choice if isinstance(choice, str) and choice in allowed else None
 
-    name = "p" if "d" in questions and chosen("d") == "in_danger" else "q"
+    name = "q"
+    if "d" in questions:
+        danger = chosen("d")
+        if danger not in {"safe", "in_danger"}:
+            return "unknown"
+        if danger == "in_danger":
+            name = "p"
     return chosen(name) or "unknown"
 
 

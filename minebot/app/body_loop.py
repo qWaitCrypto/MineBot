@@ -517,12 +517,14 @@ class BodyLoop(CallSupervisor):
         self, *, call_id: str, tool: Any, params: Mapping[str, Any],
         plan_context: Mapping[str, Any], decision_context: Mapping[str, Any],
         next_call: str = "", repeat_note: str = "",
+        question: Mapping[str, Any] | None = None,
     ) -> str:
         """Judge a plan call's terminal fact through this Body's loop.
 
-        WorkPlanExecutor supplies facts and the tree range; it no longer owns a
-        second Decision client/question protocol in production.  Unknown stays
-        unknown and lets the lifecycle loop ask again while the Body is idle.
+        WorkPlanExecutor supplies the compiled terminal question and tree
+        range. The Body loop owns the Decision channel and preserves that
+        question rather than compiling a different version. Unknown stays
+        unknown and lets the same loop ask again while the Body is idle.
         """
         result = decision_context.get("tool_result")
         result = result if isinstance(result, Mapping) else {}
@@ -533,19 +535,22 @@ class BodyLoop(CallSupervisor):
         execution.setdefault("tool", getattr(tool, "name", "unknown"))
         execution["state"] = "succeeded" if result.get("success") is True else "failed"
         execution["facts"] = dict(facts)
-        options = rq.frame_options(
-            tool=str(getattr(tool, "name", "unknown")), params=params,
-            intent=str(plan_context.get("intent") or ""), facts=facts,
-            running=False, result=result, next_call=next_call,
-            repeat_note=repeat_note,
-        )
-        options = {key: value for key, value in options.items()
-                   if key not in rq.PROTECTIVE and key != "inspect"}
+        options = None
+        if question is None:
+            options = rq.frame_options(
+                tool=str(getattr(tool, "name", "unknown")), params=params,
+                intent=str(plan_context.get("intent") or ""), facts=facts,
+                running=False, result=result, next_call=next_call,
+                repeat_note=repeat_note,
+            )
+            options = {key: value for key, value in options.items()
+                       if key not in rq.PROTECTIVE and key != "inspect"}
         try:
             return await self._judge_frame(
                 call_id, tool, params, execution, 0.0,
                 purpose="plan_result_frame", supervision_context=plan_context,
                 options=options, decision_context=decision_context,
+                question=question,
             )
         finally:
             self._release_result_pending(str(call_id))

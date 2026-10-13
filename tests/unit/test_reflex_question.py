@@ -1,5 +1,7 @@
 """The frame question wording, checked against the sentences settled offline."""
 
+import pytest
+
 from minebot.app import reflex_question as rq
 
 GOAL = "make a stone pickaxe"
@@ -123,6 +125,22 @@ def test_danger_is_asked_only_when_a_protective_action_is_on_offer():
     assert rq.frame_choice(raw(q="keep_going"), calm) == "keep_going"
     assert rq.frame_choice(raw(q="made_up"), calm) == "unknown"
     assert rq.frame_choice(None, calm) == "unknown"
+
+
+@pytest.mark.parametrize("danger_answer", [
+    None, {}, {"choice": ""}, {"choice": "unknown"},
+    {"choice": "not_a_danger_option"}, {"choice": ["safe"]},
+    {"choice": {"safe": True}}, {"choice": 1},
+])
+def test_unknown_danger_cannot_authorize_normal_or_protective_action(danger_answer):
+    questions = rq.frame_questions({
+        "keep_going": "Continue the work.", "next_step": "Stop and start the next step.",
+        "surface": "Swim up to air.", "call_agent": "Stop and call the Agent.",
+    })
+    answers = {"q": {"choice": "next_step"}, "p": {"choice": "surface"}}
+    if danger_answer is not None:
+        answers["d"] = danger_answer
+    assert rq.frame_choice({"answers": answers}, questions) == "unknown"
 
 
 def test_after_a_protective_action_the_body_may_go_back_to_its_work():

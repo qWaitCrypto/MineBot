@@ -748,6 +748,7 @@ class WorkPlanExecutor:
                     decision_context=facts,
                     next_call=str(node.get("next_call") or ""),
                     repeat_note=repeat_note,
+                    question=self._call_question(node, node_key, intents, record),
                 )
             except Exception:
                 choice = "unknown"
