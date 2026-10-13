@@ -95,4 +95,16 @@ class SurfaceSwimProgressTest {
             SurfaceSwimProgress.routeTargets(space,
                 new SurfaceSwimProgress.Cell(0, 60, 0), 0, 320, 8, 1));
     }
+
+    @Test
+    void releasesJumpUntilUpstreamsFeetCellHasHeadClearance() {
+        var space = new SurfaceSwimProgress.Space() {
+            public boolean water(int x, int y, int z) { return y == 60 || y == 61; }
+            public boolean breathable(int x, int y, int z) { return false; }
+        };
+        // Jumping against the roof pushes feet to 61; sinking below that
+        // boundary makes the same horizontal exit path calculable again.
+        assertFalse(SurfaceSwimProgress.routeStartClear(space, new SurfaceSwimProgress.Cell(0, 61, 0)));
+        assertTrue(SurfaceSwimProgress.routeStartClear(space, new SurfaceSwimProgress.Cell(0, 60, 0)));
+    }
 }

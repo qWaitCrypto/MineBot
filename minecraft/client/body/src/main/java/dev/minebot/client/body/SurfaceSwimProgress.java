@@ -32,6 +32,12 @@ public final class SurfaceSwimProgress {
         boolean breathable(int x, int y, int z);
     }
 
+    /** Use upstream's actual feet cell, after releasing jump under a ceiling. */
+    public static boolean routeStartClear(Space space, Cell feet) {
+        return (space.water(feet.x(), feet.y(), feet.z()) || space.breathable(feet.x(), feet.y(), feet.z()))
+            && (space.water(feet.x(), feet.y() + 1, feet.z()) || space.breathable(feet.x(), feet.y() + 1, feet.z()));
+    }
+
     /** Find the nearest ring of open water columns, without breaking or placing.
      * The goal is one block below the top water cell: upstream can path through
      * submerged cells, then the ordinary jump key takes the head into the air.

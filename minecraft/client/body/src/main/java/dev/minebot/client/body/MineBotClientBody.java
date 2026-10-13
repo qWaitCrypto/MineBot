@@ -2623,11 +2623,25 @@ public final class MineBotClientBody implements ClientModInitializer {
             // Upstream has already proved these goal cells unreachable. Try
             // the next ring immediately rather than wait motionless for the
             // ordinary physical stall detector to expire again.
-            if (!routeSwimToAir(client, current)) {
+            if (!swimPathStartClear(client)) {
+                // The jump has pushed the player onto the next cell boundary
+                // under a ceiling. Let them sink into the clear cell before
+                // retrying these goals; this is not an unreachable exit.
+                current.swimRoutePending = true;
+                current.swimPathFailed = false;
+                baritone.getPathingBehavior().cancelEverything();
+                baritone.getInputOverrideHandler().clearAllKeys();
+            } else if (!routeSwimToAir(client, current)) {
                 requestStop("failed", "swim_surface_route_not_found");
                 return;
             }
             current.swimNoRiseTicks = 0;
+        }
+        if (current.swimRoutePending) {
+            client.options.keyJump.setDown(false);
+            if (!swimPathStartClear(client)) return;
+            current.swimRoutePending = false;
+            baritone.getCustomGoalProcess().setGoalAndPath(current.swimRouteGoal);
         }
         // During a detour upstream controls all movement, including jumping in
         // water. Once it reaches the open column, jump through the final air
@@ -2661,8 +2675,8 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
     }
 
-    private boolean routeSwimToAir(Minecraft client, Run current) {
-        SurfaceSwimProgress.Space space = new SurfaceSwimProgress.Space() {
+    private SurfaceSwimProgress.Space swimSpace(Minecraft client) {
+        return new SurfaceSwimProgress.Space() {
             private boolean clear(BlockPos pos) {
                 return clientChunkLoaded(client, pos)
                     && client.level.getBlockState(pos).getCollisionShape(client.level, pos).isEmpty();
@@ -2676,6 +2690,10 @@ public final class MineBotClientBody implements ClientModInitializer {
                 return clear(pos) && client.level.getFluidState(pos).isEmpty();
             }
         };
+    }
+
+    private boolean routeSwimToAir(Minecraft client, Run current) {
+        SurfaceSwimProgress.Space space = swimSpace(client);
         var anchor = new SurfaceSwimProgress.Cell(current.anchor.getX(), current.anchor.getY(), current.anchor.getZ());
         var targets = SurfaceSwimProgress.routeTargets(space, anchor, client.level.getMinY(),
             client.level.getMaxY(), current.verticalDistance, current.swimNextRing);
@@ -2695,10 +2713,18 @@ public final class MineBotClientBody implements ClientModInitializer {
             .map(p -> (Goal) new GoalBlock(p.x(), p.y(), p.z())).toArray(Goal[]::new));
         current.goal = current.swimRouteGoal;
         current.swimPathFailed = false;
+        current.swimRoutePending = true;
         current.phase = 2;
         current.phaseTick = current.ticks;
-        baritone.getCustomGoalProcess().setGoalAndPath(current.swimRouteGoal);
+        baritone.getPathingBehavior().cancelEverything();
+        baritone.getInputOverrideHandler().clearAllKeys();
         return true;
+    }
+
+    private boolean swimPathStartClear(Minecraft client) {
+        BlockPos feet = baritone.getPlayerContext().playerFeet();
+        return SurfaceSwimProgress.routeStartClear(swimSpace(client),
+            new SurfaceSwimProgress.Cell(feet.getX(), feet.getY(), feet.getZ()));
     }
 
     private static void restoreSwimSettings(Run current) {
@@ -3391,6 +3417,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         Vec3 swimProgressPosition;
         Goal swimRouteGoal;
         volatile boolean swimPathFailed;
+        boolean swimRoutePending;
         int swimNextRing = 1;
         Boolean swimPreviousAllowBreak;
         Boolean swimPreviousAllowPlace;
