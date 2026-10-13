@@ -350,7 +350,7 @@ def test_protection_experience_uses_the_terminal_position_after_swimming():
 
 
 def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent():
-    """Preserve all sixteen historical frames except the repaired intent source.
+    """Preserve sixteen historical frames except intent and observed main hand.
 
     This compares raw node facts through the actual executor -> BodyLoop path;
     it neither asks a real model nor claims to recover the 118 running frames.
@@ -364,8 +364,8 @@ def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent(
             # These recorded calls supplied their own outcome in arguments.
             # The old request mistakenly inherited the enclosing plan intent.
             # Keep the historical fixture intact and permit only this repair
-            # plus the corresponding character-count change, not new facts
-            # or different options.
+            # and the omitted, recorded main hand plus their character-count
+            # changes. Do not alter historical fixtures or any options.
             expected = copy.deepcopy(case["expected_request"])
             old_intent = expected["state"]["agent_intent"]
             intent = case["node"]["arguments"]["intent"]
@@ -374,6 +374,15 @@ def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent(
                 len(json.dumps(intent, ensure_ascii=False))
                 - len(json.dumps(old_intent, ensure_ascii=False))
             )
+            facts = case["raw_decision_facts"]["body_state"]
+            selected = facts.get("selected_item")
+            if isinstance(selected, str) and facts.get("selected_item_known") is not False:
+                old_body = expected["state"]["body"]
+                expected["state"]["body"] += f" The main hand holds {selected or 'nothing'}."
+                expected["state"]["request_chars"] += (
+                    len(json.dumps(expected["state"]["body"], ensure_ascii=False))
+                    - len(json.dumps(old_body, ensure_ascii=False))
+                )
             runtime, trace, _decision = _runtime()
             loop = BodyLoop(runtime)
             executor = WorkPlanExecutor(

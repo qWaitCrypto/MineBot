@@ -11,7 +11,7 @@ from unittest.mock import patch
 from minebot.app.direct_call_supervision import CallSupervisor
 
 
-def test_step2_new_old_protocol_on_118_inputs_except_verified_running_intent_wording():
+def test_step2_new_old_protocol_on_118_inputs_except_intent_wording_and_main_hand():
     root = Path(__file__).parents[2]
     fixture = json.loads((root / 'tests/fixtures/reflex_step2_equivalent_inputs.json').read_text())
     cases = fixture['cases']
@@ -52,7 +52,11 @@ def test_step2_new_old_protocol_on_118_inputs_except_verified_running_intent_wor
                     expected['questions']['q']['instructions'] = (
                         "Choose what the Body does right now to achieve the Agent's intent."
                     )
-                # Only these two deliberate wording changes are permitted.
-                # Body facts, all options, and the danger questions stay exact.
+                facts=case['execution']['facts']
+                selected=facts.get('selected_item')
+                if isinstance(selected,str) and facts.get('selected_item_known') is not False:
+                    expected['state']['body']+=' The main hand holds '+(selected or 'nothing')+'.'
+                # Permit only the two verified intent clarifications and the
+                # observed main hand. All other facts/options remain exact.
                 assert json.dumps(expected, ensure_ascii=False, separators=(',', ':')) == json.dumps(
                     requests[1], ensure_ascii=False, separators=(',', ':')), case['seq']

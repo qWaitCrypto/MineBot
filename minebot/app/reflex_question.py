@@ -181,6 +181,9 @@ def _body_sentence(facts: Mapping[str, Any]) -> str:
             f"The Body was just hurt: health fell from {facts['health_before']:.0f} "
             f"to {health:.0f} in the last {_ago(facts)}."
         )
+    selected = facts.get("selected_item")
+    if facts.get("selected_item_known") is not False and isinstance(selected, str):
+        parts.append(f"The main hand holds {selected or 'nothing'}.")
     return " ".join(parts)
 
 

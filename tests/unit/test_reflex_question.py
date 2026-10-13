@@ -49,6 +49,31 @@ def test_changing_air_and_injury_are_written_as_change():
     assert _running({"inventory": {}})["inventory"] == "empty"
 
 
+def test_equipment_intent_sees_current_main_hand_once_in_all_frames():
+    # Live seq1825: wooden pickaxe was in the bag, but the hand still held a sapling.
+    facts = {"inventory_counts": {"wooden_pickaxe": 1}, "selected_item": "oak_sapling",
+             "health": 20, "food": 20, "oxygen": 300}
+    for running in (True, False):
+        state = rq.frame_state(goal="make a pickaxe", intent="craft and equip a wooden pickaxe",
+            tool="craft_item", params={"item": "wooden_pickaxe", "auto_equip": True},
+            facts=facts, running=running, result=None if running else {"success": True})
+        assert state["inventory"] == "wooden_pickaxe 1"
+        assert state["body"].endswith("The main hand holds oak_sapling.")
+        assert state["body"].count("main hand") == 1
+    assert rq.idle_question(facts, rq.idle_options(facts))["state"]["body"].endswith(
+        "The main hand holds oak_sapling.")
+
+
+@pytest.mark.parametrize("facts,expected", [
+    ({"selected_item": ""}, "The main hand holds nothing."),
+    ({"selected_item": None, "selected_item_known": True}, ""),
+    ({"selected_item": "oak_sapling", "selected_item_known": False}, ""),
+    ({}, ""),
+])
+def test_unknown_main_hand_is_not_reported_as_empty(facts, expected):
+    assert rq._body_sentence(facts) == expected
+
+
 def test_vital_window_gives_values_from_a_few_seconds_ago():
     window = rq.VitalWindow()
     assert window.add(0.0, {"health": 20, "oxygen": 300}) == {}
