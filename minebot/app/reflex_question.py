@@ -82,6 +82,14 @@ class VitalWindow:
         return before
 
 
+def protection_experience(stamp: float, tool: str, params: Mapping[str, Any],
+                          result: Mapping[str, Any], facts: Mapping[str, Any]) -> str:
+    from datetime import datetime, timezone
+    when = datetime.fromtimestamp(stamp, timezone.utc).isoformat(timespec="seconds")
+    position = _position(facts.get("position", facts.get("pos")))
+    return f"At {when}, {result_sentence(call_text(tool, params), result)} Now at {position or 'an unrecorded position'}."
+
+
 def hostiles(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Hostile mobs in the frame, nearest first, each with ``name`` and ``dist``."""
     found: list[dict[str, Any]] = []
@@ -350,11 +358,11 @@ def after_default_options(
     return options
 
 
-def frame_questions(options: Mapping[str, str]) -> dict[str, Any]:
+def frame_questions(options: Mapping[str, str], *, protecting: bool = False) -> dict[str, Any]:
     """One request.  The danger question is asked only when a protective
     action is on offer in this frame."""
-    protective = {key: text for key, text in options.items() if key in PROTECTIVE}
-    normal = {key: text for key, text in options.items() if key not in PROTECTIVE}
+    protective = {key: text for key, text in options.items() if key in PROTECTIVE and not protecting}
+    normal = dict(options) if protecting else {key: text for key, text in options.items() if key not in PROTECTIVE}
     questions: dict[str, Any] = {
         "q": {"type": "choice", "instructions": "Choose what the Body does next.", "criteria": normal},
     }

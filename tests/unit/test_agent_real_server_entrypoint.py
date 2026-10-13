@@ -1569,6 +1569,9 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             return type("Parts", (), {"runtime": Runtime()})()
 
         class FakeSession:
+            async def enter_world(self):
+                pass  # Lifecycle behavior is tested with the real AgentSession.
+
             parts = None
             current_goal = "collect 1 dirt"
 
@@ -1682,6 +1685,9 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         parts = type("Parts", (), {"runtime": type("Runtime", (), {"trace": Trace()})()})()
 
         class FakeSession:
+            async def enter_world(self):
+                pass  # Lifecycle behavior is tested with the real AgentSession.
+
             current_goal = "collect 1 dirt"
 
             def __init__(self, make_parts):
@@ -1766,6 +1772,9 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         conversation = FakeConversation()
 
         class FakeSession:
+            async def enter_world(self):
+                pass  # Lifecycle behavior is tested with the real AgentSession.
+
             current_goal = "collect 1 dirt"
             parts = None
 

@@ -9,6 +9,7 @@ plan call nodes use this same path.
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 import os
@@ -91,7 +92,13 @@ class CallSupervisor:
         if not execution:
             return {}
         facts = dict(execution.get("facts") or {})
-        facts.update(self._vitals.add(time.monotonic(), facts))
+        frame_clock = time.monotonic()
+        frame_input = {"execution": copy.deepcopy({key: value for key, value in execution.items()
+                                                  if key != "_frame_input"}),
+                       "monotonic_s": frame_clock,
+                       "vital_samples": copy.deepcopy(self._vitals._samples)}
+        self._last_frame_input = frame_input
+        facts.update(self._vitals.add(frame_clock, facts))
         inventory = facts.get("inventory", facts.get("inventory_counts"))
         if "food_item" not in facts and isinstance(inventory, Mapping):
             # Which items are food is the Body's knowledge, not the reflex layer's.
@@ -99,7 +106,7 @@ class CallSupervisor:
                          if isinstance(count, int) and count > 0 and _is_food_item(str(item))), None)
             if food:
                 facts["food_item"] = food
-        return {**execution, "facts": facts}
+        return {**execution, "facts": facts, "_frame_input": frame_input}
 
     def _snapshot(self, call_id: str) -> dict[str, Any]:
         snapshots = getattr(self.runtime, "execution_snapshots", None)
@@ -235,7 +242,8 @@ class CallSupervisor:
                 intent=intent, facts=facts, running=running,
                 result=result if isinstance(result, Mapping) else None,
             )
-        request: dict[str, Any] = {"state": state, "questions": rq.frame_questions(options)}
+        request: dict[str, Any] = {"state": state, "questions": rq.frame_questions(
+            options, protecting=bool((supervision_context or {}).get("is_reflex_action")))}
         size = len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str))
         # Private values, removed before the request reaches Decision.
         request["_request_chars_before"] = size
@@ -272,6 +280,13 @@ class CallSupervisor:
             loop_state=getattr(self, "loop_state", None),
             request_chars_before=request_chars_before, request_chars=request_chars,
             request=request,
+            frame_input=execution.get("_frame_input", {"execution": dict(execution)}),
+            compiler_input={"params": dict(params), "supervision_context": dict(supervision_context or {}),
+                            "decision_context": copy.deepcopy(dict(decision_context or {})),
+                            "options": dict(options) if options is not None else None},
+            clock={"request_monotonic_s": time.monotonic(),
+                   "elapsed_s": execution.get("elapsed_s"),
+                   "since_progress_s": execution.get("since_progress_s")},
         )
         started = time.monotonic()
         raw: dict[str, Any] | None = None
@@ -399,6 +414,8 @@ class CallSupervisor:
         reflex_choice = context.get("reflex_action_choice")
         if isinstance(reflex_choice, str):
             options.pop(reflex_choice, None)
+        if context.get("is_reflex_action") and not terminal:
+            options.pop("next_step", None)
         if callable(getattr(tool, "supervision_reader", None)) and record.get("reader_new_fact"):
             options["inspect"] = "Read one new registered fact."
         return options
@@ -518,6 +535,7 @@ class CallSupervisor:
             "tool": getattr(tool, "name", "unknown"),
             "params": dict(args[1]) if len(args) > 1 and isinstance(args[1], Mapping) else {},
             "started_at": time.monotonic(),
+            "timeout_s": timeout_s,
             "initial_reader_done": False,
             "reader_new_fact": False,
         }

@@ -37,6 +37,10 @@ class BodyLoop(CallSupervisor):
         self._result_pending: dict[str, dict[str, Any]] = {}
         self._loop_wakeup = asyncio.Event()
         self._idle_sequence = 0
+        self._suspended: dict[str, Any] | None = None
+        self._protection_task: asyncio.Task[Any] | None = None
+        self._protective_redirect: tuple[str, tuple[str, dict[str, Any]]] | None = None
+        self._protective_verdict: str | None = None
         self.recent_experiences: deque[str] = deque(maxlen=5)
 
     async def run(self, tool: Any, callback: Any, args: tuple[Any, ...], **kwargs: Any) -> Any:
@@ -44,6 +48,9 @@ class BodyLoop(CallSupervisor):
         context = kwargs.get("supervision_context") or {}
         context = context if isinstance(context, Mapping) else {}
         previous = self.loop_state
+        await self.start()
+        call_id = str(kwargs.get("call_id") or "")
+        self._result_pending[call_id] = {"call_id": call_id}
         if context.get("is_reflex_action"):
             choice = context.get("reflex_action_choice")
             target = "threat" if choice == "move_away" else "survival"
@@ -53,40 +60,32 @@ class BodyLoop(CallSupervisor):
         try:
             return await super().run(tool, callback, args, **kwargs)
         finally:
-            self._set_state(previous, "call_ended")
+            self._set_state(previous, "decision" if context.get("is_reflex_action") else "call_ended")
+            if not context.get("is_plan"):
+                self._release_result_pending(call_id)
             self._ensure_idle_task()
 
     def _start_monitor(
         self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
         wake: asyncio.Event, worker: asyncio.Task[Any],
     ) -> asyncio.Task[Any] | None:
-        """Register a top-level call with the one Body lifecycle task.
-
-        A protective action can be started from inside the lifecycle monitor;
-        that nested case retains a short child monitor so the parent can await
-        its physical result.  Ordinary Agent work is registered in the
-        lifecycle task itself and therefore does not create another monitor.
-        """
-        current_task = asyncio.current_task()
-        lifecycle = self._lifecycle_task
-        if lifecycle is not None and not lifecycle.done() and lifecycle is not current_task:
-            if self._active_monitor is not None:
-                raise RuntimeError("BodyLoop already has an active monitor")
-            record["monitor_registered"] = True
-            record["monitor_done"] = asyncio.Event()
-            self._result_pending.pop(str(record.get("call_id") or ""), None)
-            self._active_monitor = (record, tool, params, wake, worker)
-            self._loop_wakeup.set()
-            return None
-        # A call made before the session lifecycle starts, or a nested
-        # protective call made by the lifecycle task, keeps the compatibility
-        # child monitor path.  The parent lifecycle remains the owner.
-        return asyncio.create_task(self._monitor(record, tool, params, wake, worker))
+        """All calls, including protective calls, use the lifecycle consumer."""
+        if self._active_monitor is not None:
+            raise RuntimeError("BodyLoop already has an active monitor")
+        record["monitor_registered"] = True
+        record["monitor_done"] = asyncio.Event()
+        self._result_pending.pop(str(record.get("call_id") or ""), None)
+        self._active_monitor = (record, tool, params, wake, worker)
+        self._loop_wakeup.set()
+        return None
 
     async def _wait_monitor(self, record: Mapping[str, Any]) -> None:
         done = record.get("monitor_done")
         if isinstance(done, asyncio.Event):
             await done.wait()
+        transition = record.get("protection_task")
+        if isinstance(transition, asyncio.Task):
+            await transition
 
     async def _monitor(
         self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
@@ -198,7 +197,19 @@ class BodyLoop(CallSupervisor):
                 elif choice in {"surface", "go_to_surface", "retreat_safe", "eat", "move_away"}:
                     action = self._default_action(choice, execution)
                     if action is not None:
-                        await self._run_default_action(record, execution, choice, action)
+                        if record["supervision_context"].get("is_reflex_action"):
+                            self._protective_redirect = (choice, action)
+                            await self._handoff(record, execution,
+                                {"reason": "decision_default_tool", "confirmed": False},
+                                decision=choice)
+                        else:
+                            self._suspended = record
+                            # The execution transaction waits outside this
+                            # consumer. Return to the main loop so the next
+                            # protective call registers as current work.
+                            self._protection_task = asyncio.create_task(
+                                self._protect_work(record, execution, choice, action))
+                            record["protection_task"] = self._protection_task
                         return
                     self.runtime.trace.emit(
                         "call_supervision_default_unknown", tool_call_id=record["call_id"],
@@ -259,13 +270,16 @@ class BodyLoop(CallSupervisor):
         # The existing stop/settlement entry remains the only stop owner. Do
         # not revoke the containing plan: step_done must let it advance.
         is_plan = bool(record["supervision_context"].get("is_plan"))
+        is_protection = bool(record["supervision_context"].get("is_reflex_action"))
+        if is_protection:
+            self._protective_verdict = str(decision or "call_agent")
         started = time.monotonic()
         settled = await self.runtime.cancel_active_execution_with_facts(
             "direct_call:" + safe["reason"], cancel_reflex=False,
             # A plan handoff stops the current node but does not invalidate
             # the containing activity. Direct calls have no owner to preserve
             # and keep the existing generation invalidation safety boundary.
-            invalidate_generation=not is_plan,
+            invalidate_generation=not (is_plan or is_protection),
         )
         self.runtime.trace.emit(
             "call_supervision_stop_settled", tool_call_id=call_id,
@@ -276,18 +290,11 @@ class BodyLoop(CallSupervisor):
             "direct_call_handoff", tool_call_id=call_id, facts=safe, settlement=settled,
         )
         self.runtime.direct_call_handoffs[call_id] = {"facts": safe, "settlement": settled}
-        remember = getattr(self, "record_experience", None)
-        if callable(remember):
-            remember(
-                f"{safe.get('what', {}).get('tool', execution.get('tool'))} was stopped by "
-                f"Decision ({safe.get('decision', {}).get('choice') or 'unknown'}); "
-                f"the Body is at {safe.get('body', {}).get('position')}."
-            )
         # Only after the unified stop path has settled may a direct call send
         # its fact to the Agent. Plan calls are reported once by
         # ReflexManager, after WorkPlanExecutor records the node state; doing
         # both here and there would create two facts for one stopped node.
-        if not is_plan:
+        if not is_plan and not is_protection:
             # Use the runtime's unified delivery path.  Responses sessions
             # forward this to the kernel; SDK sessions forward it to their
             # outer AgentSession listener.  Calling the kernel directly here
@@ -369,6 +376,71 @@ class BodyLoop(CallSupervisor):
                     notify({"call_id": record["call_id"], "status": "handoff_requested", **safe})
         return choice
 
+    @staticmethod
+    def _remaining(record: Mapping[str, Any]) -> float | None:
+        timeout = record.get("timeout_s")
+        if timeout is None:
+            return None
+        return max(0.0, float(record.get("started_at", time.monotonic())) + float(timeout) - time.monotonic())
+
+    async def _protect_work(self, record, execution, choice, action) -> None:
+        """Execution waits outside the lifecycle; the original deadline remains authoritative."""
+        try:
+            remaining = self._remaining(record)
+            if remaining is None:
+                await self._run_default_action(record, execution, choice, action)
+            else:
+                await asyncio.wait_for(self._run_default_action(record, execution, choice, action), remaining)
+        except asyncio.TimeoutError:
+            safe = self._handoff_facts(execution, reason="decision_default_tool",
+                                       confirmed=False, decision="unknown")
+            safe["default_action"] = {"choice": choice, "tool": action[0],
+                                      "result": self._compact_result(record.get("protective_result", {})),
+                                      "then": "unknown"}
+            self.runtime.direct_call_handoffs[record["call_id"]] = {"facts": safe, "settlement": {"settled": True}}
+            self.runtime.trace.emit("call_supervision_default_deadline", tool_call_id=record["call_id"], facts=safe)
+        finally:
+            self._suspended = None
+            self._loop_wakeup.set()
+
+    async def _execute_protection(self, choice, action, record=None, *, call_id=None):
+        """Register each protective action as current work in the same lifecycle.
+
+        Switching responses replaces the current action, never the original
+        suspended slot. Only the enclosing transaction can notify the Agent.
+        """
+        from minebot.brain.registry import execute_tool
+        while True:
+            self._protective_redirect = None
+            self._protective_verdict = None
+            default_id = call_id or f"reflex-default-{uuid4()}"
+            default_tool = self.runtime.registry.get(action[0])
+            try:
+                result = await self.runtime.run_tool(
+                    default_tool, execute_tool, default_tool, action[1],
+                    getattr(self.runtime, "weld_context", None),
+                    tool_call_id=default_id, claim_holder="threat",
+                    supervision_context={"is_reflex_action": True,
+                                         "reflex_action_choice": choice,
+                                         "intent": supervision_module._DEFAULT_ACTION_TEXT.get(choice, choice)},
+                )
+            except Exception as exc:
+                result = {"success": False, "reason": type(exc).__name__}
+                self.runtime.trace.emit("call_supervision_default_failed", tool_call_id=default_id,
+                                        choice=choice, error_type=type(exc).__name__)
+            if record is not None:
+                record["protective_result"] = result
+            redirect = self._protective_redirect
+            if redirect is None:
+                return choice, action, result, default_id
+            choice, action = redirect
+            call_id = None
+
+    def _remember_protection(self, action, result) -> None:
+        facts = self._idle_facts()
+        self.record_experience(rq.protection_experience(time.time(), action[0], action[1],
+                                                       self._compact_result(result), facts))
+
     async def _run_default_action(
         self, record: dict[str, Any], execution: Mapping[str, Any], choice: str,
         action: tuple[str, dict[str, Any]],
@@ -396,31 +468,8 @@ class BodyLoop(CallSupervisor):
             # The earlier work may be resumed, so its owner stays valid.
             invalidate_generation=False,
         )
-        default_result: Any = None
-        default_id = f"reflex-default-{uuid4()}"
-        registry = getattr(self.runtime, "registry", None)
-        try:
-            default_tool = registry.get(action[0]) if registry is not None else None
-            if default_tool is None:
-                raise LookupError(action[0])
-            from minebot.brain.registry import execute_tool
-            default_result = await self.runtime.run_tool(
-                default_tool, execute_tool, default_tool, action[1],
-                getattr(self.runtime, "weld_context", None),
-                tool_call_id=default_id,
-                claim_holder="threat",
-                supervision_context={
-                    "is_reflex_action": True,
-                    "reflex_action_choice": choice,
-                    "intent": supervision_module._DEFAULT_ACTION_TEXT.get(choice, choice),
-                },
-            )
-        except Exception as exc:
-            self.runtime.trace.emit(
-                "call_supervision_default_failed", tool_call_id=call_id,
-                choice=choice, error_type=type(exc).__name__,
-            )
-            default_result = {"success": False, "reason": type(exc).__name__}
+        choice, action, default_result, default_id = await self._execute_protection(choice, action, record)
+        record["protective_result"] = default_result
         after = await self._after_default_action(
             record, action, default_result, default_id, protective_choice=choice,
         )
@@ -430,7 +479,7 @@ class BodyLoop(CallSupervisor):
         }, "settlement": settled}
         # The plan runtime reads this choice: "repeat" re-enters the stopped node.
         handoff["decision"] = {**dict(handoff.get("decision") or {}),
-                               "choice": "repeat" if after == "resume" else "call_agent"}
+                               "choice": "repeat" if after == "resume" else after}
         self.runtime.direct_call_handoffs[call_id] = {"facts": handoff, "settlement": settled}
         self.runtime.trace.emit(
             "call_supervision_default_finished", tool_call_id=call_id,
@@ -439,7 +488,8 @@ class BodyLoop(CallSupervisor):
         if after == "resume":
             # Back to the earlier work; the Agent is not woken for this.
             record["resume_original"] = True
-        elif not bool(record["supervision_context"].get("is_plan")):
+            self._remember_protection(action, default_result)
+        elif after == "call_agent" and not bool(record["supervision_context"].get("is_plan")):
             notify_fact = getattr(self.runtime, "notify_reflex_fact", None)
             if callable(notify_fact):
                 notify_fact({"call_id": call_id, "status": "default_action_completed", **handoff})
@@ -449,6 +499,8 @@ class BodyLoop(CallSupervisor):
         default_result: Any, default_id: str, *, protective_choice: str = "",
     ) -> str:
         """Ask what follows a protective action: go back, do it again, or the Agent."""
+        if self._protective_verdict == "call_agent":
+            return "call_agent"
         context = record["supervision_context"]
         intent = str(context.get("intent") or context.get("node_description") or "")
         registry = getattr(self.runtime, "registry", None)
@@ -457,6 +509,9 @@ class BodyLoop(CallSupervisor):
         total = 0
         new_attempt = True
         while default_tool is not None:
+            remaining = self._remaining(record)
+            if remaining is not None and remaining <= 0:
+                return "unknown"
             payload = default_result if isinstance(default_result, Mapping) else getattr(default_result, "result", default_result)
             if not isinstance(payload, Mapping):
                 payload = {"success": False, "reason": str(payload)[:200]}
@@ -482,7 +537,7 @@ class BodyLoop(CallSupervisor):
                     decision_context={"tool_result": dict(payload), "tool_arguments": dict(action[1]),
                                       "body_state": execution["facts"], "history": list(history),
                                       "history_earlier": total - len(history)},
-                ), timeout=2.2)
+                ), timeout=2.2 if remaining is None else min(2.2, remaining))
             except asyncio.TimeoutError:
                 choice = "unknown"
             record["questions"] += 1
@@ -493,22 +548,16 @@ class BodyLoop(CallSupervisor):
                 # interrupted work pending, refresh facts at the next cadence,
                 # and do not wake the Agent or add a fictitious tool attempt.
                 record["unknown_answers"] = int(record.get("unknown_answers") or 0) + 1
-                await asyncio.sleep(FACT_FRAME_INTERVAL_S)
+                remaining = self._remaining(record)
+                await asyncio.sleep(FACT_FRAME_INTERVAL_S if remaining is None else min(FACT_FRAME_INTERVAL_S, remaining))
                 continue
-            try:
-                from minebot.brain.registry import execute_tool
-                default_result = await self.runtime.run_tool(
-                    default_tool, execute_tool, default_tool, action[1],
-                    getattr(self.runtime, "weld_context", None),
-                    tool_call_id=f"{default_id}-{total}", claim_holder="threat",
-                    supervision_context={"is_reflex_action": True,
-                                         "reflex_action_choice": protective_choice,
-                                         "intent": supervision_module._DEFAULT_ACTION_TEXT.get(protective_choice, action[0])},
-                )
-            except Exception as exc:
-                default_result = {"success": False, "reason": type(exc).__name__, "canRetry": False}
+            protective_choice, action, default_result, default_id = await self._execute_protection(
+                protective_choice, action, record, call_id=f"{default_id}-{total}")
+            default_tool = registry.get(action[0])
+            if self._protective_verdict == "call_agent":
+                return "call_agent"
             new_attempt = True
-        return "call_agent"
+        return "unknown"
 
 
     def _set_state(self, state: str, cause: str) -> None:
@@ -608,6 +657,12 @@ class BodyLoop(CallSupervisor):
             if isinstance(done, asyncio.Event):
                 done.set()
         self._loop_wakeup.set()
+        protection = self._protection_task
+        self._protection_task = None
+        if protection is not None and not protection.done():
+            protection.cancel()
+            await asyncio.gather(protection, return_exceptions=True)
+        self._suspended = None
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -674,50 +729,24 @@ class BodyLoop(CallSupervisor):
         action = self._default_action(choice, {"facts": dict(facts)})
         if action is None:
             return
-        registry = getattr(self.runtime, "registry", None)
-        default_tool = registry.get(action[0]) if registry is not None else None
-        if default_tool is None:
-            self.runtime.trace.emit("call_supervision_default_unknown", tool_call_id="idle-loop", choice=choice)
-            return
-        from minebot.brain.registry import execute_tool
-
-        call_id = f"reflex-idle-{self._idle_sequence}"
         self.runtime.trace.emit(
             "call_supervision_default_requested", tool_call_id="idle-loop",
             choice=choice, tool=action[0], arguments=action[1], loop_state=self.loop_state,
         )
         try:
-            result = await self.runtime.run_tool(
-                default_tool, execute_tool, default_tool, action[1],
-                getattr(self.runtime, "weld_context", None),
-                # A protective action owns the Body as threat/survival work,
-                # even when it was selected while the Agent was idle.  This
-                # lets an arriving Agent call wait for it through the normal
-                # threat admission path instead of treating it as disposable
-                # life activity.
-                tool_call_id=call_id, claim_holder="threat",
-                supervision_context={
-                    "is_reflex_action": True,
-                    "reflex_action_choice": choice,
-                    "intent": {"surface": "Swim up to air.", "eat": "Eat food from the inventory.",
-                               "move_away": "Move away from the nearby hostile mob.",
-                               "retreat_safe": "Go back to the last safe standing place."}.get(choice, choice),
-                },
-            )
-            compact = CallSupervisor._compact_result(result)
-            self.record_experience(
-                f"The Body took the protective action {choice} while idle; "
-                f"the action result was {compact}."
-            )
-            self.runtime.trace.emit(
-                "call_supervision_default_finished", tool_call_id="idle-loop",
-                choice=choice, tool=action[0], result=compact,
-            )
-        except Exception as exc:
-            self.runtime.trace.emit(
-                "call_supervision_default_failed", tool_call_id="idle-loop",
-                choice=choice, error_type=type(exc).__name__,
-            )
+            choice, action, result, call_id = await self._execute_protection(
+                choice, action, call_id=f"reflex-idle-{self._idle_sequence}")
+            if self._protective_verdict == "call_agent":
+                notify = getattr(self.runtime, "notify_reflex_fact", None)
+                if callable(notify):
+                    notify({"call_id": call_id, "status": "handoff_requested",
+                            "reason": "decision_call_agent", "result": self._compact_result(result)})
+            else:
+                self._remember_protection(action, result)
+            self.runtime.trace.emit("call_supervision_default_finished", tool_call_id="idle-loop",
+                                    choice=choice, tool=action[0], result=self._compact_result(result))
+        finally:
+            self._loop_wakeup.set()
 
     @staticmethod
     def _default_action(choice: str, execution: Mapping[str, Any]) -> tuple[str, dict[str, Any]] | None:
@@ -754,7 +783,7 @@ class BodyLoop(CallSupervisor):
                     pass
                 if self._active_monitor is not None:
                     continue
-                if self._result_pending:
+                if self._result_pending or (self._protection_task is not None and not self._protection_task.done()):
                     # The worker has ended, but the Agent/plan result judge is
                     # still using the Body facts.  Do not start idle work or
                     # ask an idle Decision question until it releases this
@@ -776,6 +805,9 @@ class BodyLoop(CallSupervisor):
                     tool="__idle__", purpose="idle_frame", loop_state="idle",
                     fact_revision=self._idle_sequence, request=request,
                     request_chars=len(str(request)),
+                    frame_input=getattr(self, "_last_frame_input", {"execution": {"facts": dict(facts)}}),
+                    compiler_input={"facts": dict(facts), "options": dict(options)},
+                    clock={"request_monotonic_s": started},
                 )
                 try:
                     # Idle is a live state, so still ask even when the only
@@ -810,7 +842,7 @@ class BodyLoop(CallSupervisor):
                     decision_ms=round((time.monotonic() - started) * 1000.0, 3),
                 )
                 if choice in rq.PROTECTIVE or choice == "eat":
-                    await self._run_idle_protection(choice, facts)
+                    self._protection_task = asyncio.create_task(self._run_idle_protection(choice, facts))
         except asyncio.CancelledError:
             raise
 

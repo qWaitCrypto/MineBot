@@ -645,6 +645,7 @@ async def run_real_server_goal(
             return parts
 
         session = AgentSession(make_parts)
+        await session.enter_world()
         session.submit(SessionCommand.start(goal))
         try:
             def should_stop(step: SessionStep) -> bool:
@@ -872,6 +873,7 @@ async def run_real_server_interactive(
                 progress_epoch_archive,
             ),
         )
+        await session.enter_world()
         if goal:
             if task_workspace.current_task is None:
                 session.submit(SessionCommand.start(goal))

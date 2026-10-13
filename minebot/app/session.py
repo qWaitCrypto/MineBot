@@ -1468,6 +1468,13 @@ class AgentSession:
             return SessionStep(status, self.parts.lifecycle.state, f"startup_{decision}")
         return None
 
+    async def enter_world(self) -> None:
+        """Bind the runtime and start reflex supervision before any Agent turn."""
+        self._ensure_parts_for_runtime_intent()
+        body_loop = getattr(self.parts.runtime, "body_loop", None)
+        if body_loop is not None:
+            await body_loop.start()
+
     def _ensure_parts_for_runtime_intent(self) -> None:
         if self.parts is not None:
             self._bind_runtime_callbacks()

@@ -558,3 +558,194 @@ def test_plan_result_uses_the_same_body_loop_judge_once():
         assert calls[0]["call_id"] == "one"
 
     asyncio.run(run())
+
+
+def test_protective_running_frame_has_no_next_step_or_repeated_action():
+    runtime, _, _ = _runtime()
+    loop = BodyLoop(runtime)
+    options = loop._options_for(SimpleNamespace(name='go_to_surface'), {
+        'tool': 'go_to_surface', 'params': {},
+        'supervision_context': {'intent': 'Swim up to air.', 'is_reflex_action': True,
+                                'reflex_action_choice': 'surface'},
+    }, execution={'state': 'running', 'facts': {'oxygen': 100}})
+    assert set(options) == {'keep_going', 'call_agent'}
+
+
+def test_lifecycle_monitors_work_protection_and_switch_without_nested_consumer(monkeypatch):
+    import threading
+
+    async def scenario(verdict, switch=False):
+        runtime, trace, _ = _runtime()
+        runtime.direct_call_handoffs = {}
+        runtime.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
+        runtime.weld_context = None
+        notifications, frames, actions, consumers = [], [], [], []
+        runtime.notify_reflex_fact = notifications.append
+        state = {'current': None, 'last': None}
+        stop_events = {}
+
+        def tick(call_id):
+            if state['current'] and state['current']['operation_id'] == call_id:
+                state['current']['fact_revision'] += 1
+
+        runtime.execution_snapshots = SimpleNamespace(current=lambda: state['current'],
+            last=lambda: state['last'], tick=tick, running=lambda call_id: None)
+        loop = BodyLoop(runtime)
+
+        original_monitor = loop._monitor
+        async def monitor(*args):
+            consumers.append(asyncio.current_task())
+            await original_monitor(*args)
+        loop._monitor = monitor
+
+        async def lane_run(invoke, timeout_s=None):
+            return await asyncio.to_thread(invoke)
+
+        runtime.execution_lane = SimpleNamespace(run=lane_run)
+
+        async def cancel(*args, **kwargs):
+            stop_events[state['current']['operation_id']].set()
+            await asyncio.sleep(.002)
+            return {'settled': True}
+
+        runtime.cancel_active_execution_with_facts = cancel
+
+        async def physical(tool, callback, *args, tool_call_id, supervision_context, **kwargs):
+            stop = threading.Event()
+            stop_events[tool_call_id] = stop
+            state['current'] = {'operation_id': tool_call_id, 'tool': tool.name,
+                'state': 'running', 'phase': 'working', 'fact_revision': 1,
+                'facts': {'oxygen': 100, 'position': [1, 60, 2]}}
+            actions.append(tool.name)
+
+            def invoke(*unused):
+                # Work waits for a semantic stop. Protection lasts long enough
+                # to be seen by the SAME lifecycle before returning normally.
+                stopped = stop.wait(.04 if tool.name != 'collect_resource' else 1)
+                result = {'success': not stopped, 'reason': 'preempted' if stopped else 'surface_reached'}
+                state['last'] = {**state['current'], 'state': 'cancelled' if stopped else 'succeeded'}
+                state['current'] = None
+                runtime.last_known_body_state['position'] = [1, 64, 2]
+                return result
+
+            return await loop.run(tool, invoke, (tool, args[1], None), call_id=tool_call_id,
+                                  timeout_s=.5, supervision_context=supervision_context)
+
+        runtime.run_tool = physical
+
+        async def judge(call_id, tool, params, execution, idle_s, **kwargs):
+            if kwargs['purpose'] == 'default_result_frame':
+                return verdict
+            frames.append((tool.name, asyncio.current_task()))
+            if tool.name == 'collect_resource':
+                return 'surface'
+            if switch and tool.name == 'go_to_surface':
+                # The bound action uses the existing surface option for this
+                # test's second tool, without changing the suspended work.
+                return 'retreat_safe'
+            return 'call_agent' if verdict == 'call_agent' else 'keep_going'
+
+        loop.judge = judge
+        loop._default_action = lambda choice, execution: (
+            ('move_to', {'x': 1, 'y': 64, 'z': 2}) if choice == 'retreat_safe' else ('go_to_surface', {}))
+        try:
+            await asyncio.wait_for(physical(SimpleNamespace(name='collect_resource'), None,
+                SimpleNamespace(name='collect_resource'), {'item': 'oak_log'}, None,
+                tool_call_id='original', supervision_context={'intent': 'have three logs'}), 2)
+            assert frames and len(consumers) >= 2
+            assert all(task is loop._lifecycle_task for task in consumers)
+            assert {name for name, _ in frames} >= {'collect_resource', 'go_to_surface'}
+            assert len(notifications) == (1 if verdict == 'call_agent' else 0)
+            assert len(loop.recent_experiences) == (0 if verdict == 'call_agent' else 1)
+            if loop.recent_experiences:
+                text = loop.recent_experiences[0]
+                assert text.startswith('At ') and 'Now at' in text and 'ended normally' in text
+            if switch:
+                assert actions == ['collect_resource', 'go_to_surface', 'move_to']
+            assert loop._suspended is None
+        finally:
+            await loop.stop()
+
+    monkeypatch.setattr('minebot.app.direct_call_supervision.FACT_FRAME_INTERVAL_S', .005)
+    monkeypatch.setattr('minebot.app.direct_call_supervision.FAST_COMPLETION_GRACE_S', 0)
+    asyncio.run(scenario('resume'))
+    asyncio.run(scenario('call_agent'))
+    asyncio.run(scenario('resume', switch=True))
+
+
+def test_unknown_protection_results_obey_original_deadline(monkeypatch):
+    async def run():
+        runtime, trace, _ = _runtime()
+        runtime.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
+        loop = BodyLoop(runtime)
+        started = time.monotonic()
+        record = {'call_id': 'original', 'tool': 'collect_resource', 'params': {},
+                  'started_at': started, 'timeout_s': .04, 'questions': 0, 'unknown_answers': 0,
+                  'supervision_context': {'intent': 'have three logs'}}
+        loop.judge = lambda *args, **kwargs: asyncio.sleep(10, result='unknown')
+        answer = await loop._after_default_action(record, ('go_to_surface', {}), {'success': True}, 'surface')
+        assert answer == 'unknown'
+        assert .035 <= time.monotonic() - started < .15
+        assert not [e for e in trace.events if e['event'] == 'direct_call_handoff']
+    monkeypatch.setattr('minebot.app.body_loop.FACT_FRAME_INTERVAL_S', .001)
+    asyncio.run(run())
+
+
+def test_idle_quiet_protection_records_time_result_position_and_shutdown_drains():
+    async def run():
+        runtime, _, _ = _runtime()
+        runtime.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
+        notifications = []
+        runtime.notify_reflex_fact = notifications.append
+        runtime.run_tool = lambda *args, **kwargs: asyncio.sleep(0, result={'success': True})
+        loop = BodyLoop(runtime)
+        await loop._run_idle_protection('surface', {'oxygen': 100})
+        assert not notifications and len(loop.recent_experiences) == 1
+        assert 'Now at [1.0, 64.0, 2.0]' in loop.recent_experiences[0]
+        cancelled = asyncio.Event()
+        async def pending():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        await loop.start()
+        job = loop._protection_task = asyncio.create_task(pending())
+        await asyncio.sleep(0)
+        await loop.stop()
+        assert job.done() and cancelled.is_set() and loop._suspended is None
+    asyncio.run(run())
+
+
+def test_protection_questions_offer_other_responses_without_a_second_danger_question():
+    runtime, _, _ = _runtime()
+    loop = BodyLoop(runtime)
+    context = {'intent': 'Swim up to air.', 'is_reflex_action': True, 'reflex_action_choice': 'surface'}
+    record = {'tool': 'go_to_surface', 'params': {}, 'supervision_context': context}
+    execution = {'state': 'running', 'facts': {'oxygen': 100,
+        'nearby_hostiles': [{'hostile': True, 'name': 'hostile mob', 'dist': 3}]}}
+    tool = SimpleNamespace(name='go_to_surface')
+    options = loop._options_for(tool, record, execution=execution)
+    request = loop._question('protecting', tool, {}, execution, idle_s=0,
+                             purpose='running_frame', supervision_context=context, options=options)
+    assert set(request['questions']) == {'q'}
+    assert set(request['questions']['q']['criteria']) == {'keep_going', 'move_away', 'call_agent'}
+
+
+def test_trace_retains_replay_inputs_and_uses_no_recursive_frame_metadata():
+    async def run():
+        runtime, trace, _ = _runtime()
+        loop = BodyLoop(runtime)
+        original = {'facts': {'health': 20, 'oxygen': 100}, 'elapsed_s': 3, 'state': 'running'}
+        first = loop._frame(original)
+        second = loop._frame(first)
+        assert '_frame_input' not in second['_frame_input']['execution']
+        await loop.judge('call', SimpleNamespace(name='move_to'), {'x': 1}, first, 0,
+                         supervision_context={'intent': 'reach the requested place'},
+                         options={'keep_going': 'Continue.'})
+        event = next(e for e in trace.events if e['event'] == 'call_supervision_request')
+        assert event['frame_input']['execution'] == original
+        assert isinstance(event['frame_input']['monotonic_s'], float)
+        assert event['compiler_input']['params'] == {'x': 1}
+        assert event['clock']['elapsed_s'] == 3
+        assert '_frame_input' not in event['request']
+    asyncio.run(run())
