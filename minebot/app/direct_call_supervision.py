@@ -15,7 +15,7 @@ import json
 import os
 import time
 from uuid import uuid4
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
@@ -525,6 +525,7 @@ class CallSupervisor:
     async def run(
         self, tool: Any, callback: Any, args: tuple[Any, ...], *, call_id: str,
         timeout_s: float | None, supervision_context: Mapping[str, Any] | None = None,
+        readmit: Callable[[], None] | None = None,
     ) -> Any:
         loop = asyncio.get_running_loop()
         wake = asyncio.Event()
@@ -612,6 +613,11 @@ class CallSupervisor:
                     again = await self._decide_result(record, tool, params, result) == "repeat"
                 if not again:
                     break
+                # The unified stop released the old Body claim. A resumed
+                # direct call must re-enter the same admission boundary before
+                # the callback can write; it cannot reuse the old generation.
+                if readmit is not None:
+                    readmit()
                 record["cancel_requested"] = record["settling"] = False
                 record["initial_reader_done"] = record["reader_new_fact"] = False
                 record.pop("decision", None)
@@ -622,7 +628,9 @@ class CallSupervisor:
             handoff = self.runtime.direct_call_handoffs.get(call_id)
             payload = result if isinstance(result, dict) else getattr(result, "result", None)
             if handoff is not None and isinstance(payload, dict):
-                payload.setdefault("metrics", {})["direct_call_handoff"] = handoff
+                if not isinstance(payload.get("metrics"), dict):
+                    payload["metrics"] = {}
+                payload["metrics"]["direct_call_handoff"] = handoff
             metrics = payload.get("metrics") if isinstance(payload, dict) else None
             if isinstance(metrics, dict) and metrics.get("control_unknown"):
                 self.runtime.body_control.mark_unknown()

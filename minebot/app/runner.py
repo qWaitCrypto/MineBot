@@ -2028,6 +2028,13 @@ class AgentRuntime:
                 raise BodyRecoveryRequired("body_busy", facts={"holder": control.snapshot().to_payload()}) from exc
         receipt: dict[str, object] = {}
 
+        def readmit_callback():
+            nonlocal claim_generation
+            if claim_generation is not None:
+                claim_generation = self.body_control.claim(claim_id, holder=claim_holder).generation
+                self.trace.emit("body_call_readmitted", tool_call_id=tool_call_id,
+                                generation=claim_generation, holder=claim_holder)
+
         def admitted_callback(*values):
             from minebot.contract.execution import body_claim_scope, execution_checkpoint, execution_receipt_scope
             execution_checkpoint()
@@ -2074,7 +2081,7 @@ class AgentRuntime:
                     ):
                 result = await supervisor.run(tool, admitted_callback, call_args,
                     call_id=operation_id, timeout_s=timeout_s,
-                    supervision_context=supervision_context)
+                    supervision_context=supervision_context, readmit=readmit_callback)
                 outcome = _execution_outcome(result)
                 return with_execution_receipt(result)
             if tool.sidecar.can_mutate_body:

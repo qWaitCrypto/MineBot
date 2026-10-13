@@ -1072,3 +1072,68 @@ def test_plan_reports_blocked_when_a_call_is_cancelled_underneath_it():
         assert result.status == "blocked"
         assert ("work_plan_blocked", {"reason": "call_cancelled"}) in emitted
     asyncio.run(run())
+
+
+def test_direct_work_reclaims_body_after_protection_before_resuming(monkeypatch):
+    """A real run selected resume, then the old claim rejected the second write."""
+    from minebot.contract.execution import execution_checkpoint
+    from minebot.app.reflex_tools import ReflexManager
+
+    async def run():
+        runtime, _ = make_runtime(ResetGenericCallIpc(progressing=False))
+        runtime.reflex_manager = ReflexManager(runtime)
+        writes = []
+
+        def invoke(_params):
+            writes.append(runtime.body_control.snapshot())
+            if len(writes) == 1:
+                while True:
+                    execution_checkpoint()
+                    time.sleep(.001)
+            return ToolResult(True, "work_completed", False)
+
+        tool = RegisteredTool("resume_work", "A cancellable body operation.",
+            {"type": "object", "properties": {}, "additionalProperties": True}, invoke,
+            ToolSidecar("resume_work", True, source="test", body_scope=("moveTo",), timeout_s=2),
+            supervision_explanation="Work until the declared result is reached.")
+        runtime.registry.register(tool)
+        runtime.registry.register(RegisteredTool('go_to_surface', 'Swim up.',
+            tool.input_schema, lambda _: ToolResult(True, 'surface_reached', False),
+            ToolSidecar('go_to_surface', True, source='test', body_scope=('moveTo',), timeout_s=2)))
+        loop = runtime.body_loop
+        notifications = []
+        runtime.notify_reflex_fact = notifications.append
+
+        async def protect(choice, action, record=None, **kwargs):
+            # Exercise the actual settled Body claim boundary. The protective
+            # tool's claim has a new generation and is released when it ends.
+            runtime.body_control.claim("protective-call", holder="threat")
+            runtime.body_control.settle(claim_id="protective-call")
+            return choice, action, {"success": True, "reason": "surface_reached"}, "protective-call"
+
+        async def judge(call_id, selected_tool, params, execution, idle_s, **kwargs):
+            if kwargs['purpose'] == 'default_result_frame': return 'resume'
+            if kwargs['purpose'] == 'result_frame': return 'next_step'
+            return 'surface' if len(writes) == 1 else 'keep_going'
+
+        loop._execute_protection = protect
+        loop._read_idle_facts = lambda: asyncio.sleep(0, result={'position': [0, 5, 0], 'oxygen': 300})
+        loop.judge = judge
+        try:
+            result = await asyncio.wait_for(runtime.run_tool(tool, execute_tool, tool,
+                {"intent": "complete the work"}, runtime.weld_context,
+                tool_call_id="original", timeout_s=2), 3)
+            assert result['success'] is True
+            assert result['reason'] == 'work_completed'
+            assert len(writes) == 2
+            assert all(c.claim_id == 'original' and c.holder == 'agent_call' for c in writes)
+            assert writes[1].generation > writes[0].generation
+            assert runtime.body_control.snapshot().holder == 'none'
+            assert len(loop.recent_experiences) == 1
+            assert not [n for n in notifications if n.get('status') == 'default_action_completed']
+        finally:
+            await runtime.aclose()
+
+    monkeypatch.setattr(supervision_module, 'FAST_COMPLETION_GRACE_S', 0)
+    monkeypatch.setattr(supervision_module, 'FACT_FRAME_INTERVAL_S', .005)
+    asyncio.run(run())
