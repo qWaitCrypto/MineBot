@@ -442,6 +442,34 @@ def test_idle_protection_is_executed_once_through_threat_claim():
     asyncio.run(run())
 
 
+def test_idle_profile_action_uses_life_claim_and_shared_supervision():
+    async def run():
+        runtime, trace, _decision = _runtime()
+        runtime.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
+        runtime.weld_context = None
+        calls = []
+
+        async def run_tool(*args, **kwargs):
+            calls.append(kwargs)
+            return {"success": True, "reason": "arrived"}
+
+        runtime.run_tool = run_tool
+        loop = BodyLoop(runtime)
+        facts = {
+            "position": [4, 80, 4],
+            "life_profile": {"home": {"pos": [0, 80, 0]}},
+        }
+        await loop._run_idle_action("go_home", facts)
+        assert calls and calls[0]["claim_holder"] == "life"
+        assert calls[0]["supervision_context"]["is_reflex_action"] is True
+        assert calls[0]["supervision_context"]["is_life_action"] is True
+        assert calls[0]["supervision_context"]["intent"] == "Walk to the home position."
+        assert any(e["event"] == "call_supervision_default_requested" for e in trace.events)
+        assert any(e["event"] == "call_supervision_default_finished" for e in trace.events)
+
+    asyncio.run(run())
+
+
 def test_reflex_action_cannot_offer_the_same_protective_action_again():
     runtime, _trace, _decision = _runtime()
     record = {

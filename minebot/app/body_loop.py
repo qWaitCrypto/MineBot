@@ -57,6 +57,8 @@ class BodyLoop(CallSupervisor):
         self._reaction_event_loop: asyncio.AbstractEventLoop | None = None
         self._ambient_facts: dict[str, Any] = {}
         self._life_profile = load_profile()
+        self._reflex_claim_holder = "threat"
+        self._reflex_action_intent: str | None = None
 
     def _queue_lifecycle_event(self, event: Event) -> None:
         self._lifecycle_events.append(event)
@@ -226,7 +228,9 @@ class BodyLoop(CallSupervisor):
             return {"success": False, "reason": "death", "canRetry": False}
         call_id = str(kwargs.get("call_id") or "")
         self._result_pending[call_id] = {"call_id": call_id}
-        if context.get("is_reflex_action"):
+        if context.get("is_life_action"):
+            target = "idle"
+        elif context.get("is_reflex_action"):
             choice = context.get("reflex_action_choice")
             target = "threat" if choice in {"move_away", "engage", "ranged"} else "survival"
         else:
@@ -681,10 +685,12 @@ class BodyLoop(CallSupervisor):
                 result = await self.runtime.run_tool(
                     default_tool, execute_tool, default_tool, action[1],
                     getattr(self.runtime, "weld_context", None),
-                    tool_call_id=default_id, claim_holder="threat",
+                    tool_call_id=default_id, claim_holder=getattr(self, "_reflex_claim_holder", "threat"),
                     supervision_context={"is_reflex_action": True,
+                                         "is_life_action": getattr(self, "_reflex_claim_holder", "threat") == "life",
                                          "reflex_action_choice": choice,
-                                         "intent": supervision_module._DEFAULT_ACTION_TEXT.get(choice, choice)},
+                                         "intent": getattr(self, "_reflex_action_intent", None)
+                                         or supervision_module._DEFAULT_ACTION_TEXT.get(choice, choice)},
                 )
             except Exception as exc:
                 result = {"success": False, "reason": type(exc).__name__}
@@ -704,6 +710,43 @@ class BodyLoop(CallSupervisor):
                 return choice, action, result, default_id
             choice, action = redirect
             call_id = None
+
+    async def _run_idle_action(self, choice: str, facts: Mapping[str, Any]) -> None:
+        """Run one reversible life-profile action through the shared Body loop."""
+        action = self._default_action(choice, {"facts": dict(facts)})
+        if action is None:
+            return
+        self.runtime.trace.emit(
+            "call_supervision_default_requested", tool_call_id="idle-loop",
+            choice=choice, tool=action[0], arguments=action[1], loop_state=self.loop_state,
+        )
+        previous_holder = getattr(self, "_reflex_claim_holder", "threat")
+        previous_intent = getattr(self, "_reflex_action_intent", None)
+        self._reflex_claim_holder = "life"
+        self._reflex_action_intent = {
+            "go_home": "Walk to the home position.",
+            "approach_player": "Walk to the nearby player.",
+            "follow_player": "Follow the nearby player.",
+        }.get(choice, choice)
+        try:
+            choice, action, result, call_id = await self._execute_protection(
+                choice, action, call_id=f"reflex-life-{self._idle_sequence}")
+            if self._protective_verdict == "call_agent":
+                notify = getattr(self.runtime, "notify_reflex_fact", None)
+                if callable(notify):
+                    notify({"call_id": call_id, "status": "handoff_requested",
+                            "reason": "decision_call_agent", "result": self._compact_result(result)})
+            else:
+                self._remember_protection(action, result)
+            self.runtime.trace.emit(
+                "call_supervision_default_finished", tool_call_id="idle-loop",
+                choice=choice, tool=action[0], result=self._compact_result(result),
+            )
+        finally:
+            self._reflex_claim_holder = previous_holder
+            self._reflex_action_intent = previous_intent
+            self._set_state("idle", "call_ended")
+            self._loop_wakeup.set()
 
     def _refresh_interrupted_result(self, record) -> None:
         """Keep actual terminals when settlement and the caller resume separately."""
@@ -1205,6 +1248,8 @@ class BodyLoop(CallSupervisor):
                 self._reaction_answer(reaction, choice)
                 if choice in rq.PROTECTIVE or choice == "eat":
                     self._protection_task = asyncio.create_task(self._run_idle_protection(choice, facts))
+                elif choice in {"go_home", "approach_player", "follow_player"}:
+                    self._protection_task = asyncio.create_task(self._run_idle_action(choice, facts))
         except asyncio.CancelledError:
             raise
 
