@@ -471,7 +471,7 @@ def test_idle_profile_action_uses_life_claim_and_shared_supervision():
     asyncio.run(run())
 
 
-def test_reflex_action_cannot_offer_the_same_protective_action_again():
+def test_running_protection_offers_its_own_action_instead_of_keep_going():
     runtime, _trace, _decision = _runtime()
     record = {
         "tool": "move_to",
@@ -486,8 +486,9 @@ def test_reflex_action_cannot_offer_the_same_protective_action_again():
         SimpleNamespace(name="go_to_surface"), record,
         execution={"state": "running", "facts": {"oxygen": 100}},
     )
-    assert "surface" not in options
-    assert "keep_going" in options
+    # Live step5-threat-claude2: offered "keep going", Decision kept fleeing at
+    # one block while health fell; each frame asks the protective choice again.
+    assert "surface" in options and "keep_going" not in options
 
 
 def test_body_loop_state_changes_are_reported_with_standard_fields():
@@ -643,7 +644,7 @@ def test_protective_running_frame_has_no_next_step_or_repeated_action():
         'supervision_context': {'intent': 'Swim up to air.', 'is_reflex_action': True,
                                 'reflex_action_choice': 'surface'},
     }, execution={'state': 'running', 'facts': {'oxygen': 100}})
-    assert set(options) == {'keep_going', 'call_agent'}
+    assert set(options) == {'surface', 'call_agent'}
 
 
 def test_lifecycle_monitors_work_protection_and_switch_without_nested_consumer(monkeypatch):
@@ -811,7 +812,10 @@ def test_protection_questions_offer_other_responses_without_a_second_danger_ques
     request = loop._question('protecting', tool, {}, execution, idle_s=0,
                              purpose='running_frame', supervision_context=context, options=options)
     assert set(request['questions']) == {'q'}
-    assert set(request['questions']['q']['criteria']) == {'keep_going', 'move_away', 'call_agent'}
+    assert set(request['questions']['q']['criteria']) == {'surface', 'move_away', 'call_agent'}
+    assert request['questions']['q']['instructions'] == 'Choose how the Body protects itself right now.'
+    # Only what protection is judged on; no Agent intent, task or call line.
+    assert set(request['state']) <= set(rq.PROTECTION_FACTS)
 
 
 def test_trace_retains_replay_inputs_and_uses_no_recursive_frame_metadata():

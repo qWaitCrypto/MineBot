@@ -481,7 +481,11 @@ def protective_options(facts: Mapping[str, Any], *, stop: str = "") -> dict[str,
     hurt = just_hurt(facts)
     if near and (near[0]["dist"] <= HOSTILE_REACH or hurt):
         if isinstance(near[0].get("id"), str) and near[0]["id"]:
-            options["engage"] = text(f"fight back against the {near[0]['name']} in melee.")
+            # Said in the option: with only "in melee", a zombie at one block
+            # and an iron sword in hand still lost to fleeing (probe 24/36 vs 36/36).
+            hand = _main_hand(facts)
+            held_with = f" with the {hand} in the main hand" if hand and hand != "nothing" else ""
+            options["engage"] = text(f"fight back against the {near[0]['name']} in melee{held_with}.")
             inventory = _inventory(facts) or {}
             held = {str(item).removeprefix("minecraft:"): count for item, count in inventory.items()}
             weapon = next((weapon for weapon in ("bow", "crossbow") if held.get(weapon, 0) > 0), None)
@@ -490,6 +494,22 @@ def protective_options(facts: Mapping[str, Any], *, stop: str = "") -> dict[str,
         options["move_away"] = text(f"move away from the {near[0]['name']}.")
     if hurt and _position(facts.get("safe_standing_position", facts.get("last_safe_position"))):
         options["retreat_safe"] = text("go back to the last place where the Body stood safely.")
+    return options
+
+
+# What a running protective action is judged on.
+PROTECTION_FACTS = ("body", "threats", "inventory", "main_hand", "position")
+
+
+def protecting_options(facts: Mapping[str, Any], current: str) -> dict[str, str]:
+    """While a protective action runs, every frame asks the protective choice
+    again; the running action is one of the options, not a "keep going".
+    Offered "keep going", Decision kept fleeing at one block while health fell
+    from 18 to 2 (live step5-threat-claude2)."""
+    options = protective_options(facts)
+    if current not in options:
+        options = {current: DEFAULT_ACTION_INTENTS.get(current, current), **options}
+    options["call_agent"] = "Hand control back to the Agent for a new plan."
     return options
 
 
@@ -513,7 +533,7 @@ def after_default_options(
 
 def frame_questions(
     options: Mapping[str, str], *, protecting: bool = False, acting_for_intent: bool = False,
-    interrupt: Mapping[str, Any] | None = None,
+    interrupt: Mapping[str, Any] | None = None, running_protection: bool = False,
 ) -> dict[str, Any]:
     """One request.  The danger question is asked only when a protective
     action is on offer in this frame.  Whether running work has reached its
@@ -522,7 +542,8 @@ def frame_questions(
     normal = dict(options) if protecting else {key: text for key, text in options.items() if key not in PROTECTIVE}
     questions: dict[str, Any] = {
         "q": {"type": "choice", "instructions": (
-            "Choose what the Body does right now to achieve the Agent's intent."
+            "Choose how the Body protects itself right now." if running_protection
+            else "Choose what the Body does right now to achieve the Agent's intent."
             if acting_for_intent else "Choose what the Body does next."
         ), "criteria": normal},
     }
@@ -747,6 +768,7 @@ def done_choice(raw: Mapping[str, Any] | None) -> str | None:
 
 __all__ = [
     "PROTECTIVE", "VitalWindow", "after_default_options", "attempt_lines", "call_text", "frame_choice",
+    "protecting_options", "PROTECTION_FACTS",
     "frame_options", "frame_questions", "frame_state", "hostiles", "just_hurt",
     "idle_options", "idle_question", "done_question", "done_choice", "in_danger",
     "return_place_question", "return_place_choice",

@@ -31,3 +31,13 @@ def intent_question_while_running(request, intent):
     request = copy.deepcopy(request)
     request["questions"]["q"]["criteria"].pop("next_step", None)
     return request, rq.done_question(request["state"], intent)
+
+
+def protecting_while_running(request, facts, choice):
+    """A running protective action: only the protection facts, the protective
+    choice again with the running action as one option, no keep_going."""
+    request = copy.deepcopy(request)
+    request["state"] = {key: request["state"][key] for key in rq.PROTECTION_FACTS if request["state"].get(key)}
+    request["questions"] = {"q": {"type": "choice", "instructions": "Choose how the Body protects itself right now.",
+                                  "criteria": rq.protecting_options(facts, choice)}}
+    return request

@@ -246,7 +246,14 @@ class CallSupervisor:
         request: dict[str, Any] = {"state": state, "questions": rq.frame_questions(
             options, protecting=bool((supervision_context or {}).get("is_reflex_action")),
             acting_for_intent=running and bool(intent),
-            interrupt=(supervision_context or {}).get("interrupt_when") if running else None)}
+            interrupt=(supervision_context or {}).get("interrupt_when") if running else None,
+            running_protection=running and bool((supervision_context or {}).get("is_reflex_action")))}
+        if running and (supervision_context or {}).get("is_reflex_action"):
+            # Only the facts protection is judged on. The protective intent
+            # ("The Agent wants ... Move away") and the running-call line made
+            # Decision keep fleeing at one block while health fell (replay of
+            # step5-threat-claude2; same pull as the progress line in §19).
+            request["state"] = {key: state[key] for key in rq.PROTECTION_FACTS if state.get(key)}
         if (supervision_context or {}).get("is_life_action"):
             request = rq.idle_question(facts, options)
             if running:
@@ -422,6 +429,10 @@ class CallSupervisor:
                                       current=rq.call_text(str(record.get("tool")), record.get("params")))
             options.pop(str(context.get("reflex_action_choice")), None)
             return options
+        reflex_choice = context.get("reflex_action_choice")
+        if context.get("is_reflex_action") and not terminal and isinstance(reflex_choice, str):
+            # The protective choice again, the running action one option of it.
+            return rq.protecting_options(cls._facts_for_options(current), reflex_choice)
         options = rq.frame_options(
             tool=str(record.get("tool") or getattr(tool, "name", "unknown")),
             params=record.get("params") if isinstance(record.get("params"), Mapping) else {},

@@ -95,12 +95,15 @@ def test_threat_call_uses_one_normal_question_and_can_switch_to_a_different_targ
               "supervision_context": {"is_reflex_action": True, "reflex_action_choice": "engage"}}
     tool = SimpleNamespace(name="engage_entity")
     options = CallSupervisor._options_for(tool, record, execution={"state": "running", "facts": raw})
-    assert "next_step" not in options and "engage" not in options
+    assert "next_step" not in options and "keep_going" not in options and "engage" in options
     assert set(rq.frame_questions(options, protecting=True)) == {"q"}
     assert "move_away" in options and "call_agent" in options
+    loop = BodyLoop(SimpleNamespace(decision_client=SimpleNamespace(), trace=SimpleNamespace(emit=lambda *a, **k: None)))
+    # Engage again against the same target carries on; a new nearest mob is a switch.
+    assert loop._continues_protection(record, "engage", {"facts": raw})
     raw["entities"][1]["id"] = "another"
-    changed = CallSupervisor._options_for(tool, record, execution={"state": "running", "facts": raw})
-    assert "engage" in changed
+    assert not loop._continues_protection(record, "engage", {"facts": raw})
+    assert not loop._continues_protection(record, "move_away", {"facts": raw})
 
 
 def test_reaction_timing_reports_first_native_progress_once_and_unknown_is_inert():

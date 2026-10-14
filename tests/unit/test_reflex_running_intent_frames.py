@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from minebot.app.direct_call_supervision import CallSupervisor
 from minebot.app import reflex_question as rq
-from tests.unit.reflex_expected import intent_question_while_running, main_hand_beside_inventory
+from tests.unit.reflex_expected import intent_question_while_running, main_hand_beside_inventory, protecting_while_running
 
 
 def test_real_running_inputs_compile_to_the_exact_offline_verified_requests():
@@ -31,10 +31,13 @@ def test_real_running_inputs_compile_to_the_exact_offline_verified_requests():
         request.pop('_request_chars',None);request.pop('_request_chars_before',None);done=request.pop('_done',None)
         # Keep the historical fixture intact. The only new fact is the
         # recorded main hand, omitted by the original sentence compiler.
-        expected=main_hand_beside_inventory(case['expected_request'],execution.get('facts',{}))
+        facts=execution.get('facts',{})
+        expected=main_hand_beside_inventory(case['expected_request'],facts)
         # Whether the intent is shown is now its own question while running;
         # protective calls are not asked it. All facts stay as recorded.
         context=case['supervision_context']
+        if context.get('is_reflex_action'):
+            expected=protecting_while_running(expected,facts,context['reflex_action_choice'])
         if context.get('intent') and not context.get('is_reflex_action'):
             expected,expected_done=intent_question_while_running(expected,context['intent'])
             assert done==expected_done,case['seq']

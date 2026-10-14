@@ -417,6 +417,8 @@ class BodyLoop(CallSupervisor):
                 # life profile; rebinding against one silently loses actions
                 # or sends the chosen action to a different target.
                 execution = decision_execution or {}
+                if self._continues_protection(record, choice, execution):
+                    choice = "keep_going"
                 if choice == "inspect" and record["reads"] < self.max_reads:
                     record["reader_new_fact"] = False
                     read = await self._bounded_read(record, tool, params)
@@ -1052,6 +1054,17 @@ class BodyLoop(CallSupervisor):
         finally:
             if reserved_here:
                 self._release_result_pending(call_id)
+
+    def _continues_protection(self, record: Mapping[str, Any], choice: str,
+                              execution: Mapping[str, Any]) -> bool:
+        """The running protective action chosen again, bound to the same
+        target: carry on.  Fighting a different nearest mob is a switch."""
+        context = record.get("supervision_context") or {}
+        if not context.get("is_reflex_action") or choice != context.get("reflex_action_choice"):
+            return False
+        action = self._default_action(choice, execution)
+        target = (record.get("params") or {}).get("target")
+        return action is None or target is None or action[1].get("target") == target
 
     async def _stopped_again_at_the_same_place(self, record: Mapping[str, Any]) -> bool:
         """Whether danger stopped this work again where it stopped it before
