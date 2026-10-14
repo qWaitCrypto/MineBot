@@ -1,0 +1,11 @@
+{
+  "compiled_requests_byte_equal": 133,
+  "product_commit": "d454341",
+  "source_run": "/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-step7-current-f",
+  "sha256": {
+    "trace.jsonl": "612de3b0eb9bee9fc37da6223b70397e46460dc6f0203aed0cd5698691efacec",
+    "fixture-events.jsonl": "8f4ba7b95e2742026e955092ba6563c6adf3e298b2390d1c8f971cbea22accd7",
+    "acceptance-run.json": "b156f48776976c2804fa055cefd947e32df59d3585ed49d7e1c3d942f4af8deb"
+  },
+  "scope": "Local request provenance check; no new Decision answers and no real-client writes."
+}

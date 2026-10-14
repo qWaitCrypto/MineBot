@@ -19,8 +19,11 @@ def merge(intervals):
 
 
 def summarize(path):
+    path = Path(path)
+    if path.is_dir():
+        path = path / 'trace.jsonl'
     rows = []
-    for line in Path(path).read_text().splitlines():
+    for line in path.read_text().splitlines():
         rows.append(json.loads(line))
     if not rows:
         raise ValueError('Empty trace')
@@ -65,6 +68,14 @@ def summarize(path):
 
     by_purpose = Counter(r.get('purpose') for r in requests)
     by_state = Counter(r.get('loop_state') for r in requests)
+    during_work = Counter(r.get('purpose') for r in requests
+                          if any(start <= r['ts'] <= end for start, end in busy))
+    by_state_purpose = Counter((r.get('loop_state'), r.get('purpose')) for r in requests)
+    minute_counts = {}
+    for row in requests:
+        minute = int((row['ts'] - first) // 60)
+        key = f"{row.get('loop_state')} / {row.get('purpose')}"
+        minute_counts.setdefault(minute, Counter())[key] += 1
     choices = Counter(r.get('choice') for r in answers)
     milliseconds = [r['decision_ms'] for r in answers if isinstance(r.get('decision_ms'), (int, float))]
     deliveries = [r for r in rows if r['event'] in ('reflex_fact_wake', 'body_event_wake')]
@@ -73,6 +84,24 @@ def summarize(path):
               'status': r.get('status'), 'kind': r.get('kind'), 'activity_id': r.get('activity_id'),
               'body_event': r.get('body_event', r.get('name'))} for r in deliveries]
     changes = [r for r in rows if r['event'] == 'reflex_state_changed']
+    state_intervals = []
+    current_state, state_started = 'idle', first
+    for row in changes:
+        state_intervals.append((current_state, state_started, row['ts']))
+        current_state, state_started = row.get('to'), row['ts']
+    state_intervals.append((current_state, state_started, last))
+    state_seconds = Counter()
+    longest_idle_state_gap = 0
+    for state, start, end in state_intervals:
+        state_seconds[state] += max(0, end - start)
+        if state == 'idle':
+            points = [start] + [t for t in question_times if start < t < end] + [end]
+            longest_idle_state_gap = max(longest_idle_state_gap,
+                max((b - a for a, b in zip(points, points[1:])), default=0))
+    gaps = [{'before_seq': a['seq'], 'after_seq': b['seq'], 'seconds': b['ts'] - a['ts']}
+            for a, b in zip(requests, requests[1:])]
+    default_requested = [r for r in rows if r['event'] == 'call_supervision_default_requested']
+    default_finished = [r for r in rows if r['event'] == 'call_supervision_default_finished']
     chains = [r for r in rows if r['event'] == 'reflex_reaction_chain']
     last_body = next((r for r in reversed(rows) if r['event'] == 'body_progress' and 'health' in r), {})
     death_events = [r for r in rows if r['event'] == 'reflex_death']
@@ -92,11 +121,30 @@ def summarize(path):
     tool_counts = Counter(r.get('tool') for r in rows if r['event'] == 'tool_invoke')
     return {'source': str(path), 'seq_end': rows[-1]['seq'], 'elapsed_s': duration,
             'requests_by_purpose': dict(by_purpose), 'requests_by_loop_state': dict(by_state),
+            'requests_by_state_and_purpose': {f'{state} / {purpose}': n
+                for (state, purpose), n in by_state_purpose.items()},
+            'requests_per_session_minute_by_loop_state': {k: n * 60 / duration
+                for k, n in by_state.items()} if duration else {},
+            'requests_per_minute_buckets': [{'minute_from_trace_start': minute,
+                'observed_seconds': min(60, duration - minute * 60),
+                'counts_by_state_and_purpose': dict(counts)}
+                for minute, counts in sorted(minute_counts.items())],
+            'loop_state_seconds': dict(state_seconds),
             'requests_per_session_minute_by_purpose': {k: n * 60 / duration for k, n in by_purpose.items()} if duration else {},
             'requests_per_observed_body_work_minute_by_purpose': {k: n * 60 / work for k, n in by_purpose.items()} if work else None,
+            'requests_during_observed_body_work_by_purpose': dict(during_work),
+            'requests_during_observed_body_work_per_minute_by_purpose':
+                {k: n * 60 / work for k, n in during_work.items()} if work else None,
+            'rate_accounting': 'Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.',
             'native_action_count': len(actions), 'observed_native_work_s': work, 'idle_remainder_estimate_s': duration - work,
             'timing_method': 'Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.',
             'longest_estimated_idle_without_any_question_s': longest if actions else None,
+            'longest_idle_state_without_any_question_s': longest_idle_state_gap,
+            'idle_state_gap_method': 'idle is the loop state, and may contain life movement. This measurement excludes dead/work intervals but includes session startup.',
+            'largest_request_gaps': sorted(gaps, key=lambda r: r['seconds'], reverse=True)[:10],
+            'default_actions_requested': dict(Counter(r.get('choice') for r in default_requested)),
+            'default_actions_finished': dict(Counter(r.get('choice') for r in default_finished)),
+            'action_accounting': 'Answers are semantic selections, default_requested is an attempted action dispatch, and native_action_count is observed execution. They are not interchangeable.',
             'answers': dict(choices), 'unknown_ratio': choices.get('unknown', 0) / len(answers) if answers else None,
             'decision_ms_median': statistics.median(milliseconds) if milliseconds else None,
             'agent_delivery_counts': dict(Counter(r['event'] for r in deliveries)), 'agent_deliveries': wakes,
