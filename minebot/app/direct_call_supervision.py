@@ -490,12 +490,16 @@ class CallSupervisor:
                 if weapon:
                     return "ranged_attack", {"target": target, "weapon": weapon}
         if choice == "move_away":
+            near = rq.hostiles(facts)
             pos = facts.get("nearest_hostile_position")
             if not (isinstance(pos, (list, tuple)) and len(pos) == 3):
-                near = rq.hostiles(facts)
                 pos = near[0]["pos"] if near else None
             if isinstance(pos, (list, tuple)) and len(pos) == 3:
-                return "move_away", {"danger_pos": [float(value) for value in pos], "min_distance": 8.0}
+                # Moving away means getting farther than now. A fixed 8 blocks
+                # left the Body standing as "already_safe" in a skeleton's
+                # range until it was shot dead (live step5-threat-claude).
+                now = near[0]["dist"] if near else 0.0
+                return "move_away", {"danger_pos": [float(value) for value in pos], "min_distance": now + 8.0}
         if choice == "go_home":
             profile = facts.get("life_profile")
             home = profile.get("home") if isinstance(profile, Mapping) else None

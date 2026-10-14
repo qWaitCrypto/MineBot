@@ -146,3 +146,13 @@ def test_supervised_execution_forwards_its_native_observations_to_the_timing_hoo
             assert observed==[("response",{"action_id":"native","sampled_at_ms":123})]
         finally:lane.close()
     asyncio.run(run())
+
+
+def test_move_away_always_asks_for_more_distance_than_now():
+    # Live step5-threat-claude: a fixed 8 blocks returned "already_safe" with
+    # a skeleton 8 blocks away; the Body stayed in its range and was shot dead.
+    from minebot.app.direct_call_supervision import CallSupervisor
+    facts = {"entities": [{"hostile": True, "name": "Skeleton", "dist": 8.2, "pos": [8.2, 64, 0]}]}
+    tool, args = CallSupervisor._default_action("move_away", {"facts": facts})
+    assert tool == "move_away" and args["danger_pos"] == [8.2, 64.0, 0.0]
+    assert args["min_distance"] > 8.2 + 7
