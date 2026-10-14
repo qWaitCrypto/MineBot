@@ -786,16 +786,21 @@ class BodyLoop(CallSupervisor):
             self._reaction_selection = None
             if chain is not None and chain["choice"] == choice:
                 self._reaction_actions[default_id] = {**chain, "tool": action[0]}
+            context = {"is_reflex_action": True,
+                       "is_life_action": getattr(self, "_reflex_claim_holder", "threat") == "life",
+                       "reflex_action_choice": choice,
+                       "intent": getattr(self, "_reflex_action_intent", None)
+                       or supervision_module._DEFAULT_ACTION_TEXT.get(choice, choice)}
+            if record is None or record.get("supervision_context", {}).get("idle_protection"):
+                # No Agent work is suspended here. Its last durable goal is
+                # historical context, not the task of this Body-owned action.
+                context["goal"] = ""
             try:
                 result = await self.runtime.run_tool(
                     default_tool, execute_tool, default_tool, action[1],
                     getattr(self.runtime, "weld_context", None),
                     tool_call_id=default_id, claim_holder=getattr(self, "_reflex_claim_holder", "threat"),
-                    supervision_context={"is_reflex_action": True,
-                                         "is_life_action": getattr(self, "_reflex_claim_holder", "threat") == "life",
-                                         "reflex_action_choice": choice,
-                                         "intent": getattr(self, "_reflex_action_intent", None)
-                                         or supervision_module._DEFAULT_ACTION_TEXT.get(choice, choice)},
+                    supervision_context=context,
                 )
             except Exception as exc:
                 result = {"success": False, "reason": type(exc).__name__}

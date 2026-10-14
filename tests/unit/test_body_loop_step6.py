@@ -244,6 +244,28 @@ def test_idle_protection_result_unknown_obeys_tool_deadline_and_call_agent_notif
     asyncio.run(run())
 
 
+def test_idle_protection_dispatch_does_not_inherit_completed_agent_goal():
+    async def run():
+        contexts=[]
+        owner=SimpleNamespace(decision_client=SimpleNamespace(),
+            agent_context=SimpleNamespace(goal_text='Walk to a location; this task has ended.'),
+            registry=SimpleNamespace(get=lambda name:SimpleNamespace(name=name)),
+            trace=SimpleNamespace(emit=lambda *a,**kw:None))
+        async def call(*args,**kw):contexts.append(kw['supervision_context']);return {'success':True}
+        owner.run_tool=call
+        loop=BodyLoop(owner)
+        idle_record={'supervision_context':{'idle_protection':True}}
+        await loop._execute_protection('engage',('engage_entity',{'target':'id'}),idle_record,call_id='fight')
+        assert contexts[0]['goal']==''
+        assert loop._plan_context(supervision_context=contexts[0],tool=SimpleNamespace(name='engage_entity'),params={})['goal']==''
+        assert owner.agent_context.goal_text=='Walk to a location; this task has ended.'
+        # The original work context is still available during a work interruption.
+        await loop._execute_protection('engage',('engage_entity',{'target':'id'}),
+            {'supervision_context':{'is_plan':True}},call_id='work-fight')
+        assert 'goal' not in contexts[1]
+    asyncio.run(run())
+
+
 def test_equipment_node_is_judged_before_original_call_reentry():
     async def run():
         calls=[];judged=[];body={'selected_item':'','inventory':{'stone_sword':1}}
