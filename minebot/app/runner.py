@@ -2443,7 +2443,11 @@ class AgentRuntime:
         the Body across turns, anything queued there waits for that work to
         end, which would freeze the Agent it was meant to free.
         """
-        if self.native_responses or self.live_body_owner() is not None:
+        # Reflex actions also occupy the physical writer across Agent turns.
+        # They are not Agent background calls, so live_body_owner() deliberately
+        # omits them; that must not make observation queue behind their work.
+        reflex_owner = self.body_control.snapshot().holder in {"life", "threat"}
+        if self.native_responses or self.live_body_owner() is not None or reflex_owner:
             return self._read_lane
         return self.execution_lane
 
