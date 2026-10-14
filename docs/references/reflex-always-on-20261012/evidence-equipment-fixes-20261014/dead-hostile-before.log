@@ -1,0 +1,19 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___ test_dead_entities_do_not_remain_actionable_hostiles_in_facts_or_options ___
+
+    def test_dead_entities_do_not_remain_actionable_hostiles_in_facts_or_options():
+        facts={'health':20,'food':20,'oxygen':300,'entities':[
+            {'id':'dead','name':'Former hostile','hostile':True,'health':0,'dist2':1},
+            {'id':'alive','name':'Live hostile','hostile':True,'health':10,'dist2':4}]}
+>       assert [entry['id'] for entry in rq.hostiles(facts)]==['alive']
+E       AssertionError: assert ['dead', 'alive'] == ['alive']
+E         
+E         At index 0 diff: 'dead' != 'alive'
+E         Left contains one more item: 'alive'
+E         Use -v to get more diff
+
+tests/unit/test_reflex_question.py:229: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_reflex_question.py::test_dead_entities_do_not_remain_actionable_hostiles_in_facts_or_options
+1 failed, 29 deselected in 0.09s

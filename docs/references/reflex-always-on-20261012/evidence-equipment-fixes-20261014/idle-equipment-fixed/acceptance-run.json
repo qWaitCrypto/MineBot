@@ -1,0 +1,21 @@
+{
+  "code_commit": "58145e2a8214573cd6331000ff6d0bfcf351a290",
+  "code_dirty": false,
+  "world": "step5-next-edc89ff-20261014",
+  "fresh_world": false,
+  "empty_inventory": false,
+  "ports": [
+    25569,
+    25579,
+    8771
+  ],
+  "bot": "Step5NextBot",
+  "server_pid": 2105349,
+  "launcher_pid": 2106504,
+  "owner_pid": 2104837,
+  "started_at": 1791946940.5847526,
+  "model": "deepseek-v4.1-flash",
+  "kernel": "sdk",
+  "goal": null,
+  "scope": "Retained artificial platform world/player; isolated SDK state, no life profile; controlled damaged weapon, spare weapon and NoAI target; real Agent /goal patrol."
+}

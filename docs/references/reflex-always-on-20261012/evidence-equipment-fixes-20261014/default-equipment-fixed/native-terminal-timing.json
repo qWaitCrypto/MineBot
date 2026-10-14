@@ -1,0 +1,107 @@
+[
+  {
+    "action_id": "5cd15b1a-1f14-4c04-821b-0b1f5c83c05d",
+    "action_kind": null,
+    "reason": "goal_reached",
+    "elapsed_ms": 7650,
+    "sampled_at_ms": 1791946367398
+  },
+  {
+    "action_id": "4b1d390a-c06e-4dc7-848d-bde0021db80c",
+    "action_kind": null,
+    "reason": "cancel_requested",
+    "elapsed_ms": 7568,
+    "sampled_at_ms": 1791946375542
+  },
+  {
+    "action_id": "7b69b0ac-3f25-402a-9326-e81d4c1f6def",
+    "action_kind": null,
+    "reason": "goal_reached",
+    "elapsed_ms": 1278,
+    "sampled_at_ms": 1791946377099
+  },
+  {
+    "action_id": "81bea6ea-5df0-4214-ba5d-b1482b16df93",
+    "action_kind": null,
+    "reason": "goal_reached",
+    "elapsed_ms": 1153,
+    "sampled_at_ms": 1791946378903
+  },
+  {
+    "action_id": "12584a7d-7c73-4ffd-ac9a-ef74806f7f91",
+    "action_kind": "engageEntity",
+    "reason": "tool_broke",
+    "elapsed_ms": 307,
+    "sampled_at_ms": 1791946381201
+  },
+  {
+    "action_id": "11853934-f16c-49d6-9875-ec1e064af030",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 490,
+    "sampled_at_ms": 1791946383104
+  },
+  {
+    "action_id": "2977fc8e-40d4-4d9d-9a06-f1e7a0037c17",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 534,
+    "sampled_at_ms": 1791946385167
+  },
+  {
+    "action_id": "3ce03f58-be73-4409-a7cb-d270db93c8b3",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 520,
+    "sampled_at_ms": 1791946387209
+  },
+  {
+    "action_id": "982af3b4-f86a-4b05-8d6f-f217d1418eb4",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 475,
+    "sampled_at_ms": 1791946389245
+  },
+  {
+    "action_id": "8f3aaa55-7a1e-4442-9cb6-d10479d478b9",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 499,
+    "sampled_at_ms": 1791946391206
+  },
+  {
+    "action_id": "e932edba-318b-46f6-bea4-5fc08246a521",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 476,
+    "sampled_at_ms": 1791946393193
+  },
+  {
+    "action_id": "f52dbaa9-ceb9-48ff-989a-1451a93aa72c",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 528,
+    "sampled_at_ms": 1791946395201
+  },
+  {
+    "action_id": "5eead295-6bf0-4ae1-9443-d9b1cd919c0c",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 538,
+    "sampled_at_ms": 1791946397188
+  },
+  {
+    "action_id": "cd1c1325-8636-46ee-82ee-a88737eb51a7",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 500,
+    "sampled_at_ms": 1791946399105
+  },
+  {
+    "action_id": "79cb2a3c-ceba-4f10-874c-901f832cd064",
+    "action_kind": "engageEntity",
+    "reason": "killed",
+    "elapsed_ms": 283,
+    "sampled_at_ms": 1791946400852
+  }
+]

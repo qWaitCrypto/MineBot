@@ -1,0 +1,57 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____ test_idle_protection_dispatch_does_not_inherit_completed_agent_goal ______
+
+    def test_idle_protection_dispatch_does_not_inherit_completed_agent_goal():
+        async def run():
+            contexts=[]
+            owner=SimpleNamespace(decision_client=SimpleNamespace(),
+                agent_context=SimpleNamespace(goal_text='Walk to a location; this task has ended.'),
+                registry=SimpleNamespace(get=lambda name:SimpleNamespace(name=name)),
+                trace=SimpleNamespace(emit=lambda *a,**kw:None))
+            async def call(*args,**kw):contexts.append(kw['supervision_context']);return {'success':True}
+            owner.run_tool=call
+            loop=BodyLoop(owner)
+            idle_record={'supervision_context':{'idle_protection':True}}
+            await loop._execute_protection('engage',('engage_entity',{'target':'id'}),idle_record,call_id='fight')
+            assert contexts[0]['goal']==''
+            assert loop._plan_context(supervision_context=contexts[0],tool=SimpleNamespace(name='engage_entity'),params={})['goal']==''
+            assert owner.agent_context.goal_text=='Walk to a location; this task has ended.'
+            # The original work context is still available during a work interruption.
+            await loop._execute_protection('engage',('engage_entity',{'target':'id'}),
+                {'supervision_context':{'is_plan':True}},call_id='work-fight')
+            assert 'goal' not in contexts[1]
+>       asyncio.run(run())
+
+tests/unit/test_body_loop_step6.py:266: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../miniconda3/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def run():
+        contexts=[]
+        owner=SimpleNamespace(decision_client=SimpleNamespace(),
+            agent_context=SimpleNamespace(goal_text='Walk to a location; this task has ended.'),
+            registry=SimpleNamespace(get=lambda name:SimpleNamespace(name=name)),
+            trace=SimpleNamespace(emit=lambda *a,**kw:None))
+        async def call(*args,**kw):contexts.append(kw['supervision_context']);return {'success':True}
+        owner.run_tool=call
+        loop=BodyLoop(owner)
+        idle_record={'supervision_context':{'idle_protection':True}}
+        await loop._execute_protection('engage',('engage_entity',{'target':'id'}),idle_record,call_id='fight')
+>       assert contexts[0]['goal']==''
+               ^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'goal'
+
+tests/unit/test_body_loop_step6.py:259: KeyError
+=========================== short test summary info ============================
+FAILED tests/unit/test_body_loop_step6.py::test_idle_protection_dispatch_does_not_inherit_completed_agent_goal
+1 failed, 15 deselected in 0.26s

@@ -1,0 +1,11 @@
+{
+  "baseline": {
+    "selected": "resume",
+    "recorded": "resume",
+    "matched": true
+  },
+  "equipment_distribution": {
+    "equip:stone_sword": 12
+  },
+  "requests": 12
+}

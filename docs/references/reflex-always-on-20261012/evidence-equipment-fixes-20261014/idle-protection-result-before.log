@@ -1,0 +1,75 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ test_idle_protection_keeps_its_terminal_for_decision_before_next_idle_frame __
+
+    def test_idle_protection_keeps_its_terminal_for_decision_before_next_idle_frame():
+        async def run():
+            questions=[];notifications=[];actions=[]
+            tool=SimpleNamespace(name='engage_entity',sidecar=SimpleNamespace(timeout_s=1))
+            owner=SimpleNamespace(decision_client=SimpleNamespace(),registry=SimpleNamespace(get=lambda _:tool),
+                trace=SimpleNamespace(emit=lambda *a,**kw:None),notify_reflex_fact=notifications.append)
+            loop=BodyLoop(owner)
+            facts={'health':20,'selected_item':'','inventory':{'stone_sword':1}}
+            loop._read_idle_facts=lambda:asyncio.sleep(0,result=facts)
+            loop._default_action=lambda *args:('engage_entity',{'target':'id'})
+            async def execute(choice,action,record=None,**kw):
+                actions.append(action)
+                return choice,action,{'success':False,'reason':'tool_broke','canRetry':False,
+                    'metrics':{'broken_item':'wooden_sword'}},'native-fight'
+            loop._execute_protection=execute
+            async def judge(*args,**kw):
+                questions.append(kw)
+                assert 'equip:stone_sword' in kw['options']
+                assert 'resume' not in kw['options'] and 'stay' in kw['options']
+                assert kw['supervision_context']['goal']==''
+                return 'stay'
+            loop._judge_terminal_frame=judge
+            await loop._run_idle_protection('engage',facts)
+            assert len(questions)==1 and len(actions)==1
+            assert not notifications and len(loop.recent_experiences)==1
+            assert loop.loop_state=='idle' and not loop._result_pending
+>       asyncio.run(run())
+
+tests/unit/test_body_loop_step6.py:216: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../miniconda3/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def run():
+        questions=[];notifications=[];actions=[]
+        tool=SimpleNamespace(name='engage_entity',sidecar=SimpleNamespace(timeout_s=1))
+        owner=SimpleNamespace(decision_client=SimpleNamespace(),registry=SimpleNamespace(get=lambda _:tool),
+            trace=SimpleNamespace(emit=lambda *a,**kw:None),notify_reflex_fact=notifications.append)
+        loop=BodyLoop(owner)
+        facts={'health':20,'selected_item':'','inventory':{'stone_sword':1}}
+        loop._read_idle_facts=lambda:asyncio.sleep(0,result=facts)
+        loop._default_action=lambda *args:('engage_entity',{'target':'id'})
+        async def execute(choice,action,record=None,**kw):
+            actions.append(action)
+            return choice,action,{'success':False,'reason':'tool_broke','canRetry':False,
+                'metrics':{'broken_item':'wooden_sword'}},'native-fight'
+        loop._execute_protection=execute
+        async def judge(*args,**kw):
+            questions.append(kw)
+            assert 'equip:stone_sword' in kw['options']
+            assert 'resume' not in kw['options'] and 'stay' in kw['options']
+            assert kw['supervision_context']['goal']==''
+            return 'stay'
+        loop._judge_terminal_frame=judge
+        await loop._run_idle_protection('engage',facts)
+>       assert len(questions)==1 and len(actions)==1
+E       assert (0 == 1)
+E        +  where 0 = len([])
+
+tests/unit/test_body_loop_step6.py:213: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_body_loop_step6.py::test_idle_protection_keeps_its_terminal_for_decision_before_next_idle_frame
+1 failed, 12 deselected in 0.25s

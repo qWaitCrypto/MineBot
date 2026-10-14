@@ -1,0 +1,217 @@
+{
+  "source": "/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-idle-equipment-context-fixed/trace.jsonl",
+  "seq_end": 485,
+  "elapsed_s": 21.763485431671143,
+  "requests_by_purpose": {
+    "idle_frame": 12,
+    "running_frame": 6,
+    "plan_result_frame": 2,
+    "default_result_frame": 4
+  },
+  "requests_by_loop_state": {
+    "idle": 13,
+    "work": 2,
+    "threat": 9
+  },
+  "requests_by_state_and_purpose": {
+    "idle / idle_frame": 12,
+    "work / running_frame": 2,
+    "idle / plan_result_frame": 1,
+    "threat / running_frame": 4,
+    "threat / default_result_frame": 4,
+    "threat / plan_result_frame": 1
+  },
+  "requests_per_session_minute_by_loop_state": {
+    "idle": 35.8398475487254,
+    "work": 5.513822699803908,
+    "threat": 24.812202149117585
+  },
+  "requests_per_minute_buckets": [
+    {
+      "minute_from_trace_start": 0,
+      "observed_seconds": 21.763485431671143,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 12,
+        "work / running_frame": 2,
+        "idle / plan_result_frame": 1,
+        "threat / running_frame": 4,
+        "threat / default_result_frame": 4,
+        "threat / plan_result_frame": 1
+      }
+    }
+  ],
+  "loop_state_seconds": {
+    "idle": 16.44092893600464,
+    "work": 0.8345108032226562,
+    "threat": 4.488045692443848
+  },
+  "requests_per_session_minute_by_purpose": {
+    "idle_frame": 33.08293619882345,
+    "running_frame": 16.541468099411723,
+    "plan_result_frame": 5.513822699803908,
+    "default_result_frame": 11.027645399607817
+  },
+  "requests_per_observed_body_work_minute_by_purpose": {
+    "idle_frame": 1066.6667420187168,
+    "running_frame": 533.3333710093584,
+    "plan_result_frame": 177.7777903364528,
+    "default_result_frame": 355.5555806729056
+  },
+  "requests_during_observed_body_work_by_purpose": {
+    "running_frame": 1
+  },
+  "requests_during_observed_body_work_per_minute_by_purpose": {
+    "running_frame": 88.8888951682264
+  },
+  "rate_accounting": "Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.",
+  "native_action_count": 1,
+  "observed_native_work_s": 0.6749999523162842,
+  "idle_remainder_estimate_s": 21.08848547935486,
+  "supervised_body_call_s": 4.020999908447266,
+  "outside_supervised_body_calls_s": 17.742485523223877,
+  "supervised_call_timing_method": "Union of completed supervised-call intervals; includes tool execution and its settlement, not proof of physical movement. Native terminals missing elapsed_ms are excluded from native work time, never treated as proof that the Body was idle.",
+  "timing_method": "Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.",
+  "longest_estimated_idle_without_any_question_s": 1.4095017910003662,
+  "longest_idle_state_without_any_question_s": 1.4095017910003662,
+  "idle_state_gap_method": "idle is the loop state, and may contain life movement. This measurement excludes dead/work intervals but includes session startup.",
+  "largest_request_gaps": [
+    {
+      "before_seq": 311,
+      "after_seq": 403,
+      "seconds": 1.4095017910003662
+    },
+    {
+      "before_seq": 6,
+      "after_seq": 19,
+      "seconds": 1.409057855606079
+    },
+    {
+      "before_seq": 123,
+      "after_seq": 128,
+      "seconds": 1.1914939880371094
+    },
+    {
+      "before_seq": 105,
+      "after_seq": 109,
+      "seconds": 1.1879065036773682
+    },
+    {
+      "before_seq": 19,
+      "after_seq": 100,
+      "seconds": 1.1788804531097412
+    },
+    {
+      "before_seq": 128,
+      "after_seq": 136,
+      "seconds": 1.1717422008514404
+    },
+    {
+      "before_seq": 114,
+      "after_seq": 118,
+      "seconds": 1.1695425510406494
+    },
+    {
+      "before_seq": 403,
+      "after_seq": 408,
+      "seconds": 1.1655263900756836
+    },
+    {
+      "before_seq": 100,
+      "after_seq": 105,
+      "seconds": 1.1585054397583008
+    },
+    {
+      "before_seq": 109,
+      "after_seq": 114,
+      "seconds": 1.154947280883789
+    }
+  ],
+  "default_actions_requested": {
+    "engage": 1
+  },
+  "default_actions_finished": {
+    "engage": 1
+  },
+  "action_accounting": "Answers are semantic selections, default_requested is an attempted action dispatch, and native_action_count is observed execution. They are not interchangeable.",
+  "answers": {
+    "stay": 12,
+    "keep_going": 3,
+    "next_step": 2,
+    "engage": 1,
+    "equip:stone_sword": 1,
+    "repeat": 2
+  },
+  "unknown_ratio": 0.0,
+  "decision_ms_median": 131.872,
+  "agent_delivery_counts": {
+    "reflex_fact_wake": 1
+  },
+  "agent_deliveries": [
+    {
+      "seq": 320,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "completed",
+      "kind": null,
+      "activity_id": "activity-2b67194be2e848c984830c7c3c68e378",
+      "body_event": null
+    }
+  ],
+  "runtime_intent_wakes": [],
+  "wake_accounting": "reflex_death is a death observation, not a wake. agent_start counts launches/turn entries, not delivery events. Distinct deliveries can be coalesced into a model turn.",
+  "agent_start_count": 2,
+  "delegate_work": 1,
+  "read_reflex": 0,
+  "state_switches": 4,
+  "reaction_chains": [
+    {
+      "action_progress_monotonic_s": 538746.998706304,
+      "action_sampled_at_ms": 1791947511645,
+      "answer_monotonic_s": 538746.69244705,
+      "answer_to_action_s": 0.3062592539936304,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 1.0,
+      "event_health": 20.0,
+      "event_monotonic_s": 538746.491687995,
+      "event_sampled_at_ms": 1791947511127,
+      "event_to_request_s": 0.00010454398579895496,
+      "first_native_progress": true,
+      "native_action_id": "20acdbed-36d1-446f-b5b6-55f16fe02e29",
+      "request_monotonic_s": 538746.491792539,
+      "request_to_answer_s": 0.20065451099071652,
+      "seq": 414,
+      "session_id": "Step5NextBot",
+      "target": "9c334f49-68a6-41d5-97a8-b8f6d662fd2f",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-12",
+      "total_s": 0.5070183089701459,
+      "ts": 1791947511.646706
+    }
+  ],
+  "deaths": [],
+  "last_body": {
+    "seq": 471,
+    "pos": [
+      223.58,
+      121.0,
+      220.5
+    ],
+    "health": 20.0,
+    "food": 20,
+    "oxygen": 300
+  },
+  "native_client_timing": {
+    "source": "client.log MINEBOT_PHASE_A terminal JSON, deduplicated by action_id",
+    "terminal_count": 3,
+    "observed_work_s": 2.7939999103546143,
+    "remainder_s": 18.96948552131653,
+    "requests_during_work": {
+      "running_frame": 3
+    },
+    "requests_per_work_minute": {
+      "running_frame": 64.42376727820096
+    },
+    "limitation": "Only terminals with native timing are measured. Remainder includes startup and settlement; it is not proof of physical idleness."
+  }
+}

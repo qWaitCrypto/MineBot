@@ -1,24 +1,20 @@
 # 常在线循环阶段总报告（2026-10-14 当前状态）
 
-产品最新 `7e4c1e6`，分支 `codex/reflex-always-on`。已按用户授权继续第5–7步复验并收尾第8步。**全量通过，整批真实验收未完成，不能合并。**未推送、未合并。
+产品最新 `41c28d7`，分支 `codex/reflex-always-on`。**备用装备短场景通过，整批真实验收未完成，不能合并。**未推送、未合并。
 
-| 项 | 结论 |
+| 项 | 当前结论 |
 |---|---|
-| 工作事实流 | 7e4c1e6修复运行题旧实体/背包；共用既有读通道，定向132 passed |
-| 第3步离线 | 五个真实打断结果帧、三种新增生命历史写法180/180仍resume；候选未上线 |
-| 第5步近战 | b seq29 engage、seq72 killed，夜间排除日晒；反应链0.562秒 |
-| 第5步远射/恢复 | d seq290 move_away、seq297 native进度、seq321 resume；1.491秒，两次实际伤害后health2，存活 |
-| 第5步任务 | c巡视完成；d第二点后call_agent/blocked，第三点没走，不能报全过 |
-| 第6步中断 | Agent树确含interrupt，事实/选项21帧，选中0次；handler0次 |
-| 第6步装备 | 默认engage路径损坏木剑却无equip项；装备0次，目标消失后repeat91次 |
-| Agent交接 | c/d/第6步普通聊天no_active_goal丢弃终态；0 wake不是交接通过，后续夹具改/goal |
-| 第7步生活 | idle204、running8；go_home1，stay204；约268秒断线，30分钟未完成，玩家互动未过 |
-| 真实存活 | 第7步最后采样/退出存档health20、DeathTime0；seq1034死亡为缺失状态投影误报，seq1036错误唤醒 |
-| 最新全量 | 2494 passed、1 skipped、291 subtests passed，1782.53秒，真实pytest exit0；无失败 |
-| 待集中修 | 打断历史语义、中断选择、默认结果R3缺项/同目标重复、生活稳定性、断线误报死亡与其余旧验收缺口 |
-| 环境 | 仅25569/25579/8771；a新世界空背包、b–第7步沿用人工场景；会话exit0、客户端已关、测试服务器已停，trace保留 |
+| 五项修复 | 缺失状态不造死亡、保命结果装备项、空闲保命结果题、去完成目标污染、排除health0实体 |
+| 定向测试 | 最新232 passed in 17.39s；旧断言未改 |
+| 备用装备真实闭环 | 断木剑→装备石剑→4次攻击击杀→stay；误停0、repeat0、额外Agent投递0，角色health20 |
+| 参与度 | idle12/running6/plan_result2/default_result2；中位132.30ms；delegate1、read_reflex0 |
+| 工作分钟率 | 原生终态可观测工作2.961秒，区间内running题3，60.79题/分；短样本不当长期稳定 |
+| 最新全量 | 旧7e4c1e6：2494 passed、1 skipped、291 subtests passed，exit0；五项修复后尚未重跑 |
+| 未过 | interrupt handler真实选择、重复下水、不相关失败装备负对照、同目标engage重复、30分钟生活与互动 |
+| 断线 | 缺失状态假死亡已修、相关80 passed；专门断线/重连真实复验待做 |
+| 环境 | 四次沿用人工高台世界，不是自主生存；owned Agent/client/server退出，25569/25579/8771释放 |
 
-最新报告：[第5步与运行感知](next-step-20261014.md)、[第6步](step6-next-20261014.md)、[第7步与全量收尾](step7-next-20261014.md)，证据 `evidence-next-step/`。trace原件在 `/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-step5-next{,-b,-c,-d}/`、`step6-next/`、`step6-backup-next/`、`step7-next/`（后三者有相同reflex-always-on-20261014-前缀）。旧报告和失败证据保留；最新状态以顶表和这三份报告为准。
+本轮完整报告：[装备集中修复实测](equipment-fixes-live-20261014.md)。四场完整trace保留在报告列出的logs目录，提交证据为 `evidence-equipment-fixes-20261014/`。之前失败不删；下表仍保留尚未补齐的验收项，装备短场景的新结论以上表为准。
 
 ## 第15节逐项状态
 

@@ -1,0 +1,103 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+___ test_failed_protection_result_offers_same_owned_equipment_as_work_result ___
+
+    def test_failed_protection_result_offers_same_owned_equipment_as_work_result():
+        facts={'selected_item':'','inventory':{'stone_sword':1}}
+        result={'success':False,'reason':'tool_broke','canRetry':False,
+                'metrics':{'broken_item':'wooden_sword'}}
+        options=rq.after_default_options(original_call='engage_entity(target="id")',
+            intent='Kill the target',default_call='engage_entity(target="id")',result=result,facts=facts)
+>       assert list(options)==['resume','equip:stone_sword','call_agent']
+E       AssertionError: assert ['resume', 'call_agent'] == ['resume', 'e... 'call_agent']
+E         
+E         At index 1 diff: 'call_agent' != 'equip:stone_sword'
+E         Right contains one more item: 'call_agent'
+E         Use -v to get more diff
+
+tests/unit/test_body_loop_step6.py:133: AssertionError
+_ test_protection_equipment_is_judged_then_retries_protection_without_agent_wake _
+
+    def test_protection_equipment_is_judged_then_retries_protection_without_agent_wake():
+        async def run():
+            calls=[];retries=[];questions=[];notifications=[];stops=[]
+            facts={'health':20,'selected_item':'','inventory':{'stone_sword':1}}
+            async def state():return copy.deepcopy(facts)
+            async def cancel(reason,**kw):stops.append((reason,kw));return {'settled':True}
+            async def call(tool,*args,**kw):
+                calls.append(kw)
+                facts['selected_item']='stone_sword'
+                return {'success':True,'reason':'equipped','_execution':{'delivered':True}}
+            owner=SimpleNamespace(decision_client=SimpleNamespace(),
+                registry=SimpleNamespace(get=lambda name:SimpleNamespace(name=name)),
+                run_tool=call,cancel_active_execution_with_facts=cancel,
+                notify_reflex_fact=notifications.append,trace=SimpleNamespace(emit=lambda *a,**kw:None))
+            loop=BodyLoop(owner)
+            loop._read_idle_facts=state
+            async def judge(*args,**kw):
+                questions.append(kw['options'])
+                if len(questions)==1:
+                    assert 'equip:stone_sword' in kw['options']
+                    return 'equip:stone_sword'
+                return 'resume'
+            loop._judge_terminal_frame=judge
+            async def equip_judge(**kw):
+                assert kw['tool'].name=='equip_item'
+                assert facts['selected_item']=='stone_sword'
+                return 'next_step'
+            loop.decide_plan_result=equip_judge
+            async def retry(choice,action,record,**kw):
+                assert facts['selected_item']=='stone_sword'
+                retries.append(action)
+                return choice,action,{'success':True,'reason':'killed'},kw['call_id']
+            loop._execute_protection=retry
+            record={'call_id':'original','tool':'engage_entity','params':{'target':'id'},
+                'started_at':time.monotonic(),'timeout_s':2,'questions':0,
+                'supervision_context':{'intent':'Kill the target'}}
+            failed={'success':False,'reason':'tool_broke','canRetry':False,'metrics':{'broken_item':'wooden_sword'}}
+            answer=await loop._after_default_action(record,('engage_entity',{'target':'id'}),failed,'fight',protective_choice='engage')
+            assert answer=='resume'
+            assert len(calls)==1 and len(questions)==2
+            assert retries==[('engage_entity',{'target':'id'})]
+            assert all(not kwargs['invalidate_generation'] for _,kwargs in stops)
+            assert not notifications
+            assert not loop._result_pending
+>       asyncio.run(run())
+
+tests/unit/test_body_loop_step6.py:185: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../miniconda3/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/unit/test_body_loop_step6.py:178: in run
+    answer=await loop._after_default_action(record,('engage_entity',{'target':'id'}),failed,'fight',protective_choice='engage')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+minebot/app/body_loop.py:1015: in _after_default_action
+    return await self._follow_default_result(
+minebot/app/body_loop.py:1061: in _follow_default_result
+    choice = await asyncio.wait_for(self._judge_terminal_frame(
+../miniconda3/lib/python3.13/asyncio/tasks.py:507: in wait_for
+    return await fut
+           ^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+args = ('original', namespace(name='engage_entity'), {'target': 'id'}, {'tool': 'engage_entity', 'state': 'failed', 'facts': ...sult': {'success': False, 'reason': 'tool_broke', 'canRetry': False, 'metrics': {'broken_item': 'wooden_sword'}}}, 0.0)
+kw = {'purpose': 'default_result_frame', 'supervision_context': {'intent': 'Kill the target'}, 'options': {'resume': 'Go ba...False, 'reason': 'tool_broke', 'canRetry': False}, 'body': {'position': None, 'inventory': {'stone_sword': 1}}}], ...}}
+
+    async def judge(*args,**kw):
+        questions.append(kw['options'])
+        if len(questions)==1:
+>           assert 'equip:stone_sword' in kw['options']
+E           assert 'equip:stone_sword' in {'resume': 'Go back to the earlier work, engage_entity(target="id"), for: “Kill the target”', 'call_agent': 'Do not go back and hand control back to the Agent for a new plan.'}
+
+tests/unit/test_body_loop_step6.py:160: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_body_loop_step6.py::test_failed_protection_result_offers_same_owned_equipment_as_work_result
+FAILED tests/unit/test_body_loop_step6.py::test_protection_equipment_is_judged_then_retries_protection_without_agent_wake
+2 failed, 10 deselected in 0.48s
