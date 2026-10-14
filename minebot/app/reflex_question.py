@@ -475,7 +475,7 @@ def after_default_options(
     result = result if isinstance(result, Mapping) else {}
     options = {
         "resume": f"Go back to the earlier work, {original_call}" + (f", for: “{intent}”" if intent else "."),
-    }
+    } if original_call else {"stay": idle_options({})["stay"]}
     if not (result.get("success") is not True and result.get("canRetry") is False):
         options["repeat"] = f"Run the same call again: {default_call}."
     options.update(equipment_options(facts or {}, result, call=default_call))

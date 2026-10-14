@@ -627,7 +627,8 @@ class BodyLoop(CallSupervisor):
                     notify({"call_id": record["call_id"], "status": "handoff_requested", **safe})
         return choice
 
-    async def _run_result_equipment(self, record, original_tool, original_params, item, *, claim_holder="agent_call"):
+    async def _run_result_equipment(self, record, original_tool, original_params, item, *,
+                                    claim_holder="agent_call", reflex_action_choice=None):
         """Result equipment uses the same judged single-node tree."""
         from minebot.app.work_runtime import WorkPlanExecutor
         from minebot.brain.registry import execute_tool
@@ -647,7 +648,7 @@ class BodyLoop(CallSupervisor):
             transport_id = f"plan-{call_id}"
             context = executor.call_context(call_id)
             if claim_holder == "threat":
-                context = {**context, "is_reflex_action": True}
+                context = {**context, "is_reflex_action": True, "reflex_action_choice": reflex_action_choice}
             raw = await self.runtime.run_tool(target, execute_tool, target, arguments,
                 getattr(self.runtime, "weld_context", None), tool_call_id=transport_id,
                 claim_holder=claim_holder, timeout_s=self._remaining(record),
@@ -1056,7 +1057,7 @@ class BodyLoop(CallSupervisor):
                 del history[:-5]
                 new_attempt = False
             options = rq.after_default_options(
-                original_call=rq.call_text(record["tool"], record["params"]), intent=intent,
+                original_call="" if context.get("idle_protection") else rq.call_text(record["tool"], record["params"]), intent=intent,
                 default_call=rq.call_text(action[0], action[1]), result=payload,
                 facts=execution["facts"],
             )
@@ -1073,7 +1074,7 @@ class BodyLoop(CallSupervisor):
             except asyncio.TimeoutError:
                 choice = "unknown"
             record["questions"] += 1
-            if choice in {"resume", "call_agent"}:
+            if choice in {"resume", "stay", "call_agent"}:
                 return choice
             candidates = rq.equipment_candidates(execution["facts"], payload)
             if choice in candidates:
@@ -1081,7 +1082,8 @@ class BodyLoop(CallSupervisor):
                 # judged equipment node, then retry this protective call;
                 # resuming the suspended work is still a later choice.
                 choice = await self._run_result_equipment(
-                    record, default_tool, action[1], candidates[choice], claim_holder="threat")
+                    record, default_tool, action[1], candidates[choice], claim_holder="threat",
+                    reflex_action_choice=protective_choice)
                 if choice == "call_agent":
                     return choice
             if choice != "repeat":
@@ -1321,14 +1323,32 @@ class BodyLoop(CallSupervisor):
         action = self._default_action(choice, {"facts": dict(facts)})
         if action is None:
             return
+        default_tool = self.runtime.registry.get(action[0])
+        timeout = action[1].get("timeout_s", getattr(getattr(default_tool, "sidecar", None), "timeout_s", None))
+        record = {"call_id": f"reflex-idle-{self._idle_sequence}", "tool": action[0], "params": dict(action[1]),
+                  "started_at": time.monotonic(), "timeout_s": timeout, "questions": 0,
+                  "supervision_context": {"goal": "", "idle_protection": True, "is_reflex_action": True,
+                      "intent": supervision_module._DEFAULT_ACTION_TEXT.get(choice, choice)}}
         self.runtime.trace.emit(
             "call_supervision_default_requested", tool_call_id="idle-loop",
             choice=choice, tool=action[0], arguments=action[1], loop_state=self.loop_state,
         )
         try:
             choice, action, result, call_id = await self._execute_protection(
-                choice, action, call_id=f"reflex-idle-{self._idle_sequence}")
-            if self._protective_verdict == "call_agent":
+                choice, action, record, call_id=record["call_id"])
+            after = "call_agent" if self._protective_verdict == "call_agent" else "unknown"
+            if after != "call_agent":
+                remaining = self._remaining(record)
+                if remaining is None or remaining > 0:
+                    try:
+                        after = await asyncio.wait_for(
+                            self._after_default_action(record, action, result, call_id, protective_choice=choice),
+                            timeout=remaining)
+                    except asyncio.TimeoutError:
+                        after = "unknown"
+                choice, action = record.get("protective_action", (choice, action))
+                result = record.get("protective_result", result)
+            if after == "call_agent":
                 notify = getattr(self.runtime, "notify_reflex_fact", None)
                 if callable(notify):
                     notify({"call_id": call_id, "status": "handoff_requested",

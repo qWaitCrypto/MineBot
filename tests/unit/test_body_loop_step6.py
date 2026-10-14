@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import time
+import pytest
 from types import SimpleNamespace
 from minebot.app import reflex_question as rq
 from minebot.app.body_loop import BodyLoop
@@ -148,6 +149,7 @@ def test_protection_equipment_is_judged_then_retries_protection_without_agent_wa
             calls.append(kw)
             assert kw['claim_holder']=='threat'
             assert kw['supervision_context']['is_reflex_action'] is True
+            assert kw['supervision_context']['reflex_action_choice']=='engage'
             facts['selected_item']='stone_sword'
             return {'success':True,'reason':'equipped','_execution':{'delivered':True}}
         owner=SimpleNamespace(decision_client=SimpleNamespace(),
@@ -184,6 +186,61 @@ def test_protection_equipment_is_judged_then_retries_protection_without_agent_wa
         assert all(not kwargs['invalidate_generation'] for _,kwargs in stops)
         assert not notifications
         assert not loop._result_pending
+    asyncio.run(run())
+
+
+def test_idle_protection_keeps_its_terminal_for_decision_before_next_idle_frame():
+    async def run():
+        questions=[];notifications=[];actions=[]
+        tool=SimpleNamespace(name='engage_entity',sidecar=SimpleNamespace(timeout_s=1))
+        owner=SimpleNamespace(decision_client=SimpleNamespace(),registry=SimpleNamespace(get=lambda _:tool),
+            trace=SimpleNamespace(emit=lambda *a,**kw:None),notify_reflex_fact=notifications.append)
+        loop=BodyLoop(owner)
+        facts={'health':20,'selected_item':'','inventory':{'stone_sword':1}}
+        loop._read_idle_facts=lambda:asyncio.sleep(0,result=facts)
+        loop._default_action=lambda *args:('engage_entity',{'target':'id'})
+        async def execute(choice,action,record=None,**kw):
+            actions.append(action)
+            return choice,action,{'success':False,'reason':'tool_broke','canRetry':False,
+                'metrics':{'broken_item':'wooden_sword'}},'native-fight'
+        loop._execute_protection=execute
+        async def judge(*args,**kw):
+            questions.append(kw)
+            assert 'equip:stone_sword' in kw['options']
+            assert 'resume' not in kw['options'] and 'stay' in kw['options']
+            assert kw['supervision_context']['goal']==''
+            return 'stay'
+        loop._judge_terminal_frame=judge
+        await loop._run_idle_protection('engage',facts)
+        assert len(questions)==1 and len(actions)==1
+        assert not notifications and len(loop.recent_experiences)==1
+        assert loop.loop_state=='idle' and not loop._result_pending
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('answer', ['unknown', 'call_agent'])
+def test_idle_protection_result_unknown_obeys_tool_deadline_and_call_agent_notifies_once(answer,monkeypatch):
+    async def run():
+        calls=[];notifications=[];questions=[]
+        tool=SimpleNamespace(name='engage_entity',sidecar=SimpleNamespace(timeout_s=.025))
+        owner=SimpleNamespace(decision_client=SimpleNamespace(),registry=SimpleNamespace(get=lambda _:tool),
+            trace=SimpleNamespace(emit=lambda *a,**kw:None),notify_reflex_fact=notifications.append)
+        loop=BodyLoop(owner)
+        loop._default_action=lambda *args:('engage_entity',{'target':'id'})
+        async def execute(choice,action,record=None,**kw):
+            calls.append(action)
+            return choice,action,{'success':False,'reason':'tool_broke','metrics':{'broken_item':'wooden_sword'}},'fight'
+        loop._execute_protection=execute
+        loop._read_idle_facts=lambda:asyncio.sleep(0,result={'health':20,'inventory':{'stone_sword':1},'selected_item':''})
+        async def judge(*args,**kw):questions.append(kw);return answer
+        loop._judge_terminal_frame=judge
+        started=time.monotonic()
+        await loop._run_idle_protection('engage',{})
+        assert len(calls)==1 and questions
+        assert len(notifications)==(1 if answer=='call_agent' else 0)
+        assert time.monotonic()-started < .15
+        assert not loop._result_pending
+    monkeypatch.setattr('minebot.app.body_loop.FACT_FRAME_INTERVAL_S',.001)
     asyncio.run(run())
 
 
