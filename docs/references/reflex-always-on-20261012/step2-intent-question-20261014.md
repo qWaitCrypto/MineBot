@@ -30,7 +30,7 @@ Codex 已停手，用户让 Claude 接手。分支 `codex/reflex-always-on`，�
 - **单元测试**：受影响的定向测试 111 passed；全量 `tests/unit` **2536 passed, 1 skipped, 291 subtests**，exit 0（`logs/final-suite-intent-question/`）。
 - 脚本：`bench/step2-done-wording-trial.py`、`step2-done-question-trial.py`、`step2-done-regression.py`、`step2-idle-mainhand-regression.py`；输出 `logs/step2-done-*-20261014.*`。
 
-## 真实验收（无人值守，进行中）
+## 真实验收（无人值守）
 
 - 监工脚本 `logs/supervise-step2-intent-question.py`，日志 `logs/supervise-step2-intent-question.log`。
 - 17:58 起跑。任务、模型、端口和上次相同，世界是新的，seed 同为 1。没有人工干预。
@@ -44,3 +44,18 @@ Codex 已停手，用户让 Claude 接手。分支 `codex/reflex-always-on`，�
 - 危险题和 `a` 同时出现的帧没有真实样本，只有单元测试。
 - 移动类意图在上浮途中（y=67），`a` 有 6/12 答「已显示」，未标注，留待观察。
 - 第 3–8 步的未过项见 `summary.md`，没有动。
+
+## 真实验收结果（`ae4318a`，17:58–18:24，Claude 逐条核对）
+
+- 任务完成：石镐在主手，煤 12，生命 20，没有死亡。中途掉进积水石室，身体自己上浮（运行帧选上浮 65 次，空闲帧 45 次），没有淹死。
+- 运行帧选了 7 次 `next_step`，**其中 3 次误停**，另有 1 次中途选了叫 Agent：
+  - seq 1204：意图「累计 4 个原木」，背包原木 3，`a` 答「已显示」0.61。
+  - seq 12522：意图「累计 2 个原木」，背包原木 1，0.63。
+  - seq 13991：意图「拥有并已装备石镐」，主手是花岗岩，0.507。
+  - seq 8915：`dig_up` 走到 y=67.3（目标 73）时选了叫 Agent（0.52 对 0.48 继续），存疑。
+  - 正确停下 4 次：1237 工作台、6188 原木 2/2、13094 木板 4/4、15466 煤 12/12。
+- **结论：第 2 步仍未通过。** 离线 113 帧都来自同一次运行，0/1092 的结果没有推广到新帧。新运行里的错误集中在两处：数量差一个（3/4、1/2），以及「装备到主手」这一半，概率都在 0.5–0.63 之间。
+- 下一步建议：
+  - 把这次的 7 次停下和同一调用里的相邻帧加进试验台，作为没参与调写法的新帧。
+  - 另外要请用户决定一件事：运行中带数量的工具（例如 `collect_resource(count=N)`）到数会自己结束，运行帧还要不要判「做完」。这改变核心理念里「谁判够了」的分工，不能自己定。
+- 监工收尾：服务器 SIGTERM 后 60 秒没退，被 SIGKILL；本次的进程都已结束；trace 保留；分析在 `analysis.json`。

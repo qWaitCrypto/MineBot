@@ -1,5 +1,5 @@
 <!-- step2-current-status:start -->
-> **2026-10-14 更新（Claude 接手，`ae4318a`）**：运行帧提前判完成已改成单独问「事实是否已显示意图」，离线 0/1092 误判，全量 2536 通过；真实验收进行中。详见 [step2-intent-question-20261014.md](step2-intent-question-20261014.md)。下表是 Codex 在 6db65ec 时的状态，保留不改。
+> **2026-10-14 更新（Claude 接手，`ae4318a`）**：运行帧提前判完成已改成单独问「事实是否已显示意图」，离线 0/1092 误判，全量 2536 通过；真实验收 7 次停下中 3 次误停，第 2 步仍未通过。详见 [step2-intent-question-20261014.md](step2-intent-question-20261014.md)。下表是 Codex 在 6db65ec 时的状态，保留不改。
 
 ## 当前状态（2026-10-14，源码6db65ec）
 
