@@ -491,6 +491,7 @@ def after_default_options(
 
 def frame_questions(
     options: Mapping[str, str], *, protecting: bool = False, acting_for_intent: bool = False,
+    interrupt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One request.  The danger question is asked only when a protective
     action is on offer in this frame."""
@@ -502,6 +503,12 @@ def frame_questions(
             if acting_for_intent else "Choose what the Body does next."
         ), "criteria": normal},
     }
+    if "interrupt" in normal and isinstance(interrupt, Mapping):
+        condition, handler = interrupt.get("condition"), interrupt.get("handler")
+        if isinstance(condition, Mapping) and isinstance(handler, Mapping):
+            questions["q"]["instructions"] += (
+                f" The Agent also says: when “{condition.get('text', '')}”, "
+                f"interrupt the current work and do “{handler.get('intent', '')}”.")
     if protective:
         questions["d"] = {"type": "choice", "instructions": "Is the Body in danger?", "criteria": dict(_DANGER)}
         questions["p"] = {

@@ -245,7 +245,8 @@ class CallSupervisor:
             )
         request: dict[str, Any] = {"state": state, "questions": rq.frame_questions(
             options, protecting=bool((supervision_context or {}).get("is_reflex_action")),
-            acting_for_intent=running and bool(intent))}
+            acting_for_intent=running and bool(intent),
+            interrupt=(supervision_context or {}).get("interrupt_when") if running else None)}
         if (supervision_context or {}).get("is_life_action"):
             request = rq.idle_question(facts, options)
             if running:

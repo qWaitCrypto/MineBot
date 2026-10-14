@@ -29,6 +29,26 @@ def test_declared_interrupt_in_running_options_but_not_in_handler_context():
     assert 'interrupt_when' not in executor._call_plan(p['interrupt_when']['handler'],[])
 
 
+def test_running_question_carries_agent_conditional_instruction_without_evaluating_it():
+    p = plan()
+    executor = WorkPlanExecutor(p, call=lambda *a, **k: None)
+    context = executor._call_plan(p['work'], [])
+    supervisor = CallSupervisor(SimpleNamespace(decision_client=SimpleNamespace()))
+    tool = SimpleNamespace(name='move_to')
+    record = {'tool': 'move_to', 'params': {'x': 20}, 'supervision_context': context}
+    frame = {'facts': {}, 'state': 'running'}
+    options = supervisor._options_for(tool, record, execution=frame)
+    request = supervisor._question('original', tool, {'x': 20}, frame, idle_s=0,
+                                  purpose='running_frame', supervision_context=context, options=options)
+    assert request['questions']['q']['instructions'].endswith(
+        'The Agent also says: when “A visitor is nearby”, interrupt the current work and do “Stand by the visitor”.')
+    assert request['questions']['q']['criteria'] == options
+    ordinary = rq.frame_questions({'keep_going': 'Continue'}, acting_for_intent=True)
+    assert ordinary['q']['instructions'] == "Choose what the Body does right now to achieve the Agent's intent."
+    handler = rq.frame_questions({'keep_going': 'Continue'}, interrupt=p['interrupt_when'])
+    assert 'The Agent also says' not in handler['q']['instructions']
+
+
 def test_handler_then_decision_resume_reenters_original_without_agent_judgement():
     async def run():
         calls=[];events=[]
