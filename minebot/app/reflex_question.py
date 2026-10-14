@@ -400,8 +400,7 @@ def frame_options(
                 f"and do: {handler.get('intent', '')}."
             )
     if failed:
-        for key, item in equipment_candidates(facts, result).items():
-            options[key] = f"Equip {item} from the inventory and run the same call again: {call}."
+        options.update(equipment_options(facts, result, call=call))
     options.update(protective_options(facts, stop=stop))
     options["call_agent"] = f"{stop} and hand control back to the Agent for a new plan."
     return options
@@ -424,6 +423,14 @@ def equipment_candidates(facts: Mapping[str, Any], result: Mapping[str, Any]) ->
             if isinstance(count, (int, float)) and count > 0
             and str(item).endswith("_" + category)
             and str(item).removeprefix("minecraft:") not in {held, source}}
+
+
+def equipment_options(facts: Mapping[str, Any], result: Mapping[str, Any], *, call: str) -> dict[str, str]:
+    """The same owned-tool alternatives for any failed terminal call."""
+    if result.get("success") is True:
+        return {}
+    return {key: f"Equip {item} from the inventory and run the same call again: {call}."
+            for key, item in equipment_candidates(facts, result).items()}
 
 
 def equipment_intent(item: str) -> str:
@@ -471,6 +478,7 @@ def after_default_options(
     }
     if not (result.get("success") is not True and result.get("canRetry") is False):
         options["repeat"] = f"Run the same call again: {default_call}."
+    options.update(equipment_options(facts or {}, result, call=default_call))
     options["call_agent"] = "Do not go back and hand control back to the Agent for a new plan."
     return options
 

@@ -627,8 +627,8 @@ class BodyLoop(CallSupervisor):
                     notify({"call_id": record["call_id"], "status": "handoff_requested", **safe})
         return choice
 
-    async def _run_result_equipment(self, record, original_tool, original_params, item):
-        """A direct result uses the same single-node tree for its equip option."""
+    async def _run_result_equipment(self, record, original_tool, original_params, item, *, claim_holder="agent_call"):
+        """Result equipment uses the same judged single-node tree."""
         from minebot.app.work_runtime import WorkPlanExecutor
         from minebot.brain.registry import execute_tool
         budget = self._remaining(record)
@@ -645,10 +645,13 @@ class BodyLoop(CallSupervisor):
         async def call(name, arguments, *, call_id, timeout_s):
             target = self.runtime.registry.get(name)
             transport_id = f"plan-{call_id}"
+            context = executor.call_context(call_id)
+            if claim_holder == "threat":
+                context = {**context, "is_reflex_action": True}
             raw = await self.runtime.run_tool(target, execute_tool, target, arguments,
                 getattr(self.runtime, "weld_context", None), tool_call_id=transport_id,
-                claim_holder="agent_call", timeout_s=self._remaining(record),
-                return_execution_receipt=True, supervision_context=executor.call_context(call_id))
+                claim_holder=claim_holder, timeout_s=self._remaining(record),
+                return_execution_receipt=True, supervision_context=context)
             projector = getattr(self.runtime, "shown_plan_result", None)
             shown = projector(name, raw, transport_id) if callable(projector) else dict(raw)
             if isinstance(raw.get("_execution"), dict):
@@ -1072,6 +1075,15 @@ class BodyLoop(CallSupervisor):
             record["questions"] += 1
             if choice in {"resume", "call_agent"}:
                 return choice
+            candidates = rq.equipment_candidates(execution["facts"], payload)
+            if choice in candidates:
+                # A protective call is a Body call too. Reuse the existing
+                # judged equipment node, then retry this protective call;
+                # resuming the suspended work is still a later choice.
+                choice = await self._run_result_equipment(
+                    record, default_tool, action[1], candidates[choice], claim_holder="threat")
+                if choice == "call_agent":
+                    return choice
             if choice != "repeat":
                 # A missing/illegal/late answer is no choice. Keep the
                 # interrupted work pending, refresh facts at the next cadence,

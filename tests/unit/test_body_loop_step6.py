@@ -124,6 +124,69 @@ def test_equipment_is_only_a_failed_result_option_for_an_owned_other_tool_of_sam
     assert rq.equipment_candidates(body,failed)=={}
 
 
+def test_failed_protection_result_offers_same_owned_equipment_as_work_result():
+    facts={'selected_item':'','inventory':{'stone_sword':1}}
+    result={'success':False,'reason':'tool_broke','canRetry':False,
+            'metrics':{'broken_item':'wooden_sword'}}
+    options=rq.after_default_options(original_call='engage_entity(target="id")',
+        intent='Kill the target',default_call='engage_entity(target="id")',result=result,facts=facts)
+    assert list(options)==['resume','equip:stone_sword','call_agent']
+    assert options['equip:stone_sword']=='Equip stone_sword from the inventory and run the same call again: engage_entity(target="id").'
+    result['success']=True
+    assert not any(k.startswith('equip:') for k in rq.after_default_options(
+        original_call='engage_entity(target="id")',intent='Kill the target',
+        default_call='engage_entity(target="id")',result=result,facts=facts))
+
+
+def test_protection_equipment_is_judged_then_retries_protection_without_agent_wake():
+    async def run():
+        calls=[];retries=[];questions=[];notifications=[];stops=[]
+        facts={'health':20,'selected_item':'','inventory':{'stone_sword':1}}
+        async def state():return copy.deepcopy(facts)
+        async def cancel(reason,**kw):stops.append((reason,kw));return {'settled':True}
+        async def call(tool,*args,**kw):
+            calls.append(kw)
+            assert kw['claim_holder']=='threat'
+            assert kw['supervision_context']['is_reflex_action'] is True
+            facts['selected_item']='stone_sword'
+            return {'success':True,'reason':'equipped','_execution':{'delivered':True}}
+        owner=SimpleNamespace(decision_client=SimpleNamespace(),
+            registry=SimpleNamespace(get=lambda name:SimpleNamespace(name=name)),
+            run_tool=call,cancel_active_execution_with_facts=cancel,
+            notify_reflex_fact=notifications.append,trace=SimpleNamespace(emit=lambda *a,**kw:None))
+        loop=BodyLoop(owner)
+        loop._read_idle_facts=state
+        async def judge(*args,**kw):
+            questions.append(kw['options'])
+            if len(questions)==1:
+                assert 'equip:stone_sword' in kw['options']
+                return 'equip:stone_sword'
+            return 'resume'
+        loop._judge_terminal_frame=judge
+        async def equip_judge(**kw):
+            assert kw['tool'].name=='equip_item'
+            assert facts['selected_item']=='stone_sword'
+            return 'next_step'
+        loop.decide_plan_result=equip_judge
+        async def retry(choice,action,record,**kw):
+            assert facts['selected_item']=='stone_sword'
+            retries.append(action)
+            return choice,action,{'success':True,'reason':'killed'},kw['call_id']
+        loop._execute_protection=retry
+        record={'call_id':'original','tool':'engage_entity','params':{'target':'id'},
+            'started_at':time.monotonic(),'timeout_s':2,'questions':0,
+            'supervision_context':{'intent':'Kill the target'}}
+        failed={'success':False,'reason':'tool_broke','canRetry':False,'metrics':{'broken_item':'wooden_sword'}}
+        answer=await loop._after_default_action(record,('engage_entity',{'target':'id'}),failed,'fight',protective_choice='engage')
+        assert answer=='resume'
+        assert len(calls)==1 and len(questions)==2
+        assert retries==[('engage_entity',{'target':'id'})]
+        assert all(not kwargs['invalidate_generation'] for _,kwargs in stops)
+        assert not notifications
+        assert not loop._result_pending
+    asyncio.run(run())
+
+
 def test_equipment_node_is_judged_before_original_call_reentry():
     async def run():
         calls=[];judged=[];body={'selected_item':'','inventory':{'stone_sword':1}}
