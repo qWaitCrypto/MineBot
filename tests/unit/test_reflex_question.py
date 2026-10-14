@@ -168,6 +168,44 @@ def test_result_options_never_skip_a_failed_step():
     assert rq.only_option(rq.frame_questions(hopeless)) == "call_agent"
 
 
+@pytest.mark.parametrize("running", [True, False])
+def test_terminal_report_names_the_dispatch_intent_and_internal_step_names_its_call(running):
+    # Real patrol seq862 stopped at x205.8 for x220: "this work" did not
+    # identify the result the Agent actually wanted. Do not remove the choice.
+    args = dict(facts={}, intent="到达[220,121,220]", running=running,
+                result=None if running else {"success": True}, **CALL)
+    stop = "Stop the current action" if running else "Do not repeat it"
+    terminal = rq.frame_options(**args)
+    assert terminal["next_step"] == f"{stop} and report to the Agent that “到达[220,121,220]” has been achieved."
+    internal = rq.frame_options(next_call="equip_item(item=stone_sword)", **args)
+    assert internal["next_step"] == f"{stop} and start the next step of the plan: equip_item(item=stone_sword)."
+    assert set(terminal) == set(internal)
+
+
+def test_failure_observations_survive_the_agent_projector_without_new_result_fields():
+    from minebot.app.runner import _model_tool_payload
+    native = {"success": False, "reason": "target_not_found", "canRetry": True,
+              "metrics": {"requested_target": "absent-uuid", "scope": "nearbyEntities",
+                          "search_radius": 32, "entities_observed": 0}}
+    projected = _model_tool_payload("engage_entity", native, trace_ref="regression")
+    expected = "engage_entity() has ended. It reported failure: target_not_found. The tool observed 0 entities within 32 blocks."
+    assert rq.result_sentence("engage_entity()", native) == expected
+    assert rq.result_sentence("engage_entity()", projected) == expected
+    assert native["canRetry"] is True
+
+
+@pytest.mark.parametrize("details", [{}, {"search_radius": 32}, {"entities_observed": 0},
+                                     {"entities_observed": False, "search_radius": 32}])
+def test_failure_does_not_invent_missing_observation_facts(details):
+    assert rq.result_sentence("call()", {"success": False, "reason": "x", "metrics": details}) == (
+        "call() has ended. It reported failure: x.")
+
+
+def test_success_still_only_says_ended_normally_even_with_observation_metrics():
+    assert rq.result_sentence("call()", {"success": True, "metrics": {
+        "entities_observed": 1, "search_radius": 32}}) == "call() has ended normally."
+
+
 def test_result_frame_reports_how_the_call_ended_and_earlier_attempts():
     body = {"position": [1, 64, 1], "inventory": {"stick": 2}}
     fail = {"success": False, "reason": "stand_point_unreachable"}

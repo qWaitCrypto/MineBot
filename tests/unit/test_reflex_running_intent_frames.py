@@ -35,6 +35,13 @@ def test_real_running_inputs_compile_to_the_exact_offline_verified_requests():
         selected=facts.get('selected_item')
         if isinstance(selected,str) and facts.get('selected_item_known') is not False:
             expected['state']['body']+=' The main hand holds '+(selected or 'nothing')+'.'
+        # Intent-specific terminal reporting was checked offline on an
+        # unfinished patrol and an arrived direct call. Preserve all facts
+        # and every internal next-call option in the historical fixture.
+        context=case['supervision_context']
+        if not context.get('next_call') and 'next_step' in expected['questions']['q']['criteria']:
+            expected['questions']['q']['criteria']['next_step']=(
+                f'Stop the current action and report to the Agent that “{context["intent"]}” has been achieved.')
         assert request==expected,case['seq']
         assert json.dumps(request,ensure_ascii=False,separators=(',',':')) == json.dumps(
             expected,ensure_ascii=False,separators=(',',':')),case['seq']

@@ -229,7 +229,18 @@ def result_sentence(call: str, result: Mapping[str, Any] | None) -> str:
     result = result if isinstance(result, Mapping) else {}
     if result.get("success") is True:
         return f"{call} has ended normally."
-    return f"{call} has ended. It reported failure: {result.get('reason') or 'no reason given'}."
+    sentence = f"{call} has ended. It reported failure: {result.get('reason') or 'no reason given'}."
+    # The native perception result already records its scope and observation
+    # count. Preserve that fact after the Agent projector moves it to summary;
+    # it does not establish that the target is absent from the whole world.
+    for field in ("summary", "metrics"):
+        details = result.get(field)
+        if not isinstance(details, Mapping):
+            continue
+        count, radius = details.get("entities_observed"), details.get("search_radius")
+        if type(count) is int and type(radius) in (int, float):
+            return sentence + f" The tool observed {count} entities within {radius:g} blocks."
+    return sentence
 
 
 def attempt_lines(history: list[Mapping[str, Any]], earlier: int = 0) -> list[str]:
@@ -393,6 +404,7 @@ def frame_options(
     if not failed:
         options["next_step"] = (
             f"{stop} and start the next step of the plan: {next_call}." if next_call
+            else f"{stop} and report to the Agent that “{intent}” has been achieved." if intent
             else f"{stop} and report to the Agent that this work is finished."
         )
     for key, text in (tree or {}).items():

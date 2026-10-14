@@ -393,6 +393,14 @@ def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent(
                 criteria["equip:wooden_pickaxe"] = 'Equip wooden_pickaxe from the inventory and run the same call again: collect_resource(item="iron_ore", count=2).'
                 criteria["call_agent"] = agent
                 expected["state"]["request_chars"] += len(json.dumps(criteria, ensure_ascii=False, separators=(",", ":"))) - len(old)
+            if not case["node"].get("next_call") and "next_step" in expected["questions"]["q"]["criteria"]:
+                criteria = expected["questions"]["q"]["criteria"]
+                old = criteria["next_step"]
+                criteria["next_step"] = f'Do not repeat it and report to the Agent that “{intent}” has been achieved.'
+                expected["state"]["request_chars"] += (
+                    len(json.dumps(criteria["next_step"], ensure_ascii=False))
+                    - len(json.dumps(old, ensure_ascii=False))
+                )
             runtime, trace, _decision = _runtime()
             loop = BodyLoop(runtime)
             executor = WorkPlanExecutor(
