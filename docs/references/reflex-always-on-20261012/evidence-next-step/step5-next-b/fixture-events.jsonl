@@ -1,0 +1,44 @@
+{"time": 1791943102.249468, "last_seq": 7, "kind": "first_question", "matched_seq": 6}
+{"time": 1791943102.2567477, "last_seq": 7, "kind": "fixture_no_natural_spawns", "command": "gamerule minecraft:spawn_mobs false", "response": "Gamerule spawn_mobs is now set to: false"}
+{"time": 1791943102.2596598, "last_seq": 7, "kind": "fixture_day", "command": "time set night", "response": "Set minecraft:overworld to time marker minecraft:night"}
+{"time": 1791943102.2629101, "last_seq": 9, "kind": "fixture_day_frozen", "command": "gamerule minecraft:advance_time false", "response": "Gamerule advance_time is now set to: false"}
+{"time": 1791943102.2651289, "last_seq": 9, "kind": "fixture_difficulty", "command": "difficulty easy", "response": "The difficulty did not change; it is already set to easy"}
+{"time": 1791943102.2730544, "last_seq": 9, "kind": "fixture_platform", "command": "fill 180 120 180 260 120 260 minecraft:stone", "response": "No blocks were filled"}
+{"time": 1791943102.2766986, "last_seq": 9, "kind": "fixture_position", "command": "tp Step5NextBot 220.5 121 220.5", "response": "Teleported Step5NextBot to 220.500000, 121.000000, 220.500000"}
+{"time": 1791943102.27947, "last_seq": 9, "kind": "fixture_heal", "command": "effect give Step5NextBot minecraft:instant_health 1 10 true", "response": "Applied effect Instant Health to Step5NextBot"}
+{"time": 1791943102.2852273, "last_seq": 9, "kind": "fixture_feed", "command": "effect give Step5NextBot minecraft:saturation 1 10 true", "response": "Applied effect Saturation to Step5NextBot"}
+{"time": 1791943103.7892563, "last_seq": 14, "kind": "fixture_clear_effects", "command": "effect clear Step5NextBot", "response": "Target has no effects to remove"}
+{"time": 1791943103.797082, "last_seq": 14, "kind": "fixture_empty_inventory", "command": "clear Step5NextBot", "response": "No items were found on player Step5NextBot"}
+{"time": 1791943103.8016596, "last_seq": 14, "kind": "fixture_sword", "command": "item replace entity Step5NextBot weapon.mainhand with minecraft:iron_sword", "response": "Replaced a slot on Step5NextBot with [Iron Sword]"}
+{"time": 1791943105.8053179, "last_seq": 23, "kind": "melee_begin"}
+{"time": 1791943105.8113208, "last_seq": 23, "kind": "fixture_melee", "command": "execute at Step5NextBot run summon minecraft:zombie ~1 ~ ~ {PersistenceRequired:1b,Tags:[\"step5_next_melee\"]}", "response": "Summoned new Zombie"}
+{"time": 1791943107.0814972, "last_seq": 30, "kind": "melee_engage_selected", "matched_seq": 29}
+{"time": 1791943109.6474059, "last_seq": 73, "kind": "melee_action_ended", "matched_seq": 72}
+{"time": 1791943109.65718, "last_seq": 73, "kind": "fixture_melee_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791943109.666305, "last_seq": 73, "kind": "fixture_melee_target_health", "command": "data get entity @e[tag=step5_next_melee,limit=1] Health", "response": "No entity was found"}
+{"time": 1791943109.6747997, "last_seq": 73, "kind": "fixture_melee_cleanup", "command": "kill @e[tag=step5_next_melee]", "response": "No entity was found"}
+{"time": 1791943109.6835456, "last_seq": 73, "kind": "fixture_heal", "command": "effect give Step5NextBot minecraft:instant_health 1 10 true", "response": "Applied effect Instant Health to Step5NextBot"}
+{"time": 1791943109.6939945, "last_seq": 73, "kind": "fixture_feed", "command": "effect give Step5NextBot minecraft:saturation 1 10 true", "response": "Applied effect Saturation to Step5NextBot"}
+{"time": 1791943110.9008222, "last_seq": 78, "kind": "fixture_clear_effects", "command": "effect clear Step5NextBot", "response": "Target has no effects to remove"}
+{"time": 1791943110.9075646, "last_seq": 78, "kind": "user_message", "text": "这是人工威胁验收。现在在高台巡视：依次到 [250,121,220]、[250,121,250]、[190,121,250]、[190,121,190]、[220,121,220]。把路线交给 delegate_work，各步意图写到达目标位置。临时威胁交给反射层，不主动调用战斗工具，不轮询进度；完成后待命。不采集、不建造、不破坏方块。"}
+{"time": 1791943120.336517, "last_seq": 281, "kind": "real_agent_work", "matched_seq": 280}
+{"time": 1791943120.3507643, "last_seq": 281, "kind": "far_control_begin"}
+{"time": 1791943120.3681648, "last_seq": 281, "kind": "fixture_far_zombie", "command": "execute at Step5NextBot run summon minecraft:zombie ~ ~ ~20 {NoAI:1b,PersistenceRequired:1b,Tags:[\"step5_next_far\"]}", "response": "Summoned new Zombie"}
+{"time": 1791943123.3839843, "last_seq": 378, "kind": "fixture_far_cleanup", "command": "kill @e[tag=step5_next_far]", "response": "Killed Zombie"}
+{"time": 1791943123.4255133, "last_seq": 379, "kind": "far_control_end"}
+{"time": 1791943123.9850268, "last_seq": 383, "kind": "work_for_ranged", "matched_seq": 382}
+{"time": 1791943124.0067308, "last_seq": 383, "kind": "fixture_empty_hand", "command": "clear Step5NextBot", "response": "Removed 3 item(s) from player Step5NextBot"}
+{"time": 1791943124.0202217, "last_seq": 383, "kind": "fixture_no_regeneration", "command": "gamerule minecraft:natural_health_regeneration false", "response": "Gamerule natural_health_regeneration is now set to: false"}
+{"time": 1791943124.0391407, "last_seq": 383, "kind": "fixture_ranged_damage", "command": "damage Step5NextBot 14 minecraft:generic", "response": "Applied 14.0 damage to Step5NextBot"}
+{"time": 1791943124.0518622, "last_seq": 383, "kind": "ranged_begin"}
+{"time": 1791943124.1070764, "last_seq": 385, "kind": "fixture_ranged_skeleton", "command": "execute at Step5NextBot run summon minecraft:skeleton ~ ~ ~8 {PersistenceRequired:1b,Tags:[\"step5_next_ranged\"]}", "response": "Summoned new Skeleton"}
+{"time": 1791943128.6738384, "last_seq": 505, "kind": "ranged_escape_selected", "matched_seq": 503}
+{"time": 1791943130.6957767, "last_seq": 531, "kind": "fixture_ranged_remove_threat", "command": "kill @e[tag=step5_next_ranged]", "response": "Killed Skeleton"}
+{"time": 1791943130.7148292, "last_seq": 531, "kind": "threat_removed"}
+{"time": 1791943130.7466753, "last_seq": 531, "kind": "ranged_action_ended", "matched_seq": 519}
+{"time": 1791943155.803636, "last_seq": 735, "kind": "window_unavailable", "label": "resume_selected"}
+{"time": 1791943155.8653982, "last_seq": 736, "kind": "original_work_resumed", "matched_seq": 730}
+{"time": 1791943155.8944323, "last_seq": 736, "kind": "fixture_final_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 2.0f"}
+{"time": 1791943155.9225445, "last_seq": 736, "kind": "fixture_heal_after_measurement", "command": "effect give Step5NextBot minecraft:instant_health 1 10 true", "response": "Applied effect Instant Health to Step5NextBot"}
+{"time": 1791943155.9806933, "last_seq": 736, "kind": "fixture_complete", "deaths": []}
+{"time": 1791943156.0075126, "last_seq": 736, "kind": "user_message", "text": "/quit"}

@@ -1,0 +1,10 @@
+[
+  {
+    "activity_id": "activity-7841f05d224d4d91b4db727ba71e9abc",
+    "event": "reflex_fact_dropped",
+    "reason": "no_active_goal",
+    "seq": 658,
+    "session_id": "Step5NextBot",
+    "ts": 1791943318.7222908
+  }
+]

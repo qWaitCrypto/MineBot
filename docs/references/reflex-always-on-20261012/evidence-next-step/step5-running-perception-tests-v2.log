@@ -1,0 +1,209 @@
+........................................................................ [ 54%]
+......................F...F................................              [100%]
+=================================== FAILURES ===================================
+__________ test_supervisor_clock_questions_when_body_sends_no_samples __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7e117cccd7f0>
+
+    def test_supervisor_clock_questions_when_body_sends_no_samples(monkeypatch):
+        async def run():
+            ipc = GenericCallIpc(progressing=False)
+            runtime, _ = make_runtime(ipc)
+            tool = _register_generic(runtime, runtime.registry, runtime.body, name="silent_long_call")
+            # Keep the test short while preserving the one-frame-per-cadence rule.
+            monkeypatch.setattr(supervision_module, "FACT_FRAME_INTERVAL_S", 0.05)
+            monkeypatch.setattr(snapshot_module, "FACT_FRAME_INTERVAL_S", 0.05)
+    
+            decisions = []
+    
+            async def always_continue(*_args, **_kwargs):
+                decisions.append(True)
+                return "continue"
+    
+            runtime.call_supervisor.judge = always_continue
+            original = ipc.command
+    
+            def silent_command(objective, *, action_id, timeout_ms, on_progress):
+                # The native call remains active but never reports progress.
+                return original(objective, action_id=action_id, timeout_ms=timeout_ms, on_progress=lambda _payload: None)
+    
+            ipc.command = silent_command
+            try:
+                result = await asyncio.wait_for(runtime.run_tool(
+                    tool, execute_tool, tool, {"target": [1, 5, 0], "intent": "reach the requested target"}, runtime.weld_context,
+                    tool_call_id="silent", timeout_s=2), 2)
+                assert result["success"]
+                assert len(decisions) >= 5
+            finally:
+                await runtime.aclose()
+>       asyncio.run(run())
+
+tests/unit/test_direct_call_supervision.py:595: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../miniconda3/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def run():
+        ipc = GenericCallIpc(progressing=False)
+        runtime, _ = make_runtime(ipc)
+        tool = _register_generic(runtime, runtime.registry, runtime.body, name="silent_long_call")
+        # Keep the test short while preserving the one-frame-per-cadence rule.
+        monkeypatch.setattr(supervision_module, "FACT_FRAME_INTERVAL_S", 0.05)
+        monkeypatch.setattr(snapshot_module, "FACT_FRAME_INTERVAL_S", 0.05)
+    
+        decisions = []
+    
+        async def always_continue(*_args, **_kwargs):
+            decisions.append(True)
+            return "continue"
+    
+        runtime.call_supervisor.judge = always_continue
+        original = ipc.command
+    
+        def silent_command(objective, *, action_id, timeout_ms, on_progress):
+            # The native call remains active but never reports progress.
+            return original(objective, action_id=action_id, timeout_ms=timeout_ms, on_progress=lambda _payload: None)
+    
+        ipc.command = silent_command
+        try:
+            result = await asyncio.wait_for(runtime.run_tool(
+                tool, execute_tool, tool, {"target": [1, 5, 0], "intent": "reach the requested target"}, runtime.weld_context,
+                tool_call_id="silent", timeout_s=2), 2)
+            assert result["success"]
+>           assert len(decisions) >= 5
+E           assert 4 >= 5
+E            +  where 4 = len([True, True, True, True])
+
+tests/unit/test_direct_call_supervision.py:592: AssertionError
+___________ test_one_decision_in_flight_keeps_only_latest_fact_frame ___________
+
+    def test_one_decision_in_flight_keeps_only_latest_fact_frame():
+        async def run():
+            ipc = GenericCallIpc(progressing=False)
+            runtime, _ = make_runtime(ipc)
+    
+            def invoke(_params):
+                observation = __import__("minebot.contract.execution", fromlist=["current_tool_observation"]).current_tool_observation()
+                assert observation is not None
+                _call_id, notify = observation
+                notify({"position": [0, 5, 0], "pathing": True,
+                        "navigation": {"pathing": True, "path_position": 0}, "goal": True})
+                time.sleep(.03)
+                notify({"position": [0, 5, 0], "pathing": False,
+                        "builder_paused": True, "navigation": {"pathing": False, "path_position": 0}})
+                time.sleep(.08)
+                return ToolResult(True, "world_result_verified", False)
+    
+            tool = RegisteredTool(
+                "frame_test", "A frame test", {"type": "object"}, invoke,
+                ToolSidecar("frame_test", True, source="test"),
+                supervision_explanation="The test call reports navigation and then a builder phase.",
+            )
+            runtime.registry.register(tool)
+    
+            class DelayedDecision:
+                def __init__(self):
+                    self.started = asyncio.Event(); self.release = asyncio.Event(); self.payloads = []
+                async def ask(self, payload, *, priority):
+                    self.payloads.append(payload); self.started.set()
+                    if len(self.payloads) == 1:
+                        await self.release.wait()
+                    return DecisionAnswer("continue", {"answers": {"q": {"choice": "continue"}}}, .001, len(self.payloads))
+                async def close(self):
+                    return None
+    
+            decision = DelayedDecision()
+            runtime.call_supervisor._client = decision
+            try:
+                job = asyncio.create_task(runtime.run_tool(
+                    tool, execute_tool, tool, {"intent": "perform the requested body action"}, runtime.weld_context,
+                    tool_call_id="frame-test", timeout_s=2,
+                ))
+                await asyncio.wait_for(decision.started.wait(), 1)
+                await asyncio.sleep(.05)
+                assert len(decision.payloads) == 1
+                decision.release.set()
+                await asyncio.wait_for(job, 2)
+                assert len(decision.payloads) == 2
+                assert "builder_paused" in json.dumps(decision.payloads[1], ensure_ascii=False)
+            finally:
+                await runtime.aclose()
+>       asyncio.run(run())
+
+tests/unit/test_direct_call_supervision.py:790: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../miniconda3/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def run():
+        ipc = GenericCallIpc(progressing=False)
+        runtime, _ = make_runtime(ipc)
+    
+        def invoke(_params):
+            observation = __import__("minebot.contract.execution", fromlist=["current_tool_observation"]).current_tool_observation()
+            assert observation is not None
+            _call_id, notify = observation
+            notify({"position": [0, 5, 0], "pathing": True,
+                    "navigation": {"pathing": True, "path_position": 0}, "goal": True})
+            time.sleep(.03)
+            notify({"position": [0, 5, 0], "pathing": False,
+                    "builder_paused": True, "navigation": {"pathing": False, "path_position": 0}})
+            time.sleep(.08)
+            return ToolResult(True, "world_result_verified", False)
+    
+        tool = RegisteredTool(
+            "frame_test", "A frame test", {"type": "object"}, invoke,
+            ToolSidecar("frame_test", True, source="test"),
+            supervision_explanation="The test call reports navigation and then a builder phase.",
+        )
+        runtime.registry.register(tool)
+    
+        class DelayedDecision:
+            def __init__(self):
+                self.started = asyncio.Event(); self.release = asyncio.Event(); self.payloads = []
+            async def ask(self, payload, *, priority):
+                self.payloads.append(payload); self.started.set()
+                if len(self.payloads) == 1:
+                    await self.release.wait()
+                return DecisionAnswer("continue", {"answers": {"q": {"choice": "continue"}}}, .001, len(self.payloads))
+            async def close(self):
+                return None
+    
+        decision = DelayedDecision()
+        runtime.call_supervisor._client = decision
+        try:
+            job = asyncio.create_task(runtime.run_tool(
+                tool, execute_tool, tool, {"intent": "perform the requested body action"}, runtime.weld_context,
+                tool_call_id="frame-test", timeout_s=2,
+            ))
+            await asyncio.wait_for(decision.started.wait(), 1)
+            await asyncio.sleep(.05)
+            assert len(decision.payloads) == 1
+            decision.release.set()
+            await asyncio.wait_for(job, 2)
+>           assert len(decision.payloads) == 2
+E           AssertionError: assert 1 == 2
+E            +  where 1 = len([{'state': {'task': 'Fill the original cuboid', 'agent_intent': 'The Agent wants the following result: “perform the re...his work is finished.', 'call_agent': 'Stop the current action and hand control back to the Agent for a new plan.'}}}}])
+E            +    where [{'state': {'task': 'Fill the original cuboid', 'agent_intent': 'The Agent wants the following result: “perform the re...his work is finished.', 'call_agent': 'Stop the current action and hand control back to the Agent for a new plan.'}}}}] = <test_direct_call_supervision.test_one_decision_in_flight_keeps_only_latest_fact_frame.<locals>.run.<locals>.DelayedDecision object at 0x7e117ce6aa50>.payloads
+
+tests/unit/test_direct_call_supervision.py:786: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_direct_call_supervision.py::test_supervisor_clock_questions_when_body_sends_no_samples
+FAILED tests/unit/test_direct_call_supervision.py::test_one_decision_in_flight_keeps_only_latest_fact_frame
+2 failed, 129 passed in 11.96s

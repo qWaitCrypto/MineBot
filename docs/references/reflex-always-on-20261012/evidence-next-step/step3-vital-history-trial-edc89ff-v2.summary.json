@@ -1,0 +1,113 @@
+{
+  "frames": [
+    {
+      "seq": 980,
+      "attempt": 1,
+      "source_frames": [
+        956
+      ],
+      "baseline_reproduced": true,
+      "distributions": {
+        "body_at_interruption": {
+          "resume": 12
+        },
+        "chronological": {
+          "resume": 12
+        },
+        "body_then_result": {
+          "resume": 12
+        },
+        "no_history_control": {
+          "resume": 10,
+          "call_agent": 2
+        }
+      }
+    },
+    {
+      "seq": 1053,
+      "attempt": 2,
+      "source_frames": [
+        956,
+        1024
+      ],
+      "baseline_reproduced": true,
+      "distributions": {
+        "body_at_interruption": {
+          "resume": 12
+        },
+        "chronological": {
+          "resume": 12
+        },
+        "body_then_result": {
+          "resume": 12
+        }
+      }
+    },
+    {
+      "seq": 1141,
+      "attempt": 3,
+      "source_frames": [
+        956,
+        1024,
+        1105
+      ],
+      "baseline_reproduced": true,
+      "distributions": {
+        "body_at_interruption": {
+          "resume": 12
+        },
+        "chronological": {
+          "resume": 12
+        },
+        "body_then_result": {
+          "resume": 12
+        }
+      }
+    },
+    {
+      "seq": 1286,
+      "attempt": 4,
+      "source_frames": [
+        956,
+        1024,
+        1105,
+        1184
+      ],
+      "baseline_reproduced": true,
+      "distributions": {
+        "body_at_interruption": {
+          "resume": 12
+        },
+        "chronological": {
+          "resume": 12
+        },
+        "body_then_result": {
+          "resume": 12
+        }
+      }
+    },
+    {
+      "seq": 1506,
+      "attempt": 5,
+      "source_frames": [
+        956,
+        1024,
+        1105,
+        1184,
+        1482
+      ],
+      "baseline_reproduced": true,
+      "distributions": {
+        "body_at_interruption": {
+          "resume": 12
+        },
+        "chronological": {
+          "resume": 12
+        },
+        "body_then_result": {
+          "resume": 12
+        }
+      }
+    }
+  ]
+}

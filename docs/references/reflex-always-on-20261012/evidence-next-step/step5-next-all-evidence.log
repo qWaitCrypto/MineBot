@@ -1,0 +1,58 @@
+RUN reflex-always-on-20261014-step5-next
+requests_by_purpose {"idle_frame": 15, "running_frame": 31, "plan_result_frame": 3}
+answers {"stay": 13, "engage": 1, "keep_going": 27, "next_step": 3}
+decision_ms_median 134.702
+agent_delivery_counts {}
+delegate_work 1
+read_reflex 0
+supervised_body_call_s 27.436000108718872
+deaths []
+31 call_supervision_default_requested {"choice": "engage", "tool": "engage_entity", "tool_call_id": "idle-loop"}
+34 reflex_reaction_chain {"choice": "engage", "tool": "engage_entity", "tool_call_id": "reflex-idle-5", "total_s": 0.5384444770170376, "event_health": 20.0, "event_distance": 1.0, "event_to_request_s": 0.00011742999777197838, "request_to_answer_s": 0.19819622999057174, "answer_to_action_s": 0.34013081702869385}
+64 call_supervision_default_finished {"choice": "engage", "tool": "engage_entity", "tool_call_id": "idle-loop", "result": {"canRetry": false, "reason": "killed", "success": true}}
+native terminals
+last full {"seq": 674, "pos": [190.5, 121.0, 231.8], "health": 20.0, "food": 15, "oxygen": 300}
+RUN reflex-always-on-20261014-step5-next-b
+requests_by_purpose {"idle_frame": 13, "running_frame": 40, "plan_result_frame": 3, "default_result_frame": 1}
+answers {"stay": 12, "engage": 1, "keep_going": 35, "next_step": 3, "move_away": 1, "resume": 1}
+decision_ms_median 129.239
+agent_delivery_counts {}
+delegate_work 1
+read_reflex 0
+supervised_body_call_s 34.72699999809265
+deaths []
+29 call_supervision_default_requested {"choice": "engage", "tool": "engage_entity", "tool_call_id": "idle-loop"}
+32 reflex_reaction_chain {"choice": "engage", "tool": "engage_entity", "tool_call_id": "reflex-idle-5", "total_s": 0.561612167977728, "event_health": 20.0, "event_distance": 1.0, "event_to_request_s": 0.00011646596249192953, "request_to_answer_s": 0.19450037099886686, "answer_to_action_s": 0.36699533101636916}
+72 call_supervision_default_finished {"choice": "engage", "tool": "engage_entity", "tool_call_id": "idle-loop", "result": {"canRetry": false, "reason": "killed", "success": true}}
+503 call_supervision_default_requested {"choice": "move_away", "tool": "move_away", "tool_call_id": "plan-legacy:af2ca0860bb2c62e:0"}
+514 reflex_reaction_chain {"choice": "move_away", "tool": "move_away", "tool_call_id": "reflex-default-98fcd612-3f7b-4372-9637-8f34014d227f", "result": {"canRetry": false, "reason": "already_safe", "success": true}, "event_health": 4.0, "event_distance": 5.917252941914449}
+519 call_supervision_default_finished {"choice": "move_away", "tool_call_id": "plan-legacy:af2ca0860bb2c62e:0"}
+native terminals
+last full {"seq": 744, "pos": [190.74, 121.0, 191.64], "health": 20.0, "food": 20, "oxygen": 300}
+RUN reflex-always-on-20261014-step5-next-c
+requests_by_purpose {"idle_frame": 10, "running_frame": 31, "plan_result_frame": 4}
+answers {"stay": 10, "keep_going": 27, "next_step": 3, "repeat": 1}
+decision_ms_median 132.235
+agent_delivery_counts {}
+delegate_work 1
+read_reflex 0
+supervised_body_call_s 31.062999963760376
+deaths []
+657 reflex_activity_finished {"status": "completed"}
+native terminals
+last full {"seq": 661, "pos": [220.73, 121.0, 220.73], "health": 6.0, "food": 20, "oxygen": 300}
+RUN reflex-always-on-20261014-step5-next-d
+requests_by_purpose {"idle_frame": 7, "running_frame": 20, "default_result_frame": 1, "plan_result_frame": 2}
+answers {"stay": 6, "keep_going": 17, "move_away": 1, "resume": 1, "next_step": 1, "call_agent": 1}
+decision_ms_median 136.827
+agent_delivery_counts {}
+delegate_work 1
+read_reflex 0
+supervised_body_call_s 19.91000008583069
+deaths []
+290 call_supervision_default_requested {"choice": "move_away", "tool": "move_away", "tool_call_id": "plan-legacy:5e97f66512635f20:0"}
+297 reflex_reaction_chain {"choice": "move_away", "tool": "move_away", "tool_call_id": "reflex-default-3603ab78-928d-4ec2-bd81-7f76d12d6bc8", "total_s": 1.4908576150191948, "event_health": 6.0, "event_distance": 5.531068672577874, "event_to_request_s": 0.570243799011223, "request_to_answer_s": 0.20417191996239126, "answer_to_action_s": 0.7164418960455805}
+322 call_supervision_default_finished {"choice": "move_away", "tool_call_id": "plan-legacy:5e97f66512635f20:0"}
+547 reflex_activity_finished {"status": "blocked"}
+native terminals
+last full {"seq": 544, "pos": [190.51, 121.0, 220.5], "health": 2.0, "food": 20, "oxygen": 300}

@@ -1,0 +1,118 @@
+[
+  {
+    "arguments": {
+      "target": "f7415606-24bd-40f2-861a-1ea6f4751cf8"
+    },
+    "choice": "engage",
+    "event": "call_supervision_default_requested",
+    "loop_state": "idle",
+    "seq": 31,
+    "session_id": "Step5NextBot",
+    "tool": "engage_entity",
+    "tool_call_id": "idle-loop",
+    "ts": 1791942478.8429303
+  },
+  {
+    "action_progress_monotonic_s": 533714.535266705,
+    "action_sampled_at_ms": 1791942479182,
+    "answer_monotonic_s": 533714.195135888,
+    "answer_to_action_s": 0.34013081702869385,
+    "choice": "engage",
+    "event": "reflex_reaction_chain",
+    "event_distance": 1.0,
+    "event_health": 20.0,
+    "event_monotonic_s": 533713.996822228,
+    "event_sampled_at_ms": 1791942478599,
+    "event_to_request_s": 0.00011742999777197838,
+    "first_native_progress": true,
+    "native_action_id": "16f1cb7f-d907-4621-be4f-0afcb8efbe40",
+    "request_monotonic_s": 533713.996939658,
+    "request_to_answer_s": 0.19819622999057174,
+    "seq": 34,
+    "session_id": "Step5NextBot",
+    "target": "f7415606-24bd-40f2-861a-1ea6f4751cf8",
+    "tool": "engage_entity",
+    "tool_call_id": "reflex-idle-5",
+    "total_s": 0.5384444770170376,
+    "ts": 1791942479.1833134
+  },
+  {
+    "elapsed_s": 2.657,
+    "event": "call_supervision_finished",
+    "questions": 4,
+    "reads": 0,
+    "requests_per_min": 90.313,
+    "seq": 63,
+    "session_id": "Step5NextBot",
+    "tool": "engage_entity",
+    "tool_call_id": "reflex-idle-5",
+    "ts": 1791942481.5005162,
+    "unknown_answers": 0
+  },
+  {
+    "choice": "engage",
+    "event": "call_supervision_default_finished",
+    "result": {
+      "canRetry": false,
+      "reason": "killed",
+      "success": true
+    },
+    "seq": 64,
+    "session_id": "Step5NextBot",
+    "tool": "engage_entity",
+    "tool_call_id": "idle-loop",
+    "ts": 1791942481.5009644
+  },
+  {
+    "elapsed_s": 5.463,
+    "event": "call_supervision_finished",
+    "questions": 5,
+    "reads": 0,
+    "requests_per_min": 54.915,
+    "seq": 484,
+    "session_id": "Step5NextBot",
+    "tool": "move_to",
+    "tool_call_id": "plan-legacy:5e97f66512635f20:0",
+    "ts": 1791942500.0196693,
+    "unknown_answers": 0
+  },
+  {
+    "elapsed_s": 5.902,
+    "event": "call_supervision_finished",
+    "questions": 5,
+    "reads": 0,
+    "requests_per_min": 50.829,
+    "seq": 540,
+    "session_id": "Step5NextBot",
+    "tool": "move_to",
+    "tool_call_id": "plan-legacy:81a5e5195618e5b3:0",
+    "ts": 1791942506.6959977,
+    "unknown_answers": 0
+  },
+  {
+    "elapsed_s": 10.934,
+    "event": "call_supervision_finished",
+    "questions": 10,
+    "reads": 0,
+    "requests_per_min": 54.876,
+    "seq": 637,
+    "session_id": "Step5NextBot",
+    "tool": "move_to",
+    "tool_call_id": "plan-legacy:7bef6c920f1555c9:0",
+    "ts": 1791942518.2983615,
+    "unknown_answers": 0
+  },
+  {
+    "elapsed_s": 2.48,
+    "event": "call_supervision_finished",
+    "questions": 3,
+    "reads": 0,
+    "requests_per_min": 72.573,
+    "seq": 667,
+    "session_id": "Step5NextBot",
+    "tool": "move_to",
+    "tool_call_id": "plan-legacy:17e808391eb40886:0",
+    "ts": 1791942521.509531,
+    "unknown_answers": 0
+  }
+]

@@ -1,0 +1,39 @@
+Traceback (most recent call last):
+  File "/home/qwait/miniconda3/lib/python3.13/asyncio/tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/tmp/minebot-running-perception-old-hh0wre06/body_loop.py", line 314, in _monitor
+  File "/home/qwait/miniconda3/lib/python3.13/asyncio/tasks.py", line 451, in wait
+    return await _wait(fs, timeout, return_when, loop)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/qwait/miniconda3/lib/python3.13/asyncio/tasks.py", line 537, in _wait
+    await waiter
+asyncio.exceptions.CancelledError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/qwait/MineBot-always-on/logs/running-perception-old-baseline.py", line 21, in <module>
+    tests.test_running_question_reads_new_attacker_instead_of_carrying_empty_entities()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/qwait/MineBot-always-on/tests/unit/test_body_loop_running_perception.py", line 63, in test_running_question_reads_new_attacker_instead_of_carrying_empty_entities
+    asyncio.run(run())
+    ~~~~~~~~~~~^^^^^^^
+  File "/home/qwait/miniconda3/lib/python3.13/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/home/qwait/miniconda3/lib/python3.13/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/home/qwait/miniconda3/lib/python3.13/asyncio/base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/home/qwait/MineBot-always-on/tests/unit/test_body_loop_running_perception.py", line 56, in run
+    await asyncio.wait_for(loop._monitor(record, SimpleNamespace(name="move_to"),
+                                        record["params"], wake, worker), .5)
+  File "/home/qwait/miniconda3/lib/python3.13/asyncio/tasks.py", line 506, in wait_for
+    async with timeouts.timeout(timeout):
+               ~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/home/qwait/miniconda3/lib/python3.13/asyncio/timeouts.py", line 116, in __aexit__
+    raise TimeoutError from exc_val
+TimeoutError

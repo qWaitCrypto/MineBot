@@ -1,0 +1,104 @@
+194 tool_invoke {"args_hash": "f77ce1dfaf59431db8a89e513f7b1eb3bfbca6e42aa63bc5f0aa180e53fecd40", "arguments_summary": "{\"entity_types\": [\"zombie\"], \"limit\": 16, \"radius\": 32}", "body_scope": ["nearby_entities"], "event": "tool_invoke", "lifecycle": "active", "mutating": false, "permission": "read_world", "seq": 194, "session_id": "Step5NextBot", "situational": "normal", "source": "body.perception", "strategy_epoch_condition": null, "tactic_signature": "read_nearby_entities:2d417a022bdf7817", "terminal_truth": ["nearbyEntities"], "tool": "read_nearby_entities", "tool_call_id": "call_00_q2iywqkh5pegia3w4gwtoaq9", "tool_type": "perception", "ts": 1791943895.770667}
+195 tool_result read_nearby_entities {"canRetry": true, "metrics": {"error": "Additional properties are not allowed ('entity_types' was unexpected)", "path": []}, "reason": "invalid_tool_input", "success": false}
+367 tool_invoke {"args_hash": "946920c2ef96d8c64922c4d99654b0128dd4c2e5b0dac63062cf6c46be13fac5", "arguments_summary": "{\"limit\": 32, \"radius\": 32}", "body_scope": ["nearby_entities"], "event": "tool_invoke", "lifecycle": "active", "mutating": false, "permission": "read_world", "seq": 367, "session_id": "Step5NextBot", "situational": "normal", "source": "body.perception", "strategy_epoch_condition": null, "tactic_signature": "read_nearby_entities:44136fa355b3678a", "terminal_truth": ["nearbyEntities"], "tool": "read_nearby_entities", "tool_call_id": "call_00_7z3tvp5sqj7wvemgvlj8tshz", "tool_type": "perception", "ts": 1791943900.1325355}
+369 tool_result read_nearby_entities {"canRetry": false, "metrics": {"complete": true, "data": {"count": 3, "entities": [{"dist2": 430.66218942407903, "hostile": false, "id": "4c211c70-5f52-4931-a21c-c8adfb34a308", "name": "Rotten Flesh", "pos": [227.5757031035304, 121.0, 240.00888554004993], "type": "item"}, {"dist2": 484.0, "health": 20.0, "hostile": true, "id": "4f67989e-b18f-448d-a2a1-8c8d798ade7d", "name": "Zombie", "pos": [242.5, 121.0, 220.5], "type": "zombie"}, {"dist2": 925.4369890340937, "hostile": false, "id": "7f1ce99d-aefa-423f-a143-7a4ff43607de", "name": "Arrow", "pos": [248.556862738637, 121.0, 232.25795230043806], "type": "item"}]}, "next": null, "scope": "nearbyEntities", "uncertainty": []}, "nextSuggestion": null, "reason": "nearby_entities_read", "success": true}
+550 tool_invoke {"args_hash": "a6223e8fdacf041bdc3ec06e099279fa58235c4632b4466b0db170982f1516a0", "arguments_summary": "{\"plan\": {\"goal\": \"\\u51fb\\u6740\\u4e1c\\u4fa7\\u7ea622\\u683c\\u5904\\u7684\\u50f5\\u5c38 4f67989e-b18f-448d-a2a1-8c8d798ade7d\\uff1b\\u5f53\\u524d\\u624b\\u6301\\u6728\\u5251\\u4ec5\\u52691\\u70b9\\u8010\\u4e45\\uff0c\\u635f\\u574f\\u540e\\u7531\\u53cd\\u5c04\\u5c42\\u81ea\\u884c\\u51b3\\u5b9a\\u5207\\u6362\\u5230\\u5907\\u7528\\u77f3\\u5251\\u5e76\\u7ee7\\u7eed\\u540c\\u4e00\\u76ee\\u6807\", \"language\": \"minebot-work/0.2\", \"timeout_s\": 180, \"work\": {\"arguments\": {\"intent\": \"\\u51fb\\u6740\\u50f5\\u5c38 4f67989e-b18f-448d-a2a1-8c8d798ade7d\",...", "body_scope": [], "event": "tool_invoke", "lifecycle": "active", "mutating": false, "permission": "manage_reflex", "seq": 550, "session_id": "Step5NextBot", "situational": "normal", "source": "agent.reflex", "strategy_epoch_condition": null, "tactic_signature": "delegate_work:658e059406d490e9", "terminal_truth": [], "tool": "delegate_work", "tool_call_id": "call_00_3xwlmq4zgsp23xyr537ltr5z", "tool_type": "plan", "ts": 1791943906.5182648}
+551 tool_result delegate_work {"canRetry": true, "metrics": {"activity_id": "activity-d0a94ccc64b74a168d9a369ea133c3f6", "status": "running", "tree": {"goal": "击杀东侧约22格处的僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d；当前手持木剑仅剩1点耐久，损坏后由反射层自行决定切换到备用石剑并继续同一目标", "language": "minebot-work/0.2", "timeout_s": 180, "work": {"_runtime": {"status": "pending", "updated_at": 1791943906.519107}, "arguments": {"intent": "击杀僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d", "target": "4f67989e-b18f-448d-a2a1-8c8d798ade7d", "timeout_s": 150}, "id": "kill_zombie", "intent": "击杀僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d，武器损坏时换用备用手持武器继续同一目标", "kind": "call", "tool": "engage_entity"}}}, "nextSuggestion": null, "reason": "accepted", "success": true}
+654 call_supervision_default_requested {"arguments": {"target": "4f67989e-b18f-448d-a2a1-8c8d798ade7d"}, "choice": "engage", "event": "call_supervision_default_requested", "facts": {"body": {"position": [234.8, 121.0, 220.5]}, "confirmed": false, "decision": {"choice": "engage", "evidence": {"builder_paused": false, "goal": "GoalNear{x=242, y=121, z=220, rangeSq=1}", "navigation": {"calculating": false, "dest": ["<bounded>", "<bounded>", "<bounded>"], "path_position": 14, "repeated_failures": 0}, "pathing": true, "position": [234.8, 121.0, 220.5], "processes": ["goal"]}}, "plan": {"goal": "击杀东侧约22格处的僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d；当前手持木剑仅剩1点耐久，损坏后由反射层自行决定切换到备用石剑并继续同一目标", "intent_chain": ["击杀僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d，武器损坏时换用备用手持武器继续同一目标"], "node_description": "击杀僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d，武器损坏时换用备用手持武器继续同一目标"}, "reason": "decision_default_tool", "what": {"elapsed_s": 3.1, "last_progress_at": "2026-10-14T02:11:50Z", "no_progress_s": 0.2, "phase": "moving", "progress_signal": "movement", "tool": "engage_entity"}}, "seq": 654, "session_id": "Step5NextBot", "tool": "engage_entity", "tool_call_id": "plan-kill_zombie", "ts": 1791943910.9005463}
+763 call_supervision_result resume
+764 call_supervision_default_finished {"choice": "engage", "event": "call_supervision_default_finished", "facts": {"body": {"position": [234.8, 121.0, 220.5]}, "confirmed": false, "decision": {"choice": "repeat", "evidence": {"builder_paused": false, "goal": "GoalNear{x=242, y=121, z=220, rangeSq=1}", "navigation": {"calculating": false, "dest": ["<bounded>", "<bounded>", "<bounded>"], "path_position": 14, "repeated_failures": 0}, "pathing": true, "position": [234.8, 121.0, 220.5], "processes": ["goal"]}}, "default_action": {"choice": "engage", "result": {"canRetry": false, "reason": "tool_broke", "success": false}, "then": "resume", "tool": "engage_entity"}, "history": [{"body": {"inventory": {"stone_sword": 1, "wooden_sword": 1}, "position": [234.8, 121.0, 220.5]}, "result": {"canRetry": true, "metrics": {"direct_call_handoff": {"facts": {"decision": {"choice": "engage"}, "default_action": {"choice": "engage", "result": {"canRetry": false, "reason": "tool_broke", "success": false}, "tool": "engage_entity"}, "reason": "decision_default_tool"}}}, "reason": "preempted", "success": false}}], "history_earlier": 0, "plan": {"goal": "击杀东侧约22格处的僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d；当前手持木剑仅剩1点耐久，损坏后由反射层自行决定切换到备用石剑并继续同一目标", "intent_chain": ["击杀僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d，武器损坏时换用备用手持武器继续同一目标"], "node_description": "击杀僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d，武器损坏时换用备用手持武器继续同一目标"}, "reason": "decision_default_tool", "settlement": {"active_action_id": null, "body_control": {"claim_id": null, "generation": 2, "holder": "none", "since_monotonic": 535146.454427792, "stop_state": "settled"}, "cancellation_scope_count": 1, "control_unknown": false, "execution_idle": true, "interrupt_accepted": true, "interrupt_complete": false, "interrupt_ok": true, "interrupt_requested": true, "late_native_terminal": null, "na
+787 call_supervision_default_requested {"arguments": {"target": "4f67989e-b18f-448d-a2a1-8c8d798ade7d"}, "choice": "engage", "event": "call_supervision_default_requested", "facts": {"body": {"position": [241.0, 121.0, 220.5]}, "confirmed": false, "decision": {"choice": "engage", "evidence": {"builder_paused": false, "goal": "", "navigation": {"calculating": false, "repeated_failures": 0}, "pathing": false, "position": [241.0, 121.0, 220.5], "processes": []}}, "plan": {"goal": "击杀东侧约22格处的僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d；当前手持木剑仅剩1点耐久，损坏后由反射层自行决定切换到备用石剑并继续同一目标", "intent_chain": ["击杀僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d，武器损坏时换用备用手持武器继续同一目标"], "node_description": "击杀僵尸 4f67989e-b18f-448d-a2a1-8c8d798ade7d，武器损坏时换用备用手持武器继续同一目标"}, "reason": "decision_default_tool", "what": {"elapsed_s": 2.7, "last_progress_at": null, "no_progress_s": null, "phase": null, "progress_signal": null, "tool": "engage_entity"}}, "seq": 787, "session_id": "Step5NextBot", "tool": "engage_entity", "tool_call_id": "plan-kill_zombie__repeat_1", "ts": 1791943916.6506863}
+849 call_supervision_result resume
+850 call_supervision_default_finished {"choice": "engage", "event": "call_supervision_default_finished", "facts": {"body": {"position": [241.0, 121.0, 220.5]}, "confirmed": false, "decision": {"choice": "repeat", "evidence": {"builder_paused": false, "goal": "", "navigation": {"calculating": false, "repeated_failures": 0}, "pathing": false, "position": [241.0, 121.0, 220.5], "processes": []}}, "default_action": {"choice": "engage", "result": {"canRetry": false, "reason": "killed", "success": true}, "then": "resume", "tool": "engage_entity"}, "history": [{"body": {"inventory": {"stone_sword": 1, "wooden_sword": 1}, "position": [234.8, 121.0, 220.5]}, "reason": "preempted", "result": {"canRetry": true, "complete": true, "metrics": {"direct_call_handoff": {"facts": {"decision": {"choice": "repeat", "evidence": {"builder_paused": false, "goal": "GoalNear{x=242, y=121, z=220, rangeSq=1}", "navigation": {"calculating": false, "dest": ["<bounded>", "<bounded>", "<bounded>"], "path_position": 14, "repeated_failures": 0}, "pathing": true, "position": [234.8, 121.0, 220.5], "processes": ["goal"]}}, "default_action": {"choice": "engage", "result": {"canRetry": false, "reason": "tool_broke", "success": false}, "then": "resume", "tool": "engage_entity"}, "reason": "decision_default_tool"}}}, "nextSuggestion": null, "observationHandle": "observation:observation-d4231aaee1ca4df18657592d6f54c46e", "projection": {"complete": false, "omittedFieldCount": 1, "omittedFields": ["metrics.direct_call_handoff"], "omittedFieldsComplete": true, "omittedValueCounts": {"metrics.direct_call_handoff": 2}, "queryable": true}, "reason": "preempted", "success": false, "summary": {"original_result": {"canRetry": true, "metrics": {"generation_current": false, "pos": [220, 121, 220], "requested_target": "4f67989e-b18f-448d-a2a1-8c8d798ade7d", 
+863 call_supervision_result repeat
+872 call_supervision_result repeat
+882 call_supervision_result repeat
+891 call_supervision_result repeat
+900 call_supervision_result repeat
+910 call_supervision_result repeat
+919 call_supervision_result repeat
+928 call_supervision_result repeat
+937 call_supervision_result repeat
+947 call_supervision_result repeat
+956 call_supervision_result repeat
+965 call_supervision_result repeat
+974 call_supervision_result repeat
+984 call_supervision_result repeat
+993 call_supervision_result repeat
+1002 call_supervision_result repeat
+1011 call_supervision_result repeat
+1021 call_supervision_result repeat
+1030 call_supervision_result repeat
+1040 call_supervision_result repeat
+1049 call_supervision_result repeat
+1058 call_supervision_result repeat
+1067 call_supervision_result repeat
+1077 call_supervision_result repeat
+1086 call_supervision_result repeat
+1096 call_supervision_result repeat
+1105 call_supervision_result repeat
+1114 call_supervision_result repeat
+1123 call_supervision_result repeat
+1133 call_supervision_result repeat
+1142 call_supervision_result repeat
+1151 call_supervision_result repeat
+1161 call_supervision_result repeat
+1170 call_supervision_result repeat
+1179 call_supervision_result repeat
+1188 call_supervision_result repeat
+1198 call_supervision_result repeat
+1207 call_supervision_result repeat
+1216 call_supervision_result repeat
+1226 call_supervision_result repeat
+1235 call_supervision_result repeat
+1244 call_supervision_result repeat
+1253 call_supervision_result repeat
+1263 call_supervision_result repeat
+1272 call_supervision_result repeat
+1281 call_supervision_result repeat
+1291 call_supervision_result repeat
+1300 call_supervision_result repeat
+1309 call_supervision_result repeat
+1319 call_supervision_result repeat
+1328 call_supervision_result repeat
+1337 call_supervision_result repeat
+1347 call_supervision_result repeat
+1356 call_supervision_result repeat
+1365 call_supervision_result repeat
+1374 call_supervision_result repeat
+1384 call_supervision_result repeat
+1393 call_supervision_result repeat
+1402 call_supervision_result repeat
+1412 call_supervision_result repeat
+1421 call_supervision_result repeat
+1430 call_supervision_result repeat
+1440 call_supervision_result repeat
+1449 call_supervision_result repeat
+1458 call_supervision_result repeat
+1468 call_supervision_result repeat
+1477 call_supervision_result repeat
+1486 call_supervision_result repeat
+1495 call_supervision_result repeat
+1505 call_supervision_result repeat
+1514 call_supervision_result repeat
+1523 call_supervision_result repeat
+1533 call_supervision_result repeat
+1542 call_supervision_result repeat
+1551 call_supervision_result repeat
+1561 call_supervision_result repeat
+1570 call_supervision_result repeat
+1579 call_supervision_result repeat
+1588 call_supervision_result repeat
+1598 call_supervision_result repeat
+1607 call_supervision_result repeat
+1616 call_supervision_result repeat
+1625 call_supervision_result repeat
+1635 call_supervision_result repeat
+1644 call_supervision_result repeat
+1653 call_supervision_result repeat
+1663 call_supervision_result repeat
+1672 call_supervision_result repeat
+1681 call_supervision_result repeat
+1691 call_supervision_result repeat
+1700 call_supervision_result repeat
+equip choices []

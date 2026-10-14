@@ -1,0 +1,18 @@
+{"time": 1791943634.9952886, "last_seq": 7, "kind": "first_question", "matched_seq": 6}
+{"time": 1791943635.000776, "last_seq": 7, "kind": "fixture_position", "command": "tp Step5NextBot 220.5 121 220.5", "response": "Teleported Step5NextBot to 220.500000, 121.000000, 220.500000"}
+{"time": 1791943635.004255, "last_seq": 7, "kind": "fixture_heal", "command": "effect give Step5NextBot minecraft:instant_health 1 10 true", "response": "Applied effect Instant Health to Step5NextBot"}
+{"time": 1791943635.0070646, "last_seq": 7, "kind": "fixture_empty_inventory", "command": "clear Step5NextBot", "response": "Removed 1 item(s) from player Step5NextBot"}
+{"time": 1791943635.01207, "last_seq": 7, "kind": "fixture_main_hand", "command": "item replace entity Step5NextBot weapon.mainhand with minecraft:wooden_sword", "response": "Replaced a slot on Step5NextBot with [Wooden Sword]"}
+{"time": 1791943635.0177984, "last_seq": 7, "kind": "fixture_spare", "command": "item replace entity Step5NextBot hotbar.1 with minecraft:stone_sword", "response": "Replaced a slot on Step5NextBot with [Stone Sword]"}
+{"time": 1791943636.2190137, "last_seq": 12, "kind": "user_message", "text": "这是计划中断验收。巡视高台：先到 [250,121,220]，再到 [190,121,220]，最后回 [220,121,220]。用 delegate_work 写计划，整体和各步写意图。计划的 interrupt_when 写这个条件：主手已经空了，而且背包里有石剑；handler 为装备背包里的石剑，之后继续原来的巡视。现在主手是木剑，夹具会在巡视期间把它移除。不要在 Agent 主回合轮询或主动换装备，不采集、不建造、不破坏方块。收到主动通知后如实报告。"}
+{"time": 1791943648.9128802, "last_seq": 303, "kind": "real_agent_work", "matched_seq": 298}
+{"time": 1791943648.922939, "last_seq": 303, "kind": "fixture_remove_held_item_during_work", "command": "item replace entity Step5NextBot weapon.mainhand with minecraft:air", "response": "Replaced a slot on Step5NextBot with [Air]"}
+{"time": 1791943648.930645, "last_seq": 303, "kind": "condition_became_true"}
+{"time": 1791943674.135067, "last_seq": 583, "kind": "window_unavailable", "label": "interrupt_selected"}
+{"time": 1791943674.1637025, "last_seq": 583, "kind": "plan_terminal", "matched_seq": 576}
+{"time": 1791943686.2596493, "last_seq": 629, "kind": "window_unavailable", "label": "agent_terminal_wake"}
+{"time": 1791943686.2831125, "last_seq": 629, "kind": "fixture_final_inventory", "command": "data get entity Step5NextBot Inventory", "response": "Step5NextBot has the following entity data: [{count: 1, Slot: 1b, id: \"minecraft:stone_sword\"}]"}
+{"time": 1791943686.3058813, "last_seq": 629, "kind": "fixture_final_selected_slot", "command": "data get entity Step5NextBot SelectedItemSlot", "response": "Step5NextBot has the following entity data: 0"}
+{"time": 1791943686.327794, "last_seq": 629, "kind": "fixture_final_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791943686.364027, "last_seq": 629, "kind": "fixture_complete", "deaths": []}
+{"time": 1791943686.3826773, "last_seq": 629, "kind": "user_message", "text": "/quit"}
