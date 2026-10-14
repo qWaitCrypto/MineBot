@@ -26,6 +26,7 @@ from minebot.app.direct_call_supervision import (
     FACT_FRAME_INTERVAL_S,
 )
 from minebot.app.life_profile import load_profile, life_intent
+from minebot.app.execution_snapshot import TERMINAL_STATES
 
 
 class BodyLoop(CallSupervisor):
@@ -291,13 +292,17 @@ class BodyLoop(CallSupervisor):
         """
         last_revision = -1
         decision_task: asyncio.Task[str] | None = None
+        decision_execution: dict[str, Any] | None = None
         pending: tuple[dict[str, Any], float, str] | None = None
         decision_revision = -1
         snapshots = getattr(self.runtime, "execution_snapshots", None)
         while not record["cancel_requested"]:
             if await self._process_lifecycle_events():
                 return
-            if worker.done() and decision_task is None:
+            if worker.done():
+                if decision_task is not None:
+                    decision_task.cancel()
+                    await asyncio.gather(decision_task, return_exceptions=True)
                 return
             wake_wait = asyncio.create_task(wake.wait())
             clock_wait = asyncio.create_task(asyncio.sleep(supervision_module.FACT_FRAME_INTERVAL_S))
@@ -328,12 +333,12 @@ class BodyLoop(CallSupervisor):
                     if revision > last_revision and (phase_changed or revision != last_revision):
                         last_revision = revision
                         idle_s = float(execution.get("since_progress_s") or 0.0)
-                        frame = (execution, idle_s, "running_frame")
                         if (not record["initial_reader_done"]
                                 and callable(getattr(tool, "supervision_reader", None))):
                             record["initial_reader_done"] = True
                             await self._bounded_read(record, tool, params)
                             execution = self._frame(self._snapshot(record["call_id"]) or execution)
+                        frame = (execution, idle_s, "running_frame")
                         frame_options = self._options_for(
                             tool, record,
                             supplied=self._tree_options(record["supervision_context"]),
@@ -343,6 +348,7 @@ class BodyLoop(CallSupervisor):
                             pending = frame
                         elif decision_task is None and execution.get("state") not in {"succeeded", "failed", "cancelled", "unknown"}:
                             decision_revision = revision
+                            decision_execution = execution
                             decision_task = asyncio.create_task(self._judge_frame(
                                 record["call_id"], tool, params, execution, idle_s,
                                 purpose="running_frame",
@@ -359,7 +365,25 @@ class BodyLoop(CallSupervisor):
                 record["questions"] += 1
                 if choice == "unknown":
                     record["unknown_answers"] += 1
-                execution = self._snapshot(record["call_id"]) or (pending[0] if pending else {})
+                latest = self._snapshot(record["call_id"])
+                if worker.done() or latest.get("state") in TERMINAL_STATES:
+                    # This answer was about running work, which has already
+                    # ended. Its one terminal question owns what follows; a
+                    # late running answer cannot stop or redirect that result.
+                    self.runtime.trace.emit(
+                        "call_supervision_answer_discarded", tool_call_id=record["call_id"],
+                        choice=choice, reason="call_ended", fact_revision=decision_revision,
+                    )
+                    for waiter in (wake_wait, clock_wait):
+                        if not waiter.done():
+                            waiter.cancel()
+                    await asyncio.gather(wake_wait, clock_wait, return_exceptions=True)
+                    return
+                # The option was compiled from this complete frame. Native
+                # lite snapshots omit carried inventory/perception and the
+                # life profile; rebinding against one silently loses actions
+                # or sends the chosen action to a different target.
+                execution = decision_execution or {}
                 if choice == "inspect" and record["reads"] < self.max_reads:
                     record["reader_new_fact"] = False
                     read = await self._bounded_read(record, tool, params)
@@ -428,6 +452,7 @@ class BodyLoop(CallSupervisor):
                     pending = None
                     if int(frame[0].get("fact_revision") or -1) > decision_revision:
                         decision_revision = int(frame[0].get("fact_revision") or -1)
+                        decision_execution = frame[0]
                         decision_task = asyncio.create_task(self._judge_frame(
                             record["call_id"], tool, params, frame[0], frame[1],
                             purpose=frame[2], supervision_context=record["supervision_context"],

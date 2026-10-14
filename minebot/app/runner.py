@@ -2664,6 +2664,16 @@ class AgentRuntime:
         cancel_reflex: bool = True,
     ) -> JsonObject:
         cancellation_started = time.monotonic()
+        self.trace.emit("execution_cancel_started", reason=reason)
+        phase_started = cancellation_started
+        phase_ms: dict[str, float] = {}
+
+        def finish_phase(name: str) -> None:
+            nonlocal phase_started
+            now = time.monotonic()
+            phase_ms[name] = round((now - phase_started) * 1000.0, 3)
+            phase_started = now
+
         if cancel_reflex and self.reflex_manager is not None:
             # Revoke the plan before touching the native Body.  A late
             # Decision result must not be able to admit its next write.
@@ -2676,6 +2686,7 @@ class AgentRuntime:
         if invalidate_generation:
             self.authority.invalidate_generation(reason)
         cancellation_scope_count = self.request_execution_cancel(reason)
+        finish_phase("request")
         interrupt_ok: bool | None = None
         interrupt_accepted: bool | None = None
         interrupt_complete: bool | None = None
@@ -2691,11 +2702,13 @@ class AgentRuntime:
                 "error_type": type(exc).__name__,
                 "message": _shorten(str(exc), limit=300),
             }
+        finish_phase("interrupt")
         remaining_s = max(
             0.0,
             EXECUTION_LANE_CANCEL_TIMEOUT_S - (time.monotonic() - cancellation_started),
         )
         execution_idle = await self.wait_for_execution_idle(timeout_s=remaining_s)
+        finish_phase("writer_idle")
         remaining_s = max(
             0.0,
             EXECUTION_LANE_CANCEL_TIMEOUT_S - (time.monotonic() - cancellation_started),
@@ -2703,6 +2716,7 @@ class AgentRuntime:
         owner_facts = await self._wait_for_body_owner_idle(
             timeout_s=remaining_s,
         )
+        finish_phase("owner_idle")
         owner_observed = bool(owner_facts.get("owner_observed"))
         owner = owner_facts.get("owner")
         owner_settled = owner_observed and owner is None
@@ -2720,6 +2734,7 @@ class AgentRuntime:
                 native_facts = {"native_stopped": False, "control_unknown": True,
                                 "probe_error": type(exc).__name__}
             owner_settled = native_facts.get("native_stopped") is True
+        finish_phase("native_probe")
         settled = execution_idle and owner_settled
         if settled:
             self.body_control.settle()
@@ -2745,6 +2760,8 @@ class AgentRuntime:
             **facts,
             idle=execution_idle,
             active_count=self.execution_lane.active_count,
+            phase_ms=phase_ms,
+            elapsed_ms=round((time.monotonic() - cancellation_started) * 1000.0, 3),
         )
         return facts
 
