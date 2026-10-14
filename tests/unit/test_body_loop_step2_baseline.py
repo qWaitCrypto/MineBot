@@ -11,7 +11,7 @@ from unittest.mock import patch
 from minebot.app.direct_call_supervision import CallSupervisor
 
 
-def test_step2_new_old_protocol_on_118_inputs_except_intent_wording_and_main_hand():
+def test_step2_new_old_protocol_on_118_inputs_except_verified_question_changes():
     root = Path(__file__).parents[2]
     fixture = json.loads((root / 'tests/fixtures/reflex_step2_equivalent_inputs.json').read_text())
     cases = fixture['cases']
@@ -56,7 +56,15 @@ def test_step2_new_old_protocol_on_118_inputs_except_intent_wording_and_main_han
                 selected=facts.get('selected_item')
                 if isinstance(selected,str) and facts.get('selected_item_known') is not False:
                     expected['state']['body']+=' The main hand holds '+(selected or 'nothing')+'.'
+                criteria = expected['questions']['q']['criteria']
+                if intent and not case['context'].get('next_call') and 'next_step' in criteria:
+                    assert criteria['next_step'] == (
+                        'Stop the current action and report to the Agent that this work is finished.')
+                    criteria['next_step'] = (
+                        f'Stop the current action and report to the Agent that “{intent}” has been achieved.')
                 # Permit only the two verified intent clarifications and the
-                # observed main hand. All other facts/options remain exact.
+                # observed main hand, plus the separately verified explicit
+                # terminal report. Internal next calls and all other fields
+                # remain exact; this is not original-fact reconstruction.
                 assert json.dumps(expected, ensure_ascii=False, separators=(',', ':')) == json.dumps(
                     requests[1], ensure_ascii=False, separators=(',', ':')), case['seq']
