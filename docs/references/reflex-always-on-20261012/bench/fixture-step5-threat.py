@@ -119,6 +119,10 @@ def main():
         note('scene_end', label='2_far_zombie')
     # 3. Low health and a skeleton 8 blocks away.
     if wait(trace, running_work, 600):
+        # Full health first: natural regeneration is off, so earlier scenes
+        # leave less than 14 and the damage alone killed the Body (claude3).
+        rcon('effect give %s minecraft:instant_health 1 10 true' % BOT)
+        time.sleep(1.5)
         rcon('damage %s 14 minecraft:generic' % BOT)
         rcon('execute at %s run summon minecraft:skeleton ~8 ~ ~ {PersistenceRequired:1b,Tags:["s5_ranged"]}' % BOT)
         note('scene', label='3_low_health_skeleton')

@@ -297,7 +297,7 @@ def test_protective_retry_retains_its_action_identity_and_counts_only_real_attem
         runtime, _trace, _decision = _runtime()
         runtime.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
         requests, writes = [], []
-        replies = iter(("unknown", "repeat", "resume"))
+        replies = iter(("unknown", "surface", "resume"))
 
         class Decision:
             async def ask(self, request, *, priority=None):
@@ -323,8 +323,8 @@ def test_protective_retry_retains_its_action_identity_and_counts_only_real_attem
         assert len(writes) == 1
         assert writes[0]["supervision_context"]["reflex_action_choice"] == "surface"
         assert writes[0]["tool_call_id"] == "surface-call-1"
-        assert "earlier_attempts_of_this_call" not in requests[1]["state"]
-        assert requests[2]["state"]["earlier_attempts_of_this_call"] == ["Attempt 1: ended normally."]
+        # Only how the protective call ended and what protection is judged on.
+        assert all(set(r["state"]) <= {"finished_call", *rq.PROTECTION_FACTS} for r in requests)
 
     asyncio.run(run())
 

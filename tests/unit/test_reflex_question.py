@@ -319,16 +319,21 @@ def test_dead_entities_do_not_remain_actionable_hostiles_in_facts_or_options():
 def test_after_a_protective_action_the_body_may_go_back_to_its_work():
     options = rq.after_default_options(
         original_call='collect_resource(count=3, item="raw_iron")', intent="get 3 raw iron",
-        default_call="go_to_surface()", result={"success": True},
+        default_call="go_to_surface()", result={"success": True}, facts={"oxygen": 300},
+        protective_choice="surface",
     )
+    # The action that just ended is named beside the other protective actions,
+    # not "Run the same call again" (step5-threat-claude4: repeated 12 times).
     assert options == {
         "resume": 'Go back to the earlier work, collect_resource(count=3, item="raw_iron"), for: “get 3 raw iron”',
-        "repeat": "Run the same call again: go_to_surface().",
+        "surface": "Swim up to air.",
         "call_agent": "Do not go back and hand control back to the Agent for a new plan.",
     }
-    stuck = rq.after_default_options(original_call="x()", intent="", default_call="go_to_surface()",
-                                     result={"success": False, "reason": "blocked", "canRetry": False})
-    assert list(stuck) == ["resume", "call_agent"]
+    shot = rq.after_default_options(original_call="", intent="", default_call="engage_entity()",
+        result={"success": False, "reason": "disengaged_low_health"}, protective_choice="engage",
+        facts={"health": 6, "health_before": 20, "vital_age_s": 3, "selected_item": "iron_sword",
+               "entities": [{"hostile": True, "name": "Skeleton", "dist": 8, "id": "s", "pos": [8, 64, 0]}]})
+    assert list(shot) == ["stay", "engage", "move_away", "call_agent"]
 
 
 def test_a_step_without_its_own_intent_is_said_to_be_one_step_of_the_plan():

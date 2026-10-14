@@ -145,12 +145,10 @@ def test_direct_interruptions_reach_the_actual_result_question_and_agent_handoff
         assert len(stops) == 7 and all(s["invalidate_generation"] is False for s in stops)
         assert len(notifications) == 1
         assert record["history_total"] == 7 and len(record["history"]) == 5
-        for index, request in enumerate(requests, 1):
-            lines = request["state"]["interruptions_of_the_original_work"]
-            if index > 5:
-                assert lines.pop(0) == f"There were {index - 5} earlier attempts before these."
-            assert len(lines) == min(index, 5)
-            assert all("preempted" in line and "go_to_surface()" in line for line in lines)
+        # The interruption history goes to the Agent with the handoff; the
+        # result question carries how protection ended and the protection facts.
+        for request in requests:
+            assert set(request["state"]) <= {"finished_call", *rq.PROTECTION_FACTS}
             assert "under water" not in request["state"]["body"]
             assert set(request["questions"]) == {"q"}
         assert len(notifications[0]["history"]) == 5

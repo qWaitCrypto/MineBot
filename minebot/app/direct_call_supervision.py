@@ -248,6 +248,12 @@ class CallSupervisor:
             acting_for_intent=running and bool(intent),
             interrupt=(supervision_context or {}).get("interrupt_when") if running else None,
             running_protection=running and bool((supervision_context or {}).get("is_reflex_action")))}
+        if purpose == "default_result_frame":
+            # After a protective action: how it ended and what protection is
+            # judged on (replay of step5-threat-claude4, 18/18 vs 0/18).
+            request["state"] = {key: state[key] for key in ("finished_call",) + rq.PROTECTION_FACTS
+                                if state.get(key)}
+            request["questions"] = rq.frame_questions(options, protecting=True)
         if running and (supervision_context or {}).get("is_reflex_action"):
             # Only the facts protection is judged on. The protective intent
             # ("The Agent wants ... Move away") and the running-call line made

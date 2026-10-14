@@ -1163,3 +1163,35 @@ def test_direct_work_reclaims_body_after_protection_before_resuming(monkeypatch)
     monkeypatch.setattr(supervision_module, 'FAST_COMPLETION_GRACE_S', 0)
     monkeypatch.setattr(supervision_module, 'FACT_FRAME_INTERVAL_S', .005)
     asyncio.run(run())
+
+
+def test_stop_settles_on_the_native_stop_after_an_accepted_interrupt():
+    # Live step5-threat-claude4: the lane was idle in 42 ms while the native
+    # action was still stopping; one probe marked control unknown and the
+    # protective move away failed with BodyRecoveryRequired.
+    async def run():
+        runtime, _tool = make_runtime(GenericCallIpc())
+        probes = iter([{"native_stopped": False}, {"native_stopped": False}, {"native_stopped": True}])
+        runtime.body.confirm_control_idle = lambda: next(probes)
+        runtime.body.interrupt = lambda reason: SimpleNamespace(ok=True, accepted=True, complete=False)
+        try:
+            facts = await runtime.cancel_active_execution_with_facts("test")
+            assert facts["settled"] is True and facts["native_probe_checks"] == 3
+            assert not runtime.body_control.unknown
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_stop_without_an_accepted_interrupt_probes_once():
+    async def run():
+        runtime, _tool = make_runtime(GenericCallIpc())
+        probes = iter([{"native_stopped": False}, {"native_stopped": True}])
+        runtime.body.confirm_control_idle = lambda: next(probes)
+        runtime.body.interrupt = lambda reason: SimpleNamespace(ok=True, accepted=False, complete=False)
+        try:
+            facts = await runtime.cancel_active_execution_with_facts("test")
+            assert facts["settled"] is False and facts["native_probe_checks"] == 1
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())

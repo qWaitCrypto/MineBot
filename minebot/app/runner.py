@@ -2737,11 +2737,26 @@ class AgentRuntime:
         native_probe = getattr(self.body, "confirm_control_idle", None)
         native_facts = {}
         if callable(native_probe):
-            try:
-                native_facts = await self._read_lane.run(native_probe)
-            except Exception as exc:
-                native_facts = {"native_stopped": False, "control_unknown": True,
-                                "probe_error": type(exc).__name__}
+            checks = 0
+            while True:
+                checks += 1
+                try:
+                    native_facts = await self._read_lane.run(native_probe)
+                except Exception as exc:
+                    native_facts = {"native_stopped": False, "control_unknown": True,
+                                    "probe_error": type(exc).__name__}
+                    break
+                if native_facts.get("native_stopped") is True or interrupt_accepted is not True:
+                    break
+                # The native action accepted the interrupt and is still carrying
+                # it out: settle on its actual stop within the same budget. One
+                # probe 42 ms after the lane went idle marked control unknown and
+                # the protective move failed (live step5-threat-claude4).
+                remaining_s = EXECUTION_LANE_CANCEL_TIMEOUT_S - (time.monotonic() - cancellation_started)
+                if remaining_s <= 0:
+                    break
+                await asyncio.sleep(min(BODY_OWNER_SETTLE_POLL_S, remaining_s))
+            native_facts = {**native_facts, "native_probe_checks": checks}
             owner_settled = native_facts.get("native_stopped") is True
         finish_phase("native_probe")
         settled = execution_idle and owner_settled

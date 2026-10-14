@@ -1139,7 +1139,7 @@ class BodyLoop(CallSupervisor):
             options = rq.after_default_options(
                 original_call="" if context.get("idle_protection") else rq.call_text(record["tool"], record["params"]), intent=intent,
                 default_call=rq.call_text(action[0], action[1]), result=payload,
-                facts=execution["facts"],
+                facts=execution["facts"], protective_choice=protective_choice,
             )
             try:
                 choice = await asyncio.wait_for(self._judge_terminal_frame(
@@ -1166,6 +1166,15 @@ class BodyLoop(CallSupervisor):
                     reflex_action_choice=protective_choice)
                 if choice == "call_agent":
                     return choice
+            if choice == protective_choice:
+                choice = "repeat"
+            switched = (self._default_action(choice, execution)
+                        if choice in options and choice in rq.PROTECTIVE + ("eat",) else None)
+            if switched is not None:
+                # Another protective action: it replaces the one that ended.
+                protective_choice, action = choice, switched
+                default_tool = registry.get(action[0]) if registry is not None else None
+                choice = "repeat"
             if choice != "repeat":
                 # A missing/illegal/late answer is no choice. Keep the
                 # interrupted work pending, refresh facts at the next cadence,
