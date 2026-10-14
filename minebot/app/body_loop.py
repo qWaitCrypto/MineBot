@@ -787,19 +787,28 @@ class BodyLoop(CallSupervisor):
         This does not introduce another execution lane or stop entrance.
         """
         body = self.runtime.body
+        def settings(values):
+            action = Action.create("setBaritoneSettings", values)
+            accepted = body.execute(action)
+            if not accepted.ok:
+                return False
+            if getattr(accepted, "complete", True):
+                return True
+            # Native acceptance precedes application. Do not start movement
+            # until the existing control terminal confirms these settings.
+            terminal = body.await_action_terminal(action.id, timeout_s=tool.sidecar.timeout_s or FACT_FRAME_INTERVAL_S)
+            return terminal.data.get("success") is True
         def execute(params):
             state = body.get_reflex_facts()
             previous = {key: state[key] for key in ("allow_break", "allow_place") if isinstance(state.get(key), bool)}
             if len(previous) != 2:
                 return ToolResult(False, "life_movement_permissions_unknown", True)
-            accepted = body.execute(Action.create("setBaritoneSettings", {"allow_break": False, "allow_place": False}))
-            if not accepted.ok:
+            if not settings({"allow_break": False, "allow_place": False}):
                 return ToolResult(False, "life_movement_permissions_rejected", True)
             try:
                 return tool.callable(params)
             finally:
-                restored = body.execute(Action.create("setBaritoneSettings", previous))
-                if not restored.ok:
+                if not settings(previous):
                     self.runtime.trace.emit("reflex_life_settings_restore_failed", tool=tool.name)
         return replace(tool, callable=execute)
 

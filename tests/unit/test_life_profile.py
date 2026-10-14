@@ -68,3 +68,23 @@ def test_life_write_scope_disables_and_restores_terrain_edits_on_failure():
     with pytest.raises(RuntimeError, match="native failure"):
         loop._life_tool(tool).callable({})
     assert actions[-1].params == {"allow_break":True, "allow_place":False}
+
+
+def test_life_movement_waits_for_settings_to_be_applied_not_merely_accepted():
+    from minebot.app.body_loop import BodyLoop
+    from minebot.brain.registry import RegisteredTool, ToolSidecar
+    from types import SimpleNamespace
+    timeline=[]
+    def accepted(action):
+        timeline.append("accepted")
+        return SimpleNamespace(ok=True,complete=False)
+    def terminal(*args,**kwargs):
+        timeline.append("applied")
+        return SimpleNamespace(data={"success":True})
+    body=SimpleNamespace(get_reflex_facts=lambda:{"allow_break":True,"allow_place":True},
+                         execute=accepted, await_action_terminal=terminal)
+    tool=RegisteredTool("move_to","",{},lambda params:timeline.append("moved"),
+                        ToolSidecar("move_to",True,timeout_s=60))
+    loop=BodyLoop.__new__(BodyLoop);loop.runtime=SimpleNamespace(body=body)
+    loop._life_tool(tool).callable({})
+    assert timeline == ["accepted","applied","moved","accepted","applied"]
