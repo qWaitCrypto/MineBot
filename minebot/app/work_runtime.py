@@ -633,6 +633,8 @@ class WorkPlanExecutor:
                 dispatch = copy.deepcopy(child)
                 if index + 1 < len(steps) and isinstance(steps[index + 1], dict):
                     dispatch["next_call"] = self._first_call_description(steps[index + 1])
+                elif node.get("next_call"):
+                    dispatch["next_call"] = node["next_call"]
                 child_status = await self._execute(dispatch, f"{path}.steps[{index}]", chain, item=item)
                 if child_status != "done":
                     return child_status
@@ -644,6 +646,8 @@ class WorkPlanExecutor:
                 return await self._adaptive_batch(node, node_key, path, chain, items)
             for index, value in enumerate(items):
                 child = copy.deepcopy(node["body"])
+                if index == len(items) - 1 and node.get("next_call"):
+                    child["next_call"] = node["next_call"]
                 if isinstance(child.get("id"), str):
                     child["id"] = f"{child['id']}__item_{index}"
                 child_status = await self._execute(child, f"{path}.item[{index}]", chain, item=value)
@@ -666,7 +670,10 @@ class WorkPlanExecutor:
                 record.status = "blocked"
                 return "blocked"
             record.choice_id = str(option.get("id"))
-            child_status = await self._execute(option["work"], f"{path}.options.{option['id']}", chain, item=item)
+            child = copy.deepcopy(option["work"])
+            if node.get("next_call"):
+                child["next_call"] = node["next_call"]
+            child_status = await self._execute(child, f"{path}.options.{option['id']}", chain, item=item)
             if child_status == "done":
                 record.status = "done"
             return child_status
@@ -771,6 +778,12 @@ class WorkPlanExecutor:
             if interruption["phase"] == "handler":
                 attempt = interruption["attempt"]
                 handler = copy.deepcopy(spec["handler"])
+                # Finishing this subtree returns to a suspended call, not to
+                # the Agent. Expose that concrete continuation at its terminal
+                # leaf; Decision still judges the leaf and then chooses resume
+                # in the existing handler-result frame.
+                handler["next_call"] = rq.call_text(str(node["tool"]),
+                    (record.decision_facts or {}).get("tool_arguments", node.get("arguments", {})))
                 # A repeat is a fresh invocation, including explicit ids in
                 # the subtree. Never reuse completed writes from an old run.
                 def namespace(value):
@@ -1163,6 +1176,8 @@ class WorkPlanExecutor:
                 self.records[node_key].blocked = {"reason": "choice_unknown", "choice": choice}
                 return "blocked"
             child = copy.deepcopy(node["body"])
+            if not remaining and node.get("next_call"):
+                child["next_call"] = node["next_call"]
             if isinstance(child.get("id"), str):
                 child["id"] = f"{child['id']}__item_{len(items)-len(remaining)-1}"
             child_status = await self._execute(child, f"{path}.item[{len(items)-len(remaining)-1}]", intents, item=value)

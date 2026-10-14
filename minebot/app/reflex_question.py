@@ -533,7 +533,11 @@ def interrupt_result_question(*, goal: str, intent: str, original_call: str,
 
 
 def nearby_players(facts: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    return [item for item in facts.get("nearby_entities", [])
+    # Native action frames and perception reads use different names for the
+    # same bounded entity sample. An explicit empty sample is authoritative.
+    entities = next((facts[key] for key in ("nearby_entities", "entities", "entities_near")
+                     if isinstance(facts.get(key), (list, tuple))), [])
+    return [item for item in entities
             if isinstance(item, Mapping)
             and str(item.get("entity_type", item.get("type", ""))).removeprefix("minecraft:") == "player"]
 
