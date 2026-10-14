@@ -1,0 +1,32 @@
+Starting a Gradle Daemon, 2 busy Daemons could not be reused, use --status for details
+
+> Configure project :camera:protocol
+Fabric Loom: 1.17.12
+
+> Configure project :camera:client
+Fabric Loom: 1.17.12
+
+> Configure project :client:body
+Fabric Loom: 1.17.12
+
+> Configure project :server:bridge
+Fabric Loom: 1.17.12
+
+> Task :client:body:buildPatchedBaritone UP-TO-DATE
+
+> Task :client:body:compileJava
+Note: /home/qwait/MineBot-always-on/minecraft/client/body/src/main/java/dev/minebot/client/body/MineBotClientBody.java uses or overrides a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+
+> Task :client:body:processResources UP-TO-DATE
+> Task :client:body:classes
+> Task :client:body:compileTestJava UP-TO-DATE
+> Task :client:body:processTestResources NO-SOURCE
+> Task :client:body:testClasses UP-TO-DATE
+> Task :client:body:test
+
+[Incubating] Problems report is available at: file:///home/qwait/MineBot-always-on/minecraft/build/reports/problems/problems-report.html
+
+BUILD SUCCESSFUL in 11s
+5 actionable tasks: 2 executed, 3 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.5.0/userguide/configuration_cache_enabling.html

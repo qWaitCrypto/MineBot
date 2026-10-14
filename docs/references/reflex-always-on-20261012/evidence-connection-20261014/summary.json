@@ -1,0 +1,102 @@
+{
+  "runs": [
+    {
+      "run": "disconnect-check",
+      "scope": "controlled server kick",
+      "elapsed_s": 14.464949607849121,
+      "requests_by_purpose": {
+        "idle_frame": 12
+      },
+      "answers": {
+        "stay": 12
+      },
+      "decision_ms_median": 127.4395,
+      "agent_delivery_counts": {},
+      "agent_deliveries": [],
+      "delegate_work": 0,
+      "read_reflex": 0,
+      "deaths": [],
+      "supervised_body_call_s": 0,
+      "after_kick_requests": [
+        12,
+        17,
+        23,
+        28,
+        34,
+        40,
+        45,
+        51,
+        56,
+        62
+      ],
+      "after_kick_stops": [],
+      "observation_s": 12.031304836273193,
+      "stop_after_command_return_ms": null,
+      "native_disconnect_to_python_stop_ms": null,
+      "launcher_exit": 0
+    },
+    {
+      "run": "disconnect-fixed",
+      "scope": "controlled server kick",
+      "elapsed_s": 14.093255281448364,
+      "requests_by_purpose": {
+        "idle_frame": 1
+      },
+      "answers": {
+        "unknown": 1
+      },
+      "decision_ms_median": 16.85,
+      "agent_delivery_counts": {},
+      "agent_deliveries": [],
+      "delegate_work": 0,
+      "read_reflex": 0,
+      "deaths": [],
+      "supervised_body_call_s": 0,
+      "after_kick_requests": [],
+      "after_kick_stops": [
+        {
+          "event": "reflex_loop_stopped",
+          "loop_state": "idle",
+          "reason": "server_disconnected",
+          "seq": 9,
+          "session_id": "Step5NextBot",
+          "ts": 1791949159.2905476
+        }
+      ],
+      "observation_s": 12.034364461898804,
+      "stop_after_command_return_ms": 2.12860107421875,
+      "native_disconnect_to_python_stop_ms": 2.547607421875,
+      "launcher_exit": 0
+    },
+    {
+      "run": "reconnect-check",
+      "scope": "fresh client/session rejoin of same world and real Agent /goal",
+      "elapsed_s": 15.829000234603882,
+      "requests_by_purpose": {
+        "idle_frame": 10,
+        "running_frame": 2,
+        "plan_result_frame": 1
+      },
+      "answers": {
+        "unknown": 2,
+        "stay": 8,
+        "keep_going": 1,
+        "next_step": 1
+      },
+      "decision_ms_median": 128.698,
+      "agent_delivery_counts": {},
+      "agent_deliveries": [],
+      "delegate_work": 2,
+      "read_reflex": 0,
+      "deaths": [],
+      "supervised_body_call_s": 1.0699999332427979,
+      "launcher_exit": 0
+    }
+  ],
+  "java_tests": {
+    "tests": 15,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  }
+}

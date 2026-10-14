@@ -1,0 +1,21 @@
+{
+  "code_commit": "648e0733625fa08850cabbc047a96cb58faf1c8f",
+  "code_dirty": false,
+  "world": "step5-next-edc89ff-20261014",
+  "fresh_world": false,
+  "empty_inventory": false,
+  "ports": [
+    25569,
+    25579,
+    8771
+  ],
+  "bot": "Step5NextBot",
+  "server_pid": 2167201,
+  "launcher_pid": 2170114,
+  "owner_pid": 2169637,
+  "started_at": 1791949224.8852122,
+  "model": "deepseek-v4.1-flash",
+  "kernel": "sdk",
+  "goal": null,
+  "scope": "Same world and bot after controlled disconnect; new client and SDK session; real Agent goal confirms physical work after rejoin."
+}

@@ -1,0 +1,135 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_____ test_disconnect_finishes_consumer_and_reconnect_starts_one_successor _____
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x78a44bf83a80>
+
+    def test_disconnect_finishes_consumer_and_reconnect_starts_one_successor(monkeypatch):
+        async def run():
+            runtime, trace, decision = _runtime()
+            listeners = []
+            runtime.body = SimpleNamespace(add_lifecycle_listener=listeners.append,
+                                           remove_lifecycle_listener=listeners.remove)
+            monkeypatch.setattr('minebot.app.body_loop.FACT_FRAME_INTERVAL_S', .001)
+            loop = BodyLoop(runtime)
+            await loop.start()
+            await asyncio.sleep(.01)
+            first = loop._lifecycle_task
+            listeners[0](Event(seq=1, tick=1, bot='test', name='world_disconnected', data={}))
+            await asyncio.sleep(.01)
+            assert first.done()
+            assert loop._lifecycle_started is False
+            count = len(decision.requests)
+            await loop.start()  # An Agent turn cannot reopen a disconnected world.
+            result = await loop.run(None, lambda: (_ for _ in ()).throw(AssertionError('disconnected write')), ())
+            assert result == {'success': False, 'reason': 'server_disconnected', 'canRetry': True}
+            assert await loop._judge_terminal_frame() == 'unknown'
+            await asyncio.sleep(.01)
+            assert len(decision.requests) == count
+            assert not any(event['event'] == 'reflex_death' for event in trace.events)
+            listeners[0](Event(seq=2, tick=2, bot='test', name='world_ready', data={}))
+            await asyncio.sleep(.01)
+            assert loop._lifecycle_started
+            assert loop._lifecycle_task is not first
+            assert len(listeners) == 1
+            assert len(decision.requests) > count
+            await loop.stop()
+            assert not listeners
+            assert len([e for e in trace.events if e['event'] == 'reflex_loop_started']) == 2
+            assert len([e for e in trace.events if e['event'] == 'reflex_loop_stopped']) == 2
+>       asyncio.run(run())
+
+tests/unit/test_body_loop_connection.py:54: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../miniconda3/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def run():
+        runtime, trace, decision = _runtime()
+        listeners = []
+        runtime.body = SimpleNamespace(add_lifecycle_listener=listeners.append,
+                                       remove_lifecycle_listener=listeners.remove)
+        monkeypatch.setattr('minebot.app.body_loop.FACT_FRAME_INTERVAL_S', .001)
+        loop = BodyLoop(runtime)
+        await loop.start()
+        await asyncio.sleep(.01)
+        first = loop._lifecycle_task
+        listeners[0](Event(seq=1, tick=1, bot='test', name='world_disconnected', data={}))
+        await asyncio.sleep(.01)
+>       assert first.done()
+E       AssertionError: assert False
+E        +  where False = <built-in method done of _asyncio.Task object at 0x78a44b8b8310>()
+E        +    where <built-in method done of _asyncio.Task object at 0x78a44b8b8310> = <Task cancelling name='Task-2' coro=<BodyLoop._idle_frames() running at /tmp/minebot-connection-before-wrxg9uvs/body_loop.py:1405> wait_for=<Future cancelled>>.done
+
+tests/unit/test_body_loop_connection.py:34: AssertionError
+______ test_immediate_reconnect_waits_for_disconnected_consumer_to_finish ______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x78a44bf836f0>
+
+    def test_immediate_reconnect_waits_for_disconnected_consumer_to_finish(monkeypatch):
+        async def run():
+            runtime, trace, decision = _runtime()
+            listeners = []
+            runtime.body = SimpleNamespace(add_lifecycle_listener=listeners.append,
+                                           remove_lifecycle_listener=listeners.remove)
+            monkeypatch.setattr('minebot.app.body_loop.FACT_FRAME_INTERVAL_S', .001)
+            loop = BodyLoop(runtime)
+            await loop.start()
+            first = loop._lifecycle_task
+            listeners[0](Event(seq=1, tick=1, bot='test', name='world_disconnected', data={}))
+            listeners[0](Event(seq=2, tick=2, bot='test', name='world_ready', data={}))
+            await asyncio.sleep(.02)
+            assert first.done()
+            assert loop._lifecycle_started
+            assert loop._lifecycle_task is not first
+            assert len(listeners) == 1
+            assert decision.requests
+            await loop.stop()
+            await asyncio.sleep(.01)
+            assert not loop._lifecycle_started
+            assert not listeners
+>       asyncio.run(run())
+
+tests/unit/test_body_loop_connection.py:79: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../miniconda3/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def run():
+        runtime, trace, decision = _runtime()
+        listeners = []
+        runtime.body = SimpleNamespace(add_lifecycle_listener=listeners.append,
+                                       remove_lifecycle_listener=listeners.remove)
+        monkeypatch.setattr('minebot.app.body_loop.FACT_FRAME_INTERVAL_S', .001)
+        loop = BodyLoop(runtime)
+        await loop.start()
+        first = loop._lifecycle_task
+        listeners[0](Event(seq=1, tick=1, bot='test', name='world_disconnected', data={}))
+        listeners[0](Event(seq=2, tick=2, bot='test', name='world_ready', data={}))
+        await asyncio.sleep(.02)
+>       assert first.done()
+E       AssertionError: assert False
+E        +  where False = <built-in method done of _asyncio.Task object at 0x78a44b8b89f0>()
+E        +    where <built-in method done of _asyncio.Task object at 0x78a44b8b89f0> = <Task cancelling name='Task-38' coro=<BodyLoop._idle_frames() running at /tmp/minebot-connection-before-wrxg9uvs/body_loop.py:1405> wait_for=<Future cancelled>>.done
+
+tests/unit/test_body_loop_connection.py:70: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_body_loop_connection.py::test_disconnect_finishes_consumer_and_reconnect_starts_one_successor
+FAILED tests/unit/test_body_loop_connection.py::test_immediate_reconnect_waits_for_disconnected_consumer_to_finish
+2 failed, 1 deselected in 0.19s
