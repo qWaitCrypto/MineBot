@@ -1,0 +1,5956 @@
+[
+  {
+    "disposable_world": true,
+    "protocol": "minebot-client-spike/1",
+    "ready": true,
+    "active_action_known": true,
+    "active_action_id": "41fc1f87-da4a-4353-8caa-ac23d892ad66",
+    "sampled_at_ms": 1791950888460,
+    "pid": 2209079,
+    "heap_used_bytes": 391619608,
+    "heap_committed_bytes": 555745280,
+    "player": "Step5NextBot",
+    "position": [
+      245.7766180167728,
+      121.0,
+      245.7766180167728
+    ],
+    "on_ground": true,
+    "head_in_liquid": false,
+    "creative": false,
+    "dimension": "minecraft:overworld",
+    "difficulty": "normal",
+    "health": 20.0,
+    "food": 20,
+    "time": 12500,
+    "sleeping": false,
+    "weather": "rain",
+    "effects": [],
+    "using_item": false,
+    "use_key_down": false,
+    "oxygen": 300,
+    "yaw": 135.00006,
+    "pitch": 9.75004,
+    "selected_slot": 0,
+    "selected_item": "stone_sword",
+    "selected_item_known": true,
+    "offhand_item": "",
+    "fall_flying": false,
+    "menu": "InventoryMenu",
+    "chest_item": "air",
+    "feet_chunk_loaded": true,
+    "inventory": {
+      "stone_sword": 1
+    },
+    "scaffold_blocks": 0,
+    "inventory_complete": true,
+    "inventory_includes_selected": true,
+    "inventory_count_scope": "all_player_inventory_slots_including_selected_hotbar",
+    "inventory_slots": [
+      {
+        "slot": 0,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.0",
+        "empty": false,
+        "count": 1,
+        "item": "minecraft:stone_sword",
+        "stackRaw": "{}",
+        "maxStack": 1
+      },
+      {
+        "slot": 1,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.1",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 2,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.2",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 3,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.3",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 4,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.4",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 5,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.5",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 6,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.6",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 7,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.7",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 8,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.8",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 9,
+        "slotType": "inventory",
+        "slotLabel": "inventory.9",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 10,
+        "slotType": "inventory",
+        "slotLabel": "inventory.10",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 11,
+        "slotType": "inventory",
+        "slotLabel": "inventory.11",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 12,
+        "slotType": "inventory",
+        "slotLabel": "inventory.12",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 13,
+        "slotType": "inventory",
+        "slotLabel": "inventory.13",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 14,
+        "slotType": "inventory",
+        "slotLabel": "inventory.14",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 15,
+        "slotType": "inventory",
+        "slotLabel": "inventory.15",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 16,
+        "slotType": "inventory",
+        "slotLabel": "inventory.16",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 17,
+        "slotType": "inventory",
+        "slotLabel": "inventory.17",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 18,
+        "slotType": "inventory",
+        "slotLabel": "inventory.18",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 19,
+        "slotType": "inventory",
+        "slotLabel": "inventory.19",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 20,
+        "slotType": "inventory",
+        "slotLabel": "inventory.20",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 21,
+        "slotType": "inventory",
+        "slotLabel": "inventory.21",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 22,
+        "slotType": "inventory",
+        "slotLabel": "inventory.22",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 23,
+        "slotType": "inventory",
+        "slotLabel": "inventory.23",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 24,
+        "slotType": "inventory",
+        "slotLabel": "inventory.24",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 25,
+        "slotType": "inventory",
+        "slotLabel": "inventory.25",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 26,
+        "slotType": "inventory",
+        "slotLabel": "inventory.26",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 27,
+        "slotType": "inventory",
+        "slotLabel": "inventory.27",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 28,
+        "slotType": "inventory",
+        "slotLabel": "inventory.28",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 29,
+        "slotType": "inventory",
+        "slotLabel": "inventory.29",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 30,
+        "slotType": "inventory",
+        "slotLabel": "inventory.30",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 31,
+        "slotType": "inventory",
+        "slotLabel": "inventory.31",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 32,
+        "slotType": "inventory",
+        "slotLabel": "inventory.32",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 33,
+        "slotType": "inventory",
+        "slotLabel": "inventory.33",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 34,
+        "slotType": "inventory",
+        "slotLabel": "inventory.34",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 35,
+        "slotType": "inventory",
+        "slotLabel": "inventory.35",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 36,
+        "slotType": "armor",
+        "slotLabel": "armor.36",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 37,
+        "slotType": "armor",
+        "slotLabel": "armor.37",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 38,
+        "slotType": "armor",
+        "slotLabel": "armor.38",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 39,
+        "slotType": "armor",
+        "slotLabel": "armor.39",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 40,
+        "slotType": "offhand",
+        "slotLabel": "offhand.40",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 41,
+        "slotType": "aux",
+        "slotLabel": "aux.41",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 42,
+        "slotType": "aux",
+        "slotLabel": "aux.42",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 43,
+        "slotType": "aux",
+        "slotLabel": "aux.43",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 44,
+        "slotType": "aux",
+        "slotLabel": "aux.44",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 45,
+        "slotType": "aux",
+        "slotLabel": "aux.45",
+        "empty": true,
+        "count": 0
+      }
+    ],
+    "entities": [
+      {
+        "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          203.76877154014718,
+          69.0,
+          189.72854945159034
+        ],
+        "dist2": 7610.0451554911415,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "c377f82d-ab90-4875-a110-ce1f341c93d2",
+        "name": "Chicken",
+        "type": "chicken",
+        "pos": [
+          199.14463612741417,
+          67.0,
+          299.7778694406797
+        ],
+        "dist2": 8006.6768902774775,
+        "hostile": false,
+        "health": 4.0
+      },
+      {
+        "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          219.8420574703207,
+          66.0,
+          196.8267943812454
+        ],
+        "dist2": 6093.686664686826,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          221.45270592578478,
+          66.0,
+          198.27780311976184
+        ],
+        "dist2": 5872.790116030623,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          214.83604283470217,
+          64.0,
+          252.83605682794473
+        ],
+        "dist2": 4256.154868926045,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          212.5590831405268,
+          65.0,
+          280.71116440541715
+        ],
+        "dist2": 5459.827154634962,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d4f23c81-b5c1-403f-9722-3213bdcf8f2d",
+        "name": "Chicken",
+        "type": "chicken",
+        "pos": [
+          210.5059470764972,
+          65.0,
+          291.1426886899649
+        ],
+        "dist2": 6438.100596902264,
+        "hostile": false,
+        "health": 4.0
+      },
+      {
+        "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          237.79049397949524,
+          69.0,
+          235.42424981305913
+        ],
+        "dist2": 2874.9497045640446,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          238.74016604139828,
+          64.0,
+          268.2817863878835
+        ],
+        "dist2": 3804.994259813795,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          232.75891128506638,
+          64.0,
+          274.8085975156697
+        ],
+        "dist2": 4261.316522177085,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "a5dc949e-42b7-4e6d-ad91-52fa8491f3d5",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          236.80489595445778,
+          64.0,
+          300.13017989385077
+        ],
+        "dist2": 6283.801485488773,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "7d024208-b804-444f-8915-825a10acfe8d",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          230.82814691687395,
+          64.0,
+          290.7504162670028
+        ],
+        "dist2": 5495.0993172768995,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "14510fa6-a618-4e00-a134-c31990921a95",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          240.7484619845504,
+          64.0,
+          272.8092204750978
+        ],
+        "dist2": 4005.0439487542126,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "47457d81-af85-4a04-99d2-76db4abb7d7d",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          254.17923240082095,
+          66.0,
+          303.4902475166384
+        ],
+        "dist2": 6426.466958534772,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          271.4677077716032,
+          67.0,
+          194.2632436294999
+        ],
+        "dist2": 6229.659833554097,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "90d22a00-f1c8-4cfa-8168-5b08b30f61c8",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          263.23276336359817,
+          70.0,
+          307.50071776373113
+        ],
+        "dist2": 6715.5814999419545,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "fd5020d4-0f85-4f06-a50b-c4778cb9c726",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          278.20583675574863,
+          67.0,
+          182.5009926300139
+        ],
+        "dist2": 7971.458996105787,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "7bcb1214-edc0-4914-822b-55c5eec53d2d",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          278.1623740490049,
+          70.0,
+          218.78519465243383
+        ],
+        "dist2": 4378.37412901224,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "adabd36c-f88d-455d-ae93-c1466e101302",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          277.16349166432656,
+          71.0,
+          231.76205323522154
+        ],
+        "dist2": 3681.543863383801,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "b69c245a-1f4c-4fc7-8dc3-4072da069c06",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          287.50216666347245,
+          71.0,
+          245.6946072726187
+        ],
+        "dist2": 4241.028135630256,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "bee2a9ad-eb70-4084-942d-80cf9f0bd66b",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          272.47936024325134,
+          69.0,
+          294.20563393737353
+        ],
+        "dist2": 5762.406025451559,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "779ae1ed-b255-4bc7-8284-61fa3b60db4a",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          283.21775014189666,
+          68.0,
+          289.2514008907188
+        ],
+        "dist2": 6100.89512074773,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "a1cac268-509e-4c25-af08-d71144248253",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          289.0336630873786,
+          68.0,
+          223.46907426086253
+        ],
+        "dist2": 5177.798456662274,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "25886ec6-5701-418f-bb85-015d3b6a62d3",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          303.195667710841,
+          71.0,
+          231.8100378298473
+        ],
+        "dist2": 5992.012629887694,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "a7637a3f-9bda-4caf-80cf-c94806932e72",
+        "name": "Sheep",
+        "type": "sheep",
+        "pos": [
+          308.49354460782104,
+          70.0,
+          267.7746938409801
+        ],
+        "dist2": 7018.328220994506,
+        "hostile": false,
+        "health": 8.0,
+        "properties": {
+          "sheared": false,
+          "color": "white"
+        }
+      }
+    ],
+    "pathing": false,
+    "allow_inventory": false,
+    "navigation": {
+      "path_position": 4,
+      "path_movements": 29,
+      "feet_block": "Block{minecraft:air}",
+      "movement": "MovementDiagonal",
+      "src": [
+        246,
+        121,
+        246
+      ],
+      "dest": [
+        245,
+        121,
+        245
+      ],
+      "pending_break": [],
+      "pending_place": [],
+      "repeated_failures": 0,
+      "idle_ms": 119,
+      "path_calculations": 1,
+      "calculating": false,
+      "pathing": false
+    },
+    "mine_active": false,
+    "goal_active": false,
+    "get_active": false,
+    "explore_active": false,
+    "follow_active": false,
+    "farm_active": false,
+    "builder_active": false,
+    "builder_paused": false,
+    "builder_placeable": [],
+    "builder_selections": [],
+    "elytra_active": false,
+    "elytra_loaded": true,
+    "elytra_safe_to_cancel": true,
+    "elytra_destination": "",
+    "elytra_path_size": 0,
+    "following": [],
+    "any_process_active": false,
+    "baritone_goal": "",
+    "build_in_layers": false,
+    "allow_break": false,
+    "allow_place": false,
+    "explore_for_blocks": true,
+    "replant_crops": true,
+    "farm_max_scan_size": 256,
+    "legit_mine_y": -59,
+    "free_look": true,
+    "block_free_look": false,
+    "remain_with_existing_look": true,
+    "smooth_look": false,
+    "random_looking": 0.01,
+    "random_looking_113": 2.0,
+    "flight_observed": false,
+    "type": "terminal",
+    "action_id": "41fc1f87-da4a-4353-8caa-ac23d892ad66",
+    "status": "canceled",
+    "native_stopped": true,
+    "reason": "cancel_requested",
+    "objective": "near:220:121:220:2",
+    "elapsed_ms": 1313,
+    "stop_latency_ms": 65,
+    "baritone_stop_latency_ms": 4,
+    "inventory_before": 0,
+    "inventory_after": 0,
+    "inventory_delta": 0,
+    "process_kind": "near",
+    "seen_active": true,
+    "last_path_event": "CANCELED",
+    "path_events": {
+      "CALC_STARTED": 1,
+      "CALC_FINISHED_NOW_EXECUTING": 1,
+      "CANCELED": 4
+    }
+  },
+  {
+    "disposable_world": true,
+    "protocol": "minebot-client-spike/1",
+    "ready": true,
+    "active_action_known": true,
+    "active_action_id": "8e41c80d-8b98-4b3b-bd4e-68b20c3d0898",
+    "sampled_at_ms": 1791950900381,
+    "pid": 2209079,
+    "heap_used_bytes": 503029224,
+    "heap_committed_bytes": 555745280,
+    "player": "Step5NextBot",
+    "position": [
+      211.64265071184366,
+      121.0,
+      230.64218398188612
+    ],
+    "on_ground": true,
+    "head_in_liquid": false,
+    "creative": false,
+    "dimension": "minecraft:overworld",
+    "difficulty": "normal",
+    "health": 20.0,
+    "food": 20,
+    "time": 12500,
+    "sleeping": false,
+    "weather": "rain",
+    "effects": [],
+    "using_item": false,
+    "use_key_down": false,
+    "oxygen": 300,
+    "yaw": 135.00008,
+    "pitch": 9.75004,
+    "selected_slot": 0,
+    "selected_item": "stone_sword",
+    "selected_item_known": true,
+    "offhand_item": "",
+    "fall_flying": false,
+    "menu": "InventoryMenu",
+    "chest_item": "air",
+    "feet_chunk_loaded": true,
+    "inventory": {
+      "stone_sword": 1
+    },
+    "scaffold_blocks": 0,
+    "inventory_complete": true,
+    "inventory_includes_selected": true,
+    "inventory_count_scope": "all_player_inventory_slots_including_selected_hotbar",
+    "inventory_slots": [
+      {
+        "slot": 0,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.0",
+        "empty": false,
+        "count": 1,
+        "item": "minecraft:stone_sword",
+        "stackRaw": "{}",
+        "maxStack": 1
+      },
+      {
+        "slot": 1,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.1",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 2,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.2",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 3,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.3",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 4,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.4",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 5,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.5",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 6,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.6",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 7,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.7",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 8,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.8",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 9,
+        "slotType": "inventory",
+        "slotLabel": "inventory.9",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 10,
+        "slotType": "inventory",
+        "slotLabel": "inventory.10",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 11,
+        "slotType": "inventory",
+        "slotLabel": "inventory.11",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 12,
+        "slotType": "inventory",
+        "slotLabel": "inventory.12",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 13,
+        "slotType": "inventory",
+        "slotLabel": "inventory.13",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 14,
+        "slotType": "inventory",
+        "slotLabel": "inventory.14",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 15,
+        "slotType": "inventory",
+        "slotLabel": "inventory.15",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 16,
+        "slotType": "inventory",
+        "slotLabel": "inventory.16",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 17,
+        "slotType": "inventory",
+        "slotLabel": "inventory.17",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 18,
+        "slotType": "inventory",
+        "slotLabel": "inventory.18",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 19,
+        "slotType": "inventory",
+        "slotLabel": "inventory.19",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 20,
+        "slotType": "inventory",
+        "slotLabel": "inventory.20",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 21,
+        "slotType": "inventory",
+        "slotLabel": "inventory.21",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 22,
+        "slotType": "inventory",
+        "slotLabel": "inventory.22",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 23,
+        "slotType": "inventory",
+        "slotLabel": "inventory.23",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 24,
+        "slotType": "inventory",
+        "slotLabel": "inventory.24",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 25,
+        "slotType": "inventory",
+        "slotLabel": "inventory.25",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 26,
+        "slotType": "inventory",
+        "slotLabel": "inventory.26",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 27,
+        "slotType": "inventory",
+        "slotLabel": "inventory.27",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 28,
+        "slotType": "inventory",
+        "slotLabel": "inventory.28",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 29,
+        "slotType": "inventory",
+        "slotLabel": "inventory.29",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 30,
+        "slotType": "inventory",
+        "slotLabel": "inventory.30",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 31,
+        "slotType": "inventory",
+        "slotLabel": "inventory.31",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 32,
+        "slotType": "inventory",
+        "slotLabel": "inventory.32",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 33,
+        "slotType": "inventory",
+        "slotLabel": "inventory.33",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 34,
+        "slotType": "inventory",
+        "slotLabel": "inventory.34",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 35,
+        "slotType": "inventory",
+        "slotLabel": "inventory.35",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 36,
+        "slotType": "armor",
+        "slotLabel": "armor.36",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 37,
+        "slotType": "armor",
+        "slotLabel": "armor.37",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 38,
+        "slotType": "armor",
+        "slotLabel": "armor.38",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 39,
+        "slotType": "armor",
+        "slotLabel": "armor.39",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 40,
+        "slotType": "offhand",
+        "slotLabel": "offhand.40",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 41,
+        "slotType": "aux",
+        "slotLabel": "aux.41",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 42,
+        "slotType": "aux",
+        "slotLabel": "aux.42",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 43,
+        "slotType": "aux",
+        "slotLabel": "aux.43",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 44,
+        "slotType": "aux",
+        "slotLabel": "aux.44",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 45,
+        "slotType": "aux",
+        "slotLabel": "aux.45",
+        "empty": true,
+        "count": 0
+      }
+    ],
+    "entities": [
+      {
+        "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          175.20577404370354,
+          72.0,
+          199.4794606088044
+        ],
+        "dist2": 4699.761309356467,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          203.76877154014718,
+          69.0,
+          189.72854945159034
+        ],
+        "dist2": 4439.923463689087,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          219.8420574703207,
+          66.0,
+          196.8267943812454
+        ],
+        "dist2": 4235.710845034078,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          221.45270592578478,
+          66.0,
+          198.27780311976184
+        ],
+        "dist2": 4168.69033188921,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          214.83604283470217,
+          64.0,
+          252.83605682794473
+        ],
+        "dist2": 3751.7657451573523,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          212.5590831405268,
+          65.0,
+          280.71116440541715
+        ],
+        "dist2": 5643.742649048276,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d4f23c81-b5c1-403f-9722-3213bdcf8f2d",
+        "name": "Chicken",
+        "type": "chicken",
+        "pos": [
+          210.5059470764972,
+          65.0,
+          291.1426886899649
+        ],
+        "dist2": 6797.603165086875,
+        "hostile": false,
+        "health": 4.0
+      },
+      {
+        "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          237.79049397949524,
+          69.0,
+          235.42424981305913
+        ],
+        "dist2": 3410.5778611633446,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          238.74016604139828,
+          64.0,
+          268.2817863878835
+        ],
+        "dist2": 5400.015006317014,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          232.75891128506638,
+          64.0,
+          274.8085975156697
+        ],
+        "dist2": 5645.568545033422,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "7d024208-b804-444f-8915-825a10acfe8d",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          230.82814691687395,
+          64.0,
+          290.7504162670028
+        ],
+        "dist2": 7230.082853074772,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "14510fa6-a618-4e00-a134-c31990921a95",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          240.7484619845504,
+          64.0,
+          272.8092204750978
+        ],
+        "dist2": 5874.207216462268,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          271.4677077716032,
+          67.0,
+          194.2632436294999
+        ],
+        "dist2": 7818.464753365962,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "bee2a9ad-eb70-4084-942d-80cf9f0bd66b",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          272.47936024325134,
+          69.0,
+          294.20563393737353
+        ],
+        "dist2": 10445.417396852623,
+        "hostile": false,
+        "health": 10.0
+      }
+    ],
+    "pathing": false,
+    "allow_inventory": false,
+    "navigation": {
+      "path_position": 33,
+      "path_movements": 34,
+      "feet_block": "Block{minecraft:air}",
+      "movement": "MovementDiagonal",
+      "src": [
+        212,
+        121,
+        231
+      ],
+      "dest": [
+        211,
+        121,
+        230
+      ],
+      "pending_break": [],
+      "pending_place": [],
+      "repeated_failures": 0,
+      "idle_ms": 110,
+      "path_calculations": 1,
+      "calculating": false,
+      "pathing": false
+    },
+    "mine_active": false,
+    "goal_active": false,
+    "get_active": false,
+    "explore_active": false,
+    "follow_active": false,
+    "farm_active": false,
+    "builder_active": false,
+    "builder_paused": false,
+    "builder_placeable": [],
+    "builder_selections": [],
+    "elytra_active": false,
+    "elytra_loaded": true,
+    "elytra_safe_to_cancel": true,
+    "elytra_destination": "",
+    "elytra_path_size": 0,
+    "following": [],
+    "any_process_active": false,
+    "baritone_goal": "",
+    "build_in_layers": false,
+    "allow_break": true,
+    "allow_place": true,
+    "explore_for_blocks": true,
+    "replant_crops": true,
+    "farm_max_scan_size": 256,
+    "legit_mine_y": -59,
+    "free_look": true,
+    "block_free_look": false,
+    "remain_with_existing_look": true,
+    "smooth_look": false,
+    "random_looking": 0.01,
+    "random_looking_113": 2.0,
+    "flight_observed": false,
+    "type": "terminal",
+    "action_id": "8e41c80d-8b98-4b3b-bd4e-68b20c3d0898",
+    "status": "completed",
+    "native_stopped": true,
+    "reason": "goal_reached",
+    "objective": "near:210:121:230:1",
+    "elapsed_ms": 7359,
+    "stop_latency_ms": 109,
+    "baritone_stop_latency_ms": 0,
+    "inventory_before": 0,
+    "inventory_after": 0,
+    "inventory_delta": 0,
+    "process_kind": "near",
+    "seen_active": true,
+    "last_path_event": "CANCELED",
+    "path_events": {
+      "CALC_STARTED": 1,
+      "CALC_FINISHED_NOW_EXECUTING": 1,
+      "CANCELED": 3
+    }
+  },
+  {
+    "disposable_world": true,
+    "protocol": "minebot-client-spike/1",
+    "ready": true,
+    "active_action_known": true,
+    "active_action_id": "1a60aa7e-70a6-4c24-904a-13dfc1d1c115",
+    "sampled_at_ms": 1791950912299,
+    "pid": 2209079,
+    "heap_used_bytes": 287769744,
+    "heap_committed_bytes": 555745280,
+    "player": "Step5NextBot",
+    "position": [
+      211.5749576596042,
+      121.0,
+      230.5744989358114
+    ],
+    "on_ground": true,
+    "head_in_liquid": false,
+    "creative": false,
+    "dimension": "minecraft:overworld",
+    "difficulty": "normal",
+    "health": 20.0,
+    "food": 20,
+    "time": 12500,
+    "sleeping": false,
+    "weather": "rain",
+    "effects": [],
+    "using_item": false,
+    "use_key_down": false,
+    "oxygen": 300,
+    "yaw": 135.00008,
+    "pitch": 9.75004,
+    "selected_slot": 0,
+    "selected_item": "stone_sword",
+    "selected_item_known": true,
+    "offhand_item": "",
+    "fall_flying": false,
+    "menu": "InventoryMenu",
+    "chest_item": "air",
+    "feet_chunk_loaded": true,
+    "inventory": {
+      "stone_sword": 1
+    },
+    "scaffold_blocks": 0,
+    "inventory_complete": true,
+    "inventory_includes_selected": true,
+    "inventory_count_scope": "all_player_inventory_slots_including_selected_hotbar",
+    "inventory_slots": [
+      {
+        "slot": 0,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.0",
+        "empty": false,
+        "count": 1,
+        "item": "minecraft:stone_sword",
+        "stackRaw": "{}",
+        "maxStack": 1
+      },
+      {
+        "slot": 1,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.1",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 2,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.2",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 3,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.3",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 4,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.4",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 5,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.5",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 6,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.6",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 7,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.7",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 8,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.8",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 9,
+        "slotType": "inventory",
+        "slotLabel": "inventory.9",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 10,
+        "slotType": "inventory",
+        "slotLabel": "inventory.10",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 11,
+        "slotType": "inventory",
+        "slotLabel": "inventory.11",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 12,
+        "slotType": "inventory",
+        "slotLabel": "inventory.12",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 13,
+        "slotType": "inventory",
+        "slotLabel": "inventory.13",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 14,
+        "slotType": "inventory",
+        "slotLabel": "inventory.14",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 15,
+        "slotType": "inventory",
+        "slotLabel": "inventory.15",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 16,
+        "slotType": "inventory",
+        "slotLabel": "inventory.16",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 17,
+        "slotType": "inventory",
+        "slotLabel": "inventory.17",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 18,
+        "slotType": "inventory",
+        "slotLabel": "inventory.18",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 19,
+        "slotType": "inventory",
+        "slotLabel": "inventory.19",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 20,
+        "slotType": "inventory",
+        "slotLabel": "inventory.20",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 21,
+        "slotType": "inventory",
+        "slotLabel": "inventory.21",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 22,
+        "slotType": "inventory",
+        "slotLabel": "inventory.22",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 23,
+        "slotType": "inventory",
+        "slotLabel": "inventory.23",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 24,
+        "slotType": "inventory",
+        "slotLabel": "inventory.24",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 25,
+        "slotType": "inventory",
+        "slotLabel": "inventory.25",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 26,
+        "slotType": "inventory",
+        "slotLabel": "inventory.26",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 27,
+        "slotType": "inventory",
+        "slotLabel": "inventory.27",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 28,
+        "slotType": "inventory",
+        "slotLabel": "inventory.28",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 29,
+        "slotType": "inventory",
+        "slotLabel": "inventory.29",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 30,
+        "slotType": "inventory",
+        "slotLabel": "inventory.30",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 31,
+        "slotType": "inventory",
+        "slotLabel": "inventory.31",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 32,
+        "slotType": "inventory",
+        "slotLabel": "inventory.32",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 33,
+        "slotType": "inventory",
+        "slotLabel": "inventory.33",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 34,
+        "slotType": "inventory",
+        "slotLabel": "inventory.34",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 35,
+        "slotType": "inventory",
+        "slotLabel": "inventory.35",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 36,
+        "slotType": "armor",
+        "slotLabel": "armor.36",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 37,
+        "slotType": "armor",
+        "slotLabel": "armor.37",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 38,
+        "slotType": "armor",
+        "slotLabel": "armor.38",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 39,
+        "slotType": "armor",
+        "slotLabel": "armor.39",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 40,
+        "slotType": "offhand",
+        "slotLabel": "offhand.40",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 41,
+        "slotType": "aux",
+        "slotLabel": "aux.41",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 42,
+        "slotType": "aux",
+        "slotLabel": "aux.42",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 43,
+        "slotType": "aux",
+        "slotLabel": "aux.43",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 44,
+        "slotType": "aux",
+        "slotLabel": "aux.44",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 45,
+        "slotType": "aux",
+        "slotLabel": "aux.45",
+        "empty": true,
+        "count": 0
+      }
+    ],
+    "entities": [
+      {
+        "id": "1b0ad00f-1d24-4048-bf11-8f95c8d3b45c",
+        "name": "Nautilus",
+        "type": "nautilus",
+        "pos": [
+          149.232421875,
+          58.46199544270833,
+          288.068115234375
+        ],
+        "dist2": 11103.109697148948,
+        "hostile": false,
+        "health": 15.0
+      },
+      {
+        "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          175.20577404370354,
+          72.0,
+          199.4794606088044
+        ],
+        "dist2": 4690.61892544513,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          203.76877154014718,
+          69.0,
+          189.72854945159034
+        ],
+        "dist2": 4433.328130999142,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          219.8420574703207,
+          66.0,
+          196.8267943812454
+        ],
+        "dist2": 4232.252501982623,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          221.45270592578478,
+          66.0,
+          198.27780311976184
+        ],
+        "dist2": 4165.646471444466,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          214.83604283470217,
+          64.0,
+          252.83605682794473
+        ],
+        "dist2": 3755.211636304048,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          212.5590831405268,
+          65.0,
+          280.71116440541715
+        ],
+        "dist2": 5650.653727373359,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d4f23c81-b5c1-403f-9722-3213bdcf8f2d",
+        "name": "Chicken",
+        "type": "chicken",
+        "pos": [
+          210.5059470764972,
+          65.0,
+          291.1426886899649
+        ],
+        "dist2": 6805.648393721944,
+        "hostile": false,
+        "health": 4.0
+      },
+      {
+        "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          237.79049397949524,
+          69.0,
+          235.42424981305913
+        ],
+        "dist2": 3414.7744281108917,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          238.74016604139828,
+          64.0,
+          268.2817863878835
+        ],
+        "dist2": 5408.788073419492,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          232.75891128506638,
+          64.0,
+          274.8085975156697
+        ],
+        "dist2": 5654.415368378355,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "7d024208-b804-444f-8915-825a10acfe8d",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          230.82814691687395,
+          64.0,
+          290.7504162670028
+        ],
+        "dist2": 7240.826323226627,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "14510fa6-a618-4e00-a134-c31990921a95",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          240.7484619845504,
+          64.0,
+          272.8092204750978
+        ],
+        "dist2": 5883.865058098718,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          271.4677077716032,
+          67.0,
+          194.2632436294999
+        ],
+        "dist2": 7821.648777898494,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "bee2a9ad-eb70-4084-942d-80cf9f0bd66b",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          272.47936024325134,
+          69.0,
+          294.20563393737353
+        ],
+        "dist2": 10462.267595657991,
+        "hostile": false,
+        "health": 10.0
+      }
+    ],
+    "pathing": false,
+    "allow_inventory": false,
+    "navigation": {
+      "repeated_failures": 0,
+      "idle_ms": 106,
+      "path_calculations": 0,
+      "calculating": false,
+      "pathing": false
+    },
+    "mine_active": false,
+    "goal_active": false,
+    "get_active": false,
+    "explore_active": false,
+    "follow_active": false,
+    "farm_active": false,
+    "builder_active": false,
+    "builder_paused": false,
+    "builder_placeable": [],
+    "builder_selections": [],
+    "elytra_active": false,
+    "elytra_loaded": true,
+    "elytra_safe_to_cancel": true,
+    "elytra_destination": "",
+    "elytra_path_size": 0,
+    "following": [],
+    "any_process_active": false,
+    "baritone_goal": "",
+    "build_in_layers": false,
+    "allow_break": true,
+    "allow_place": true,
+    "explore_for_blocks": true,
+    "replant_crops": true,
+    "farm_max_scan_size": 256,
+    "legit_mine_y": -59,
+    "free_look": true,
+    "block_free_look": false,
+    "remain_with_existing_look": true,
+    "smooth_look": false,
+    "random_looking": 0.01,
+    "random_looking_113": 2.0,
+    "flight_observed": false,
+    "type": "terminal",
+    "action_id": "1a60aa7e-70a6-4c24-904a-13dfc1d1c115",
+    "status": "completed",
+    "native_stopped": true,
+    "reason": "goal_reached",
+    "objective": "near:210:121:230:1",
+    "elapsed_ms": 110,
+    "stop_latency_ms": 105,
+    "baritone_stop_latency_ms": 0,
+    "inventory_before": 0,
+    "inventory_after": 0,
+    "inventory_delta": 0,
+    "process_kind": "near",
+    "seen_active": true,
+    "last_path_event": "CANCELED",
+    "path_events": {
+      "CANCELED": 3
+    }
+  },
+  {
+    "disposable_world": true,
+    "protocol": "minebot-client-spike/1",
+    "ready": true,
+    "active_action_known": true,
+    "active_action_id": "e6c7b07f-70fe-48aa-92b9-ce59feb0de6a",
+    "sampled_at_ms": 1791950934226,
+    "pid": 2209079,
+    "heap_used_bytes": 334223200,
+    "heap_committed_bytes": 555745280,
+    "player": "Step5NextBot",
+    "position": [
+      219.18608253451058,
+      121.0,
+      221.81437924821986
+    ],
+    "on_ground": true,
+    "head_in_liquid": false,
+    "creative": false,
+    "dimension": "minecraft:overworld",
+    "difficulty": "normal",
+    "health": 20.0,
+    "food": 20,
+    "time": 12500,
+    "sleeping": false,
+    "weather": "rain",
+    "effects": [],
+    "using_item": false,
+    "use_key_down": false,
+    "oxygen": 300,
+    "yaw": 225.00009,
+    "pitch": 9.75004,
+    "selected_slot": 0,
+    "selected_item": "stone_sword",
+    "selected_item_known": true,
+    "offhand_item": "",
+    "fall_flying": false,
+    "menu": "InventoryMenu",
+    "chest_item": "air",
+    "feet_chunk_loaded": true,
+    "inventory": {
+      "stone_sword": 1
+    },
+    "scaffold_blocks": 0,
+    "inventory_complete": true,
+    "inventory_includes_selected": true,
+    "inventory_count_scope": "all_player_inventory_slots_including_selected_hotbar",
+    "inventory_slots": [
+      {
+        "slot": 0,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.0",
+        "empty": false,
+        "count": 1,
+        "item": "minecraft:stone_sword",
+        "stackRaw": "{}",
+        "maxStack": 1
+      },
+      {
+        "slot": 1,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.1",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 2,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.2",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 3,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.3",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 4,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.4",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 5,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.5",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 6,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.6",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 7,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.7",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 8,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.8",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 9,
+        "slotType": "inventory",
+        "slotLabel": "inventory.9",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 10,
+        "slotType": "inventory",
+        "slotLabel": "inventory.10",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 11,
+        "slotType": "inventory",
+        "slotLabel": "inventory.11",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 12,
+        "slotType": "inventory",
+        "slotLabel": "inventory.12",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 13,
+        "slotType": "inventory",
+        "slotLabel": "inventory.13",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 14,
+        "slotType": "inventory",
+        "slotLabel": "inventory.14",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 15,
+        "slotType": "inventory",
+        "slotLabel": "inventory.15",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 16,
+        "slotType": "inventory",
+        "slotLabel": "inventory.16",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 17,
+        "slotType": "inventory",
+        "slotLabel": "inventory.17",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 18,
+        "slotType": "inventory",
+        "slotLabel": "inventory.18",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 19,
+        "slotType": "inventory",
+        "slotLabel": "inventory.19",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 20,
+        "slotType": "inventory",
+        "slotLabel": "inventory.20",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 21,
+        "slotType": "inventory",
+        "slotLabel": "inventory.21",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 22,
+        "slotType": "inventory",
+        "slotLabel": "inventory.22",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 23,
+        "slotType": "inventory",
+        "slotLabel": "inventory.23",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 24,
+        "slotType": "inventory",
+        "slotLabel": "inventory.24",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 25,
+        "slotType": "inventory",
+        "slotLabel": "inventory.25",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 26,
+        "slotType": "inventory",
+        "slotLabel": "inventory.26",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 27,
+        "slotType": "inventory",
+        "slotLabel": "inventory.27",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 28,
+        "slotType": "inventory",
+        "slotLabel": "inventory.28",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 29,
+        "slotType": "inventory",
+        "slotLabel": "inventory.29",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 30,
+        "slotType": "inventory",
+        "slotLabel": "inventory.30",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 31,
+        "slotType": "inventory",
+        "slotLabel": "inventory.31",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 32,
+        "slotType": "inventory",
+        "slotLabel": "inventory.32",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 33,
+        "slotType": "inventory",
+        "slotLabel": "inventory.33",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 34,
+        "slotType": "inventory",
+        "slotLabel": "inventory.34",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 35,
+        "slotType": "inventory",
+        "slotLabel": "inventory.35",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 36,
+        "slotType": "armor",
+        "slotLabel": "armor.36",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 37,
+        "slotType": "armor",
+        "slotLabel": "armor.37",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 38,
+        "slotType": "armor",
+        "slotLabel": "armor.38",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 39,
+        "slotType": "armor",
+        "slotLabel": "armor.39",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 40,
+        "slotType": "offhand",
+        "slotLabel": "offhand.40",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 41,
+        "slotType": "aux",
+        "slotLabel": "aux.41",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 42,
+        "slotType": "aux",
+        "slotLabel": "aux.42",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 43,
+        "slotType": "aux",
+        "slotLabel": "aux.43",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 44,
+        "slotType": "aux",
+        "slotLabel": "aux.44",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 45,
+        "slotType": "aux",
+        "slotLabel": "aux.45",
+        "empty": true,
+        "count": 0
+      }
+    ],
+    "entities": [
+      {
+        "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          175.20577404370354,
+          72.0,
+          199.4794606088044
+        ],
+        "dist2": 4834.116125575862,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          203.76877154014718,
+          69.0,
+          189.72854945159034
+        ],
+        "dist2": 3971.1939520351975,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          219.8420574703207,
+          66.0,
+          196.8267943812454
+        ],
+        "dist2": 3649.809700600662,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          221.45270592578478,
+          66.0,
+          198.27780311976184
+        ],
+        "dist2": 3584.1079974485715,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          214.83604283470217,
+          64.0,
+          252.83605682794473
+        ],
+        "dist2": 4230.267325250314,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          212.5590831405268,
+          65.0,
+          280.71116440541715
+        ],
+        "dist2": 6648.748422820916,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          237.79049397949524,
+          69.0,
+          235.42424981305913
+        ],
+        "dist2": 3235.3527020059546,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          238.74016604139828,
+          64.0,
+          268.2817863878835
+        ],
+        "dist2": 5790.582108077603,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          232.75891128506638,
+          64.0,
+          274.8085975156697
+        ],
+        "dist2": 6241.608850070028,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "14510fa6-a618-4e00-a134-c31990921a95",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          240.7484619845504,
+          64.0,
+          272.8092204750978
+        ],
+        "dist2": 6314.410039301989,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "4ed15022-9b9e-41e4-afd5-0676547777ac",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          264.7823636732889,
+          65.0,
+          164.51658687009532
+        ],
+        "dist2": 8498.057865093178,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          271.4677077716032,
+          67.0,
+          194.2632436294999
+        ],
+        "dist2": 6408.4334113129025,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "8942de41-5739-453e-bf2e-b4adb4022ceb",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          275.2368530421672,
+          67.0,
+          165.17706408531913
+        ],
+        "dist2": 9265.474343363734,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "fd5020d4-0f85-4f06-a50b-c4778cb9c726",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          278.20583675574863,
+          67.0,
+          182.5009926300139
+        ],
+        "dist2": 7944.873755727883,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "7bcb1214-edc0-4914-822b-55c5eec53d2d",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          278.1623740490049,
+          70.0,
+          218.78519465243383
+        ],
+        "dist2": 6088.378920117961,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "adabd36c-f88d-455d-ae93-c1466e101302",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          277.16349166432656,
+          71.0,
+          231.76205323522154
+        ],
+        "dist2": 5960.336187157739,
+        "hostile": false,
+        "health": 10.0
+      }
+    ],
+    "pathing": false,
+    "allow_inventory": false,
+    "navigation": {
+      "path_position": 8,
+      "path_movements": 9,
+      "feet_block": "Block{minecraft:air}",
+      "movement": "MovementDiagonal",
+      "src": [
+        218,
+        121,
+        222
+      ],
+      "dest": [
+        219,
+        121,
+        221
+      ],
+      "pending_break": [],
+      "pending_place": [],
+      "repeated_failures": 0,
+      "idle_ms": 109,
+      "path_calculations": 1,
+      "calculating": false,
+      "pathing": false
+    },
+    "mine_active": false,
+    "goal_active": false,
+    "get_active": false,
+    "explore_active": false,
+    "follow_active": false,
+    "farm_active": false,
+    "builder_active": false,
+    "builder_paused": false,
+    "builder_placeable": [],
+    "builder_selections": [],
+    "elytra_active": false,
+    "elytra_loaded": true,
+    "elytra_safe_to_cancel": true,
+    "elytra_destination": "",
+    "elytra_path_size": 0,
+    "following": [],
+    "any_process_active": false,
+    "baritone_goal": "",
+    "build_in_layers": false,
+    "allow_break": false,
+    "allow_place": false,
+    "explore_for_blocks": true,
+    "replant_crops": true,
+    "farm_max_scan_size": 256,
+    "legit_mine_y": -59,
+    "free_look": true,
+    "block_free_look": false,
+    "remain_with_existing_look": true,
+    "smooth_look": false,
+    "random_looking": 0.01,
+    "random_looking_113": 2.0,
+    "flight_observed": false,
+    "type": "terminal",
+    "action_id": "e6c7b07f-70fe-48aa-92b9-ce59feb0de6a",
+    "status": "completed",
+    "native_stopped": true,
+    "reason": "goal_reached",
+    "objective": "near:220:121:220:2",
+    "elapsed_ms": 2237,
+    "stop_latency_ms": 109,
+    "baritone_stop_latency_ms": 0,
+    "inventory_before": 0,
+    "inventory_after": 0,
+    "inventory_delta": 0,
+    "process_kind": "near",
+    "seen_active": true,
+    "last_path_event": "CANCELED",
+    "path_events": {
+      "CALC_STARTED": 1,
+      "CALC_FINISHED_NOW_EXECUTING": 1,
+      "CANCELED": 3
+    }
+  },
+  {
+    "disposable_world": true,
+    "protocol": "minebot-client-spike/1",
+    "ready": true,
+    "active_action_known": true,
+    "active_action_id": "5d5f9804-d0af-41dd-bd96-7fb33adadfb6",
+    "sampled_at_ms": 1791950963621,
+    "pid": 2209079,
+    "heap_used_bytes": 310913224,
+    "heap_committed_bytes": 555745280,
+    "player": "Step5NextBot",
+    "position": [
+      210.79259288269665,
+      121.0,
+      230.20786890097602
+    ],
+    "on_ground": true,
+    "head_in_liquid": false,
+    "creative": false,
+    "dimension": "minecraft:overworld",
+    "difficulty": "normal",
+    "health": 20.0,
+    "food": 20,
+    "time": 12500,
+    "sleeping": false,
+    "weather": "rain",
+    "effects": [],
+    "using_item": false,
+    "use_key_down": false,
+    "oxygen": 300,
+    "yaw": 405.0001,
+    "pitch": 9.75004,
+    "selected_slot": 0,
+    "selected_item": "stone_sword",
+    "selected_item_known": true,
+    "offhand_item": "",
+    "fall_flying": false,
+    "menu": "InventoryMenu",
+    "chest_item": "air",
+    "feet_chunk_loaded": true,
+    "inventory": {
+      "stone_sword": 1
+    },
+    "scaffold_blocks": 0,
+    "inventory_complete": true,
+    "inventory_includes_selected": true,
+    "inventory_count_scope": "all_player_inventory_slots_including_selected_hotbar",
+    "inventory_slots": [
+      {
+        "slot": 0,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.0",
+        "empty": false,
+        "count": 1,
+        "item": "minecraft:stone_sword",
+        "stackRaw": "{}",
+        "maxStack": 1
+      },
+      {
+        "slot": 1,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.1",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 2,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.2",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 3,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.3",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 4,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.4",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 5,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.5",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 6,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.6",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 7,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.7",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 8,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.8",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 9,
+        "slotType": "inventory",
+        "slotLabel": "inventory.9",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 10,
+        "slotType": "inventory",
+        "slotLabel": "inventory.10",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 11,
+        "slotType": "inventory",
+        "slotLabel": "inventory.11",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 12,
+        "slotType": "inventory",
+        "slotLabel": "inventory.12",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 13,
+        "slotType": "inventory",
+        "slotLabel": "inventory.13",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 14,
+        "slotType": "inventory",
+        "slotLabel": "inventory.14",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 15,
+        "slotType": "inventory",
+        "slotLabel": "inventory.15",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 16,
+        "slotType": "inventory",
+        "slotLabel": "inventory.16",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 17,
+        "slotType": "inventory",
+        "slotLabel": "inventory.17",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 18,
+        "slotType": "inventory",
+        "slotLabel": "inventory.18",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 19,
+        "slotType": "inventory",
+        "slotLabel": "inventory.19",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 20,
+        "slotType": "inventory",
+        "slotLabel": "inventory.20",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 21,
+        "slotType": "inventory",
+        "slotLabel": "inventory.21",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 22,
+        "slotType": "inventory",
+        "slotLabel": "inventory.22",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 23,
+        "slotType": "inventory",
+        "slotLabel": "inventory.23",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 24,
+        "slotType": "inventory",
+        "slotLabel": "inventory.24",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 25,
+        "slotType": "inventory",
+        "slotLabel": "inventory.25",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 26,
+        "slotType": "inventory",
+        "slotLabel": "inventory.26",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 27,
+        "slotType": "inventory",
+        "slotLabel": "inventory.27",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 28,
+        "slotType": "inventory",
+        "slotLabel": "inventory.28",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 29,
+        "slotType": "inventory",
+        "slotLabel": "inventory.29",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 30,
+        "slotType": "inventory",
+        "slotLabel": "inventory.30",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 31,
+        "slotType": "inventory",
+        "slotLabel": "inventory.31",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 32,
+        "slotType": "inventory",
+        "slotLabel": "inventory.32",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 33,
+        "slotType": "inventory",
+        "slotLabel": "inventory.33",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 34,
+        "slotType": "inventory",
+        "slotLabel": "inventory.34",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 35,
+        "slotType": "inventory",
+        "slotLabel": "inventory.35",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 36,
+        "slotType": "armor",
+        "slotLabel": "armor.36",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 37,
+        "slotType": "armor",
+        "slotLabel": "armor.37",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 38,
+        "slotType": "armor",
+        "slotLabel": "armor.38",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 39,
+        "slotType": "armor",
+        "slotLabel": "armor.39",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 40,
+        "slotType": "offhand",
+        "slotLabel": "offhand.40",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 41,
+        "slotType": "aux",
+        "slotLabel": "aux.41",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 42,
+        "slotType": "aux",
+        "slotLabel": "aux.42",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 43,
+        "slotType": "aux",
+        "slotLabel": "aux.43",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 44,
+        "slotType": "aux",
+        "slotLabel": "aux.44",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 45,
+        "slotType": "aux",
+        "slotLabel": "aux.45",
+        "empty": true,
+        "count": 0
+      }
+    ],
+    "entities": [
+      {
+        "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          175.20577404370354,
+          72.0,
+          199.4794606088044
+        ],
+        "dist2": 4611.656751249717,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          203.76877154014718,
+          69.0,
+          189.72854945159034
+        ],
+        "dist2": 4391.909369337468,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          219.8420574703207,
+          66.0,
+          196.8267943812454
+        ],
+        "dist2": 4221.18894541447,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          221.45270592578478,
+          66.0,
+          198.27780311976184
+        ],
+        "dist2": 4158.167110884082,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          214.83604283470217,
+          64.0,
+          252.83605682794473
+        ],
+        "dist2": 3777.3843763725854,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          212.5590831405268,
+          65.0,
+          280.71116440541715
+        ],
+        "dist2": 5689.703344639912,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d4f23c81-b5c1-403f-9722-3213bdcf8f2d",
+        "name": "Chicken",
+        "type": "chicken",
+        "pos": [
+          210.5059470764972,
+          65.0,
+          291.1426886899649
+        ],
+        "dist2": 6849.134428534766,
+        "hostile": false,
+        "health": 4.0
+      },
+      {
+        "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          237.79049397949524,
+          69.0,
+          235.42424981305913
+        ],
+        "dist2": 3460.0972934524634,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          238.74016604139828,
+          64.0,
+          268.2817863878835
+        ],
+        "dist2": 5479.690038260821,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          232.75891128506638,
+          64.0,
+          274.8085975156697
+        ],
+        "dist2": 5720.744137115842,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "7d024208-b804-444f-8915-825a10acfe8d",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          230.82814691687395,
+          64.0,
+          290.7504162670028
+        ],
+        "dist2": 7315.823467024031,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "14510fa6-a618-4e00-a134-c31990921a95",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          240.7484619845504,
+          64.0,
+          272.8092204750978
+        ],
+        "dist2": 5961.229249589323,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          271.4677077716032,
+          67.0,
+          194.2632436294999
+        ],
+        "dist2": 7889.485652688851,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "bee2a9ad-eb70-4084-942d-80cf9f0bd66b",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          272.47936024325134,
+          69.0,
+          294.20563393737353
+        ],
+        "dist2": 10604.971197049137,
+        "hostile": false,
+        "health": 10.0
+      }
+    ],
+    "pathing": false,
+    "allow_inventory": false,
+    "navigation": {
+      "path_position": 8,
+      "path_movements": 9,
+      "feet_block": "Block{minecraft:air}",
+      "movement": "MovementDiagonal",
+      "src": [
+        211,
+        121,
+        229
+      ],
+      "dest": [
+        210,
+        121,
+        230
+      ],
+      "pending_break": [],
+      "pending_place": [],
+      "repeated_failures": 0,
+      "idle_ms": 99,
+      "path_calculations": 1,
+      "calculating": false,
+      "pathing": false
+    },
+    "mine_active": false,
+    "goal_active": false,
+    "get_active": false,
+    "explore_active": false,
+    "follow_active": false,
+    "farm_active": false,
+    "builder_active": false,
+    "builder_paused": false,
+    "builder_placeable": [],
+    "builder_selections": [],
+    "elytra_active": false,
+    "elytra_loaded": true,
+    "elytra_safe_to_cancel": true,
+    "elytra_destination": "",
+    "elytra_path_size": 0,
+    "following": [],
+    "any_process_active": false,
+    "baritone_goal": "",
+    "build_in_layers": false,
+    "allow_break": true,
+    "allow_place": true,
+    "explore_for_blocks": true,
+    "replant_crops": true,
+    "farm_max_scan_size": 256,
+    "legit_mine_y": -59,
+    "free_look": true,
+    "block_free_look": false,
+    "remain_with_existing_look": true,
+    "smooth_look": false,
+    "random_looking": 0.01,
+    "random_looking_113": 2.0,
+    "flight_observed": false,
+    "type": "terminal",
+    "action_id": "5d5f9804-d0af-41dd-bd96-7fb33adadfb6",
+    "status": "completed",
+    "native_stopped": true,
+    "reason": "goal_reached",
+    "objective": "near:210:121:230:0",
+    "elapsed_ms": 2243,
+    "stop_latency_ms": 98,
+    "baritone_stop_latency_ms": 0,
+    "inventory_before": 0,
+    "inventory_after": 0,
+    "inventory_delta": 0,
+    "process_kind": "near",
+    "seen_active": true,
+    "last_path_event": "CANCELED",
+    "path_events": {
+      "CALC_STARTED": 1,
+      "CALC_FINISHED_NOW_EXECUTING": 1,
+      "CANCELED": 3
+    }
+  },
+  {
+    "disposable_world": true,
+    "protocol": "minebot-client-spike/1",
+    "ready": true,
+    "active_action_known": true,
+    "active_action_id": "4e058a81-b6bc-4ad9-b457-a2089bb4d975",
+    "sampled_at_ms": 1791951019076,
+    "pid": 2209079,
+    "heap_used_bytes": 436128832,
+    "heap_committed_bytes": 555745280,
+    "player": "Step5NextBot",
+    "position": [
+      219.18608253497823,
+      121.0,
+      221.81437924869445
+    ],
+    "on_ground": true,
+    "head_in_liquid": false,
+    "creative": false,
+    "dimension": "minecraft:overworld",
+    "difficulty": "normal",
+    "health": 20.0,
+    "food": 20,
+    "time": 12500,
+    "sleeping": false,
+    "weather": "rain",
+    "effects": [],
+    "using_item": false,
+    "use_key_down": false,
+    "oxygen": 300,
+    "yaw": 225.00009,
+    "pitch": 9.75004,
+    "selected_slot": 0,
+    "selected_item": "stone_sword",
+    "selected_item_known": true,
+    "offhand_item": "",
+    "fall_flying": false,
+    "menu": "InventoryMenu",
+    "chest_item": "air",
+    "feet_chunk_loaded": true,
+    "inventory": {
+      "stone_sword": 1
+    },
+    "scaffold_blocks": 0,
+    "inventory_complete": true,
+    "inventory_includes_selected": true,
+    "inventory_count_scope": "all_player_inventory_slots_including_selected_hotbar",
+    "inventory_slots": [
+      {
+        "slot": 0,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.0",
+        "empty": false,
+        "count": 1,
+        "item": "minecraft:stone_sword",
+        "stackRaw": "{}",
+        "maxStack": 1
+      },
+      {
+        "slot": 1,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.1",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 2,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.2",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 3,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.3",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 4,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.4",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 5,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.5",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 6,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.6",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 7,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.7",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 8,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.8",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 9,
+        "slotType": "inventory",
+        "slotLabel": "inventory.9",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 10,
+        "slotType": "inventory",
+        "slotLabel": "inventory.10",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 11,
+        "slotType": "inventory",
+        "slotLabel": "inventory.11",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 12,
+        "slotType": "inventory",
+        "slotLabel": "inventory.12",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 13,
+        "slotType": "inventory",
+        "slotLabel": "inventory.13",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 14,
+        "slotType": "inventory",
+        "slotLabel": "inventory.14",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 15,
+        "slotType": "inventory",
+        "slotLabel": "inventory.15",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 16,
+        "slotType": "inventory",
+        "slotLabel": "inventory.16",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 17,
+        "slotType": "inventory",
+        "slotLabel": "inventory.17",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 18,
+        "slotType": "inventory",
+        "slotLabel": "inventory.18",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 19,
+        "slotType": "inventory",
+        "slotLabel": "inventory.19",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 20,
+        "slotType": "inventory",
+        "slotLabel": "inventory.20",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 21,
+        "slotType": "inventory",
+        "slotLabel": "inventory.21",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 22,
+        "slotType": "inventory",
+        "slotLabel": "inventory.22",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 23,
+        "slotType": "inventory",
+        "slotLabel": "inventory.23",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 24,
+        "slotType": "inventory",
+        "slotLabel": "inventory.24",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 25,
+        "slotType": "inventory",
+        "slotLabel": "inventory.25",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 26,
+        "slotType": "inventory",
+        "slotLabel": "inventory.26",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 27,
+        "slotType": "inventory",
+        "slotLabel": "inventory.27",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 28,
+        "slotType": "inventory",
+        "slotLabel": "inventory.28",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 29,
+        "slotType": "inventory",
+        "slotLabel": "inventory.29",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 30,
+        "slotType": "inventory",
+        "slotLabel": "inventory.30",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 31,
+        "slotType": "inventory",
+        "slotLabel": "inventory.31",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 32,
+        "slotType": "inventory",
+        "slotLabel": "inventory.32",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 33,
+        "slotType": "inventory",
+        "slotLabel": "inventory.33",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 34,
+        "slotType": "inventory",
+        "slotLabel": "inventory.34",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 35,
+        "slotType": "inventory",
+        "slotLabel": "inventory.35",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 36,
+        "slotType": "armor",
+        "slotLabel": "armor.36",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 37,
+        "slotType": "armor",
+        "slotLabel": "armor.37",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 38,
+        "slotType": "armor",
+        "slotLabel": "armor.38",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 39,
+        "slotType": "armor",
+        "slotLabel": "armor.39",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 40,
+        "slotType": "offhand",
+        "slotLabel": "offhand.40",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 41,
+        "slotType": "aux",
+        "slotLabel": "aux.41",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 42,
+        "slotType": "aux",
+        "slotLabel": "aux.42",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 43,
+        "slotType": "aux",
+        "slotLabel": "aux.43",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 44,
+        "slotType": "aux",
+        "slotLabel": "aux.44",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 45,
+        "slotType": "aux",
+        "slotLabel": "aux.45",
+        "empty": true,
+        "count": 0
+      }
+    ],
+    "entities": [
+      {
+        "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          175.20577404370354,
+          72.0,
+          199.4794606088044
+        ],
+        "dist2": 4834.1161256381965,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          203.76877154014718,
+          69.0,
+          189.72854945159034
+        ],
+        "dist2": 3971.193952080072,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          219.8420574703207,
+          66.0,
+          196.8267943812454
+        ],
+        "dist2": 3649.809700623766,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          221.45270592578478,
+          66.0,
+          198.27780311976184
+        ],
+        "dist2": 3584.107997468792,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          214.83604283470217,
+          64.0,
+          252.83605682794473
+        ],
+        "dist2": 4230.267325224937,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          212.5590831405268,
+          65.0,
+          280.71116440541715
+        ],
+        "dist2": 6648.74842277121,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          237.79049397949524,
+          69.0,
+          235.42424981305913
+        ],
+        "dist2": 3235.3527019756357,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          238.74016604139828,
+          64.0,
+          268.2817863878835
+        ],
+        "dist2": 5790.582108015209,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          232.75891128506638,
+          64.0,
+          274.8085975156697
+        ],
+        "dist2": 6241.608850007033,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "14510fa6-a618-4e00-a134-c31990921a95",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          240.7484619845504,
+          64.0,
+          272.8092204750978
+        ],
+        "dist2": 6314.4100392334185,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "4ed15022-9b9e-41e4-afd5-0676547777ac",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          264.7823636732889,
+          65.0,
+          164.51658687009532
+        ],
+        "dist2": 8498.057865104918,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          271.4677077716032,
+          67.0,
+          194.2632436294999
+        ],
+        "dist2": 6408.433411290153,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "8942de41-5739-453e-bf2e-b4adb4022ceb",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          275.2368530421672,
+          67.0,
+          165.17706408531913
+        ],
+        "dist2": 9265.474343365067,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "fd5020d4-0f85-4f06-a50b-c4778cb9c726",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          278.20583675574863,
+          67.0,
+          182.5009926300139
+        ],
+        "dist2": 7944.873755709997,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "7bcb1214-edc0-4914-822b-55c5eec53d2d",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          278.1623740490049,
+          70.0,
+          218.78519465243383
+        ],
+        "dist2": 6088.378920065675,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "adabd36c-f88d-455d-ae93-c1466e101302",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          277.16349166432656,
+          71.0,
+          231.76205323522154
+        ],
+        "dist2": 5960.336187094071,
+        "hostile": false,
+        "health": 10.0
+      }
+    ],
+    "pathing": false,
+    "allow_inventory": false,
+    "navigation": {
+      "path_position": 8,
+      "path_movements": 9,
+      "feet_block": "Block{minecraft:air}",
+      "movement": "MovementDiagonal",
+      "src": [
+        218,
+        121,
+        222
+      ],
+      "dest": [
+        219,
+        121,
+        221
+      ],
+      "pending_break": [],
+      "pending_place": [],
+      "repeated_failures": 0,
+      "idle_ms": 107,
+      "path_calculations": 1,
+      "calculating": false,
+      "pathing": false
+    },
+    "mine_active": false,
+    "goal_active": false,
+    "get_active": false,
+    "explore_active": false,
+    "follow_active": false,
+    "farm_active": false,
+    "builder_active": false,
+    "builder_paused": false,
+    "builder_placeable": [],
+    "builder_selections": [],
+    "elytra_active": false,
+    "elytra_loaded": true,
+    "elytra_safe_to_cancel": true,
+    "elytra_destination": "",
+    "elytra_path_size": 0,
+    "following": [],
+    "any_process_active": false,
+    "baritone_goal": "",
+    "build_in_layers": false,
+    "allow_break": false,
+    "allow_place": false,
+    "explore_for_blocks": true,
+    "replant_crops": true,
+    "farm_max_scan_size": 256,
+    "legit_mine_y": -59,
+    "free_look": true,
+    "block_free_look": false,
+    "remain_with_existing_look": true,
+    "smooth_look": false,
+    "random_looking": 0.01,
+    "random_looking_113": 2.0,
+    "flight_observed": false,
+    "type": "terminal",
+    "action_id": "4e058a81-b6bc-4ad9-b457-a2089bb4d975",
+    "status": "completed",
+    "native_stopped": true,
+    "reason": "goal_reached",
+    "objective": "near:220:121:220:2",
+    "elapsed_ms": 2272,
+    "stop_latency_ms": 107,
+    "baritone_stop_latency_ms": 0,
+    "inventory_before": 0,
+    "inventory_after": 0,
+    "inventory_delta": 0,
+    "process_kind": "near",
+    "seen_active": true,
+    "last_path_event": "CANCELED",
+    "path_events": {
+      "CALC_STARTED": 1,
+      "CALC_FINISHED_NOW_EXECUTING": 1,
+      "CANCELED": 3
+    }
+  },
+  {
+    "disposable_world": true,
+    "protocol": "minebot-client-spike/1",
+    "ready": true,
+    "active_action_known": true,
+    "active_action_id": "20584996-f87e-41cf-8987-08311625500a",
+    "sampled_at_ms": 1791951119743,
+    "pid": 2209079,
+    "heap_used_bytes": 345757984,
+    "heap_committed_bytes": 555745280,
+    "player": "Step5NextBot",
+    "position": [
+      210.79259288269665,
+      121.0,
+      230.20786890097602
+    ],
+    "on_ground": true,
+    "head_in_liquid": false,
+    "creative": false,
+    "dimension": "minecraft:overworld",
+    "difficulty": "normal",
+    "health": 20.0,
+    "food": 20,
+    "time": 1000,
+    "sleeping": false,
+    "weather": "rain",
+    "effects": [],
+    "using_item": false,
+    "use_key_down": false,
+    "oxygen": 300,
+    "yaw": 405.0001,
+    "pitch": 9.75004,
+    "selected_slot": 0,
+    "selected_item": "stone_sword",
+    "selected_item_known": true,
+    "offhand_item": "",
+    "fall_flying": false,
+    "menu": "InventoryMenu",
+    "chest_item": "air",
+    "feet_chunk_loaded": true,
+    "inventory": {
+      "stone_sword": 1
+    },
+    "scaffold_blocks": 0,
+    "inventory_complete": true,
+    "inventory_includes_selected": true,
+    "inventory_count_scope": "all_player_inventory_slots_including_selected_hotbar",
+    "inventory_slots": [
+      {
+        "slot": 0,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.0",
+        "empty": false,
+        "count": 1,
+        "item": "minecraft:stone_sword",
+        "stackRaw": "{}",
+        "maxStack": 1
+      },
+      {
+        "slot": 1,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.1",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 2,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.2",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 3,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.3",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 4,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.4",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 5,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.5",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 6,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.6",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 7,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.7",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 8,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.8",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 9,
+        "slotType": "inventory",
+        "slotLabel": "inventory.9",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 10,
+        "slotType": "inventory",
+        "slotLabel": "inventory.10",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 11,
+        "slotType": "inventory",
+        "slotLabel": "inventory.11",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 12,
+        "slotType": "inventory",
+        "slotLabel": "inventory.12",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 13,
+        "slotType": "inventory",
+        "slotLabel": "inventory.13",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 14,
+        "slotType": "inventory",
+        "slotLabel": "inventory.14",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 15,
+        "slotType": "inventory",
+        "slotLabel": "inventory.15",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 16,
+        "slotType": "inventory",
+        "slotLabel": "inventory.16",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 17,
+        "slotType": "inventory",
+        "slotLabel": "inventory.17",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 18,
+        "slotType": "inventory",
+        "slotLabel": "inventory.18",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 19,
+        "slotType": "inventory",
+        "slotLabel": "inventory.19",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 20,
+        "slotType": "inventory",
+        "slotLabel": "inventory.20",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 21,
+        "slotType": "inventory",
+        "slotLabel": "inventory.21",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 22,
+        "slotType": "inventory",
+        "slotLabel": "inventory.22",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 23,
+        "slotType": "inventory",
+        "slotLabel": "inventory.23",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 24,
+        "slotType": "inventory",
+        "slotLabel": "inventory.24",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 25,
+        "slotType": "inventory",
+        "slotLabel": "inventory.25",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 26,
+        "slotType": "inventory",
+        "slotLabel": "inventory.26",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 27,
+        "slotType": "inventory",
+        "slotLabel": "inventory.27",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 28,
+        "slotType": "inventory",
+        "slotLabel": "inventory.28",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 29,
+        "slotType": "inventory",
+        "slotLabel": "inventory.29",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 30,
+        "slotType": "inventory",
+        "slotLabel": "inventory.30",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 31,
+        "slotType": "inventory",
+        "slotLabel": "inventory.31",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 32,
+        "slotType": "inventory",
+        "slotLabel": "inventory.32",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 33,
+        "slotType": "inventory",
+        "slotLabel": "inventory.33",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 34,
+        "slotType": "inventory",
+        "slotLabel": "inventory.34",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 35,
+        "slotType": "inventory",
+        "slotLabel": "inventory.35",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 36,
+        "slotType": "armor",
+        "slotLabel": "armor.36",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 37,
+        "slotType": "armor",
+        "slotLabel": "armor.37",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 38,
+        "slotType": "armor",
+        "slotLabel": "armor.38",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 39,
+        "slotType": "armor",
+        "slotLabel": "armor.39",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 40,
+        "slotType": "offhand",
+        "slotLabel": "offhand.40",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 41,
+        "slotType": "aux",
+        "slotLabel": "aux.41",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 42,
+        "slotType": "aux",
+        "slotLabel": "aux.42",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 43,
+        "slotType": "aux",
+        "slotLabel": "aux.43",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 44,
+        "slotType": "aux",
+        "slotLabel": "aux.44",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 45,
+        "slotType": "aux",
+        "slotLabel": "aux.45",
+        "empty": true,
+        "count": 0
+      }
+    ],
+    "entities": [
+      {
+        "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          175.20577404370354,
+          72.0,
+          199.4794606088044
+        ],
+        "dist2": 4611.656751249717,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          203.76877154014718,
+          69.0,
+          189.72854945159034
+        ],
+        "dist2": 4391.909369337468,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          219.8420574703207,
+          66.0,
+          196.8267943812454
+        ],
+        "dist2": 4221.18894541447,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          221.45270592578478,
+          66.0,
+          198.27780311976184
+        ],
+        "dist2": 4158.167110884082,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          214.83604283470217,
+          64.0,
+          252.83605682794473
+        ],
+        "dist2": 3777.3843763725854,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          212.5590831405268,
+          65.0,
+          280.71116440541715
+        ],
+        "dist2": 5689.703344639912,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d4f23c81-b5c1-403f-9722-3213bdcf8f2d",
+        "name": "Chicken",
+        "type": "chicken",
+        "pos": [
+          210.5059470764972,
+          65.0,
+          291.1426886899649
+        ],
+        "dist2": 6849.134428534766,
+        "hostile": false,
+        "health": 4.0
+      },
+      {
+        "id": "2a994a1a-ecc8-4f90-9378-a6d938670b38",
+        "name": "Egg",
+        "type": "item",
+        "pos": [
+          209.6637948667959,
+          65.0,
+          291.3418646562796
+        ],
+        "dist2": 6874.639621970176,
+        "hostile": false
+      },
+      {
+        "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          237.79049397949524,
+          69.0,
+          235.42424981305913
+        ],
+        "dist2": 3460.0972934524634,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          238.74016604139828,
+          64.0,
+          268.2817863878835
+        ],
+        "dist2": 5479.690038260821,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          232.75891128506638,
+          64.0,
+          274.8085975156697
+        ],
+        "dist2": 5720.744137115842,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "7d024208-b804-444f-8915-825a10acfe8d",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          230.82814691687395,
+          64.0,
+          290.7504162670028
+        ],
+        "dist2": 7315.823467024031,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "14510fa6-a618-4e00-a134-c31990921a95",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          240.7484619845504,
+          64.0,
+          272.8092204750978
+        ],
+        "dist2": 5961.229249589323,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          271.4677077716032,
+          67.0,
+          194.2632436294999
+        ],
+        "dist2": 7889.485652688851,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "bee2a9ad-eb70-4084-942d-80cf9f0bd66b",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          272.47936024325134,
+          69.0,
+          294.20563393737353
+        ],
+        "dist2": 10604.971197049137,
+        "hostile": false,
+        "health": 10.0
+      }
+    ],
+    "pathing": false,
+    "allow_inventory": false,
+    "navigation": {
+      "path_position": 8,
+      "path_movements": 9,
+      "feet_block": "Block{minecraft:air}",
+      "movement": "MovementDiagonal",
+      "src": [
+        211,
+        121,
+        229
+      ],
+      "dest": [
+        210,
+        121,
+        230
+      ],
+      "pending_break": [],
+      "pending_place": [],
+      "repeated_failures": 0,
+      "idle_ms": 101,
+      "path_calculations": 1,
+      "calculating": false,
+      "pathing": false
+    },
+    "mine_active": false,
+    "goal_active": false,
+    "get_active": false,
+    "explore_active": false,
+    "follow_active": false,
+    "farm_active": false,
+    "builder_active": false,
+    "builder_paused": false,
+    "builder_placeable": [],
+    "builder_selections": [],
+    "elytra_active": false,
+    "elytra_loaded": true,
+    "elytra_safe_to_cancel": true,
+    "elytra_destination": "",
+    "elytra_path_size": 0,
+    "following": [],
+    "any_process_active": false,
+    "baritone_goal": "",
+    "build_in_layers": false,
+    "allow_break": true,
+    "allow_place": true,
+    "explore_for_blocks": true,
+    "replant_crops": true,
+    "farm_max_scan_size": 256,
+    "legit_mine_y": -59,
+    "free_look": true,
+    "block_free_look": false,
+    "remain_with_existing_look": true,
+    "smooth_look": false,
+    "random_looking": 0.01,
+    "random_looking_113": 2.0,
+    "flight_observed": false,
+    "type": "terminal",
+    "action_id": "20584996-f87e-41cf-8987-08311625500a",
+    "status": "completed",
+    "native_stopped": true,
+    "reason": "goal_reached",
+    "objective": "near:210:121:230:0",
+    "elapsed_ms": 2241,
+    "stop_latency_ms": 101,
+    "baritone_stop_latency_ms": 0,
+    "inventory_before": 0,
+    "inventory_after": 0,
+    "inventory_delta": 0,
+    "process_kind": "near",
+    "seen_active": true,
+    "last_path_event": "CANCELED",
+    "path_events": {
+      "CALC_STARTED": 1,
+      "CALC_FINISHED_NOW_EXECUTING": 1,
+      "CANCELED": 3
+    }
+  },
+  {
+    "disposable_world": true,
+    "protocol": "minebot-client-spike/1",
+    "ready": true,
+    "active_action_known": true,
+    "active_action_id": "dd84658b-3af8-4fcb-8c22-2ab69a77b73e",
+    "sampled_at_ms": 1791951154862,
+    "pid": 2209079,
+    "heap_used_bytes": 455986128,
+    "heap_committed_bytes": 555745280,
+    "player": "Step5NextBot",
+    "position": [
+      209.62032903449398,
+      121.0,
+      229.57620498103165
+    ],
+    "on_ground": true,
+    "head_in_liquid": false,
+    "creative": false,
+    "dimension": "minecraft:overworld",
+    "difficulty": "normal",
+    "health": 20.0,
+    "food": 20,
+    "time": 1000,
+    "sleeping": false,
+    "weather": "thunder",
+    "effects": [],
+    "using_item": false,
+    "use_key_down": false,
+    "oxygen": 300,
+    "yaw": 482.2501,
+    "pitch": 9.75004,
+    "selected_slot": 0,
+    "selected_item": "stone_sword",
+    "selected_item_known": true,
+    "offhand_item": "",
+    "fall_flying": false,
+    "menu": "InventoryMenu",
+    "chest_item": "air",
+    "feet_chunk_loaded": true,
+    "inventory": {
+      "stone_sword": 1
+    },
+    "scaffold_blocks": 0,
+    "inventory_complete": true,
+    "inventory_includes_selected": true,
+    "inventory_count_scope": "all_player_inventory_slots_including_selected_hotbar",
+    "inventory_slots": [
+      {
+        "slot": 0,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.0",
+        "empty": false,
+        "count": 1,
+        "item": "minecraft:stone_sword",
+        "stackRaw": "{}",
+        "maxStack": 1
+      },
+      {
+        "slot": 1,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.1",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 2,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.2",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 3,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.3",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 4,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.4",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 5,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.5",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 6,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.6",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 7,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.7",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 8,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.8",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 9,
+        "slotType": "inventory",
+        "slotLabel": "inventory.9",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 10,
+        "slotType": "inventory",
+        "slotLabel": "inventory.10",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 11,
+        "slotType": "inventory",
+        "slotLabel": "inventory.11",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 12,
+        "slotType": "inventory",
+        "slotLabel": "inventory.12",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 13,
+        "slotType": "inventory",
+        "slotLabel": "inventory.13",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 14,
+        "slotType": "inventory",
+        "slotLabel": "inventory.14",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 15,
+        "slotType": "inventory",
+        "slotLabel": "inventory.15",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 16,
+        "slotType": "inventory",
+        "slotLabel": "inventory.16",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 17,
+        "slotType": "inventory",
+        "slotLabel": "inventory.17",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 18,
+        "slotType": "inventory",
+        "slotLabel": "inventory.18",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 19,
+        "slotType": "inventory",
+        "slotLabel": "inventory.19",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 20,
+        "slotType": "inventory",
+        "slotLabel": "inventory.20",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 21,
+        "slotType": "inventory",
+        "slotLabel": "inventory.21",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 22,
+        "slotType": "inventory",
+        "slotLabel": "inventory.22",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 23,
+        "slotType": "inventory",
+        "slotLabel": "inventory.23",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 24,
+        "slotType": "inventory",
+        "slotLabel": "inventory.24",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 25,
+        "slotType": "inventory",
+        "slotLabel": "inventory.25",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 26,
+        "slotType": "inventory",
+        "slotLabel": "inventory.26",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 27,
+        "slotType": "inventory",
+        "slotLabel": "inventory.27",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 28,
+        "slotType": "inventory",
+        "slotLabel": "inventory.28",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 29,
+        "slotType": "inventory",
+        "slotLabel": "inventory.29",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 30,
+        "slotType": "inventory",
+        "slotLabel": "inventory.30",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 31,
+        "slotType": "inventory",
+        "slotLabel": "inventory.31",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 32,
+        "slotType": "inventory",
+        "slotLabel": "inventory.32",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 33,
+        "slotType": "inventory",
+        "slotLabel": "inventory.33",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 34,
+        "slotType": "inventory",
+        "slotLabel": "inventory.34",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 35,
+        "slotType": "inventory",
+        "slotLabel": "inventory.35",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 36,
+        "slotType": "armor",
+        "slotLabel": "armor.36",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 37,
+        "slotType": "armor",
+        "slotLabel": "armor.37",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 38,
+        "slotType": "armor",
+        "slotLabel": "armor.38",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 39,
+        "slotType": "armor",
+        "slotLabel": "armor.39",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 40,
+        "slotType": "offhand",
+        "slotLabel": "offhand.40",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 41,
+        "slotType": "aux",
+        "slotLabel": "aux.41",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 42,
+        "slotType": "aux",
+        "slotLabel": "aux.42",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 43,
+        "slotType": "aux",
+        "slotLabel": "aux.43",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 44,
+        "slotType": "aux",
+        "slotLabel": "aux.44",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 45,
+        "slotType": "aux",
+        "slotLabel": "aux.45",
+        "empty": true,
+        "count": 0
+      }
+    ],
+    "entities": [
+      {
+        "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          175.20577404370354,
+          72.0,
+          199.4794606088044
+        ],
+        "dist2": 4491.175617021332,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          203.76877154014718,
+          69.0,
+          189.72854945159034
+        ],
+        "dist2": 4326.076376302661,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          219.8420574703207,
+          66.0,
+          196.8267943812454
+        ],
+        "dist2": 4202.00762684918,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          221.45270592578478,
+          66.0,
+          198.27780311976184
+        ],
+        "dist2": 4144.59510196709,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          214.83604283470217,
+          64.0,
+          252.83605682794473
+        ],
+        "dist2": 3817.224378386028,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          212.5590831405268,
+          65.0,
+          280.71116440541715
+        ],
+        "dist2": 5759.4203510292755,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d4f23c81-b5c1-403f-9722-3213bdcf8f2d",
+        "name": "Chicken",
+        "type": "chicken",
+        "pos": [
+          210.5059470764972,
+          65.0,
+          291.1426886899649
+        ],
+        "dist2": 6927.216235598668,
+        "hostile": false,
+        "health": 4.0
+      },
+      {
+        "id": "2a994a1a-ecc8-4f90-9378-a6d938670b38",
+        "name": "Egg",
+        "type": "item",
+        "pos": [
+          209.6637948667959,
+          65.0,
+          291.3418646562796
+        ],
+        "dist2": 6950.998604397128,
+        "hostile": false
+      },
+      {
+        "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          237.79049397949524,
+          69.0,
+          235.42424981305913
+        ],
+        "dist2": 3531.7578213859815,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          238.74016604139828,
+          64.0,
+          268.2817863878835
+        ],
+        "dist2": 5595.086939351111,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          232.75891128506638,
+          64.0,
+          274.8085975156697
+        ],
+        "dist2": 5830.363322974084,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "7d024208-b804-444f-8915-825a10acfe8d",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          230.82814691687395,
+          64.0,
+          290.7504162670028
+        ],
+        "dist2": 7441.055665792833,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "14510fa6-a618-4e00-a134-c31990921a95",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          240.7484619845504,
+          64.0,
+          272.8092204750978
+        ],
+        "dist2": 6087.054289666552,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          271.4677077716032,
+          67.0,
+          194.2632436294999
+        ],
+        "dist2": 7988.103496066207,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "bee2a9ad-eb70-4084-942d-80cf9f0bd66b",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          272.47936024325134,
+          69.0,
+          294.20563393737353
+        ],
+        "dist2": 10832.220891726374,
+        "hostile": false,
+        "health": 10.0
+      }
+    ],
+    "pathing": false,
+    "allow_inventory": false,
+    "navigation": {
+      "path_position": 0,
+      "path_movements": 1,
+      "feet_block": "Block{minecraft:air}",
+      "movement": "MovementDiagonal",
+      "src": [
+        210,
+        121,
+        230
+      ],
+      "dest": [
+        209,
+        121,
+        229
+      ],
+      "pending_break": [],
+      "pending_place": [],
+      "repeated_failures": 0,
+      "idle_ms": 104,
+      "path_calculations": 1,
+      "calculating": false,
+      "pathing": false
+    },
+    "mine_active": false,
+    "goal_active": false,
+    "get_active": false,
+    "explore_active": false,
+    "follow_active": false,
+    "farm_active": false,
+    "builder_active": false,
+    "builder_paused": false,
+    "builder_placeable": [],
+    "builder_selections": [],
+    "elytra_active": false,
+    "elytra_loaded": true,
+    "elytra_safe_to_cancel": true,
+    "elytra_destination": "",
+    "elytra_path_size": 0,
+    "following": [],
+    "any_process_active": false,
+    "baritone_goal": "",
+    "build_in_layers": false,
+    "allow_break": true,
+    "allow_place": true,
+    "explore_for_blocks": true,
+    "replant_crops": true,
+    "farm_max_scan_size": 256,
+    "legit_mine_y": -59,
+    "free_look": true,
+    "block_free_look": false,
+    "remain_with_existing_look": true,
+    "smooth_look": false,
+    "random_looking": 0.01,
+    "random_looking_113": 2.0,
+    "flight_observed": false,
+    "type": "terminal",
+    "action_id": "dd84658b-3af8-4fcb-8c22-2ab69a77b73e",
+    "status": "completed",
+    "native_stopped": true,
+    "reason": "goal_reached",
+    "objective": "near:209:121:229:0",
+    "elapsed_ms": 357,
+    "stop_latency_ms": 104,
+    "baritone_stop_latency_ms": 0,
+    "inventory_before": 0,
+    "inventory_after": 0,
+    "inventory_delta": 0,
+    "process_kind": "near",
+    "seen_active": true,
+    "last_path_event": "CANCELED",
+    "path_events": {
+      "CALC_STARTED": 1,
+      "CALC_FINISHED_NOW_EXECUTING": 1,
+      "CANCELED": 3
+    }
+  },
+  {
+    "disposable_world": true,
+    "protocol": "minebot-client-spike/1",
+    "ready": true,
+    "active_action_known": true,
+    "active_action_id": "4804e1f0-0bd2-4a86-a684-e149b80173bd",
+    "sampled_at_ms": 1791951158884,
+    "pid": 2209079,
+    "heap_used_bytes": 306443128,
+    "heap_committed_bytes": 555745280,
+    "player": "Step5NextBot",
+    "position": [
+      210.26654744185313,
+      121.0,
+      230.2620546212887
+    ],
+    "on_ground": true,
+    "head_in_liquid": false,
+    "creative": false,
+    "dimension": "minecraft:overworld",
+    "difficulty": "normal",
+    "health": 20.0,
+    "food": 20,
+    "time": 1000,
+    "sleeping": false,
+    "weather": "thunder",
+    "effects": [],
+    "using_item": false,
+    "use_key_down": false,
+    "oxygen": 300,
+    "yaw": 386.2501,
+    "pitch": 9.75004,
+    "selected_slot": 0,
+    "selected_item": "stone_sword",
+    "selected_item_known": true,
+    "offhand_item": "",
+    "fall_flying": false,
+    "menu": "InventoryMenu",
+    "chest_item": "air",
+    "feet_chunk_loaded": true,
+    "inventory": {
+      "stone_sword": 1
+    },
+    "scaffold_blocks": 0,
+    "inventory_complete": true,
+    "inventory_includes_selected": true,
+    "inventory_count_scope": "all_player_inventory_slots_including_selected_hotbar",
+    "inventory_slots": [
+      {
+        "slot": 0,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.0",
+        "empty": false,
+        "count": 1,
+        "item": "minecraft:stone_sword",
+        "stackRaw": "{}",
+        "maxStack": 1
+      },
+      {
+        "slot": 1,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.1",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 2,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.2",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 3,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.3",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 4,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.4",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 5,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.5",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 6,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.6",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 7,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.7",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 8,
+        "slotType": "hotbar",
+        "slotLabel": "hotbar.8",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 9,
+        "slotType": "inventory",
+        "slotLabel": "inventory.9",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 10,
+        "slotType": "inventory",
+        "slotLabel": "inventory.10",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 11,
+        "slotType": "inventory",
+        "slotLabel": "inventory.11",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 12,
+        "slotType": "inventory",
+        "slotLabel": "inventory.12",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 13,
+        "slotType": "inventory",
+        "slotLabel": "inventory.13",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 14,
+        "slotType": "inventory",
+        "slotLabel": "inventory.14",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 15,
+        "slotType": "inventory",
+        "slotLabel": "inventory.15",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 16,
+        "slotType": "inventory",
+        "slotLabel": "inventory.16",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 17,
+        "slotType": "inventory",
+        "slotLabel": "inventory.17",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 18,
+        "slotType": "inventory",
+        "slotLabel": "inventory.18",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 19,
+        "slotType": "inventory",
+        "slotLabel": "inventory.19",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 20,
+        "slotType": "inventory",
+        "slotLabel": "inventory.20",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 21,
+        "slotType": "inventory",
+        "slotLabel": "inventory.21",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 22,
+        "slotType": "inventory",
+        "slotLabel": "inventory.22",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 23,
+        "slotType": "inventory",
+        "slotLabel": "inventory.23",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 24,
+        "slotType": "inventory",
+        "slotLabel": "inventory.24",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 25,
+        "slotType": "inventory",
+        "slotLabel": "inventory.25",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 26,
+        "slotType": "inventory",
+        "slotLabel": "inventory.26",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 27,
+        "slotType": "inventory",
+        "slotLabel": "inventory.27",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 28,
+        "slotType": "inventory",
+        "slotLabel": "inventory.28",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 29,
+        "slotType": "inventory",
+        "slotLabel": "inventory.29",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 30,
+        "slotType": "inventory",
+        "slotLabel": "inventory.30",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 31,
+        "slotType": "inventory",
+        "slotLabel": "inventory.31",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 32,
+        "slotType": "inventory",
+        "slotLabel": "inventory.32",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 33,
+        "slotType": "inventory",
+        "slotLabel": "inventory.33",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 34,
+        "slotType": "inventory",
+        "slotLabel": "inventory.34",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 35,
+        "slotType": "inventory",
+        "slotLabel": "inventory.35",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 36,
+        "slotType": "armor",
+        "slotLabel": "armor.36",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 37,
+        "slotType": "armor",
+        "slotLabel": "armor.37",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 38,
+        "slotType": "armor",
+        "slotLabel": "armor.38",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 39,
+        "slotType": "armor",
+        "slotLabel": "armor.39",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 40,
+        "slotType": "offhand",
+        "slotLabel": "offhand.40",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 41,
+        "slotType": "aux",
+        "slotLabel": "aux.41",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 42,
+        "slotType": "aux",
+        "slotLabel": "aux.42",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 43,
+        "slotType": "aux",
+        "slotLabel": "aux.43",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 44,
+        "slotType": "aux",
+        "slotLabel": "aux.44",
+        "empty": true,
+        "count": 0
+      },
+      {
+        "slot": 45,
+        "slotType": "aux",
+        "slotLabel": "aux.45",
+        "empty": true,
+        "count": 0
+      }
+    ],
+    "entities": [
+      {
+        "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          175.20577404370354,
+          72.0,
+          199.4794606088044
+        ],
+        "dist2": 4577.825925413829,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          203.76877154014718,
+          69.0,
+          189.72854945159034
+        ],
+        "dist2": 4389.186133010755,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          219.8420574703207,
+          66.0,
+          196.8267943812454
+        ],
+        "dist2": 4234.607019624704,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          221.45270592578478,
+          66.0,
+          198.27780311976184
+        ],
+        "dist2": 4173.12248574056,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          214.83604283470217,
+          64.0,
+          252.83605682794473
+        ],
+        "dist2": 3779.465863771379,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          212.5590831405268,
+          65.0,
+          280.71116440541715
+        ],
+        "dist2": 5686.368397940737,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d4f23c81-b5c1-403f-9722-3213bdcf8f2d",
+        "name": "Chicken",
+        "type": "chicken",
+        "pos": [
+          210.5059470764972,
+          65.0,
+          291.1426886899649
+        ],
+        "dist2": 6842.5089167891265,
+        "hostile": false,
+        "health": 4.0
+      },
+      {
+        "id": "2a994a1a-ecc8-4f90-9378-a6d938670b38",
+        "name": "Egg",
+        "type": "item",
+        "pos": [
+          209.6637948667959,
+          65.0,
+          291.3418646562796
+        ],
+        "dist2": 6867.106504577311,
+        "hostile": false
+      },
+      {
+        "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          237.79049397949524,
+          69.0,
+          235.42424981305913
+        ],
+        "dist2": 3488.2158922049184,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+        "name": "Pig",
+        "type": "pig",
+        "pos": [
+          238.74016604139828,
+          64.0,
+          268.2817863878835
+        ],
+        "dist2": 5505.246959756183,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          232.75891128506638,
+          64.0,
+          274.8085975156697
+        ],
+        "dist2": 5739.300915096412,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "7d024208-b804-444f-8915-825a10acfe8d",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          230.82814691687395,
+          64.0,
+          290.7504162670028
+        ],
+        "dist2": 7330.621267553868,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "14510fa6-a618-4e00-a134-c31990921a95",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          240.7484619845504,
+          64.0,
+          272.8092204750978
+        ],
+        "dist2": 5988.4084363798365,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          271.4677077716032,
+          67.0,
+          194.2632436294999
+        ],
+        "dist2": 7957.496418530311,
+        "hostile": false,
+        "health": 10.0
+      },
+      {
+        "id": "bee2a9ad-eb70-4084-942d-80cf9f0bd66b",
+        "name": "Cow",
+        "type": "cow",
+        "pos": [
+          272.47936024325134,
+          69.0,
+          294.20563393737353
+        ],
+        "dist2": 10663.215412414245,
+        "hostile": false,
+        "health": 10.0
+      }
+    ],
+    "pathing": false,
+    "allow_inventory": false,
+    "navigation": {
+      "path_position": 0,
+      "path_movements": 1,
+      "feet_block": "Block{minecraft:air}",
+      "movement": "MovementDiagonal",
+      "src": [
+        209,
+        121,
+        229
+      ],
+      "dest": [
+        210,
+        121,
+        230
+      ],
+      "pending_break": [],
+      "pending_place": [],
+      "repeated_failures": 0,
+      "idle_ms": 104,
+      "path_calculations": 1,
+      "calculating": false,
+      "pathing": false
+    },
+    "mine_active": false,
+    "goal_active": false,
+    "get_active": false,
+    "explore_active": false,
+    "follow_active": false,
+    "farm_active": false,
+    "builder_active": false,
+    "builder_paused": false,
+    "builder_placeable": [],
+    "builder_selections": [],
+    "elytra_active": false,
+    "elytra_loaded": true,
+    "elytra_safe_to_cancel": true,
+    "elytra_destination": "",
+    "elytra_path_size": 0,
+    "following": [],
+    "any_process_active": false,
+    "baritone_goal": "",
+    "build_in_layers": false,
+    "allow_break": true,
+    "allow_place": true,
+    "explore_for_blocks": true,
+    "replant_crops": true,
+    "farm_max_scan_size": 256,
+    "legit_mine_y": -59,
+    "free_look": true,
+    "block_free_look": false,
+    "remain_with_existing_look": true,
+    "smooth_look": false,
+    "random_looking": 0.01,
+    "random_looking_113": 2.0,
+    "flight_observed": false,
+    "type": "terminal",
+    "action_id": "4804e1f0-0bd2-4a86-a684-e149b80173bd",
+    "status": "completed",
+    "native_stopped": true,
+    "reason": "goal_reached",
+    "objective": "near:210:121:230:0",
+    "elapsed_ms": 323,
+    "stop_latency_ms": 104,
+    "baritone_stop_latency_ms": 0,
+    "inventory_before": 0,
+    "inventory_after": 0,
+    "inventory_delta": 0,
+    "process_kind": "near",
+    "seen_active": true,
+    "last_path_event": "CANCELED",
+    "path_events": {
+      "CALC_STARTED": 1,
+      "CALC_FINISHED_NOW_EXECUTING": 1,
+      "CANCELED": 3
+    }
+  }
+]

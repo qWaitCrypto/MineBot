@@ -1,0 +1,39 @@
+[
+  {
+    "seq": 490,
+    "recorded": "stay",
+    "baseline": "stay",
+    "candidate_only": true,
+    "distribution": {
+      "look_player": 12
+    },
+    "added_facts": "Player Visitor is 6 blocks away.",
+    "option_keys": [
+      "look_player",
+      "approach_player",
+      "follow_player",
+      "go_home",
+      "stay",
+      "call_agent"
+    ]
+  },
+  {
+    "seq": 915,
+    "recorded": "stay",
+    "baseline": "stay",
+    "candidate_only": true,
+    "distribution": {
+      "stay": 10,
+      "look_player": 2
+    },
+    "added_facts": "Player Visitor is 56 blocks away.",
+    "option_keys": [
+      "look_player",
+      "approach_player",
+      "follow_player",
+      "go_home",
+      "stay",
+      "call_agent"
+    ]
+  }
+]
