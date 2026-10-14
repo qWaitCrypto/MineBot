@@ -1053,6 +1053,39 @@ class BodyLoop(CallSupervisor):
             if reserved_here:
                 self._release_result_pending(call_id)
 
+    async def _stopped_again_at_the_same_place(self, record: Mapping[str, Any]) -> bool:
+        """Whether danger stopped this work again where it stopped it before
+        the Body last went back.  Decision compares the two recorded places;
+        a missing or invalid answer leaves the ordinary result question."""
+        stops = [entry.get("body", {}).get("position") for entry in record.get("history", [])
+                 if isinstance(entry, Mapping)
+                 and ((((entry.get("result") or {}).get("metrics") or {}).get("direct_call_handoff") or {})
+                      .get("facts") or {}).get("reason") == "decision_default_tool"]
+        if len(stops) < 2:
+            return False
+        context = record["supervision_context"]
+        request = rq.return_place_question(
+            work_call=rq.call_text(record["tool"], record["params"]),
+            intent=str(context.get("intent") or context.get("node_description") or ""),
+            before=stops[-2], now=stops[-1])
+        if request is None:
+            return False
+        self.runtime.trace.emit(
+            "call_supervision_request", tool_call_id=record["call_id"], tool=record["tool"],
+            purpose="return_place_frame", loop_state=self.loop_state, request=request)
+        raw = None
+        try:
+            answer = await asyncio.wait_for(
+                self._client.ask(request, priority=supervision_module.DecisionPriority.SUPERVISION), timeout=2.2)
+            raw = answer.raw
+        except Exception:
+            raw = None
+        choice = rq.return_place_choice(raw)
+        self.runtime.trace.emit(
+            "call_supervision_result", tool_call_id=record["call_id"], tool=record["tool"],
+            purpose="return_place_frame", response=raw, choice=choice or "unknown", unknown=choice is None)
+        return choice == "same"
+
     async def _follow_default_result(
         self, record: dict[str, Any], action: tuple[str, dict[str, Any]],
         default_result: Any, default_id: str, *, protective_choice: str = "",
@@ -1061,6 +1094,9 @@ class BodyLoop(CallSupervisor):
         if self._protective_verdict == "call_agent":
             return "call_agent"
         context = record["supervision_context"]
+        if not context.get("idle_protection") and await self._stopped_again_at_the_same_place(record):
+            # Going back into the same danger is a risk the Agent takes or not.
+            return "call_agent"
         intent = str(context.get("intent") or context.get("node_description") or "")
         registry = getattr(self.runtime, "registry", None)
         default_tool = registry.get(action[0]) if registry is not None else None

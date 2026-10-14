@@ -710,6 +710,33 @@ def done_question(state: Mapping[str, Any], intent: str) -> dict[str, Any]:
     }}}}
 
 
+def return_place_question(*, work_call: str, intent: str, before: Any, now: Any) -> dict[str, Any] | None:
+    """Whether danger stopped the work again where it stopped it before the
+    Body last went back.  The 4B Decision compares two places well but not
+    a count of interruptions; whether to risk going back again is then the
+    Agent's (decision-capability-20261014.md)."""
+    before_at, now_at = _position(before), _position(now)
+    if not before_at or not now_at:
+        return None
+    return {"state": {
+        "agent_intent": f"The earlier work was for: “{intent}”." if intent else f"The earlier work was {work_call}.",
+        "last_return": f"Before the Body last went back to {work_call}, danger stopped it at {before_at}.",
+        "this_interruption": f"Now danger has stopped it again at {now_at}.",
+    }, "questions": {"r": {"type": "choice", "instructions": (
+        "Compare the two places. Did danger stop the work again at about the same place?"
+    ), "criteria": {
+        "same": "Yes: about the same place as before the last return.",
+        "different": "No: somewhere else.",
+    }}}}
+
+
+def return_place_choice(raw: Mapping[str, Any] | None) -> str | None:
+    answers = raw.get("answers") if isinstance(raw, Mapping) else None
+    answer = answers.get("r") if isinstance(answers, Mapping) else None
+    choice = answer.get("choice") if isinstance(answer, Mapping) else None
+    return choice if choice in {"same", "different"} else None
+
+
 def done_choice(raw: Mapping[str, Any] | None) -> str | None:
     """"shown" / "not_shown", or None when there is no valid answer."""
     answers = raw.get("answers") if isinstance(raw, Mapping) else None
@@ -722,5 +749,6 @@ __all__ = [
     "PROTECTIVE", "VitalWindow", "after_default_options", "attempt_lines", "call_text", "frame_choice",
     "frame_options", "frame_questions", "frame_state", "hostiles", "just_hurt",
     "idle_options", "idle_question", "done_question", "done_choice", "in_danger",
+    "return_place_question", "return_place_choice",
     "only_option", "result_sentence",
 ]
