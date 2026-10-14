@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from minebot.app.direct_call_supervision import CallSupervisor
+from tests.unit.reflex_expected import intent_question_while_running, main_hand_beside_inventory
 
 
 def test_step2_new_old_protocol_on_118_inputs_except_verified_question_changes():
@@ -52,19 +53,13 @@ def test_step2_new_old_protocol_on_118_inputs_except_verified_question_changes()
                     expected['questions']['q']['instructions'] = (
                         "Choose what the Body does right now to achieve the Agent's intent."
                     )
-                facts=case['execution']['facts']
-                selected=facts.get('selected_item')
-                if isinstance(selected,str) and facts.get('selected_item_known') is not False:
-                    expected['state']['body']+=' The main hand holds '+(selected or 'nothing')+'.'
-                criteria = expected['questions']['q']['criteria']
-                if intent and not case['context'].get('next_call') and 'next_step' in criteria:
-                    assert criteria['next_step'] == (
-                        'Stop the current action and report to the Agent that this work is finished.')
-                    criteria['next_step'] = (
-                        f'Stop the current action and report to the Agent that “{intent}” has been achieved.')
-                # Permit only the two verified intent clarifications and the
-                # observed main hand, plus the separately verified explicit
-                # terminal report. Internal next calls and all other fields
-                # remain exact; this is not original-fact reconstruction.
+                expected = main_hand_beside_inventory(expected, case['execution']['facts'])
+                if intent and not case['context'].get('is_reflex_action'):
+                    expected = intent_question_while_running(expected, intent)
+                # Permit only the two verified intent clarifications, the
+                # observed main hand beside the inventory, and the separate
+                # "is the intent shown" question that replaced next_step.
+                # All other fields remain exact; this is not original-fact
+                # reconstruction.
                 assert json.dumps(expected, ensure_ascii=False, separators=(',', ':')) == json.dumps(
                     requests[1], ensure_ascii=False, separators=(',', ':')), case['seq']

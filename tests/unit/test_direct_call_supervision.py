@@ -295,7 +295,12 @@ class StubDecision:
         choice = next(self.answers)
         # Tests written before the options were renamed still say step_done/continue.
         choice = {"step_done": "next_step", "continue": "keep_going"}.get(choice, choice)
-        return DecisionAnswer(choice, {"answers": {"q": {"choice": choice}}}, 0.01, len(self.requests))
+        answers = {"q": {"choice": choice}}
+        if "a" in payload.get("questions", {}):
+            # A running frame asks separately whether the intent is shown;
+            # "next step" is answered there.
+            answers["a"] = {"choice": "shown" if choice == "next_step" else "not_shown"}
+        return DecisionAnswer(choice, {"answers": answers}, 0.01, len(self.requests))
 
     async def close(self):
         return None
@@ -663,7 +668,7 @@ def test_ambiguous_decision_is_unknown_and_does_not_stop():
                     "call_agent",
                     {"answers": {"q": {"choice": "call_agent", "probabilities": {
                         "call_agent": 0.46, "continue": 0.44, "step_done": 0.10,
-                    }}}},
+                    }}, "a": {"choice": "not_shown"}}},
                     0.2, 1,
                 )
 

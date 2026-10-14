@@ -57,21 +57,25 @@ def test_equipment_intent_sees_current_main_hand_once_in_all_frames():
         state = rq.frame_state(goal="make a pickaxe", intent="craft and equip a wooden pickaxe",
             tool="craft_item", params={"item": "wooden_pickaxe", "auto_equip": True},
             facts=facts, running=running, result=None if running else {"success": True})
-        assert state["inventory"] == "wooden_pickaxe 1"
-        assert state["body"].endswith("The main hand holds oak_sapling.")
-        assert state["body"].count("main hand") == 1
-    assert rq.idle_question(facts, rq.idle_options(facts))["state"]["body"].endswith(
-        "The main hand holds oak_sapling.")
+        # Said beside the inventory: inside the body sentence it was missed
+        # when an intent named both the item and holding it (live seq1978).
+        assert list(state)[list(state).index("inventory") + 1] == "main_hand"
+        assert state["main_hand"] == "oak_sapling"
+        assert "main hand" not in state["body"]
+    idle = rq.idle_question(facts, rq.idle_options(facts))["state"]
+    assert idle["main_hand"] == "oak_sapling"
+    assert list(idle)[list(idle).index("inventory") + 1] == "main_hand"
 
 
 @pytest.mark.parametrize("facts,expected", [
-    ({"selected_item": ""}, "The main hand holds nothing."),
-    ({"selected_item": None, "selected_item_known": True}, ""),
-    ({"selected_item": "oak_sapling", "selected_item_known": False}, ""),
-    ({}, ""),
+    ({"selected_item": ""}, "nothing"),
+    ({"selected_item": None, "selected_item_known": True}, None),
+    ({"selected_item": "oak_sapling", "selected_item_known": False}, None),
+    ({}, None),
 ])
 def test_unknown_main_hand_is_not_reported_as_empty(facts, expected):
-    assert rq._body_sentence(facts) == expected
+    assert rq._main_hand(facts) == expected
+    assert "main hand" not in rq._body_sentence(facts)
 
 
 def test_vital_window_gives_values_from_a_few_seconds_ago():
@@ -137,9 +141,10 @@ def test_idle_and_work_use_the_same_protective_eligibility_and_inventory_words()
 def test_running_options_are_concrete_and_protective_ones_follow_the_facts():
     calm = rq.frame_options(facts={"oxygen": 300}, intent="get 3 raw iron", running=True,
                             next_call='smelt_item(count=3, input_item="raw_iron")', **CALL)
+    # With an intent, "next step" is not an option beside "keep going":
+    # whether the facts show the intent is its own question.
     assert calm == {
         "keep_going": 'Keep doing the current work, collect_resource(count=3, item="raw_iron"), for: “get 3 raw iron”',
-        "next_step": 'Stop the current action and start the next step of the plan: smelt_item(count=3, input_item="raw_iron").',
         "call_agent": "Stop the current action and hand control back to the Agent for a new plan.",
     }
     danger = rq.frame_options(
@@ -168,18 +173,48 @@ def test_result_options_never_skip_a_failed_step():
     assert rq.only_option(rq.frame_questions(hopeless)) == "call_agent"
 
 
-@pytest.mark.parametrize("running", [True, False])
-def test_terminal_report_names_the_dispatch_intent_and_internal_step_names_its_call(running):
-    # Real patrol seq862 stopped at x205.8 for x220: "this work" did not
-    # identify the result the Agent actually wanted. Do not remove the choice.
-    args = dict(facts={}, intent="到达[220,121,220]", running=running,
-                result=None if running else {"success": True}, **CALL)
-    stop = "Stop the current action" if running else "Do not repeat it"
+def test_result_report_is_a_concrete_thing_to_do_not_a_verdict():
+    # Agreed rule (frame-question doc section 1): no "has been achieved"
+    # options. The last step reports that the work is finished.
+    args = dict(facts={}, intent="到达[220,121,220]", running=False, result={"success": True}, **CALL)
     terminal = rq.frame_options(**args)
-    assert terminal["next_step"] == f"{stop} and report to the Agent that “到达[220,121,220]” has been achieved."
+    assert terminal["next_step"] == "Do not repeat it and report to the Agent that this work is finished."
     internal = rq.frame_options(next_call="equip_item(item=stone_sword)", **args)
-    assert internal["next_step"] == f"{stop} and start the next step of the plan: equip_item(item=stone_sword)."
+    assert internal["next_step"] == "Do not repeat it and start the next step of the plan: equip_item(item=stone_sword)."
     assert set(terminal) == set(internal)
+
+
+@pytest.mark.parametrize("next_call", ["", "equip_item(item=stone_sword)"])
+def test_running_work_asks_separately_whether_the_facts_show_the_intent(next_call):
+    # Live seq499/1978/3913: asked beside "keep going", the next step was
+    # chosen at 3 of 5 logs, 3 of 12 coal and an unheld pickaxe.
+    intent = "背包里有 1 把 wooden_pickaxe 并已装备到主手"
+    options = rq.frame_options(facts={}, intent=intent, running=True, next_call=next_call, **CALL)
+    assert "next_step" not in options
+    questions = rq.frame_questions(options, acting_for_intent=True, intent=intent)
+    assert list(questions) == ["q", "a"]
+    assert set(questions["a"]["criteria"]) == {"shown", "not_shown"}
+    assert intent in questions["a"]["criteria"]["shown"]
+    assert rq.only_option(questions) is None
+    # A protective call and a call without an intent are not asked this.
+    assert "a" not in rq.frame_questions(options, acting_for_intent=True, intent=intent, protecting=True)
+    assert "a" not in rq.frame_questions(options, acting_for_intent=False, intent=intent)
+
+
+def test_shown_intent_means_next_step_and_danger_comes_first():
+    questions = rq.frame_questions(
+        {"keep_going": "k", "call_agent": "c", "surface": "s"}, acting_for_intent=True, intent="x")
+    assert list(questions) == ["q", "a", "d", "p"]
+
+    def choice(**answers):
+        return rq.frame_choice({"answers": {k: {"choice": v} for k, v in answers.items()}}, questions)
+
+    assert choice(q="keep_going", a="shown", d="safe") == "next_step"
+    assert choice(q="keep_going", a="not_shown", d="safe") == "keep_going"
+    assert choice(q="call_agent", a="not_shown", d="safe") == "call_agent"
+    assert choice(q="keep_going", a="maybe", d="safe") == "unknown"
+    assert choice(q="keep_going", d="safe") == "unknown"
+    assert choice(q="keep_going", a="shown", d="in_danger", p="surface") == "surface"
 
 
 def test_failure_observations_survive_the_agent_projector_without_new_result_fields():

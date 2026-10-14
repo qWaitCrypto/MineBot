@@ -201,10 +201,17 @@ def _body_sentence(facts: Mapping[str, Any]) -> str:
             f"The Body was just hurt: health fell from {facts['health_before']:.0f} "
             f"to {health:.0f} in the last {_ago(facts)}."
         )
-    selected = facts.get("selected_item")
-    if facts.get("selected_item_known") is not False and isinstance(selected, str):
-        parts.append(f"The main hand holds {selected or 'nothing'}.")
     return " ".join(parts)
+
+
+def _main_hand(facts: Mapping[str, Any]) -> str | None:
+    """The observed main-hand item, said beside the inventory.  Said inside
+    the body sentence it was overlooked when an intent named both an item and
+    holding it.  An unobserved hand is left out, never written as empty."""
+    selected = facts.get("selected_item")
+    if dead(facts) or facts.get("selected_item_known") is False or not isinstance(selected, str):
+        return None
+    return selected or "nothing"
 
 
 def _threat_sentence(facts: Mapping[str, Any]) -> str:
@@ -336,6 +343,7 @@ def frame_state(
     inventory = _inventory(facts)
     if inventory is not None:
         state["inventory"] = ", ".join(f"{item} {count}" for item, count in inventory.items()) or "empty"
+    state["main_hand"] = _main_hand(facts)
     state["body"] = _body_sentence(facts)
     state["threats"] = _threat_sentence(facts)
     if running:
@@ -401,10 +409,12 @@ def frame_options(
     elif not (failed and result.get("canRetry") is False):
         options["repeat"] = f"Run the same call again: {call}." + (f" {repeat_note}" if repeat_note else "")
     # After a failed step the plan cannot simply move on: later steps depend on it.
-    if not failed:
+    # While a call runs for an intent, whether the facts already show it is
+    # asked as its own question (frame_questions); the next step follows from
+    # that answer, not from an option beside "keep going".
+    if not failed and not (running and intent):
         options["next_step"] = (
             f"{stop} and start the next step of the plan: {next_call}." if next_call
-            else f"{stop} and report to the Agent that “{intent}” has been achieved." if intent
             else f"{stop} and report to the Agent that this work is finished."
         )
     for key, text in (tree or {}).items():
@@ -503,10 +513,12 @@ def after_default_options(
 
 def frame_questions(
     options: Mapping[str, str], *, protecting: bool = False, acting_for_intent: bool = False,
-    interrupt: Mapping[str, Any] | None = None,
+    interrupt: Mapping[str, Any] | None = None, intent: str = "",
 ) -> dict[str, Any]:
     """One request.  The danger question is asked only when a protective
-    action is on offer in this frame."""
+    action is on offer in this frame.  While work runs for an intent, a
+    second question asks whether the facts already show that intent; asked
+    among the work options it was answered from the progress, not the facts."""
     protective = {key: text for key, text in options.items() if key in PROTECTIVE and not protecting}
     normal = dict(options) if protecting else {key: text for key, text in options.items() if key not in PROTECTIVE}
     questions: dict[str, Any] = {
@@ -521,6 +533,14 @@ def frame_questions(
             questions["q"]["instructions"] += (
                 f" The Agent also says: when “{condition.get('text', '')}”, "
                 f"interrupt the current work and do “{handler.get('intent', '')}”.")
+    if acting_for_intent and intent and not protecting:
+        questions["a"] = {"type": "choice", "instructions": (
+            "Compare each part of the result the Agent wants with the inventory and Body facts above. "
+            "Do the facts already show every part of it?"
+        ), "criteria": {
+            "shown": f"Yes: the facts above already show “{intent}”.",
+            "not_shown": f"No: the facts above do not show all of “{intent}” yet.",
+        }}
     if protective:
         questions["d"] = {"type": "choice", "instructions": "Is the Body in danger?", "criteria": dict(_DANGER)}
         questions["p"] = {
@@ -632,6 +652,9 @@ def idle_question(facts: Mapping[str, Any], options: Mapping[str, str]) -> dict[
     inventory = _inventory(facts)
     if inventory is not None:
         state["inventory"] = ", ".join(f"{k} {v}" for k, v in inventory.items()) or "empty"
+    hand = _main_hand(facts)
+    if hand:
+        state["main_hand"] = hand
     position = _position(facts.get("position", facts.get("pos")))
     if position:
         state["position"] = f"now at {position}."
@@ -646,7 +669,8 @@ def only_option(questions: Mapping[str, Any]) -> str | None:
 
 
 def frame_choice(raw: Mapping[str, Any] | None, questions: Mapping[str, Any]) -> str:
-    """Read Decision's answer: protective action if in danger, else normal work."""
+    """Read Decision's answer: protective action if in danger; otherwise the
+    next step when the facts already show the intent, else the work choice."""
     answers = raw.get("answers") if isinstance(raw, Mapping) else None
     if not isinstance(answers, Mapping):
         return "unknown"
@@ -664,6 +688,12 @@ def frame_choice(raw: Mapping[str, Any] | None, questions: Mapping[str, Any]) ->
             return "unknown"
         if danger == "in_danger":
             name = "p"
+    if name == "q" and "a" in questions:
+        shown = chosen("a")
+        if shown not in {"shown", "not_shown"}:
+            return "unknown"
+        if shown == "shown":
+            return "next_step"
     return chosen(name) or "unknown"
 
 

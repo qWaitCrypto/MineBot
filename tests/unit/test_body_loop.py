@@ -13,6 +13,7 @@ from minebot.app import reflex_question as rq
 from minebot.app.work_runtime import NodeRecord, WorkPlanExecutor
 from minebot.app.execution_lane import SerialExecutionLane
 from minebot.game.real_client_body import RealClientBody
+from tests.unit.reflex_expected import main_hand_beside_inventory
 
 
 class _Trace:
@@ -376,14 +377,7 @@ def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent(
                 - len(json.dumps(old_intent, ensure_ascii=False))
             )
             facts = case["raw_decision_facts"]["body_state"]
-            selected = facts.get("selected_item")
-            if isinstance(selected, str) and facts.get("selected_item_known") is not False:
-                old_body = expected["state"]["body"]
-                expected["state"]["body"] += f" The main hand holds {selected or 'nothing'}."
-                expected["state"]["request_chars"] += (
-                    len(json.dumps(expected["state"]["body"], ensure_ascii=False))
-                    - len(json.dumps(old_body, ensure_ascii=False))
-                )
+            expected = main_hand_beside_inventory(expected, facts)
             if case["seq"] in {3785, 3805, 3825, 3845}:
                 candidates = rq.equipment_candidates(facts, case["raw_decision_facts"]["tool_result"])
                 assert candidates == {"equip:wooden_pickaxe": "wooden_pickaxe"}
@@ -393,14 +387,10 @@ def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent(
                 criteria["equip:wooden_pickaxe"] = 'Equip wooden_pickaxe from the inventory and run the same call again: collect_resource(item="iron_ore", count=2).'
                 criteria["call_agent"] = agent
                 expected["state"]["request_chars"] += len(json.dumps(criteria, ensure_ascii=False, separators=(",", ":"))) - len(old)
-            if not case["node"].get("next_call") and "next_step" in expected["questions"]["q"]["criteria"]:
-                criteria = expected["questions"]["q"]["criteria"]
-                old = criteria["next_step"]
-                criteria["next_step"] = f'Do not repeat it and report to the Agent that “{intent}” has been achieved.'
-                expected["state"]["request_chars"] += (
-                    len(json.dumps(criteria["next_step"], ensure_ascii=False))
-                    - len(json.dumps(old, ensure_ascii=False))
-                )
+            # The size is derived from the request above, as the executor does.
+            expected["state"].pop("request_chars")
+            expected["state"]["request_chars"] = len(json.dumps(
+                expected, ensure_ascii=False, separators=(",", ":"), default=str))
             runtime, trace, _decision = _runtime()
             loop = BodyLoop(runtime)
             executor = WorkPlanExecutor(

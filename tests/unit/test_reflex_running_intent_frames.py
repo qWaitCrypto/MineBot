@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from minebot.app.direct_call_supervision import CallSupervisor
 from minebot.app import reflex_question as rq
+from tests.unit.reflex_expected import intent_question_while_running, main_hand_beside_inventory
 
 
 def test_real_running_inputs_compile_to_the_exact_offline_verified_requests():
@@ -30,18 +31,12 @@ def test_real_running_inputs_compile_to_the_exact_offline_verified_requests():
         request.pop('_request_chars',None);request.pop('_request_chars_before',None)
         # Keep the historical fixture intact. The only new fact is the
         # recorded main hand, omitted by the original sentence compiler.
-        expected=copy.deepcopy(case['expected_request'])
-        facts=execution.get('facts',{})
-        selected=facts.get('selected_item')
-        if isinstance(selected,str) and facts.get('selected_item_known') is not False:
-            expected['state']['body']+=' The main hand holds '+(selected or 'nothing')+'.'
-        # Intent-specific terminal reporting was checked offline on an
-        # unfinished patrol and an arrived direct call. Preserve all facts
-        # and every internal next-call option in the historical fixture.
+        expected=main_hand_beside_inventory(case['expected_request'],execution.get('facts',{}))
+        # Whether the intent is shown is now its own question while running;
+        # protective calls are not asked it. All facts stay as recorded.
         context=case['supervision_context']
-        if not context.get('next_call') and 'next_step' in expected['questions']['q']['criteria']:
-            expected['questions']['q']['criteria']['next_step']=(
-                f'Stop the current action and report to the Agent that “{context["intent"]}” has been achieved.')
+        if context.get('intent') and not context.get('is_reflex_action'):
+            expected=intent_question_while_running(expected,context['intent'])
         assert request==expected,case['seq']
         assert json.dumps(request,ensure_ascii=False,separators=(',',':')) == json.dumps(
             expected,ensure_ascii=False,separators=(',',':')),case['seq']
