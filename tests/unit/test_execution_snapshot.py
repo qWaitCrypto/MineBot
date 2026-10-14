@@ -124,3 +124,16 @@ def test_survival_vitals_are_carried_into_execution_facts():
     assert facts["health"] == 10.8
     assert facts["food"] == 8
     assert facts["oxygen"] == -12
+
+
+def test_running_facts_keep_the_nearest_entities_when_the_list_is_cut():
+    # Live step6-interrupt-claude2: 50 entities arrived unsorted and the cut
+    # at 32 dropped the skeleton shooting from 8 blocks.
+    from minebot.app.execution_snapshot import ExecutionSnapshots
+    snapshots = ExecutionSnapshots()
+    snapshots.begin("c", "collect_resource", {})
+    far = [{"name": "Cow", "dist2": 900.0 + i, "hostile": False} for i in range(40)]
+    near = {"name": "Skeleton", "dist2": 64.0, "hostile": True}
+    snapshots.observe("c", {"entities": far + [near]})
+    entities = snapshots.current()["facts"]["entities"]
+    assert len(entities) == 32 and entities[0]["name"] == "Skeleton"
