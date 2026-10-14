@@ -1,0 +1,29 @@
+[
+  {
+    "seq": 298,
+    "recorded": "keep_going",
+    "baseline": "keep_going",
+    "expected": "keep_going",
+    "distribution": {
+      "keep_going": 12
+    }
+  },
+  {
+    "seq": 475,
+    "recorded": "keep_going",
+    "baseline": "keep_going",
+    "expected": "interrupt",
+    "distribution": {
+      "interrupt": 12
+    }
+  },
+  {
+    "seq": 563,
+    "recorded": "keep_going",
+    "baseline": "keep_going",
+    "expected": "interrupt",
+    "distribution": {
+      "interrupt": 12
+    }
+  }
+]

@@ -1,0 +1,45 @@
+[
+  {
+    "seq": 298,
+    "recorded": "keep_going",
+    "baseline": "keep_going",
+    "expected": "keep_going",
+    "candidates": {
+      "instruction": {
+        "keep_going": 11,
+        "unknown": 1
+      },
+      "condition_question": {
+        "keep_going": 12
+      }
+    }
+  },
+  {
+    "seq": 475,
+    "recorded": "keep_going",
+    "baseline": "keep_going",
+    "expected": "interrupt",
+    "candidates": {
+      "instruction": {
+        "interrupt": 12
+      },
+      "condition_question": {
+        "interrupt": 12
+      }
+    }
+  },
+  {
+    "seq": 563,
+    "recorded": "keep_going",
+    "baseline": "keep_going",
+    "expected": "interrupt",
+    "candidates": {
+      "instruction": {
+        "interrupt": 12
+      },
+      "condition_question": {
+        "interrupt": 12
+      }
+    }
+  }
+]
