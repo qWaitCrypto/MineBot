@@ -66,7 +66,7 @@
 
 ## 真实运行与全量
 
-b084609全量还在后台进行，不报通过数。完整日志logs/final-suite-b084609/pytest.log。
+**b084609真正全量：2526 passed, 1 skipped, 291 subtests passed in 342.42s (0:05:42)，exit 0。**结束tracked source dirty=[]；专用tmpfs临时目录，不证明重启持久性。
 
 第一遍c0ed3ee真正全量：**1 failed, 2525 passed, 1 skipped, 291 subtests passed in1325.73s，exit1**。失败名test_step2_new_old_protocol_on_118_inputs_except_intent_wording_and_main_hand，seq981的末端报告文字仍要求旧句子，是本轮漏同步的测试预期；不是把未知失败称作“旧断言不一致”。b084609仅更新该测试：允许同样已离线验证的末端intent报告，旧模块输入和内部next_call仍逐字比较，改名为except_verified_question_changes。新增基线在内的定向244 passed in27.63s；产品源码未再改，c0ed3ee的真实运行仍对应最终行为。
 
