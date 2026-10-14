@@ -1,22 +1,23 @@
 # 常在线循环阶段总报告（2026-10-14 当前状态）
 
-产品最新 `d454341`，分支 `codex/reflex-always-on`。用户授权先进入下一步、问题之后集中处理，本轮已做第8步。**还不能合并，整批未完成。**未推送、未合并。
+产品最新 `d050458`，分支 `codex/reflex-always-on`。已按用户授权做完第8步报告并开始集中修复。**还不能合并，整批未完成。**未推送、未合并。
 
 | 项 | 结论 |
 |---|---|
-| 第7步工程 | 完成最小生活范围、统一运行监督、内部视线和异步地形设置结算 |
-| 生活离线 | 133请求；连续60帧stay、0切换；黄昏/夜晚12/12回家；玩家20格10stay/2look，有顺序影响 |
-| 第7步真实 | 979题、19分39秒，真实看向/走近/回家；一次蜘蛛致死，不能验收30分钟无死亡 |
-| 运行go_home | 109次选择没执行；只有空闲帧那1次真的回家 |
-| 真实Agent | 木板任务成功；后续走路任务失败；Agent明确知道死过，重生后背包清空 |
-| 第8步全量 | **2483 passed、1 failed、1 skipped、290 subtests passed，1412.58秒，exit1** |
-| 唯一失败复跑 | HTTP keepalive本地100ms读超时；原样单独3次均通过，具体时序源未定，不覆盖全量失败 |
-| 定向 | 113 passed、114 subtests passed，6.71秒 |
-| 待集中修 | 选项执行丢事实、死亡通知延迟/停问、生活终态竞态、Agent只走路仍打掉树叶 |
+| 答案执行接线 | 9023943修复；109/109旧题面不变；g运行帧go_home真实切到move_to，但导航失败 |
+| 终态竞态 | 已修；195项定向通过；g/h各丢弃1个迟到运行答案 |
+| Agent读取 | d050458修复life/threat读取排在写动作后；旧版2失败，新版100通过；h真实读取任务完成，长动作重叠未验证 |
+| 生活真实复验 | g14分19秒817请求，h2分50秒197请求；未过生活验收：回家失败、look/stay切换；没有30分钟通过 |
+| 死亡计时 | g受控kill一次，停止405ms、native重生240ms；旧35秒延迟未复现，不宣称解决 |
+| 真实Agent | g受控重生后才到家，不能当原任务正常脱困；h背包读取成功；read_reflex分别1/0 |
+| 第8步旧全量 | 2483 passed、1 failed、1 skipped、290 subtests passed，exit1；原失败保留 |
+| keepalive测试 | 仅扩大测试时间尺度，21 passed、16 subtests passed；生产超时不变 |
+| 最新全量 | d050458：2491 passed、1 skipped、291 subtests passed，1252.35秒；无测试失败。收尾shell退出码记录错误，外层exit1，另列报告 |
+| 待集中修 | 导航/生活稳定性、旧死亡通知延迟根因、正常工作误停和其余真实验收缺口 |
 | 旧验收缺项 | 第2步正常误停、3步打断历史语义、5步反击/退回、6步handler/备用装备仍未全过 |
-| 环境 | 仅25569/25579/8771；旧测试世界旧背包已披露；自己客户端/Agent/服务器已停止，世界和trace保留 |
+| 环境 | 仅25569/25579/8771；g/h旧世界旧背包已披露；会话exit0，客户端/服务器已停止，世界和trace保留 |
 
-详细报告：[第7步](step-7.md)、[第8步](step-8.md)。可复核数据/完整测试堆栈在 `evidence-step7-step8-20261014/`。当前真实trace：`/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-step7-current-f/trace.jsonl`。
+最新报告：[集中修复与复验](concentrated-fixes-20261014.md)，证据 `evidence-answer-dispatch/`。g/h trace：`/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-step7-fixed-{g,h}/trace.jsonl`。旧[第7步](step-7.md)、[第8步](step-8.md)及 `evidence-step7-step8-20261014/` 保留；下文逐项状态是此前基线，最新修复状态以顶表和最新报告为准。
 
 ## 第15节逐项状态
 

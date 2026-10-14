@@ -52,6 +52,14 @@ def summarize(path):
             visit(row.get('raw_result'), row['ts'])
     busy = merge([(max(first, a['end'] - a['elapsed_s']), min(last, a['end'])) for a in actions.values()])
     work = sum(end - start for start, end in busy)
+    # Some native-backed tools (notably look-at) return no native elapsed_ms.
+    # Their admitted call duration is observable, but is not movement time.
+    call_intervals = merge([
+        (max(first, row['ts'] - row['elapsed_s']), min(last, row['ts']))
+        for row in rows if row['event'] == 'call_supervision_finished'
+        and isinstance(row.get('elapsed_s'), (int, float)) and row['elapsed_s'] >= 0
+    ])
+    supervised_s = sum(end - start for start, end in call_intervals)
     idle = []
     cursor = first
     for start, end in busy:
@@ -136,7 +144,11 @@ def summarize(path):
             'requests_during_observed_body_work_per_minute_by_purpose':
                 {k: n * 60 / work for k, n in during_work.items()} if work else None,
             'rate_accounting': 'Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.',
-            'native_action_count': len(actions), 'observed_native_work_s': work, 'idle_remainder_estimate_s': duration - work,
+            'native_action_count': len(actions), 'observed_native_work_s': work,
+            'idle_remainder_estimate_s': duration - work if actions else None,
+            'supervised_body_call_s': supervised_s,
+            'outside_supervised_body_calls_s': duration - supervised_s,
+            'supervised_call_timing_method': 'Union of completed supervised-call intervals; includes tool execution and its settlement, not proof of physical movement. Native terminals missing elapsed_ms are excluded from native work time, never treated as proof that the Body was idle.',
             'timing_method': 'Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.',
             'longest_estimated_idle_without_any_question_s': longest if actions else None,
             'longest_idle_state_without_any_question_s': longest_idle_state_gap,

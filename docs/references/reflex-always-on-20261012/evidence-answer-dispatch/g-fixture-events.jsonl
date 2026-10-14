@@ -1,0 +1,25 @@
+{"time": 1791939517.541932, "last_seq": 252, "kind": "daytime_control", "command": "time set day", "response": "Set minecraft:overworld to time marker minecraft:day"}
+{"time": 1791939517.5782864, "last_seq": 252, "kind": "life_observation_started", "scope": "Same world, fresh SDK state, no initial task. Natural mobs remain enabled. Player/time interventions are artificial."}
+{"time": 1791939517.6424012, "last_seq": 252, "kind": "observation_minute", "elapsed_s": 0.1, "last_body_seq": 252, "health": 20.0, "total_questions": 31, "death_sequences": []}
+{"time": 1791939578.0402708, "last_seq": 502, "kind": "observation_minute", "elapsed_s": 60.4, "last_body_seq": 498, "health": 20.0, "total_questions": 79, "death_sequences": []}
+{"time": 1791939638.6211772, "last_seq": 759, "kind": "observation_minute", "elapsed_s": 120.8, "last_body_seq": 755, "health": 20.0, "total_questions": 128, "death_sequences": []}
+{"time": 1791939643.4515724, "last_seq": 780, "kind": "visitor_spawn", "command": "player Visitor spawn at 179.5 74.0 163.5", "response": ""}
+{"time": 1791939698.4753625, "last_seq": 1267, "kind": "observation_minute", "elapsed_s": 180.5, "last_body_seq": 1267, "health": 20.0, "total_questions": 196, "death_sequences": []}
+{"time": 1791939708.6390827, "last_seq": 1363, "kind": "visitor_walk", "command": "player Visitor move forward", "response": ""}
+{"time": 1791939738.7468975, "last_seq": 1741, "kind": "visitor_stop", "command": "player Visitor stop", "response": ""}
+{"time": 1791939759.655968, "last_seq": 2001, "kind": "observation_minute", "elapsed_s": 241.4, "last_body_seq": 1989, "health": 20.0, "total_questions": 271, "death_sequences": []}
+{"time": 1791939818.9393795, "last_seq": 2738, "kind": "dusk_control", "command": "time set 12500", "response": "Set minecraft:overworld to 12500 tick(s)"}
+{"time": 1791939819.434809, "last_seq": 2755, "kind": "observation_minute", "elapsed_s": 300.5, "last_body_seq": 2724, "health": 20.0, "total_questions": 342, "death_sequences": []}
+{"time": 1791939822.7161167, "last_seq": 2792, "kind": "user_task_sent", "text": "请安全走到住处坐标151.5,70,163.5附近。不要破坏或放置任何方块，不要采集，不要传送，不要外部补给；完成后如实汇报实际位置，再回到空闲生活。", "while_life_move": true, "life_request_seq": 2784}
+{"time": 1791939879.201886, "last_seq": 4213, "kind": "observation_minute", "elapsed_s": 360.5, "last_body_seq": 4206, "health": 20.0, "total_questions": 399, "death_sequences": []}
+{"time": 1791939940.1867516, "last_seq": 4921, "kind": "observation_minute", "elapsed_s": 421.3, "last_body_seq": 4916, "health": 20.0, "total_questions": 450, "death_sequences": []}
+{"time": 1791939999.3278446, "last_seq": 5570, "kind": "visitor_leave", "command": "player Visitor kill", "response": ""}
+{"time": 1791940000.2708907, "last_seq": 5663, "kind": "observation_minute", "elapsed_s": 480.3, "last_body_seq": 5565, "health": 20.0, "total_questions": 499, "death_sequences": []}
+{"time": 1791940059.2205424, "last_seq": 6301, "kind": "observation_minute", "elapsed_s": 540.2, "last_body_seq": 6290, "health": 20.0, "total_questions": 559, "death_sequences": []}
+{"time": 1791940119.526465, "last_seq": 6772, "kind": "observation_minute", "elapsed_s": 600.4, "last_body_seq": 6763, "health": 20.0, "total_questions": 620, "death_sequences": []}
+{"time": 1791940180.0337908, "last_seq": 7208, "kind": "day_after_task", "command": "time set day", "response": "Set minecraft:overworld to time marker minecraft:day"}
+{"time": 1791940180.8340552, "last_seq": 7213, "kind": "observation_minute", "elapsed_s": 660.8, "last_body_seq": 7199, "health": 20.0, "total_questions": 680, "death_sequences": []}
+{"time": 1791940239.6523817, "last_seq": 7436, "kind": "observation_minute", "elapsed_s": 720.4, "last_body_seq": 7431, "health": 20.0, "total_questions": 722, "death_sequences": []}
+{"time": 1791940270.9210508, "kind": "life_acceptance_ended_early", "last_seq": 7558, "reason": "Home navigation did not reach its destination; repeated look/stay switching. Not a 30-minute acceptance pass."}
+{"time": 1791940272.5096698, "kind": "controlled_death_diagnostic", "last_seq": 7567, "command": "kill Step3CurrentBot", "response": "Killed Step3CurrentBot"}
+{"time": 1791940275.4627075, "kind": "controlled_death_diagnostic_ended", "last_seq": 7578, "reflex_deaths": 1, "reflex_respawns": 1}

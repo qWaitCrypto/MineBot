@@ -1,0 +1,12 @@
+{
+  "source_commit": "d050458",
+  "passed": 2491,
+  "skipped": 1,
+  "subtests_passed": 291,
+  "test_failures": 0,
+  "duration_s": 1252.35,
+  "wrapper_exit_code": 1,
+  "pytest_exit_code": null,
+  "pytest_exit_record_invalid": true,
+  "summary_source": "pytest.log final output; not an invented child exit code"
+}
