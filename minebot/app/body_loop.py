@@ -296,6 +296,7 @@ class BodyLoop(CallSupervisor):
         pending: tuple[dict[str, Any], float, str] | None = None
         decision_revision = -1
         snapshots = getattr(self.runtime, "execution_snapshots", None)
+        last_body_read = float("-inf")
         while not record["cancel_requested"]:
             if await self._process_lifecycle_events():
                 return
@@ -317,6 +318,14 @@ class BodyLoop(CallSupervisor):
                 snapshots.tick(record["call_id"])
             if wake_wait in done or clock_wait in done:
                 wake.clear()
+                # Lite action progress carries motion and vitals, but not
+                # perception. Refresh the same Body read used while idle;
+                # carrying the last call's entities cannot observe a new
+                # attacker (or one that has gone away). This stays in the
+                # one lifecycle consumer and the existing read lane.
+                if time.monotonic() - last_body_read >= supervision_module.FACT_FRAME_INTERVAL_S:
+                    await self._refresh_running_facts(record["call_id"])
+                    last_body_read = time.monotonic()
                 execution = self._frame(self._snapshot(record["call_id"]))
                 if await self._process_lifecycle_events(execution.get("facts")) or record["cancel_requested"]:
                     if decision_task is not None:
@@ -1219,8 +1228,8 @@ class BodyLoop(CallSupervisor):
             return dict(cached)
         return {}
 
-    async def _read_idle_facts(self) -> dict[str, Any]:
-        """Read state and nearby entities on the read lane, then join Body history."""
+    async def _read_body_facts(self) -> dict[str, Any]:
+        """Read raw state and perception on the same lane in work and idle."""
         body = getattr(self.runtime, "body", None)
         getter = getattr(body, "get_reflex_facts", None) or getattr(body, "get_state", None)
         read_lane = getattr(self.runtime, "_read_lane", None)
@@ -1245,7 +1254,9 @@ class BodyLoop(CallSupervisor):
             # tool-result fields. An entity read gap must not discard a state
             # read that already succeeded.
             perceive = getattr(body, "perceive", None)
-            if callable(perceive):
+            if callable(perceive) and not any(
+                    isinstance(facts.get(key), (list, tuple))
+                    for key in ("entities", "nearby_entities", "hostiles", "nearby_hostiles")):
                 try:
                     nearby = await read_lane.run(perceive, "nearbyEntities", {"radius": 64, "limit": 32})
                     ok = nearby.get("ok") if isinstance(nearby, Mapping) else getattr(nearby, "ok", False)
@@ -1261,7 +1272,30 @@ class BodyLoop(CallSupervisor):
         if self._life_profile:
             facts["life_profile"] = copy.deepcopy(self._life_profile)
             facts["life_intent"] = life_intent(self._life_profile)
-        return self._frame({"facts": facts})["facts"]
+        return facts
+
+    async def _read_idle_facts(self) -> dict[str, Any]:
+        return self._frame({"facts": await self._read_body_facts()})["facts"]
+
+    async def _refresh_running_facts(self, call_id: str) -> None:
+        body = getattr(self.runtime, "body", None)
+        getter = getattr(body, "get_reflex_facts", None) or getattr(body, "get_state", None)
+        snapshots = getattr(self.runtime, "execution_snapshots", None)
+        observe = getattr(snapshots, "observe", None)
+        if (callable(getter) and getattr(self.runtime, "_read_lane", None) is not None
+                and callable(observe)):
+            # observe already rejects late reads after a terminal or a change
+            # of call ownership. Do not write enriched history back as raw.
+            facts = await self._read_body_facts()
+            # The action observer owns its navigation, phase and movement.
+            # This read supplies the facts missing from lite progress, not a
+            # second execution progress stream. Explicit complete inventory
+            # remains a complete observation even in this lite envelope.
+            ambient_keys = ("inventory", "inventory_counts", "inventory_complete",
+                "inventory_includes_selected", "selected_item", "selected_item_known",
+                "entities", "nearby_entities", "hostiles", "nearby_hostiles",
+                "health", "food", "oxygen", "head_in_liquid", "on_ground")
+            observe(call_id, {"lite": True, **{key: facts[key] for key in ambient_keys if key in facts}})
 
     @staticmethod
     def _idle_options(facts: Mapping[str, Any]) -> dict[str, str]:

@@ -571,17 +571,24 @@ def test_supervisor_clock_questions_when_body_sends_no_samples(monkeypatch):
         monkeypatch.setattr(snapshot_module, "FACT_FRAME_INTERVAL_S", 0.05)
 
         decisions = []
+        finish_native = threading.Event()
 
         async def always_continue(*_args, **_kwargs):
             decisions.append(True)
+            if len(decisions) >= 5:
+                finish_native.set()
             return "continue"
 
         runtime.call_supervisor.judge = always_continue
-        original = ipc.command
-
         def silent_command(objective, *, action_id, timeout_ms, on_progress):
             # The native call remains active but never reports progress.
-            return original(objective, action_id=action_id, timeout_ms=timeout_ms, on_progress=lambda _payload: None)
+            # Finish after observed clock questions, rather than racing the
+            # Body read lane against an artificial 350ms wall-clock window.
+            ipc.active = action_id
+            ipc.started.set()
+            finish_native.wait(1.5)
+            ipc.active = None
+            return RealClientTerminal(action_id, "completed", "world_result_verified", ipc.state())
 
         ipc.command = silent_command
         try:
@@ -591,6 +598,7 @@ def test_supervisor_clock_questions_when_body_sends_no_samples(monkeypatch):
             assert result["success"]
             assert len(decisions) >= 5
         finally:
+            finish_native.set()
             await runtime.aclose()
     asyncio.run(run())
 
@@ -740,6 +748,7 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
     async def run():
         ipc = GenericCallIpc(progressing=False)
         runtime, _ = make_runtime(ipc)
+        finish_native = threading.Event()
 
         def invoke(_params):
             observation = __import__("minebot.contract.execution", fromlist=["current_tool_observation"]).current_tool_observation()
@@ -747,10 +756,14 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
             _call_id, notify = observation
             notify({"position": [0, 5, 0], "pathing": True,
                     "navigation": {"pathing": True, "path_position": 0}, "goal": True})
-            time.sleep(.03)
+            # The first request must contain the first frame before the
+            # native action publishes the replacement frame.
+            deadline = time.monotonic() + 1
+            while not decision.started.is_set() and time.monotonic() < deadline:
+                time.sleep(.001)
             notify({"position": [0, 5, 0], "pathing": False,
                     "builder_paused": True, "navigation": {"pathing": False, "path_position": 0}})
-            time.sleep(.08)
+            finish_native.wait(1.5)
             return ToolResult(True, "world_result_verified", False)
 
         tool = RegisteredTool(
@@ -767,6 +780,8 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
                 self.payloads.append(payload); self.started.set()
                 if len(self.payloads) == 1:
                     await self.release.wait()
+                else:
+                    finish_native.set()
                 return DecisionAnswer("continue", {"answers": {"q": {"choice": "continue"}}}, .001, len(self.payloads))
             async def close(self):
                 return None
@@ -786,6 +801,7 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
             assert len(decision.payloads) == 2
             assert "builder_paused" in json.dumps(decision.payloads[1], ensure_ascii=False)
         finally:
+            finish_native.set()
             await runtime.aclose()
     asyncio.run(run())
 

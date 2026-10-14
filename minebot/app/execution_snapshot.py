@@ -256,7 +256,7 @@ class ExecutionSnapshots:
         inventory = payload.get("inventory")
         if not isinstance(inventory, Mapping):
             inventory = payload.get("inventory_counts")
-        if not payload.get("lite") and isinstance(inventory, Mapping) and payload.get("inventory_complete") is not False:
+        if (not payload.get("lite") or payload.get("inventory_complete") is True) and isinstance(inventory, Mapping) and payload.get("inventory_complete") is not False:
             counts = {str(key): int(value) for key, value in inventory.items() if isinstance(value, int)}
             if op.inventory is None:
                 op.start_inventory = dict(counts)
