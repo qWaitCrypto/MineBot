@@ -222,6 +222,21 @@ def test_unknown_danger_cannot_authorize_normal_or_protective_action(danger_answ
     assert rq.frame_choice({"answers": answers}, questions) == "unknown"
 
 
+def test_dead_entities_do_not_remain_actionable_hostiles_in_facts_or_options():
+    facts={'health':20,'food':20,'oxygen':300,'entities':[
+        {'id':'dead','name':'Former hostile','hostile':True,'health':0,'dist2':1},
+        {'id':'alive','name':'Live hostile','hostile':True,'health':10,'dist2':4}]}
+    assert [entry['id'] for entry in rq.hostiles(facts)]==['alive']
+    assert 'Live hostile' in rq._threat_sentence(facts)
+    assert 'Former hostile' not in rq._threat_sentence(facts)
+    facts['entities']=facts['entities'][:1]
+    assert rq._threat_sentence(facts)=='No hostile mob is in view.'
+    assert not {'engage','ranged','move_away'} & rq.protective_options(facts).keys()
+    # Missing health does not prove an entity dead.
+    facts['entities'][0].pop('health')
+    assert rq.hostiles(facts)[0]['id']=='dead'
+
+
 def test_after_a_protective_action_the_body_may_go_back_to_its_work():
     options = rq.after_default_options(
         original_call='collect_resource(count=3, item="raw_iron")', intent="get 3 raw iron",

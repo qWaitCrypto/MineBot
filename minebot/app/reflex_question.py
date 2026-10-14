@@ -110,6 +110,12 @@ def hostiles(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
         for item in items:
             if not isinstance(item, Mapping) or not item.get("hostile"):
                 continue
+            # Native entities can remain visible during their death animation.
+            # Observed zero health is a terminal game fact, not a live target
+            # or a judgement about whether the Agent's intention is complete.
+            health = item.get("health")
+            if isinstance(health, (int, float)) and health <= 0:
+                continue
             dist = item.get("dist", item.get("distance"))
             if dist is None and isinstance(item.get("dist2"), (int, float)):
                 dist = float(item["dist2"]) ** 0.5
