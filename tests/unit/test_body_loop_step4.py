@@ -228,3 +228,30 @@ def test_active_stream_watch_observes_death_even_after_health_has_recovered():
         assert reason == "death" and facts["position"] == [4, 60, 8]
         assert owner._pending_body_death is None
     asyncio.run(run())
+
+
+def test_death_reaches_the_agent_before_the_old_action_settles():
+    # Live step7-f: settling the dead Body's action took 35.5 s, and the
+    # Agent heard of the death only after it. The death facts never needed it.
+    async def run():
+        rows, notifications = [], []
+        release = asyncio.Event()
+        owner = SimpleNamespace(decision_client=SimpleNamespace(),
+            trace=SimpleNamespace(emit=lambda event, **data: rows.append(event)))
+        async def stop(reason):
+            await release.wait()
+            return {"settled": True}
+        owner.cancel_active_execution_with_facts = stop
+        owner.notify_body_lifecycle_event = notifications.append
+        loop = BodyLoop(owner)
+        loop.current = {"cancel_requested": False}
+        loop._queue_lifecycle_event(death())
+        processing = asyncio.create_task(loop._process_lifecycle_events())
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert [e.name for e in notifications] == ["death"]
+        assert "reflex_death" in rows and "reflex_death_settled" not in rows
+        release.set()
+        assert await processing
+        assert rows.index("reflex_death") < rows.index("reflex_death_settled")
+    asyncio.run(run())

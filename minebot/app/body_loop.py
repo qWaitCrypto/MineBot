@@ -119,14 +119,17 @@ class BodyLoop(CallSupervisor):
                 if self.current is not None:
                     self.current["cancel_requested"] = True
                     self.current["result_abandoned"] = True
+                # The death facts do not depend on how the old action settles.
+                # Tell the Agent first: settling a dead Body's action has
+                # taken up to the lane's cancel timeout (35.5 s live, step7-f).
+                self.runtime.trace.emit("reflex_death", facts=death)
+                notify = getattr(self.runtime, "notify_body_lifecycle_event", None)
+                if callable(notify):
+                    notify(Event(seq=event.seq, tick=event.tick, bot=event.bot, name=event.name, data=death))
                 settled = await self.runtime.cancel_active_execution_with_facts("death")
                 if protection is not None and protection is not asyncio.current_task():
                     await asyncio.gather(protection, return_exceptions=True)
-                self.runtime.trace.emit("reflex_death", facts=death, settlement=settled)
-                event = Event(seq=event.seq, tick=event.tick, bot=event.bot, name=event.name, data=death)
-                notify = getattr(self.runtime, "notify_body_lifecycle_event", None)
-                if callable(notify):
-                    notify(event)
+                self.runtime.trace.emit("reflex_death_settled", settlement=settled)
             elif event.name == "respawned":
                 self._vitals = rq.VitalWindow()
                 self._ambient_facts.clear()
