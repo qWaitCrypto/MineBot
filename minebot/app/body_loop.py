@@ -53,6 +53,7 @@ class BodyLoop(CallSupervisor):
         self._death_count = 0
         self._native_lifecycle = False
         self._body_lifecycle_listener = None
+        self._world_connected: bool | None = None
         self._reaction_observations: dict[str, dict[str, Any]] = {}
         self._reaction_selection: dict[str, Any] | None = None
         self._reaction_actions: dict[str, dict[str, Any]] = {}
@@ -63,6 +64,12 @@ class BodyLoop(CallSupervisor):
         self._reflex_action_intent: str | None = None
 
     def _queue_lifecycle_event(self, event: Event) -> None:
+        if event.name == "world_ready":
+            self._world_connected = True
+            if self._lifecycle_task is None or self._lifecycle_task.done():
+                asyncio.create_task(self.start())
+        elif event.name == "world_disconnected":
+            self._world_connected = False
         self._lifecycle_events.append(event)
         self._loop_wakeup.set()
         if self._active_monitor is not None:
@@ -78,7 +85,19 @@ class BodyLoop(CallSupervisor):
             return self.loop_state == "dead" or any(e.name == "death" for e in self._lifecycle_events)
         while self._lifecycle_events:
             event = self._lifecycle_events.popleft()
-            if event.name == "death":
+            if event.name == "world_disconnected":
+                if self.current is not None:
+                    self.current["cancel_requested"] = True
+                    self.current["result_abandoned"] = True
+                    await self.runtime.cancel_active_execution_with_facts("server_disconnected")
+                await self.stop(keep_world_listener=True, reason="server_disconnected")
+                return True
+            elif event.name == "world_ready":
+                self._vitals = rq.VitalWindow()
+                self._ambient_facts.clear()
+                self.safe_standing_position = None
+                self._set_state("idle", "world_ready")
+            elif event.name == "death":
                 if self.loop_state == "dead":
                     continue
                 self._set_state("dead", "death")
@@ -230,6 +249,8 @@ class BodyLoop(CallSupervisor):
         previous = self.loop_state
         death_count = self._death_count
         await self.start()
+        if self._world_connected is False:
+            return {"success": False, "reason": "server_disconnected", "canRetry": True}
         if await self._process_lifecycle_events():
             return {"success": False, "reason": "death", "canRetry": False}
         call_id = str(kwargs.get("call_id") or "")
@@ -681,6 +702,8 @@ class BodyLoop(CallSupervisor):
         They never open a parallel Decision request while waiting for a result.
         """
         await self.start()
+        if self._world_connected is False:
+            return "unknown"
         answer = asyncio.get_running_loop().create_future()
         self._terminal_questions.append((answer, args, kwargs))
         self._loop_wakeup.set()
@@ -1184,14 +1207,14 @@ class BodyLoop(CallSupervisor):
 
     async def start(self) -> None:
         """Start the one lifecycle task when the SDK session enters the world."""
-        if self._lifecycle_started:
+        if self._lifecycle_started or self._world_connected is False:
             return
         self._lifecycle_started = True
         loop = asyncio.get_running_loop()
         self._reaction_event_loop = loop
         body = getattr(self.runtime, "body", None)
         register = getattr(body, "add_lifecycle_listener", None)
-        if callable(register):
+        if callable(register) and self._body_lifecycle_listener is None:
             def receive(event):
                 if not loop.is_closed():
                     loop.call_soon_threadsafe(self._queue_lifecycle_event, event)
@@ -1200,6 +1223,14 @@ class BodyLoop(CallSupervisor):
             register(receive)
         self.runtime.trace.emit("reflex_loop_started", loop_state=self.loop_state)
         self._lifecycle_task = asyncio.create_task(self._idle_frames())
+        self._lifecycle_task.add_done_callback(self._restart_after_world_ready)
+
+    def _restart_after_world_ready(self, task: asyncio.Task[Any]) -> None:
+        # A rapid reconnect may arrive while the old consumer is settling.
+        # Start its successor only after that consumer has finished.
+        if (self._body_lifecycle_listener is not None and self._world_connected is True
+                and not self._lifecycle_started):
+            asyncio.create_task(self.start())
 
     def _ensure_idle_task(self) -> None:
         # The lifecycle task never ends after a call; it switches back to its
@@ -1207,14 +1238,19 @@ class BodyLoop(CallSupervisor):
         if self._lifecycle_started and self._lifecycle_task is not None:
             self._loop_wakeup.set()
 
-    async def stop(self) -> None:
+    async def stop(self, *, keep_world_listener: bool = False, reason: str = "session_closed") -> None:
         """Stop the lifecycle task before the runtime closes its read lane."""
         task = self._lifecycle_task
         remove = getattr(getattr(self.runtime, "body", None), "remove_lifecycle_listener", None)
-        if callable(remove) and self._body_lifecycle_listener is not None:
+        if not keep_world_listener and callable(remove) and self._body_lifecycle_listener is not None:
             remove(self._body_lifecycle_listener)
-        self._body_lifecycle_listener = None
-        self._lifecycle_task = None
+        if not keep_world_listener:
+            self._body_lifecycle_listener = None
+            self._world_connected = None
+        # Keep the old task reference until it exits: a reconnect must not
+        # create another consumer while this one is still settling.
+        if task is not asyncio.current_task():
+            self._lifecycle_task = None
         active = self._active_monitor
         self._active_monitor = None
         self._result_pending.clear()
@@ -1223,6 +1259,10 @@ class BodyLoop(CallSupervisor):
             answer.cancel()
         if active is not None:
             active[0]["cancel_requested"] = True
+            decision = active[0].get("decision_task")
+            if isinstance(decision, asyncio.Task) and not decision.done():
+                decision.cancel()
+                await asyncio.gather(decision, return_exceptions=True)
             done = active[0].get("monitor_done")
             if isinstance(done, asyncio.Event):
                 done.set()
@@ -1233,13 +1273,15 @@ class BodyLoop(CallSupervisor):
             protection.cancel()
             await asyncio.gather(protection, return_exceptions=True)
         self._suspended = None
-        if task is not None and not task.done():
+        if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         if self._lifecycle_started:
-            self.runtime.trace.emit("reflex_loop_stopped", loop_state=self.loop_state)
+            self.runtime.trace.emit("reflex_loop_stopped", loop_state=self.loop_state, reason=reason)
         self._lifecycle_started = False
         self._ambient_facts.clear()
+        self._vitals = rq.VitalWindow()
+        self.safe_standing_position = None
 
     def _idle_facts(self) -> dict[str, Any]:
         cached = getattr(self.runtime, "last_known_body_state", None)
@@ -1378,8 +1420,10 @@ class BodyLoop(CallSupervisor):
         ``run_tool`` admission and settlement path.
         """
         try:
-            while True:
+            while self._lifecycle_started:
                 await self._process_lifecycle_events()
+                if not self._lifecycle_started:
+                    return
                 active = self._active_monitor
                 if active is not None:
                     record, tool, params, wake, worker = active

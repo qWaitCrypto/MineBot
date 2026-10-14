@@ -164,6 +164,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             joinedTicks = 0;
             if (menuRead != null) finishMenuRead(client, "server_disconnected");
             confirmedResults.clear();
+            emitLifecycle(client, "world_disconnected", state(client));
         });
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
         Thread.ofPlatform().daemon().name("minebot-spike-ipc").start(this::serve);
@@ -1094,6 +1095,7 @@ public final class MineBotClientBody implements ClientModInitializer {
                 for (JsonObject event : lifecycleEvents) peer.send(event);
             }
             LOG.info("MINEBOT_PHASE_A ready {}", response);
+            emitLifecycle(client, "world_ready", state(client));
         }
         Run current = run;
         if (current == null) {
@@ -1185,7 +1187,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         event.addProperty("type", "body_event");
         event.addProperty("epoch", lifecycleEpoch);
         event.addProperty("seq", ++lifecycleSeq);
-        event.addProperty("tick", client.level.getGameTime());
+        event.addProperty("tick", client.level == null ? 0 : client.level.getGameTime());
         event.addProperty("name", name);
         event.add("data", facts);
         lifecycleEvents.add(event);

@@ -122,7 +122,8 @@ class RealClientBody:
             if listener not in self._lifecycle_listeners:
                 self._lifecycle_listeners.append(listener)
             # Replay persisted native edges to a newly entered Body loop.
-            events = [event for event in self.event_log if event.name in {"death", "respawned"}]
+            events = [event for event in self.event_log if event.name in {
+                "death", "respawned", "world_ready", "world_disconnected"}]
         for event in events:
             listener(event)
 
@@ -132,7 +133,7 @@ class RealClientBody:
                 self._lifecycle_listeners.remove(listener)
 
     def _on_lifecycle_event(self, payload: Mapping[str, Any]) -> None:
-        if payload.get("name") not in {"death", "respawned"}:
+        if payload.get("name") not in {"death", "respawned", "world_ready", "world_disconnected"}:
             return
         native_id = (str(payload.get("epoch") or ""), int(payload.get("seq") or 0))
         with self._lock:
